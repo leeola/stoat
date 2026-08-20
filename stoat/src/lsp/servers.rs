@@ -43,6 +43,12 @@ impl ResolvedServer {
     }
 }
 
+/// The servers that route every buffer unless `lsp.globals` names others.
+///
+/// Empty so far. Nothing yet has a subject that spans every language, and the
+/// emoji shortcode server is what fills this.
+const BUILTIN_GLOBAL_SERVERS: &[&str] = &[];
+
 /// One entry in the builtin per-language server table.
 struct BuiltinServer {
     name: &'static str,
@@ -115,6 +121,26 @@ pub(crate) fn resolve_servers(settings: &Settings, language: &str) -> Vec<Resolv
     };
     apply_primary_override(settings, language, &mut resolved);
     resolved
+}
+
+/// The servers that serve every buffer whatever its language, in routing
+/// priority order.
+///
+/// Names come from `lsp.globals` when set, else from [`BUILTIN_GLOBAL_SERVERS`],
+/// so `lsp.globals = [];` turns them all off. Each name resolves the same way a
+/// per-language one does, so `lsp.command`, `lsp.only`, and `lsp.except` apply
+/// to a global server too.
+pub(crate) fn resolve_global_servers(settings: &Settings) -> Vec<ResolvedServer> {
+    match settings.lsp_globals.as_deref() {
+        Some(configured) => configured
+            .iter()
+            .map(|name| resolve_named(settings, name.as_str()))
+            .collect(),
+        None => BUILTIN_GLOBAL_SERVERS
+            .iter()
+            .map(|name| resolve_named(settings, name))
+            .collect(),
+    }
 }
 
 /// Resolve a single server by name, drawing its argv and feature filters from
@@ -229,7 +255,11 @@ fn feature_set(features: &[LanguageServerFeature]) -> HashSet<LanguageServerFeat
 
 #[cfg(test)]
 mod tests {
-    use super::{lsp_language_for_extension, resolve_servers, ServerSource};
+    use super::{
+        lsp_language_for_extension, resolve_global_servers, resolve_servers, LanguageServerFeature,
+        ServerSource,
+    };
+    use std::collections::{BTreeMap, HashSet};
     use stoat_config::Settings;
 
     fn names_and_argv(settings: &Settings, language: &str) -> Vec<(String, Vec<String>)> {
@@ -243,6 +273,45 @@ mod tests {
                 (server.name, argv)
             })
             .collect()
+    }
+
+    #[test]
+    fn globals_come_from_config_and_resolve_like_any_server() {
+        assert!(
+            resolve_global_servers(&Settings::default()).is_empty(),
+            "no builtin global exists until the emoji server lands",
+        );
+
+        let settings = Settings {
+            lsp_globals: Some(vec!["typos-lsp".to_string()]),
+            lsp_commands: BTreeMap::from([(
+                "typos-lsp".to_string(),
+                vec!["typos-lsp".to_string(), "--stdio".to_string()],
+            )]),
+            lsp_only: BTreeMap::from([("typos-lsp".to_string(), vec!["diagnostics".to_string()])]),
+            ..Settings::default()
+        };
+        let resolved = resolve_global_servers(&settings);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "typos-lsp");
+        assert!(matches!(
+            &resolved[0].source,
+            ServerSource::Command(argv) if argv == &["typos-lsp".to_string(), "--stdio".to_string()],
+        ));
+        assert_eq!(
+            resolved[0].only,
+            HashSet::from([LanguageServerFeature::Diagnostics]),
+            "lsp.only applies to a global server like any other",
+        );
+
+        assert!(
+            resolve_global_servers(&Settings {
+                lsp_globals: Some(Vec::new()),
+                ..Settings::default()
+            })
+            .is_empty(),
+            "an empty list is a choice, not an absence",
+        );
     }
 
     #[test]

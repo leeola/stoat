@@ -13,7 +13,7 @@
 
 use crate::{
     action_handlers,
-    app::{PendingSpawn, Stoat, UpdateEffect},
+    app::{PendingSpawn, SpawnScope, Stoat, UpdateEffect},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     host::{LocalLsp, LspHost, LspTranscript},
@@ -110,16 +110,19 @@ pub(crate) fn notify_buffer_opened(
     }
 }
 
-/// Launch the language servers for `buffer_id`'s language the first time a
-/// buffer of that language opens, registering each in [`Stoat::lsp_registry`]
-/// once it is ready.
+/// Launch the servers `buffer_id` calls for the first time a buffer calls for
+/// them, registering each in [`Stoat::lsp_registry`] once it is ready.
 ///
-/// No-op unless auto-spawn is enabled and the language has known servers
-/// ([`crate::lsp::servers::resolve_servers`]). Each of the language's servers
-/// spawns at most once. A server already up or already spawn-attempted is
-/// skipped, and a real injected sole host (tests, legacy) suppresses spawning
-/// entirely. The binary opts into auto-spawn via [`Stoat::set_lsp_auto_spawn`].
-/// Tests leave it off, so no server IO happens.
+/// Those are the buffer's own language servers
+/// ([`crate::lsp::servers::resolve_servers`]) plus the global ones
+/// ([`crate::lsp::servers::resolve_global_servers`]), which every buffer calls
+/// for, a buffer with no language at all included.
+///
+/// No-op unless auto-spawn is enabled. Each server spawns at most once. A
+/// server already up or already spawn-attempted is skipped, and a real injected
+/// sole host (tests, legacy) suppresses spawning entirely. The binary opts into
+/// auto-spawn via [`Stoat::set_lsp_auto_spawn`]. Tests leave it off, so no
+/// server IO happens.
 ///
 /// Each spawn plus `initialize` handshake runs detached on the workspace
 /// [`Stoat::executor`] via [`spawn_server`]. The ready host, or the failure, is
@@ -136,21 +139,31 @@ pub(crate) fn maybe_spawn_language_server(
     if stoat.lsp_registry.has_real_sole_client() {
         return;
     }
-    let Some(language_name) = lsp_language_name(&stoat.workspaces[workspace].buffers, buffer_id)
-    else {
-        return;
-    };
 
-    // Only the language's servers not already up and not already tried this
-    // session. A failed spawn is never retried.
-    let to_spawn: Vec<crate::lsp::servers::ResolvedServer> =
-        crate::lsp::servers::resolve_servers(&stoat.settings, &language_name)
-            .into_iter()
-            .filter(|server| {
-                !stoat.lsp_registry.contains_client(&server.name)
-                    && !stoat.lsp_registry.spawn_attempted(&server.name)
-            })
-            .collect();
+    let language_name = lsp_language_name(&stoat.workspaces[workspace].buffers, buffer_id);
+    let scoped: Vec<(crate::lsp::servers::ResolvedServer, SpawnScope)> = language_name
+        .iter()
+        .flat_map(|name| {
+            crate::lsp::servers::resolve_servers(&stoat.settings, name)
+                .into_iter()
+                .map(|server| (server, SpawnScope::Language(name.clone())))
+        })
+        .chain(
+            crate::lsp::servers::resolve_global_servers(&stoat.settings)
+                .into_iter()
+                .map(|server| (server, SpawnScope::Global)),
+        )
+        .collect();
+
+    // Only the servers not already up and not already tried this session. A
+    // failed spawn is never retried.
+    let to_spawn: Vec<(crate::lsp::servers::ResolvedServer, SpawnScope)> = scoped
+        .into_iter()
+        .filter(|(server, _)| {
+            !stoat.lsp_registry.contains_client(&server.name)
+                && !stoat.lsp_registry.spawn_attempted(&server.name)
+        })
+        .collect();
     if to_spawn.is_empty() {
         return;
     }
@@ -162,13 +175,13 @@ pub(crate) fn maybe_spawn_language_server(
     let env_loading =
         stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading;
     let mut deferred = false;
-    for server in to_spawn {
+    for (server, scope) in to_spawn {
         if env_loading && matches!(server.source, ServerSource::Command(_)) {
             deferred = true;
             continue;
         }
         stoat.lsp_registry.mark_spawn_attempted(server.name.clone());
-        spawn_server(stoat, server, language_name.clone());
+        spawn_server(stoat, server, scope);
     }
     if deferred {
         stoat.lsp_spawn_deferred = Some(buffer_id);
@@ -178,19 +191,19 @@ pub(crate) fn maybe_spawn_language_server(
 /// Spawn one resolved `server` for `language` detached on the workspace
 /// executor, parking the ready host or the failure in
 /// [`Stoat::pending_lsp_host`].
-fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, language: String) {
+fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, scope: SpawnScope) {
     let crate::lsp::servers::ResolvedServer { name, source, .. } = server;
     match source {
-        ServerSource::Command(argv) => spawn_command_server(stoat, name, argv, language),
+        ServerSource::Command(argv) => spawn_command_server(stoat, name, argv, scope),
         ServerSource::InProcess(construct) => {
-            spawn_in_process_server(stoat, name, construct, language)
+            spawn_in_process_server(stoat, name, construct, scope)
         },
     }
 }
 
 /// Spawn a subprocess language server `command` with `argv`, initialize it under
 /// the workspace environment, and park the result.
-fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, language: String) {
+fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, scope: SpawnScope) {
     let git_root = stoat.active_workspace().git_root.clone();
     let env = stoat.active_workspace().env.diff.clone();
     let root_uri = action_handlers::lsp::path_to_uri(&git_root);
@@ -220,7 +233,7 @@ fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, l
                         tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
                         slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                             server: command.clone(),
-                            language: language.clone(),
+                            scope: scope.clone(),
                             result: Err(format!("{command}: {err}")),
                         });
                         return;
@@ -239,7 +252,7 @@ fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, l
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
                     slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                         server: command.clone(),
-                        language: language.clone(),
+                        scope: scope.clone(),
                         result: Err(format!("{command}: {err}")),
                     });
                     return;
@@ -247,7 +260,7 @@ fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, l
             }
             slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                 server: command,
-                language,
+                scope,
                 result: Ok(host),
             });
         })
@@ -264,7 +277,7 @@ fn spawn_in_process_server(
     stoat: &mut Stoat,
     name: String,
     construct: fn() -> Arc<dyn LspHost>,
-    language: String,
+    scope: SpawnScope,
 ) {
     let slot = stoat.pending_lsp_host.clone();
     let wake = stoat.redraw_notify.clone();
@@ -285,7 +298,7 @@ fn spawn_in_process_server(
             };
             slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                 server: name,
-                language,
+                scope,
                 result,
             });
             wake.notify_one();
@@ -446,6 +459,59 @@ mod tests {
             !h.stoat.lsp_registry.spawn_attempted_any(),
             "FakeLsp is a non-noop host, so opening a rust buffer attempts no spawn",
         );
+    }
+
+    #[test]
+    fn a_buffer_with_no_language_still_spawns_the_globals() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
+        h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+        h.stoat.set_lsp_auto_spawn(true);
+        // In-process, so the spawn this drives opens no process.
+        h.stoat.settings.lsp_globals = Some(vec!["stcfg-ls".to_string()]);
+        let root = seed(&mut h, &[("notes.txt", "hello\n")]);
+
+        open_buffer(&mut h, root.join("notes.txt"));
+
+        assert!(
+            h.stoat.lsp_registry.spawn_attempted("stcfg-ls"),
+            "a buffer with no language of its own still calls for the globals",
+        );
+    }
+
+    #[test]
+    fn a_global_server_reopens_every_language_it_now_serves() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
+        h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+        h.stoat.settings.lsp_globals = Some(vec!["emoji-ls".to_string()]);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.json", "{}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        open_buffer(&mut h, root.join("b.json"));
+
+        let global = Arc::new(crate::host::FakeLsp::new());
+        h.stoat
+            .pending_lsp_host
+            .lock()
+            .expect("pending lsp host mutex")
+            .push(PendingSpawn {
+                server: "emoji-ls".to_string(),
+                scope: SpawnScope::Global,
+                result: Ok(global.clone()),
+            });
+
+        crate::lsp::drain::install_pending_lsp_host(&mut h.stoat);
+        h.settle();
+
+        let mut opened: Vec<String> = global
+            .observed_opens()
+            .iter()
+            .map(|open| open.text_document.uri.as_str().to_string())
+            .collect();
+        opened.sort();
+        assert_eq!(opened.len(), 2, "opened: {opened:?}");
+        assert!(opened[0].ends_with("/a.rs"));
+        assert!(opened[1].ends_with("/b.json"));
     }
 
     #[test]

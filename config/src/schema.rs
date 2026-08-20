@@ -209,6 +209,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "built-in",
         },
         SettingDef {
+            path: &[Lit("lsp"), Lit("globals")],
+            shape: ValueShape::StringArray,
+            doc: "Language servers that serve every buffer whatever its language, \
+                  in routing priority order. An empty list disables them.",
+            default: "built-in",
+        },
+        SettingDef {
             path: &[Lit("lsp"), Lit("command"), Wildcard("name")],
             shape: ValueShape::StringArray,
             doc: "Argv for a named language server referenced by an lsp.servers list.",

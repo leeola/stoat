@@ -358,14 +358,25 @@ type PendingLspHost = Arc<std::sync::Mutex<Vec<PendingSpawn>>>;
 /// A language server whose spawn task finished, waiting for [`Stoat::update`]
 /// to install it.
 ///
-/// Carries the resolved `server` command name and `language` so the registry
-/// keys the ready host and routes its language on install. `result` is the
-/// ready host, or the failure string to surface in the message row when the
-/// spawn or handshake failed.
+/// Carries the resolved `server` command name and the `scope` it was spawned
+/// for, so the registry keys the ready host and installs it into the right
+/// routing list. `result` is the ready host, or the failure string to surface
+/// in the message row when the spawn or handshake failed.
 pub(crate) struct PendingSpawn {
     pub(crate) server: String,
-    pub(crate) language: String,
+    pub(crate) scope: SpawnScope,
     pub(crate) result: Result<Arc<dyn LspHost>, String>,
+}
+
+/// Which routing list a spawning server belongs to.
+///
+/// A server is spawned either because a buffer's language calls for it or
+/// because it serves every buffer. The install has to know which, since the two
+/// land in separate registry lists and reopen different sets of documents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnScope {
+    Language(String),
+    Global,
 }
 
 /// A finished off-thread `--continue` restore, produced by the blocking task and

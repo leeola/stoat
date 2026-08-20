@@ -2373,6 +2373,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: Some("all".to_string()),
             },

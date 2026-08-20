@@ -206,6 +206,13 @@ pub struct Settings {
     /// `lsp.except.<name> = [feature, ...];` in stcfg. A server with an entry
     /// routes every feature except those listed.
     pub lsp_except: BTreeMap<String, Vec<String>>,
+    /// Named servers that serve every buffer whatever its language, in routing
+    /// priority order. Set via `lsp.globals = [name, ...];` in stcfg.
+    ///
+    /// For a server whose subject is not the language, such as a shortcode
+    /// expander or a spell checker. `None` uses the builtin list, and an empty
+    /// list disables globals entirely.
+    pub lsp_globals: Option<Vec<String>>,
     /// Named finder scopes, each a list of globs (relative to the workspace
     /// root) that scope lists. Set via `finder.scope.<name> = ["src/**"];` in
     /// stcfg. Shift-Tab in the finder cycles through these after All/Modified.
@@ -283,6 +290,7 @@ impl Settings {
             lsp_commands,
             lsp_only,
             lsp_except,
+            lsp_globals: other.lsp_globals.or(self.lsp_globals),
             finder_scopes,
             finder_default_scope: other.finder_default_scope.or(self.finder_default_scope),
         }
@@ -468,6 +476,11 @@ impl Settings {
                         .insert((*language).to_string(), string_array(items));
                 }
             },
+            ["lsp", "globals"] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.lsp_globals = Some(string_array(items));
+                }
+            },
             ["lsp", "command", name] => {
                 if let Value::Array(items) = &setting.value.node {
                     self.lsp_commands
@@ -581,6 +594,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -777,6 +791,28 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_lsp_globals() {
+        let config = parse_ok(r#"on init { lsp.globals = ["typos-lsp", "harper-ls"]; }"#);
+        assert_eq!(
+            Settings::from_config(&config).lsp_globals,
+            Some(vec!["typos-lsp".to_string(), "harper-ls".to_string()]),
+        );
+
+        let empty = parse_ok(r#"on init { lsp.globals = []; }"#);
+        assert_eq!(
+            Settings::from_config(&empty).lsp_globals,
+            Some(Vec::new()),
+            "an empty list turns the globals off rather than reading as unset",
+        );
+
+        assert_eq!(
+            Settings::from_config(&parse_ok("on init { }")).lsp_globals,
+            None,
+            "unset leaves the builtin list in play",
+        );
+    }
+
+    #[test]
     fn from_config_extracts_finder_scope() {
         let config = parse_ok(r#"on init { finder.scope.src = ["src/**", "language/**"]; }"#);
         assert_eq!(
@@ -855,6 +891,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -896,6 +933,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -946,6 +984,7 @@ mod tests {
             lsp_commands: BTreeMap::new(),
             lsp_only: BTreeMap::new(),
             lsp_except: BTreeMap::new(),
+            lsp_globals: None,
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -979,6 +1018,7 @@ mod tests {
             lsp_commands: BTreeMap::new(),
             lsp_only: BTreeMap::new(),
             lsp_except: BTreeMap::new(),
+            lsp_globals: None,
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -1014,6 +1054,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -1052,6 +1093,7 @@ mod tests {
             lsp_commands: BTreeMap::new(),
             lsp_only: BTreeMap::new(),
             lsp_except: BTreeMap::new(),
+            lsp_globals: None,
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -1088,6 +1130,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -1137,6 +1180,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -1178,6 +1222,7 @@ mod tests {
                 lsp_commands: BTreeMap::new(),
                 lsp_only: BTreeMap::new(),
                 lsp_except: BTreeMap::new(),
+                lsp_globals: None,
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -1216,6 +1261,7 @@ mod tests {
             lsp_commands: BTreeMap::new(),
             lsp_only: BTreeMap::new(),
             lsp_except: BTreeMap::new(),
+            lsp_globals: None,
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -1249,6 +1295,7 @@ mod tests {
             lsp_commands: BTreeMap::new(),
             lsp_only: BTreeMap::new(),
             lsp_except: BTreeMap::new(),
+            lsp_globals: None,
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };

@@ -14,7 +14,12 @@
 //! Both drains take a per-pass cap. A server that floods would otherwise starve
 //! the event loop, and whatever is left drains on the next pass.
 
-use crate::{app::Stoat, buffer::BufferId, host::LspHost, lsp::util};
+use crate::{
+    app::{SpawnScope, Stoat},
+    buffer::BufferId,
+    host::LspHost,
+    lsp::util,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -205,7 +210,7 @@ pub(crate) fn install_pending_lsp_host(stoat: &mut Stoat) {
     );
     for spawn in pending {
         match spawn.result {
-            Ok(host) => install_ready_server(stoat, spawn.server, spawn.language, host),
+            Ok(host) => install_ready_server(stoat, spawn.server, spawn.scope, host),
             Err(msg) => {
                 // The server never came up, so its language keeps the noop
                 // placeholder and the failure surfaces in the status bar
@@ -218,30 +223,47 @@ pub(crate) fn install_pending_lsp_host(stoat: &mut Stoat) {
     }
 }
 
-/// Register a ready `host` under its `server` name and `language`, then
-/// re-fire `did_open` for the open buffers of that language.
+/// Register a ready `host` under its `server` name, install it into the
+/// routing list its `scope` names, then re-fire `did_open` for the buffers it
+/// now serves.
 ///
 /// Those buffers already sent `did_open` to the noop while the server was
 /// starting, so they are dropped from [`lsp_opened`] and reopened to
-/// deliver the documents to the real server. Buffers of other languages
-/// keep their own servers untouched.
+/// deliver the documents to the real server.
+///
+/// A language server reopens only its own language's buffers, leaving other
+/// languages' servers untouched. A global server serves every open buffer, so
+/// every one of them is reopened.
 fn install_ready_server(
     stoat: &mut Stoat,
     server: String,
-    language: String,
+    scope: SpawnScope,
     host: Arc<dyn LspHost>,
 ) {
     stoat.lsp_registry.insert(server, host);
-    let selectors = crate::lsp::servers::resolve_servers(&stoat.settings, &language)
-        .iter()
-        .map(|resolved| resolved.to_selector())
-        .collect();
-    stoat
-        .lsp_registry
-        .set_selectors(language.clone(), selectors);
+    let language = match &scope {
+        SpawnScope::Language(language) => {
+            let selectors = crate::lsp::servers::resolve_servers(&stoat.settings, language)
+                .iter()
+                .map(|resolved| resolved.to_selector())
+                .collect();
+            stoat
+                .lsp_registry
+                .set_selectors(language.clone(), selectors);
+            Some(language.clone())
+        },
+        SpawnScope::Global => {
+            let selectors = crate::lsp::servers::resolve_global_servers(&stoat.settings)
+                .iter()
+                .map(|resolved| resolved.to_selector())
+                .collect();
+            stoat.lsp_registry.set_global_selectors(selectors);
+            None
+        },
+    };
 
-    // Ropes rather than strings, because this runs over every open buffer
-    // of the language in one turn and a rope clone is a refcount bump where
+    // Ropes rather than strings, because this runs over every buffer the server
+    // covers in one turn and a rope clone is a refcount bump where
     // materializing each buffer is not.
     let reopen: Vec<(BufferId, PathBuf, Rope)> = {
         let buffers = &stoat.active_workspace().buffers;
@@ -250,8 +272,9 @@ fn install_ready_server(
             .into_iter()
             .filter_map(|path| {
                 let id = buffers.id_for_path(&path)?;
-                if crate::lsp::session::lsp_language_name(buffers, id).as_deref()
-                    != Some(language.as_str())
+                if let Some(language) = &language
+                    && crate::lsp::session::lsp_language_name(buffers, id).as_deref()
+                        != Some(language.as_str())
                 {
                     return None;
                 }
@@ -414,7 +437,7 @@ mod tests {
             .expect("pending lsp host mutex")
             .push(PendingSpawn {
                 server: "rust-analyzer".to_string(),
-                language: "rust".to_string(),
+                scope: SpawnScope::Language("rust".to_string()),
                 result: Err("rust-analyzer: NotFound".to_string()),
             });
 
@@ -441,7 +464,7 @@ mod tests {
             .expect("pending lsp host mutex")
             .push(PendingSpawn {
                 server: "rust-analyzer".to_string(),
-                language: "rust".to_string(),
+                scope: SpawnScope::Language("rust".to_string()),
                 result: Ok(host),
             });
 

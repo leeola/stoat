@@ -312,6 +312,7 @@ fn run_tui(
         lsp_commands: std::collections::BTreeMap::new(),
         lsp_only: std::collections::BTreeMap::new(),
         lsp_except: std::collections::BTreeMap::new(),
+        lsp_globals: None,
         finder_scopes: std::collections::BTreeMap::new(),
         finder_default_scope: None,
     };

@@ -48,15 +48,27 @@ impl ServerSelector {
 pub(crate) struct LspRegistry {
     clients: HashMap<String, Arc<dyn LspHost>>,
     languages: HashMap<String, Vec<ServerSelector>>,
+    /// Servers that route every buffer whatever its language, consulted after
+    /// the buffer's own language servers.
+    ///
+    /// A shortcode expander or a spell checker has nothing to do with the
+    /// language it sits in, and a buffer with no language at all still wants
+    /// them. Kept beside the per-language map rather than copied into every
+    /// entry, since a buffer whose language has no entry needs them too.
+    ///
+    /// Fan-out traffic only. [`Self::route`] and [`Self::sole_or_noop`] answer
+    /// goto and rename, which a narrow global server must never take from a
+    /// language's own server.
+    globals: Vec<ServerSelector>,
     spawn_attempted: HashSet<String>,
     sole: Option<Arc<dyn LspHost>>,
     noop: Arc<dyn LspHost>,
     /// Bumped by every change to the set of servers, so a consumer caching a
     /// derived view of it can tell that view is stale without re-deriving it.
     ///
-    /// Covers [`Self::clients`] and [`Self::languages`], the two the server set
-    /// is read out of. A method touching neither leaves it alone, since a bump
-    /// costs every cache keyed on it a rebuild.
+    /// Covers [`Self::clients`], [`Self::languages`], and [`Self::globals`],
+    /// the three the server set is read out of. A method touching none of them
+    /// leaves it alone, since a bump costs every cache keyed on it a rebuild.
     generation: u64,
 }
 
@@ -65,6 +77,7 @@ impl LspRegistry {
         Self {
             clients: HashMap::new(),
             languages: HashMap::new(),
+            globals: Vec::new(),
             spawn_attempted: HashSet::new(),
             sole: None,
             noop: Arc::new(NoopLsp),
@@ -101,6 +114,16 @@ impl LspRegistry {
     /// Set `language`'s ordered server selectors, replacing any prior list.
     pub(crate) fn set_selectors(&mut self, language: String, selectors: Vec<ServerSelector>) {
         self.languages.insert(language, selectors);
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Set the ordered selectors for servers that route every buffer,
+    /// replacing any prior list.
+    ///
+    /// These rank after a buffer's own language servers, so a language's
+    /// server still leads its routing order.
+    pub(crate) fn set_global_selectors(&mut self, selectors: Vec<ServerSelector>) {
+        self.globals = selectors;
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -166,8 +189,11 @@ impl LspRegistry {
     }
 
     /// Returns a single active client for editor-wide and cross-language
-    /// traffic, preferring the injected sole client, then the only per-language
+    /// traffic, preferring the injected sole client, then the only registered
     /// client when exactly one is up, then a noop.
+    ///
+    /// The one registered client is whichever is up, global or per-language.
+    /// Nothing else being up is what makes it the editor's server.
     pub(crate) fn sole_or_noop(&self) -> Arc<dyn LspHost> {
         if let Some(sole) = &self.sole {
             return sole.clone();
@@ -195,20 +221,31 @@ impl LspRegistry {
         self.named_hosts().iter().any(|(_, host)| !host.is_noop())
     }
 
+    /// `language`'s own selectors followed by the global ones, in routing
+    /// order.
+    ///
+    /// The order carries the rule. A language's servers lead, and the globals
+    /// answer beside them rather than instead of them.
+    fn selectors_for(&self, language: &str) -> impl Iterator<Item = &ServerSelector> {
+        self.languages
+            .get(language)
+            .into_iter()
+            .flatten()
+            .chain(&self.globals)
+    }
+
     /// Every up host serving `language`, for document-sync notifications that
     /// each running server must mirror.
     ///
-    /// Falls back to the injected sole client when the language has no
-    /// per-language servers up.
+    /// Falls back to the injected sole client when neither the language nor the
+    /// globals have a server up.
     pub(crate) fn hosts_for_language(&self, language: &str) -> Vec<Arc<dyn LspHost>> {
-        if let Some(selectors) = self.languages.get(language) {
-            let hosts: Vec<Arc<dyn LspHost>> = selectors
-                .iter()
-                .filter_map(|selector| self.clients.get(&selector.name).cloned())
-                .collect();
-            if !hosts.is_empty() {
-                return hosts;
-            }
+        let hosts: Vec<Arc<dyn LspHost>> = self
+            .selectors_for(language)
+            .filter_map(|selector| self.clients.get(&selector.name).cloned())
+            .collect();
+        if !hosts.is_empty() {
+            return hosts;
         }
         self.sole.iter().cloned().collect()
     }
@@ -217,58 +254,47 @@ impl LspRegistry {
     /// counterpart of [`Self::hosts_for_language`] for callers that only need to
     /// know a server exists rather than the hosts themselves.
     pub(crate) fn has_host_for_language(&self, language: &str) -> bool {
-        if let Some(selectors) = self.languages.get(language)
-            && selectors
-                .iter()
-                .any(|selector| self.clients.contains_key(&selector.name))
-        {
-            return true;
-        }
-        self.sole.is_some()
+        self.selectors_for(language)
+            .any(|selector| self.clients.contains_key(&selector.name))
+            || self.sole.is_some()
     }
 
-    /// The names of `language`'s running servers, in selector (routing) order.
+    /// The names of the running servers that route `language`, its own first
+    /// and the globals after, in selector (routing) order.
     ///
-    /// Only named per-language servers appear. The nameless sole client is
-    /// omitted, so the status bar can label each server it lists. Empty when no
-    /// named server for the language is up.
+    /// Only named servers appear. The nameless sole client is omitted, so the
+    /// status bar can label each server it lists. Empty when no named server
+    /// routing the language is up.
     pub(crate) fn names_for_language(&self, language: &str) -> Vec<String> {
-        self.languages
-            .get(language)
-            .map(|selectors| {
-                selectors
-                    .iter()
-                    .filter(|selector| self.clients.contains_key(&selector.name))
-                    .map(|selector| selector.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.selectors_for(language)
+            .filter(|selector| self.clients.contains_key(&selector.name))
+            .map(|selector| selector.name.clone())
+            .collect()
     }
 
-    /// Every up host serving `language` whose selector routes `feature` and
-    /// whose capabilities support it, each paired with its server name.
+    /// Every up host routing `language` whose selector routes `feature` and
+    /// whose capabilities support it, each paired with its server name, the
+    /// language's own servers first and the globals after.
     ///
     /// Requests fan out over the result (completion) or take the first (hover,
-    /// goto, ...). Falls back to the injected sole client when the language has
-    /// no per-language match, so tests driving a single fake still route.
+    /// goto, ...). Falls back to the injected sole client when nothing matches,
+    /// so tests driving a single fake still route.
     pub(crate) fn hosts_with_feature(
         &self,
         language: &str,
         feature: LanguageServerFeature,
     ) -> Vec<(String, Arc<dyn LspHost>)> {
-        if let Some(selectors) = self.languages.get(language) {
-            let hosts: Vec<(String, Arc<dyn LspHost>)> = selectors
-                .iter()
-                .filter(|selector| selector.has_feature(feature))
-                .filter_map(|selector| {
-                    let host = self.clients.get(&selector.name)?;
-                    host.supports_feature(feature)
-                        .then(|| (selector.name.clone(), host.clone()))
-                })
-                .collect();
-            if !hosts.is_empty() {
-                return hosts;
-            }
+        let hosts: Vec<(String, Arc<dyn LspHost>)> = self
+            .selectors_for(language)
+            .filter(|selector| selector.has_feature(feature))
+            .filter_map(|selector| {
+                let host = self.clients.get(&selector.name)?;
+                host.supports_feature(feature)
+                    .then(|| (selector.name.clone(), host.clone()))
+            })
+            .collect();
+        if !hosts.is_empty() {
+            return hosts;
         }
         match &self.sole {
             Some(sole) if sole.supports_feature(feature) => {
@@ -451,6 +477,76 @@ mod tests {
         let completion = registry.hosts_with_feature("rust", LanguageServerFeature::Completion);
         assert_eq!(completion.len(), 1);
         assert_eq!(completion[0].0, "secondary");
+    }
+
+    #[test]
+    fn a_global_server_routes_every_language_and_none() {
+        let mut registry = LspRegistry::new();
+        registry.insert("emoji-ls".into(), fake_with(completion_caps()));
+        registry.set_global_selectors(vec![ServerSelector::all("emoji-ls".into())]);
+
+        for language in ["rust", "python", ""] {
+            let hosts = registry.hosts_with_feature(language, LanguageServerFeature::Completion);
+            assert_eq!(
+                hosts
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["emoji-ls"],
+                "a global server answers for {language:?}, mapped or not",
+            );
+            assert_eq!(registry.hosts_for_language(language).len(), 1);
+            assert!(registry.has_host_for_language(language));
+            assert_eq!(registry.names_for_language(language), vec!["emoji-ls"]);
+        }
+    }
+
+    #[test]
+    fn a_languages_own_servers_rank_before_the_globals() {
+        let mut registry = LspRegistry::new();
+        registry.insert("rust-analyzer".into(), fake_with(completion_caps()));
+        registry.insert("emoji-ls".into(), fake_with(completion_caps()));
+        registry.set_selectors(
+            "rust".into(),
+            vec![ServerSelector::all("rust-analyzer".into())],
+        );
+        registry.set_global_selectors(vec![ServerSelector::all("emoji-ls".into())]);
+
+        assert_eq!(
+            registry.names_for_language("rust"),
+            vec!["rust-analyzer", "emoji-ls"],
+            "the language's own server leads its routing order",
+        );
+        assert_eq!(
+            registry
+                .hosts_with_feature("rust", LanguageServerFeature::Completion)
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rust-analyzer", "emoji-ls"],
+        );
+    }
+
+    #[test]
+    fn a_global_server_never_answers_a_single_target_request() {
+        let mut registry = LspRegistry::new();
+        let rust_analyzer = fake_with(hover_caps());
+        registry.insert("rust-analyzer".into(), rust_analyzer.clone());
+        registry.insert("emoji-ls".into(), fake_with(hover_caps()));
+        registry.set_selectors(
+            "rust".into(),
+            vec![ServerSelector::all("rust-analyzer".into())],
+        );
+        registry.set_global_selectors(vec![ServerSelector::all("emoji-ls".into())]);
+
+        assert!(
+            Arc::ptr_eq(&registry.route("rust"), &rust_analyzer),
+            "goto and rename go to the language's own server",
+        );
+        assert!(
+            registry.route("python").is_noop(),
+            "and an unmapped language gets nothing rather than a global",
+        );
     }
 
     #[test]
