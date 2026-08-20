@@ -12,7 +12,14 @@ use crate::{
 };
 use futures::FutureExt;
 use slotmap::new_key_type;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+/// Source of [`TermSession::token`] values, handed out by
+/// [`TermSession::next_token`].
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
 
 new_key_type! {
     /// Workspace-scoped key for a [`TermSession`] in the workspace's term
@@ -120,22 +127,41 @@ pub struct TermSession {
     /// The record is deliberately not persisted. Sessions die with the process,
     /// and a respawned shell starts with no history to return to.
     pub(crate) return_focus: Option<TermReturnFocus>,
+    /// Process-unique name for this session, exported to a terminal shell as
+    /// `STOAT_TERM_ID` so a command run inside it names the pane it came from.
+    ///
+    /// A [`TermId`] does not serve. The spawn environment is built before the
+    /// PTY opens, while the id exists only after the finished session is
+    /// inserted. A [`PaneId`] does not serve either. Moving a pane swaps which
+    /// view sits where and strands the name, while the session itself stays
+    /// put.
+    pub token: u64,
 }
 
 impl TermSession {
+    /// A token no other session in this process holds.
+    ///
+    /// Minted before the spawn so the value is available to put in the child's
+    /// environment, then handed to [`Self::new`] to record on the session it
+    /// names.
+    pub(crate) fn next_token() -> u64 {
+        NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Pair `term` with the `session` driving it, opening in `"normal"` mode.
     ///
     /// A [`View::Terminal`](crate::pane::View::Terminal) pane is flipped to
     /// insert when focus arrives, so this initial normal mode is what a
     /// [`View::Agent`](crate::pane::View::Agent) pane holds until the user
     /// presses `i`.
-    pub fn new(term: TermScreen, session: Arc<dyn TerminalSession>) -> Self {
+    pub fn new(term: TermScreen, session: Arc<dyn TerminalSession>, token: u64) -> Self {
         Self {
             term,
             session,
             selection: None,
             mode: "normal".into(),
             return_focus: None,
+            token,
         }
     }
 
@@ -195,18 +221,30 @@ impl TermSession {
 mod tests {
     use super::{TermSelection, TermSession};
     use crate::{host::FakeTerminalSession, term_screen::TermScreen};
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     fn session_with(text: &[u8]) -> TermSession {
         let mut term = TermScreen::new(4, 20);
         term.feed(text);
-        TermSession::new(term, Arc::new(FakeTerminalSession::new()))
+        TermSession::new(
+            term,
+            Arc::new(FakeTerminalSession::new()),
+            TermSession::next_token(),
+        )
     }
 
     fn selection(anchor: (usize, usize), head: (usize, usize)) -> TermSelection {
         let mut sel = TermSelection::new(anchor.0, anchor.1);
         sel.extend_to(head.0, head.1);
         sel
+    }
+
+    // Other tests mint tokens on their own threads, so this asserts only
+    // distinctness, never the values or the step between them.
+    #[test]
+    fn tokens_are_never_reissued() {
+        let minted: HashSet<u64> = (0..4).map(|_| TermSession::next_token()).collect();
+        assert_eq!(minted.len(), 4, "each session gets a name of its own");
     }
 
     #[test]

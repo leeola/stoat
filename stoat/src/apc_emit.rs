@@ -3521,6 +3521,7 @@ mod tests {
             let term_id = ws.terms.insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 session,
+                TermSession::next_token(),
             ));
             ws.panes.pane_mut(focused).view = View::Terminal(term_id);
             (focused, term_id, ws.panes.pane(focused).index)

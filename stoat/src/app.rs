@@ -1383,6 +1383,15 @@ pub struct Stoat {
     /// by default so the test harness never spawns a warm pass. The binary
     /// turns it on for a live session via [`Self::set_diff_warm_auto`].
     pub(crate) diff_warm_auto: bool,
+    /// Directory holding the per-workspace agent sockets, the single source of
+    /// the path both [`Self::serve_term_session`] binds and an owned child's
+    /// `STOAT_AGENT_SOCK` names.
+    ///
+    /// `None` by default, which serves no socket and injects no session
+    /// environment, so a test drives the spawn paths without binding a
+    /// listener or reading the developer's own state directory. The binary and
+    /// the fixture harness set it via [`Self::set_agent_socket_dir`].
+    pub(crate) agent_socket_dir: Option<PathBuf>,
     /// Landing slot for a finished direnv load, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
     /// Shared rather than returned because the load runs detached on
@@ -2124,6 +2133,7 @@ impl Stoat {
             pending_lsp_host: Arc::new(std::sync::Mutex::new(Vec::new())),
             env_auto_load: false,
             diff_warm_auto: false,
+            agent_socket_dir: None,
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
@@ -2709,6 +2719,15 @@ impl Stoat {
     /// the test harness never spawns a warm pass. The binary turns it on.
     pub fn set_diff_warm_auto(&mut self, enabled: bool) {
         self.diff_warm_auto = enabled;
+    }
+
+    /// Point the per-workspace agent sockets at `dir`, enabling both socket
+    /// serving and session-environment injection for owned children.
+    ///
+    /// Unset by default, which leaves both off. The binary and the fixture
+    /// harness pass the Stoat state directory.
+    pub fn set_agent_socket_dir(&mut self, dir: PathBuf) {
+        self.agent_socket_dir = Some(dir);
     }
 
     pub fn active_workspace(&self) -> &Workspace {
@@ -6378,11 +6397,19 @@ impl Stoat {
 
     /// Start the per-session agent hook server for `uid` on the executor.
     ///
-    /// Binds the session's hook socket (see [`crate::run::agent_socket_path`])
-    /// and forwards decoded events to [`Self::handle_agent_event`] through the
-    /// shared channel. Callers spawn this alongside the owned Claude subshell.
+    /// Binds the session's hook socket under [`Self::agent_socket_dir`] and
+    /// forwards decoded events to [`Self::handle_agent_event`] through the
+    /// shared channel. Callers spawn this alongside the owned Claude subshell,
+    /// which reaches it by `STOAT_AGENT_SOCK`, and a terminal pane's own shell
+    /// carries the same variable.
+    ///
+    /// Serves nothing and reports success when no directory is set, which is
+    /// the default a test runs under.
     pub fn serve_term_session(&self, uid: WorkspaceUid) -> io::Result<()> {
-        let socket_path = crate::run::agent_socket_path(uid)?;
+        let Some(dir) = self.agent_socket_dir.as_deref() else {
+            return Ok(());
+        };
+        let socket_path = crate::run::agent_socket_path_in(dir, uid);
         let tx = self.agent_event_tx.clone();
         let control_tx = self.agent_control_tx.clone();
         self.executor
@@ -9392,6 +9419,7 @@ mod tests {
         let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ));
         // Show the agent in the focused pane so its output marks the frame dirty.
         let pane = stoat.active_workspace().panes.focus();
@@ -9425,6 +9453,7 @@ mod tests {
             .insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 session,
+                TermSession::next_token(),
             ));
 
         // OSC 52 set-clipboard with the base64 of "hi", BEL-terminated.
@@ -9538,6 +9567,7 @@ mod tests {
         let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ));
 
         // A DSR cursor-position query in the PTY output must be answered back
@@ -9562,6 +9592,7 @@ mod tests {
         let agent_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ));
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
@@ -9595,6 +9626,7 @@ mod tests {
         let agent_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ));
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
@@ -9623,6 +9655,7 @@ mod tests {
         let term_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ));
         ws.panes.pane_mut(focused).view = View::Terminal(term_id);
 
@@ -9645,6 +9678,7 @@ mod tests {
         ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ))
     }
 
@@ -9927,6 +9961,7 @@ mod tests {
         let term_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
+            TermSession::next_token(),
         ));
         ws.panes.pane_mut(focused).view = make_view(term_id);
         stoat.set_focused_mode("insert".to_string());
@@ -10426,6 +10461,7 @@ mod tests {
             let above_closed = ws.terms.insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 Arc::new(crate::host::FakeTerminalSession::default()),
+                TermSession::next_token(),
             ));
             ws.terms[at_closed].return_focus = Some(TermReturnFocus::Pane { tab: 1, pane });
             ws.terms[above_closed].return_focus = Some(TermReturnFocus::Pane { tab: 2, pane });
@@ -10638,6 +10674,7 @@ mod tests {
             let term_id = ws.terms.insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 session,
+                TermSession::next_token(),
             ));
             ws.panes.pane_mut(pane).view = View::Terminal(term_id);
         }
@@ -12003,6 +12040,7 @@ mod tests {
             .insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 session,
+                TermSession::next_token(),
             ));
 
         let view = View::Terminal(term_id);

@@ -88,9 +88,11 @@ mod tests {
         let focused = ws.panes.focus();
 
         let session: Arc<dyn TerminalSession> = Arc::new(FakeTerminalSession::new());
-        let agent_id = ws
-            .terms
-            .insert(TermSession::new(TermScreen::new(24, 80), session));
+        let agent_id = ws.terms.insert(TermSession::new(
+            TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
         let size = h.stoat.size();

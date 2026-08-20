@@ -44,6 +44,7 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     let agent_id = ws.terms.insert(TermSession::new(
         TermScreen::new(AGENT_ROWS, AGENT_COLS),
         session.clone(),
+        TermSession::next_token(),
     ));
     let focused = ws.panes.focus();
     ws.panes.pane_mut(focused).view = View::Agent(agent_id);

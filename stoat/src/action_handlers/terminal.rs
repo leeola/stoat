@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     host::terminal::TerminalSession,
     pane::View,
-    run::{spawn_term_reader, spawn_terminal},
+    run::{agent_socket_path_in, spawn_term_reader, spawn_terminal, TermSpawnEnv},
     term_screen::TermScreen,
     term_session::TermSession,
 };
@@ -110,13 +110,24 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let host = stoat.terminal_host.clone();
     let executor = stoat.executor.clone();
     let pty_tx = stoat.pty_tx.clone();
+    let socket_dir = stoat.agent_socket_dir.clone();
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
     let diff = ws.env.diff.clone();
 
+    // Minted before the spawn because the child's environment names it, and the
+    // session it belongs to does not exist until the insert below.
+    let token = TermSession::next_token();
+    let session_env = socket_dir.map(|dir| TermSpawnEnv {
+        uid: ws.uid,
+        socket_path: agent_socket_path_in(&dir, ws.uid),
+        token,
+    });
+
     // The local terminal host opens the PTY synchronously, so the spawn future
     // is ready on first poll, matching the claude pane's spawn path.
-    let session = match spawn_terminal(&*host, &cwd, &program, &args, &diff).now_or_never() {
+    let spawned = spawn_terminal(&*host, &cwd, &program, &args, &diff, session_env).now_or_never();
+    let session = match spawned {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
             tracing::warn!(target: "stoat::terminal", %err, "failed to spawn terminal session");
@@ -129,6 +140,7 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let term_id = ws.terms.insert(TermSession::new(
         TermScreen::new(TERM_ROWS, TERM_COLS),
         session.clone(),
+        token,
     ));
     spawn_term_reader(&executor, session, term_id, pty_tx);
     View::Terminal(term_id)
@@ -225,6 +237,53 @@ mod tests {
         assert!(
             spawns[0].args.is_empty(),
             "an env-resolved shell launches with no args",
+        );
+    }
+
+    #[test]
+    fn terminal_spawn_carries_the_session_triple() {
+        let mut h = Stoat::test();
+        h.stoat.set_agent_socket_dir("/state".into());
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let ws = h.stoat.active_workspace();
+        let View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("focused pane should hold a terminal view");
+        };
+        let expected = vec![
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("STOAT_SESSION".to_string(), ws.uid.to_string()),
+            (
+                "STOAT_AGENT_SOCK".to_string(),
+                format!("/state/agent-{}.sock", ws.uid),
+            ),
+            (
+                "STOAT_TERM_ID".to_string(),
+                ws.terms[term_id].token.to_string(),
+            ),
+        ];
+
+        let spawns = h.fake_terminal_host().spawns();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(
+            spawns[0].env, expected,
+            "the shell is told which instance, socket, and terminal pane owns it",
+        );
+    }
+
+    #[test]
+    fn terminal_spawn_omits_the_session_triple_without_a_socket_dir() {
+        let mut h = Stoat::test();
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let spawns = h.fake_terminal_host().spawns();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(
+            spawns[0].env,
+            vec![("TERM".to_string(), "xterm-256color".to_string())],
+            "no socket dir means no parent instance to name",
         );
     }
 

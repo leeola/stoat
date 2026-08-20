@@ -163,6 +163,18 @@ pub async fn spawn_claude(
     .await
 }
 
+/// The owning instance a terminal shell reaches back to, as the shell's
+/// environment names it.
+///
+/// Carried into the spawn rather than resolved inside it, because the token is
+/// minted before the PTY opens and the socket directory is a per-instance knob
+/// ([`crate::Stoat::set_agent_socket_dir`]).
+pub struct TermSpawnEnv {
+    pub uid: WorkspaceUid,
+    pub socket_path: PathBuf,
+    pub token: u64,
+}
+
 /// Spawn `program` as an owned subshell terminal session, returning its
 /// [`TerminalSession`].
 ///
@@ -170,13 +182,37 @@ pub async fn spawn_claude(
 /// child runs with `TERM=xterm-256color` to match the xterm-compatible
 /// emulator the pane renders into, and inherits no other environment beyond
 /// the parent's.
+///
+/// With `session_env`, the child also learns which instance, socket, and
+/// terminal pane it belongs to, so a command run inside it addresses the
+/// editor that hosts it. `EDITOR` and `VISUAL` stay untouched either way. A
+/// terminal shell is the user's own, and an owned agent's blocking-editor
+/// contract is not theirs.
 pub async fn spawn_terminal(
     host: &dyn TerminalHost,
     cwd: &Path,
     program: &str,
     args: &[String],
     diff: &[(String, Option<String>)],
+    session_env: Option<TermSpawnEnv>,
 ) -> std::io::Result<Box<dyn TerminalSession>> {
+    host.spawn(terminal_spawn_args(
+        cwd,
+        program,
+        args,
+        diff,
+        session_env.as_ref(),
+    ))
+    .await
+}
+
+fn terminal_spawn_args(
+    cwd: &Path,
+    program: &str,
+    args: &[String],
+    diff: &[(String, Option<String>)],
+    session_env: Option<&TermSpawnEnv>,
+) -> SpawnArgs {
     let mut spawn_args = SpawnArgs {
         program: program.to_string(),
         args: args.to_vec(),
@@ -190,7 +226,18 @@ pub async fn spawn_terminal(
     spawn_args
         .env
         .push(("TERM".into(), "xterm-256color".into()));
-    host.spawn(spawn_args).await
+
+    if let Some(env) = session_env {
+        spawn_args.env.extend([
+            ("STOAT_SESSION".into(), env.uid.to_string()),
+            (
+                "STOAT_AGENT_SOCK".into(),
+                env.socket_path.to_string_lossy().into_owned(),
+            ),
+            ("STOAT_TERM_ID".into(), env.token.to_string()),
+        ]);
+    }
+    spawn_args
 }
 
 /// Spawn the reader that pumps a term session's PTY output into its
@@ -245,7 +292,16 @@ async fn term_reader_task(
 /// in-process IPC server binds the same path, so a hook callback reaches
 /// the owning session.
 pub fn agent_socket_path(uid: WorkspaceUid) -> std::io::Result<PathBuf> {
-    Ok(stoat_log::state_dir()?.join(format!("agent-{uid}.sock")))
+    Ok(agent_socket_path_in(&stoat_log::state_dir()?, uid))
+}
+
+/// Filesystem path of the per-session agent hook socket for `uid` under `dir`.
+///
+/// The naming half of [`agent_socket_path`], split out so a caller holding a
+/// directory of its own resolves the same name without touching the real
+/// environment. [`crate::Stoat::set_agent_socket_dir`] is that caller.
+pub fn agent_socket_path_in(dir: &Path, uid: WorkspaceUid) -> PathBuf {
+    dir.join(format!("agent-{uid}.sock"))
 }
 
 fn claude_spawn_args(
@@ -366,6 +422,64 @@ mod tests {
                 ("EDITOR".to_string(), "/usr/bin/stoat editor".to_string()),
                 ("VISUAL".to_string(), "/usr/bin/stoat editor".to_string()),
             ],
+        );
+    }
+
+    #[test]
+    fn terminal_args_inject_the_session_triple_only_when_asked() {
+        let uid = WorkspaceUid(0xABCD);
+        let diff = vec![
+            ("FLAKE_VAR".to_string(), Some("1".to_string())),
+            ("OLD_VAR".to_string(), None),
+        ];
+        let session_env = TermSpawnEnv {
+            uid,
+            socket_path: PathBuf::from("/run/agent.sock"),
+            token: 7,
+        };
+        let args = terminal_spawn_args(
+            Path::new("/work"),
+            "/bin/zsh",
+            &["-l".to_string()],
+            &diff,
+            Some(&session_env),
+        );
+        assert_eq!(args.program, "/bin/zsh");
+        assert_eq!(args.args, vec!["-l".to_string()]);
+        assert_eq!(args.cwd, Path::new("/work"));
+        assert_eq!(args.env_remove, vec!["OLD_VAR".to_string()]);
+        assert_eq!(
+            args.env,
+            vec![
+                // The diff's set lands first, so the built-ins below win any
+                // key conflict under open_local_pty's last-writer semantics.
+                ("FLAKE_VAR".to_string(), "1".to_string()),
+                ("TERM".to_string(), "xterm-256color".to_string()),
+                ("STOAT_SESSION".to_string(), uid.to_string()),
+                (
+                    "STOAT_AGENT_SOCK".to_string(),
+                    "/run/agent.sock".to_string()
+                ),
+                ("STOAT_TERM_ID".to_string(), "7".to_string()),
+            ],
+        );
+
+        let bare = terminal_spawn_args(Path::new("/work"), "/bin/zsh", &[], &diff, None);
+        assert_eq!(
+            bare.env,
+            vec![
+                ("FLAKE_VAR".to_string(), "1".to_string()),
+                ("TERM".to_string(), "xterm-256color".to_string()),
+            ],
+            "without a session env the shell learns only its terminal type",
+        );
+    }
+
+    #[test]
+    fn agent_socket_named_under_the_given_dir() {
+        assert_eq!(
+            agent_socket_path_in(Path::new("/state"), WorkspaceUid(0xABCD)),
+            Path::new("/state/agent-000000000000abcd.sock"),
         );
     }
 
