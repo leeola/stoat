@@ -77,7 +77,10 @@ struct Globals {
 
 /// The instanced panel pipeline and its per-frame buffers.
 pub struct PanelPass {
-    pipeline: RenderPipeline,
+    /// The shadow, fill, and overhang, recorded beneath the text a panel frames.
+    pipeline_under: RenderPipeline,
+    /// The frame stroke alone, so it can be recorded above that text.
+    pipeline_stroke: RenderPipeline,
     bind_group_layout: BindGroupLayout,
     globals: Buffer,
     bind_group: BindGroup,
@@ -144,47 +147,53 @@ impl PanelPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("panel"),
-            layout: Some(&layout),
-            vertex: VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
-                    array_stride: size_of::<PanelInstance>() as u64,
-                    step_mode: VertexStepMode::Instance,
-                    attributes: &vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2,
-                        2 => Float32x3,
-                        3 => Float32x3,
-                        4 => Float32x2,
-                        5 => Float32,
-                        6 => Float32,
-                        7 => Float32,
-                        8 => Uint32,
-                        9 => Float32,
-                        10 => Float32,
-                    ],
-                }],
-            },
-            fragment: Some(FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // One module, two fragment stages. The stroke draws separately from the
+        // rest so it can be recorded above the text the frame surrounds.
+        let build = |label: &str, entry: &str| {
+            device.create_render_pipeline(&RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[VertexBufferLayout {
+                        array_stride: size_of::<PanelInstance>() as u64,
+                        step_mode: VertexStepMode::Instance,
+                        attributes: &vertex_attr_array![
+                            0 => Float32x2,
+                            1 => Float32x2,
+                            2 => Float32x3,
+                            3 => Float32x3,
+                            4 => Float32x2,
+                            5 => Float32,
+                            6 => Float32,
+                            7 => Float32,
+                            8 => Uint32,
+                            9 => Float32,
+                            10 => Float32,
+                        ],
+                    }],
+                },
+                fragment: Some(FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(ColorTargetState {
+                        format,
+                        blend: Some(BlendState::ALPHA_BLENDING),
+                        write_mask: ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline_under = build("panel under", "fs_under");
+        let pipeline_stroke = build("panel stroke", "fs_stroke");
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("panel globals"),
@@ -197,7 +206,8 @@ impl PanelPass {
         let bind_group = make_bind_group(device, &bind_group_layout, &globals, &instances);
 
         PanelPass {
-            pipeline,
+            pipeline_under,
+            pipeline_stroke,
             bind_group_layout,
             globals,
             bind_group,
@@ -297,7 +307,29 @@ impl PanelPass {
             return;
         }
 
-        render_pass.set_pipeline(&self.pipeline);
+        self.draw_under(render_pass);
+        self.draw_stroke(render_pass);
+    }
+
+    /// Record the shadow, fill, and overhang of every non-riding panel.
+    pub fn draw_under(&self, render_pass: &mut RenderPass<'_>) {
+        self.draw_slots(render_pass, &self.pipeline_under);
+    }
+
+    /// Record the frame stroke of every non-riding panel.
+    ///
+    /// Split from [`Self::draw_under`] so a caller can put the stroke above the
+    /// text the frame surrounds while the rest stays below it.
+    pub fn draw_stroke(&self, render_pass: &mut RenderPass<'_>) {
+        self.draw_slots(render_pass, &self.pipeline_stroke);
+    }
+
+    fn draw_slots(&self, render_pass: &mut RenderPass<'_>, pipeline: &RenderPipeline) {
+        if self.count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
 
@@ -321,11 +353,27 @@ impl PanelPass {
     /// chrome, so the frame lands over the pooled surface it belongs to instead
     /// of being painted over by it. A no-op on a frame with no ride.
     pub fn draw_riding(&self, render_pass: &mut RenderPass<'_>) {
+        self.draw_riding_under(render_pass);
+        self.draw_riding_stroke(render_pass);
+    }
+
+    /// Record the shadow, fill, and overhang of every riding panel.
+    pub fn draw_riding_under(&self, render_pass: &mut RenderPass<'_>) {
+        self.draw_riding_slots(render_pass, &self.pipeline_under);
+    }
+
+    /// Record the frame stroke of every riding panel, split for
+    /// [`Self::draw_stroke`]'s reason.
+    pub fn draw_riding_stroke(&self, render_pass: &mut RenderPass<'_>) {
+        self.draw_riding_slots(render_pass, &self.pipeline_stroke);
+    }
+
+    fn draw_riding_slots(&self, render_pass: &mut RenderPass<'_>, pipeline: &RenderPipeline) {
         if self.riding.is_empty() {
             return;
         }
 
-        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         for &(index, [x, y, w, h]) in &self.riding {

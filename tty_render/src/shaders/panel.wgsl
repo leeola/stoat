@@ -164,14 +164,16 @@ fn line_coverage(style: u32, d: f32) -> f32 {
     return clamp(1.0 - d + 0.5, 0.0, 1.0);
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Self-occlusion: discard fragments falling inside the box rect of any later
-    // panel (a higher index draws on top), so a lower box's shadow, fill, and
-    // stroke cannot show through an upper box's body. A later panel's exterior
-    // shadow lies outside its box rect, so shadows past a box edge keep blending.
-    let frag = in.clip.xy;
-    for (var j = in.instance + 1u; j < globals.count; j = j + 1u) {
+/// Discard a fragment that falls inside the box rect of any later panel.
+///
+/// A higher index draws on top, so a lower box's shadow, fill, and stroke must
+/// not show through an upper box's body. A later panel's exterior shadow lies
+/// outside its box rect, so shadows past a box edge keep blending.
+///
+/// Both fragment stages run this. A stroke hidden behind a later panel has to
+/// stay hidden whichever pass draws it.
+fn occluded(frag: vec2<f32>, instance: u32) -> bool {
+    for (var j = instance + 1u; j < globals.count; j = j + 1u) {
         let base = j * INSTANCE_STRIDE;
         let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
         let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
@@ -184,10 +186,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             instances[base + 16u]
         );
         if sdf < -0.5 {
-            discard;
+            return true;
         }
     }
+    return false;
+}
 
+/// The panel's signed distance field and the coverages derived from it, shared
+/// by both fragment stages so each measures the same box.
+struct Coverage {
+    stroke: f32,
+    fill: f32,
+    shadow: f32,
+    overhang: f32,
+}
+
+fn coverage_of(in: VsOut) -> Coverage {
     let p = in.quad_px;
 
     let center = (in.box_min + in.box_max) * 0.5;
@@ -227,16 +241,48 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         in.shadow_mode > 1.5
     );
 
-    // Composite bottom-up: the exterior shadow, the optional fill, the overhang
-    // band cast onto that fill, then the stroke.
-    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    acc = over(acc, SHADOW_COLOR, shadow_base);
-    acc = over(acc, in.fill, fill_alpha);
-    acc = over(acc, SHADOW_COLOR, overhang);
-    acc = over(acc, in.border, stroke);
+    return Coverage(stroke, fill_alpha, shadow_base, overhang);
+}
 
-    // The pipeline blends unpremultiplied source alpha, so hand the coverage
-    // back out of the color. A zero-coverage fragment paints nothing, so what
-    // the guard returns for it does not matter.
+/// Hand an accumulated premultiplied color back as the unpremultiplied color the
+/// pipeline's blend expects.
+///
+/// A zero-coverage fragment paints nothing, so what the guard returns for it
+/// does not matter.
+fn unpremultiply(acc: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(acc.rgb / max(acc.a, 1.0e-5), acc.a);
+}
+
+/// Everything of the panel that sits beneath the text it frames: the exterior
+/// shadow, the optional fill, and the overhang band cast onto that fill.
+@fragment
+fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
+    if occluded(in.clip.xy, in.instance) {
+        discard;
+    }
+    let c = coverage_of(in);
+
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    acc = over(acc, SHADOW_COLOR, c.shadow);
+    acc = over(acc, in.fill, c.fill);
+    acc = over(acc, SHADOW_COLOR, c.overhang);
+    return unpremultiply(acc);
+}
+
+/// The panel's frame stroke alone, so it can be recorded above the text the
+/// frame surrounds.
+///
+/// Drawing it separately rather than in one composite gives the same pixels:
+/// alpha compositing is associative, so blending the stroke over the result of
+/// the under draw equals compositing both and blending once.
+@fragment
+fn fs_stroke(in: VsOut) -> @location(0) vec4<f32> {
+    if occluded(in.clip.xy, in.instance) {
+        discard;
+    }
+    let c = coverage_of(in);
+
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    acc = over(acc, in.border, c.stroke);
+    return unpremultiply(acc);
 }
