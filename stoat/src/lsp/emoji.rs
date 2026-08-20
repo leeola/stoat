@@ -11,9 +11,13 @@
 //! What keeps it quiet inside code is the boundary rule. A completion answers
 //! only when the opening `:` sits at a word boundary, so `std::` and `x: T`
 //! offer nothing while a colon at the start of a line or after a space offers
-//! everything.
+//! everything. That rule lives in [`crate::emoji_expand`], shared with the
+//! typed-colon swap so the two never disagree about what opens a shortcode.
 
-use crate::host::lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError};
+use crate::{
+    emoji_expand::{is_shortcode_char, opens_a_shortcode},
+    host::lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError},
+};
 use async_trait::async_trait;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
@@ -461,24 +465,7 @@ fn typing_shortcode(text: &str, position: Position) -> Option<(u32, &str)> {
     if !typed.chars().all(is_shortcode_char) {
         return None;
     }
-    let opens_a_shortcode = before_cursor[..colon]
-        .chars()
-        .next_back()
-        .is_none_or(|ch| !is_word_char(ch));
-    opens_a_shortcode.then_some((colon as u32, typed))
-}
-
-/// Whether `ch` appears in a gemoji shortcode.
-fn is_shortcode_char(ch: char) -> bool {
-    ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '+' | '-')
-}
-
-/// Whether `ch` before an opening colon means that colon belongs to the code
-/// rather than to a shortcode.
-///
-/// `:` is included so the second colon of a `std::` path never opens one.
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | ':')
+    opens_a_shortcode(before_cursor[..colon].chars().next_back()).then_some((colon as u32, typed))
 }
 
 /// Every shortcode that starts with what has been typed at `position`.

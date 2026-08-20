@@ -2357,6 +2357,7 @@ mod tests {
                 editor_line_numbers: Some(LineNumbers::Relative),
                 editor_minimap: None,
                 editor_auto_pairs: Some(true),
+                editor_emoji_expansion: None,
                 editor_wrap: Some(WrapMode::EditorWidth),
                 editor_wrap_column: None,
                 ui_tab_bar: Some(TabBarMode::Auto),

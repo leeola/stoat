@@ -27,6 +27,7 @@ pub(crate) mod diff_warm;
 pub mod display_map;
 pub mod dump;
 mod editor_state;
+pub(crate) mod emoji_expand;
 pub mod file_finder;
 pub mod image_emit;
 mod review_walk;

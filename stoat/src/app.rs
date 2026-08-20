@@ -13,6 +13,7 @@ use crate::{
     debounce,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, ScrollGlide},
+    emoji_expand,
     file_finder::{FileFinder, FinderPathCache},
     help::Help,
     host::{
@@ -5621,6 +5622,14 @@ impl Stoat {
         let mut encoded = [0u8; 4];
         let text = ch.encode_utf8(&mut encoded);
 
+        // A colon pairs with nothing, so this path owns it outright. Handing
+        // back a cursor list leaves the bracket path resolving them a second
+        // time on every typed colon.
+        if ch == ':' && self.emoji_expansion_enabled() {
+            self.editor_insert_colon(editor_id, buffer_id);
+            return;
+        }
+
         // Most typed characters open nothing, and the table answers that from a
         // six-entry scan before a single cursor is resolved.
         let Some(pairs) = self.auto_pairs_for(buffer_id) else {
@@ -5684,6 +5693,74 @@ impl Stoat {
         }
 
         self.editor_edit_each(editor_id, buffer_id, insertions);
+    }
+
+    /// Type a colon at every cursor, swapping each `:name:` it closes for the
+    /// emoji that name belongs to.
+    ///
+    /// A cursor with nothing to swap types the colon as written, so a
+    /// multi-cursor session where only some cursors sit on a shortcode lands
+    /// each of them correctly.
+    ///
+    /// The typed colon never reaches the buffer on a swap. One edit replaces
+    /// the whole span, which is what makes a single undo take the glyph back
+    /// rather than leaving the name behind.
+    fn editor_insert_colon(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let cursors = self.editor_cursor_offsets(editor_id);
+        let expansions = {
+            let ws = self.active_workspace();
+            let Some(buffer) = ws.buffers.get(buffer_id) else {
+                return;
+            };
+            let guard = buffer.read().expect("buffer poisoned");
+            let rope = guard.rope();
+            cursors
+                .iter()
+                .map(|&(_, offset)| emoji_expand::hook_insert(rope, offset))
+                .collect::<Vec<_>>()
+        };
+
+        if expansions.iter().all(Option::is_none) {
+            self.editor_insert_at(editor_id, buffer_id, ":", cursors);
+            return;
+        }
+
+        let insertions = cursors
+            .iter()
+            .zip(&expansions)
+            .map(|(&(id, offset), expansion)| match expansion {
+                Some(swap) => CursorEdit {
+                    id,
+                    range: swap.open..offset,
+                    text: swap.emoji.to_owned(),
+                    caret: swap.emoji.len(),
+                },
+                None => CursorEdit {
+                    id,
+                    range: offset..offset,
+                    text: ":".to_owned(),
+                    caret: 1,
+                },
+            })
+            .collect();
+
+        // The colon counts as typing even where it wrote something else, since
+        // the run is what decides whether an untouched auto-indent is stripped
+        // on the way out of insert mode.
+        if let Some(run) = self.current_insert_run.as_mut() {
+            run.push(':');
+        }
+
+        self.editor_edit_each(editor_id, buffer_id, insertions);
+    }
+
+    /// Whether a typed closing colon swaps its shortcode for an emoji.
+    ///
+    /// A modal input answers `false` for the same reason it declines pairing.
+    /// The command prompt is spelled with colons, and swapping one out from
+    /// under a command is a nuisance rather than a convenience.
+    fn emoji_expansion_enabled(&self) -> bool {
+        self.settings.editor_emoji_expansion.unwrap_or(true) && self.active_modal_input().is_none()
     }
 
     /// The pair table for `buffer_id`, or `None` where nothing pairs.
@@ -15300,6 +15377,78 @@ mod tests {
             vec![1, 4],
             "each cursor sits inside the pair it wrote",
         );
+    }
+
+    #[test]
+    fn a_closing_colon_swaps_its_shortcode_for_the_emoji() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("hi :smile:");
+
+        assert_eq!(buffer_text(&h, &path), "hi \u{1f604}");
+        assert_eq!(
+            h.head_offsets(),
+            vec!["hi \u{1f604}".len()],
+            "the cursor sits after the glyph it typed",
+        );
+    }
+
+    #[test]
+    fn a_colon_with_no_shortcode_to_close_is_typed_as_written() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("use std::mem");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "use std::mem",
+            "a path is untouched"
+        );
+
+        h.type_text(" x:y: :notaname:");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "use std::mem x:y: :notaname:",
+            "a colon after a letter and an unknown name both type as written",
+        );
+    }
+
+    #[test]
+    fn a_multi_codepoint_emoji_lands_whole_with_the_cursor_past_it() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text(":+1:");
+
+        let text = buffer_text(&h, &path);
+        assert_eq!(text, "\u{1f44d}");
+        assert_eq!(h.head_offsets(), vec![text.len()]);
+    }
+
+    #[test]
+    fn a_swap_and_a_plain_colon_land_together_across_cursors() {
+        // The first cursor closes a shortcode and the second does not, so one
+        // batch has to carry both an emoji and a literal colon.
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, ":smile\nstd\n");
+        h.type_keys("i");
+        select_forward(&mut h, 6, 6);
+        insert_cursor_at(&mut h, 10);
+        h.type_text(":");
+
+        assert_eq!(buffer_text(&h, &path), "\u{1f604}\nstd:\n");
+    }
+
+    #[test]
+    fn emoji_expansion_off_types_every_colon_as_written() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_emoji_expansion = Some(false);
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text(":smile:");
+
+        assert_eq!(buffer_text(&h, &path), ":smile:");
     }
 
     #[test]

@@ -134,6 +134,11 @@ pub struct Settings {
     /// too. `None` falls back to enabled. Set `editor.auto_pairs = false;` in
     /// stcfg to type every character as written.
     pub editor_auto_pairs: Option<bool>,
+    /// Whether typing the closing colon of a `:name:` shortcode swaps it for the
+    /// emoji it names. `None` falls back to enabled. Set
+    /// `editor.emoji_expansion = false;` in stcfg to type every colon as
+    /// written.
+    pub editor_emoji_expansion: Option<bool>,
     /// The column `bounded` wrap mode wraps at, clamped against the pane text
     /// width. `None` falls back at the consumer to 80. Set `editor.wrap_column =
     /// N;` in stcfg. Consulted only by [`WrapMode::Bounded`].
@@ -274,6 +279,7 @@ impl Settings {
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
             editor_auto_pairs: other.editor_auto_pairs.or(self.editor_auto_pairs),
+            editor_emoji_expansion: other.editor_emoji_expansion.or(self.editor_emoji_expansion),
             editor_wrap: other.editor_wrap.or(self.editor_wrap),
             editor_wrap_column: other.editor_wrap_column.or(self.editor_wrap_column),
             ui_tab_bar: other.ui_tab_bar.or(self.ui_tab_bar),
@@ -404,6 +410,11 @@ impl Settings {
             ["editor", "auto_pairs"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.editor_auto_pairs = Some(b);
+                }
+            },
+            ["editor", "emoji_expansion"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.editor_emoji_expansion = Some(b);
                 }
             },
             ["editor", "wrap"] => {
@@ -578,6 +589,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -875,6 +887,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -917,6 +930,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -968,6 +982,7 @@ mod tests {
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
+            editor_emoji_expansion: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -1002,6 +1017,7 @@ mod tests {
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
+            editor_emoji_expansion: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -1038,6 +1054,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1077,6 +1094,7 @@ mod tests {
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
+            editor_emoji_expansion: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -1114,6 +1132,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1164,6 +1183,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1206,6 +1226,7 @@ mod tests {
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
+                editor_emoji_expansion: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1245,6 +1266,7 @@ mod tests {
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
+            editor_emoji_expansion: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -1279,6 +1301,7 @@ mod tests {
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
+            editor_emoji_expansion: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,

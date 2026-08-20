@@ -162,6 +162,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "true",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("emoji_expansion")],
+            shape: ValueShape::Bool,
+            doc: "Swap a typed :name: shortcode for the emoji it names as the \
+                  closing colon lands.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("wrap_column")],
             shape: ValueShape::Number,
             doc: "Column that bounded wrap mode wraps at, clamped to the pane \
