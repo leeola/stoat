@@ -4191,6 +4191,9 @@ name = "stoatty_term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
+ "flate2",
+ "image",
  "memchr",
  "parking_lot",
  "stoatty_protocol",

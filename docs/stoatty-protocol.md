@@ -169,6 +169,38 @@ emitted byte stream and returns the commands in order, stitching each
 an emitter asserts its own output with, and it steps over a filled page's escape
 sequences rather than mistaking them for frames.
 
+## Foreign graphics protocols
+
+Not everything on this APC stream is stoatty's. The Kitty graphics protocol
+shares the introducer and a leading `G`, and stoatty answers it so an image
+client works here without knowing what stoatty is.
+
+The two never collide. Kitty control data is `k=v` pairs, which the stoatty
+prefix is not, and a Kitty frame carries no `Gstoatty` to strip.
+
+The subset stoatty implements:
+
+| Key | Values honored | Note |
+|---|---|---|
+| `a` | `q`, `t`, `T`, `p`, `d` | Animation and compose are not implemented |
+| `f` | `24`, `32`, `100` | RGB, RGBA, PNG |
+| `t` | `d` | The other mediums answer `EBADF`, so a client falls back to streaming |
+| `o` | `z` | zlib, inflated before decoding |
+| `m` | `0`, `1` | Chunks accumulate and decode once, joined |
+| `q` | `0`, `1`, `2` | 1 drops the success reply, 2 drops errors too |
+| `d` | The full table minus animation frames | Case selects whether the image data goes too |
+
+A frame that named neither `i` nor `I` gets no reply, since it asked for none.
+One that named `I` is answered with both the number it sent and the id stoatty
+assigned.
+
+Deliberate deviations, so a reader is not left hunting for a bug:
+
+- The scrolled-back history view does not redraw placements. They translate with
+  the live grid and are dropped once fully off-screen.
+- Unicode placeholders, relative placements, and the below-background z bucket
+  are out.
+
 ## Evolving a command
 
 A command grows only by appending, never by reordering, resizing, or
@@ -187,3 +219,5 @@ terminal has to keep understanding the prefix it knows.
 | Ratatui widgets that emit these frames | `widgets/` |
 | Runnable examples | `cargo run --example panel`, and its siblings in `tty/examples/` |
 | Why non-cell components exist at all | `docs/stoatty-non-cell-components.md` |
+| Kitty graphics frames on the wire | `tty_protocol/src/kitty.rs` |
+| What the terminal does with them | `tty_term/src/term/images.rs` |

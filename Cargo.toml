@@ -105,6 +105,8 @@ swash = "0.2.7"
 etagere = "0.3"
 lru = { version = "0.16", default-features = false }
 rustc-hash = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+flate2 = "1"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

@@ -51,9 +51,11 @@ use stoatty_protocol::{
         TextRunCommand, WindowOpenCommand,
     },
     frame::FrameScratch,
+    kitty,
 };
 
 mod decorate;
+mod images;
 mod project;
 mod scan;
 
@@ -372,6 +374,14 @@ pub struct Terminal {
     /// `Gstoatty;pool_drop`. A [`BTreeMap`] so [`Self::pools`] yields them in
     /// ascending-id (z) order.
     pools: BTreeMap<u32, Pool>,
+    /// Kitty graphics images this terminal holds, and the transmission still
+    /// arriving.
+    ///
+    /// Persistent state like [`Self::pools`], surviving a reset and retired
+    /// only by the client or by the store's own quota. A client transmits an
+    /// image once and places it repeatedly, so dropping the pixels on a reset
+    /// would make every placement after one a re-transmission.
+    images: images::ImageStore,
     /// The in-progress page fill, set while a `Gstoatty;fill` open marker has
     /// redirected the VT write path onto a pool slot.
     ///
@@ -903,6 +913,7 @@ impl Terminal {
             decoration_damage: Vec::new(),
             last_history: 0,
             pools: BTreeMap::new(),
+            images: images::ImageStore::new(),
             fill: None,
             fill_scratch: None,
             capture: None,
@@ -923,11 +934,13 @@ impl Terminal {
     /// Bytes need not be escape-sequence aligned; the parser retains a partial
     /// sequence across calls.
     ///
-    /// Each stoatty `Gstoatty` APC frame in the stream is decoded and applied
-    /// before the bytes reach the parser. Outside a fill redirect the bytes are
-    /// still fed to the parser verbatim: alacritty consumes the APC string and
-    /// ignores it, so feeding it is harmless and avoids the desync that removing
-    /// bytes would risk.
+    /// Each APC frame in the stream is decoded and applied before the bytes
+    /// reach the parser, and its interior is then excised so the parser never
+    /// sees it. Everything between frames is fed through untouched, which is
+    /// what keeps a partial escape sequence around a frame intact.
+    ///
+    /// Both the `Gstoatty` sub-protocol and Kitty graphics frames ride this
+    /// path.
     ///
     /// A `Gstoatty;fill` open marker redirects the bytes that follow onto an
     /// isolated page-painting context instead of the live screen, until the
@@ -1075,6 +1088,10 @@ impl Terminal {
                         | Command::ConfigReload
                         | Command::ZoomCapture { .. }
                         | Command::FontStep { .. }
+                        // A graphics frame mutates the image store, which is
+                        // persistent state a page paint must not swallow, the
+                        // same reason the pool commands act here.
+                        | Command::Kitty(_)
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
@@ -1499,11 +1516,22 @@ impl Terminal {
             // pressed.
             Command::ZoomCapture { on } => self.pending_events.push(TermEvent::ZoomCapture(on)),
             Command::FontStep { delta } => self.pending_events.push(TermEvent::FontStep(delta)),
-            // FIXME: Deferring the image store and its query responses, which is
-            // its own unit of work. Dropping the frame until then is what a
-            // terminal without graphics support does, so a client sees no reply
-            // and falls back rather than waiting on one.
-            Command::Kitty(_) => {},
+            // Graphics frames touch no grid state. They feed a store the client
+            // places from later, and the reply goes back on the response path
+            // the ident handshake uses.
+            Command::Kitty(graphics) => {
+                if let Some(response) = self.images.apply(graphics) {
+                    let mut out = Vec::new();
+                    kitty::encode_response_into(
+                        &mut out,
+                        response.id,
+                        response.number,
+                        response.placement,
+                        &response.result,
+                    );
+                    self.responses.push(&out);
+                }
+            },
         }
     }
 
@@ -7412,5 +7440,77 @@ mod tests {
             "the grid store is untouched"
         );
         assert_eq!(grid.minimap_epoch(), epoch, "the epoch is untouched");
+    }
+
+    /// A graphics frame rides the same APC stream as the stoatty commands, so
+    /// the terminal must route it to the image store and send the reply back
+    /// the way it answers any other query.
+    #[test]
+    fn a_graphics_frame_is_applied_and_answered() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format, ResponseResult};
+
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        // A 1x1 opaque pixel as raw RGBA, small enough to state inline.
+        let mut frame = Vec::new();
+        kitty::encode_into(
+            &mut frame,
+            &ControlData {
+                action: Action::Transmit,
+                format: Format::Rgba,
+                width: 1,
+                height: 1,
+                id: 21,
+                ..ControlData::default()
+            },
+            b"AQIDBA==",
+        );
+        terminal.advance(&frame);
+
+        let response = kitty::parse_response(&terminal.take_responses())
+            .expect("the terminal answers a frame that named an id");
+        assert_eq!(
+            (response.id, response.result),
+            (21, ResponseResult::Ok),
+            "the reply names the image it answers for",
+        );
+    }
+
+    /// A page fill redirects the byte stream onto an off-screen context, but the
+    /// image store is persistent state a redirect must not swallow.
+    #[test]
+    fn a_graphics_frame_applies_during_a_page_fill() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            window: 0,
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 4,
+        }));
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+
+        let mut frame = Vec::new();
+        kitty::encode_into(
+            &mut frame,
+            &ControlData {
+                action: Action::Transmit,
+                format: Format::Rgba,
+                width: 1,
+                height: 1,
+                id: 22,
+                ..ControlData::default()
+            },
+            b"AQIDBA==",
+        );
+        terminal.advance(&frame);
+
+        assert!(
+            kitty::parse_response(&terminal.take_responses()).is_some(),
+            "the frame acted rather than being dropped with the page decorations",
+        );
     }
 }
