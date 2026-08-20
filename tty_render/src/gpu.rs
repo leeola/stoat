@@ -29,7 +29,7 @@ use crate::{
 use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::{thread, time::Instant};
+use std::{mem, thread, time::Instant};
 use stoatty_term::{
     grid::{Grid, Panel, Rgb},
     term::Damage,
@@ -288,6 +288,13 @@ pub struct Renderer {
     /// what covers that pool, while the live grid's is every panel, and a frame that
     /// composites pools prepares the live grid too.
     pool_occluders: Vec<Occluder>,
+    /// The pools this frame's panels ride, built beside [`Self::occluders`] from
+    /// the same anchors and reused for the same reason.
+    ///
+    /// A ridden panel draws shifted, after the composites, so its rect on the
+    /// live grid is stale for the whole glide. Every occluder list drops it
+    /// rather than punch a hole where it no longer is.
+    riding: Vec<u32>,
     /// GPU frame timer, created lazily on the first render when the device was
     /// built with `TIMESTAMP_QUERY`. `None` until then or when unsupported.
     #[cfg(feature = "perf")]
@@ -339,6 +346,7 @@ impl Renderer {
             cursor_color: cursor,
             occluders: Vec::new(),
             pool_occluders: Vec::new(),
+            riding: Vec::new(),
             #[cfg(feature = "perf")]
             gpu_timer: None,
             #[cfg(feature = "perf")]
@@ -443,6 +451,7 @@ impl Renderer {
         self.prepare_frame(device, queue, grid, &frame, anchored);
 
         let panels = grid.panels();
+        let riding = mem::take(&mut self.riding);
         for (slot, pool) in pools.iter().enumerate() {
             if self.pool_scissor(pool.scissor).is_none() {
                 continue;
@@ -452,6 +461,7 @@ impl Renderer {
                 queue,
                 pool.grid,
                 panels,
+                &riding,
                 pool.shift_rows,
                 pool.origin_cells,
                 pool.content_changed,
@@ -461,6 +471,7 @@ impl Renderer {
                 slot,
             );
         }
+        self.riding = riding;
 
         #[cfg(feature = "perf")]
         let timing = self.prepare_gpu_timing(device, queue);
@@ -533,8 +544,9 @@ impl Renderer {
         );
         // Built once here rather than per pass, since every pass that occludes
         // derives the same list from the same panels.
-        let riding: Vec<u32> = anchored.iter().map(|ride| ride.host).collect();
-        crate::render::build_occluders_into(grid.panels(), &riding, &mut self.occluders);
+        self.riding.clear();
+        self.riding.extend(anchored.iter().map(|ride| ride.host));
+        crate::render::build_occluders_into(grid.panels(), &self.riding, &mut self.occluders);
 
         self.text
             .prepare(device, queue, grid, resolution, frame, &self.occluders);
@@ -789,6 +801,8 @@ impl Renderer {
             queue,
             pool_grid,
             panels,
+            // A standalone composite has no frame of rides around it.
+            &[],
             shift_rows,
             origin_cells,
             content_changed,
@@ -828,6 +842,10 @@ impl Renderer {
     /// frame compositing several pools prepares them all before any draws, so they
     /// can share one render pass. The buffers a pool prepares are its own, keyed by
     /// `pool`, so preparing the next one does not disturb them.
+    ///
+    /// `riding` names the pools this frame's panels are anchored to. A panel
+    /// riding one of them draws shifted, after the composites, so the rect it
+    /// declared is not where it is and this pool must not occlude against it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_pool(
         &mut self,
@@ -835,6 +853,7 @@ impl Renderer {
         queue: &Queue,
         pool_grid: &Grid,
         panels: &[Panel],
+        riding: &[u32],
         shift_rows: f32,
         origin_cells: [f32; 2],
         content_changed: bool,
@@ -849,7 +868,7 @@ impl Renderer {
         // built once here rather than in each of them. It cannot share
         // `self.occluders`: that holds the live grid's unfiltered list, which the live
         // passes still read on a frame that also composites pools.
-        crate::render::pool_occluders_into(occludable, panels, &[], &mut self.pool_occluders);
+        crate::render::pool_occluders_into(occludable, panels, riding, &mut self.pool_occluders);
 
         self.background.prepare_composite(
             device,
@@ -1686,6 +1705,7 @@ impl GpuContext {
             .prepare_frame(&self.device, &self.queue, live_grid, frame, anchored);
 
         let panels = live_grid.panels();
+        let riding = mem::take(&mut self.renderer.riding);
         for (slot, pool) in pools.iter().enumerate() {
             if self.renderer.pool_scissor(pool.scissor).is_none() {
                 continue;
@@ -1695,6 +1715,7 @@ impl GpuContext {
                 &self.queue,
                 pool.grid,
                 panels,
+                &riding,
                 pool.shift_rows,
                 pool.origin_cells,
                 pool.content_changed,
@@ -1704,6 +1725,7 @@ impl GpuContext {
                 slot,
             );
         }
+        self.renderer.riding = riding;
     }
 
     /// Adopt a drawable's `width`x`height` when it disagrees with the
@@ -1939,6 +1961,7 @@ mod tests {
                 &queue,
                 pool.grid,
                 &[],
+                &[],
                 pool.shift_rows,
                 pool.origin_cells,
                 pool.content_changed,
@@ -2085,6 +2108,7 @@ mod tests {
             &device,
             &queue,
             &pool,
+            &[],
             &[],
             0.0,
             [0.0; 2],

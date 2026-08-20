@@ -10,7 +10,10 @@
 //! GPU adapter is present, so a GPU-less CI stays green.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, PoolComposite, Renderer, Scroll},
+    gpu::{
+        build_font_system, headless_device, AnchoredPanel, FontConfig, Frame, PoolComposite,
+        Renderer, Scroll,
+    },
     render::cell_size,
 };
 use stoatty_term::{
@@ -523,6 +526,154 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
             "and the {what} stays hidden under the box that covers it",
         );
     }
+}
+
+/// A box riding the pool it floats above stops occluding that pool.
+///
+/// The box is drawn shifted, after the composites, so the rect it declared on
+/// the live grid is where it no longer is. Occluding against that rect punches a
+/// hole in the pool at a place nothing covers, for every frame of the glide.
+#[test]
+fn a_box_riding_a_pool_stops_occluding_it() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("occlusion_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let [cell_w, cell_h] = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
+    let (width, height) = (128u32, cell_h * 6);
+
+    let live_bg = Rgb::new(10, 20, 30);
+    let pool_bg = Rgb::new(240, 180, 20);
+    let border = Rgb::new(128, 128, 128);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("riding occlusion target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        Rgb::new(0, 0, 0),
+        Rgb::new(0, 0, 0),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 5 && cols >= 7, "grid too small: {rows}x{cols}");
+
+    // Anchored to the pool below, and unfilled, so its interior is the pool's to
+    // paint and only its border ring is the box's own.
+    let host = 0;
+    let mut live = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            live.get_mut(r, c).bg = live_bg;
+        }
+    }
+    live.set_panels(vec![Panel {
+        top: 0,
+        left: 2,
+        width: 4,
+        height: rows as u16,
+        style: BorderStyle::Light,
+        border,
+        corner_radius: 0,
+        fill: None,
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        anchor: Some((host, 0.0)),
+        seq: 100,
+    }]);
+
+    let mut pool = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            pool.get_mut(r, c).bg = pool_bg;
+        }
+    }
+
+    let full = [0, 0, width, height];
+    let pools = [PoolComposite {
+        id: host,
+        grid: &pool,
+        origin_cells: [0.0; 2],
+        scissor: full,
+        shift_rows: 0.0,
+        content_changed: true,
+        scrolled_rows: None,
+        occludable: true,
+    }];
+
+    renderer.render_pools_into(
+        &device,
+        &queue,
+        &view,
+        &live,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+        },
+        &pools,
+        &[AnchoredPanel {
+            host,
+            dy_px: 0.0,
+            scissor: full,
+        }],
+    );
+    let pixels = read_back(&device, &queue, &target, width, height);
+
+    let cell = |row: u32, col: u32| -> (u8, u8, u8) {
+        let x = col * cell_w + cell_w / 2;
+        let y = row * cell_h + cell_h / 2;
+        let i = ((y * width + x) * 4) as usize;
+        (pixels[i], pixels[i + 1], pixels[i + 2])
+    };
+    let rgb = |c: Rgb| (c.r, c.g, c.b);
+
+    assert_eq!(
+        cell(2, 0),
+        rgb(pool_bg),
+        "the pool paints outside the box, or this proves nothing",
+    );
+    assert_eq!(
+        cell(2, 3),
+        rgb(pool_bg),
+        "and inside it too, since the rect the box declared is not where it is",
+    );
 }
 
 /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
