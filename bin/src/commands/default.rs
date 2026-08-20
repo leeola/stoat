@@ -182,12 +182,39 @@ enum TuiStart {
     Files,
 }
 
+/// Whether this invocation is the plain "show me these files" form that a
+/// terminal pane's parent instance handles better than a nested editor.
+///
+/// Every other form asks for a session of its own. A subcommand starts
+/// somewhere other than a file list, a restore flag names a workspace to
+/// reopen, `--inputs` and `--timeout` drive a scripted run, `--fixture` builds
+/// a throwaway repo, and `--working-dir` names a root other than the parent's.
+fn forwardable(start: &TuiStart, common: &CommonArgs, working_dir: Option<&Path>) -> bool {
+    matches!(start, TuiStart::Files)
+        && !common.files.is_empty()
+        && working_dir.is_none()
+        && !common.continue_
+        && !common.resume
+        && common.inputs.is_none()
+        && common.timeout.is_none()
+        && common.fixture.is_none()
+}
+
 fn run_tui(
     text_proto_log: Option<bool>,
     common: CommonArgs,
     working_dir: Option<PathBuf>,
     start: TuiStart,
 ) -> Result<(), Whatever> {
+    // Run before anything takes over the terminal, so a forwarded open leaves
+    // the shell exactly as it found it. Outside a stoat terminal pane this
+    // costs one absent environment read.
+    if forwardable(&start, &common, working_dir.as_deref())
+        && crate::commands::term_open::try_forward(&common.files)
+    {
+        return Ok(());
+    }
+
     let CommonArgs {
         files,
         continue_,
@@ -512,6 +539,105 @@ async fn drive_inputs(tx: UnboundedSender<Event>, keys: Vec<KeyEvent>, executor:
 mod tests {
     use super::*;
     use stoat_scheduler::TestScheduler;
+
+    fn bare_files() -> CommonArgs {
+        CommonArgs {
+            files: vec![PathBuf::from("a.rs")],
+            continue_: false,
+            resume: false,
+            inputs: None,
+            timeout: None,
+            fixture: None,
+        }
+    }
+
+    #[test]
+    fn only_a_bare_file_open_forwards_to_the_parent() {
+        assert!(forwardable(&TuiStart::Files, &bare_files(), None));
+
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &CommonArgs {
+                    files: Vec::new(),
+                    ..bare_files()
+                },
+                None
+            ),
+            "with no files there is nothing to show",
+        );
+        assert!(
+            !forwardable(&TuiStart::Review, &bare_files(), None),
+            "a subcommand starts somewhere other than a file list",
+        );
+        assert!(
+            !forwardable(&TuiStart::Conflict, &bare_files(), None),
+            "a subcommand starts somewhere other than a file list",
+        );
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &bare_files(),
+                Some(Path::new("/elsewhere"))
+            ),
+            "--working-dir names a root other than the parent's",
+        );
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &CommonArgs {
+                    continue_: true,
+                    ..bare_files()
+                },
+                None
+            ),
+            "--continue reopens a workspace of its own",
+        );
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &CommonArgs {
+                    resume: true,
+                    ..bare_files()
+                },
+                None
+            ),
+            "--resume reopens a workspace of its own",
+        );
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &CommonArgs {
+                    inputs: Some("ifoo<Esc>".into()),
+                    ..bare_files()
+                },
+                None,
+            ),
+            "--inputs drives a session of its own",
+        );
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &CommonArgs {
+                    timeout: Some(1.0),
+                    ..bare_files()
+                },
+                None
+            ),
+            "--timeout ends a session of its own",
+        );
+        assert!(
+            !forwardable(
+                &TuiStart::Files,
+                &CommonArgs {
+                    fixture: Some("basic".into()),
+                    ..bare_files()
+                },
+                None,
+            ),
+            "--fixture builds a repo of its own",
+        );
+    }
 
     #[test]
     fn drive_inputs_paces_parsed_keys_onto_the_channel() {
