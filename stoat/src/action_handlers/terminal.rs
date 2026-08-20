@@ -4,7 +4,7 @@ use crate::{
     pane::View,
     run::{agent_socket_path_in, spawn_term_reader, spawn_terminal, TermSpawnEnv},
     term_screen::TermScreen,
-    term_session::TermSession,
+    term_session::{TermId, TermSession},
 };
 use futures::FutureExt;
 use std::sync::Arc;
@@ -14,18 +14,36 @@ use std::sync::Arc;
 const TERM_ROWS: u16 = 24;
 const TERM_COLS: u16 = 80;
 
-/// Open a subshell in the focused pane.
+/// Open a subshell in the focused pane, or return to the one already hidden
+/// behind it.
 ///
-/// Spawns a fresh terminal session and points the focused pane at it,
-/// recording the view it replaced in [`crate::pane::Pane::prev_view`] so it
-/// can be restored if the terminal later exits in the last split pane. A spawn
-/// failure leaves the focused pane unchanged.
+/// Opening a file in front of a terminal leaves the shell live and recorded in
+/// [`crate::pane::Pane::prev_view`], so this action and that open are two
+/// halves of a round trip over one shell rather than a way to accumulate them.
+/// A record naming a session that has since died falls through to a fresh
+/// spawn, as does one naming a session another pane or dock already shows,
+/// since two views over one PTY fight for its input.
 ///
-/// The new pane enters insert mode so typing reaches the shell immediately.
-/// The focus-arrival hook in [`Stoat::update`] covers the same transition when
-/// the action is dispatched through the event loop, but the direct call here
-/// also readies a terminal opened off that seam.
+/// A fresh spawn points the focused pane at the new session and records the
+/// view it replaced, which is what restores that view if the terminal later
+/// exits in the last split pane. A spawn failure leaves the pane unchanged.
+///
+/// Either way the pane enters insert mode so typing reaches the shell
+/// immediately. The focus-arrival hook in [`Stoat::update`] covers the same
+/// transition when the action is dispatched through the event loop, but the
+/// direct call here also readies a terminal opened off that seam.
 pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(term_id) = hidden_terminal_to_restore(stoat) {
+        {
+            let ws = stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            let pane = ws.panes.pane_mut(focused);
+            pane.prev_view = Some(std::mem::replace(&mut pane.view, View::Terminal(term_id)));
+        }
+        stoat.transition_mode("insert".to_string());
+        return UpdateEffect::Redraw;
+    }
+
     match spawn_terminal_view(stoat) {
         view @ View::Terminal(_) => {
             {
@@ -41,6 +59,30 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
         },
         _ => UpdateEffect::None,
     }
+}
+
+/// The live shell the focused pane covers, ready to be shown again.
+///
+/// `None` unless the pane's record names a terminal, the workspace still holds
+/// that session, and nothing else on screen already shows it.
+fn hidden_terminal_to_restore(stoat: &Stoat) -> Option<TermId> {
+    let ws = stoat.active_workspace();
+    let Some(View::Terminal(term_id)) = ws.panes.pane(ws.panes.focus()).prev_view else {
+        return None;
+    };
+    if !ws.terms.contains_key(term_id) {
+        return None;
+    }
+
+    let shown_in_pane = ws.panes.split_pane_ids().into_iter().any(
+        |id| matches!(ws.panes.pane(id).view, View::Terminal(t) | View::Agent(t) if t == term_id),
+    );
+    let shown_in_dock = ws
+        .docks
+        .iter()
+        .any(|(_, dock)| matches!(dock.view, View::Terminal(t) | View::Agent(t) if t == term_id));
+
+    (!shown_in_pane && !shown_in_dock).then_some(term_id)
 }
 
 /// Respawn a fresh shell for every persisted terminal pane and dock whose
@@ -219,6 +261,125 @@ mod tests {
             ws.terms.contains_key(term_id),
             "spawned terminal session is stored",
         );
+    }
+
+    /// Open a terminal in the focused pane, then cover it the way an
+    /// open-in-term request does. The buffer sits in front and the shell is
+    /// recorded behind it.
+    fn hide_a_live_terminal(h: &mut crate::test_harness::TestHarness) -> TermId {
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let ws = h.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let pane = ws.panes.pane_mut(focused);
+        let View::Terminal(term_id) = pane.view else {
+            panic!("the terminal action should leave a terminal in the focused pane");
+        };
+        let covering = pane
+            .prev_view
+            .take()
+            .expect("the view the terminal replaced");
+        pane.prev_view = Some(std::mem::replace(&mut pane.view, covering));
+        term_id
+    }
+
+    fn focused_view_terminal(h: &crate::test_harness::TestHarness) -> TermId {
+        let ws = h.stoat.active_workspace();
+        let View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("focused pane should hold a terminal view");
+        };
+        term_id
+    }
+
+    #[test]
+    fn the_terminal_action_returns_to_the_shell_it_hid() {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        assert_eq!(
+            focused_view_terminal(&h),
+            hidden,
+            "the shell behind the buffer comes back",
+        );
+        assert_eq!(
+            h.fake_terminal_host().spawns().len(),
+            1,
+            "returning to a live shell starts no second one",
+        );
+        assert!(
+            matches!(
+                h.stoat
+                    .active_workspace()
+                    .panes
+                    .pane(h.stoat.active_workspace().panes.focus())
+                    .prev_view,
+                Some(View::Editor(_)),
+            ),
+            "the buffer it covered is what the next toggle returns to",
+        );
+        assert_eq!(h.stoat.focused_mode(), "insert");
+    }
+
+    #[test]
+    fn a_dead_recorded_shell_spawns_a_fresh_one() {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+        h.stoat.active_workspace_mut().terms.remove(hidden);
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        assert_ne!(
+            focused_view_terminal(&h),
+            hidden,
+            "a record outliving its session is no shell to return to",
+        );
+        assert_eq!(h.fake_terminal_host().spawns().len(), 2);
+    }
+
+    /// Hide a shell, then have `show_elsewhere` put it on another surface, and
+    /// assert the action spawns rather than returning to it.
+    fn refuses_a_shell_shown_elsewhere(show_elsewhere: impl FnOnce(&mut Stoat, TermId)) {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+        let covered = h.stoat.active_workspace().panes.focus();
+
+        show_elsewhere(&mut h.stoat, hidden);
+        h.stoat.active_workspace_mut().panes.set_focus(covered);
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        assert_ne!(
+            focused_view_terminal(&h),
+            hidden,
+            "one PTY driven from two surfaces fights over its input",
+        );
+        assert_eq!(h.fake_terminal_host().spawns().len(), 2);
+    }
+
+    #[test]
+    fn a_shell_another_pane_shows_spawns_a_fresh_one() {
+        refuses_a_shell_shown_elsewhere(|stoat, hidden| {
+            let ws = stoat.active_workspace_mut();
+            let side = ws.panes.split(crate::pane::Axis::Vertical);
+            ws.panes.pane_mut(side).view = View::Terminal(hidden);
+        });
+    }
+
+    #[test]
+    fn a_shell_a_dock_shows_spawns_a_fresh_one() {
+        use crate::pane::{DockPanel, DockSide, DockVisibility};
+
+        refuses_a_shell_shown_elsewhere(|stoat, hidden| {
+            stoat.active_workspace_mut().docks.insert(DockPanel {
+                view: View::Terminal(hidden),
+                side: DockSide::Right,
+                visibility: DockVisibility::Hidden,
+                default_width: 30,
+                area: Default::default(),
+            });
+        });
     }
 
     #[test]
