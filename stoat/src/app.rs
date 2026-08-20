@@ -6611,10 +6611,36 @@ impl Stoat {
                     })
                     .collect::<Vec<_>>();
 
-                // Only terminal panes retire on exit. An agent pane sharing the
-                // same reader keeps its last frame, so bail before touching the
-                // session when nothing references it as a terminal.
+                // With nothing showing the session as a terminal, what happens
+                // next turns on whether an agent view holds it. An agent shares
+                // the reader and keeps its last frame after the shell dies, so
+                // its session has to outlive the exit. A session no view holds
+                // at all is a terminal hidden behind a buffer, which retires
+                // like any other. Its records go with it, since the Terminal
+                // action has nothing to return to once the shell is gone.
                 if pane_ids.is_empty() && dock_ids.is_empty() {
+                    let agent_displayed =
+                        ws.panes.split_pane_ids().into_iter().any(
+                            |id| matches!(ws.panes.pane(id).view, View::Agent(t) if t == term_id),
+                        ) || ws
+                            .docks
+                            .iter()
+                            .any(|(_, dock)| matches!(dock.view, View::Agent(t) if t == term_id));
+                    if agent_displayed {
+                        return UpdateEffect::None;
+                    }
+
+                    ws.terms.remove(term_id);
+                    for id in ws.panes.split_pane_ids() {
+                        let names_exited = matches!(
+                            ws.panes.pane(id).prev_view,
+                            Some(View::Terminal(t) | View::Agent(t)) if t == term_id,
+                        );
+                        if names_exited {
+                            ws.panes.pane_mut(id).prev_view = None;
+                        }
+                    }
+                    // Nothing on screen showed it, so nothing on screen changed.
                     return UpdateEffect::None;
                 }
 
@@ -9932,6 +9958,63 @@ mod tests {
         assert!(
             matches!(ws.panes.pane(only_pane).view, View::Agent(id) if id == term_id),
             "agent pane view unchanged",
+        );
+    }
+
+    #[test]
+    fn a_dock_held_agent_survives_shell_exit() {
+        use crate::pane::{DockPanel, DockSide, DockVisibility};
+
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let term_id = insert_term_session(ws);
+        ws.docks.insert(DockPanel {
+            view: View::Agent(term_id),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Default::default(),
+        });
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        assert!(
+            h.stoat.active_workspace().terms.contains_key(term_id),
+            "an agent keeps its last frame wherever it is shown",
+        );
+    }
+
+    #[test]
+    fn a_terminal_hidden_behind_a_buffer_retires_on_exit() {
+        let mut h = Stoat::test();
+        let (pane, term_id) = {
+            let ws = h.stoat.active_workspace_mut();
+            let pane = ws.panes.focus();
+            let term_id = insert_term_session(ws);
+            // An open-in-term request leaves this state. The buffer sits in
+            // front, and nothing shows the shell recorded behind it.
+            ws.panes.pane_mut(pane).prev_view = Some(View::Terminal(term_id));
+            (pane, term_id)
+        };
+
+        let effect = h
+            .stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        assert_eq!(
+            effect,
+            UpdateEffect::None,
+            "nothing showed the shell, so nothing repaints",
+        );
+        let ws = h.stoat.active_workspace();
+        assert!(
+            !ws.terms.contains_key(term_id),
+            "a hidden shell's session is not left behind",
+        );
+        assert!(
+            ws.panes.pane(pane).prev_view.is_none(),
+            "a dead shell is nothing to return to",
         );
     }
 
