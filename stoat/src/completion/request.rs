@@ -205,18 +205,21 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         owned.clone(),
     ));
 
+    let completion_hosts = crate::lsp::hosts::feature_hosts(
+        stoat,
+        snapshot.buffer_id,
+        LanguageServerFeature::Completion,
+    );
+
+    // Any server that declared the character wants to answer it, so the
+    // immediate path is open even when the language's primary server has no
+    // interest in it.
     let trigger_char = owned.text_before_cursor.chars().last();
-    let is_trigger_char = match (
-        trigger_char,
-        server_trigger_characters(&crate::lsp::hosts::lsp_for_feature(
-            stoat,
-            snapshot.buffer_id,
-            LanguageServerFeature::Completion,
-        )),
-    ) {
-        (Some(ch), Some(triggers)) => triggers.contains(&ch.to_string()),
-        _ => false,
-    };
+    let is_trigger_char = trigger_char.is_some_and(|ch| {
+        completion_hosts
+            .iter()
+            .any(|(_, host)| declares_trigger(host.as_ref(), ch))
+    });
 
     // A server asked to answer a trigger character wants to answer it, so the
     // cached list is not consulted even where the prefix only grew.
@@ -258,26 +261,14 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let completion_hosts = crate::lsp::hosts::feature_hosts(
-        stoat,
-        snapshot.buffer_id,
-        LanguageServerFeature::Completion,
-    );
     let fs_host = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
     let home_dir = stoat.env_host.var("HOME").map(PathBuf::from);
     let base_dir = base_dir_for(snapshot.source_path.as_deref(), &snapshot.git_root);
 
-    let completion_context = if is_trigger_char {
-        LspCompletionContext {
-            trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
-            trigger_character: trigger_char.map(|ch| ch.to_string()),
-        }
-    } else {
-        LspCompletionContext {
-            trigger_kind: CompletionTriggerKind::INVOKED,
-            trigger_character: None,
-        }
+    let trigger = match trigger_char.filter(|_| is_trigger_char) {
+        Some(ch) => LspTrigger::Typed(ch),
+        None => LspTrigger::Invoked,
     };
 
     // The pieces a position is built from rather than a built one, since each
@@ -286,7 +277,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         .then(|| LspRequest {
             source_path: snapshot.source_path.clone(),
             cursor_offset: snapshot.cursor_offset,
-            context: completion_context,
+            trigger,
         });
 
     // A trigger character skips the completion debounce, so without this the
@@ -469,10 +460,7 @@ fn ask_again(
     let request = LspRequest {
         source_path: snapshot.source_path.clone(),
         cursor_offset: snapshot.cursor_offset,
-        context: LspCompletionContext {
-            trigger_kind: CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
-            trigger_character: None,
-        },
+        trigger: LspTrigger::Incomplete,
     };
 
     let Some(request) =
@@ -517,7 +505,7 @@ fn ask_again(
                     &buffer.visible_text,
                     request.cursor_offset,
                     encoding,
-                    Some(request.context.clone()),
+                    Some(host_context(host.as_ref(), request.trigger)),
                 ) else {
                     continue;
                 };
@@ -740,18 +728,57 @@ fn base_dir_for(source_path: Option<&Path>, git_root: &Path) -> PathBuf {
         .unwrap_or_else(|| git_root.to_path_buf())
 }
 
-/// The server's completion trigger characters, if it advertises any.
-/// Each is a single character (e.g. `.`, `:`). Typing one fires
-/// completion immediately with
-/// [`CompletionTriggerKind::TRIGGER_CHARACTER`] instead of waiting out
-/// the prefix debounce.
-fn server_trigger_characters(lsp_host: &Arc<dyn LspHost>) -> Option<Vec<String>> {
-    lsp_host
-        .capabilities()
+/// Whether `host` declared `ch` among its completion trigger characters.
+///
+/// Typing one fires completion immediately instead of waiting out the prefix
+/// debounce. Each declared trigger is a single character (`.`, `:`), so a
+/// longer one matches nothing.
+fn declares_trigger(host: &dyn LspHost, ch: char) -> bool {
+    host.capabilities()
         .completion_provider
-        .as_ref()?
-        .trigger_characters
-        .clone()
+        .as_ref()
+        .and_then(|provider| provider.trigger_characters.as_ref())
+        .is_some_and(|triggers| {
+            triggers
+                .iter()
+                .any(|trigger| trigger.len() == ch.len_utf8() && trigger.starts_with(ch))
+        })
+}
+
+/// Why a completion request went out.
+///
+/// Left unresolved because the answer is per server. The same keystroke is a
+/// trigger character to a server that declared it and a plain invocation to one
+/// that did not. Telling a server it triggered on a character it never asked
+/// for invites an answer it withholds otherwise.
+#[derive(Clone, Copy)]
+enum LspTrigger {
+    /// Nothing a server declared was typed, so every server is asked outright.
+    Invoked,
+    /// This character was typed and at least one server declared it.
+    Typed(char),
+    /// A re-ask of the servers that stopped early on the last answer.
+    Incomplete,
+}
+
+/// The context `host` is asked with, resolved against its own declarations.
+fn host_context(host: &dyn LspHost, trigger: LspTrigger) -> LspCompletionContext {
+    let invoked = LspCompletionContext {
+        trigger_kind: CompletionTriggerKind::INVOKED,
+        trigger_character: None,
+    };
+    match trigger {
+        LspTrigger::Invoked => invoked,
+        LspTrigger::Incomplete => LspCompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
+            trigger_character: None,
+        },
+        LspTrigger::Typed(ch) if declares_trigger(host, ch) => LspCompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_character: Some(ch.to_string()),
+        },
+        LspTrigger::Typed(_) => invoked,
+    }
 }
 
 /// What a completion request needs to build its position, held unbuilt so each
@@ -759,7 +786,7 @@ fn server_trigger_characters(lsp_host: &Arc<dyn LspHost>) -> Option<Vec<String>>
 struct LspRequest {
     source_path: Option<PathBuf>,
     cursor_offset: usize,
-    context: LspCompletionContext,
+    trigger: LspTrigger,
 }
 
 fn build_lsp_params(
@@ -855,7 +882,7 @@ async fn run_request(
                             &buffer.visible_text,
                             request.cursor_offset,
                             encoding,
-                            Some(request.context.clone()),
+                            Some(host_context(host.as_ref(), request.trigger)),
                         ) else {
                             continue;
                         };
@@ -1310,6 +1337,79 @@ mod harness_tests {
         };
         assert_eq!(character(&utf8), 4, "utf-8 counts e-acute as two");
         assert_eq!(character(&utf16), 3, "utf-16 counts it as one");
+    }
+
+    /// Two completion servers on one language, only `second` declaring `:`.
+    ///
+    /// This is the shape the emoji server arrives in. The language own server
+    /// has no interest in the character a second server exists to answer.
+    fn install_two_servers_one_declaring_colon(
+        h: &mut TestHarness,
+    ) -> (Arc<crate::host::FakeLsp>, Arc<crate::host::FakeLsp>) {
+        let (first, second) = crate::test_fixture::install_two_servers(
+            h,
+            ServerCapabilities {
+                completion_provider: Some(CompletionOptions::default()),
+                ..ServerCapabilities::default()
+            },
+        );
+        second.set_capabilities(ServerCapabilities {
+            completion_provider: Some(CompletionOptions {
+                trigger_characters: Some(vec![":".to_string()]),
+                ..CompletionOptions::default()
+            }),
+            ..ServerCapabilities::default()
+        });
+        (first, second)
+    }
+
+    #[test]
+    fn a_secondary_servers_trigger_fires_the_immediate_path() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (first, second) = install_two_servers_one_declaring_colon(&mut h);
+        open_scratch(&mut h, "");
+
+        h.type_keys("i");
+        h.type_text(":");
+        h.settle();
+
+        assert_eq!(
+            second.observed_completions().len(),
+            1,
+            "the server that declared the character answers it without the debounce",
+        );
+        assert_eq!(
+            first.observed_completions().len(),
+            1,
+            "the fan-out still reaches every completion server",
+        );
+    }
+
+    #[test]
+    fn each_server_is_told_the_trigger_kind_it_declared() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (first, second) = install_two_servers_one_declaring_colon(&mut h);
+        open_scratch(&mut h, "");
+
+        h.type_keys("i");
+        h.type_text(":");
+        h.settle();
+
+        assert_eq!(
+            second.observed_completions()[0].context,
+            Some(LspCompletionContext {
+                trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                trigger_character: Some(":".to_string()),
+            }),
+        );
+        assert_eq!(
+            first.observed_completions()[0].context,
+            Some(LspCompletionContext {
+                trigger_kind: CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            }),
+            "a server never told the editor about this character did not trigger on it",
+        );
     }
 
     #[test]
@@ -1950,6 +2050,35 @@ mod harness_tests {
             labels(&popup.items).contains(&"foobarred".to_string()),
             "and what it then offered is shown: {:?}",
             labels(&popup.items)
+        );
+    }
+
+    #[test]
+    fn a_re_ask_says_it_is_refining_an_incomplete_list() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar"]);
+        h.fake_lsp().set_completions_incomplete("/ws/buf.rs", 0, 3);
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 4, &["foobarred"]);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        let asked = h.fake_lsp().observed_completions().len();
+
+        h.type_text("b");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        assert_eq!(
+            h.fake_lsp().observed_completions()[asked].context,
+            Some(LspCompletionContext {
+                trigger_kind: CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
+                trigger_character: None,
+            }),
+            "a server narrowing its own unfinished list is told that is what this is",
         );
     }
 
