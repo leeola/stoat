@@ -150,13 +150,16 @@ columns the editor leaves blank, so its bars and numbers sit over the cleared
 gutter region rather than over body text.
 
 **Z-order is fixed by the pass chain, not by declaration order.** The frame
-records one pass per kind, in this order: background, panels, cell borders, grid
-text, region text, bars, polylines, the minimap, text runs, the cursor,
-overlays, overlay text, icons. Declaration order decides the order *within* a
-kind, so one bar draws over another it was declared before. It has no say
-*across* kinds: a bar declared after a polyline still draws beneath it, because
-the bar pass runs first. Interleaving draws across kinds is deferred until a
-consumer needs it.
+records one pass per kind, in this order: background, panels, grid text, region
+text, cell borders, bars, polylines, the minimap, text runs, the cursor,
+overlays, overlay text, icons. Cell borders sit above the grid text because they
+frame those cells. Glyph ink that reaches a cell edge would otherwise break the
+line around it.
+
+Declaration order decides the order *within* a kind, so one bar draws over
+another it was declared before. It has no say *across* kinds: a bar declared
+after a polyline still draws beneath it, because the bar pass runs first.
+Interleaving draws across kinds is deferred until a consumer needs it.
 
 `seq` therefore orders nothing. Each panel, bar, text run, path, and icon
 carries a monotonic declaration-order `seq`, and every occluding fragment shader

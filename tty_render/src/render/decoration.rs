@@ -4,9 +4,10 @@
 //! cell, the fragment painting a line along every present edge in that edge's
 //! color and weight. Holding a cell's four edges in one instance lets a
 //! [`BorderStyle::Rounded`] corner arc the join where two adjacent edges meet,
-//! which a per-edge instance could not coordinate. Borders are decoration over
-//! the cell backgrounds, so the pass alpha-blends and runs after the background
-//! fill.
+//! which a per-edge instance could not coordinate. Borders frame the cells they
+//! surround rather than sit beneath them, so the pass alpha-blends and runs
+//! after the grid text. Glyph ink that reaches a cell edge would otherwise break
+//! the APC line it sits inside.
 
 use crate::render::{row_len, row_uploads, CellMetrics};
 use bytemuck::{Pod, Zeroable};
@@ -342,8 +343,8 @@ impl DecorationPass {
 
     /// Record the border draw into `render_pass`.
     ///
-    /// A no-op when no cell carries a border. Run after the background fill so
-    /// the borders sit over the cell backgrounds.
+    /// A no-op when no cell carries a border. Run after the grid text so the
+    /// borders sit over the glyphs they frame as well as the cell backgrounds.
     pub fn draw(&self, render_pass: &mut RenderPass<'_>) {
         if self.count == 0 {
             return;

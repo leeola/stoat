@@ -523,12 +523,15 @@ impl Renderer {
     pub(crate) fn record_frame(&self, render_pass: &mut RenderPass<'_>, cursor: CursorLayer) {
         self.background.draw(render_pass);
         self.panel.draw(render_pass);
-        self.decoration.draw(render_pass);
         self.text.draw(render_pass);
         self.text.draw_region_text(render_pass);
         // The region draw leaves its scissor set, so restore the full
-        // surface before the cursor and overlay draws that follow.
+        // surface before the decoration, cursor, and overlay draws that follow.
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
+        // Cell borders frame the cells they surround, so they draw over the
+        // glyphs rather than under them. Ink that reaches a cell edge would
+        // otherwise break the line it sits inside.
+        self.decoration.draw(render_pass);
         // Off-grid color bars and text runs sit above the grid text but
         // below floating popovers and icons, like a gutter beneath a
         // tooltip. The bars fill behind the runs.
