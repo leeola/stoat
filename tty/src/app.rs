@@ -1064,10 +1064,15 @@ impl ApplicationHandler<PtyEvent> for App {
                 WindowEvent::RedrawRequested => {
                     let font_size = state.font_size;
                     let scale = state.scale_factor as f32;
+                    let mut report = None;
                     if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
                         if !aux.visibility.admit() {
                             return;
                         }
+                        // Same ordering as the primary window's frame: the
+                        // redraw a resize asked for arrives before the batch
+                        // ends, so it fits itself first.
+                        report = fit_aux(aux).map(|(cols, rows)| (aux.id, cols, rows));
                         let now = Instant::now();
                         let dt = aux
                             .last_redraw
@@ -1077,6 +1082,11 @@ impl ApplicationHandler<PtyEvent> for App {
                         if redraw_aux(aux, &state.terminal, font_size, scale, dt) {
                             aux.window.request_redraw();
                         }
+                    }
+                    // Sent out here, since the socket lives on the whole state
+                    // and the fit above borrows one window out of it.
+                    if let Some((window, cols, rows)) = report {
+                        send_window_event(state, WindowIpcEvent::Resized { window, cols, rows });
                     }
                     return;
                 },
@@ -2033,6 +2043,11 @@ fn redraw(state: &mut State) {
         return;
     }
 
+    // A Resized event asks for this frame, and winit delivers the request
+    // before the batch ends, so fitting here is what keeps the frame from
+    // going out against the surface the resize was meant to replace.
+    apply_primary_resize(state);
+
     // The first redraw drives the first present, so report the total
     // cold-start time once, then never again.
     if let Some(start) = state.first_frame_start.take() {
@@ -2826,33 +2841,59 @@ fn send_window_event(state: &State, event: WindowIpcEvent) {
 /// reallocation and one pty ioctl per frame instead of one per size the window
 /// manager reported on the way. The terminal already refuses a resize to the
 /// cell dimensions it has, so only the reaching of it moved.
+///
+/// This is the backstop, not the main path. winit dispatches
+/// `RedrawRequested` before `AboutToWait`, so the redraw a `Resized` event asks
+/// for arrives first and fits itself ([`apply_primary_resize`] at the top of
+/// [`redraw`], [`fit_aux`] in the aux redraw arm). What is left for here is a
+/// batch that scheduled no frame at all. An occluded window is that case. It
+/// draws nothing, and its pty still has to learn the new size.
 fn apply_pending_resizes(state: &mut State) {
-    if let Some((width, height)) = state.pending_resize.take() {
-        state.gpu.resize(width, height);
-        let (rows, cols) = state.gpu.grid_size();
-        let (pixel_width, pixel_height) =
-            grid_pixels(state.font_size, state.scale_factor as f32, rows, cols);
-        state.terminal.lock().resize(rows, cols);
-        let _ = state
-            .pty
-            .resize(rows as u16, cols as u16, pixel_width, pixel_height);
-    }
+    apply_primary_resize(state);
 
     let mut reports: Vec<(u32, u16, u16)> = Vec::new();
     for aux in &mut state.aux {
-        let Some((width, height)) = aux.pending_resize.take() else {
-            continue;
-        };
-        let Some(gpu) = aux.gpu.as_mut() else {
-            continue;
-        };
-        gpu.resize(width, height);
-        let (rows, cols) = gpu.grid_size();
-        reports.push((aux.id, cols as u16, rows as u16));
+        if let Some((cols, rows)) = fit_aux(aux) {
+            reports.push((aux.id, cols, rows));
+        }
     }
     for (window, cols, rows) in reports {
         send_window_event(state, WindowIpcEvent::Resized { window, cols, rows });
     }
+}
+
+/// Fit the primary window's surface, terminal, and pty to the size its last
+/// batch settled on.
+///
+/// Does nothing when no size waits, so a frame that follows no resize pays one
+/// `Option` check for the guarantee that it draws against the surface the
+/// window actually has.
+fn apply_primary_resize(state: &mut State) {
+    let Some((width, height)) = state.pending_resize.take() else {
+        return;
+    };
+    state.gpu.resize(width, height);
+    let (rows, cols) = state.gpu.grid_size();
+    let (pixel_width, pixel_height) =
+        grid_pixels(state.font_size, state.scale_factor as f32, rows, cols);
+    state.terminal.lock().resize(rows, cols);
+    let _ = state
+        .pty
+        .resize(rows as u16, cols as u16, pixel_width, pixel_height);
+}
+
+/// Fit one aux window's surface to the size its last batch settled on,
+/// returning the cell dimensions to report to the child.
+///
+/// `None` when no size waits or the window's GPU has not arrived yet. The
+/// caller sends the report, since the socket lives on the whole [`State`] while
+/// this borrows one window out of it.
+fn fit_aux(aux: &mut AuxWindow) -> Option<(u16, u16)> {
+    let (width, height) = aux.pending_resize.take()?;
+    let gpu = aux.gpu.as_mut()?;
+    gpu.resize(width, height);
+    let (rows, cols) = gpu.grid_size();
+    Some((cols as u16, rows as u16))
 }
 
 /// Report an app-wide DECSET 1004 focus change to the child when it flips.
