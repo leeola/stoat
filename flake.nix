@@ -138,6 +138,10 @@
                 rust-toolchain
                 # Drives the feature-powerset compile check in scripts/check-features.sh.
                 cargo-hack
+                # A color emoji face for the terminal to fall back to. The
+                # bundled faces cover text and symbols but carry no emoji, and
+                # the fallback only finds an installed one.
+                noto-fonts-color-emoji
 
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
@@ -168,6 +172,13 @@
                 pkgs.xorg.libXi
               ]
             );
+
+            # Point fontconfig at the emoji face above. It adds to the standard
+            # font directories rather than replacing them, so everything else
+            # the machine has stays visible.
+            FONTCONFIG_FILE = pkgs.makeFontsConf {
+              fontDirectories = [ pkgs.noto-fonts-color-emoji ];
+            };
 
             # Silence nixpkgs cc-wrapper's target-mismatch warning emitted
             # when Rust's `cc` crate canonicalizes Apple triples before
