@@ -690,10 +690,7 @@ pub(crate) fn paint_diff_rows(
                         base_line + 1,
                         dim_style,
                     );
-                    let token_spans = snapshot
-                        .diff_map()
-                        .and_then(|dm| dm.base_highlights_for_line(base_line))
-                        .unwrap_or(&[]);
+                    let token_spans = base_token_spans(snapshot, base_line);
                     paint_base_row(
                         buf,
                         left_text_x,
@@ -909,6 +906,24 @@ pub(crate) fn paint_base_row(
     });
 }
 
+/// The base line's syntax spans, empty where the editor paints no syntax color.
+///
+/// The left column's tokens come from the diff map rather than from the display
+/// map, so the snapshot cannot withhold them the way it withholds the right
+/// column's. Reading its flag here is what keeps the two columns agreeing.
+fn base_token_spans(
+    snapshot: &DisplaySnapshot,
+    base_line: u32,
+) -> &[(std::ops::Range<usize>, HighlightStyle)] {
+    if !snapshot.syntax_highlighting() {
+        return &[];
+    }
+    snapshot
+        .diff_map()
+        .and_then(|dm| dm.base_highlights_for_line(base_line))
+        .unwrap_or(&[])
+}
+
 /// Paint the diff view's two-cell status column for a hunk row.
 ///
 /// The first cell carries the change-kind bar in `change_scope`. The second
@@ -982,10 +997,7 @@ fn paint_base_side(
         dim_style,
     );
 
-    let token_spans = snapshot
-        .diff_map()
-        .and_then(|dm| dm.base_highlights_for_line(base_line))
-        .unwrap_or(&[]);
+    let token_spans = base_token_spans(snapshot, base_line);
     let changes = base_changes
         .get(&base_line)
         .map(Vec::as_slice)

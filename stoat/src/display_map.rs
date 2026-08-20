@@ -1172,6 +1172,15 @@ impl DisplaySnapshot {
         &self.inlay_highlights
     }
 
+    /// Whether this snapshot's editor paints syntax color.
+    ///
+    /// The snapshot already withholds its own token highlights when this is
+    /// off. A caller reads the flag itself only for coloring that comes from
+    /// somewhere else, as the diff view's base column does.
+    pub fn syntax_highlighting(&self) -> bool {
+        self.syntax_highlighting
+    }
+
     pub fn is_masked(&self) -> bool {
         self.masked
     }

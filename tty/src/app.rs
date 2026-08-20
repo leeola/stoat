@@ -18,9 +18,9 @@ use crate::{
     },
     config::{self, Config, CursorAnimation},
     input::{
-        alternate_scroll_bytes, cell_at, encode_key, font_step, ipc_button, modifier_bits,
-        paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes,
-        stepped_font_size, swallow_super_combo, wheel_lines,
+        alternate_scroll_bytes, cell_at, chord_char, encode_key, font_step, ipc_button,
+        modifier_bits, paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes,
+        sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -1330,6 +1330,20 @@ impl ApplicationHandler<PtyEvent> for App {
                     } else {
                         apply_font_step(state, delta);
                     }
+                    return;
+                }
+
+                // A digit chord has no terminal encoding, so a program can only
+                // hear it over the socket. Without the claim it falls through to
+                // encode_key, which yields nothing for it, exactly as before.
+                if primary
+                    && let Some(ch) = chord_char(platform_mod_held, &event.logical_key)
+                    && forwards_zoom(
+                        state.zoom_capture,
+                        state.window_client_connected.load(Ordering::Relaxed),
+                    )
+                {
+                    send_window_event(state, WindowIpcEvent::Chord { window: 0, ch });
                     return;
                 }
 

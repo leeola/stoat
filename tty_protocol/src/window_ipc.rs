@@ -38,6 +38,14 @@ pub enum WindowIpcEvent {
     /// means in its current context. A program that never claims the combo
     /// never sees this and the terminal steps its own font size instead.
     Zoom { window: u32, delta: i32 },
+    /// A platform-modifier chord over the character `ch` was pressed while the
+    /// program held the zoom claim.
+    ///
+    /// Cmd or Ctrl with a digit has no terminal byte encoding, so it cannot
+    /// reach the program as input at all. Forwarding it here is the only way a
+    /// program hears it, and it travels the same claim the zoom combo does. A
+    /// program that never claims the combo never sees this.
+    Chord { window: u32, ch: char },
 }
 
 /// A pointer gesture carried by [`WindowIpcEvent::Mouse`].
@@ -135,6 +143,7 @@ impl WindowIpcEvent {
                 format!("mouse {window} {col} {row} {mods} {verb} {arg}")
             },
             WindowIpcEvent::Zoom { window, delta } => format!("zoom {window} {delta}"),
+            WindowIpcEvent::Chord { window, ch } => format!("chord {window} {ch}"),
         }
     }
 }
@@ -175,6 +184,18 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
         "zoom" => WindowIpcEvent::Zoom {
             window: parts.next()?.parse().ok()?,
             delta: parts.next()?.parse().ok()?,
+        },
+        "chord" => {
+            let window = parts.next()?.parse().ok()?;
+            let text = parts.next()?;
+            let mut chars = text.chars();
+            let ch = chars.next()?;
+            // The line splits on whitespace, so a multi-char token is a peer
+            // sending something this arm cannot represent rather than a chord.
+            if chars.next().is_some() {
+                return None;
+            }
+            WindowIpcEvent::Chord { window, ch }
         },
         _ => return None,
     };
@@ -256,6 +277,29 @@ mod tests {
         assert_eq!(parse_line("zoom 0"), None, "missing delta");
         assert_eq!(parse_line("zoom 0 up"), None, "non-numeric delta");
         assert_eq!(parse_line("zoom 0 1 2"), None, "trailing token");
+    }
+
+    #[test]
+    fn chord_events_round_trip() {
+        for event in [
+            WindowIpcEvent::Chord { window: 0, ch: '9' },
+            WindowIpcEvent::Chord { window: 4, ch: '0' },
+        ] {
+            assert_eq!(parse_line(&event.encode_line()), Some(event));
+        }
+        assert_eq!(
+            WindowIpcEvent::Chord { window: 0, ch: '9' }.encode_line(),
+            "chord 0 9",
+            "the character rides the wire bare"
+        );
+    }
+
+    #[test]
+    fn malformed_chord_lines_yield_none() {
+        assert_eq!(parse_line("chord 0"), None, "missing character");
+        assert_eq!(parse_line("chord x 9"), None, "non-numeric window");
+        assert_eq!(parse_line("chord 0 99"), None, "multi-character token");
+        assert_eq!(parse_line("chord 0 9 8"), None, "trailing token");
     }
 
     #[test]

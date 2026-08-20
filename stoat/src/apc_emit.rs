@@ -796,6 +796,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
     let mut async_jobs: Vec<PoolFill> = Vec::new();
     let syntax_highlight = stoat.syntax_highlight;
+    // What each editor actually paints with, which is what a page's hash has to
+    // carry. The diff toggle only subtracts, and only from a diff view.
+    let editor_syntax = |diff_view: bool| syntax_highlight && (stoat.diff_syntax || !diff_view);
     let line_numbers = stoat
         .settings
         .editor_line_numbers
@@ -884,7 +887,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let content_version = match editor.review_view.as_ref() {
             Some(view) => view.session_version,
             None => editor_page_content_version(
-                syntax_highlight,
+                editor_syntax(editor.diff_view),
                 editor.gutter_width,
                 editor.display_map.wrap_width(),
                 current_line,
@@ -1119,7 +1122,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.scroll_row as f32
             };
             let content_version = editor_page_content_version(
-                syntax_highlight,
+                editor_syntax(editor.diff_view),
                 editor.gutter_width,
                 editor.display_map.wrap_width(),
                 None,
@@ -4526,6 +4529,66 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Command::Scroll(_))),
             "the scroll target eases into the region behind it, got {cmds:?}"
+        );
+    }
+
+    /// The pooled pages hold rendered text, so a toggle that recolors every row
+    /// has to reach their content hash or the pool glides the old colors.
+    #[test]
+    fn a_diff_syntax_toggle_reenters_the_pool_pages() {
+        use stoatty_protocol::command::{Command, FillCommand};
+        use tokio::sync::mpsc::UnboundedReceiver;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/diff-syntax-pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .set_diff_view(true);
+
+        fn drain_fills(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<u64> {
+            let mut filled = Vec::new();
+            while let Ok(batch) = rx.try_recv() {
+                for cmd in command::decode_stream(&batch) {
+                    if let Command::Fill(FillCommand { index, .. }) = cmd {
+                        filled.push(index);
+                    }
+                }
+            }
+            filled
+        }
+
+        let scroll = |stoat: &mut Stoat, offset: f32| {
+            let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+            editor.scroll_offset = offset;
+            editor.scroll_glide = ScrollGlide::Page;
+        };
+
+        emit_smooth_scroll(&mut h.stoat);
+        let _ = drain_fills(&mut rx);
+
+        scroll(&mut h.stoat, 0.5);
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            drain_fills(&mut rx).is_empty(),
+            "a same-window scroll with the toggle untouched re-enters nothing"
+        );
+
+        h.stoat.diff_syntax = false;
+        scroll(&mut h.stoat, 0.9);
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            !drain_fills(&mut rx).is_empty(),
+            "the toggle recolors the page, so the pool re-enters it"
         );
     }
 

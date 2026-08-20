@@ -41,6 +41,28 @@ pub(crate) fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
     }
 }
 
+/// The digit a platform-modifier chord names, or `None` when the press is not
+/// one.
+///
+/// `platform_mod_held` is the same modifier [`font_step`] reads. A digit chord
+/// has no terminal byte encoding, so a caller forwards it upstream instead of
+/// writing it to the pty, and the program decides what the digit means.
+pub(crate) fn chord_char(platform_mod_held: bool, key: &Key) -> Option<char> {
+    if !platform_mod_held {
+        return None;
+    }
+
+    let Key::Character(s) = key else {
+        return None;
+    };
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || !c.is_ascii_digit() {
+        return None;
+    }
+    Some(c)
+}
+
 /// The size `delta` steps `current` to, held inside the live-zoom range.
 ///
 /// The delta arrives from the wire, so the add saturates rather than
@@ -267,6 +289,27 @@ mod tests {
             stepped_font_size(u32::MAX, 0),
             FONT_SIZE_CEIL,
             "a size set from outside the zoom is pulled back into range"
+        );
+    }
+
+    #[test]
+    fn chord_char_maps_a_platform_digit_and_nothing_else() {
+        assert_eq!(chord_char(true, &Key::Character("9".into())), Some('9'));
+        assert_eq!(chord_char(true, &Key::Character("0".into())), Some('0'));
+        assert_eq!(
+            chord_char(false, &Key::Character("9".into())),
+            None,
+            "no platform modifier held"
+        );
+        assert_eq!(
+            chord_char(true, &Key::Character("a".into())),
+            None,
+            "a letter is not a digit chord"
+        );
+        assert_eq!(
+            chord_char(true, &Key::Named(NamedKey::Enter)),
+            None,
+            "a named key carries no character"
         );
     }
 

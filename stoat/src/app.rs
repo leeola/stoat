@@ -659,6 +659,20 @@ pub struct Stoat {
     /// whole session rather than one per editor, because how hard to recede is
     /// a reading preference rather than a property of any one file.
     pub(crate) diff_soften: i8,
+    /// Whether the diff view paints syntax color, in both of its columns.
+    ///
+    /// The diff view marks a change by contrast: the chars around it recede and
+    /// a prose change bolds. Syntax color competes with that, since a row
+    /// carries several colors before the diff says anything. Turning it off
+    /// leaves the soften and the bold as the only cues on screen.
+    ///
+    /// Scoped to the diff view alone. [`stoat_action::ToggleSyntaxHighlight`]
+    /// keeps its own session-wide meaning, and this cannot color a plain pane
+    /// that toggle left plain.
+    ///
+    /// Session-scoped and deliberately not persisted, for [`Self::diff_soften`]'s
+    /// reason: it answers what is on screen right now.
+    pub(crate) diff_syntax: bool,
     /// Share of its body each modal's list pane takes, as a percentage, for the
     /// kinds whose list/preview separator the user has dragged. An absent kind
     /// sits at [`crate::render::picker::DEFAULT_LIST_PERCENT`].
@@ -1996,6 +2010,7 @@ impl Stoat {
             imported_themes,
             modal_zoom: std::collections::BTreeMap::new(),
             diff_soften: 0,
+            diff_syntax: true,
             modal_split: std::collections::BTreeMap::new(),
             command_palette: None,
             help: None,
@@ -2464,6 +2479,12 @@ impl Stoat {
             return self.handle_zoom_step(delta);
         }
 
+        // The syntax chord reads the focused view, which the pane-tree borrow
+        // below leaves unreachable for the same reason.
+        if let WindowIpcEvent::Chord { ch: '9', .. } = event {
+            return self.handle_diff_syntax_toggle();
+        }
+
         let panes = &mut self.active_workspace_mut().panes;
         match event {
             WindowIpcEvent::Focused { window: 0 } => {
@@ -2491,7 +2512,24 @@ impl Stoat {
             },
             WindowIpcEvent::Mouse { .. } => unreachable!("mouse events return above"),
             WindowIpcEvent::Zoom { .. } => unreachable!("zoom events return above"),
+            // Only `9` is spoken for. Another digit is a chord the terminal
+            // forwarded on the claim and nothing here answers.
+            WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
         }
+        UpdateEffect::Redraw
+    }
+
+    /// Flip the diff view's syntax coloring, or do nothing outside it.
+    ///
+    /// The chord reaches here whatever is on screen, because the terminal
+    /// forwards it on the zoom claim rather than on what the program is
+    /// showing. Off the diff view there is nothing to toggle, so the flag holds
+    /// and the frame is left alone.
+    fn handle_diff_syntax_toggle(&mut self) -> UpdateEffect {
+        if keymap_state::view_predicate(self.active_workspace()) != Some("diff") {
+            return UpdateEffect::None;
+        }
+        self.diff_syntax = !self.diff_syntax;
         UpdateEffect::Redraw
     }
 
@@ -6939,9 +6977,15 @@ impl Stoat {
         // Keep every editor's syntax coloring in step with the session toggle
         // before painting, so a newly opened editor inherits the current
         // state. set_syntax_highlighting is a no-op when already in sync.
+        //
+        // The diff toggle only ever subtracts. A pane the session toggle left
+        // plain stays plain, and a diff view under a diff toggle that is off
+        // goes plain whatever the session says.
         let syntax = self.syntax_highlight;
+        let diff_syntax = self.diff_syntax;
         for editor in self.active_workspace_mut().editors.values_mut() {
-            editor.display_map.set_syntax_highlighting(syntax);
+            let on = syntax && (diff_syntax || !editor.diff_view);
+            editor.display_map.set_syntax_highlighting(on);
         }
 
         // Take the scene and undercurl buffers out so `frame` can hold `&mut`
@@ -7430,7 +7474,10 @@ mod tests {
         },
     };
     use crossterm::event::{MouseButton, MouseEventKind};
-    use std::path::{Path, PathBuf};
+    use std::{
+        ops::Range,
+        path::{Path, PathBuf},
+    };
     use stoat_config::LineNumbers;
     use stoatty_protocol::command::{self, PoolRegionCommand};
 
@@ -7624,6 +7671,73 @@ mod tests {
         WindowIpc::Event(WindowIpcEvent::Zoom { window: 0, delta })
     }
 
+    fn chord(ch: char) -> WindowIpc {
+        WindowIpc::Event(WindowIpcEvent::Chord { window: 0, ch })
+    }
+
+    /// A width-120 harness over one `.rs` file whose second line changed,
+    /// rendered in the diff view. The first line is unchanged, so it paints as
+    /// a context row on both sides, and the removed line paints as a block row
+    /// on the left.
+    fn diff_syntax_harness() -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 20);
+        // The column scans below address fixed side-by-side columns, so the
+        // pane must span the full width rather than share it with a minimap.
+        h.stoat.minimap_override = Some(false);
+        h.stage_review_scenario(
+            "/repo",
+            &[(
+                "a.rs",
+                "fn keep() {}\nfn old() {}\n",
+                "fn keep() {}\nfn new() {}\n",
+            )],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.snapshot();
+        h
+    }
+
+    /// The foreground of the first `glyph` cell on the row holding `text`.
+    fn glyph_fg(h: &crate::test_harness::TestHarness, text: &str, glyph: &str) -> String {
+        let buf = h.rendered_buffer();
+        let line = |y: u16| -> String {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        let row = (0..buf.area.height)
+            .find(|&y| line(y).contains(text))
+            .unwrap_or_else(|| panic!("{text:?} rendered"));
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, row)].symbol() == glyph)
+            .unwrap_or_else(|| panic!("{glyph:?} on the {text:?} row"));
+        format!("{:?}", buf[(x, row)].style().fg)
+    }
+
+    /// The distinct foregrounds of the non-blank cells in `cols` on the row
+    /// holding `text`, which is one color exactly where nothing colors tokens.
+    fn row_colors(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str) -> usize {
+        let buf = h.rendered_buffer();
+        let line = |y: u16| -> String {
+            cols.clone()
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        let row = (0..buf.area.height)
+            .find(|&y| line(y).contains(text))
+            .unwrap_or_else(|| panic!("{text:?} rendered in cols {cols:?}"));
+        cols.clone()
+            .filter(|&x| !buf[(x, row)].symbol().trim().is_empty())
+            .map(|x| format!("{:?}", buf[(x, row)].style().fg))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
     /// With nothing over the panes the combo is a pane resize, so the focused
     /// pane takes room from its neighbor.
     #[test]
@@ -7711,6 +7825,99 @@ mod tests {
             "a plain pane takes the step as a resize again"
         );
     }
+    /// Syntax color competes with the diff's own marking, so the chord drops it
+    /// from both columns and leaves the soften and the bold to speak alone.
+    #[test]
+    fn the_syntax_chord_drops_both_diff_columns_to_one_color() {
+        let mut h = diff_syntax_harness();
+        assert!(
+            h.stoat.diff_syntax,
+            "the diff view opens with its syntax color on"
+        );
+        assert!(
+            row_colors(&h, 68..120, "fn keep") > 1
+                && row_colors(&h, 8..59, "fn keep") > 1
+                && row_colors(&h, 8..59, "fn old") > 1,
+            "every row starts out carrying token colors"
+        );
+
+        assert_eq!(h.stoat.handle_window_ipc(chord('9')), UpdateEffect::Redraw);
+        h.snapshot();
+        assert_eq!(
+            (
+                h.stoat.diff_syntax,
+                row_colors(&h, 68..120, "fn keep"),
+                row_colors(&h, 8..59, "fn keep"),
+                row_colors(&h, 8..59, "fn old"),
+            ),
+            (false, 1, 1, 2),
+            "every row loses its tokens, and the two left on the removed row are \
+             the receded gaps against the changed word, which is the diff's own \
+             marking rather than syntax"
+        );
+
+        h.stoat.handle_window_ipc(chord('9'));
+        h.snapshot();
+        assert!(
+            h.stoat.diff_syntax && row_colors(&h, 68..120, "fn keep") > 1,
+            "a second chord brings the color back"
+        );
+    }
+
+    /// The terminal forwards the chord on the zoom claim rather than on what is
+    /// on screen, so the flag has to defend its own scope.
+    #[test]
+    fn the_syntax_chord_outside_the_diff_view_changes_nothing() {
+        let mut h = diff_syntax_harness();
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+
+        assert_eq!(
+            (h.stoat.handle_window_ipc(chord('9')), h.stoat.diff_syntax),
+            (UpdateEffect::None, true),
+            "a chord over a plain pane leaves the flag and the frame alone"
+        );
+    }
+
+    /// The flag subtracts from the diff view alone, so a plain pane keeps the
+    /// color the session toggle gave it.
+    #[test]
+    fn a_plain_pane_keeps_its_color_while_the_diff_toggle_is_off() {
+        let mut h = diff_syntax_harness();
+        h.stoat.handle_window_ipc(chord('9'));
+        h.snapshot();
+        assert!(!h.stoat.diff_syntax, "the toggle is off");
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+        h.snapshot();
+
+        // The keyword and the name it declares carry different scopes, so their
+        // colors part exactly where something is coloring tokens. Reading two
+        // glyphs rather than a column range keeps the gutter out of the answer.
+        let keyword = glyph_fg(&h, "fn keep", "f");
+        let name = glyph_fg(&h, "fn keep", "k");
+        assert_ne!(
+            keyword, name,
+            "the same file outside the diff view still paints its tokens"
+        );
+    }
+
+    /// Another digit is a chord the terminal forwarded on the claim that
+    /// nothing here answers, so it must not redraw or move any state.
+    #[test]
+    fn an_unclaimed_digit_chord_is_a_no_op() {
+        let mut h = diff_syntax_harness();
+
+        assert_eq!(
+            (h.stoat.handle_window_ipc(chord('8')), h.stoat.diff_syntax),
+            (UpdateEffect::None, true),
+            "an unspoken-for digit changes nothing"
+        );
+    }
+
     /// An open modal owns the combo, so the panes behind it must not move.
     #[test]
     fn a_zoom_step_with_a_modal_open_zooms_it_and_leaves_the_panes_alone() {
