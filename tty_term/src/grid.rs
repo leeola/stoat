@@ -277,6 +277,20 @@ impl Grid {
         self.clear_except(0, 0);
     }
 
+    /// Reset everything the grid holds except its cells.
+    ///
+    /// For a grid recomposed in place, where the cells are overwritten by the
+    /// compose and only what sits beside them has to go. The decorations are
+    /// the reason: a compose that adds each source's runs and bars to this
+    /// grid's would otherwise stack this pass's on the last one's.
+    ///
+    /// Moves the three decoration epochs, as [`Self::clear`] does, so a render
+    /// pass gating on them rebuilds a decoration that changed however the cells
+    /// compare.
+    pub fn clear_decorations(&mut self) {
+        self.clear_except(self.rows, self.cols);
+    }
+
     /// Reset the grid, leaving the cells in the top-left `rows` by `cols` box
     /// as they are.
     ///
@@ -629,18 +643,34 @@ impl Grid {
     }
 
     /// Copy `rows` rows of `src` in at (`top`, `left`), adding `src`'s
-    /// decorations to this grid's rather than replacing them.
+    /// decorations to this grid's rather than replacing them, and mark in
+    /// `damage` every destination row the copy changed.
     ///
     /// For a destination several sources compose into, each owning its own
-    /// rectangle. The caller blanks the grid once before the run, so what
+    /// rectangle. The caller resets the grid once before the run, so what
     /// accumulates is that run's and nothing older.
     ///
+    /// A row already holding what the copy would write is left alone and
+    /// unmarked, which is what lets a caller recompose in place and rebuild only
+    /// what moved. A caller that blanked the grid first has nothing to compare
+    /// against and passes [`Damage::Full`], where marking is a no-op.
+    ///
+    /// The decorations are appended whatever the cells compare, since nothing
+    /// here can tell whether the caller reset them.
+    ///
     /// See [`Self::blit_region`] for what `rows` means and how the edges clip.
-    pub fn append_region(&mut self, src: &Grid, top: usize, left: usize, rows: usize) {
+    pub fn append_region(
+        &mut self,
+        src: &Grid,
+        top: usize,
+        left: usize,
+        rows: usize,
+        damage: &mut Damage,
+    ) {
         let Some((rows, cols)) = self.region_extent(src, top, left, rows) else {
             return;
         };
-        self.copy_cells(src, top, left, rows, cols);
+        self.copy_damaged_cells(src, top, left, rows, cols, damage);
 
         let (dx, dy) = decoration_shift(top, left);
         self.text_runs.extend(src.text_runs().iter().map(|run| {
@@ -680,6 +710,37 @@ impl Grid {
     fn copy_cells(&mut self, src: &Grid, top: usize, left: usize, rows: usize, cols: usize) {
         for r in 0..rows {
             self.row_mut(top + r)[left..left + cols].copy_from_slice(&src.row(r)[..cols]);
+        }
+    }
+
+    /// [`Self::copy_cells`], marking each destination row the copy changed.
+    ///
+    /// The compare is per row rather than per cell because the damage names
+    /// rows: a row that differs anywhere is rebuilt over its whole width, so
+    /// finding where it differs would buy nothing.
+    fn copy_damaged_cells(
+        &mut self,
+        src: &Grid,
+        top: usize,
+        left: usize,
+        rows: usize,
+        cols: usize,
+        damage: &mut Damage,
+    ) {
+        let width = self.cols;
+        for r in 0..rows {
+            let source = &src.row(r)[..cols];
+            let into = &mut self.row_mut(top + r)[left..left + cols];
+            if into == source {
+                continue;
+            }
+
+            into.copy_from_slice(source);
+            if let Damage::Partial(marked) = damage
+                && let Some(row) = marked.get_mut(top + r)
+            {
+                *row = whole_row(width);
+            }
         }
     }
 
@@ -2577,7 +2638,7 @@ mod tests {
 
 #[cfg(test)]
 mod region_blit_tests {
-    use super::{Bar, Grid, Polyline, Rgb, TextRun};
+    use super::{whole_row, Bar, Damage, Grid, Polyline, Rgb, RowDamage, TextRun};
 
     /// A 2x2 source with a sentinel in every cell and one of each decoration
     /// kind at the region's own origin.
@@ -2640,10 +2701,80 @@ mod region_blit_tests {
         );
     }
 
+    /// A destination recomposed in place is overwritten row for row, and most of
+    /// those rows come back holding what they already held. Marking only the
+    /// ones that changed is what lets a renderer rebuild only those.
+    #[test]
+    fn an_append_marks_the_rows_it_changed_and_no_others() {
+        let mut dst = Grid::new(4, 4);
+        dst.append_region(&source(), 1, 2, 2, &mut Damage::Full);
+
+        // The same source again, over the rows it already wrote.
+        let mut damage = Damage::Partial(vec![None; 4]);
+        dst.append_region(&source(), 1, 2, 2, &mut damage);
+        assert_eq!(
+            marked(&damage),
+            Vec::<usize>::new(),
+            "a copy that writes the bytes already there changes no row",
+        );
+
+        // One cell of the source moved, so one destination row did.
+        let mut moved = source();
+        moved.get_mut(1, 0).ch = 'z';
+        let mut damage = Damage::Partial(vec![None; 4]);
+        dst.append_region(&moved, 1, 2, 2, &mut damage);
+        assert_eq!(
+            marked(&damage),
+            vec![2],
+            "only the row the cell sits on, and over its whole width",
+        );
+        assert_eq!(
+            damage_at(&damage, 2),
+            whole_row(4),
+            "the damage names the destination's width, not the region's",
+        );
+        assert_eq!(dst.get(2, 2).ch, 'z', "and the cell landed");
+    }
+
+    /// A caller that blanked the grid first has nothing to compare against, so
+    /// it asks for none of this and the marking is a no-op.
+    #[test]
+    fn an_append_into_a_full_damage_marks_nothing_of_its_own() {
+        let mut dst = Grid::new(4, 4);
+        let mut damage = Damage::Full;
+        dst.append_region(&source(), 1, 2, 2, &mut damage);
+
+        assert!(
+            matches!(damage, Damage::Full),
+            "a full damage already covers every row and stays as it was",
+        );
+        assert_eq!(dst.get(1, 2).ch, 'd', "and the cells still land");
+    }
+
+    /// The rows a partial damage names, ascending.
+    fn marked(damage: &Damage) -> Vec<usize> {
+        match damage {
+            Damage::Full => Vec::new(),
+            Damage::Partial(rows) => rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.is_some())
+                .map(|(at, _)| at)
+                .collect(),
+        }
+    }
+
+    fn damage_at(damage: &Damage, row: usize) -> RowDamage {
+        match damage {
+            Damage::Full => None,
+            Damage::Partial(rows) => rows.get(row).copied().flatten(),
+        }
+    }
+
     #[test]
     fn an_append_carries_every_decoration_kind_translated() {
         let mut dst = Grid::new(4, 4);
-        dst.append_region(&source(), 1, 2, 2);
+        dst.append_region(&source(), 1, 2, 2, &mut Damage::Full);
 
         assert_eq!(dst.get(1, 2).ch, 'd', "the cells land at the origin");
         assert_eq!(
@@ -2673,7 +2804,7 @@ mod region_blit_tests {
                 seq: 0,
             }]);
             if append {
-                dst.append_region(&source(), 0, 0, 2);
+                dst.append_region(&source(), 0, 0, 2, &mut Damage::Full);
             } else {
                 dst.blit_region(&source(), 0, 0, 2);
             }

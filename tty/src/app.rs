@@ -469,11 +469,19 @@ struct AuxWindow {
     /// Wall-clock of the previous redraw, driving this window's own ease step.
     /// Aux windows redraw independently, so each keeps its own frame clock.
     last_redraw: Option<Instant>,
-    /// Hash of the inputs the last base compose read (each pool's content, target,
-    /// and region, plus the window size). A redraw whose inputs hash the same
-    /// skips the recompose and reuses last frame's instances. The sub-cell glide
-    /// overlay still animates. `None` forces the first frame to compose.
-    last_compose: Option<u64>,
+    /// Hash of where the last base compose put things: the pool set, their
+    /// regions, and the window size. A move here changes which cells any pool
+    /// covers at all, so the grid goes back to the window background and every
+    /// row is suspect. `None` forces the first frame to compose.
+    last_geometry: Option<u64>,
+    /// Hash of what the last base compose held: each pool's content version and,
+    /// for the ones no overlay covered, its scroll target. A move here leaves
+    /// every rectangle where it was, so the compose overwrites in place and
+    /// damages only the rows that came back different.
+    ///
+    /// A redraw where neither hash moved skips the recompose and reuses last
+    /// frame's instances. The sub-cell glide overlay still animates.
+    last_content: Option<u64>,
     /// Reused buffer for the window's pool snapshots, so a redraw allocates no
     /// fresh Vec to gather them.
     pool_scratch: Vec<PoolView>,
@@ -1983,7 +1991,8 @@ fn open_aux_window(
         wheel_pixels: 0.0,
         pool_anims: BTreeMap::new(),
         last_redraw: None,
-        last_compose: None,
+        last_geometry: None,
+        last_content: None,
         pool_scratch: Vec::new(),
         last_clear_bg: None,
     });
@@ -2657,7 +2666,8 @@ fn redraw_aux(
 
     let mut easing = false;
     let mut active: Vec<ActivePool> = Vec::new();
-    let mut recomposed = false;
+    // What the base compose changed, when one ran at all.
+    let mut composed = None;
     {
         let mut terminal = terminal.lock();
         // The aux clear follows the terminal's default background for the same
@@ -2694,13 +2704,24 @@ fn redraw_aux(
             }
         }
 
-        // Recomposed only when the hash of what it reads moves. A pure sub-cell
+        // Recomposed only when a hash of what it reads moves. A pure sub-cell
         // glide leaves the base untouched and rides the overlay below, and so
         // does a whole-row one under a pool the overlay covers.
-        let compose_hash = aux_compose_hash(&pools, &active, rows, cols);
-        if aux.last_compose != Some(compose_hash) {
-            aux.last_compose = Some(compose_hash);
-            recomposed = true;
+        //
+        // Which hash moved decides how much of the frame the recompose costs. A
+        // geometry move changes which cells any pool covers, so the grid is
+        // blanked and every row rebuilt. A content move leaves every rectangle
+        // where it was, so the same rows are overwritten in place and only the
+        // ones that came back different are rebuilt.
+        let geometry = aux_geometry_hash(&pools, rows, cols);
+        let content = aux_content_hash(&pools, &active);
+        if aux.last_geometry != Some(geometry) || aux.last_content != Some(content) {
+            let mut damage = match aux.last_geometry == Some(geometry) {
+                true => Damage::Partial(vec![None; rows]),
+                false => Damage::Full,
+            };
+            aux.last_geometry = Some(geometry);
+            aux.last_content = Some(content);
             compose_aux_grid(
                 &terminal,
                 &pools,
@@ -2708,7 +2729,9 @@ fn redraw_aux(
                 &mut aux.scratch,
                 rows,
                 cols,
+                &mut damage,
             );
+            composed = Some(damage);
         }
 
         aux.pool_scratch = pools;
@@ -2730,13 +2753,9 @@ fn redraw_aux(
         })
         .collect::<Vec<_>>();
 
-    // A recomposed base rebuilds every instance. A skipped one reuses last
-    // frame's, so empty partial damage leaves them untouched.
-    let damage = if recomposed {
-        Damage::Full
-    } else {
-        Damage::Partial(Vec::new())
-    };
+    // A skipped recompose reuses last frame's instances, so empty partial damage
+    // leaves them untouched.
+    let damage = composed.unwrap_or(Damage::Partial(Vec::new()));
     let heal = gpu.render_with_pools(
         &aux.grid,
         Frame {
@@ -2779,12 +2798,34 @@ fn snap_shift_to_pixels(frac: f32, cell_h: f32) -> f32 {
     (frac * cell_h).round() / cell_h
 }
 
-/// Hash the inputs [`compose_aux_grid`] reads, so [`redraw_aux`] can skip the
-/// recompose when nothing they cover moved.
+/// Hash where [`compose_aux_grid`] puts things: the window size and, per pool in
+/// z-order, its id and region rectangle.
 ///
-/// Covers the window size and, per pool in z-order, its id, content version,
-/// and region rectangle. The sub-cell glide fraction is not covered, since it
-/// rides the overlay rather than the base.
+/// A move here changes which cells any pool covers at all, so the grid has to go
+/// back to the window background before the compose and every row of it is
+/// suspect. [`aux_content_hash`] covers what the pools hold, which is the
+/// cheaper half.
+fn aux_geometry_hash(pools: &[PoolView], rows: usize, cols: usize) -> u64 {
+    let mut hasher = FxHasher::default();
+    rows.hash(&mut hasher);
+    cols.hash(&mut hasher);
+    for pool in pools {
+        pool.id.hash(&mut hasher);
+        pool.region.top.hash(&mut hasher);
+        pool.region.left.hash(&mut hasher);
+        pool.region.width.hash(&mut hasher);
+        pool.region.height.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Hash what [`compose_aux_grid`] holds: per pool in z-order, its content
+/// version and, for the ones no overlay covers, its scroll target.
+///
+/// A move here leaves every rectangle where it was, so the compose overwrites
+/// the same rows in place and damages only the ones that came back different.
+/// The sub-cell glide fraction is not covered, since it rides the overlay rather
+/// than the base.
 ///
 /// `covered` are the pools drawing a composite over their own region this
 /// frame, whose scroll target is left out. Such a pool hides the base beneath
@@ -2796,23 +2837,15 @@ fn snap_shift_to_pixels(frac: f32, cell_h: f32) -> f32 {
 /// it settles and its target is read again, which catches the base up to where
 /// the glide actually landed. The ticks between read nothing and cost nothing.
 ///
-/// A content version or a region move is read whatever the pool is doing.
-/// Output arriving mid-glide has to reach the base before a settle reveals it,
-/// and a region that moved uncovers base the composite no longer draws over.
-fn aux_compose_hash(pools: &[PoolView], covered: &[ActivePool], rows: usize, cols: usize) -> u64 {
+/// A content version is read whatever the pool is doing, since output arriving
+/// mid-glide has to reach the base before a settle reveals it.
+fn aux_content_hash(pools: &[PoolView], covered: &[ActivePool]) -> u64 {
     let mut hasher = FxHasher::default();
-    rows.hash(&mut hasher);
-    cols.hash(&mut hasher);
     for pool in pools {
-        pool.id.hash(&mut hasher);
         pool.content_version.hash(&mut hasher);
         if !covered.iter().any(|tile| tile.id == pool.id) {
             pool.scroll_target.pages().to_bits().hash(&mut hasher);
         }
-        pool.region.top.hash(&mut hasher);
-        pool.region.left.hash(&mut hasher);
-        pool.region.width.hash(&mut hasher);
-        pool.region.height.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -2820,12 +2853,21 @@ fn aux_compose_hash(pools: &[PoolView], covered: &[ActivePool], rows: usize, col
 /// Compose every pool in `pools` into `grid`, sized to `rows` x `cols`, each
 /// pool's cells and decorations placed at its window-relative region.
 ///
-/// `grid` is blanked first, so a cell no pool covers shows the window
-/// background, and `scratch` is reused to project each pool before its rows are
-/// blitted. Pools compose in ascending-id order, their off-grid text runs and
-/// bars translated from region-local to window coordinates. v1 projects at each
-/// pool's scroll target directly, with no sub-cell glide, so only the region's
-/// own rows are copied and the straddle row `project_pool` composes is dropped.
+/// `scratch` is reused to project each pool before its rows are blitted. Pools
+/// compose in ascending-id order, their off-grid text runs and bars translated
+/// from region-local to window coordinates. v1 projects at each pool's scroll
+/// target directly, with no sub-cell glide, so only the region's own rows are
+/// copied and the straddle row `project_pool` composes is dropped.
+///
+/// `damage` says how much of the last compose survives, and collects what this
+/// one changed. Under a [`Damage::Full`] the grid is blanked first, so a cell no
+/// pool covers shows the window background. Under a partial one the cells stand
+/// and the pools overwrite them in place, marking the rows that came back
+/// different; only what sits beside the cells is reset, since a compose that
+/// kept it would stack this pass's decorations on the last one's.
+///
+/// A grid that had to be resized holds nothing worth comparing, so it is damaged
+/// whole whatever the caller asked for.
 fn compose_aux_grid(
     terminal: &Terminal,
     pools: &[PoolView],
@@ -2833,11 +2875,15 @@ fn compose_aux_grid(
     scratch: &mut Grid,
     rows: usize,
     cols: usize,
+    damage: &mut Damage,
 ) {
     if grid.rows() != rows || grid.cols() != cols {
         grid.resize(rows, cols);
-    } else {
+        *damage = Damage::Full;
+    } else if matches!(damage, Damage::Full) {
         grid.clear();
+    } else {
+        grid.clear_decorations();
     }
 
     for pool in pools {
@@ -2856,6 +2902,7 @@ fn compose_aux_grid(
             pool.region.top as usize,
             pool.region.left as usize,
             pool.region.height as usize,
+            damage,
         );
     }
 }
@@ -3186,10 +3233,10 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_has_focus, aux_compose_hash, aux_drag_event, bell_should_ring, classify_window_open,
-        forwards_zoom, grid_pixels, selection_copy_text, snap_shift_to_pixels, swallow_super_combo,
-        ActivePool, Input, PendingResize, PoolView, PtyWrite, Visibility, WindowOpenVerdict,
-        MAX_AUX_WINDOWS,
+        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
+        classify_window_open, compose_aux_grid, forwards_zoom, grid_pixels, selection_copy_text,
+        snap_shift_to_pixels, swallow_super_combo, ActivePool, Input, PendingResize, PoolView,
+        PtyWrite, Visibility, WindowOpenVerdict, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -3201,7 +3248,7 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use stoatty_term::{
-        grid::{DocumentOffset, PoolRegion},
+        grid::{Damage, DocumentOffset, Grid, PoolRegion},
         term::Terminal,
         theme::Theme,
     };
@@ -3214,19 +3261,19 @@ mod tests {
     #[test]
     fn a_covered_pool_s_target_is_not_read() {
         let (mut pool, covered) = gliding_pool();
-        let before = aux_compose_hash(&[pool], &covered, 24, 80);
+        let before = aux_content_hash(&[pool], &covered);
 
         pool.scroll_target = DocumentOffset {
             page: 3,
             fraction: 0.25,
         };
         assert_eq!(
-            aux_compose_hash(&[pool], &covered, 24, 80),
+            aux_content_hash(&[pool], &covered),
             before,
             "the target of a pool an overlay covers moves nothing",
         );
         assert_ne!(
-            aux_compose_hash(&[pool], &[], 24, 80),
+            aux_content_hash(&[pool], &[]),
             before,
             "and the same move on an uncovered pool is what the base rests on",
         );
@@ -3239,7 +3286,7 @@ mod tests {
     #[test]
     fn a_glide_moves_the_hash_at_each_end_and_not_between() {
         let (mut pool, covered) = gliding_pool();
-        let at_rest = aux_compose_hash(&[pool], &[], 24, 80);
+        let at_rest = aux_content_hash(&[pool], &[]);
 
         // The wheel moves the target and the pool takes a composite, both on the
         // frame the glide starts.
@@ -3247,7 +3294,7 @@ mod tests {
             page: 5,
             fraction: 0.0,
         };
-        let starting = aux_compose_hash(&[pool], &covered, 24, 80);
+        let starting = aux_content_hash(&[pool], &covered);
         assert_ne!(at_rest, starting, "the base is composed at the destination");
 
         // Every tick after moves the target again and reads none of it.
@@ -3256,41 +3303,250 @@ mod tests {
             fraction: 0.5,
         };
         assert_eq!(
-            aux_compose_hash(&[pool], &covered, 24, 80),
+            aux_content_hash(&[pool], &covered),
             starting,
             "a tick under the overlay costs nothing",
         );
 
         assert_ne!(
-            aux_compose_hash(&[pool], &[], 24, 80),
+            aux_content_hash(&[pool], &[]),
             starting,
             "and the settle is read, so the base catches up to the landing",
         );
     }
 
     /// Output arriving mid-glide has to reach the base before the settle reveals
-    /// it, and a region that moved uncovers base the composite no longer draws
-    /// over. Neither depends on whether an overlay covers the pool.
+    /// it, so a content version is read whether an overlay covers the pool or
+    /// not.
     #[test]
-    fn a_covered_pool_still_reads_its_content_and_its_region() {
+    fn a_covered_pool_still_reads_its_content() {
         let (pool, covered) = gliding_pool();
-        let before = aux_compose_hash(&[pool], &covered, 24, 80);
+        let before = aux_content_hash(&[pool], &covered);
 
         let mut printed = pool;
         printed.content_version = pool.content_version + 1;
         assert_ne!(
-            aux_compose_hash(&[printed], &covered, 24, 80),
+            aux_content_hash(&[printed], &covered),
             before,
             "content arriving under an overlay still has to reach the base",
+        );
+    }
+
+    /// The two hashes divide the compose's inputs between them, because what
+    /// moved decides how much of the frame the recompose costs. Where the pools
+    /// sit is the half that makes the grid go back to the window background and
+    /// every row rebuild.
+    #[test]
+    fn the_two_hashes_split_where_the_pools_sit_from_what_they_hold() {
+        let (pool, covered) = gliding_pool();
+        let (geometry, content) = (
+            aux_geometry_hash(&[pool], 24, 80),
+            aux_content_hash(&[pool], &covered),
         );
 
         let mut moved = pool;
         moved.region.top += 1;
         assert_ne!(
-            aux_compose_hash(&[moved], &covered, 24, 80),
-            before,
-            "and a region that moved uncovers base the overlay left behind",
+            aux_geometry_hash(&[moved], 24, 80),
+            geometry,
+            "a region that moved uncovers base the pool no longer draws over",
         );
+        assert_eq!(
+            aux_content_hash(&[moved], &covered),
+            content,
+            "and says nothing about what the pool holds",
+        );
+
+        assert_ne!(
+            aux_geometry_hash(&[pool], 25, 80),
+            geometry,
+            "so does a window that resized",
+        );
+
+        let mut printed = pool;
+        printed.content_version = pool.content_version + 1;
+        printed.scroll_target = DocumentOffset {
+            page: 9,
+            fraction: 0.0,
+        };
+        assert_eq!(
+            aux_geometry_hash(&[printed], 24, 80),
+            geometry,
+            "while new content and a new target leave every rectangle where it was",
+        );
+        assert_ne!(
+            aux_content_hash(&[printed], &[]),
+            content,
+            "and are read by the half that overwrites those rectangles in place",
+        );
+    }
+
+    /// A geometry move changes which cells any pool covers, so the grid goes
+    /// back to the window background first. A content move leaves every
+    /// rectangle where it was, so the cells stand and the pools overwrite them,
+    /// which is what makes the row compare below worth anything.
+    #[test]
+    fn a_full_compose_blanks_the_grid_and_a_partial_one_overwrites_it() {
+        let (terminal, pools) = composed_pool(b"aa");
+        let (mut grid, mut scratch) = (Grid::new(4, 4), Grid::new(1, 1));
+
+        // A cell outside every region, which only a blanking compose clears.
+        grid.get_mut(3, 3).ch = 'x';
+        compose_aux_grid(
+            &terminal,
+            &pools,
+            &mut grid,
+            &mut scratch,
+            4,
+            4,
+            &mut Damage::Full,
+        );
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(3, 3).ch),
+            ('a', ' '),
+            "the pool lands and the cell no pool covers goes back to background",
+        );
+
+        grid.get_mut(3, 3).ch = 'x';
+        let mut damage = Damage::Partial(vec![None; 4]);
+        compose_aux_grid(
+            &terminal,
+            &pools,
+            &mut grid,
+            &mut scratch,
+            4,
+            4,
+            &mut damage,
+        );
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(3, 3).ch),
+            ('a', 'x'),
+            "an in-place compose touches only what the pools cover",
+        );
+        assert_eq!(
+            marked_rows(&damage),
+            Vec::<usize>::new(),
+            "and marks nothing, since every row came back as it was",
+        );
+    }
+
+    /// The rows a pool overwrites with the bytes they already held are the ones
+    /// worth not rebuilding, which is the whole point of composing in place.
+    #[test]
+    fn an_in_place_compose_marks_only_the_rows_that_changed() {
+        let (mut terminal, pools) = composed_pool(b"aa\r\nbb");
+        let (mut grid, mut scratch) = (Grid::new(4, 4), Grid::new(1, 1));
+        compose_aux_grid(
+            &terminal,
+            &pools,
+            &mut grid,
+            &mut scratch,
+            4,
+            4,
+            &mut Damage::Full,
+        );
+
+        fill_page(&mut terminal, 1, 0, b"aa\r\nzz");
+        let mut damage = Damage::Partial(vec![None; 4]);
+        compose_aux_grid(
+            &terminal,
+            &pools,
+            &mut grid,
+            &mut scratch,
+            4,
+            4,
+            &mut damage,
+        );
+
+        assert_eq!(grid.get(1, 0).ch, 'z', "the row that changed is written");
+        assert_eq!(
+            marked_rows(&damage),
+            vec![1],
+            "and it is the only one marked",
+        );
+    }
+
+    /// A resized grid holds nothing the compare could read, so the compose says
+    /// so however little the caller thought had moved.
+    #[test]
+    fn a_compose_that_resizes_damages_the_whole_grid() {
+        let (terminal, pools) = composed_pool(b"aa");
+        let (mut grid, mut scratch) = (Grid::new(2, 2), Grid::new(1, 1));
+
+        let mut damage = Damage::Partial(vec![None; 4]);
+        compose_aux_grid(
+            &terminal,
+            &pools,
+            &mut grid,
+            &mut scratch,
+            4,
+            4,
+            &mut damage,
+        );
+
+        assert!(
+            matches!(damage, Damage::Full),
+            "a grid that came back a different size has no clean rows to keep",
+        );
+    }
+
+    /// A terminal holding one two-row pool with `text` painted into its first
+    /// page, and the view of it a compose reads.
+    fn composed_pool(text: &[u8]) -> (Terminal, Vec<PoolView>) {
+        use stoatty_protocol::command::{encode_pool_region, PoolRegionCommand};
+
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 2,
+            height: 2,
+            window: 1,
+        }));
+        // A two-row page, and the one below it, since the compose spans a row
+        // more than the region is tall.
+        fill_page(&mut terminal, 1, 0, text);
+        fill_page(&mut terminal, 1, 1, b"..");
+
+        let pools = vec![PoolView {
+            id: 1,
+            region: PoolRegion {
+                pool: 1,
+                window: 1,
+                top: 0,
+                left: 0,
+                width: 2,
+                height: 2,
+            },
+            scroll_target: DocumentOffset::default(),
+            cursor_anchor: None,
+            anchor: None,
+            content_version: 0,
+        }];
+        (terminal, pools)
+    }
+
+    fn fill_page(terminal: &mut Terminal, pool: u32, index: u64, text: &[u8]) {
+        use stoatty_protocol::command::{encode_fill, encode_fill_end, FillCommand};
+
+        let mut stream = encode_fill(&FillCommand { pool, index });
+        stream.extend_from_slice(text);
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+    }
+
+    /// The rows a partial damage names, ascending.
+    fn marked_rows(damage: &Damage) -> Vec<usize> {
+        match damage {
+            Damage::Full => Vec::new(),
+            Damage::Partial(rows) => rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.is_some())
+                .map(|(at, _)| at)
+                .collect(),
+        }
     }
 
     /// A pool at rest, and the one entry that says an overlay covers it.
