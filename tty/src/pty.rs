@@ -92,14 +92,16 @@ impl Pty {
         theme: &str,
         rows: u16,
         cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
         sink: impl FnMut(PtyOutput<'_>) -> bool + Send + 'static,
     ) -> io::Result<Pty> {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })
             .map_err(io::Error::other)?;
 
@@ -139,13 +141,24 @@ impl Pty {
     }
 
     /// Resize the PTY to `rows` by `cols` so the shell learns the new geometry.
-    pub(crate) fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
+    ///
+    /// `pixel_width` and `pixel_height` are the text area's extent, which an
+    /// image client reads to size what it draws. A terminal that cannot draw
+    /// images reports zero here, so reporting the real extent is also how a
+    /// client learns this one can.
+    pub(crate) fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> io::Result<()> {
         self.master
             .resize(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })
             .map_err(io::Error::other)
     }

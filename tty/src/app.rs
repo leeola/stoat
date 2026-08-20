@@ -771,6 +771,8 @@ impl ApplicationHandler<PtyEvent> for App {
         // non-fatal. Aux windows still render, they just report nothing upstream.
         let (window_socket, window_event_tx, window_client_connected) = open_window_event_socket();
 
+        let (pixel_width, pixel_height) =
+            grid_pixels(self.font_size, scale_factor as f32, rows, cols);
         let t_pty = Instant::now();
         let pty = {
             let proxy = self.proxy.clone();
@@ -788,6 +790,8 @@ impl ApplicationHandler<PtyEvent> for App {
                 &self.theme_name,
                 rows as u16,
                 cols as u16,
+                pixel_width,
+                pixel_height,
                 move |output| match output {
                     PtyOutput::Data { bytes, may_refuse } => {
                         // Parse on the reader thread under the shared lock. The
@@ -1519,6 +1523,21 @@ fn update_cell_pixels(terminal: &FairMutex<Terminal>, font_size: u32, scale_fact
         .set_cell_pixels(width.round() as u16, height.round() as u16);
 }
 
+/// The text area's pixel extent, which the pty reports so an image client can
+/// size what it draws.
+///
+/// The grid rather than the window. A winsize's pixel fields describe the text
+/// area, and the window carries padding and chrome that no cell occupies.
+///
+/// A grid too wide for the field saturates rather than wrapping, since the cast
+/// does that on its own. No display reaches such a grid, but reporting a tiny
+/// area for an enormous one would be the worst answer available.
+fn grid_pixels(font_size: u32, scale_factor: f32, rows: usize, cols: usize) -> (u16, u16) {
+    let [width, height] = render::cell_size(font_size, scale_factor);
+    let extent = |cell: f32, count: usize| (cell * count as f32).round() as u16;
+    (extent(width, cols), extent(height, rows))
+}
+
 /// Whether a zoom-combo press goes to the child instead of stepping the font.
 ///
 /// The claim alone is not enough. A press with no reader on the other end
@@ -1549,8 +1568,11 @@ fn apply_font_step(state: &mut State, delta: i32) {
     update_cell_pixels(&state.terminal, font_size, state.scale_factor as f32);
 
     let (rows, cols) = state.gpu.grid_size();
+    let (pixel_width, pixel_height) = grid_pixels(font_size, state.scale_factor as f32, rows, cols);
     state.terminal.lock().resize(rows, cols);
-    let _ = state.pty.resize(rows as u16, cols as u16);
+    let _ = state
+        .pty
+        .resize(rows as u16, cols as u16, pixel_width, pixel_height);
 
     state.window.request_redraw();
 }
@@ -1746,8 +1768,12 @@ fn apply_config_reload(
         // The surface is unchanged, so only the cell metrics moved. Re-read the
         // grid size and resize the rest to match, as the font-zoom path does.
         let (rows, cols) = state.gpu.grid_size();
+        let (pixel_width, pixel_height) =
+            grid_pixels(state.font_size, state.scale_factor as f32, rows, cols);
         state.terminal.lock().resize(rows, cols);
-        let _ = state.pty.resize(rows as u16, cols as u16);
+        let _ = state
+            .pty
+            .resize(rows as u16, cols as u16, pixel_width, pixel_height);
     }
 
     state.cursor_animation = config.cursor_animation;
@@ -2804,8 +2830,12 @@ fn apply_pending_resizes(state: &mut State) {
     if let Some((width, height)) = state.pending_resize.take() {
         state.gpu.resize(width, height);
         let (rows, cols) = state.gpu.grid_size();
+        let (pixel_width, pixel_height) =
+            grid_pixels(state.font_size, state.scale_factor as f32, rows, cols);
         state.terminal.lock().resize(rows, cols);
-        let _ = state.pty.resize(rows as u16, cols as u16);
+        let _ = state
+            .pty
+            .resize(rows as u16, cols as u16, pixel_width, pixel_height);
     }
 
     let mut reports: Vec<(u32, u16, u16)> = Vec::new();
@@ -3080,8 +3110,8 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 mod tests {
     use super::{
         app_has_focus, aux_drag_event, bell_should_ring, classify_window_open, forwards_zoom,
-        selection_copy_text, snap_shift_to_pixels, swallow_super_combo, Input, PendingResize,
-        PtyWrite, Visibility, WindowOpenVerdict, MAX_AUX_WINDOWS,
+        grid_pixels, selection_copy_text, snap_shift_to_pixels, swallow_super_combo, Input,
+        PendingResize, PtyWrite, Visibility, WindowOpenVerdict, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -3664,5 +3694,40 @@ mod tests {
             bell_should_ring(Some(t0), t0 + Duration::from_millis(200)),
             "a bell at the interval boundary rings again"
         );
+    }
+
+    /// An image client sizes what it draws from these two numbers, so they have
+    /// to be the text area rather than anything else on screen.
+    #[test]
+    fn the_reported_extent_is_the_cell_size_times_the_grid() {
+        let [cell_w, cell_h] = stoatty_render::render::cell_size(14, 1.0);
+
+        assert_eq!(
+            grid_pixels(14, 1.0, 24, 80),
+            (
+                (cell_w * 80.0).round() as u16,
+                (cell_h * 24.0).round() as u16,
+            ),
+        );
+        assert_eq!(grid_pixels(14, 1.0, 0, 0), (0, 0), "an empty grid has none");
+    }
+
+    /// The cell rectangle scales with the display, so the extent has to as well.
+    /// Reporting logical pixels to a client drawing physical ones halves the
+    /// image on a 2x screen.
+    #[test]
+    fn the_extent_follows_the_display_scale() {
+        let (one_x, one_y) = grid_pixels(14, 1.0, 24, 80);
+        let (two_x, two_y) = grid_pixels(14, 2.0, 24, 80);
+
+        assert_eq!((two_x, two_y), (one_x * 2, one_y * 2));
+    }
+
+    /// A grid wide enough to overflow the field is unreachable, but wrapping one
+    /// would report a tiny area for an enormous one, which is the worst answer
+    /// available to the question.
+    #[test]
+    fn an_unreachable_grid_saturates_rather_than_wrapping() {
+        assert_eq!(grid_pixels(14, 1.0, usize::MAX, usize::MAX), (65535, 65535));
     }
 }
