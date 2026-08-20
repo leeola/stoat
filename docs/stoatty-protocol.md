@@ -223,6 +223,30 @@ Deliberate deviations, so a reader is not left hunting for a bug:
 - Pools and aux windows draw no images. A client places against the live grid,
   and an aux window owns a separate GPU device.
 
+
+### iTerm2 inline images
+
+The other protocol image clients speak, as `OSC 1337 ; File=<k=v>... : <base64>`.
+Where a Kitty frame separates transmitting an image from placing it, this
+carries both at once, so there is no id to name it by and no way to delete it.
+An inline image lives until it scrolls off or a reset takes it.
+
+| Key | Honored | Note |
+|---|---|---|
+| `name` | Yes | Decoded, and dropped rather than failing the escape if unreadable |
+| `size` | Parsed | Nothing here shows download progress |
+| `width`, `height` | `N`, `Npx`, `N%`, `auto` | Cells, pixels, a share of the screen, or the image's own |
+| `preserveAspectRatio` | Yes | On by default. A box is fitted inside rather than filled |
+| `inline` | Yes | `0` draws nothing, since there are no downloads here |
+| `doNotMoveCursor` | Yes | Otherwise the cursor lands past the image |
+
+The escape's payload is taken off the stream before the VT parser sees it. That
+is not an optimization: an unrecognized OSC is buffered whole, and an image is
+not the size of thing a terminal should hold twice.
+
+The format is whatever the bytes say, since the escape names none. An animated
+GIF renders its first frame. Multipart transfers are out.
+
 ## Evolving a command
 
 A command grows only by appending, never by reordering, resizing, or
@@ -242,4 +266,5 @@ terminal has to keep understanding the prefix it knows.
 | Runnable examples | `cargo run --example panel`, and its siblings in `tty/examples/` |
 | Why non-cell components exist at all | `docs/stoatty-non-cell-components.md` |
 | Kitty graphics frames on the wire | `tty_protocol/src/kitty.rs` |
+| The iTerm2 inline-image escape | `tty_protocol/src/iterm.rs` |
 | What the terminal does with them | `tty_term/src/term/images.rs` |

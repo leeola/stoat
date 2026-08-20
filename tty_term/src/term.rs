@@ -51,7 +51,7 @@ use stoatty_protocol::{
         TextRunCommand, WindowOpenCommand,
     },
     frame::FrameScratch,
-    kitty,
+    iterm, kitty,
 };
 
 mod decorate;
@@ -1002,6 +1002,18 @@ impl Terminal {
             } => {
                 frames.push((command::decode_with(payload, scratch), interior, end));
             },
+            // Excised like an APC frame, and for a harder reason: an image on an
+            // OSC is bytes the vte parser buffers without bound. A payload the
+            // scanner refused still has to go, which is why it excises whether
+            // or not anything parsed.
+            EscEvent::OscImage {
+                payload,
+                interior,
+                end,
+            } => {
+                let command = payload.and_then(iterm::parse_file).map(Command::ItermFile);
+                frames.push((command, interior, end));
+            },
             EscEvent::XtVersion => responses.push(XTVERSION_REPLY.as_bytes()),
             EscEvent::OscNotify { code, payload } => {
                 if let Some(event) = notification_from_osc(code, payload) {
@@ -1102,10 +1114,11 @@ impl Terminal {
                         | Command::ConfigReload
                         | Command::ZoomCapture { .. }
                         | Command::FontStep { .. }
-                        // A graphics frame mutates the image store, which is
+                        // The image commands mutate the image store, which is
                         // persistent state a page paint must not swallow, the
                         // same reason the pool commands act here.
                         | Command::Kitty(_)
+                        | Command::ItermFile(_)
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
@@ -1569,6 +1582,29 @@ impl Terminal {
                 // and nothing else marks it dirty.
                 self.damage_pending = true;
             },
+            // An inline image carries the pixels and the size in one escape and
+            // has no id to answer under, so this stores and places it in one
+            // step and says nothing back.
+            Command::ItermFile(file) => {
+                let cursor = self.cursor();
+                let landed = self.images.apply_inline(
+                    &file,
+                    images::Screen {
+                        cursor: (cursor.row, cursor.col),
+                        cell: (u32::from(self.cell_pixels.0), u32::from(self.cell_pixels.1)),
+                    },
+                    (self.term.screen_lines(), self.term.columns()),
+                );
+
+                if let Some((row, col)) = landed {
+                    let cols = self.term.columns();
+                    self.term.goto(
+                        row.min(self.term.screen_lines() - 1) as i32,
+                        col.min(cols - 1),
+                    );
+                }
+                self.damage_pending = true;
+            },
         }
     }
 
@@ -1781,7 +1817,8 @@ impl Terminal {
             | Command::ConfigReload
             | Command::ZoomCapture { .. }
             | Command::FontStep { .. }
-            | Command::Kitty(_) => {},
+            | Command::Kitty(_)
+            | Command::ItermFile(_) => {},
         }
     }
 
@@ -7876,6 +7913,214 @@ mod tests {
         assert!(
             grid.images().is_empty(),
             "and widening again does not bring it back, since the resize dropped it",
+        );
+    }
+
+    /// A 2x2 opaque PNG, built rather than pasted so what a test feeds and what
+    /// it asserts cannot drift apart.
+    fn png_2x2() -> Vec<u8> {
+        let buffer = image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 8, 7, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        buffer
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    /// One inline-image escape, with `args` before the payload.
+    fn iterm_escape(args: &str, image: &[u8]) -> Vec<u8> {
+        format!("\x1b]1337;File={args}:{}\x1b\\", {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(image)
+        })
+        .into_bytes()
+    }
+
+    /// The payload is base64 text, which the parser would otherwise print as a
+    /// screenful of characters. Excising it is also what keeps the vte parser
+    /// from buffering a whole image.
+    #[test]
+    fn an_inline_image_payload_is_not_rendered_as_text() {
+        let mut terminal = Terminal::new(4, 20, Theme::default());
+        let mut grid = Grid::new(4, 20);
+        terminal.set_cell_pixels(8, 16);
+
+        // The cursor stays put, so the columns the text lands on are the ones the
+        // payload would have taken had it reached the parser.
+        let mut stream = iterm_escape("inline=1;doNotMoveCursor=1", &png_2x2());
+        stream.extend_from_slice(b"hi");
+        terminal.advance(&stream);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(0, 1).ch),
+            ('h', 'i'),
+            "only the text after the escape reaches the screen",
+        );
+        assert_eq!(*grid.get(0, 2), Cell::default(), "and nothing follows it");
+    }
+
+    #[test]
+    fn an_inline_image_lands_on_the_grid_at_the_cursor() {
+        let mut terminal = Terminal::new(6, 20, Theme::default());
+        let mut grid = Grid::new(6, 20);
+        terminal.set_cell_pixels(8, 16);
+        terminal.advance(b"\r\n  ");
+        terminal.advance(&iterm_escape("inline=1;width=4;height=2", &png_2x2()));
+        terminal.project(&mut grid);
+
+        let placed = grid.images();
+        assert_eq!(placed.len(), 1, "the escape places an image");
+        assert_eq!(
+            (placed[0].row, placed[0].col, placed[0].cols, placed[0].rows),
+            (1, 2, 4, 2),
+            "anchored at the cursor, in the cell box the client named",
+        );
+    }
+
+    /// A client that asked the terminal not to move the cursor is drawing
+    /// around the image itself.
+    #[test]
+    fn the_cursor_moves_past_an_inline_image_unless_told_not_to() {
+        let landed = |args: &str| {
+            let mut terminal = Terminal::new(6, 20, Theme::default());
+            let mut grid = Grid::new(6, 20);
+            terminal.set_cell_pixels(8, 16);
+            terminal.advance(&iterm_escape(args, &png_2x2()));
+            let (cursor, _, _) = terminal.project(&mut grid);
+            (cursor.row, cursor.col)
+        };
+
+        assert_eq!(
+            landed("inline=1;width=4;height=2"),
+            (1, 4),
+            "the cursor lands on the image's last row and past its last column",
+        );
+        assert_eq!(
+            landed("inline=1;width=4;height=2;doNotMoveCursor=1"),
+            (0, 0),
+            "and stays put when the client says so",
+        );
+    }
+
+    /// inline=0 asks the terminal to offer the file as a download, which is a
+    /// file-manager feature rather than a rendering one.
+    #[test]
+    fn a_file_that_is_not_inline_draws_nothing() {
+        let mut terminal = Terminal::new(4, 20, Theme::default());
+        let mut grid = Grid::new(4, 20);
+        terminal.set_cell_pixels(8, 16);
+
+        terminal.advance(&iterm_escape("inline=0", &png_2x2()));
+        terminal.project(&mut grid);
+
+        assert!(grid.images().is_empty());
+    }
+
+    /// A client sends whatever format it has, and the escape names none, so the
+    /// decoder has only the bytes to go on.
+    #[test]
+    fn an_inline_image_decodes_whatever_format_it_arrives_in() {
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::Gif,
+            image::ImageFormat::Bmp,
+        ] {
+            let buffer = image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 8, 7, 255]));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(buffer)
+                .into_rgb8()
+                .write_to(&mut encoded, format)
+                .expect("encode");
+
+            let mut terminal = Terminal::new(4, 20, Theme::default());
+            let mut grid = Grid::new(4, 20);
+            terminal.set_cell_pixels(8, 16);
+            terminal.advance(&iterm_escape("inline=1", &encoded.into_inner()));
+            terminal.project(&mut grid);
+
+            assert_eq!(grid.images().len(), 1, "{format:?} draws");
+        }
+    }
+
+    /// A cell is taller than it is wide, so deriving one side from the other in
+    /// cell counts stretches every image by the cell's own aspect. The sizing
+    /// has to go through pixels.
+    #[test]
+    fn a_derived_dimension_keeps_the_image_shape_rather_than_the_cell_shape() {
+        let sized = |args: &str, width: u32, height: u32| {
+            let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .expect("encode");
+
+            let mut terminal = Terminal::new(30, 60, Theme::default());
+            let mut grid = Grid::new(30, 60);
+            terminal.set_cell_pixels(8, 16);
+            terminal.advance(&iterm_escape(args, &encoded.into_inner()));
+            terminal.project(&mut grid);
+            grid.images().first().map(|image| (image.cols, image.rows))
+        };
+
+        // A square image over an 8x16 cell: four columns are 32 pixels wide, so
+        // matching that height takes two rows.
+        assert_eq!(sized("inline=1;width=4", 64, 64), Some((4, 2)));
+        assert_eq!(
+            sized("inline=1;height=2", 64, 64),
+            Some((4, 2)),
+            "either side derives the other",
+        );
+
+        assert_eq!(
+            sized("inline=1;width=4;height=8", 64, 64),
+            Some((4, 2)),
+            "a box is fitted inside rather than filled",
+        );
+        assert_eq!(
+            sized("inline=1;width=4;height=8;preserveAspectRatio=0", 64, 64),
+            Some((4, 8)),
+            "unless the client asked for the box exactly",
+        );
+    }
+
+    /// A percentage is of the screen, which is the only dimension a client
+    /// cannot know without asking.
+    #[test]
+    fn a_percent_dimension_is_of_the_screen() {
+        let mut terminal = Terminal::new(30, 60, Theme::default());
+        let mut grid = Grid::new(30, 60);
+        terminal.set_cell_pixels(8, 16);
+        terminal.advance(&iterm_escape(
+            "inline=1;width=50%;height=10%;preserveAspectRatio=0",
+            &png_2x2(),
+        ));
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.images().first().map(|image| (image.cols, image.rows)),
+            Some((30, 3)),
+            "half the columns and a tenth of the rows",
+        );
+    }
+
+    /// An image wider than the terminal is one the client cannot see the rest
+    /// of, so the box stops at the screen.
+    #[test]
+    fn a_dimension_past_the_screen_is_capped_to_it() {
+        let mut terminal = Terminal::new(6, 20, Theme::default());
+        let mut grid = Grid::new(6, 20);
+        terminal.set_cell_pixels(8, 16);
+        terminal.advance(&iterm_escape(
+            "inline=1;width=500;height=500;preserveAspectRatio=0",
+            &png_2x2(),
+        ));
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.images().first().map(|image| (image.cols, image.rows)),
+            Some((20, 6)),
         );
     }
 }

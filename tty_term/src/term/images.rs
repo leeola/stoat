@@ -15,9 +15,12 @@
 //! error falls back, while one that gets silence waits.
 
 use std::{collections::HashMap, sync::Arc};
-use stoatty_protocol::kitty::{
-    Action, Compression, ControlData, DeleteKind, Format, GraphicsFrame, Medium, Response,
-    ResponseResult,
+use stoatty_protocol::{
+    iterm::{Dimension, ItermFile},
+    kitty::{
+        Action, Compression, ControlData, DeleteKind, Format, GraphicsFrame, Medium, Response,
+        ResponseResult,
+    },
 };
 
 /// Largest base64 payload one transmission may accumulate.
@@ -293,6 +296,45 @@ impl ImageStore {
             0 => Ok(Some((cursor.0 + rows - 1, cursor.1 + cols))),
             _ => Ok(None),
         }
+    }
+
+    /// Take an iTerm2 inline image: decode it, store it, and place it.
+    ///
+    /// Returns where the cursor should land, or `None` when the client asked it
+    /// to stay and when nothing could be drawn. An inline image carries no id
+    /// and no way to ask about it afterward, so a failure has nowhere to be
+    /// reported and is dropped, which is what iTerm2 itself does.
+    ///
+    /// `screen_cells` is the grid's size, which a percentage dimension is a
+    /// percentage of.
+    pub(crate) fn apply_inline(
+        &mut self,
+        file: &ItermFile,
+        screen: Screen,
+        screen_cells: (usize, usize),
+    ) -> Option<(usize, usize)> {
+        // inline=0 asks the terminal to offer the file as a download, which is a
+        // file-manager feature rather than a rendering one.
+        if !file.inline {
+            return None;
+        }
+
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &file.payload)
+                .ok()?;
+        let decoded = decode_any_format(&bytes).ok()?;
+
+        let id = self.assign_id();
+        let (cols, rows) = inline_cells(file, &decoded, screen.cell, screen_cells);
+        self.store(id, 0, decoded).ok()?;
+
+        let control = ControlData {
+            cols: cols as u32,
+            rows: rows as u32,
+            cursor_policy: u8::from(file.do_not_move_cursor),
+            ..ControlData::default()
+        };
+        self.place(&control, id, screen.cursor, screen.cell).ok()?
     }
 
     /// Remove the placements `control` names, freeing image data when the
@@ -604,6 +646,103 @@ fn placement_cells(
         (cols, rows) => (cols as usize, rows as usize),
     }
 }
+
+/// Decode an inline image, letting the decoder work out the format.
+///
+/// An iTerm2 escape names no format, so the bytes are all there is to go on.
+/// An animated GIF yields its first frame, which the decoder gives for free and
+/// which is a better answer than nothing.
+fn decode_any_format(bytes: &[u8]) -> Result<DecodedImage, ResponseResult> {
+    let decoded =
+        image::load_from_memory(bytes).map_err(|_| error("EINVAL", "unrecognized image"))?;
+
+    let (width, height) = (decoded.width(), decoded.height());
+    check_size(width, height)?;
+
+    Ok(DecodedImage {
+        rgba: decoded.into_rgba8().into_raw().into(),
+        width,
+        height,
+        generation: 0,
+        number: 0,
+    })
+}
+
+/// The cell box an inline image occupies.
+///
+/// Each side is whatever the client stated, and the two interact: with the
+/// aspect ratio preserved, a side the client left automatic follows from the one
+/// it gave, and a box it gave both sides of is fitted inside rather than filled.
+/// Turning that off lets the image stretch to exactly the box.
+///
+/// Every result is at least one cell and no larger than the screen. An image
+/// wider than the terminal is one the client cannot see the rest of, and one of
+/// zero cells is one it cannot see at all.
+fn inline_cells(
+    file: &ItermFile,
+    image: &DecodedImage,
+    cell: (u32, u32),
+    screen: (usize, usize),
+) -> (usize, usize) {
+    let (cell_w, cell_h) = match cell {
+        (0, _) | (_, 0) => FALLBACK_CELL,
+        cell => cell,
+    };
+    let (screen_rows, screen_cols) = screen;
+
+    let natural_w = image.width.div_ceil(cell_w).max(1) as usize;
+    let natural_h = image.height.div_ceil(cell_h).max(1) as usize;
+
+    let resolve = |dimension: Dimension, per_cell: u32, span: usize, natural: usize| match dimension
+    {
+        Dimension::Auto => None,
+        Dimension::Cells(cells) => Some((cells as usize).max(1)),
+        Dimension::Pixels(pixels) => Some((pixels.div_ceil(per_cell).max(1)) as usize),
+        Dimension::Percent(percent) => {
+            Some((span * percent as usize / 100).max(1)).filter(|_| span > 0)
+        },
+        // A percent of nothing, and a natural size is the better answer than
+        // none.
+        #[allow(unreachable_patterns)]
+        _ => Some(natural),
+    };
+
+    let stated_w = resolve(file.width, cell_w, screen_cols, natural_w);
+    let stated_h = resolve(file.height, cell_h, screen_rows, natural_h);
+
+    // Aspect is a ratio of pixels, and a cell is not square, so deriving one
+    // side from the other goes through pixels rather than cell counts. Doing it
+    // in cells would stretch every image by the cell's own aspect.
+    let rows_for = |cols: usize| {
+        let pixels = cols as u64 * u64::from(cell_w) * u64::from(image.height);
+        ((pixels / (u64::from(image.width) * u64::from(cell_h))) as usize).max(1)
+    };
+    let cols_for = |rows: usize| {
+        let pixels = rows as u64 * u64::from(cell_h) * u64::from(image.width);
+        ((pixels / (u64::from(image.height) * u64::from(cell_w))) as usize).max(1)
+    };
+
+    let (cols, rows) = match (stated_w, stated_h, file.preserve_aspect_ratio) {
+        (None, None, _) => (natural_w, natural_h),
+        (Some(w), Some(h), false) => (w, h),
+        // Fitted inside the box rather than filling it, so the picture keeps
+        // its shape and sits within what the client allowed.
+        (Some(w), Some(h), true) => match rows_for(w) <= h {
+            true => (w, rows_for(w)),
+            false => (cols_for(h), h),
+        },
+        (Some(w), None, true) => (w, rows_for(w)),
+        (Some(w), None, false) => (w, natural_h),
+        (None, Some(h), true) => (cols_for(h), h),
+        (None, Some(h), false) => (natural_w, h),
+    };
+
+    (
+        cols.clamp(1, screen_cols.max(1)),
+        rows.clamp(1, screen_rows.max(1)),
+    )
+}
+
 /// Whether `control` is a continuation frame rather than a new command.
 ///
 /// A continuation carries only `m` and `q`, so every other field sits at its

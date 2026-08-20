@@ -18,6 +18,7 @@
 
 use crate::{
     frame::{self, FrameScratch},
+    iterm::ItermFile,
     kitty::{self, GraphicsFrame},
 };
 use bar::decode_bar;
@@ -243,6 +244,13 @@ pub enum Command {
     /// Decoded here because the terminal's scanner hands every APC payload to
     /// one place. See [`crate::kitty`] for why the two never collide.
     Kitty(GraphicsFrame),
+    /// An iTerm2 inline-image escape, which rides an OSC rather than an APC.
+    ///
+    /// Not a stoatty command and not decoded by [`decode`], which reads APC
+    /// frames. The scanner hands the OSC payload straight to
+    /// [`crate::iterm::parse_file`] and the terminal applies the result through
+    /// the same seam as every other command.
+    ItermFile(ItermFile),
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -337,6 +345,8 @@ fn take_streamed(rest: &mut &[u8]) -> String {
 /// Every variant but [`Command::Kitty`] writes a `Gstoatty` frame. That one
 /// writes the foreign graphics format it was decoded from.
 ///
+/// Panics on [`Command::ItermFile`], which this project only ever receives.
+///
 /// The encode-side mirror of [`decode`]: an emitter assembling a scene appends
 /// each command into one reused buffer.
 pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
@@ -376,6 +386,10 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         // Chunked, because a graphics payload routinely exceeds what one frame
         // carries and a caller reading this back walks whole frames either way.
         Command::Kitty(c) => kitty::encode_chunked_into(out, &c.control, &c.payload),
+        // Receive-only. Nothing here emits an inline image, so there is no
+        // encoder to call, and writing nothing would hand a caller a stream
+        // missing the command it asked to append.
+        Command::ItermFile(_) => unreachable!("inline images are decoded, never emitted"),
     }
 }
 

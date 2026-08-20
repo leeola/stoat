@@ -46,6 +46,22 @@ pub(super) enum EscEvent<'a> {
     /// An OSC 9 or OSC 777 notification, as its code and the bytes after the
     /// code's `;`.
     OscNotify { code: u32, payload: &'a [u8] },
+    /// An OSC 1337 payload, the bytes between the code's `;` and the
+    /// terminator, paired with where they sat and the offset one past that
+    /// terminator.
+    ///
+    /// Reported like [`EscEvent::Apc`] so a caller can excise them from what it
+    /// passes to a parser. That is not optional here: an image on an OSC is
+    /// bytes the vte parser buffers without bound.
+    ///
+    /// `payload` is absent when the escape overran the cap. The interior is
+    /// reported regardless, since the bytes must be excised whether or not
+    /// anything can be drawn from them.
+    OscImage {
+        payload: Option<&'a [u8]>,
+        interior: Range<usize>,
+        end: usize,
+    },
     /// A full reset (`ESC c`).
     ///
     /// The parser resets the screen itself, so this reports it only for the
@@ -108,6 +124,11 @@ enum EscState {
     OscBuffer,
     /// Seen `ESC` inside a buffered OSC payload.
     OscBufferEscape,
+    /// Inside an OSC 1337 payload, buffered under its own far larger cap since
+    /// it carries an image rather than a line of text.
+    OscImage,
+    /// Seen `ESC` inside an image payload.
+    OscImageEscape,
     /// Inside any other OSC, skipped to its terminator so a large clipboard write
     /// is never copied.
     OscSkip,
@@ -132,6 +153,10 @@ impl EscScanner {
         // terminator, which cannot be sized: `ESC ESC \` ends a string as surely
         // as `ESC \` does, and counting back two would swallow the first `ESC`.
         let mut apc = 0..0;
+        // The same, for an image OSC. Its payload is excised from what reaches
+        // the vte parser, which would otherwise buffer a whole image without
+        // bound.
+        let mut osc = 0..0;
 
         while i < bytes.len() {
             let byte = bytes[i];
@@ -232,10 +257,13 @@ impl EscScanner {
                             .saturating_add(u32::from(byte - b'0'));
                     },
                     b';' => {
-                        self.state = if self.code == 9 || self.code == 777 {
-                            EscState::OscBuffer
-                        } else {
-                            EscState::OscSkip
+                        // The image payload starts here, so the interior the
+                        // driver excises starts one past the semicolon.
+                        osc = i + 1..i + 1;
+                        self.state = match self.code {
+                            9 | 777 => EscState::OscBuffer,
+                            1337 => EscState::OscImage,
+                            _ => EscState::OscSkip,
                         };
                     },
                     ESC => self.state = EscState::OscSkipEscape,
@@ -255,6 +283,24 @@ impl EscScanner {
                     ESC => self.state = EscState::OscBufferEscape,
                     _ => {
                         self.payload.clear();
+                        self.state = EscState::Ground;
+                    },
+                },
+                EscState::OscImage => match byte {
+                    ESC => self.state = EscState::OscImageEscape,
+                    BEL => self.finish_osc_image(osc.clone(), i + 1, emit),
+                    _ => {
+                        i += self.push_osc_image_run(payload_run(&bytes[i..]));
+                        osc.end = i;
+                        continue;
+                    },
+                },
+                EscState::OscImageEscape => match byte {
+                    STRING_TERMINATOR => self.finish_osc_image(osc.clone(), i + 1, emit),
+                    ESC => self.state = EscState::OscImageEscape,
+                    _ => {
+                        self.payload.clear();
+                        self.overflow = false;
                         self.state = EscState::Ground;
                     },
                 },
@@ -331,6 +377,49 @@ impl EscScanner {
         run.len()
     }
 
+    /// Buffer a run of image payload, or note that the escape overran its cap.
+    ///
+    /// Overrunning keeps consuming rather than skipping to the terminator, and
+    /// keeps the interior range growing with it. The bytes still have to be
+    /// excised from what the vte parser sees, or the payload this refused would
+    /// be buffered whole by the thing this cap exists to protect.
+    fn push_osc_image_run(&mut self, run: &[u8]) -> usize {
+        if self.overflow {
+            return run.len();
+        }
+        if self.payload.len() + run.len() > MAX_OSC_IMAGE_BYTES {
+            self.overflow = true;
+            self.payload.clear();
+        } else {
+            self.payload.extend_from_slice(run);
+        }
+        run.len()
+    }
+
+    /// Emit the buffered image payload and reset, releasing its memory.
+    ///
+    /// The payload buffer is shared with the notification and frame paths, and
+    /// an image leaves it orders of magnitude larger than either needs. Shrinking
+    /// here rather than at the next use is what keeps one image off the
+    /// session's memory for the rest of its life.
+    fn finish_osc_image(
+        &mut self,
+        interior: Range<usize>,
+        end: usize,
+        emit: &mut impl FnMut(EscEvent<'_>),
+    ) {
+        emit(EscEvent::OscImage {
+            payload: (!self.overflow).then_some(self.payload.as_slice()),
+            interior,
+            end,
+        });
+
+        self.payload.clear();
+        self.payload.shrink_to(MAX_OSC_NOTIFY_BYTES);
+        self.overflow = false;
+        self.state = EscState::Ground;
+    }
+
     /// Emit the buffered OSC payload unless it overran the cap, then reset.
     fn finish_osc(&mut self, emit: &mut impl FnMut(EscEvent<'_>)) {
         if !self.overflow {
@@ -374,6 +463,13 @@ const OSC_INTRODUCER: u8 = b']';
 /// against a sequence that never terminates. A larger notification is discarded.
 const MAX_OSC_NOTIFY_BYTES: usize = 4096;
 
+/// Cap on a buffered OSC 1337 image payload.
+///
+/// Far above the notification cap because this carries a whole image rather
+/// than a line of text, and far below unbounded because the bytes arrive from
+/// whatever program holds the other end of a pty.
+const MAX_OSC_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+
 /// Map a scanned OSC notification `(code, payload)` to a [`TermEvent::Notification`].
 ///
 /// OSC 9 carries only a body. OSC 777's payload is `kind;title;body`, where only
@@ -404,7 +500,7 @@ pub(super) fn notification_from_osc(code: u32, payload: &[u8]) -> Option<TermEve
 
 #[cfg(test)]
 mod tests {
-    use super::{EscEvent, EscScanner, MAX_APC_PAYLOAD, MAX_OSC_NOTIFY_BYTES};
+    use super::{EscEvent, EscScanner, MAX_APC_PAYLOAD, MAX_OSC_IMAGE_BYTES, MAX_OSC_NOTIFY_BYTES};
 
     #[test]
     fn osc_notify_scan_takes_both_terminators() {
@@ -519,6 +615,7 @@ mod tests {
             EscEvent::XtVersion => queries += 1,
             EscEvent::OscNotify { code, payload } => notes.push((code, payload.to_vec())),
             EscEvent::Ris => resets += 1,
+            EscEvent::OscImage { .. } => panic!("this stream carries no image escape"),
         });
         assert_eq!(resets, 0, "this stream carries no full reset");
 
@@ -852,5 +949,111 @@ mod tests {
             0,
             "nor the same byte inside an APC payload",
         );
+    }
+
+    /// The payload buffer is shared with the notification and frame paths, and
+    /// an image leaves it orders of magnitude larger than either needs. Without
+    /// the shrink one image costs the session that memory for its whole life.
+    #[test]
+    fn an_image_payload_releases_its_buffer_afterward() {
+        let mut scanner = EscScanner::default();
+        let mut image = Vec::from(b"\x1b]1337;File=inline=1:".as_slice());
+        image.extend(std::iter::repeat_n(b'A', MAX_OSC_NOTIFY_BYTES * 4));
+        image.extend_from_slice(b"\x1b\\");
+
+        let mut seen = 0;
+        scanner.scan(&image, &mut |event| {
+            if let EscEvent::OscImage { payload, .. } = event {
+                seen = payload.map_or(0, <[u8]>::len);
+            }
+        });
+
+        assert_eq!(
+            seen,
+            MAX_OSC_NOTIFY_BYTES * 4 + "File=inline=1:".len(),
+            "the whole payload is reported",
+        );
+        assert!(
+            scanner.payload.capacity() <= MAX_OSC_NOTIFY_BYTES,
+            "and the buffer is back to what a notification needs, not {}",
+            scanner.payload.capacity(),
+        );
+    }
+
+    /// A payload past the cap is dropped, but its bytes still have to be
+    /// excised. The parser this cap protects would otherwise buffer the whole
+    /// thing itself.
+    #[test]
+    fn an_oversize_image_reports_no_payload_and_still_names_its_bytes() {
+        let mut scanner = EscScanner::default();
+        // The interior starts one past the code's semicolon, so everything the
+        // client sent after `1337;` is what gets excised.
+        let prefix = b"\x1b]1337;";
+        let mut image = Vec::from(prefix.as_slice());
+        image.extend_from_slice(b"File=inline=1:");
+        image.extend(std::iter::repeat_n(b'A', MAX_OSC_IMAGE_BYTES + 1));
+        image.extend_from_slice(b"\x1b\\");
+
+        let mut seen = None;
+        scanner.scan(&image, &mut |event| {
+            if let EscEvent::OscImage {
+                payload,
+                interior,
+                end,
+            } = event
+            {
+                seen = Some((payload.is_some(), interior, end));
+            }
+        });
+
+        assert_eq!(
+            seen,
+            Some((false, prefix.len()..image.len() - 2, image.len())),
+            "nothing to draw, but every byte of it named for excision",
+        );
+    }
+
+    /// An escape split across reads completes on the read that ends it, which is
+    /// the ordinary case for an image far larger than one pty read.
+    #[test]
+    fn an_image_split_across_reads_completes_on_the_last() {
+        let mut scanner = EscScanner::default();
+        let whole = b"\x1b]1337;File=inline=1:QUJD\x1b\\";
+
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+        for split in 1..whole.len() {
+            payloads.clear();
+            let mut collect = |event: EscEvent<'_>| {
+                if let EscEvent::OscImage { payload, .. } = event {
+                    payloads.push(payload.expect("within the cap").to_vec());
+                }
+            };
+            scanner.scan(&whole[..split], &mut collect);
+            scanner.scan(&whole[split..], &mut collect);
+
+            assert_eq!(
+                payloads,
+                [b"File=inline=1:QUJD".to_vec()],
+                "split at {split} loses the payload",
+            );
+        }
+    }
+
+    /// Every other 1337 escape belongs to a feature this terminal does not
+    /// have, and buffering one would spend the image cap on a line of text.
+    #[test]
+    fn only_the_image_code_takes_the_buffered_path() {
+        let mut scanner = EscScanner::default();
+        let mut images = 0;
+        scanner.scan(
+            b"\x1b]1338;File=inline=1:QQ==\x1b\\\x1b]0;title\x07",
+            &mut |event| {
+                if matches!(event, EscEvent::OscImage { .. }) {
+                    images += 1;
+                }
+            },
+        );
+
+        assert_eq!(images, 0);
     }
 }
