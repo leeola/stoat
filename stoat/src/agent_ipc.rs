@@ -1,11 +1,17 @@
-//! Per-session IPC server for Claude hook events.
+//! Per-session IPC server for the shells this instance owns.
 //!
-//! Each owned Claude subshell is spawned with `STOAT_AGENT_SOCK` pointing at a
-//! per-session Unix socket (see [`crate::run::agent_socket_path`]). This module
-//! binds that socket, reads newline-framed JSON hook events from connecting
-//! clients, and forwards them to the render process's event loop as
-//! [`AgentEvent`]s, which it applies to the owning workspace's
-//! [`AgentStatus`](crate::agent_status::AgentStatus).
+//! Every owned Claude subshell and every terminal pane's shell is spawned with
+//! `STOAT_AGENT_SOCK` pointing at a per-session Unix socket (see
+//! [`crate::run::agent_socket_path`]). This module binds that socket and reads
+//! newline-framed JSON from connecting clients.
+//!
+//! A hook line forwards to the render process's event loop as an
+//! [`AgentEvent`], which it applies to the owning workspace's
+//! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
+//! rides [`AgentControl`] and expects a reply: a query answers with live
+//! session state, `open-editor` parks the caller until its buffer closes, and
+//! `open-in-term` opens files in the terminal pane the caller runs in, which is
+//! what makes a `stoat <file>` inside a pane reach the instance hosting it.
 
 use crate::{
     agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
@@ -47,6 +53,20 @@ pub enum AgentControl {
         path: PathBuf,
         done: oneshot::Sender<()>,
     },
+    /// Open `paths` in the split pane showing the terminal whose
+    /// [`token`](crate::term_session::TermSession::token) is `term`, in front of
+    /// the shell that asked, and fire `done` once they are open.
+    ///
+    /// Unlike [`Self::OpenEditor`], nothing blocks on the buffer: the requesting
+    /// command wants its prompt back, so `done` fires as soon as the open lands.
+    /// It fires on every path through the handler, since a caller parked on a
+    /// reply that never comes hangs the user's shell.
+    OpenInTerm {
+        uid: WorkspaceUid,
+        term: u64,
+        paths: Vec<PathBuf>,
+        done: oneshot::Sender<()>,
+    },
     /// Answer a live-session [`AgentQuery`] and fire `reply` with the JSON
     /// result. The connection stays open afterward, so several queries ride one
     /// connection, unlike the park-and-return [`Self::OpenEditor`].
@@ -83,6 +103,10 @@ pub enum AgentQuery {
 enum AgentRequest {
     /// `{"req":"open-editor","path":"..."}`.
     OpenEditor { path: PathBuf },
+    /// `{"req":"open-in-term","term":N,"paths":["/abs/a"]}`. `term` is the
+    /// terminal's `STOAT_TERM_ID`, and the paths are absolute, since the
+    /// requesting shell's working directory is not the workspace root.
+    OpenInTerm { term: u64, paths: Vec<PathBuf> },
     /// `{"req":"lsp-status"}`.
     LspStatus,
     /// `{"req":"diagnostics"}` or `{"req":"diagnostics","path":"..."}`.
@@ -132,15 +156,18 @@ pub async fn serve_agent_hooks(
     }
 }
 
-/// Forward one client connection's hook events to `tx` and its open-editor
-/// requests to `control_tx`, replying to the latter once the editor closes.
+/// Forward one client connection's hook events to `tx` and its requests to
+/// `control_tx`, writing each request's reply back over the same connection.
 ///
 /// Each line is tried as an [`AgentRequest`] first, then as an
 /// [`AgentHookEvent`]. An open-editor request parks the connection until the
 /// event loop fires its waiter, then writes an `editor-closed` reply and
-/// returns. Otherwise returns when the client disconnects, a read fails, or a
-/// receiver is dropped. Blank lines are ignored and malformed lines are logged
-/// and skipped, so one bad line never tears down the connection.
+/// returns, since the caller's `$EDITOR` blocks for exactly that long. Every
+/// other request replies and reads on, so one connection carries a series.
+///
+/// Otherwise returns when the client disconnects, a read fails, or a receiver
+/// is dropped. Blank lines are ignored and malformed lines are logged and
+/// skipped, so one bad line never tears down the connection.
 async fn serve_connection<R>(
     stream: R,
     uid: WorkspaceUid,
@@ -186,6 +213,30 @@ async fn serve_connection<R>(
                         .write_all(b"{\"reply\":\"editor-closed\"}\n")
                         .await;
                     return;
+                },
+                AgentRequest::OpenInTerm { term, paths } => {
+                    let (done_tx, done_rx) = oneshot::channel();
+                    if control_tx
+                        .send(AgentControl::OpenInTerm {
+                            uid,
+                            term,
+                            paths,
+                            done: done_tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = done_rx.await;
+                    if write_half
+                        .write_all(b"{\"reply\":\"opened\"}\n")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
                 },
                 AgentRequest::LspStatus => AgentQuery::LspStatus,
                 AgentRequest::Diagnostics { path } => AgentQuery::Diagnostics { path },
@@ -362,6 +413,174 @@ mod tests {
             names.contains(&"primary") && names.contains(&"secondary"),
             "servers listed: {names:?}",
         );
+    }
+
+    /// Open a terminal in the focused pane and report its id and token.
+    fn terminal_in_focused_pane(h: &mut TestHarness) -> (crate::term_session::TermId, u64) {
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let ws = h.stoat.active_workspace();
+        let crate::pane::View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the terminal action should leave a terminal in the focused pane");
+        };
+        (term_id, ws.terms[term_id].token)
+    }
+
+    /// The file `pane` shows, or `None` when it shows anything but an editor.
+    fn shown_path(h: &TestHarness, pane: crate::pane::PaneId) -> Option<PathBuf> {
+        let ws = h.stoat.active_workspace();
+        let crate::pane::View::Editor(editor_id) = ws.panes.pane(pane).view else {
+            return None;
+        };
+        let buffer_id = ws.editors.get(editor_id)?.buffer_id;
+        ws.buffers.path_for(buffer_id).map(|p| p.to_path_buf())
+    }
+
+    fn open_in_term(
+        h: &mut TestHarness,
+        term: u64,
+        paths: Vec<PathBuf>,
+    ) -> (crate::app::UpdateEffect, oneshot::Receiver<()>) {
+        let uid = h.stoat.active_workspace().uid();
+        let (done_tx, done_rx) = oneshot::channel();
+        let effect = h.stoat.handle_agent_control(AgentControl::OpenInTerm {
+            uid,
+            term,
+            paths,
+            done: done_tx,
+        });
+        (effect, done_rx)
+    }
+
+    /// Split a labelled pane beside the focused one and leave focus on it, so a
+    /// request landing on the terminal's pane is the token's doing rather than
+    /// the fallback's.
+    fn focus_a_pane_beside(h: &mut TestHarness) -> crate::pane::PaneId {
+        let ws = h.stoat.active_workspace_mut();
+        let side = ws.panes.split(crate::pane::Axis::Vertical);
+        ws.panes.pane_mut(side).view = crate::pane::View::Label("side".into());
+        side
+    }
+
+    #[test]
+    fn open_in_term_covers_the_named_terminal_and_keeps_it_reachable() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        let (term_id, token) = terminal_in_focused_pane(&mut h);
+        let term_pane = h.stoat.active_workspace().panes.focus();
+        let side = focus_a_pane_beside(&mut h);
+
+        let (effect, mut done_rx) = open_in_term(&mut h, token, vec![root.join("a.rs")]);
+
+        assert_eq!(effect, crate::app::UpdateEffect::Redraw);
+        assert_eq!(
+            shown_path(&h, term_pane),
+            Some(root.join("a.rs")),
+            "the token names the pane, not the focus",
+        );
+        assert_eq!(shown_path(&h, side), None, "the focused pane is untouched");
+        let ws = h.stoat.active_workspace();
+        assert!(
+            matches!(ws.panes.pane(term_pane).prev_view, Some(crate::pane::View::Terminal(t)) if t == term_id),
+            "the live shell stays reachable behind the buffer",
+        );
+        assert!(
+            ws.terms.contains_key(term_id),
+            "covering a terminal does not end its session",
+        );
+        assert_eq!(
+            ws.panes.focus(),
+            term_pane,
+            "focus follows the buffer that just opened",
+        );
+        assert_eq!(h.stoat.focused_mode(), "normal");
+        done_rx.try_recv().expect("the caller is unparked");
+    }
+
+    #[test]
+    fn open_in_term_with_an_unknown_token_uses_the_focused_pane() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        let (term_id, token) = terminal_in_focused_pane(&mut h);
+        let term_pane = h.stoat.active_workspace().panes.focus();
+        let side = focus_a_pane_beside(&mut h);
+
+        let (_, mut done_rx) = open_in_term(&mut h, token + 1, vec![root.join("a.rs")]);
+
+        assert_eq!(shown_path(&h, side), Some(root.join("a.rs")));
+        let ws = h.stoat.active_workspace();
+        assert!(
+            matches!(ws.panes.pane(term_pane).view, crate::pane::View::Terminal(t) if t == term_id),
+            "an unresolved token leaves the terminal showing",
+        );
+        assert!(
+            ws.panes.pane(side).prev_view.is_none(),
+            "an unresolved token records no return view",
+        );
+        assert!(ws.terms.contains_key(term_id));
+        done_rx.try_recv().expect("the caller is unparked");
+    }
+
+    #[test]
+    fn open_in_term_splits_a_pane_per_extra_path() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let (_, token) = terminal_in_focused_pane(&mut h);
+        let first = h.stoat.active_workspace().panes.focus();
+
+        let (_, mut done_rx) =
+            open_in_term(&mut h, token, vec![root.join("a.rs"), root.join("b.rs")]);
+
+        let panes = h.stoat.active_workspace().panes.split_pane_ids();
+        assert_eq!(panes.len(), 2, "the second path splits a pane of its own");
+        let second = panes
+            .into_iter()
+            .find(|&id| id != first)
+            .expect("split pane");
+        assert_eq!(shown_path(&h, first), Some(root.join("a.rs")));
+        assert_eq!(shown_path(&h, second), Some(root.join("b.rs")));
+        done_rx.try_recv().expect("the caller is unparked");
+    }
+
+    #[test]
+    fn open_in_term_takes_the_shell_out_of_insert_when_the_open_defers() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = PathBuf::from("/big");
+        let path = root.join("huge.txt");
+        // Past the inline-read ceiling, so the open lands on the pool and the
+        // pane still shows the shell when the handler returns.
+        h.fake_fs().insert_file(&path, vec![b'x'; (1 << 20) + 16]);
+        h.stoat.active_workspace_mut().git_root = root;
+        let (term_id, token) = terminal_in_focused_pane(&mut h);
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "a terminal pane opens ready to type into",
+        );
+
+        let (_, mut done_rx) = open_in_term(&mut h, token, vec![path]);
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            matches!(ws.panes.pane(ws.panes.focus()).view, crate::pane::View::Terminal(t) if t == term_id),
+            "a deferred open leaves the shell on screen",
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the next keys are the user's, not the shell's",
+        );
+        done_rx.try_recv().expect("the caller is unparked");
+    }
+
+    #[test]
+    fn open_in_term_with_no_paths_still_unparks_the_caller() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (_, token) = terminal_in_focused_pane(&mut h);
+
+        let (effect, mut done_rx) = open_in_term(&mut h, token, Vec::new());
+
+        assert_eq!(effect, crate::app::UpdateEffect::None);
+        done_rx.try_recv().expect("the caller is unparked");
     }
 
     #[test]
@@ -547,6 +766,82 @@ mod tests {
         let mut reply = String::new();
         client.read_to_string(&mut reply).await.unwrap();
         assert_eq!(reply, "{\"reply\":\"editor-closed\"}\n");
+        conn.await.unwrap();
+    }
+
+    #[test]
+    fn open_in_term_decodes_its_token_and_paths() {
+        let decoded: AgentRequest =
+            serde_json::from_str(r#"{"req":"open-in-term","term":7,"paths":["/abs/a","/abs/b"]}"#)
+                .expect("open-in-term decodes");
+        let AgentRequest::OpenInTerm { term, paths } = decoded else {
+            panic!("expected an open-in-term request, got {decoded:?}");
+        };
+        assert_eq!(term, 7);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/abs/a"), PathBuf::from("/abs/b")]
+        );
+    }
+
+    #[tokio::test]
+    async fn open_in_term_replies_opened_and_keeps_reading() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
+        let uid = WorkspaceUid(11);
+
+        let (client, server) = tokio::io::duplex(256);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+
+        let conn = tokio::spawn(async move {
+            serve_connection(server, uid, &tx, &control_tx).await;
+        });
+
+        client_write
+            .write_all(b"{\"req\":\"open-in-term\",\"term\":3,\"paths\":[\"/abs/a\"]}\n")
+            .await
+            .unwrap();
+        let AgentControl::OpenInTerm {
+            uid: got_uid,
+            term,
+            paths,
+            done,
+        } = control_rx.recv().await.expect("control message")
+        else {
+            panic!("expected an open-in-term control message");
+        };
+        assert_eq!(got_uid, uid);
+        assert_eq!(term, 3);
+        assert_eq!(paths, vec![PathBuf::from("/abs/a")]);
+        done.send(()).expect("connection parked on the waiter");
+        assert_eq!(
+            replies.next_line().await.unwrap().unwrap(),
+            r#"{"reply":"opened"}"#
+        );
+
+        // A second request over the same connection proves the read loop
+        // continued rather than returning like open-editor.
+        client_write
+            .write_all(b"{\"req\":\"open-in-term\",\"term\":4,\"paths\":[\"/abs/b\"]}\n")
+            .await
+            .unwrap();
+        let AgentControl::OpenInTerm { term, done, .. } =
+            control_rx.recv().await.expect("second control message")
+        else {
+            panic!("expected a second open-in-term control message");
+        };
+        assert_eq!(term, 4);
+        done.send(()).expect("connection parked again");
+        assert_eq!(
+            replies.next_line().await.unwrap().unwrap(),
+            r#"{"reply":"opened"}"#
+        );
+
+        drop(client_write);
+        drop(replies);
         conn.await.unwrap();
     }
 

@@ -288,9 +288,10 @@ async fn term_reader_task(
 /// Filesystem path of the per-session agent hook socket for `uid`, under
 /// the Stoat state dir.
 ///
-/// Passed to the owned Claude subshell as `STOAT_AGENT_SOCK`. The
-/// in-process IPC server binds the same path, so a hook callback reaches
-/// the owning session.
+/// Passed as `STOAT_AGENT_SOCK` to both kinds of shell this instance owns, the
+/// Claude subshell and a terminal pane's own shell. The in-process IPC server
+/// binds the same path, so a hook callback from the one and a `stoat <file>`
+/// from the other both reach the owning session.
 pub fn agent_socket_path(uid: WorkspaceUid) -> std::io::Result<PathBuf> {
     Ok(agent_socket_path_in(&stoat_log::state_dir()?, uid))
 }

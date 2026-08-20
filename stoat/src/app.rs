@@ -6384,6 +6384,60 @@ impl Stoat {
                     .insert(buffer_id, done);
                 UpdateEffect::Redraw
             },
+            AgentControl::OpenInTerm {
+                uid,
+                term,
+                paths,
+                done,
+            } => {
+                let Some(ws_id) = self
+                    .workspaces
+                    .iter()
+                    .find(|(_, ws)| ws.uid == uid)
+                    .map(|(id, _)| id)
+                else {
+                    let _ = done.send(());
+                    return UpdateEffect::None;
+                };
+                self.active_workspace = ws_id;
+
+                let target = {
+                    let ws = self.active_workspace_mut();
+                    match Self::terminal_pane_for_token(ws, term) {
+                        Some((pane, term_id)) => {
+                            // The reverse of the record `open_terminal_pane`
+                            // makes, so the shell stays reachable behind the
+                            // buffer now covering it.
+                            ws.panes.pane_mut(pane).prev_view = Some(View::Terminal(term_id));
+                            ws.panes.set_focus(pane);
+                            ws.focus = FocusTarget::SplitPane;
+                            pane
+                        },
+                        None => ws.panes.focus(),
+                    }
+                };
+
+                let Some((first, rest)) = paths.split_first() else {
+                    let _ = done.send(());
+                    return UpdateEffect::None;
+                };
+                crate::buffer_lifecycle::open_file_in_pane(self, target, first);
+                for path in rest {
+                    let split = self
+                        .active_workspace_mut()
+                        .panes
+                        .split(crate::pane::Axis::Vertical);
+                    crate::buffer_lifecycle::open_file_in_pane(self, split, path);
+                }
+
+                // The user typed into the shell the request came from, so the
+                // buffer that replaced it must not inherit passthrough.
+                if self.focused_mode() == "insert" {
+                    self.transition_mode("normal".to_string());
+                }
+                let _ = done.send(());
+                UpdateEffect::Redraw
+            },
             AgentControl::Query {
                 uid,
                 request,
@@ -6393,6 +6447,25 @@ impl Stoat {
                 UpdateEffect::None
             },
         }
+    }
+
+    /// The split pane showing the terminal session named by `token`, with that
+    /// session's id.
+    ///
+    /// `None` when no session carries the token, or when the one that does
+    /// shows only in a dock, which holds no buffer to open into.
+    fn terminal_pane_for_token(ws: &Workspace, token: u64) -> Option<(PaneId, TermId)> {
+        let term_id = ws
+            .terms
+            .iter()
+            .find(|(_, session)| session.token == token)
+            .map(|(id, _)| id)?;
+        let pane = ws
+            .panes
+            .split_pane_ids()
+            .into_iter()
+            .find(|&id| matches!(ws.panes.pane(id).view, View::Terminal(t) if t == term_id))?;
+        Some((pane, term_id))
     }
 
     /// Start the per-session agent hook server for `uid` on the executor.
