@@ -394,7 +394,7 @@ pub(super) fn apply_minimaps(
     grid.fill_minimaps(commands.len(), |index| {
         let command = &commands[index];
         Minimap {
-            strip: minimap_strip_from_command(command.clone()),
+            strip: minimap_strip_from_command(command),
             seq: seqs[index],
             view: views.get(&command.strip_id).copied(),
         }

@@ -116,7 +116,7 @@ pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion
 
 /// Project a declared [`MinimapCommand`] into the grid's [`MinimapStrip`],
 /// resolving its wire color triples.
-pub(crate) fn minimap_strip_from_command(command: MinimapCommand) -> MinimapStrip {
+pub(crate) fn minimap_strip_from_command(command: &MinimapCommand) -> MinimapStrip {
     MinimapStrip {
         top: command.top,
         left: command.left,
@@ -140,7 +140,7 @@ pub(crate) fn minimap_strip_from_command(command: MinimapCommand) -> MinimapStri
         ),
         palette: command
             .palette
-            .into_iter()
+            .iter()
             .map(|entry| Rgb::new(entry[0], entry[1], entry[2]))
             .collect(),
     }

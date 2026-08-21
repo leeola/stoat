@@ -36,7 +36,7 @@ const RUN_HEIGHT_RATIO: f32 = 0.75;
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
 /// fill, and the strip's declaration-order seq the fragment shader occludes by.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct MinimapInstance {
     origin: [f32; 2],
     size: [f32; 2],
@@ -77,6 +77,22 @@ struct StripDraw {
     count: u32,
 }
 
+/// One strip's built instances, beside what they were built from.
+///
+/// A frame rebuilds a strip only when [`Self::declared`] or
+/// [`Self::content_version`] moved. Holding the declaration itself rather than a
+/// digest of it means a field added to a strip is compared without anyone
+/// remembering to add it here.
+struct StripState {
+    declared: Minimap,
+    /// The store's write count when [`Self::instances`] was built. The slice's
+    /// address and length answer nothing, since a one-line edit splices the same
+    /// count into the same allocation.
+    content_version: u64,
+    scissor: [u32; 4],
+    instances: Vec<MinimapInstance>,
+}
+
 /// The instanced minimap pipeline and its per-frame buffers.
 pub struct MinimapPass {
     pipeline: RenderPipeline,
@@ -86,6 +102,11 @@ pub struct MinimapPass {
     instances: Buffer,
     capacity: usize,
     strips: Vec<StripDraw>,
+    /// What each strip was built from and the instances it built, so a frame
+    /// that moved one strip leaves the rest alone.
+    ///
+    /// Indexed alongside [`Self::strips`], in the grid's declaration order.
+    built: Vec<StripState>,
     /// Where a rebuild gathers every strip's instances before the single upload,
     /// reused so a rebuild does not open a fresh list and discard it.
     instance_scratch: Vec<MinimapInstance>,
@@ -103,6 +124,18 @@ pub struct MinimapPass {
     /// unchanged, so the rebuild and upload are skipped. `None` forces a rebuild,
     /// set at construction and whenever the cell metrics change.
     last_build: Option<(u64, [f32; 2])>,
+    /// How many strips this pass has built since it was made.
+    ///
+    /// A build is a pure function of its inputs, so a kept strip's instances and
+    /// the ones a rebuild would produce are the same bytes. Only a count tells
+    /// the two apart, and telling them apart is the whole claim the per-strip
+    /// cache makes.
+    #[cfg(test)]
+    builds: usize,
+    /// How many times this pass has re-packed and sent the instance buffer,
+    /// counted for the same reason [`Self::builds`] is.
+    #[cfg(test)]
+    uploads: usize,
 }
 
 impl MinimapPass {
@@ -201,6 +234,7 @@ impl MinimapPass {
             instances,
             capacity: INITIAL_CAPACITY,
             strips: Vec::new(),
+            built: Vec::new(),
             occluders,
             last_occluders: Vec::new(),
             last_globals: None,
@@ -208,6 +242,10 @@ impl MinimapPass {
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
             last_build: None,
+            #[cfg(test)]
+            builds: 0,
+            #[cfg(test)]
+            uploads: 0,
         }
     }
 
@@ -218,6 +256,7 @@ impl MinimapPass {
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.metrics = metrics;
         self.last_build = None;
+        self.built.clear();
     }
 
     /// Upload the frame's uniform, panel occluders, and one instance per strip
@@ -269,21 +308,65 @@ impl MinimapPass {
         }
         self.last_build = Some((grid.minimap_epoch(), resolution));
 
+        // The epoch moved, but it moves for any minimap change anywhere. Which
+        // strips it moved for is what decides how much of this frame costs
+        // anything: with a strip per pane, one thumb drag would otherwise
+        // rebuild every pane on screen.
+        let declared = grid.minimaps();
+        let mut rebuilt = self.built.len() != declared.len();
+        self.built.truncate(declared.len());
+        for (index, strip) in declared.iter().enumerate() {
+            let version = grid.minimap_content_version(strip.strip.content_id);
+            if let Some(state) = self.built.get(index)
+                && state.declared == *strip
+                && state.content_version == version
+            {
+                continue;
+            }
+
+            let content = grid.minimap_content(strip.strip.content_id);
+            let (instances, rect) = build_strip(strip, content, self.metrics);
+            #[cfg(test)]
+            {
+                self.builds += 1;
+            }
+            let state = StripState {
+                declared: strip.clone(),
+                content_version: version,
+                scissor: clamp_scissor(rect, resolution),
+                instances,
+            };
+            match self.built.get_mut(index) {
+                Some(slot) => *slot = state,
+                None => self.built.push(state),
+            }
+            rebuilt = true;
+        }
+
+        if !rebuilt {
+            return;
+        }
+
+        // A rebuilt strip whose instance count moved shifts every later strip's
+        // range, so the buffer is re-packed and sent once rather than patched
+        // per strip.
+        #[cfg(test)]
+        {
+            self.uploads += 1;
+        }
         let instances = &mut self.instance_scratch;
         instances.clear();
         self.strips.clear();
-        for strip in grid.minimaps() {
-            let content = grid.minimap_content(strip.strip.content_id);
-            let (strip_instances, rect) = build_strip(strip, content, self.metrics);
-            if strip_instances.is_empty() {
+        for state in &self.built {
+            if state.instances.is_empty() {
                 continue;
             }
             self.strips.push(StripDraw {
-                scissor: clamp_scissor(rect, resolution),
+                scissor: state.scissor,
                 start: instances.len() as u32,
-                count: strip_instances.len() as u32,
+                count: state.instances.len() as u32,
             });
-            instances.extend(strip_instances);
+            instances.extend_from_slice(&state.instances);
         }
 
         if instances.is_empty() {
@@ -790,6 +873,158 @@ mod tests {
             pass.strips.len(),
             1,
             "a resolution change rebuilds the strips against the current grid"
+        );
+    }
+
+    /// A second strip beside the first, over its own content store, so a change
+    /// to one can be seen not to touch the other.
+    fn second_strip(view: Option<MinimapView>) -> Minimap {
+        Minimap {
+            strip: MinimapStrip {
+                left: 2,
+                strip_id: 2,
+                content_id: 2,
+                ..command()
+            },
+            seq: 4,
+            view,
+        }
+    }
+
+    /// One run per line, so a strip's instance count follows its line count.
+    fn lines(count: usize) -> Vec<Vec<MinimapRun>> {
+        (0..count)
+            .map(|_| {
+                vec![MinimapRun {
+                    start_col: 0,
+                    len: 4,
+                    class: 1,
+                }]
+            })
+            .collect()
+    }
+
+    /// Two strips over two stores, each with its own line count.
+    fn two_strip_grid(first_lines: usize, second_lines: usize) -> Grid {
+        let mut grid = Grid::new(12, 24);
+        grid.set_minimaps(vec![strip(None), second_strip(None)]);
+        grid.set_minimap_contents(HashMap::from([
+            (1, summaries(lines(first_lines))),
+            (2, summaries(lines(second_lines))),
+        ]));
+        grid
+    }
+
+    /// The epoch moves for any minimap change anywhere, so it cannot say which
+    /// strip moved. With a strip per pane, rebuilding on it alone means one
+    /// thumb drag rebuilds every pane on screen.
+    #[test]
+    fn a_view_move_rebuilds_only_the_strip_that_moved() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+        let mut grid = two_strip_grid(4, 7);
+        let resolution = [640.0, 480.0];
+
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+        let untouched = pass.built[1].instances.clone();
+        let (built_once, uploaded_once) = (pass.builds, pass.uploads);
+
+        grid.set_minimaps(vec![
+            strip(Some(MinimapView {
+                top_256: 512,
+                visible: 3,
+            })),
+            second_strip(None),
+        ]);
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+
+        assert_ne!(
+            pass.built[0].declared.view, None,
+            "the moved strip took the new view"
+        );
+        assert!(
+            pass.built[1].instances == untouched,
+            "the strip nothing touched keeps the instances it already had"
+        );
+        assert_eq!(
+            (pass.builds - built_once, pass.uploads - uploaded_once),
+            (1, 1),
+            "and the frame built the one strip that moved, then sent the frame"
+        );
+    }
+
+    /// The epoch moves whenever the strips are declared, which a projection does
+    /// every frame whether they moved or not. Re-packing and sending the same
+    /// bytes on each of those is the idle cost the per-strip key removes.
+    #[test]
+    fn a_redeclared_but_unmoved_strip_set_sends_nothing() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+        let mut grid = two_strip_grid(4, 7);
+        let resolution = [640.0, 480.0];
+
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+        let (built, uploaded) = (pass.builds, pass.uploads);
+        let drawn = pass.strips.len();
+
+        // The same two strips again, which moves the epoch and nothing else.
+        grid.set_minimaps(vec![strip(None), second_strip(None)]);
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+
+        assert_eq!(
+            (pass.builds, pass.uploads, pass.strips.len()),
+            (built, uploaded, drawn),
+            "nothing was built, nothing was sent, and the draws still stand"
+        );
+    }
+
+    /// A one-line edit splices the same count into the same allocation, so the
+    /// store's address and length both stand still while its bytes move. Only a
+    /// version says the strip has to rebuild.
+    #[test]
+    fn a_same_length_content_edit_rebuilds_its_strip() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+        let mut grid = two_strip_grid(4, 7);
+        let resolution = [640.0, 480.0];
+
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+        let before = pass.built[0].instances.clone();
+        let untouched = pass.built[1].instances.clone();
+        let (built_once, uploaded_once) = (pass.builds, pass.uploads);
+
+        // One line replaced by one line, over a run of a different width, so the
+        // instances have to move while the line count does not.
+        grid.splice_minimap_content(
+            1,
+            0,
+            1,
+            &summaries(vec![vec![MinimapRun {
+                start_col: 0,
+                len: 40,
+                class: 2,
+            }]]),
+        );
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+
+        assert!(
+            pass.built[0].instances != before,
+            "the edited store's strip rebuilds against its new content"
+        );
+        assert!(
+            pass.built[1].instances == untouched,
+            "and the store nothing edited leaves its strip alone"
+        );
+        assert_eq!(
+            (pass.builds - built_once, pass.uploads - uploaded_once),
+            (1, 1),
+            "one store edited, one strip built, one frame sent"
         );
     }
 

@@ -55,6 +55,9 @@ pub struct Grid {
     /// blocks a strip renders. A strip finds its store via its
     /// [`MinimapCommand::content_id`].
     minimap_contents: HashMap<u32, Vec<LineSummary>>,
+    /// How many times each store has been written, read through
+    /// [`Self::minimap_content_version`] by a renderer caching per strip.
+    minimap_content_versions: HashMap<u32, u64>,
     /// Physical start row of each logical line, indexed from the top, so an
     /// inline expansion pushes later lines down.
     ///
@@ -98,6 +101,7 @@ impl Grid {
             bars: Vec::new(),
             polylines: Vec::new(),
             minimaps: Vec::new(),
+            minimap_content_versions: HashMap::new(),
             minimap_contents: HashMap::new(),
             line_start_rows: Vec::new(),
             popovers_epoch: 0,
@@ -761,6 +765,21 @@ impl Grid {
             .unwrap_or(&[])
     }
 
+    /// How many times the store under `content_id` has been written, or zero
+    /// where no store exists.
+    ///
+    /// A renderer caching per strip needs to know whether that strip's content
+    /// moved, and neither the slice's address nor its length answers that: a
+    /// one-line edit splices the same count into the same allocation. Only
+    /// inequality is read, so a wrap after a lifetime of edits would cost one
+    /// rebuild that was already owed.
+    pub fn minimap_content_version(&self, content_id: u32) -> u64 {
+        self.minimap_content_versions
+            .get(&content_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Replace the declared minimap strips.
     ///
     /// Moves [`Self::minimap_epoch`].
@@ -774,6 +793,14 @@ impl Grid {
     /// Moves [`Self::minimap_epoch`].
     pub fn set_minimap_contents(&mut self, contents: HashMap<u32, Vec<LineSummary>>) {
         self.minimap_contents = contents;
+        // Every store is new, including any the replacement dropped, so every
+        // version moves rather than only the ones the new map names.
+        for version in self.minimap_content_versions.values_mut() {
+            *version += 1;
+        }
+        for id in self.minimap_contents.keys() {
+            self.minimap_content_versions.entry(*id).or_insert(1);
+        }
         self.minimap_epoch += 1;
     }
 
@@ -796,6 +823,7 @@ impl Grid {
     ) {
         let store = self.minimap_contents.entry(content_id).or_default();
         splice_summaries(store, start, removed, lines);
+        *self.minimap_content_versions.entry(content_id).or_default() += 1;
         self.minimap_epoch += 1;
     }
 
@@ -804,6 +832,9 @@ impl Grid {
     /// Moves [`Self::minimap_epoch`], as [`Self::splice_minimap_content`] does.
     pub fn drop_minimap_content(&mut self, content_id: u32) {
         self.minimap_contents.remove(&content_id);
+        // The version outlives the store, so a strip still pointing at the id
+        // sees its content move from whatever it held to empty.
+        *self.minimap_content_versions.entry(content_id).or_default() += 1;
         self.minimap_epoch += 1;
     }
 
