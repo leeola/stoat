@@ -47,6 +47,12 @@ pub(super) enum AmendRoute {
     Refused,
 }
 
+/// What every staging key says when [`AmendRoute::Refused`] closes the
+/// transport. Both funnels that read the route share it, so their wording
+/// stays in step.
+pub(super) const REFUSED_BADGE: &str =
+    "amend needs HEAD on the reviewed commit; use :rebase edit for older commits";
+
 /// Whether `s` and `u` rewrite the checked-out commit rather than the index.
 ///
 /// The commit is rewritable only where nothing is built on it yet. That means

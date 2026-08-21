@@ -1236,9 +1236,7 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
             return super::amend::amend_hunk(stoat, &*repo, &target, mode, site);
         },
         AmendRoute::Refused => {
-            stoat.set_status(
-                "amend needs HEAD on the reviewed commit; use :rebase edit for older commits",
-            );
+            stoat.set_status(super::amend::REFUSED_BADGE);
             return UpdateEffect::Redraw;
         },
     }
@@ -1304,6 +1302,11 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 /// against the live buffer so sequential single-line stages inside one hunk
 /// compose. A missing repo, an untracked file, or a cursor on no change sets a
 /// status message and changes nothing.
+///
+/// Only the index is a target. Under a review base the staged side is the
+/// checked-out commit, and there is no line-granularity amend to reach it, so
+/// the keys report that rather than writing an index the user is not looking
+/// at. [`stage_hunk`] carries the whole-hunk amend for that case.
 pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
@@ -1335,6 +1338,21 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
         stoat.set_status("not in a git repository");
         return UpdateEffect::Redraw;
     };
+
+    // Read before the line is resolved, so a refusal names the missing
+    // transport rather than whatever sits under the cursor.
+    match super::amend::amend_route(stoat, &*repo) {
+        AmendRoute::Index => {},
+        AmendRoute::Commit(_) => {
+            stoat.set_status("no line-level amend; use s or u to move the whole hunk");
+            return UpdateEffect::Redraw;
+        },
+        AmendRoute::Refused => {
+            stoat.set_status(super::amend::REFUSED_BADGE);
+            return UpdateEffect::Redraw;
+        },
+    }
+
     let Some(head_text) = repo.head_content(&path) else {
         stoat.set_status("no line change under the cursor");
         return UpdateEffect::Redraw;
@@ -3266,6 +3284,122 @@ mod tests {
             patch.contains(" c\n"),
             "the other line stays as context: {patch}"
         );
+    }
+
+    /// A review base makes the checked-out commit the staged side, and there is
+    /// no line-granularity amend to reach it. An index write there changes a
+    /// thing the user is not looking at.
+    #[test]
+    fn stage_line_under_a_commit_base_writes_no_index() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
+        h.fake_git().add_repo(&workdir).commit("c1", &[]);
+        {
+            let ws = h.stoat.active_workspace_mut();
+            ws.set_diff_base(Some(DiffBase::Rev {
+                sha: Some("c1".to_string()),
+            }));
+            ws.rebase_active = Some(paused_rebase(&workdir));
+        }
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        assert_eq!(
+            (
+                h.fake_git().applied_patches(&workdir),
+                h.stoat.pending_message.as_deref()
+            ),
+            (
+                vec![],
+                Some("no line-level amend; use s or u to move the whole hunk")
+            ),
+            "the index is untouched and the badge names the whole-hunk keys",
+        );
+    }
+
+    /// Unstaging takes the same route. Both keys read the base before they read
+    /// the cursor, so neither reaches the index while a commit is the staged
+    /// side.
+    #[test]
+    fn unstage_line_under_a_commit_base_writes_no_index() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
+        h.fake_git().add_repo(&workdir).commit("c1", &[]);
+        {
+            let ws = h.stoat.active_workspace_mut();
+            ws.set_diff_base(Some(DiffBase::Rev {
+                sha: Some("c1".to_string()),
+            }));
+            ws.rebase_active = Some(paused_rebase(&workdir));
+        }
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+
+        assert_eq!(
+            (
+                h.fake_git().applied_patches(&workdir),
+                h.stoat.pending_message.as_deref()
+            ),
+            (
+                vec![],
+                Some("no line-level amend; use s or u to move the whole hunk")
+            ),
+            "the index is untouched here too",
+        );
+    }
+
+    /// A base with nothing safe to rewrite under it gets the transport's own
+    /// refusal rather than the line-granularity one, since the commit is out of
+    /// reach for `s` and `u` as well.
+    #[test]
+    fn stage_line_reports_the_transport_refusal_below_the_tip() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
+        h.fake_git().add_repo(&workdir).commit("c1", &[]);
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Rev {
+                sha: Some("c1".to_string()),
+            }));
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        assert_eq!(
+            (
+                h.fake_git().applied_patches(&workdir),
+                h.stoat.pending_message.as_deref()
+            ),
+            (vec![], Some(crate::action_handlers::amend::REFUSED_BADGE)),
+            "no walk and no edit stop, so the transport is closed to both key pairs",
+        );
+    }
+
+    /// A rebase stopped on an edit, which is one of the two positions that make
+    /// rewriting the checked-out commit safe.
+    fn paused_rebase(workdir: &Path) -> crate::rebase::ActiveRebase {
+        crate::rebase::ActiveRebase {
+            workdir: workdir.to_path_buf(),
+            onto: "c1".to_string(),
+            remaining: std::collections::VecDeque::new(),
+            current_head: "c1".to_string(),
+            last_pick_sha: Some("c1".to_string()),
+            last_message: None,
+            pause: Some(crate::rebase::RebasePause::Edit {
+                cherry_picked_commit: "c1".to_string(),
+            }),
+        }
     }
 
     /// The line stage resolves its hunk from bare extents now, so a second hunk
