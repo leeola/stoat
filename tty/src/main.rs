@@ -105,6 +105,11 @@ fn resolve_log_path(stem: &str) -> std::io::Result<std::path::PathBuf> {
 /// to the prior hook, so a panic survives in `stoatty-<log-id>.log` after the
 /// window is gone. Idempotent across repeated calls.
 ///
+/// A release build keeps its symbol table but not its debug info, so a captured
+/// frame carries a function name and no file or line. The panic's own location
+/// is logged separately and is exact either way. Build under the `profiling`
+/// profile for frames that name a line too.
+///
 /// Unlike the editor's hook, stoatty runs a GUI rather than a raw-mode terminal,
 /// so there is no cooked-mode restore to perform here.
 fn install_panic_hook() {

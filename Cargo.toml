@@ -126,4 +126,18 @@ opt-level = 3
 [profile.release]
 lto = "fat"
 codegen-units = 1
-strip = "symbols"
+# Debug info goes, the symbol table stays. Stripping both leaves every frame of
+# a panic backtrace reading <unknown>, which blinds the forensics hook in
+# exactly the builds users run. Keeping the table costs about a megabyte and a
+# half, and names every frame, without the file and line a full debug build
+# carries.
+strip = "debuginfo"
+
+# Release, plus what a profiler needs to attribute a sample to a line.
+#
+# `perf record` against a release build has no names to work with, and line
+# tables alone are enough to annotate without paying for a full debug build.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
