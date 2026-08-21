@@ -127,6 +127,17 @@ const MAX_MINIMAP_STORES: usize = 256;
 /// strip per pane, the same order as [`MAX_POOLS`].
 const MAX_MINIMAP_VIEWS: usize = 64;
 
+/// Store changes the journal holds before the projection gives up on replaying
+/// them.
+///
+/// A projection drains the journal, so it holds a handful of entries in the
+/// ordinary case. Nothing drains it while projections are skipped, though, and
+/// they are skipped for a scrolled-back view or an occluded window: a chatty
+/// child behind either accumulates one entry per splice for as long as that
+/// lasts. Past this the entries cost more than the clone they exist to avoid,
+/// and the clone reproduces them exactly, so nothing is lost by taking it.
+const MAX_MINIMAP_JOURNAL: usize = 4096;
+
 /// Line summaries one minimap content store may hold.
 ///
 /// A store grows by splices the writer sends, so without a ceiling one store id
@@ -1515,9 +1526,7 @@ impl Terminal {
             },
             Command::MinimapDrop(drop) => {
                 self.minimap_contents.remove(&drop.content_id);
-                self.minimap_content_dirty = true;
-                self.minimap_journal
-                    .push(MinimapJournal::Drop(drop.content_id));
+                self.journal_minimap(MinimapJournal::Drop(drop.content_id));
             },
             // A reset is also a fill/capture close trigger. The fill and capture
             // commits must run at feed time, but the decoration clear stages so a
@@ -1658,8 +1667,27 @@ impl Terminal {
 
         let store = self.minimap_contents.entry(command.content_id).or_default();
         grid::splice_summaries(store, command.start, command.removed, &command.lines);
+        self.journal_minimap(MinimapJournal::Splice(command));
+    }
+
+    /// Record `change` for the next projection to replay, or give up on
+    /// replaying and ask it for the whole map instead.
+    ///
+    /// Past [`MAX_MINIMAP_JOURNAL`] the journal goes and the reclone flag takes
+    /// over. Nothing is lost, since the clone reproduces exactly what the
+    /// replay would have. While that flag stands the journal is dead weight, so
+    /// nothing more is recorded into it.
+    fn journal_minimap(&mut self, change: MinimapJournal) {
         self.minimap_content_dirty = true;
-        self.minimap_journal.push(MinimapJournal::Splice(command));
+        if self.minimap_reclone {
+            return;
+        }
+
+        self.minimap_journal.push(change);
+        if self.minimap_journal.len() > MAX_MINIMAP_JOURNAL {
+            self.minimap_journal.clear();
+            self.minimap_reclone = true;
+        }
     }
 
     /// The length of store `content_id`, or `None` when it does not exist and
@@ -3103,8 +3131,8 @@ mod tests {
     use super::{
         insert_room, mark_selection_change, whole_row, Arc, Cursor, CursorShape, Damage,
         MinimapJournal, SelectionRange, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
-        MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_MINIMAP_VIEWS, MAX_POOLS,
-        PAGE_POOL_CAPACITY, XTVERSION_REPLY,
+        MAX_DECORATIONS, MAX_MINIMAP_JOURNAL, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES,
+        MAX_MINIMAP_VIEWS, MAX_POOLS, PAGE_POOL_CAPACITY, XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -7818,6 +7846,64 @@ mod tests {
         assert!(
             grid.minimap_content(9).is_empty(),
             "a replayed drop empties the grid store",
+        );
+    }
+
+    /// Nothing drains the journal while projections are skipped, and they are
+    /// skipped for a scrolled-back view or an occluded window. Past the cap the
+    /// entries cost more than the clone they exist to avoid, so the projection
+    /// takes the clone and the journal resumes from there.
+    #[test]
+    fn an_over_cap_journal_reclones_once_and_then_replays_again() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        // Seed a line so every splice below replaces rather than inserts, which
+        // keeps the store one line long however many entries pile up.
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 1, 1)]]));
+        terminal.project(&mut grid);
+
+        // One past the cap, with no projection between them to drain it.
+        for class in 0..=MAX_MINIMAP_JOURNAL {
+            terminal.advance(&splice(9, 0, 1, vec![vec![run(0, 2, class as u8)]]));
+        }
+        assert!(
+            terminal.minimap_journal.is_empty() && terminal.minimap_reclone,
+            "the journal gave up and asked for the whole map"
+        );
+
+        // The clone reproduces whatever the stores hold when it runs, so an
+        // entry recorded while the flag stands would be replayed on top of a
+        // map that already has it.
+        terminal.advance(&splice(9, 0, 1, vec![vec![run(1, 1, 5)]]));
+        assert!(
+            terminal.minimap_journal.is_empty(),
+            "and records nothing more while it stands"
+        );
+
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimap_content(9),
+            &terminal.minimap_contents[&9][..],
+            "the clone carries what the dropped entries would have"
+        );
+        assert!(
+            !terminal.minimap_reclone,
+            "and the projection clears the flag"
+        );
+
+        // The journal is trusted again from here, so the next splice replays.
+        terminal.advance(&splice(9, 0, 1, vec![vec![run(3, 3, 7)]]));
+        assert_eq!(
+            terminal.minimap_journal.len(),
+            1,
+            "the next change is journaled rather than dropped"
+        );
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimap_content(9),
+            summaries(vec![vec![run(3, 3, 7)]]),
+            "and replaying it lands the change"
         );
     }
 
