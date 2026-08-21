@@ -41,6 +41,24 @@ pub(crate) fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
     }
 }
 
+/// The CSI-u bytes a zoom press of `delta` reaches a claiming program as, when
+/// the claim asked for delivery down the PTY.
+///
+/// The key is the one the user pressed: `=` (codepoint 61) to grow, `-` (45) to
+/// shrink. The modifier field is 9, which is super alone in the `1 + bitmask`
+/// encoding CSI-u uses.
+///
+/// Super whatever the user actually held. The physical zoom modifier is Cmd on
+/// macOS and Ctrl elsewhere, and which of those it was says nothing about what
+/// the press meant, so normalizing here is what lets the program on the other
+/// end match one combo rather than one per platform it might be running under.
+pub(crate) fn zoom_csi_u(delta: i32) -> &'static [u8] {
+    match delta > 0 {
+        true => b"\x1b[61;9u",
+        false => b"\x1b[45;9u",
+    }
+}
+
 /// The digit a platform-modifier chord names, or `None` when the press is not
 /// one.
 ///
@@ -331,6 +349,17 @@ mod tests {
             font_step(true, &Key::Character("+".into())),
             None,
             "shifted plus no longer zooms"
+        );
+    }
+
+    /// A program matches these bytes exactly, so what they are is the contract
+    /// rather than an implementation detail of how they are built.
+    #[test]
+    fn a_zoom_press_reaches_a_program_as_super_plus_the_key() {
+        assert_eq!(
+            (zoom_csi_u(1), zoom_csi_u(-1)),
+            (b"\x1b[61;9u".as_slice(), b"\x1b[45;9u".as_slice()),
+            "`=` and `-` under modifier 9, which is super alone",
         );
     }
 

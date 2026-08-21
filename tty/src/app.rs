@@ -20,7 +20,7 @@ use crate::{
     input::{
         alternate_scroll_bytes, cell_at, chord_char, encode_key, font_step, ipc_button,
         modifier_bits, paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes,
-        sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines,
+        sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines, zoom_csi_u,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -1444,30 +1444,43 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.modifiers.control_key()
                 };
 
+                // Read where both the zoom and the chord below reach for it, so
+                // one press cannot be routed two ways within a frame.
+                let route = || {
+                    zoom_route(
+                        state.zoom_capture,
+                        state.zoom_inband,
+                        state.window_client_connected.load(Ordering::Relaxed),
+                    )
+                };
+
                 // Font zoom resizes the primary surface, so it stays a primary
                 // control. Per-window font zoom is out of scope, so an aux zoom
                 // combo falls through and reaches the PTY as a plain keystroke.
                 if primary && let Some(delta) = font_step(platform_mod_held, &event.logical_key) {
-                    if forwards_zoom(
-                        state.zoom_capture,
-                        state.window_client_connected.load(Ordering::Relaxed),
-                    ) {
-                        send_window_event(state, WindowIpcEvent::Zoom { window: 0, delta });
-                    } else {
-                        apply_font_step(state, delta);
+                    match route() {
+                        // Written straight rather than through the keystroke
+                        // path, which clears the selection and jumps to the live
+                        // bottom. The other two routes do neither, and one press
+                        // should not move the viewport depending on which
+                        // delivery the child asked for.
+                        ZoomRoute::Inband => {
+                            let _ = state.pty.write(zoom_csi_u(delta));
+                        },
+                        ZoomRoute::Socket => {
+                            send_window_event(state, WindowIpcEvent::Zoom { window: 0, delta })
+                        },
+                        ZoomRoute::FontStep => apply_font_step(state, delta),
                     }
                     return;
                 }
 
                 // A digit chord has no terminal encoding, so a program can only
-                // hear it over the socket. Without the claim it falls through to
-                // encode_key, which yields nothing for it, exactly as before.
+                // hear it over the socket. Without that route it falls through
+                // to encode_key, which yields nothing for it, exactly as before.
                 if primary
                     && let Some(ch) = chord_char(platform_mod_held, &event.logical_key)
-                    && forwards_zoom(
-                        state.zoom_capture,
-                        state.window_client_connected.load(Ordering::Relaxed),
-                    )
+                    && route() == ZoomRoute::Socket
                 {
                     send_window_event(state, WindowIpcEvent::Chord { window: 0, ch });
                     return;
@@ -1708,18 +1721,37 @@ fn grid_pixels(font_size: u32, scale_factor: f32, rows: usize, cols: usize) -> (
     (extent(width, cols), extent(height, rows))
 }
 
-/// Whether a zoom-combo press goes to the child instead of stepping the font.
+/// Where a zoom-combo press goes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ZoomRoute {
+    /// Down the PTY as terminal bytes, which is the one channel that reaches a
+    /// program wherever it is running.
+    Inband,
+    /// Over the window socket, as a structured event.
+    Socket,
+    /// Nowhere: the terminal steps its own font size.
+    FontStep,
+}
+
+/// Where a zoom-combo press goes, given what the claiming program asked for and
+/// whether anything is reading the socket.
 ///
-/// The claim alone is not enough. A press with no reader on the other end
-/// queues for a client that may never arrive and simply vanishes, so a claimed
-/// combo with nothing upstream falls back to font zoom rather than doing
-/// nothing.
-///
+/// A socket claim needs a reader as much as it needs the claim. A press queued
+/// for a client that never arrives simply vanishes, so a claimed combo with
+/// nothing upstream falls back to font zoom rather than doing nothing.
 /// `client_connected` rather than the socket being bound, because those differ
-/// exactly where this goes wrong. A child reached over ssh never sees the
+/// exactly where this goes wrong: a child reached over a link never sees the
 /// socket path, and one that exits leaves the socket behind it.
-fn forwards_zoom(zoom_capture: bool, client_connected: bool) -> bool {
-    zoom_capture && client_connected
+///
+/// An inband claim needs no such test. The PTY is the child's own channel and
+/// lives as long as the child does, so a press written there either reaches
+/// whatever is on the other end or dies with the thing that asked for it.
+fn zoom_route(capture: bool, inband: bool, client_connected: bool) -> ZoomRoute {
+    match (capture, inband, client_connected) {
+        (true, true, _) => ZoomRoute::Inband,
+        (true, false, true) => ZoomRoute::Socket,
+        _ => ZoomRoute::FontStep,
+    }
 }
 
 /// Step the terminal's font size by `delta` and re-fit everything measured in
@@ -3551,10 +3583,10 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
-        classify_window_open, compose_aux_grid, earliest, forced_damage, forwards_zoom,
-        grid_pixels, selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo,
+        classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
+        selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo, zoom_route,
         ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite, Visibility,
-        WindowOpenVerdict, MAX_AUX_WINDOWS,
+        WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -4212,24 +4244,46 @@ mod tests {
         assert!(!swallow_super_combo(ModifiersState::empty()));
     }
 
-    /// A claimed combo with nowhere to send it must not vanish, so a connected
+    /// A socket claim with nowhere to send it must not vanish, so a connected
     /// reader is as much a precondition as the claim itself.
     ///
     /// A connected client rather than a bound socket, because those come apart
     /// exactly where the combo goes dead. A child reached over ssh never sees
     /// the socket path, and one that exits leaves the socket bound behind it.
+    ///
+    /// An inband claim is the answer to that same gap, so it turns on the claim
+    /// alone: the PTY it writes to is there whenever the child is.
     #[test]
-    fn a_zoom_combo_forwards_only_with_both_a_claim_and_a_reader() {
-        assert!(forwards_zoom(true, true), "claimed with a reader forwards");
-        assert!(
-            !forwards_zoom(true, false),
-            "claimed with nobody reading falls back to font zoom"
+    fn a_zoom_press_takes_the_route_the_claim_asked_for() {
+        let routes = |connected| {
+            [
+                zoom_route(true, true, connected),
+                zoom_route(true, false, connected),
+                zoom_route(false, true, connected),
+                zoom_route(false, false, connected),
+            ]
+        };
+
+        assert_eq!(
+            routes(true),
+            [
+                ZoomRoute::Inband,
+                ZoomRoute::Socket,
+                ZoomRoute::FontStep,
+                ZoomRoute::FontStep,
+            ],
+            "with a reader, each claim takes its own route and no claim zooms",
         );
-        assert!(
-            !forwards_zoom(false, true),
-            "an unclaimed combo zooms the font even though a reader is there"
+        assert_eq!(
+            routes(false),
+            [
+                ZoomRoute::Inband,
+                ZoomRoute::FontStep,
+                ZoomRoute::FontStep,
+                ZoomRoute::FontStep,
+            ],
+            "with nobody reading, only the inband claim still has a channel",
         );
-        assert!(!forwards_zoom(false, false), "neither forwards");
     }
 
     /// The connected flag follows a client across its whole life, so the combo
