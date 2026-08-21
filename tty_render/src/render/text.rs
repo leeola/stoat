@@ -12,7 +12,7 @@ use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
         globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics, CompositeSlot,
-        CompositeSlots, Frame, Occluder, OccluderBuffer, PoolOccluders, GLOBALS_SLOTS,
+        CompositeSlots, Frame, GridVersion, Occluder, OccluderBuffer, PoolOccluders, GLOBALS_SLOTS,
         GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
@@ -432,12 +432,23 @@ pub struct TextPass {
     /// damage-tracked rows intact. Indexed by the pool's position in the frame's
     /// slice and grown on demand, so a renderer that never composites holds none.
     composite_slots: CompositeSlots<TextCompositeSlot>,
-    /// The [`Grid::text_runs_epoch`] and [`Atlas::content_epoch`] the live text
-    /// runs and rects were last built against. `prepare` reuses those instances
-    /// while both still match, since the runs are unchanged and their atlas UVs
-    /// have not moved.
-    last_text_run_epoch: u64,
+    /// The grid and [`Grid::text_runs_epoch`] the live text runs and rects were
+    /// last built against, or `None` before the first build. `prepare` reuses
+    /// those instances while this and the atlas epoch below both still match,
+    /// since the runs are unchanged and their atlas UVs have not moved.
+    last_text_runs: Option<GridVersion>,
+    /// The [`Atlas::content_epoch`] those same instances resolved against.
     last_atlas_epoch: u64,
+    /// How many times this pass has rebuilt the live text-run instances, and how
+    /// many times it has rasterized the overlay content, since it was made.
+    ///
+    /// Either build is a pure function of its inputs, so what a reuse keeps and
+    /// what a rebuild would produce are the same bytes. Only a count tells the
+    /// two apart, and telling them apart is the whole claim these caches make.
+    #[cfg(test)]
+    run_builds: usize,
+    #[cfg(test)]
+    overlay_builds: usize,
     /// The [`Atlas::content_epoch`] the cached grid-glyph instances were last
     /// built against. An eviction reuses a slot without moving the texture size,
     /// and one can come from any earlier pass, such as a pool composite between
@@ -455,7 +466,7 @@ pub struct TextPass {
     /// several can scroll independently.
     overlay_draws: Vec<OverlayDraw>,
     /// The shaped overlay glyphs per overlay, reused while
-    /// [`Self::last_popovers_epoch`] holds so an unchanged frame skips the
+    /// [`Self::last_popovers`] holds so an unchanged frame skips the
     /// content walk and shape-cache lookups. The glyphs inside the box's current
     /// window are re-touched against the atlas every frame to keep them resident,
     /// since the packing phase evicts anything not marked in use this frame.
@@ -469,17 +480,17 @@ pub struct TextPass {
     overlay_cell_scratch: Vec<(usize, usize, char)>,
     overlay_cell_line_scratch: Vec<u32>,
     /// The overlay instances before the per-frame anchor and scroll shift,
-    /// embedding the atlas UVs. Reused while [`Self::last_popovers_epoch`] and
+    /// embedding the atlas UVs. Reused while [`Self::last_popovers`] and
     /// [`Self::last_overlay_atlas_epoch`] both hold, so a scroll-only frame
     /// re-shifts these instead of rebuilding them.
     overlay_bases: Vec<Vec<TextInstance>>,
     /// The scissor box per overlay, cached alongside [`Self::overlay_bases`]
     /// since it depends only on the overlay geometry, not the scroll offset.
     overlay_base_scissors: Vec<Option<[u32; 4]>>,
-    /// The [`Grid::popovers_epoch`] the pending groups and bases were built
-    /// against. A change means overlay content or geometry moved, so both are
-    /// rebuilt.
-    last_popovers_epoch: u64,
+    /// The grid and [`Grid::popovers_epoch`] the pending groups and bases were
+    /// built against, or `None` before the first build. A change means overlay
+    /// content or geometry moved, so both are rebuilt.
+    last_popovers: Option<GridVersion>,
     /// The [`Atlas::content_epoch`] [`Self::overlay_bases`] were built against.
     /// A change means an eviction moved a glyph, so the bases are rebuilt even
     /// when the content held.
@@ -892,8 +903,12 @@ impl TextPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_slots: CompositeSlots::new(),
-            last_text_run_epoch: 0,
+            last_text_runs: None,
             last_atlas_epoch: 0,
+            #[cfg(test)]
+            run_builds: 0,
+            #[cfg(test)]
+            overlay_builds: 0,
             // Never a real content epoch, so the first prepare always builds.
             grid_atlas_epoch: u64::MAX,
             overlay_instances,
@@ -906,7 +921,7 @@ impl TextPass {
             overlay_cell_line_scratch: Vec::new(),
             overlay_bases: Vec::new(),
             overlay_base_scissors: Vec::new(),
-            last_popovers_epoch: 0,
+            last_popovers: None,
             last_overlay_atlas_epoch: 0,
             last_popover_scrolls: Vec::new(),
             region_instances,
@@ -1148,8 +1163,8 @@ impl TextPass {
         // An eviction bumps the epoch, so the window is rebuilt against the atlas
         // before it is drawn from again.
         let scroll_at = |index: usize| scroll.popovers.get(index).copied().unwrap_or(0.0);
-        let popovers_epoch = grid.popovers_epoch();
-        let pending_reused = popovers_epoch == self.last_popovers_epoch
+        let popovers = GridVersion::new(grid, grid.popovers_epoch());
+        let pending_reused = self.last_popovers == Some(popovers)
             && self.overlay_pending.len() == grid.overlays().len();
         if pending_reused {
             let pending = mem::take(&mut self.overlay_pending);
@@ -1162,7 +1177,11 @@ impl TextPass {
             self.overlay_pending = pending;
         } else {
             self.overlay_pending = self.rasterize_overlays(device, queue, grid);
-            self.last_popovers_epoch = popovers_epoch;
+            self.last_popovers = Some(popovers);
+            #[cfg(test)]
+            {
+                self.overlay_builds += 1;
+            }
         }
 
         // Off-grid text runs are screen-anchored. No grid or region scroll
@@ -1176,8 +1195,8 @@ impl TextPass {
         // The chrome the runs back changes rarely, so reuse the instances built
         // on an earlier frame while the run content and their atlas texels both
         // held. Such a frame skips the build and upload and keeps the counts.
-        let text_runs_epoch = grid.text_runs_epoch();
-        let runs_rebuilt = text_runs_epoch != self.last_text_run_epoch
+        let text_runs = GridVersion::new(grid, grid.text_runs_epoch());
+        let runs_rebuilt = self.last_text_runs != Some(text_runs)
             || self.atlas.content_epoch() != self.last_atlas_epoch;
         if runs_rebuilt {
             let epoch_at_build = self.atlas.content_epoch();
@@ -1203,8 +1222,12 @@ impl TextPass {
             self.build_run_rects_into(grid, &mut rects);
             self.run_rect_build_scratch = rects;
 
-            self.last_text_run_epoch = text_runs_epoch;
+            self.last_text_runs = Some(text_runs);
             self.last_atlas_epoch = self.atlas.content_epoch();
+            #[cfg(test)]
+            {
+                self.run_builds += 1;
+            }
         }
 
         let region = grid.scroll_region();
@@ -6001,6 +6024,156 @@ mod tests {
                 row_len(&fresh.region_row_instances)
             ),
             "the carried rows split by the rows they are on now"
+        );
+    }
+
+    /// A frame whose grid declares `text_runs` and `overlays` and nothing else,
+    /// for the gate tests, which read what a prepare rebuilt rather than what it
+    /// drew.
+    fn chrome_grid(text_runs: Vec<TextRun>, overlays: Vec<Overlay>) -> Grid {
+        let mut grid = Grid::new(4, 20);
+        grid.set_text_runs(text_runs);
+        grid.set_overlays(overlays);
+        grid
+    }
+
+    /// An idle whole-screen frame over a four-row grid.
+    fn chrome_frame() -> Frame<'static> {
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Full,
+            scrolled_rows: 0,
+        }
+    }
+
+    fn chrome_run(text: &str) -> TextRun {
+        TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(200, 200, 200),
+            bg: None,
+            text: text.into(),
+            seq: 0,
+        }
+    }
+
+    fn chrome_overlay(content: &str) -> Overlay {
+        Overlay {
+            top: 0,
+            left: 0,
+            width: 12,
+            height: 3,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: content.to_owned(),
+        }
+    }
+
+    /// The chrome the off-grid runs and the popovers back changes far more
+    /// rarely than frames are drawn, so a frame whose grid reports neither
+    /// moved must rebuild neither. Both builds are pure, so a count is the only
+    /// thing that separates a reuse from a rebuild producing the same bytes.
+    #[test]
+    fn an_unchanged_grid_rebuilds_neither_the_runs_nor_the_popovers() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("chrome reuse test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+        let grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        assert_eq!(
+            (pass.run_builds, pass.overlay_builds),
+            (1, 1),
+            "the second frame reuses what the first built",
+        );
+
+        let moved = chrome_grid(vec![chrome_run("xx")], vec![chrome_overlay("xx")]);
+        pass.prepare(&device, &queue, &moved, resolution, &frame, &[]);
+        assert_eq!(
+            (pass.run_builds, pass.overlay_builds),
+            (2, 2),
+            "a grid the pass has not seen rebuilds both",
+        );
+    }
+
+    /// The live screen and the scrollback window take turns through one pass,
+    /// and each grid counts only its own changes, so two of them meet on a count
+    /// routinely. A pass reading the count alone would hold one grid's off-grid
+    /// runs over the other for as long as the two agreed.
+    #[test]
+    fn a_second_grid_holding_the_same_run_count_is_not_the_first() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("text run grid test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+
+        // Declared by the same calls, so both counters land in the same place
+        // over runs of different lengths.
+        let first = chrome_grid(vec![chrome_run("x")], Vec::new());
+        let second = chrome_grid(vec![chrome_run("xxxxxxxx")], Vec::new());
+        assert_eq!(
+            first.text_runs_epoch(),
+            second.text_runs_epoch(),
+            "the fixture needs two grids that agree on their count",
+        );
+
+        pass.prepare(&device, &queue, &first, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &second, resolution, &frame, &[]);
+        assert_eq!(
+            pass.text_run_count, 8,
+            "the second grid's runs are the ones drawn",
+        );
+    }
+
+    /// The overlay glyphs and their bases are cached the same way the runs are,
+    /// and against a grid that likewise takes turns with another. See
+    /// [`a_second_grid_holding_the_same_run_count_is_not_the_first`].
+    #[test]
+    fn a_second_grid_holding_the_same_popover_count_is_not_the_first() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("popover grid test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+
+        // One overlay each, so the length check the reuse also makes cannot be
+        // what tells them apart.
+        let first = chrome_grid(Vec::new(), vec![chrome_overlay("x")]);
+        let second = chrome_grid(Vec::new(), vec![chrome_overlay("xxxxxxxx")]);
+        assert_eq!(
+            first.popovers_epoch(),
+            second.popovers_epoch(),
+            "the fixture needs two grids that agree on their count",
+        );
+
+        pass.prepare(&device, &queue, &first, resolution, &frame, &[]);
+        let one_glyph = pass.overlay_count;
+        pass.prepare(&device, &queue, &second, resolution, &frame, &[]);
+        assert_eq!(
+            (one_glyph, pass.overlay_count),
+            (1, 8),
+            "the second grid's overlay content is the one drawn",
         );
     }
 

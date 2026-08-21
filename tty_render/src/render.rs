@@ -2,7 +2,10 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
-use stoatty_term::{grid::Panel, term::Damage};
+use stoatty_term::{
+    grid::{Grid, Panel},
+    term::Damage,
+};
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
 
 pub mod background;
@@ -343,6 +346,46 @@ fn alloc_occluders(device: &Device, label: &'static str, capacity: usize) -> Buf
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+/// Which grid a cached build came from, and where the counter it was keyed on
+/// stood at the time.
+///
+/// One pass serves more than one grid: the live screen and the scrollback
+/// window take turns through the same renderer, and nothing invalidates a
+/// pass cache on the switch. Each grid counts only its own changes, so the two
+/// counters meet on a value routinely, and a cache keyed on a counter alone
+/// then reads one grid's decorations as the other's for as long as they agree.
+/// The grid's id is what tells the two apart.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct GridVersion {
+    grid: u64,
+    epoch: u64,
+}
+
+impl GridVersion {
+    /// `grid` as it stands with its `epoch` counter where it is now.
+    ///
+    /// The counter is passed rather than read here, because a grid carries one
+    /// per decoration kind and only the caller knows which one its cache is
+    /// keyed on.
+    pub(crate) fn new(grid: &Grid, epoch: u64) -> GridVersion {
+        GridVersion {
+            grid: grid.id(),
+            epoch,
+        }
+    }
+
+    /// Whether `other` names the same grid as this one, whatever their counters
+    /// say.
+    ///
+    /// For a cache holding more than the counter covers, such as per-item state
+    /// keyed on counters of its own. Those counters are the source grid's, so
+    /// they say nothing about another grid's, and the state built from them has
+    /// to go when the grid changes.
+    pub(crate) fn same_grid(&self, other: GridVersion) -> bool {
+        self.grid == other.grid
+    }
 }
 
 /// Whether `built` differs from what was last uploaded, and so has to be sent

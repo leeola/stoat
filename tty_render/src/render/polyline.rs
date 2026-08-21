@@ -7,8 +7,8 @@
 //! cell size, so a path tracks font zoom.
 
 use crate::render::{
-    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
-    PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, GridVersion, Occluder,
+    OccluderBuffer, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -99,20 +99,6 @@ struct Globals {
     _pad1: [u32; 2],
 }
 
-/// Which grid declared the paths the live instances were built from, and where
-/// that grid's [`Grid::polylines_epoch`] stood at the time.
-///
-/// The id rides along because one pass serves more than one grid: the live
-/// screen and the scrollback window take turns through it. Each counts only its
-/// own changes, so an epoch alone would call two unrelated path lists the same
-/// list whenever the two counts happened to meet, and the pass would draw one
-/// grid's lanes over the other.
-#[derive(Clone, Copy, PartialEq)]
-struct PathVersion {
-    grid: u64,
-    epoch: u64,
-}
-
 /// The instanced stroked-path pipeline and its per-frame buffers.
 pub struct PolylinePass {
     pipeline: RenderPipeline,
@@ -139,7 +125,7 @@ pub struct PolylinePass {
     /// An `Option` rather than a version starting at zero, because a fresh pass
     /// and a grid that has never declared a path both start there, and the first
     /// frame must build rather than trust a counter it has never read.
-    last_polylines: Option<PathVersion>,
+    last_polylines: Option<GridVersion>,
     /// Where a composited pool's segments are built, separate from [`Self::built`] so
     /// a pool draw leaves the live comparison intact.
     ///
@@ -361,10 +347,7 @@ impl PolylinePass {
         // cell size, so neither a surface resize nor a font zoom moves one. Only
         // the path list changing can, and the globals written above already
         // carry everything that does move.
-        let version = PathVersion {
-            grid: grid.id(),
-            epoch: grid.polylines_epoch(),
-        };
+        let version = GridVersion::new(grid, grid.polylines_epoch());
         if self.last_polylines == Some(version) {
             return;
         }

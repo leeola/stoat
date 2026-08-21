@@ -10,7 +10,7 @@
 //! ([`minimap_top`], [`thumb_geometry`], [`build_strip`]) is unit-tested without a
 //! GPU.
 
-use crate::render::{CellMetrics, Occluder};
+use crate::render::{CellMetrics, GridVersion, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Grid, LineSummary, Minimap, MinimapStrip, MinimapView, Rgb, Rgba};
 use wgpu::{
@@ -119,11 +119,12 @@ pub struct MinimapPass {
     /// The uniform last written, so an unchanged frame skips that write too.
     last_globals: Option<Globals>,
     metrics: CellMetrics,
-    /// The grid minimap epoch and resolution the current [`Self::strips`] and
-    /// instance buffer were built against. While both hold, the strips are
-    /// unchanged, so the rebuild and upload are skipped. `None` forces a rebuild,
-    /// set at construction and whenever the cell metrics change.
-    last_build: Option<(u64, [f32; 2])>,
+    /// The grid, its minimap epoch, and the resolution the current
+    /// [`Self::strips`] and instance buffer were built against. While all hold,
+    /// the strips are unchanged, so the rebuild and upload are skipped. `None`
+    /// forces a rebuild, set at construction and whenever the cell metrics
+    /// change.
+    last_build: Option<(GridVersion, [f32; 2])>,
     /// How many strips this pass has built since it was made.
     ///
     /// A build is a pure function of its inputs, so a kept strip's instances and
@@ -271,10 +272,11 @@ impl MinimapPass {
     ///
     /// The panel occluders and the globals uniform are rewritten every frame,
     /// since panels move independently of the strips. The strip instances rebuild
-    /// only when the grid's minimap epoch or the resolution changed. The epoch
-    /// bumps whenever the projection re-applies the strip list or their content
-    /// ([`Grid::minimap_epoch`]), so an unchanged epoch means the strips would
-    /// build byte-for-byte identically, and the reused buffer still holds.
+    /// only when the resolution changed, or the grid did, or its minimap epoch
+    /// moved. The epoch bumps whenever the projection re-applies the strip list
+    /// or their content ([`Grid::minimap_epoch`]), so an unchanged epoch on the
+    /// same grid means the strips would build byte-for-byte identically, and the
+    /// reused buffer still holds.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -303,10 +305,18 @@ impl MinimapPass {
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        if self.last_build == Some((grid.minimap_epoch(), resolution)) {
+        let built_from = GridVersion::new(grid, grid.minimap_epoch());
+        if self.last_build == Some((built_from, resolution)) {
             return;
         }
-        self.last_build = Some((grid.minimap_epoch(), resolution));
+
+        // A cached strip's content version is its own grid's write count, so it
+        // says nothing about the store another grid keeps under the same content
+        // id. Nothing per-strip carries over when the grid does not.
+        let grid_changed = !self
+            .last_build
+            .is_some_and(|(last, _)| last.same_grid(built_from));
+        self.last_build = Some((built_from, resolution));
 
         // The epoch moved, but it moves for any minimap change anywhere. Which
         // strips it moved for is what decides how much of this frame costs
@@ -317,7 +327,8 @@ impl MinimapPass {
         self.built.truncate(declared.len());
         for (index, strip) in declared.iter().enumerate() {
             let version = grid.minimap_content_version(strip.strip.content_id);
-            if let Some(state) = self.built.get(index)
+            if !grid_changed
+                && let Some(state) = self.built.get(index)
                 && state.declared == *strip
                 && state.content_version == version
             {
@@ -873,6 +884,87 @@ mod tests {
             pass.strips.len(),
             1,
             "a resolution change rebuilds the strips against the current grid"
+        );
+    }
+
+    /// The live screen and the scrollback window take turns through one pass,
+    /// and each grid counts only its own changes, so two of them meet on a
+    /// count routinely. A pass reading the count alone would hold one grid's
+    /// strips over the other for as long as the two agreed.
+    #[test]
+    fn a_second_grid_holding_the_same_count_is_not_the_first() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+
+        // Built by the same calls in the same order, so both counters land in
+        // the same place over different strip lists.
+        let mut first = Grid::new(12, 24);
+        first.set_minimaps(vec![strip(None)]);
+        first.set_minimap_contents(HashMap::from([(1, summaries(lines(4)))]));
+        let second = two_strip_grid(4, 4);
+        assert_eq!(
+            first.minimap_epoch(),
+            second.minimap_epoch(),
+            "the fixture needs two grids that agree on their count",
+        );
+
+        let resolution = [640.0, 480.0];
+        pass.prepare(&device, &queue, &first, &[], resolution);
+        pass.prepare(&device, &queue, &second, &[], resolution);
+        assert_eq!(
+            pass.strips.len(),
+            2,
+            "the second grid's strips are the ones drawn",
+        );
+    }
+
+    /// The per-strip cache under the epoch gate keys on the store's write count,
+    /// which is the declaring grid's own. Two grids agree on a strip and on that
+    /// count as readily as they agree on the epoch, so the cache has to go when
+    /// the grid does or it hands one grid's lines to the other.
+    #[test]
+    fn a_second_grid_reuses_no_strip_of_the_first() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+
+        // The same strip over stores of different heights, declared by the same
+        // calls, so the two grids agree on both counters the cache reads.
+        let content = |count: usize| {
+            let mut grid = Grid::new(12, 24);
+            grid.set_minimaps(vec![strip(None)]);
+            grid.set_minimap_contents(HashMap::from([(1, summaries(lines(count)))]));
+            grid
+        };
+        let first = content(2);
+        let second = content(6);
+        assert_eq!(
+            (
+                first.minimap_epoch(),
+                first.minimap_content_version(1),
+                first.minimaps()[0].clone(),
+            ),
+            (
+                second.minimap_epoch(),
+                second.minimap_content_version(1),
+                second.minimaps()[0].clone(),
+            ),
+            "the fixture needs two grids the cache cannot tell apart by its keys",
+        );
+
+        let resolution = [640.0, 480.0];
+        pass.prepare(&device, &queue, &first, &[], resolution);
+        let two_lines = pass.built[0].instances.len();
+        pass.prepare(&device, &queue, &second, &[], resolution);
+
+        // A strip's instances are its lines plus its background and its thumb.
+        assert_eq!(
+            (two_lines, pass.built[0].instances.len(), pass.builds),
+            (4, 8, 2),
+            "the second grid's lines are the ones built",
         );
     }
 
