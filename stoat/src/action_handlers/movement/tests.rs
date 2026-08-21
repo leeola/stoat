@@ -62,6 +62,79 @@ fn next_change_crosses_to_next_file_first_hunk() {
     );
 }
 
+/// `space g g` pins the goto chord so repeated `n` walks the changes until
+/// Escape. The walk crosses files, and the open that crosses swaps the pane's
+/// editor. A pin left on the old editor releases itself mid-walk.
+#[test]
+fn next_change_across_files_holds_the_goto_pin() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.set_diff_view(true);
+        set_cursor_row(editor, 1);
+    }
+    h.stoat.set_focused_mode("goto_pin".into());
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (focused_buffer_path(&h.stoat), h.stoat.focused_mode()),
+        (workdir.join("b.rs"), "goto_pin"),
+        "the walk crossed to b.rs and the pin came with it",
+    );
+}
+
+/// `a` inside the pinned chord swaps the editor the same way a cross-file `n`
+/// does, so the pin has to survive it too.
+#[test]
+fn last_accessed_holds_the_goto_pin() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join("a.rs"));
+    h.open_file(&workdir.join("b.rs"));
+    h.settle();
+    h.stoat.set_focused_mode("goto_pin".into());
+
+    dispatch(&mut h.stoat, &stoat_action::GotoLastAccessed);
+    h.settle();
+
+    assert_eq!(
+        (focused_buffer_path(&h.stoat), h.stoat.focused_mode()),
+        (workdir.join("a.rs"), "goto_pin"),
+        "the hop back to a.rs kept the pin",
+    );
+}
+
+/// Only a pinned chord carries. An unpinned mode belongs to the editor that
+/// held it, and moving one onto a fresh editor over a different buffer leaves
+/// the mode's own bookkeeping pointed at the buffer that just left.
+#[test]
+fn next_change_across_files_leaves_a_plain_mode_on_the_new_editor() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.set_diff_view(true);
+        set_cursor_row(editor, 1);
+    }
+    h.stoat.set_focused_mode("space_goto".into());
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (focused_buffer_path(&h.stoat), h.stoat.focused_mode()),
+        (workdir.join("b.rs"), "normal"),
+        "the new editor started fresh rather than inheriting space_goto",
+    );
+}
+
 /// The hop leaves the keypress with nothing but a scan armed, and lands
 /// when the pump picks the answer up.
 ///

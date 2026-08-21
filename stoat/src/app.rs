@@ -7195,6 +7195,21 @@ fn is_insert_run_mode(mode: &str) -> bool {
     mode == "insert"
 }
 
+/// Whether `mode` is a pinned chord, which holds until Escape rather than
+/// releasing after one key.
+///
+/// A pinned chord outlives the editor that was focused when the user entered
+/// it. `goto_pin` walks changes across files and `git_pin` stages hunks across
+/// them (config.stcfg:1137,1165), so both routinely hop to another file
+/// mid-chord, and the swap that opens it must not drop the mode.
+///
+/// Keyed on the `_pin` naming convention rather than a list, the way
+/// [`Stoat::in_select_mode`] keys on the `select_` prefix. A new pinned chord
+/// gets the behavior by being named for it.
+pub(crate) fn is_pinned_mode(mode: &str) -> bool {
+    mode.ends_with("_pin")
+}
+
 /// Visual columns a tab advances, for the column math in [`backspace_range`].
 /// Matches the editor's default render tab size.
 const TAB_WIDTH: usize = 4;

@@ -14,7 +14,7 @@ use crate::{
         file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump, read_open_content,
         OpenContent,
     },
-    app::{Stoat, UpdateEffect},
+    app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
     editor_state::{EditorId, EditorState},
@@ -313,6 +313,10 @@ fn finish_open(
 ///
 /// The displaced buffer becomes the pane's last accessed one, which is what
 /// [`goto_last_accessed`] switches back to.
+///
+/// A pinned mode on the displaced editor carries onto the new one, so a chord
+/// the user still holds survives the swap. Every other mode is dropped, since
+/// the new editor starts on a different buffer. See [`app::is_pinned_mode`].
 pub(crate) fn show_buffer_in_pane(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
@@ -332,13 +336,21 @@ pub(crate) fn show_buffer_in_pane(
         return Some(buffer_id);
     }
 
-    let editor = ws.seeded_editor(buffer_id, buffer, executor);
-    let new_editor_id = ws.editors.insert(editor);
-
     let old = match ws.panes.pane(target).view {
         View::Editor(eid) => Some(eid),
         _ => None,
     };
+    let carried_mode = old
+        .and_then(|eid| ws.editors.get(eid))
+        .map(|editor| editor.mode.clone())
+        .filter(|mode| app::is_pinned_mode(mode));
+
+    let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
+    if let Some(mode) = carried_mode {
+        editor.mode = mode;
+    }
+    let new_editor_id = ws.editors.insert(editor);
+
     // Read before the gc below, which is free to drop the outgoing editor.
     let outgoing = old
         .and_then(|eid| ws.editors.get(eid))
