@@ -9,6 +9,7 @@
 //! Every case skips with a message when no adapter answers, so a machine
 //! without a GPU still runs the rest of the suite.
 
+use std::cell::Cell;
 use stoatty_render::gpu::{
     build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
 };
@@ -61,20 +62,7 @@ fn setup() -> Option<Bench> {
     });
     let view = target.create_view(&TextureViewDescriptor::default());
 
-    let renderer = Renderer::new(
-        &device,
-        format,
-        [WIDTH, HEIGHT],
-        build_font_system(),
-        FontConfig {
-            size: 15,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        Rgb::new(0, 0, 0),
-        Rgb::new(217, 217, 217),
-    );
+    let renderer = build_renderer(&device);
 
     let (rows, cols) = renderer.grid_size();
     let mut grid = Grid::new(rows, cols);
@@ -87,6 +75,24 @@ fn setup() -> Option<Bench> {
         renderer,
         grid,
     })
+}
+
+/// A renderer over the standard bench target, with its caches empty.
+fn build_renderer(device: &Device) -> Renderer {
+    Renderer::new(
+        device,
+        TextureFormat::Rgba8Unorm,
+        [WIDTH, HEIGHT],
+        build_font_system(),
+        FontConfig {
+            size: 15,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        Rgb::new(0, 0, 0),
+        Rgb::new(217, 217, 217),
+    )
 }
 
 /// Fill every cell with printable text in a repeating color cycle, so the text
@@ -182,11 +188,31 @@ fn add_chrome(grid: &mut Grid) {
 
 /// Draw one frame over `damage` and wait for it to finish.
 fn draw(bench: &mut Bench, damage: &Damage) {
-    bench.renderer.render_into(
+    render_frame(
+        &mut bench.renderer,
         &bench.device,
         &bench.queue,
         &bench.view,
         &bench.grid,
+        damage,
+    );
+    let _ = bench.device.poll(PollType::wait_indefinitely());
+}
+
+/// Encode and submit one frame, leaving the wait to the caller.
+fn render_frame(
+    renderer: &mut Renderer,
+    device: &Device,
+    queue: &Queue,
+    view: &TextureView,
+    grid: &Grid,
+    damage: &Damage,
+) {
+    renderer.render_into(
+        device,
+        queue,
+        view,
+        grid,
         Frame {
             cursor: Some([0.0, 0.0]),
             cursor_corners: Some([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
@@ -202,7 +228,6 @@ fn draw(bench: &mut Bench, damage: &Damage) {
             scrolled_rows: 0,
         },
     );
-    let _ = bench.device.poll(PollType::wait_indefinitely());
 }
 
 /// Announce the skip once per case, so an adapter-less run says why it reported
@@ -220,6 +245,80 @@ fn full_damage_text(bencher: divan::Bencher<'_, '_>) {
         return;
     };
     bencher.bench_local(|| draw(&mut bench, &Damage::Full));
+}
+
+/// A screenful of prose no run has been shaped for, which is what a fling
+/// through scrollback costs.
+///
+/// The renderer stays warm across iterations and the content does not: every
+/// frame draws lines the shape cache has never seen, spelled from letters the
+/// glyph atlas already holds. That is a fling exactly. The cases above all
+/// redraw text that was already shaped, so this is the only one whose cost
+/// includes shaping at all.
+///
+/// It reports a whole frame, not the shaping inside it. The body waits for the
+/// GPU, and at this surface size that wait covers the CPU work, so a change
+/// that only moves shaping cost does not move this number. Counting what gets
+/// shaped is what shows that; timing a frame is what shows whether it matters.
+#[divan::bench]
+fn fresh_rows(bencher: divan::Bencher<'_, '_>) {
+    let Some(bench) = setup() else {
+        skipped("fresh_rows");
+        return;
+    };
+    let Bench {
+        device,
+        queue,
+        view,
+        mut renderer,
+        ..
+    } = bench;
+    let (rows, cols) = renderer.grid_size();
+
+    // One frame of the same shape fills the atlas, so the timed frames rasterize
+    // no glyph for the first time.
+    render_frame(
+        &mut renderer,
+        &device,
+        &queue,
+        &view,
+        &prose_grid(rows, cols, 0),
+        &Damage::Full,
+    );
+    let _ = device.poll(PollType::wait_indefinitely());
+
+    let frame = Cell::new(1usize);
+    bencher
+        .with_inputs(|| {
+            let at = frame.get();
+            frame.set(at + 1);
+            prose_grid(rows, cols, at)
+        })
+        .bench_local_refs(|grid| {
+            render_frame(&mut renderer, &device, &queue, &view, grid, &Damage::Full);
+            let _ = device.poll(PollType::wait_indefinitely());
+        });
+}
+
+/// A screen of numbered source-like prose, as though `frame` screenfuls had
+/// already scrolled past.
+///
+/// The rows share every word but the number that leads them, which is what
+/// scrollback is: lines novel as wholes and almost entirely familiar as words.
+fn prose_grid(rows: usize, cols: usize, frame: usize) -> Grid {
+    const TAIL: &str = " fn handle_event(ev) -> Result<()> { self.dispatch(ev)?; }";
+
+    let mut grid = Grid::new(rows, cols);
+    for row in 0..rows {
+        let line = format!("line {:07}{TAIL}", frame * rows + row);
+        let mut chars = line.chars();
+        for col in 0..cols {
+            let cell = grid.get_mut(row, col);
+            cell.ch = chars.next().unwrap_or(' ');
+            cell.fg = Rgb::new(200, 200, 180);
+        }
+    }
+    grid
 }
 
 /// The same screen with the chrome passes drawing too.

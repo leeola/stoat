@@ -114,11 +114,11 @@ const TAB_WIDTH: u16 = 8;
 
 /// The number of shaped runs the cache holds before it evicts to make room.
 ///
-/// A screenful of distinct ligature runs is a few hundred, so this holds
-/// several screens of scrolled-past content and still bounds the cache at a
-/// couple of megabytes of run text and glyph vectors. A stream of unique runs,
-/// which is what log, hex, and UUID output is, settles here and evicts rather
-/// than growing.
+/// A run is one word, and a screenful of distinct words is under a thousand,
+/// so this holds several screens of scrolled-past content and still bounds the
+/// cache at a couple of megabytes of run text and glyph vectors. A stream of
+/// unique words, which is what log, hex, and UUID output is, settles here and
+/// evicts rather than growing.
 const RUN_SHAPE_CACHE_CAP: usize = 4096;
 
 /// Shape `text` as one run, reusing an identical run's glyphs from `cache`.
@@ -177,6 +177,28 @@ pub(super) struct RunShapeCache {
     /// insert so a fresh run gets a full pass around the ring before it is
     /// considered.
     hand: usize,
+}
+
+#[cfg(test)]
+impl RunShapeCache {
+    /// Every run text held, sorted, so a caller can assert what was shaped
+    /// rather than only how much was.
+    pub(super) fn cached_texts(&self) -> Vec<String> {
+        let mut texts: Vec<String> = self.at.keys().map(|key| key.to_string()).collect();
+        texts.sort();
+        texts
+    }
+
+    /// The glyphs held for `text`, or `None` when it was never shaped.
+    pub(super) fn cached_glyphs(&self, text: &str) -> Option<&[(usize, CacheKey)]> {
+        self.at.get(text).map(|&slot| &self.runs[slot].glyphs[..])
+    }
+
+    /// Characters shaped to fill this cache, which is the work a screen of text
+    /// costs: every distinct run is shaped exactly once.
+    pub(super) fn shaped_chars(&self) -> usize {
+        self.at.keys().map(|key| key.chars().count()).sum()
+    }
 }
 
 impl RunShapeCache {

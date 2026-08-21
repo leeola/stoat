@@ -4284,7 +4284,7 @@ mod tests {
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        TextureFormat,
+        Device, Queue, TextureFormat,
     };
 
     /// A partial damage marking each flagged row over its whole width, for a
@@ -4979,14 +4979,14 @@ mod tests {
     }
 
     /// A text pass on the headless device, or `None` when no adapter is present.
-    fn headless_text_pass() -> Option<(wgpu::Device, wgpu::Queue, TextPass)> {
+    fn headless_text_pass() -> Option<(Device, Queue, TextPass)> {
         headless_text_pass_font(16)
     }
 
     /// A text pass at `font_size` on the headless device, or `None` when no
     /// adapter is present. A large size makes a small glyph burst overflow the
     /// initial atlas and force a grow.
-    fn headless_text_pass_font(font_size: u32) -> Option<(wgpu::Device, wgpu::Queue, TextPass)> {
+    fn headless_text_pass_font(font_size: u32) -> Option<(Device, Queue, TextPass)> {
         let (device, queue) = headless_device()?;
         let pass = TextPass::new(
             &device,
@@ -5003,6 +5003,111 @@ mod tests {
         for (col, ch) in text.chars().enumerate() {
             grid.get_mut(row, col).ch = ch;
         }
+    }
+
+    /// Rasterize `rows` as a grid wide enough to hold the longest of them, so a
+    /// caller can then read what the pass's run cache was filled with.
+    fn rasterize_rows(pass: &mut TextPass, device: &Device, queue: &Queue, rows: &[&str]) {
+        let cols = rows
+            .iter()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut grid = Grid::new(rows.len().max(1), cols.max(1));
+        for (row, text) in rows.iter().enumerate() {
+            fill_row(&mut grid, row, text);
+        }
+
+        let covers = |_: char| true;
+        let family = Some("JetBrains Mono".to_owned());
+        let shaping = RowShaping {
+            primary: font::shape_family(family.as_deref()),
+            covers: &covers,
+            cursor_cell: None,
+        };
+        let mut pending = Vec::new();
+        for row in 0..rows.len() {
+            pass.rasterize_row(device, queue, &grid, row, &shaping, &mut pending);
+        }
+    }
+
+    /// A run is one word, so a row of several words fills the cache with each of
+    /// them rather than with the row.
+    ///
+    /// This is the whole point of the split: keyed on the row, one novel token
+    /// would miss the line, and a scrollback line is novel as a whole far more
+    /// often than its words are.
+    #[test]
+    fn a_row_caches_one_run_per_word() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("run split test: no wgpu adapter available, skipping");
+            return;
+        };
+        rasterize_rows(&mut pass, &device, &queue, &["a => b => a"]);
+
+        assert_eq!(
+            pass.run_shape_cache.cached_texts(),
+            ["=>", "a", "b"],
+            "the row cached its distinct words, and the repeats reused them"
+        );
+    }
+
+    /// A ligature still forms inside a word, so the split cost none. The `=>`
+    /// glyphs a mixed row shapes are the ones a row holding only `=>` shapes.
+    #[test]
+    fn a_word_shapes_its_ligature_the_same_beside_other_words() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("ligature split test: no wgpu adapter available, skipping");
+            return;
+        };
+        rasterize_rows(&mut pass, &device, &queue, &["a => b => a"]);
+        let beside_words = pass
+            .run_shape_cache
+            .cached_glyphs("=>")
+            .expect("the arrow was cached")
+            .to_vec();
+
+        let Some((device, queue, mut alone)) = headless_text_pass() else {
+            return;
+        };
+        rasterize_rows(&mut alone, &device, &queue, &["=>"]);
+
+        assert_eq!(
+            beside_words,
+            alone
+                .run_shape_cache
+                .cached_glyphs("=>")
+                .expect("the lone arrow was cached"),
+            "the arrow shapes to the same glyphs with or without words beside it"
+        );
+    }
+
+    /// The work a screen of prose costs, counted rather than timed: every
+    /// distinct run is shaped exactly once, so the characters the cache holds
+    /// are the characters that were shaped.
+    ///
+    /// Scrollback lines repeat each other's words and not each other, which is
+    /// why keying on words is worth doing at all. Twenty lines differing only in
+    /// the number that leads them shape their shared words once.
+    #[test]
+    fn a_screen_of_prose_shapes_only_its_distinct_words() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("prose shaping test: no wgpu adapter available, skipping");
+            return;
+        };
+        let rows: Vec<String> = (0..20)
+            .map(|row| format!("line {row:04} fn handle_event(ev) -> Result<()>"))
+            .collect();
+        let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+        rasterize_rows(&mut pass, &device, &queue, &borrowed);
+
+        let shaped = pass.run_shape_cache.shaped_chars();
+        let on_screen: usize = rows.iter().map(|row| row.chars().count()).sum();
+        assert!(
+            shaped * 4 < on_screen,
+            "{shaped} characters shaped for {on_screen} on screen, which is no better than \
+             shaping every row whole"
+        );
     }
 
     /// A glyph's stored placement builds the same instance a fresh lookup would,
@@ -5303,8 +5408,8 @@ mod tests {
     /// current atlas, so none were left frozen at a pre-grow atlas size.
     fn assert_composite_runs_healed(
         pass: &mut TextPass,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: &Device,
+        queue: &Queue,
         grid: &Grid,
     ) {
         let fresh = pass.build_text_run_instances(device, queue, grid, [0.0; 2], 0);
