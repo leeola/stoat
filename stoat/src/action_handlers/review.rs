@@ -3305,6 +3305,60 @@ mod tests {
         );
     }
 
+    /// Staging moves the index, which is one of the two sides the gutter reads,
+    /// so the map computed before it no longer describes what is on screen.
+    #[test]
+    fn stage_hunk_stales_the_diff_map() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        h.seed_current_diff_map("a\nb\nc\nd\n");
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+        }
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the map starts current, so staling it is the stage's doing",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the index moved, so the map is owed a recompute",
+        );
+    }
+
+    /// The line funnel writes the index too, and it is a second call site, so
+    /// it stales the map on its own.
+    #[test]
+    fn stage_line_stales_the_diff_map() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        h.seed_current_diff_map("a\nb\nc\nd\n");
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+        }
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the map starts current, so staling it is the stage's doing",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "one staged line moves the index the same way a hunk does",
+        );
+    }
+
     /// A review base makes the checked-out commit the staged side, so the line
     /// keys reach it through the amend transport. The index is not on screen
     /// there, and an index write changes a thing the user never sees.

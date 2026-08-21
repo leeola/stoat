@@ -991,6 +991,20 @@ impl TestHarness {
         editor::seed_focused_buffer(&mut self.stoat, text);
     }
 
+    /// Install a diff map against `base` on the focused buffer, recorded as
+    /// computed for that buffer's current version so it reads as current.
+    ///
+    /// A test that wants to observe a map going stale has to start from a
+    /// current one, and neither settling nor the synchronous install produces
+    /// one for a file with a language. That install is line-only by design: it
+    /// skips the base parse the background pass owes, so the map it leaves is
+    /// genuinely incomplete and every reader is right to treat it as stale.
+    ///
+    /// Panics if the focused pane is not an editor.
+    pub(crate) fn seed_current_diff_map(&mut self, base: &str) {
+        editor::seed_current_diff_map(&mut self.stoat, base);
+    }
+
     /// Publish `diagnostics` for `path` as one unnamed server would, resolving
     /// each span against the buffer open there.
     ///

@@ -812,6 +812,28 @@ mod tests {
         );
     }
 
+    /// The amend stales the buffer's diff map. The map on screen was computed
+    /// against the commit the amend replaced, so its gutter keeps marking a
+    /// hunk the commit no longer carries until something recomputes it.
+    #[test]
+    fn an_amend_stales_the_diff_map() {
+        let mut h = walking_the_tip();
+        h.seed_current_diff_map("a\nb\nc\n");
+        cursor_to(&mut h, 2);
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the map starts current, so staling it is the amend's doing",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the map was computed against a commit that no longer exists",
+        );
+    }
+
     /// The cursor's offset into the hunk is what picks its counterpart. On the
     /// second row of a two-row hunk the base's second line is what comes back,
     /// not the first one the hunk happens to start at.

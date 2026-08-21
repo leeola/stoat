@@ -6,7 +6,7 @@ use crate::{
     selection::SelectionsCollection,
     View,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
 
 /// Append `text` at offset 0 in the focused editor's buffer, then re-seed the
@@ -33,6 +33,31 @@ pub(crate) fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
     let editor = &mut ws.editors[editor_id];
     let snapshot = editor.display_map.snapshot();
     editor.selections.seed_cursor(snapshot.buffer_snapshot());
+}
+
+/// Install a diff map against `base` on the focused buffer, recorded as
+/// computed for that buffer's current version. See
+/// [`crate::test_harness::TestHarness::seed_current_diff_map`].
+pub(crate) fn seed_current_diff_map(stoat: &mut Stoat, base: &str) {
+    let buffer_id = stoat.focused_editor_ids().expect("focused editor").1;
+    let text = {
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        editor
+            .display_map
+            .snapshot()
+            .buffer_snapshot()
+            .rope()
+            .to_string()
+    };
+
+    let diff_map = crate::diff_map::DiffMap::from_structural_changes(
+        stoat_language::structural_diff::diff(base, &text),
+        Arc::new(base.to_string()),
+        &text,
+    );
+    stoat
+        .active_workspace_mut()
+        .install_test_diff_map(buffer_id, diff_map);
 }
 
 /// Block-cursor cell (via [`cursor_offset`]) for each selection in the focused
