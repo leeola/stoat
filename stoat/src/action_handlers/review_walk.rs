@@ -2,10 +2,15 @@ use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
+    host::CommitInfo,
     review_session::ReviewSession,
     review_walk::{ReturnRef, ReviewWalk},
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// Commits the picker loads for a ref. Bounds the eager walk on a long
 /// history without paging, which fuzzy filtering could not work across.
@@ -329,24 +334,67 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
     let mut commits = picker.commits[..=base_idx].to_vec();
     commits.reverse();
 
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        return review_error(stoat, "not in a git repository", None);
-    };
-    if repo.has_tracked_changes() {
-        return dirty_tree_error(stoat);
-    }
-    let return_ref = match repo.head_branch() {
-        Some(branch) => ReturnRef::Branch(branch),
-        None => match repo.resolve_rev("HEAD") {
-            Some(sha) => ReturnRef::Detached(sha),
-            None => return review_error(stoat, "cannot resolve HEAD", None),
-        },
+    let return_ref = match walk_return_ref(stoat, &workdir) {
+        Ok(return_ref) => return_ref,
+        Err(refused) => return refused,
     };
 
+    // Closed only now. A refusal above leaves the picker up, so the base the
+    // user picked is still selected when they come back to it.
     commit_picker_close(stoat);
     stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
         workdir,
         commits,
+        cursor: 0,
+        return_ref,
+    });
+    walk_navigate(stoat)
+}
+
+/// Where a walk over `workdir` must put HEAD back, or the effect that refuses
+/// to start one.
+///
+/// Captured before anything detaches, because afterwards there is no way to
+/// tell whether the user was on a branch or already detached, and reattaching
+/// someone who was detached would move a branch they never asked to move.
+///
+/// A tree with tracked changes refuses. A walk checks commits out, so starting
+/// one over uncommitted work would either lose it or leave the checkout half
+/// applied.
+fn walk_return_ref(stoat: &mut Stoat, workdir: &Path) -> Result<ReturnRef, UpdateEffect> {
+    let Some(repo) = stoat.git_host.discover(workdir) else {
+        return Err(review_error(stoat, "not in a git repository", None));
+    };
+    if repo.has_tracked_changes() {
+        return Err(dirty_tree_error(stoat));
+    }
+    match repo.head_branch() {
+        Some(branch) => Ok(ReturnRef::Branch(branch)),
+        None => match repo.resolve_rev("HEAD") {
+            Some(sha) => Ok(ReturnRef::Detached(sha)),
+            None => Err(review_error(stoat, "cannot resolve HEAD", None)),
+        },
+    }
+}
+
+/// Start a walk over `commit` alone and land on it.
+///
+/// The commits view opens a commit this way. A walk of one steps nowhere, but
+/// it carries the same checkout and the same return ref, so `:done` puts the
+/// tree back exactly as it does for a walk over many.
+pub(super) fn walk_one_commit(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    commit: CommitInfo,
+) -> UpdateEffect {
+    let return_ref = match walk_return_ref(stoat, &workdir) {
+        Ok(return_ref) => return_ref,
+        Err(refused) => return refused,
+    };
+
+    stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+        workdir,
+        commits: vec![commit],
         cursor: 0,
         return_ref,
     });

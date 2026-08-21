@@ -146,11 +146,11 @@ define_action!(
     CommitsOpenReview,
     "CommitsOpenReview",
     ActionKind::CommitsOpenReview,
-    "open the selected commit in review",
-    "Open a review session over the currently selected commit. The \
-     session is read-only (ReviewApplyStaged is a no-op for commit \
-     sources); use the separate `ReviewRemoveSelected` action to \
-     actually remove staged hunks from the commit. Closing the review \
-     returns to commits mode.",
+    "check the selected commit out and diff it",
+    "Check the selected commit out and open a diff of it against its \
+     parent, so the files on disk are the commit and the diff on screen \
+     is what it changed. A working tree with uncommitted changes refuses, \
+     since the checkout would have to overwrite it. Run `:done` to put \
+     HEAD back where it was.",
     ActionPriority::Rare
 );

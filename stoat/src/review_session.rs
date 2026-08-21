@@ -296,22 +296,6 @@ impl ReviewViewState {
     }
 }
 
-/// What surface the review was opened from, used to decide where
-/// `CloseReview` should land the user (normal mode vs. back to the
-/// commit-list view).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ReviewOrigin {
-    /// Opened directly from normal mode (e.g. `Diff` or
-    /// `OpenReviewCommit` from the palette). `CloseReview` returns to
-    /// normal mode.
-    #[default]
-    Standalone,
-    /// Opened from a `CommitsOpenReview` dispatch while the user was in
-    /// commits mode. `CloseReview` restores commits mode with the
-    /// previously selected commit still highlighted.
-    FromCommits,
-}
-
 // FIXME: Per-chunk Staged/Unstaged/Skipped status not persisted across
 // workspace save/load. [`ReviewChunkId`] is allocated fresh per session, so we
 // cannot simply serialize the HashMap keyed on it. Resolution: assign each
@@ -351,8 +335,6 @@ pub(crate) struct ReviewSession {
     /// not moved, so the parses carry over while the buffers reparse. Scoped
     /// to the session because that is the span over which a base repeats.
     tree_cache: TreeCache,
-    /// Where the user launched this review from; consulted on close.
-    pub origin: ReviewOrigin,
     /// Filesystem-watch tokens covering each path in [`Self::files`].
     /// Populated only when [`Self::source`] is
     /// [`ReviewSource::WorkingTree`]; other sources skip watching
@@ -375,7 +357,6 @@ impl ReviewSession {
             stashed_display_row: None,
             version: 0,
             tree_cache: TreeCache::default(),
-            origin: ReviewOrigin::Standalone,
             watch_tokens: Vec::new(),
             next_id: 0,
         }

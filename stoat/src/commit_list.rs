@@ -253,7 +253,7 @@ mod tests {
         app::Stoat,
         host::GitHost,
         review_session::{ReviewSession, ReviewSource},
-        test_harness::CommitSpec,
+        test_harness::{CommitSpec, TestHarness},
     };
     use std::{path::PathBuf, sync::Arc};
 
@@ -404,44 +404,80 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_commits_open_review_readonly() {
+    fn snapshot_commit_review_readonly() {
         let mut h = Stoat::test();
         h.resize(90, 16);
         h.seed_linear_history("/repo", HISTORY);
-        h.open_commits("/repo");
-        h.type_keys("o");
-        h.assert_snapshot("commits_open_review_readonly");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.open_commit_review("/repo", "c1000003");
+        h.assert_snapshot("commit_review_readonly");
     }
 
+    /// Enter checks the selected commit out and shows what it changed.
+    ///
+    /// The commit list used to open a read-only screen over the commit, which
+    /// left the files on disk somewhere else entirely. Checking out means the
+    /// buffers are the commit, so the reader can move through it as code
+    /// instead of as a rendering of a diff.
     #[test]
-    fn close_review_from_commits_returns_to_commits_mode() {
+    fn enter_walks_to_the_selected_commit() {
         let mut h = Stoat::test();
         h.resize(90, 16);
         h.seed_linear_history("/repo", HISTORY);
+        h.fake_fs()
+            .insert_file("/repo/a.rs", b"fn a() {}\nfn a2() {}\n");
+        h.fake_fs().insert_file("/repo/b.rs", b"fn b() {}\n");
         h.open_commits("/repo");
-        h.type_keys("j"); // select second commit
-        h.type_keys("o"); // open review of it
-        assert_eq!(h.stoat.current_view(), Some("review"));
-        let session_sha = match h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .map(|s| s.source.clone())
-        {
-            Some(ReviewSource::Commit { sha, .. }) => sha,
-            other => panic!("expected Commit source, got {other:?}"),
-        };
-        assert_eq!(session_sha, "c1000002");
-        h.type_keys("q"); // close review
-        assert_eq!(h.stoat.current_view(), Some("commits"));
-        let state = h
-            .stoat
-            .active_workspace()
-            .commits
-            .as_ref()
-            .expect("commits state preserved");
-        assert_eq!(state.selected, 1);
+        h.type_keys("j"); // select the middle commit
+        h.type_keys("Enter");
+        h.settle();
+
+        let panes = &h.stoat.active_workspace().panes;
+        assert_eq!(
+            (
+                h.fake_git().checkouts(std::path::Path::new("/repo")),
+                diff_base(&h),
+                panes.pane(panes.focus()).diff_mode,
+            ),
+            (
+                vec!["detached:c1000002".to_string()],
+                Some(Some("c1000001".to_string())),
+                true,
+            ),
+            "the tree is the commit and the diff reads against its parent",
+        );
+    }
+
+    /// A tree with uncommitted work refuses, because the checkout would have to
+    /// overwrite it. Nothing moves: not HEAD, not the base, not the view.
+    #[test]
+    fn a_dirty_tree_refuses_to_walk_from_commits() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history("/repo", HISTORY);
+        h.fake_git()
+            .add_repo("/repo")
+            .modified("a.rs", "fn a() {}\n", "fn a() { edited }\n");
+        h.open_commits("/repo");
+        h.type_keys("Enter");
+        h.settle();
+
+        assert_eq!(
+            (
+                h.fake_git().checkouts(std::path::Path::new("/repo")),
+                diff_base(&h),
+                dirty_badge(&h),
+            ),
+            (Vec::new(), None, Some("uncommitted changes".to_string()),),
+            "nothing was checked out and no base was installed",
+        );
+    }
+
+    fn diff_base(h: &TestHarness) -> Option<Option<String>> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(crate::workspace::diff::DiffBase::Rev { sha }) => Some(sha.clone()),
+            _ => None,
+        }
     }
 
     #[test]
@@ -459,8 +495,7 @@ mod tests {
                 "feat: drop this hunk",
                 &[("a.rs", "one\ntwo_NEW\nthree\n")],
             );
-        h.open_commits("/repo");
-        h.type_keys("o");
+        h.open_commit_review("/repo", "head");
         assert_eq!(h.stoat.current_view(), Some("review"));
 
         // Stage the only chunk then dispatch removal.
@@ -472,14 +507,14 @@ mod tests {
         assert_eq!(amends[0].old_head, "head");
         assert_eq!(amends[0].new_head, "amended-head-1");
 
-        // The rewritten commit now matches its parent exactly (the only
-        // modification was reverted), so scan_commit produces no
-        // session and `close_review` bounces us back to commits mode.
+        // The rewritten commit now matches its parent exactly, since the only
+        // modification was reverted, so the re-scan finds nothing to show and
+        // the review closes rather than sitting there empty.
         assert!(h.stoat.active_workspace().review.is_none());
-        assert_eq!(h.stoat.current_view(), Some("commits"));
+        assert_eq!(h.stoat.current_view(), Some("file"));
     }
 
-    fn dirty_badge(h: &crate::test_harness::TestHarness) -> Option<String> {
+    fn dirty_badge(h: &TestHarness) -> Option<String> {
         use crate::badge::BadgeSource;
         let ws = h.stoat.active_workspace();
         ws.badges
@@ -488,10 +523,14 @@ mod tests {
             .map(|b| b.label.clone())
     }
 
-    fn staged_head_review(h: &mut crate::test_harness::TestHarness) {
+    /// A read-only review of HEAD with its only chunk staged.
+    ///
+    /// Opened through the action rather than through the commits view, which
+    /// checks the commit out and shows a diff instead. What the callers below
+    /// exercise is what the review does to a commit, not how it was reached.
+    fn staged_head_review(h: &mut TestHarness) {
         use crate::review_session::ChunkStatus;
-        h.open_commits("/repo");
-        h.type_keys("o");
+        h.open_commit_review("/repo", "head");
         assert_eq!(h.stoat.current_view(), Some("review"));
         h.set_review_status(0, ChunkStatus::Staged);
     }
@@ -564,13 +603,7 @@ mod tests {
             .commit_with_message("c1", "init", &[("a.rs", "line1\n")])
             .commit_with_parent_message("c2", "c1", "middle", &[("a.rs", "line1\nM\n")])
             .commit_with_parent_message("c3", "c2", "tip", &[("a.rs", "line1\nM\nN\n")]);
-        h.open_commits("/repo");
-        h.type_keys("j"); // move to "middle"
-        assert_eq!(
-            h.stoat.active_workspace().commits.as_ref().unwrap().commits[1].sha,
-            "c2"
-        );
-        h.type_keys("o");
+        h.open_commit_review("/repo", "c2");
         h.set_review_status(0, ChunkStatus::Staged);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
 
@@ -614,9 +647,7 @@ mod tests {
             .commit_with_parent_message("c3", "c2", "tip", &[("a.rs", "line1\nM\nN\n")])
             .simulate_conflict_at("c3");
 
-        h.open_commits("/repo");
-        h.type_keys("j"); // select "c2"
-        h.type_keys("o");
+        h.open_commit_review("/repo", "c2");
         h.set_review_status(0, ChunkStatus::Staged);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
 
@@ -657,8 +688,7 @@ mod tests {
             .unstaged_file("a.rs", "something else\n");
         h.stoat.active_workspace_mut().git_root = workdir.clone();
 
-        h.open_commits(workdir.clone());
-        h.type_keys("o");
+        h.open_commit_review(workdir.clone(), "head");
         h.set_review_status(0, ChunkStatus::Staged);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
 
@@ -681,8 +711,7 @@ mod tests {
         h.fake_git
             .add_repo("/repo")
             .commit_with_message("head", "only", &[("a.rs", "only\n")]);
-        h.open_commits("/repo");
-        h.type_keys("o");
+        h.open_commit_review("/repo", "head");
         // No status change; dispatch anyway.
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
         assert!(h
@@ -703,8 +732,7 @@ mod tests {
         let mut h = Stoat::test();
         h.resize(90, 16);
         h.seed_linear_history("/repo", HISTORY);
-        h.open_commits("/repo");
-        h.type_keys("o");
+        h.open_commit_review("/repo", "c1000003");
         assert_eq!(h.stoat.current_view(), Some("review"));
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewApplyStaged);

@@ -282,21 +282,13 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 fn reopen_review_on_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
-    let origin = stoat
-        .active_workspace()
-        .review
-        .as_ref()
-        .map(|s| s.origin)
-        .unwrap_or_default();
     match scan_commit(stoat, workdir, sha) {
-        Some(mut session) => {
-            session.origin = origin;
+        Some(session) => {
             install_review_session(stoat, session);
         },
         _ => {
-            // Rewritten commit has no diffs vs. parent. Drop the review;
-            // `close_review` routes back to commits mode if that's where the
-            // user launched from.
+            // A rewritten commit with no diffs against its parent has nothing
+            // to show, so the review goes rather than sitting there empty.
             close_review(stoat);
         },
     }
@@ -342,45 +334,13 @@ pub(super) fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Op
 }
 
 pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::review_session::ReviewOrigin;
-
-    let Some((workdir, sha)) = stoat.active_workspace().commits.as_ref().and_then(|s| {
-        s.selected_sha()
-            .map(|sha| (s.workdir.clone(), sha.to_string()))
+    let Some((workdir, commit)) = stoat.active_workspace().commits.as_ref().and_then(|state| {
+        let commit = state.commits.get(state.selected)?;
+        Some((state.workdir.clone(), commit.clone()))
     }) else {
         return UpdateEffect::None;
     };
-    open_commit_review(stoat, workdir, sha, ReviewOrigin::FromCommits)
-}
-
-/// Open a review session diffing `sha` against its first parent, tagged with
-/// `origin` so `CloseReview` knows where to return the user.
-///
-/// The scan runs off the event loop and installs the session when it lands, so
-/// this returns as soon as the work is queued.
-pub(super) fn open_commit_review(
-    stoat: &mut Stoat,
-    workdir: std::path::PathBuf,
-    sha: String,
-    origin: crate::review_session::ReviewOrigin,
-) -> UpdateEffect {
-    let git_host = stoat.git_host.clone();
-    let langs = stoat.language_registry.clone();
-
-    spawn_review_scan(stoat, None, false, move |tx, redraw, cancel| {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Some(mut session) = scan_commit_pure(&*git_host, &langs, &workdir, &sha) {
-            session.origin = origin;
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            let _ = tx.send(ReviewScanMsg::Complete(session));
-            redraw.notify_one();
-        }
-    });
-    UpdateEffect::Redraw
+    super::review_walk::walk_one_commit(stoat, workdir, commit)
 }
 
 pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
