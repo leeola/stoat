@@ -109,13 +109,17 @@ pub(crate) fn emit_config_reload(stoat: &Stoat) {
 
 /// Claim the platform zoom combo from the hosting terminal, or release it.
 ///
-/// While claimed the terminal forwards each press as a
-/// [`WindowIpcEvent::Zoom`] instead of stepping its own font size, which is
-/// what lets the combo mean whatever the current context calls for.
+/// While claimed the terminal delivers each press here instead of stepping its
+/// own font size, which is what lets the combo mean whatever the current
+/// context calls for.
+///
+/// The claim asks for the press in band, as CSI-u down the pty. That is the one
+/// route to a stoat running on the far end of a link, where the window socket
+/// the terminal would otherwise use names a path on the wrong machine. A
+/// terminal predating the mode ignores the request and forwards over the socket
+/// as it always did, which is the same claim honored the older way.
 ///
 /// [`Stoat::sync_zoom_claim`] decides when to call this and holds the reason.
-/// A claim outlives no more than the window socket carrying the presses
-/// back, so it is not a once-per-session send.
 ///
 /// A no-op until [`Stoat::stoatty`] confirms a listener, since under any
 /// other terminal the combo never reaches stoat at all and that terminal
@@ -126,8 +130,7 @@ pub(crate) fn emit_zoom_capture(stoat: &Stoat, on: bool) {
     };
 
     let mut out = Vec::new();
-    // Socket delivery, which is the route this claim is gated on above.
-    stoatty_protocol::command::encode_zoom_capture_into(&mut out, on, false);
+    stoatty_protocol::command::encode_zoom_capture_into(&mut out, on, true);
     let _ = apc_tx.send(out);
 }
 

@@ -2401,20 +2401,21 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
-    /// Claim the zoom combo once both halves of the round trip exist, and
-    /// release it when either goes away.
+    /// Claim the zoom combo as soon as the terminal answers the handshake.
     ///
-    /// The presses come back over the window socket, so claiming without one
-    /// swallows them. Stoatty stops stepping its font and queues each press for
-    /// a client that never connects. That is the ordinary state over ssh, where
-    /// the APC handshake succeeds because APC rides the link while
-    /// `STOATTY_WINDOW_SOCKET` does not.
+    /// The claim asks for the presses in band, so the round trip is the pty
+    /// both ways: the frame goes out over it and each press comes back over it
+    /// as CSI-u. A link carries the pty, so the claim holds over ssh, which is
+    /// exactly where it never used to. The window socket is not part of it --
+    /// `STOATTY_WINDOW_SOCKET` names a path on the far machine and never
+    /// connects there.
     ///
-    /// Called from whichever of the two arrives second, and from the
-    /// disconnect, which is what hands the combo back to a stoatty outliving
-    /// this process.
+    /// Nothing here releases it. A terminal drops the claim when this process
+    /// leaves the alternate screen, which covers a clean exit and a crash
+    /// alike, and does so without needing to hear from a process that may no
+    /// longer exist.
     fn sync_zoom_claim(&mut self) {
-        let claim = self.stoatty && self.window_ipc_connected;
+        let claim = self.stoatty;
         if claim == self.zoom_claimed {
             return;
         }
@@ -2448,12 +2449,10 @@ impl Stoat {
         let event = match message {
             WindowIpc::Connected => {
                 self.window_ipc_connected = true;
-                self.sync_zoom_claim();
                 return UpdateEffect::None;
             },
             WindowIpc::Disconnected => {
                 self.window_ipc_connected = false;
-                self.sync_zoom_claim();
                 return UpdateEffect::None;
             },
             WindowIpc::Event(event) => event,
@@ -2473,6 +2472,10 @@ impl Stoat {
             return self.handle_aux_mouse(window, kind, col, row);
         }
 
+        // A terminal predating the delivery mode reads the claim as the
+        // socket-mode one it has always understood and forwards the press here,
+        // so this is how the same claim is honored by an older host.
+        //
         // Routing a zoom step reads the open modal and the zoom ledger, neither
         // of which the pane-tree borrow below leaves reachable.
         if let WindowIpcEvent::Zoom { delta, .. } = event {
@@ -7590,11 +7593,12 @@ mod tests {
     /// The bin layer wires the app up before the run loop drains the handshake,
     /// so the theme defaults cannot go out there and ride confirmation instead.
     ///
-    /// The zoom claim does not ride with them. It needs the window socket to
-    /// carry the presses back, and over ssh the handshake succeeds while that
-    /// socket never crosses the link.
+    /// The zoom claim rides with them, asking for the press in band. That is
+    /// what makes the combo work over a link: the handshake and the presses
+    /// both cross it, where the window socket the claim used to wait for names
+    /// a path on the wrong machine.
     #[test]
-    fn confirming_a_stoatty_sends_the_theme_defaults_alone() {
+    fn confirming_a_stoatty_sends_the_theme_defaults_and_claims_the_zoom() {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         h.stoat.stoatty = false;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -7606,75 +7610,65 @@ mod tests {
         let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
             .flatten()
             .collect();
-        let expected = osc_default_colors(&h.stoat.theme);
+        let mut expected = osc_default_colors(&h.stoat.theme);
         assert!(
             expected.starts_with(b"\x1b]10;"),
             "the harness theme defines the default colors this covers"
         );
+        command::encode_zoom_capture_into(&mut expected, true, true);
         assert_eq!(
             sent, expected,
-            "confirmation pushes the theme defaults and claims nothing, since \
-             a claimed combo with no socket back swallows every press"
+            "confirmation pushes the theme defaults and an inband zoom claim, \
+             and nothing else"
         );
     }
 
-    /// The zoom claim goes out once both halves of the round trip exist,
-    /// whichever arrives second, and comes back when the socket drops.
+    /// The zoom claim goes out on the handshake and stays out.
     ///
-    /// A press only reaches stoat over the window socket, so claiming the combo
-    /// without one means stoatty stops stepping its font and queues the press
-    /// for a client that never connects. Releasing on disconnect is what hands
-    /// the combo back to a stoatty that outlives this process.
+    /// The presses come back down the pty, so the handshake is the whole round
+    /// trip and the window socket is no part of it. That is what makes the claim
+    /// hold over a link, where the socket names a path on the wrong machine and
+    /// never connects at all.
+    ///
+    /// Nothing here releases it either. A terminal drops the claim when this
+    /// process leaves the alternate screen, which it can see for itself.
     #[test]
-    fn the_zoom_claim_waits_for_the_socket_and_is_released_with_it() {
+    fn the_zoom_claim_rides_the_handshake_alone() {
         let claim = |on: bool| {
             let mut out = Vec::new();
-            command::encode_zoom_capture_into(&mut out, on, false);
+            command::encode_zoom_capture_into(&mut out, on, on);
             out
         };
 
-        for present_first in [true, false] {
-            let mut h = crate::test_harness::TestHarness::with_size(80, 24);
-            h.stoat.stoatty = false;
-            h.stoat.window_ipc_connected = false;
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-            h.stoat.set_apc_tx(tx);
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = false;
+        h.stoat.window_ipc_connected = false;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
 
-            let announce =
-                |h: &mut Stoat| h.handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION));
-            let connect = |h: &mut Stoat| h.handle_window_ipc(WindowIpc::Connected);
-            match present_first {
-                true => {
-                    announce(&mut h.stoat);
-                    connect(&mut h.stoat);
-                },
-                false => {
-                    connect(&mut h.stoat);
-                    announce(&mut h.stoat);
-                },
-            }
+        // Every zoom frame, not a count of the claims, so a release sent before
+        // anything was claimed shows up here too.
+        let zoom_frames = |rx: &mut UnboundedReceiver<Vec<u8>>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|frame| *frame == claim(true) || *frame == claim(false))
+                .collect::<Vec<_>>()
+        };
 
-            // Every zoom frame, not a count of the claims, so a release sent
-            // before anything was claimed shows up here too.
-            let zoom_frames = |rx: &mut UnboundedReceiver<Vec<u8>>| {
-                std::iter::from_fn(|| rx.try_recv().ok())
-                    .filter(|frame| *frame == claim(true) || *frame == claim(false))
-                    .collect::<Vec<_>>()
-            };
+        h.stoat
+            .handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION));
+        assert_eq!(
+            zoom_frames(&mut rx),
+            vec![claim(true)],
+            "the handshake alone claims the combo, with no socket in sight",
+        );
 
-            assert_eq!(
-                zoom_frames(&mut rx),
-                vec![claim(true)],
-                "the claim is the only zoom frame, arriving present-first: {present_first}",
-            );
-
-            h.stoat.handle_window_ipc(WindowIpc::Disconnected);
-            assert_eq!(
-                zoom_frames(&mut rx),
-                vec![claim(false)],
-                "and losing the socket releases it, arriving present-first: {present_first}",
-            );
-        }
+        h.stoat.handle_window_ipc(WindowIpc::Connected);
+        h.stoat.handle_window_ipc(WindowIpc::Disconnected);
+        assert_eq!(
+            zoom_frames(&mut rx),
+            Vec::<Vec<u8>>::new(),
+            "and the socket coming and going says nothing about it",
+        );
     }
 
     #[test]
