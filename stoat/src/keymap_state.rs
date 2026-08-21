@@ -334,10 +334,11 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     match ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()) {
         Some(RebasePause::Reword { .. }) => return Some("reword"),
         Some(RebasePause::Conflict { .. }) => return Some("rebase_conflict"),
-        // An Edit pause reviews the picked commit. It normally installs a review
-        // session (caught by the `review` check above), but the no-session
-        // fallback still needs the review screen so RebaseContinue stays bound.
-        Some(RebasePause::Edit { .. }) => return Some("review"),
+        // An Edit pause lands on the diff view, which the check above already
+        // reports whenever a file was opened. This covers the commit that
+        // changed nothing and so opened none, where the pause still has to keep
+        // RebaseContinue bound.
+        Some(RebasePause::Edit { .. }) => return Some("diff"),
         None => {},
     }
     if ws.rebase.is_some() {

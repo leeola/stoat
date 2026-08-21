@@ -4,7 +4,6 @@ use crate::{
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     review_session::ReviewSession,
     review_walk::{ReturnRef, ReviewWalk},
-    workspace::diff::DiffBase,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -397,23 +396,8 @@ fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
 
-    // A root commit has no parent, and `None` is the empty tree, against which
-    // every line of the commit reads as added.
-    let base = DiffBase::Rev {
-        sha: repo.parent_sha(&sha),
-    };
-    stoat.active_workspace_mut().set_diff_base(Some(base));
-
     super::review::emit_review_info_badge(stoat, &standing);
-
-    let first_changed = repo
-        .commit_file_changes(&sha)
-        .first()
-        .map(|change| workdir.join(&change.rel_path));
-    if let Some(path) = first_changed {
-        super::file::open_file(stoat, &path);
-        super::review::enter_diff_view(stoat);
-    }
+    super::review::land_diff_on_commit(stoat, &*repo, &workdir, &sha);
     UpdateEffect::Redraw
 }
 

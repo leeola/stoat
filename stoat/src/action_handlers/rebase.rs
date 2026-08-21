@@ -1,11 +1,8 @@
 use crate::{
-    action_handlers::{
-        commits::commits_refresh,
-        review::{close_review, install_review_session, scan_commit},
-        reword::install_reword_pause,
-    },
+    action_handlers::{commits::commits_refresh, reword::install_reword_pause},
     app::{Stoat, UpdateEffect},
 };
+use std::path::Path;
 
 #[derive(Copy, Clone, Debug)]
 pub(super) enum RebaseMove {
@@ -96,20 +93,17 @@ pub(super) fn rebase_set_op(stoat: &mut Stoat, op: crate::host::RebaseTodoOp) ->
 }
 
 pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::{
-        rebase::RebasePause,
-        review_session::{ReviewOrigin, ReviewSource},
-    };
+    use crate::rebase::RebasePause;
 
-    let maybe_new_head = {
-        let ws = stoat.active_workspace();
-        ws.review
-            .as_ref()
-            .filter(|s| s.origin == ReviewOrigin::FromRebaseEdit)
-            .and_then(|s| match &s.source {
-                ReviewSource::Commit { sha, .. } => Some(sha.clone()),
-                _ => None,
-            })
+    // Read from HEAD rather than from what the stepper last recorded. The pause
+    // checked the commit out, so HEAD is where an amend made while stopped would
+    // have left it, and resuming from the recorded sha would drop that amend.
+    let head = {
+        let workdir = stoat.active_workspace().git_root.clone();
+        stoat
+            .git_host
+            .discover(&workdir)
+            .and_then(|repo| repo.resolve_rev("HEAD"))
     };
 
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
@@ -118,16 +112,42 @@ pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
     if !matches!(active.pause, Some(RebasePause::Edit { .. })) {
         return UpdateEffect::None;
     }
-    if let Some(new_head) = maybe_new_head {
-        active.current_head = new_head.clone();
-        active.last_pick_sha = Some(new_head);
+    if let Some(head) = head {
+        active.current_head = head.clone();
+        active.last_pick_sha = Some(head);
     }
     active.pause = None;
 
-    if stoat.active_workspace().review.is_some() {
-        close_review(stoat);
-    }
+    stoat.active_workspace_mut().set_diff_base(None);
+    super::review::exit_diff_view(stoat);
     drive_rebase(stoat)
+}
+
+/// Check the just-picked commit out and point `:diff` at what it changed.
+///
+/// The stepper builds commits without moving HEAD or touching the working tree,
+/// so an Edit stop has to do both before the diff means anything: `:diff`
+/// compares live buffers against a base, and the buffers have to be the commit
+/// for that comparison to be the commit. This is also what an interactive
+/// rebase does when it stops to let you edit, so the tree the user lands in is
+/// the one they would expect.
+///
+/// A failed checkout badges and leaves the pause standing. The stepper is
+/// stopped either way, and reporting it is better than showing a diff against a
+/// tree that is not there.
+fn install_edit_pause(stoat: &mut Stoat, workdir: &Path, sha: &str) {
+    let Some(repo) = stoat.git_host.discover(workdir) else {
+        emit_rebase_error(stoat, "git repo not found", None);
+        return;
+    };
+    if let Err(err) = repo.checkout_detached(sha) {
+        emit_rebase_error(stoat, "checkout failed", Some(err.to_string()));
+        return;
+    }
+
+    let short = &sha[..sha.len().min(7)];
+    super::review::emit_review_info_badge(stoat, &format!("editing {short}, C continues"));
+    super::review::land_diff_on_commit(stoat, &*repo, workdir, sha);
 }
 
 /// Core rebase stepper. Pops entries from `remaining`, applying each via
@@ -139,7 +159,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
     use crate::{
         host::{CherryPickOutcome, GitApplyError, RebaseTodoOp},
         rebase::RebasePause,
-        review_session::ReviewOrigin,
     };
 
     loop {
@@ -220,15 +239,7 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                     active.pause = Some(RebasePause::Edit {
                                         cherry_picked_commit: new_sha.clone(),
                                     });
-                                    // With no session to review the Edit pause
-                                    // still derives the diff view, so
-                                    // RebaseContinue stays bound.
-                                    if let Some(mut session) =
-                                        scan_commit(stoat, &workdir, &new_sha)
-                                    {
-                                        session.origin = ReviewOrigin::FromRebaseEdit;
-                                        install_review_session(stoat, session);
-                                    }
+                                    install_edit_pause(stoat, &workdir, &new_sha);
                                     return UpdateEffect::Redraw;
                                 },
                                 _ => unreachable!(),

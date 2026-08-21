@@ -934,7 +934,7 @@ on key {
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
     }
-    view == review && rebase_exec {
+    view == diff && rebase_exec {
         C -> RebaseContinue();
     }
     view == conflict && mode == normal {

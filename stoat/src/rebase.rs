@@ -184,7 +184,13 @@ impl ActiveRebase {
 #[cfg(test)]
 mod tests {
     use super::RebasePause;
-    use crate::{app::Stoat, test_harness::CommitSpec};
+    use crate::{
+        app::Stoat,
+        badge::BadgeSource,
+        host::GitHost,
+        test_harness::{CommitSpec, TestHarness},
+        workspace::diff::DiffBase,
+    };
 
     const THREE_COMMITS: &[CommitSpec<'static>] = &[
         ("c1", "c1: root", &[("a.rs", "line1\n")]),
@@ -246,7 +252,7 @@ mod tests {
         let ws = h.stoat.active_workspace();
         let badge_id = ws
             .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
+            .find_by_source(BadgeSource::Review)
             .expect("info badge about empty todo");
         let badge = ws.badges.get(badge_id).unwrap();
         assert!(badge.label.contains("nothing"));
@@ -469,43 +475,176 @@ mod tests {
         );
     }
 
-    #[test]
-    fn edit_flow_opens_review_and_continue_resumes() {
-        use crate::host::GitHost;
+    /// A history whose middle commit changed nothing, so the Edit stop on it
+    /// has no file to open.
+    const EMPTY_MIDDLE: &[CommitSpec<'static>] = &[
+        ("c1", "c1: root", &[("a.rs", "line1\n")]),
+        ("c2", "c2: no change", &[("a.rs", "line1\n")]),
+        ("c3", "c3: tip", &[("a.rs", "line1\nline2\n")]),
+    ];
 
-        let mut h = Stoat::test();
+    /// Stop the stepper on an Edit entry, with the tree seeded so the diff the
+    /// pause lands on has a buffer to read.
+    fn pause_on_edit(h: &mut TestHarness) {
+        pause_on_edit_over(h, THREE_COMMITS, b"line1\nline2\nline3\n");
+    }
+
+    fn pause_on_edit_over(h: &mut TestHarness, commits: &[CommitSpec<'_>], tree: &[u8]) {
         h.resize(90, 16);
-        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.seed_linear_history("/repo", commits);
+        h.fake_fs().insert_file("/repo/a.rs", tree);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
         // Mark c2 as Edit (first entry).
         h.type_keys("e");
         h.type_keys("Enter");
-        // Stepper paused; opened review of the just-picked commit.
-        assert_eq!(h.stoat.current_view(), Some("review"));
+    }
+
+    fn checkouts(h: &TestHarness) -> Vec<String> {
+        h.fake_git.checkouts(std::path::Path::new("/repo"))
+    }
+
+    fn diff_base(h: &TestHarness) -> Option<Option<String>> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+            _ => None,
+        }
+    }
+
+    /// An Edit stop checks the picked commit out and shows what it changed.
+    ///
+    /// The checkout is what makes the diff mean anything: the stepper builds
+    /// commits without moving HEAD or writing the tree, so without it the
+    /// buffers on screen would be the pre-rebase tree measured against the
+    /// picked commit's parent.
+    #[test]
+    fn an_edit_pause_checks_the_commit_out_and_diffs_it() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+
+        assert_eq!(h.stoat.current_view(), Some("diff"));
         assert!(
             h.stoat.active_workspace().rebase_active.is_some(),
             "rebase execution state retained during edit"
         );
-        let session = h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .expect("edit-mode review installed");
+
+        let picked = checkouts(&h).last().cloned().expect("a checkout happened");
+        let sha = picked
+            .strip_prefix("detached:")
+            .expect("detached checkout")
+            .to_string();
+        let repo = h
+            .fake_git()
+            .discover(std::path::Path::new("/repo"))
+            .unwrap();
         assert_eq!(
-            session.origin,
-            crate::review_session::ReviewOrigin::FromRebaseEdit
+            (repo.resolve_rev("HEAD"), diff_base(&h)),
+            (Some(sha.clone()), Some(repo.parent_sha(&sha))),
+            "HEAD is the picked commit and the diff reads against its parent"
         );
 
-        // Resume via RebaseContinue.
+        let panes = &h.stoat.active_workspace().panes;
+        assert!(
+            panes.pane(panes.focus()).diff_mode,
+            "the pause armed the diff view"
+        );
+
+        // The review screen used to be what said a rebase was stopped here. An
+        // ordinary diff view says nothing, so the badge is the only thing left
+        // telling the user where they are and how to leave.
+        assert_eq!(
+            pause_badge(&h).as_deref(),
+            Some(format!("editing {}, C continues", &sha[..sha.len().min(7)]).as_str()),
+        );
+    }
+
+    fn pause_badge(h: &TestHarness) -> Option<String> {
+        let ws = h.stoat.active_workspace();
+        ws.badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|badge| badge.label.clone())
+    }
+
+    /// A stop on a commit that changed nothing still holds the pause open.
+    ///
+    /// There is no file to open and so no editor carrying the diff view, which
+    /// is what usually names the screen. Without the pause naming it instead the
+    /// view would read as an ordinary file and the key that resumes the rebase
+    /// would not be bound, stranding the user mid-plan.
+    #[test]
+    fn a_stop_on_an_empty_commit_keeps_continue_bound() {
+        let mut h = Stoat::test();
+        pause_on_edit_over(&mut h, EMPTY_MIDDLE, b"line1\n");
+
+        assert_eq!(h.stoat.current_view(), Some("diff"), "the pause names it");
+
+        h.type_keys("C");
+        assert!(
+            h.stoat.active_workspace().rebase_active.is_none(),
+            "C resumed the rebase from the empty stop"
+        );
+    }
+
+    /// An amend made while stopped is what the resume has to carry forward.
+    ///
+    /// The stepper recorded the commit it created, and an amend replaces that
+    /// commit with another. HEAD is what tracks the replacement, so resuming
+    /// from the recorded sha would rebase the rest of the plan onto the commit
+    /// the user just edited away.
+    #[test]
+    fn continue_carries_an_amend_made_while_stopped() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let amended = {
+            let head = repo.resolve_rev("HEAD").expect("HEAD");
+            let tree = repo.commit_tree(&head).expect("the picked commit's tree");
+            repo.amend_head(&tree, Some("c2: amended while stopped"))
+                .expect("amend")
+        };
+
+        h.type_keys("C");
+        let messages: Vec<String> = repo
+            .log_commits(None, 10)
+            .iter()
+            .filter_map(|c| {
+                h.fake_git
+                    .commit_message(std::path::Path::new("/repo"), &c.sha)
+            })
+            .collect();
+        assert!(
+            messages.iter().any(|m| m.contains("amended while stopped")),
+            "the rebase continued from {amended}, so the amend is in the chain: {messages:?}"
+        );
+    }
+
+    /// Continuing resumes from HEAD rather than from the sha the stepper last
+    /// recorded, and puts the diff view away with the pause.
+    #[test]
+    fn continue_resumes_from_head_and_clears_the_diff() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+
         h.type_keys("C");
         assert!(
             h.stoat.active_workspace().rebase_active.is_none(),
             "rebase execution complete after continue"
         );
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+
+        let panes = &h.stoat.active_workspace().panes;
+        assert_eq!(
+            (diff_base(&h), panes.pane(panes.focus()).diff_mode),
+            (None, false),
+            "the base and the latch went with the pause"
+        );
+
+        let repo = h
+            .fake_git()
+            .discover(std::path::Path::new("/repo"))
+            .unwrap();
         let log = repo.log_commits(None, 10);
         // Two rebased commits (from c2 and c3) plus root c1.
         assert_eq!(log.len(), 3, "full chain rebased: {log:#?}");
@@ -654,7 +793,7 @@ mod tests {
             .is_empty());
     }
 
-    fn dirty_badge(h: &crate::test_harness::TestHarness) -> Option<String> {
+    fn dirty_badge(h: &TestHarness) -> Option<String> {
         use crate::badge::BadgeSource;
         let ws = h.stoat.active_workspace();
         ws.badges
