@@ -2,8 +2,9 @@ use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
-    review_session::{ReviewOrigin, ReviewSession},
+    review_session::ReviewSession,
     review_walk::{ReturnRef, ReviewWalk},
+    workspace::diff::DiffBase,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -353,17 +354,31 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
     walk_navigate(stoat)
 }
 
-/// Check the walk's current commit out and open its diff.
+/// Check the walk's current commit out and point `:diff` at what it changed.
 ///
-/// The session opens as [`ReviewOrigin::Standalone`] so closing the diff drops
-/// to normal mode with the walk still running, which is what lets the user
-/// look around a commit's files and then step on.
+/// The tree becomes the commit and the base becomes the commit's parent, so the
+/// diff on screen is the commit itself. The buffers stay the real editable
+/// files, which is what lets the user look around a commit and then step on
+/// without a screen of its own to leave first.
+///
+/// A commit that changed nothing still moves the base, because the base names
+/// what the tree is compared against and the tree did move. Only the landing is
+/// skipped: there is no file the commit would open onto, so whatever the last
+/// step showed stays up and the badge reports where the walk now stands.
 fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((workdir, sha)) = stoat
-        .active_workspace()
-        .review_walk
-        .as_ref()
-        .map(|walk| (walk.workdir.clone(), walk.current().sha.clone()))
+    let Some((workdir, sha, standing)) =
+        stoat.active_workspace().review_walk.as_ref().map(|walk| {
+            (
+                walk.workdir.clone(),
+                walk.current().sha.clone(),
+                format!(
+                    "reviewing {} ({}/{})",
+                    walk.current().short_sha,
+                    walk.cursor + 1,
+                    walk.commits.len()
+                ),
+            )
+        })
     else {
         return UpdateEffect::None;
     };
@@ -382,7 +397,24 @@ fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
 
-    super::review::open_commit_review(stoat, workdir, sha, ReviewOrigin::Standalone)
+    // A root commit has no parent, and `None` is the empty tree, against which
+    // every line of the commit reads as added.
+    let base = DiffBase::Rev {
+        sha: repo.parent_sha(&sha),
+    };
+    stoat.active_workspace_mut().set_diff_base(Some(base));
+
+    super::review::emit_review_info_badge(stoat, &standing);
+
+    let first_changed = repo
+        .commit_file_changes(&sha)
+        .first()
+        .map(|change| workdir.join(&change.rel_path));
+    if let Some(path) = first_changed {
+        super::file::open_file(stoat, &path);
+        super::review::enter_diff_view(stoat);
+    }
+    UpdateEffect::Redraw
 }
 
 pub(crate) fn review_next_commit(stoat: &mut Stoat) -> UpdateEffect {
@@ -425,6 +457,12 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
         stoat.active_workspace_mut().review_walk = Some(walk);
         return review_error(stoat, "could not return", Some(err.to_string()));
     }
+
+    // Cleared only once the tree is back. A failed return leaves the tree at the
+    // commit, and a base dropped beforehand would name a base the tree is not
+    // at, which is exactly the state the retry has to read correctly.
+    stoat.active_workspace_mut().set_diff_base(None);
+    super::review::exit_diff_view(stoat);
 
     if stoat.active_workspace().review.is_some() {
         super::review::close_review(stoat);
@@ -686,9 +724,12 @@ fn spawn_preview_load(
 
 #[cfg(test)]
 mod tests {
+    use super::{walk_navigate, ReturnRef, ReviewWalk};
     use crate::{
         app::Stoat, badge::BadgeSource, commit_picker::CommitPickerRole, test_harness::TestHarness,
+        workspace::diff::DiffBase,
     };
+    use std::path::{Path, PathBuf};
 
     /// A harness whose `/repo` carries three commits, `main` on the tip and
     /// `feature` one commit back, with the workspace rooted there.
@@ -716,7 +757,34 @@ mod tests {
             .branch("feature", "b2c3d4e5")
             .set_head_branch("main");
         h.stoat.active_workspace_mut().git_root = "/repo".into();
+        // The fake host moves HEAD on a checkout but does not write the tree to
+        // disk, so the working tree is seeded once at the tip and stays there.
+        // A walk still diffs correctly, because every base it installs is read
+        // from the commit rather than from these files.
+        h.fake_fs()
+            .insert_file("/repo/a.rs", b"fn a() {}\nfn a2() {}\n");
+        h.fake_fs().insert_file("/repo/b.rs", b"fn b() {}\n");
         h
+    }
+
+    fn diff_base(h: &TestHarness) -> Option<Option<String>> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+            _ => None,
+        }
+    }
+
+    fn latched(h: &TestHarness) -> bool {
+        let panes = &h.stoat.active_workspace().panes;
+        panes.pane(panes.focus()).diff_mode
+    }
+
+    fn open_path(h: &TestHarness) -> Option<PathBuf> {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .path_for(h.stoat.focused_editor_ids()?.1)
+            .map(Path::to_path_buf)
     }
 
     fn review_badge(h: &TestHarness) -> Option<String> {
@@ -1347,7 +1415,7 @@ mod tests {
     }
 
     fn checkouts(h: &TestHarness) -> Vec<String> {
-        h.fake_git().checkouts(std::path::Path::new("/repo"))
+        h.fake_git().checkouts(Path::new("/repo"))
     }
 
     fn walk_shas(h: &TestHarness) -> Vec<String> {
@@ -1395,6 +1463,186 @@ mod tests {
         assert_eq!(walk_shas(&h), ["a1b2c3d4", "b2c3d4e5", "c3d4e5f6"]);
         assert_eq!(walk_cursor(&h), Some(0));
         assert_eq!(checkouts(&h), ["detached:a1b2c3d4"]);
+    }
+
+    /// The base is the commit's parent, so what the reader sees is the commit.
+    /// A root commit has no parent, and the empty tree is the base that makes
+    /// every one of its lines read as added rather than as nothing at all.
+    #[test]
+    fn a_walk_lands_on_the_root_commits_file_against_the_empty_tree() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        assert_eq!(
+            (diff_base(&h), latched(&h), open_path(&h)),
+            (Some(None), true, Some(PathBuf::from("/repo/a.rs"))),
+        );
+    }
+
+    /// Stepping re-points the base at the new commit's parent and opens what
+    /// that commit changed, which is not the file the previous step left open.
+    #[test]
+    fn a_step_opens_what_the_new_commit_changed() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(
+            (diff_base(&h), open_path(&h)),
+            (
+                Some(Some("a1b2c3d4".to_string())),
+                Some(PathBuf::from("/repo/a.rs"))
+            ),
+            "the middle commit touched a.rs",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(
+            (diff_base(&h), latched(&h), open_path(&h)),
+            (
+                Some(Some("b2c3d4e5".to_string())),
+                true,
+                Some(PathBuf::from("/repo/b.rs"))
+            ),
+            "the tip commit added b.rs, so the walk crosses to it",
+        );
+    }
+
+    /// The badge is the only thing naming where a walk stands, since the view
+    /// it lands on is the ordinary diff view rather than a screen of its own.
+    #[test]
+    fn the_badge_names_the_commit_and_the_position() {
+        let mut h = harness();
+        start_walk(&mut h);
+        assert_eq!(review_badge(&h).as_deref(), Some("reviewing a1b2c3d (1/3)"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(review_badge(&h).as_deref(), Some("reviewing b2c3d4e (2/3)"));
+    }
+    /// Drive a walk without the commit picker that normally installs one.
+    ///
+    /// The picker spawns a preview build per selected commit, and a commit
+    /// whose diff is empty is exactly what it cannot cache, so opening the
+    /// picker over a history holding one never settles. That is a defect in the
+    /// picker rather than in the walk, and the walk is what this covers.
+    fn seed_walk(h: &mut TestHarness, shas: &[&str]) {
+        let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+        let commits = shas
+            .iter()
+            .map(|sha| {
+                repo.log_from(sha, 1)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| panic!("no commit {sha}"))
+            })
+            .collect();
+        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+            workdir: PathBuf::from("/repo"),
+            commits,
+            cursor: 0,
+            return_ref: ReturnRef::Branch("main".to_string()),
+        });
+        walk_navigate(&mut h.stoat);
+        h.settle();
+    }
+
+    /// A commit that changed nothing has no file to land on. The base still
+    /// follows the tree onto it, so the view left up from the last step reads
+    /// against the right commit rather than against a stale one.
+    #[test]
+    fn an_empty_commit_moves_the_base_and_leaves_the_view_alone() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                ("b2c3d4e5", "chore: nothing", &[("a.rs", "fn a() {}\n")]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.fake_fs().insert_file("/repo/a.rs", b"fn a() {}\n");
+        seed_walk(&mut h, &["a1b2c3d4", "b2c3d4e5"]);
+
+        let landed = open_path(&h);
+        assert_eq!(landed, Some(PathBuf::from("/repo/a.rs")), "the root landed");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(
+            (diff_base(&h), open_path(&h), review_badge(&h)),
+            (
+                Some(Some("a1b2c3d4".to_string())),
+                landed,
+                Some("reviewing b2c3d4e (2/2)".to_string())
+            ),
+            "the base moved to the empty commit's parent and the view stayed",
+        );
+    }
+
+    /// A walk that opens on an empty commit has nothing to show, so it shows
+    /// nothing. Arming the view regardless would widen the pane over whichever
+    /// buffer happened to be focused and call it the commit's diff.
+    #[test]
+    fn a_walk_opening_on_an_empty_commit_arms_nothing() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                ("b2c3d4e5", "chore: nothing", &[("a.rs", "fn a() {}\n")]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.fake_fs().insert_file("/repo/a.rs", b"fn a() {}\n");
+        seed_walk(&mut h, &["b2c3d4e5"]);
+
+        assert_eq!(
+            (diff_base(&h), latched(&h), review_badge(&h)),
+            (
+                Some(Some("a1b2c3d4".to_string())),
+                false,
+                Some("reviewing b2c3d4e (1/1)".to_string())
+            ),
+            "the base tracks the commit but no view opened over it",
+        );
+    }
+
+    /// Ending the walk puts the diff back where the tree goes: off the commit
+    /// and onto the working tree's own base.
+    #[test]
+    fn review_done_clears_the_base_and_the_latch() {
+        let mut h = harness();
+        start_walk(&mut h);
+        assert!(latched(&h), "the walk armed the view");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(
+            (diff_base(&h), latched(&h)),
+            (None, false),
+            "the base and the latch went with the walk",
+        );
+    }
+
+    /// A return that fails leaves the tree at the commit, so the base has to
+    /// keep naming that commit's parent. Dropping it would leave the statusline
+    /// claiming a base the files on disk are not measured against.
+    #[test]
+    fn a_failed_return_keeps_the_base() {
+        let mut h = harness();
+        h.fake_git().add_repo("/repo").set_head_branch("gone");
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(
+            (diff_base(&h), latched(&h)),
+            (Some(None), true),
+            "the view still reads against the commit the tree is at",
+        );
     }
 
     #[test]

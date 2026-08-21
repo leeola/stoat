@@ -315,7 +315,7 @@ fn emit_review_complete_badge(stoat: &mut Stoat, label: &str) {
     });
 }
 
-fn emit_review_info_badge(stoat: &mut Stoat, label: &str) {
+pub(super) fn emit_review_info_badge(stoat: &mut Stoat, label: &str) {
     use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
     let ws = stoat.active_workspace_mut();
     ws.badges.remove_by_source(BadgeSource::Review);
@@ -988,9 +988,20 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     // Turned on rather than toggled. Naming a revision asks to look at it, so a
     // second `:diff <rev>` re-targets the view rather than closing it; only the
     // bare command closes.
+    enter_diff_view(stoat);
+    UpdateEffect::Redraw
+}
+
+/// Turn the diff view on, whatever it was showing before.
+///
+/// [`toggle_diff_view`] closes an open view, so a caller that means "show this"
+/// rather than "flip this" has to shut the view before opening it. Every such
+/// caller arrives with a base it just installed, and the exit half leaves a
+/// base alone by design, so the round trip re-reads the new base rather than
+/// dropping it.
+pub(super) fn enter_diff_view(stoat: &mut Stoat) {
     exit_diff_view(stoat);
     toggle_diff_view(stoat);
-    UpdateEffect::Redraw
 }
 
 pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {

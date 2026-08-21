@@ -78,10 +78,9 @@ pub(crate) struct ChangedRangesScan {
 /// parent, so the base moves off HEAD while the buffers stay the working
 /// tree. An agent's proposed edits have no commit behind them at all, so they
 /// carry their base as text.
-// The constructors (`:diff <rev>`, the review walk, the rebase edit pause, the
-// commits view, and the agent-edit entry point) do not exist yet. The base
-// resolution below lands ahead of them, and `#[allow(dead_code)]` covers the
-// gap until the first one arrives.
+// `Memory` has no constructor outside tests yet: the agent-edit entry point is
+// the one that builds it, and it has not landed. `#[allow(dead_code)]` covers
+// that gap.
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) enum DiffBase {
