@@ -28,18 +28,33 @@ mod enabled {
     /// frames after the frame it measures.
     #[derive(Clone, Copy)]
     pub struct FrameSample {
+        /// Everything the frame did before it reached the surface acquire:
+        /// the wait on the terminal lock, the projection under it, and the
+        /// frame assembly.
+        ///
+        /// Zero for a caller that never marked a redraw start, which is every
+        /// caller but the primary window's redraw.
+        pub pre: Duration,
         pub acquire: Duration,
         pub encode: Duration,
         pub present: Duration,
         pub interval: Duration,
         pub gpu: Option<Duration>,
+        /// How long the byte that woke this frame waited to reach the screen.
+        ///
+        /// `None` for a frame no child output asked for: a resize, an easing
+        /// step, or a second frame after one wakeup.
+        pub latency: Option<Duration>,
     }
 
     impl FrameSample {
-        /// The frame's total main-thread cost, summing surface acquire,
-        /// encode/submit, and present.
+        /// The frame's total main-thread cost, from redraw entry to present.
+        ///
+        /// The pre-acquire span counts, because under a flood that is where
+        /// the frame waits. A sum that skipped it would read healthy exactly
+        /// when the terminal is stalling.
         pub fn cpu(&self) -> Duration {
-            self.acquire + self.encode + self.present
+            self.pre + self.acquire + self.encode + self.present
         }
     }
 
@@ -55,13 +70,15 @@ mod enabled {
     /// the headline metrics.
     ///
     /// `gpu` is `Some` only when at least one retained frame carried a GPU
-    /// duration.
+    /// duration, and `latency` only when at least one followed child output.
     pub struct FrameStats {
         pub frames: usize,
         pub last: FrameSample,
         pub cpu: Percentiles,
+        pub pre: Percentiles,
         pub interval: Percentiles,
         pub gpu: Option<Percentiles>,
+        pub latency: Option<Percentiles>,
     }
 
     /// Fixed-ring recorder of per-frame CPU timing.
@@ -72,10 +89,19 @@ mod enabled {
     /// after present. A frame the renderer skips on transient surface loss
     /// records nothing, because only `end_frame` pushes a sample and the next
     /// `begin_frame` resets the pending start.
+    ///
+    /// [`Self::mark_redraw_start`] and [`Self::mark_ingest`] are optional and
+    /// come from outside the render call, so each is consumed by the next
+    /// `begin_frame` and left unset after. A mark a skipped frame never
+    /// consumed is simply overwritten by the next one.
     pub struct FrameProfiler {
         ring: Vec<FrameSample>,
         next: usize,
+        redraw_start: Option<Instant>,
+        ingest_at: Option<Instant>,
         frame_start: Option<Instant>,
+        frame_pre: Option<Instant>,
+        frame_ingest: Option<Instant>,
         acquired_at: Option<Instant>,
         submitted_at: Option<Instant>,
         last_end: Option<Instant>,
@@ -92,15 +118,35 @@ mod enabled {
             FrameProfiler {
                 ring: Vec::with_capacity(RING),
                 next: 0,
+                redraw_start: None,
+                ingest_at: None,
                 frame_start: None,
+                frame_pre: None,
+                frame_ingest: None,
                 acquired_at: None,
                 submitted_at: None,
                 last_end: None,
             }
         }
 
+        /// Mark the top of the redraw, before the terminal lock and the
+        /// projection, so the frame's cost counts what happens there.
+        pub fn mark_redraw_start(&mut self) {
+            self.redraw_start = Some(Instant::now());
+        }
+
+        /// Mark when the output this frame answers arrived from the child.
+        ///
+        /// Set once per wakeup rather than once per frame, so a second frame
+        /// on the same wakeup reports no latency instead of a shorter one.
+        pub fn mark_ingest(&mut self, at: Instant) {
+            self.ingest_at = Some(at);
+        }
+
         pub fn begin_frame(&mut self) {
             self.frame_start = Some(Instant::now());
+            self.frame_pre = self.redraw_start.take();
+            self.frame_ingest = self.ingest_at.take();
             self.acquired_at = None;
             self.submitted_at = None;
         }
@@ -119,6 +165,10 @@ mod enabled {
             let acquired = self.acquired_at.unwrap_or(start);
             let submitted = self.submitted_at.unwrap_or(acquired);
             let sample = FrameSample {
+                pre: self
+                    .frame_pre
+                    .map(|marked| start.saturating_duration_since(marked))
+                    .unwrap_or_default(),
                 acquire: acquired.saturating_duration_since(start),
                 encode: submitted.saturating_duration_since(acquired),
                 present: now.saturating_duration_since(submitted),
@@ -127,6 +177,9 @@ mod enabled {
                     .map(|prev| now.saturating_duration_since(prev))
                     .unwrap_or_default(),
                 gpu: None,
+                latency: self
+                    .frame_ingest
+                    .map(|marked| now.saturating_duration_since(marked)),
             };
             self.record(sample);
             self.last_end = Some(now);
@@ -140,12 +193,15 @@ mod enabled {
             }
             let last = self.ring[(self.next + RING - 1) % RING];
             let gpu: Vec<Duration> = self.ring.iter().filter_map(|s| s.gpu).collect();
+            let latency: Vec<Duration> = self.ring.iter().filter_map(|s| s.latency).collect();
             Some(FrameStats {
                 frames: self.ring.len(),
                 last,
                 cpu: percentiles(self.ring.iter().map(FrameSample::cpu)),
+                pre: percentiles(self.ring.iter().map(|s| s.pre)),
                 interval: percentiles(self.ring.iter().map(|s| s.interval)),
                 gpu: (!gpu.is_empty()).then(|| percentiles(gpu.into_iter())),
+                latency: (!latency.is_empty()).then(|| percentiles(latency.into_iter())),
             })
         }
 
@@ -214,12 +270,111 @@ mod enabled {
         /// the two metrics stay distinguishable in assertions.
         fn sample(cpu_ms: u64) -> FrameSample {
             FrameSample {
+                pre: Duration::ZERO,
                 acquire: ms(cpu_ms),
                 encode: Duration::ZERO,
                 present: Duration::ZERO,
                 interval: ms(cpu_ms * 2),
                 gpu: None,
+                latency: None,
             }
+        }
+
+        /// The pre-acquire span is where a frame waits under a flood, so the
+        /// cost the HUD graphs has to include it. Leaving it out is exactly the
+        /// blind spot that reports healthy while the terminal stalls.
+        #[test]
+        fn the_frame_cost_counts_the_span_before_the_acquire() {
+            let mut with_pre = sample(10);
+            with_pre.pre = ms(7);
+            assert_eq!((sample(10).cpu(), with_pre.cpu()), (ms(10), ms(17)));
+        }
+
+        /// A caller that marks neither reports neither, rather than a zero
+        /// latency that would read as an instant response.
+        #[test]
+        fn an_unmarked_frame_reports_no_pre_and_no_latency() {
+            let mut p = FrameProfiler::new();
+            p.begin_frame();
+            p.end_frame();
+
+            let last = p.stats().expect("stats").last;
+            assert_eq!((last.pre, last.latency), (Duration::ZERO, None));
+        }
+
+        /// Both marks come from outside the render call, so both have to
+        /// survive the trip into the sample the frame records.
+        #[test]
+        fn a_marked_redraw_and_ingest_reach_the_sample() {
+            const GAP: Duration = Duration::from_micros(200);
+
+            let mut p = FrameProfiler::new();
+            p.mark_ingest(Instant::now());
+            p.mark_redraw_start();
+
+            // Spin rather than sleep, so the assertion rests on the clock
+            // having advanced rather than on a scheduler honoring a deadline.
+            let marked = Instant::now();
+            while marked.elapsed() < GAP {
+                std::hint::spin_loop();
+            }
+            p.begin_frame();
+            p.end_frame();
+
+            let last = p.stats().expect("stats").last;
+            assert!(
+                last.pre >= GAP,
+                "the span before the acquire is measured, not zeroed: {:?}",
+                last.pre
+            );
+            assert!(
+                last.latency.is_some_and(|latency| latency >= last.pre),
+                "the ingest wait spans the redraw, so it cannot be the shorter \
+                 of the two: pre {:?}, latency {:?}",
+                last.pre,
+                last.latency
+            );
+        }
+
+        /// A wakeup names one byte's wait. A second frame drawn off the same
+        /// wakeup measured nothing, and reporting the same instant again would
+        /// invent a longer wait that no byte had.
+        #[test]
+        fn a_second_frame_on_one_wakeup_reports_no_latency() {
+            let mut p = FrameProfiler::new();
+            p.mark_ingest(Instant::now());
+            p.begin_frame();
+            p.end_frame();
+            p.begin_frame();
+            p.end_frame();
+
+            let latencies: Vec<Option<Duration>> =
+                p.samples().iter().map(|sample| sample.latency).collect();
+            assert!(
+                matches!(latencies.as_slice(), [Some(_), None]),
+                "one wakeup, one latency: {latencies:?}"
+            );
+        }
+
+        /// Latency percentiles read `None` until a frame follows child output,
+        /// the same way the GPU ones wait for a query to land.
+        #[test]
+        fn latency_percentiles_are_absent_until_a_wakeup_lands() {
+            let mut p = FrameProfiler::new();
+            p.record(sample(10));
+            let stats = p.stats().expect("stats");
+            assert!(stats.latency.is_none());
+            assert_eq!(stats.pre.worst, Duration::ZERO);
+
+            let mut answered = sample(20);
+            answered.pre = ms(4);
+            answered.latency = Some(ms(30));
+            p.record(answered);
+            let stats = p.stats().expect("stats");
+            assert_eq!(
+                (stats.pre.worst, stats.latency.map(|l| l.worst)),
+                (ms(4), Some(ms(30)))
+            );
         }
 
         #[test]
@@ -320,6 +475,12 @@ mod disabled {
         pub fn new() -> FrameProfiler {
             FrameProfiler
         }
+
+        #[inline]
+        pub fn mark_redraw_start(&mut self) {}
+
+        #[inline]
+        pub fn mark_ingest(&mut self, _at: std::time::Instant) {}
 
         #[inline]
         pub fn begin_frame(&mut self) {}

@@ -24,11 +24,13 @@ use wgpu::{
 
 fn sample(cpu_ms: f32) -> FrameSample {
     FrameSample {
+        pre: Duration::ZERO,
         acquire: Duration::from_secs_f32(cpu_ms / 1000.0),
         encode: Duration::ZERO,
         present: Duration::ZERO,
         interval: Duration::ZERO,
         gpu: None,
+        latency: None,
     }
 }
 
@@ -110,8 +112,10 @@ fn hud_composites_over_a_frame_off_screen() {
         frames: 3,
         last,
         cpu: pct(20),
+        pre: pct(5),
         interval: pct(16),
         gpu: Some(pct(3)),
+        latency: Some(pct(28)),
     };
     let resolution = [width as f32, height as f32];
     let samples = [sample(4.0), sample(12.0), sample(24.0)];

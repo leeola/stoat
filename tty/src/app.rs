@@ -35,7 +35,7 @@ use std::{
     mem,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::Sender,
         Arc,
     },
@@ -555,6 +555,18 @@ struct State {
     /// wakeup only on the clean-to-dirty edge, so a flood of chunks coalesces
     /// into one wakeup per render cycle instead of one per chunk.
     dirty: Arc<AtomicBool>,
+    /// When the reader last set [`Self::dirty`] from clean, as nanoseconds
+    /// since [`Self::ingest_epoch`]. Zero means no wakeup is outstanding.
+    ///
+    /// The frame that services the wakeup takes this and hands it to the
+    /// profiler, which is what turns a per-frame cost into an answer to the
+    /// question a terminal is judged on: how long a byte took to reach the
+    /// screen. An [`Instant`] cannot cross the thread boundary in an atomic,
+    /// hence the offset from a fixed base.
+    ingest_at: Arc<AtomicU64>,
+    /// The base [`Self::ingest_at`] counts from, taken before the reader
+    /// starts so every stamp it writes is positive.
+    ingest_epoch: Instant,
     /// Set by the reader while a DEC 2026 synchronized update is buffering in the
     /// parser, so [`App::about_to_wait`] arms a wait until the update's timeout
     /// and flushes it if no ESU arrives. Cleared once the update flushes.
@@ -805,6 +817,8 @@ impl ApplicationHandler<PtyEvent> for App {
         }
         let dirty = Arc::new(AtomicBool::new(false));
         let sync_pending = Arc::new(AtomicBool::new(false));
+        let ingest_at = Arc::new(AtomicU64::new(0));
+        let ingest_epoch = Instant::now();
 
         // Bind the socket aux windows report focus, resize, and close over, and
         // export its path so the child editor can connect. A bind failure is
@@ -819,6 +833,7 @@ impl ApplicationHandler<PtyEvent> for App {
             let terminal = terminal.clone();
             let dirty = dirty.clone();
             let sync_pending = sync_pending.clone();
+            let ingest_at = ingest_at.clone();
             let mut tail: Vec<u8> = Vec::new();
             Pty::spawn(
                 &self.program,
@@ -871,6 +886,11 @@ impl ApplicationHandler<PtyEvent> for App {
                         // synchronized-update buffer changes nothing on screen, so
                         // it skips the wakeup.
                         if redraw && !dirty.swap(true, Ordering::Relaxed) {
+                            // Stamped on the same edge as the wakeup, so the
+                            // frame that services it measures from the first
+                            // byte of the burst rather than the last.
+                            ingest_at
+                                .store(ingest_epoch.elapsed().as_nanos() as u64, Ordering::Relaxed);
                             let _ = proxy.send_event(PtyEvent::Redraw);
                         }
                         true
@@ -939,6 +959,8 @@ impl ApplicationHandler<PtyEvent> for App {
             gpu,
             terminal,
             dirty,
+            ingest_at,
+            ingest_epoch,
             sync_pending,
             grid,
             pty,
@@ -2170,6 +2192,18 @@ fn redraw(state: &mut State) {
     // would otherwise keep asking for frames nobody sees.
     if !state.visibility.admit() {
         return;
+    }
+
+    // Before the terminal lock and the projection, so the frame's measured
+    // cost covers where it actually waits under a flood. Taking the ingest
+    // stamp here too means a frame nobody's output asked for reports no
+    // latency rather than the previous wakeup's.
+    state.gpu.mark_redraw_start();
+    let ingest = state.ingest_at.swap(0, Ordering::Relaxed);
+    if ingest != 0 {
+        state
+            .gpu
+            .mark_ingest(state.ingest_epoch + Duration::from_nanos(ingest));
     }
 
     // A Resized event asks for this frame, and winit delivers the request

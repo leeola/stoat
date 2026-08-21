@@ -1905,6 +1905,25 @@ impl GpuContext {
         self.renderer.set_size(width, height);
     }
 
+    /// Mark the top of the caller's redraw, before it assembles the frame.
+    ///
+    /// Everything between here and the surface acquire is the caller's own
+    /// work, which the profiler cannot see from inside [`Self::render`]. A
+    /// caller that never marks reports a zero pre-acquire span.
+    ///
+    /// A no-op without the `perf` feature.
+    pub fn mark_redraw_start(&mut self) {
+        self.perf.mark_redraw_start();
+    }
+
+    /// Mark when the output the next frame answers arrived from the child, so
+    /// the frame reports how long that byte waited to reach the screen.
+    ///
+    /// A no-op without the `perf` feature.
+    pub fn mark_ingest(&mut self, at: Instant) {
+        self.perf.mark_ingest(at);
+    }
+
     /// The per-frame timing recorder, read by the perf HUD.
     #[cfg(feature = "perf")]
     pub fn perf(&self) -> &FrameProfiler {

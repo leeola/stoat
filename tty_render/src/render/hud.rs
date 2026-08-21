@@ -23,10 +23,10 @@ const INITIAL_CAPACITY: usize = 256;
 
 /// Outer margin from the surface's top-right corner, in pixels.
 const MARGIN: f32 = 12.0;
-/// Panel width and height in pixels. The height holds the graph plus the two
+/// Panel width and height in pixels. The height holds the graph plus the three
 /// readout lines below it.
 const PANEL_W: f32 = 260.0;
-const PANEL_H: f32 = 128.0;
+const PANEL_H: f32 = 154.0;
 /// Inner padding between the panel edge and the graph, in pixels.
 const PAD: f32 = 8.0;
 /// Graph height in pixels. The readout occupies the panel below it.
@@ -269,17 +269,27 @@ fn bar_color(ms: f32) -> [f32; 4] {
     }
 }
 
-/// The two readout lines below the graph. The first is the last and p95 CPU
-/// frame time, the second the GPU frame time when the timestamp path has one.
+/// The three readout lines below the graph.
+///
+/// The first is the last and p95 CPU frame time, which counts the whole frame
+/// from redraw entry. The second is the GPU frame time when the timestamp path
+/// has one. The third splits out the p95 of the pre-acquire span and of the
+/// child-output-to-present latency, the two numbers that say whether a late
+/// frame waited on the terminal lock or on the child.
 pub(crate) fn readout_lines(stats: &FrameStats) -> Vec<String> {
     let ms = |d: Duration| d.as_secs_f32() * 1000.0;
     let gpu = match stats.last.gpu {
         Some(gpu) => format!("gpu {:.1}", ms(gpu)),
         None => "gpu --".to_string(),
     };
+    let latency = match stats.latency {
+        Some(latency) => format!("{:.1}", ms(latency.p95)),
+        None => "--".to_string(),
+    };
     vec![
         format!("cpu {:.1} / {:.1}", ms(stats.last.cpu()), ms(stats.cpu.p95)),
         gpu,
+        format!("pre {:.1} lat {latency}", ms(stats.pre.p95)),
     ]
 }
 
@@ -302,11 +312,13 @@ mod tests {
 
     fn sample(cpu_ms: f32) -> FrameSample {
         FrameSample {
+            pre: Duration::ZERO,
             acquire: Duration::from_secs_f32(cpu_ms / 1000.0),
             encode: Duration::ZERO,
             present: Duration::ZERO,
             interval: Duration::ZERO,
             gpu: None,
+            latency: None,
         }
     }
 
@@ -349,8 +361,10 @@ mod tests {
             frames: 10,
             last: sample(8.0),
             cpu: flat(14),
+            pre: flat(3),
             interval: flat(16),
             gpu: None,
+            latency: None,
         };
         let lines = readout_lines(&stats);
         assert_eq!(lines[0], "cpu 8.0 / 14.0");
@@ -358,5 +372,29 @@ mod tests {
 
         stats.last.gpu = Some(Duration::from_millis(2));
         assert_eq!(readout_lines(&stats)[1], "gpu 2.0");
+    }
+
+    /// The two spans a late frame is diagnosed by, and each reads `--` rather
+    /// than a zero when nothing measured it.
+    #[test]
+    fn readout_lines_report_the_pre_span_and_the_ingest_latency() {
+        let flat = |ms: u64| Percentiles {
+            p50: Duration::from_millis(ms),
+            p95: Duration::from_millis(ms),
+            worst: Duration::from_millis(ms),
+        };
+        let mut stats = FrameStats {
+            frames: 10,
+            last: sample(8.0),
+            cpu: flat(14),
+            pre: flat(3),
+            interval: flat(16),
+            gpu: None,
+            latency: None,
+        };
+        assert_eq!(readout_lines(&stats)[2], "pre 3.0 lat --");
+
+        stats.latency = Some(flat(21));
+        assert_eq!(readout_lines(&stats)[2], "pre 3.0 lat 21.0");
     }
 }
