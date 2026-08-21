@@ -964,6 +964,67 @@ mod tests {
         );
     }
 
+    /// A `Replaced` pair is not always two atoms of one kind. Pairing runs by
+    /// file-wide position, so a deleted comment pairs with whatever code atom
+    /// happens to sit at the same index on the other side. Refining that pair
+    /// char-diffs two texts with nothing to do with each other, so one prose
+    /// side is not enough to earn the narrowing.
+    #[test]
+    fn a_pair_that_mixes_prose_and_code_marks_whole() {
+        // Both pairs come out mixed, one in each order, so the gate is read
+        // from the prose side and from the code side alike.
+        let lhs = "// one two\nfn keep() {}\n";
+        let rhs = "fn renamed() {}\n// one two three\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let pairs: Vec<(Option<u32>, &str, bool, usize)> = result
+            .changes
+            .iter()
+            .map(|c| {
+                let text = if c.side == Side::Lhs { lhs } else { rhs };
+                (
+                    c.pair_id,
+                    &text[c.byte_range.clone()],
+                    c.prose,
+                    c.refined_spans.len(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            pairs,
+            vec![
+                (Some(0), "// one two", true, 0),
+                (Some(0), "renamed", false, 0),
+                (Some(1), "keep", false, 0),
+                (Some(1), "// one two three", true, 0),
+            ],
+            "each comment paired with an unrelated code atom, so neither pair refines",
+        );
+    }
+
+    /// An identifier has no internal boundary to mark against, so a rename
+    /// marks the whole token. A char refinement marks `remov` and leaves the
+    /// `e` unchanged, which reads as a typo rather than as an edit.
+    #[test]
+    fn a_renamed_identifier_marks_whole() {
+        let lhs = "fn f() { remove(1); }\n";
+        let rhs = "fn f() { keep(1); }\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            (
+                refined(&result, Side::Lhs, lhs),
+                refined(&result, Side::Rhs, rhs)
+            ),
+            (
+                (DiffChangeKind::Replaced, false, vec![]),
+                (DiffChangeKind::Replaced, false, vec![])
+            ),
+            "neither side is prose, so neither carries a sub-token span",
+        );
+    }
+
     /// One side's change, as its kind, its prose flag, and the text its refined
     /// spans cover. An unrefined change reports an empty span list.
     fn refined<'a>(

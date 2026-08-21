@@ -1,4 +1,4 @@
-//! Char-level refinement of `Replaced` pairs.
+//! Char-level refinement of prose `Replaced` pairs.
 //!
 //! The structural diff is token-granular, so a one-word edit inside a string
 //! atom or a line-diff fallback run marks the whole token or line. Refinement
@@ -6,6 +6,12 @@
 //! sub-ranges whose characters actually differ in
 //! [`DiffChange::refined_spans`](super::DiffChange::refined_spans), so display
 //! can narrow the mark.
+//!
+//! Only prose pairs are refined. A code atom carries its own token boundary, so
+//! marking part of one reads as a typo rather than as an edit. An honest
+//! `remove` -> `keep` rename narrowed to `remov` says the `e` survived, which
+//! is not what happened. Prose has no such boundary, which is the whole reason
+//! the narrowing is worth doing there.
 //!
 //! It only writes `refined_spans`. It never alters byte ranges, kinds, pairing,
 //! or hunk extents.
@@ -38,8 +44,12 @@ const MAX_REFINE_PAIR_LINES: usize = 32;
 const MERGE_GAP: usize = 3;
 
 /// Populate [`DiffChange::refined_spans`](super::DiffChange::refined_spans) for
-/// every `Replaced` pair, narrowing both sides to the chars that actually
+/// every prose `Replaced` pair, narrowing both sides to the chars that actually
 /// differ.
+///
+/// A pair is prose only when both of its sides are, since one code atom brings
+/// a token boundary back to the run. Every other pair is left with empty spans,
+/// so it marks whole.
 ///
 /// A pair whose two sides char-diff cleanly gets per-line refined spans. A line
 /// that is a full rewrite, unpaired, or too long to char-diff contributes its
@@ -65,6 +75,9 @@ pub fn refine_replaced_pairs(changes: &mut [DiffChange], lhs_text: &str, rhs_tex
         let (Some(lhs_idx), Some(rhs_idx)) = (lhs_idx, rhs_idx) else {
             continue;
         };
+        if !(changes[lhs_idx].prose && changes[rhs_idx].prose) {
+            continue;
+        }
         let lhs_range = changes[lhs_idx].byte_range.clone();
         let rhs_range = changes[rhs_idx].byte_range.clone();
         let (lhs_spans, rhs_spans) = refine_pair(
