@@ -25,6 +25,7 @@ use wgpu::{
 fn sample(cpu_ms: f32) -> FrameSample {
     FrameSample {
         pre: Duration::ZERO,
+        prepare: Duration::ZERO,
         acquire: Duration::from_secs_f32(cpu_ms / 1000.0),
         encode: Duration::ZERO,
         present: Duration::ZERO,

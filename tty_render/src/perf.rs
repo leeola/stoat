@@ -35,6 +35,16 @@ mod enabled {
         /// Zero for a caller that never marked a redraw start, which is every
         /// caller but the primary window's redraw.
         pub pre: Duration,
+        /// Uploading every buffer the frame draws from, which runs before the
+        /// drawable is acquired so it overlaps that wait.
+        ///
+        /// Zero for a caller that never marked it, which then reports the whole
+        /// span up to the acquire as [`Self::acquire`].
+        pub prepare: Duration,
+        /// Waiting for the compositor to hand over a drawable.
+        ///
+        /// Measured from the prepare mark rather than the frame start, so it
+        /// names the wait alone and drops as the prepare covers more of it.
         pub acquire: Duration,
         pub encode: Duration,
         pub present: Duration,
@@ -54,7 +64,7 @@ mod enabled {
         /// the frame waits. A sum that skipped it would read healthy exactly
         /// when the terminal is stalling.
         pub fn cpu(&self) -> Duration {
-            self.pre + self.acquire + self.encode + self.present
+            self.pre + self.prepare + self.acquire + self.encode + self.present
         }
     }
 
@@ -102,6 +112,7 @@ mod enabled {
         frame_start: Option<Instant>,
         frame_pre: Option<Instant>,
         frame_ingest: Option<Instant>,
+        prepared_at: Option<Instant>,
         acquired_at: Option<Instant>,
         submitted_at: Option<Instant>,
         last_end: Option<Instant>,
@@ -123,6 +134,7 @@ mod enabled {
                 frame_start: None,
                 frame_pre: None,
                 frame_ingest: None,
+                prepared_at: None,
                 acquired_at: None,
                 submitted_at: None,
                 last_end: None,
@@ -147,8 +159,18 @@ mod enabled {
             self.frame_start = Some(Instant::now());
             self.frame_pre = self.redraw_start.take();
             self.frame_ingest = self.ingest_at.take();
+            self.prepared_at = None;
             self.acquired_at = None;
             self.submitted_at = None;
+        }
+
+        /// Mark the end of the buffer uploads, before the drawable is acquired.
+        ///
+        /// Splits the two so the acquire span names the wait alone. A caller
+        /// that prepares after acquiring leaves this unset, and the whole span
+        /// counts as the acquire.
+        pub fn mark_prepared(&mut self) {
+            self.prepared_at = Some(Instant::now());
         }
 
         pub fn mark_acquired(&mut self) {
@@ -162,14 +184,16 @@ mod enabled {
         pub fn end_frame(&mut self) {
             let now = Instant::now();
             let start = self.frame_start.unwrap_or(now);
-            let acquired = self.acquired_at.unwrap_or(start);
+            let prepared = self.prepared_at.unwrap_or(start);
+            let acquired = self.acquired_at.unwrap_or(prepared);
             let submitted = self.submitted_at.unwrap_or(acquired);
             let sample = FrameSample {
                 pre: self
                     .frame_pre
                     .map(|marked| start.saturating_duration_since(marked))
                     .unwrap_or_default(),
-                acquire: acquired.saturating_duration_since(start),
+                prepare: prepared.saturating_duration_since(start),
+                acquire: acquired.saturating_duration_since(prepared),
                 encode: submitted.saturating_duration_since(acquired),
                 present: now.saturating_duration_since(submitted),
                 interval: self
@@ -271,6 +295,7 @@ mod enabled {
         fn sample(cpu_ms: u64) -> FrameSample {
             FrameSample {
                 pre: Duration::ZERO,
+                prepare: Duration::ZERO,
                 acquire: ms(cpu_ms),
                 encode: Duration::ZERO,
                 present: Duration::ZERO,
@@ -280,14 +305,72 @@ mod enabled {
             }
         }
 
-        /// The pre-acquire span is where a frame waits under a flood, so the
-        /// cost the HUD graphs has to include it. Leaving it out is exactly the
-        /// blind spot that reports healthy while the terminal stalls.
+        /// The spans before the acquire are where a frame waits under a flood,
+        /// so the cost the HUD graphs has to include them. Leaving one out is
+        /// exactly the blind spot that reports healthy while the terminal
+        /// stalls.
         #[test]
-        fn the_frame_cost_counts_the_span_before_the_acquire() {
-            let mut with_pre = sample(10);
-            with_pre.pre = ms(7);
-            assert_eq!((sample(10).cpu(), with_pre.cpu()), (ms(10), ms(17)));
+        fn the_frame_cost_counts_every_span_before_the_acquire() {
+            let mut wider = sample(10);
+            wider.pre = ms(7);
+            wider.prepare = ms(3);
+            assert_eq!((sample(10).cpu(), wider.cpu()), (ms(10), ms(20)));
+        }
+
+        /// The prepare runs before the acquire, so the acquire span has to
+        /// start where the prepare ended. Measuring it from the frame start
+        /// would fold the uploads into the wait and hide the overlap the
+        /// ordering exists to create.
+        #[test]
+        fn the_acquire_span_starts_where_the_prepare_ended() {
+            const GAP: Duration = Duration::from_micros(200);
+
+            // Spin rather than sleep, so each span rests on the clock having
+            // advanced rather than on a scheduler honoring a deadline.
+            let spin = |units: u32| {
+                let from = Instant::now();
+                while from.elapsed() < GAP * units {
+                    std::hint::spin_loop();
+                }
+            };
+
+            // A long prepare and a short acquire, so measuring the acquire from
+            // the frame start rather than from the prepare mark is visible as a
+            // ratio rather than as a few microseconds of noise.
+            let mut p = FrameProfiler::new();
+            p.begin_frame();
+            spin(5);
+            p.mark_prepared();
+            spin(1);
+            p.mark_acquired();
+            p.end_frame();
+
+            let last = p.stats().expect("stats").last;
+            assert!(
+                last.prepare >= GAP * 5 && last.acquire >= GAP,
+                "each span holds its own stretch: prepare {:?}, acquire {:?}",
+                last.prepare,
+                last.acquire
+            );
+            assert!(
+                last.acquire * 2 < last.prepare,
+                "the acquire names the wait alone, not the prepare before it: \
+                 prepare {:?}, acquire {:?}",
+                last.prepare,
+                last.acquire
+            );
+        }
+
+        /// A caller that prepares after acquiring never marks the split, and the
+        /// whole span up to the acquire is the wait it actually had.
+        #[test]
+        fn an_unmarked_prepare_leaves_the_span_with_the_acquire() {
+            let mut p = FrameProfiler::new();
+            p.begin_frame();
+            p.mark_acquired();
+            p.end_frame();
+
+            assert_eq!(p.stats().expect("stats").last.prepare, Duration::ZERO);
         }
 
         /// A caller that marks neither reports neither, rather than a zero
@@ -484,6 +567,9 @@ mod disabled {
 
         #[inline]
         pub fn begin_frame(&mut self) {}
+
+        #[inline]
+        pub fn mark_prepared(&mut self) {}
 
         #[inline]
         pub fn mark_acquired(&mut self) {}

@@ -416,7 +416,16 @@ impl Renderer {
         frame: Frame<'_>,
     ) {
         self.prepare_frame(device, queue, grid, &frame, &[]);
+        self.record_into(device, queue, view);
+    }
 
+    /// Record and submit a frame whose buffers are already prepared, into
+    /// `view`.
+    ///
+    /// Split out of [`Self::render_into`] because a caller waiting on a surface
+    /// drawable prepares before it holds a view, and still has to record
+    /// through the same path afterward.
+    pub(crate) fn record_into(&mut self, device: &Device, queue: &Queue, view: &TextureView) {
         // Time this frame's GPU work when the timer's current slot is free.
         #[cfg(feature = "perf")]
         let timing = self.prepare_gpu_timing(device, queue);
@@ -1613,11 +1622,23 @@ impl GpuContext {
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
     ///
+    /// Every buffer is prepared before the drawable is acquired, so the uploads
+    /// overlap the wait rather than following it. Only the recording needs a
+    /// view.
+    ///
     /// When the acquired drawable's size disagrees with the configured size,
     /// the frame adopts the drawable's size so a live resize cannot trip
-    /// scissor validation.
+    /// scissor validation, and prepares again against the size it settled on.
     pub fn render(&mut self, grid: &Grid, frame: Frame<'_>) -> FrameOutcome {
         self.perf.begin_frame();
+
+        // Ahead of the acquire, so the buffer uploads run while the compositor
+        // is still deciding to hand over a drawable. Nothing a prepare writes
+        // needs the view.
+        self.renderer
+            .prepare_frame(&self.device, &self.queue, grid, &frame, &[]);
+        self.perf.mark_prepared();
+
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -1632,17 +1653,22 @@ impl GpuContext {
         };
         self.perf.mark_acquired();
 
-        self.adopt_drawable_size(
+        // The drawable can arrive at a size the surface was not configured for,
+        // and every pass just prepared against the old one. Preparing again is
+        // what a resize frame costs; one that kept its size pays nothing.
+        if self.adopt_drawable_size(
             surface_frame.texture.width(),
             surface_frame.texture.height(),
-        );
+        ) {
+            self.renderer
+                .prepare_frame(&self.device, &self.queue, grid, &frame, &[]);
+        }
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
             ..Default::default()
         });
-        self.renderer
-            .render_into(&self.device, &self.queue, &view, grid, frame);
+        self.renderer.record_into(&self.device, &self.queue, &view);
 
         #[cfg(feature = "perf")]
         if self.show_perf_hud
@@ -1691,6 +1717,9 @@ impl GpuContext {
     /// pool. The perf HUD keeps a pass of its own inside that encoder, to stay out
     /// of the timed one.
     ///
+    /// That prepare runs before the drawable is acquired, so its uploads overlap
+    /// the wait, and it runs again when the drawable settles on a different size.
+    ///
     /// Skips and re-configures on the same transient surface states as
     /// [`Self::render`], and adopts the acquired drawable's size the same way,
     /// so its pool and cursor scissors stay within the render target during a
@@ -1709,6 +1738,13 @@ impl GpuContext {
         cursor_scissor: Option<[u32; 4]>,
     ) -> FrameOutcome {
         self.perf.begin_frame();
+
+        // Ahead of the acquire, so the buffer uploads run while the compositor
+        // is still deciding to hand over a drawable. Nothing a prepare writes
+        // needs the view.
+        let mut atlas_changed = self.prepare_pooled(live_grid, &frame, pools, anchored);
+        self.perf.mark_prepared();
+
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -1723,68 +1759,21 @@ impl GpuContext {
         };
         self.perf.mark_acquired();
 
-        self.adopt_drawable_size(
+        // The drawable can arrive at a size the surface was not configured for,
+        // and every pass just prepared against the old one. Preparing again is
+        // what a resize frame costs; one that kept its size pays nothing.
+        if self.adopt_drawable_size(
             surface_frame.texture.width(),
             surface_frame.texture.height(),
-        );
+        ) {
+            atlas_changed = self.prepare_pooled(live_grid, &frame, pools, anchored);
+        }
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
             ..Default::default()
         });
 
-        let resolution = [self.config.width as f32, self.config.height as f32];
-        let cursor_corners = frame.cursor_corners;
-        let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
-
-        // The pool composites paint over the cursor's cell, so the base prepares
-        // without its cursor block and the block is recorded after the pools. The
-        // ligature-break cell (`frame.cursor`) stays, keeping the live grid's
-        // glyph under a chrome cursor broken out of any ligature.
-        let base = Frame {
-            cursor_corners: None,
-            ..frame
-        };
-
-        // Every pass prepares before anything draws, so the whole frame shares one
-        // render pass. A pool that grows the atlas partway through moves the UVs the
-        // live grid and the pools before it already resolved, so the sweep runs
-        // again when the epoch moved. Both prepare paths rebuild rather than reuse
-        // on an epoch mismatch, so the second sweep re-resolves exactly what went
-        // stale.
-        let epoch_before = self.renderer.content_epoch();
-        self.prepare_pool_frame(live_grid, &base, pools, anchored);
-        let settled = self.renderer.content_epoch();
-        let atlas_changed = if settled == epoch_before {
-            false
-        } else {
-            // The heal rebuilds against the settled atlas rather than repeating the
-            // first sweep. Full damage with no slide, because the passes that cache
-            // per row already rotated those caches by this frame's scroll and must
-            // not rotate them a second time.
-            let full = Damage::Full;
-            let heal = Frame {
-                cursor: base.cursor,
-                cursor_corners: None,
-                scroll: base.scroll,
-                damage: &full,
-                decoration_damage: &full,
-                scrolled_rows: 0,
-            };
-            self.prepare_pool_frame(live_grid, &heal, pools, anchored);
-            // A grow during the healing sweep leaves it stale in turn, and the
-            // caller's extra frame is the backstop for that.
-            self.renderer.content_epoch() != settled
-        };
-
-        if cursor_corners.is_some() {
-            self.renderer.prepare_cursor_over(
-                &self.queue,
-                resolution,
-                cursor_corners,
-                cursor_scroll,
-            );
-        }
         let cursor_scissor = cursor_scissor.and_then(|s| self.renderer.pool_scissor(s));
 
         #[cfg(feature = "perf")]
@@ -1792,6 +1781,7 @@ impl GpuContext {
         #[cfg(feature = "perf")]
         if let Some(stats) = hud.as_ref() {
             let samples = self.perf.samples();
+            let resolution = [self.config.width as f32, self.config.height as f32];
             self.renderer
                 .prepare_hud_over(&self.device, &self.queue, stats, &samples, resolution);
         }
@@ -1880,6 +1870,79 @@ impl GpuContext {
         }
     }
 
+    /// Prepare every buffer a pooled frame draws from, reporting whether the
+    /// glyph atlas was still moving when the sweep finished.
+    ///
+    /// Nothing here touches a surface, so a caller runs it before acquiring the
+    /// drawable and lets the uploads overlap that wait. A caller whose drawable
+    /// then arrives at a different size runs it again, since every pass resolved
+    /// against the old resolution.
+    ///
+    /// The HUD is not prepared here. It reads the resolution the frame ends up
+    /// with, which only the acquire settles.
+    fn prepare_pooled(
+        &mut self,
+        live_grid: &Grid,
+        frame: &Frame<'_>,
+        pools: &[PoolComposite<'_>],
+        anchored: &[AnchoredPanel],
+    ) -> bool {
+        let resolution = [self.config.width as f32, self.config.height as f32];
+        let cursor_corners = frame.cursor_corners;
+        let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
+
+        // The pool composites paint over the cursor's cell, so the base prepares
+        // without its cursor block and the block is recorded after the pools. The
+        // ligature-break cell (`frame.cursor`) stays, keeping the live grid's
+        // glyph under a chrome cursor broken out of any ligature.
+        let base = Frame {
+            cursor_corners: None,
+            ..*frame
+        };
+
+        // Every pass prepares before anything draws, so the whole frame shares one
+        // render pass. A pool that grows the atlas partway through moves the UVs the
+        // live grid and the pools before it already resolved, so the sweep runs
+        // again when the epoch moved. Both prepare paths rebuild rather than reuse
+        // on an epoch mismatch, so the second sweep re-resolves exactly what went
+        // stale.
+        let epoch_before = self.renderer.content_epoch();
+        self.prepare_pool_frame(live_grid, &base, pools, anchored);
+        let settled = self.renderer.content_epoch();
+        let atlas_changed = if settled == epoch_before {
+            false
+        } else {
+            // The heal rebuilds against the settled atlas rather than repeating the
+            // first sweep. Full damage with no slide, because the passes that cache
+            // per row already rotated those caches by this frame's scroll and must
+            // not rotate them a second time.
+            let full = Damage::Full;
+            let heal = Frame {
+                cursor: base.cursor,
+                cursor_corners: None,
+                scroll: base.scroll,
+                damage: &full,
+                decoration_damage: &full,
+                scrolled_rows: 0,
+            };
+            self.prepare_pool_frame(live_grid, &heal, pools, anchored);
+            // A grow during the healing sweep leaves it stale in turn, and the
+            // caller's extra frame is the backstop for that.
+            self.renderer.content_epoch() != settled
+        };
+
+        if cursor_corners.is_some() {
+            self.renderer.prepare_cursor_over(
+                &self.queue,
+                resolution,
+                cursor_corners,
+                cursor_scroll,
+            );
+        }
+
+        atlas_changed
+    }
+
     /// Upload the live grid's buffers and every pool's, in the order they draw.
     ///
     /// Run twice by [`Self::render_with_pools`] when a pool grew the atlas during
@@ -1932,14 +1995,19 @@ impl GpuContext {
     /// so every scissor derived from the surface size stays within the render
     /// target until the queued `Resized` re-fits the grid and PTY a moment
     /// later.
-    fn adopt_drawable_size(&mut self, width: u32, height: u32) {
+    ///
+    /// Reports whether the size moved, since every pass prepared against the
+    /// old one before the drawable existed and has to prepare again when it
+    /// did.
+    fn adopt_drawable_size(&mut self, width: u32, height: u32) -> bool {
         if width == self.config.width && height == self.config.height {
-            return;
+            return false;
         }
 
         self.config.width = width;
         self.config.height = height;
         self.renderer.set_size(width, height);
+        true
     }
 
     /// Mark the top of the caller's redraw, before it assembles the frame.
