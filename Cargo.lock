@@ -4235,6 +4235,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
+ "divan",
  "etagere",
  "futures",
  "lru 0.16.4",
@@ -4252,6 +4253,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "base64",
+ "divan",
  "flate2",
  "image",
  "memchr",

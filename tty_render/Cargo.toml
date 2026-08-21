@@ -24,3 +24,10 @@ swash.workspace = true
 etagere.workspace = true
 lru.workspace = true
 rustc-hash.workspace = true
+
+[dev-dependencies]
+divan = "0.1"
+
+[[bench]]
+name = "compose"
+harness = false
