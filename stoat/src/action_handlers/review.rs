@@ -1233,7 +1233,14 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
                 cursor_row,
                 buffer_text: &buffer_text,
             };
-            return super::amend::amend_hunk(stoat, &*repo, &target, mode, site);
+            return super::amend::amend_hunk(
+                stoat,
+                &*repo,
+                &target,
+                mode,
+                super::amend::AmendUnit::Hunk,
+                site,
+            );
         },
         AmendRoute::Refused => {
             stoat.set_status(super::amend::REFUSED_BADGE);
@@ -1303,10 +1310,10 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 /// compose. A missing repo, an untracked file, or a cursor on no change sets a
 /// status message and changes nothing.
 ///
-/// Only the index is a target. Under a review base the staged side is the
-/// checked-out commit, and there is no line-granularity amend to reach it, so
-/// the keys report that rather than writing an index the user is not looking
-/// at. [`stage_hunk`] carries the whole-hunk amend for that case.
+/// The index is not the only target. Under a review base the staged side is the
+/// checked-out commit, so the keys amend the cursor's line into or out of it
+/// through [`amend::amend_hunk`], leaving the rest of the hunk where it was.
+/// [`stage_hunk`] moves the whole hunk the same way.
 pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
@@ -1343,9 +1350,21 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     // transport rather than whatever sits under the cursor.
     match super::amend::amend_route(stoat, &*repo) {
         AmendRoute::Index => {},
-        AmendRoute::Commit(_) => {
-            stoat.set_status("no line-level amend; use s or u to move the whole hunk");
-            return UpdateEffect::Redraw;
+        AmendRoute::Commit(target) => {
+            let site = super::amend::HunkSite {
+                buffer_id,
+                path: &path,
+                cursor_row,
+                buffer_text: &buffer_text,
+            };
+            return super::amend::amend_hunk(
+                stoat,
+                &*repo,
+                &target,
+                mode,
+                super::amend::AmendUnit::Line,
+                site,
+            );
         },
         AmendRoute::Refused => {
             stoat.set_status(super::amend::REFUSED_BADGE);
@@ -3286,38 +3305,22 @@ mod tests {
         );
     }
 
-    /// A review base makes the checked-out commit the staged side, and there is
-    /// no line-granularity amend to reach it. An index write there changes a
-    /// thing the user is not looking at.
+    /// A review base makes the checked-out commit the staged side, so the line
+    /// keys reach it through the amend transport. The index is not on screen
+    /// there, and an index write changes a thing the user never sees.
     #[test]
-    fn stage_line_under_a_commit_base_writes_no_index() {
-        let mut h = TestHarness::with_size(80, 14);
-        let workdir = PathBuf::from("/work");
-        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
-        h.fake_git().add_repo(&workdir).commit("c1", &[]);
-        {
-            let ws = h.stoat.active_workspace_mut();
-            ws.set_diff_base(Some(DiffBase::Rev {
-                sha: Some("c1".to_string()),
-            }));
-            ws.rebase_active = Some(paused_rebase(&workdir));
-        }
-        h.open_file(&workdir.join("a.rs"));
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        crate::action_handlers::movement::set_cursor_row(editor, 1);
+    fn stage_line_under_a_commit_base_amends_rather_than_writing_the_index() {
+        let mut h = reviewing_a_commit("a\nP\nQ\nd\n");
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
 
         assert_eq!(
             (
-                h.fake_git().applied_patches(&workdir),
+                h.fake_git().applied_patches(&PathBuf::from("/work")),
                 h.stoat.pending_message.as_deref()
             ),
-            (
-                vec![],
-                Some("no line-level amend; use s or u to move the whole hunk")
-            ),
-            "the index is untouched and the badge names the whole-hunk keys",
+            (vec![], Some("amended line into the commit")),
+            "the line went into the commit and the index was left alone",
         );
     }
 
@@ -3325,35 +3328,46 @@ mod tests {
     /// the cursor, so neither reaches the index while a commit is the staged
     /// side.
     #[test]
-    fn unstage_line_under_a_commit_base_writes_no_index() {
+    fn unstage_line_under_a_commit_base_amends_rather_than_writing_the_index() {
+        let mut h = reviewing_a_commit("a\nX\nY\nd\n");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+
+        assert_eq!(
+            (
+                h.fake_git().applied_patches(&PathBuf::from("/work")),
+                h.stoat.pending_message.as_deref()
+            ),
+            (vec![], Some("amended line out of the commit")),
+            "the line came out of the commit and the index was left alone",
+        );
+    }
+
+    /// A rebase stopped on an edit over commit `c1`, with `c0` as the review
+    /// base, and the cursor on row 1 of `a.rs`. `working` is what the buffer
+    /// holds, which is what separates a worktree edit from the commit's own
+    /// change.
+    fn reviewing_a_commit(working: &str) -> TestHarness {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = PathBuf::from("/work");
-        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
-        h.fake_git().add_repo(&workdir).commit("c1", &[]);
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .commit("c0", &[("a.rs", "a\nb\nc\nd\n")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "a\nX\nY\nd\n")])
+            .head_file("a.rs", working);
+        h.fake_fs().insert_file("/work/a.rs", working.as_bytes());
         {
             let ws = h.stoat.active_workspace_mut();
             ws.set_diff_base(Some(DiffBase::Rev {
-                sha: Some("c1".to_string()),
+                sha: Some("c0".to_string()),
             }));
             ws.rebase_active = Some(paused_rebase(&workdir));
         }
         h.open_file(&workdir.join("a.rs"));
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 1);
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
-
-        assert_eq!(
-            (
-                h.fake_git().applied_patches(&workdir),
-                h.stoat.pending_message.as_deref()
-            ),
-            (
-                vec![],
-                Some("no line-level amend; use s or u to move the whole hunk")
-            ),
-            "the index is untouched here too",
-        );
+        h
     }
 
     /// A base with nothing safe to rewrite under it gets the transport's own

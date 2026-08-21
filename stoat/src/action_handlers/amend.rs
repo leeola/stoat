@@ -137,6 +137,7 @@ pub(super) fn amend_hunk(
     repo: &dyn GitRepo,
     target: &AmendTarget,
     mode: HunkStage,
+    unit: AmendUnit,
     site: HunkSite<'_>,
 ) -> UpdateEffect {
     let HunkSite {
@@ -154,18 +155,19 @@ pub(super) fn amend_hunk(
         None => String::new(),
     };
 
-    let amend_in = || amended_content(&head, buffer_text, &head, cursor_row, true);
-    let amend_out = || amended_content(&parent, &head, &head, cursor_row, false);
+    let amend_in = || amended_content(&head, buffer_text, &head, cursor_row, true, unit);
+    let amend_out = || amended_content(&parent, &head, &head, cursor_row, false, unit);
+    let (into, out_of, nothing) = unit.messages();
     let amended_and_message = match mode {
-        HunkStage::Stage => amend_in().map(|text| (text, "amended hunk into the commit")),
-        HunkStage::Unstage => amend_out().map(|text| (text, "amended hunk out of the commit")),
+        HunkStage::Stage => amend_in().map(|text| (text, into)),
+        HunkStage::Unstage => amend_out().map(|text| (text, out_of)),
         HunkStage::Toggle => amend_in()
-            .map(|text| (text, "amended hunk into the commit"))
-            .or_else(|| amend_out().map(|text| (text, "amended hunk out of the commit"))),
+            .map(|text| (text, into))
+            .or_else(|| amend_out().map(|text| (text, out_of))),
     };
 
     let Some((amended, message)) = amended_and_message else {
-        stoat.set_status("no hunk under the cursor");
+        stoat.set_status(nothing);
         return UpdateEffect::Redraw;
     };
 
@@ -215,26 +217,76 @@ fn amended_content(
     commit: &str,
     cursor_row: u32,
     stage: bool,
+    unit: AmendUnit,
 ) -> Option<String> {
-    let (from_span, to_span) = hunk_spans_at(from, to, cursor_row)?;
+    let (from_span, to_span) = match unit {
+        AmendUnit::Hunk => hunk_spans_at(from, to, cursor_row)?,
+        AmendUnit::Line => line_spans_at(from, to, cursor_row)?,
+    };
     Some(match stage {
         true => splice(commit, from_span, to, to_span),
         false => splice(commit, to_span, from, from_span),
     })
 }
 
+/// How much of the hunk under the cursor one keypress moves.
+#[derive(Clone, Copy)]
+pub(super) enum AmendUnit {
+    /// The whole hunk, which is what `s` and `u` move.
+    Hunk,
+    /// The cursor's line alone, which is what `S` and `U` move.
+    Line,
+}
+
+impl AmendUnit {
+    /// What the badge says about this unit, as
+    /// `(amended in, amended out, nothing under the cursor)`.
+    ///
+    /// The unit is the whole point of the two key pairs, so it is the word the
+    /// user needs back to know which pair they just pressed.
+    fn messages(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Hunk => (
+                "amended hunk into the commit",
+                "amended hunk out of the commit",
+                "no hunk under the cursor",
+            ),
+            Self::Line => (
+                "amended line into the commit",
+                "amended line out of the commit",
+                "no line change under the cursor",
+            ),
+        }
+    }
+}
+
 /// The byte spans a hunk covering `cursor_row` occupies on each side of the
 /// diff from `from` to `to`, as `(from span, to span)`.
 ///
-/// The row is a `to`-side row, since that is the text on screen. A hunk that
-/// deletes leaves an empty span there, anchored where the deletion sat, which
-/// is where the gutter marks it.
+/// Both spans are whole lines, covering everything the hunk moves. A hunk that
+/// deletes leaves an empty `to` span, anchored where the deletion sat, which is
+/// where the gutter marks it.
 ///
-/// Both spans are whole lines, and both come from the line ranges rather than
-/// from the hunk's raw base bytes. A hunk records which base bytes it replaces
-/// but not which base line they start on, so the two sides are only aligned
-/// once that anchor is derived, which is what [`base_line_range`] does.
+/// See also:
+/// - [`hunk_rows_at`] for how the hunk is found and its two sides aligned.
+/// - [`line_spans_at`] for the same spans narrowed to one line.
 fn hunk_spans_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<usize>, Range<usize>)> {
+    let (from_rows, to_rows) = hunk_rows_at(from, to, cursor_row)?;
+    Some((line_span(from, from_rows), line_span(to, to_rows)))
+}
+
+/// The line ranges the hunk covering `cursor_row` occupies on each side of the
+/// diff from `from` to `to`, as `(from rows, to rows)`.
+///
+/// The row is a `to`-side row, since that is the text on screen. A hunk that
+/// deletes covers no `to` row, so it is found by the anchor the gutter marks it
+/// at rather than by containment.
+///
+/// The `from` rows come from the line ranges rather than from the hunk's raw
+/// base bytes. A hunk records which base bytes it replaces but not which base
+/// line they start on, so the two sides are only aligned once that anchor is
+/// derived, which is what [`base_line_range`] does.
+fn hunk_rows_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<u32>, Range<u32>)> {
     let result = stoat_language::structural_diff::diff(from, to);
     let hunks = crate::diff_map::changes_to_hunks(&result.changes, from, to);
     let k = hunks.iter().position(|hunk| {
@@ -245,9 +297,43 @@ fn hunk_spans_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<usize>,
         }
     })?;
 
-    let from_rows = base_line_range(from, &hunks, k);
-    let to_rows = hunks[k].buffer_line_range.clone();
-    Some((line_span(from, from_rows), line_span(to, to_rows)))
+    Some((
+        base_line_range(from, &hunks, k),
+        hunks[k].buffer_line_range.clone(),
+    ))
+}
+
+/// The byte spans the cursor's single line occupies on each side of the diff
+/// from `from` to `to`, as `(from span, to span)`.
+///
+/// The line-granularity counterpart to [`hunk_spans_at`], which is where the
+/// hunk under the cursor is found. Only the narrowing lives here.
+///
+/// A hunk that replaces three lines with five has no arithmetic mapping from a
+/// `to` row back to a `from` row, so the pairing is positional inside the hunk,
+/// the way `hunk_rows` in [`crate::review_apply`] pairs the rows it emits. The
+/// cursor's offset into the hunk is its offset into both sides, and a row past
+/// the shorter side is one-sided.
+///
+/// A cursor on a purely added line therefore has no counterpart, and its `from`
+/// span comes back empty, anchored where the line lands. A deletion hunk covers
+/// no `to` row at all, so its offset is zero and each call moves the first
+/// remaining `from` line, which walks the deletion one press at a time.
+fn line_spans_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<usize>, Range<usize>)> {
+    let (from_rows, to_rows) = hunk_rows_at(from, to, cursor_row)?;
+
+    let offset = cursor_row.saturating_sub(to_rows.start);
+    let from_row = from_rows.start + offset;
+    let from_line = match from_row < from_rows.end {
+        true => from_row..from_row + 1,
+        false => from_rows.end..from_rows.end,
+    };
+    let to_line = match to_rows.is_empty() {
+        true => to_rows.clone(),
+        false => cursor_row..cursor_row + 1,
+    };
+
+    Some((line_span(from, from_line), line_span(to, to_line)))
 }
 
 /// The bytes `rows` covers in `text`, from the start of the first row to the
@@ -688,6 +774,115 @@ mod tests {
             committed(&h).as_deref(),
             Some("Z\na\nb\nX\n"),
             "the commit took the edit the buffer already carried",
+        );
+    }
+
+    /// `S` moves the cursor's line alone. The rest of the hunk is a separate
+    /// decision the user has not made yet, so it stays where it was.
+    #[test]
+    fn stage_line_amends_one_line_of_a_longer_hunk() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
+        h.seed_focused_buffer("a\nP\nQ\nd\n");
+        cursor_to(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("a\nP\nY\nd\n"),
+            "row 1 went in and row 2 kept the commit's own text",
+        );
+    }
+
+    /// `U` is the same narrowing in the other direction, over the diff between
+    /// the base and the commit rather than between the commit and the buffer.
+    #[test]
+    fn unstage_line_amends_one_line_of_a_longer_hunk() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
+        cursor_to(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("a\nb\nY\nd\n"),
+            "row 1 came out and row 2 stayed in the commit",
+        );
+    }
+
+    /// The cursor's offset into the hunk is what picks its counterpart. On the
+    /// second row of a two-row hunk the base's second line is what comes back,
+    /// not the first one the hunk happens to start at.
+    #[test]
+    fn unstage_line_takes_the_counterpart_at_the_cursors_offset() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
+        cursor_to(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("a\nX\nc\nd\n"),
+            "row 2 came back as c, the base line paired with it",
+        );
+    }
+
+    /// Amending in reads the offset the same way, against the buffer rather
+    /// than the base.
+    #[test]
+    fn stage_line_replaces_the_commit_line_at_the_cursors_offset() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
+        h.seed_focused_buffer("a\nP\nQ\nd\n");
+        cursor_to(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("a\nX\nQ\nd\n"),
+            "Q replaced Y, the commit line paired with it",
+        );
+    }
+
+    /// A cursor past the end of the hunk's other side sits on a purely added
+    /// line, which replaces nothing. The line is inserted where it lands, and
+    /// its neighbour addition is left for a second press.
+    #[test]
+    fn stage_line_on_an_added_line_replaces_nothing() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
+        h.seed_focused_buffer("a\nX\nY\nN1\nN2\nd\n");
+        cursor_to(&mut h, 4);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("a\nX\nY\nN2\nd\n"),
+            "the second added line went in on its own",
+        );
+    }
+
+    /// Repeating walks the hunk a line at a time, which is what makes the
+    /// narrowing useful rather than a one-shot.
+    #[test]
+    fn two_line_amends_empty_the_hunk() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
+
+        for row in [1, 2] {
+            cursor_to(&mut h, row);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+            h.settle();
+        }
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("a\nb\nc\nd\n"),
+            "both lines came out one press at a time",
         );
     }
 }
