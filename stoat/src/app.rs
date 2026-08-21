@@ -4025,6 +4025,25 @@ impl Stoat {
             }
         }
 
+        // The zoom combo, arriving as bytes because the host was asked to
+        // deliver it that way. Over the window socket the same press never
+        // reaches here at all, being routed straight to the same step, so this
+        // sits ahead of every reader that would otherwise take it: terminal
+        // passthrough would hand it to a run pane's child, macro capture would
+        // record a press the socket transport does not, and the keymap would
+        // resolve `=` or `-` to whatever the mode binds, which in insert mode is
+        // typing the character.
+        //
+        // Exactly super, not super among others. That is what the host writes,
+        // and a press carrying more is a different chord the keymap should get.
+        if key.modifiers == KeyModifiers::SUPER {
+            match key.code {
+                KeyCode::Char('=') => return self.handle_zoom_step(1),
+                KeyCode::Char('-') => return self.handle_zoom_step(-1),
+                _ => {},
+            }
+        }
+
         if let Some(count) = self.pending_macro_replay.take() {
             if let KeyCode::Char(ch) = key.code {
                 // The register name is half of what a recording needs to replay
@@ -7944,6 +7963,110 @@ mod tests {
             h.stoat.active_workspace().panes.pane(left).area.width,
             50,
             "and the pane behind it kept its share"
+        );
+    }
+
+    /// The zoom press as it arrives over the pty, which is exactly super on `=`
+    /// or `-`. The same press over the window socket is [`zoom`].
+    fn inband_zoom(delta: i32) -> Event {
+        let ch = if delta > 0 { '=' } else { '-' };
+        Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SUPER))
+    }
+
+    /// The press has to mean the same thing whichever transport carried it, so
+    /// the two are run against separate harnesses and compared rather than
+    /// checked against a number written here.
+    #[test]
+    fn an_inband_zoom_press_steps_a_modal_like_the_socket_event_does() {
+        let mut over_pty = zoomable_finder();
+        let mut over_socket = zoomable_finder();
+
+        over_pty.stoat.update(inband_zoom(1));
+        over_socket.stoat.handle_window_ipc(zoom(1));
+
+        assert_eq!(
+            (
+                over_pty.stoat.modal_zoom.clone(),
+                finder_box(&over_pty),
+                over_pty.stoat.modal_zoom.is_empty(),
+            ),
+            (
+                over_socket.stoat.modal_zoom.clone(),
+                finder_box(&over_socket),
+                false,
+            ),
+            "the press moved the modal, and moved it the same way over both",
+        );
+    }
+
+    /// With nothing over the panes the press is a pane resize, the same as the
+    /// socket event is. Reaching that means passing every reader below it: the
+    /// keymap alone would type the character instead.
+    #[test]
+    fn an_inband_zoom_press_with_no_modal_open_resizes_the_focused_pane() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let left = h.stoat.active_workspace().panes.focus();
+        let right = h
+            .stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        h.stoat.active_workspace_mut().panes.set_focus(left);
+        let width = |h: &crate::test_harness::TestHarness, id| {
+            h.stoat.active_workspace().panes.pane(id).area.width
+        };
+        assert_eq!((width(&h, left), width(&h, right)), (50, 50));
+
+        h.stoat.update(inband_zoom(-1));
+
+        assert_eq!(
+            (width(&h, left), width(&h, right)),
+            (40, 60),
+            "the focused pane gave a step to its neighbor"
+        );
+
+        // Exactly super is what the host writes. A press carrying more is some
+        // other chord, and taking it here would shadow whatever the keymap has
+        // for it.
+        h.stoat.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('-'),
+            KeyModifiers::SUPER | KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(
+            (width(&h, left), width(&h, right)),
+            (40, 60),
+            "a press with more than super held is not the zoom combo"
+        );
+    }
+
+    /// A macro replays what the user typed, and over the socket the press is
+    /// never typing at all. Capturing it here would make a replay zoom where the
+    /// recording did not.
+    #[test]
+    fn a_macro_recorded_around_an_inband_zoom_press_does_not_carry_it() {
+        use stoat_action as action;
+
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        action_handlers::dispatch(&mut h.stoat, &action::RecordMacro);
+
+        h.stoat.update(inband_zoom(1));
+        h.stoat.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(
+            h.stoat
+                .macro_recording
+                .as_ref()
+                .expect("recording")
+                .keys
+                .iter()
+                .map(|key| key.code)
+                .collect::<Vec<_>>(),
+            [KeyCode::Char('j')],
+            "the ordinary key was recorded and the zoom press was not",
         );
     }
 
