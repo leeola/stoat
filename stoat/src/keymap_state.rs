@@ -982,13 +982,13 @@ mod tests {
             Some("file"),
             "a plain editor starts outside the diff view"
         );
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
         assert_eq!(
             h.stoat.current_view(),
             Some("diff"),
             "Diff turns the diff view on"
         );
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
         assert_eq!(
             h.stoat.current_view(),
             Some("file"),
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn escape_in_the_diff_view_stays_in_the_view() {
         let mut h = Stoat::test();
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
         assert_eq!(h.stoat.current_view(), Some("diff"));
 
         h.type_keys("Escape");

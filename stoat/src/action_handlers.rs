@@ -60,8 +60,8 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GitLs, GitReview, GotoTab,
-    OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
+    Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
+    GotoTab, OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
     OpenReviewCommitRange, RenameTab, RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
     WalkthroughOpen,
 };
@@ -390,8 +390,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::Diff => {
-            review::toggle_diff_view(stoat);
-            UpdateEffect::Redraw
+            let action = action
+                .as_any()
+                .downcast_ref::<Diff>()
+                .expect("Diff action downcast");
+            review::diff(stoat, action.rev.as_deref())
         },
         ActionKind::ToggleDiff => review::toggle_diff(stoat),
         ActionKind::Conflict => {

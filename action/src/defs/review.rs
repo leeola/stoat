@@ -1,14 +1,51 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
+};
+use std::{any::Any, path::PathBuf};
 
-define_action!(
+const DIFF_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "rev",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: false,
+    description: "Branch, tag, sha, or revspec to diff against. Defaults to HEAD.",
+}];
+
+define_action_def!(
     DiffDef,
-    Diff,
     "Diff",
     ActionKind::Diff,
     "open a diff of working-tree changes",
-    "Open the first modified or staged file with a structural diff against HEAD.",
-    ActionPriority::Common
+    "Open the first changed file with a structural diff against HEAD, or \
+     against the given revision. A revision points the whole workspace at \
+     that commit, so every file diffs against it and the change list spans \
+     everything committed since. Running it again closes the diff and \
+     returns to HEAD.",
+    ActionPriority::Common,
+    params = DIFF_PARAMS
 );
+
+#[derive(Debug)]
+pub struct Diff {
+    /// Revision to diff against, or `None` for the working tree's own
+    /// HEAD-plus-index.
+    pub rev: Option<String>,
+}
+
+impl Diff {
+    pub const DEF: &DiffDef = &DiffDef;
+}
+
+impl Action for Diff {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 define_action!(
     ToggleDiffDef,
@@ -271,9 +308,6 @@ define_action!(
      error badge if the working tree is dirty.",
     ActionPriority::Rare
 );
-
-use crate::{action::define_action_def, Action, ActionDef, ParamDef, ParamKind, ValueSource};
-use std::{any::Any, path::PathBuf};
 
 define_action!(
     ReviewNextCommitDef,
@@ -547,15 +581,29 @@ mod tests {
 
     #[test]
     fn kind_and_name() {
-        assert_eq!(Diff.kind(), ActionKind::Diff);
-        assert_eq!(Diff.def().name(), "Diff");
-        assert!(Diff.def().params().is_empty());
-        assert!(Diff.def().palette_visible());
+        let diff = Diff { rev: None };
+        assert_eq!(diff.kind(), ActionKind::Diff);
+        assert_eq!(diff.def().name(), "Diff");
+        assert!(diff.def().palette_visible());
+    }
+
+    /// The revision is optional, so `:diff` on its own still means HEAD. A
+    /// required parameter would make the bare command an error.
+    #[test]
+    fn the_revision_is_one_optional_string() {
+        let params = Diff { rev: None }.def().params();
+        assert_eq!(
+            params
+                .iter()
+                .map(|param| (param.name, param.kind, param.required))
+                .collect::<Vec<_>>(),
+            [("rev", ParamKind::String, false)],
+        );
     }
 
     #[test]
     fn downcast() {
-        let action: Box<dyn Action> = Box::new(Diff);
+        let action: Box<dyn Action> = Box::new(Diff { rev: None });
         assert!(action.as_any().downcast_ref::<Diff>().is_some());
     }
 }

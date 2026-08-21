@@ -383,7 +383,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = "/repo".into();
         h.seed_focused_buffer("changed\n");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
         h.settle();
         assert_eq!(
             h.stoat.current_view(),

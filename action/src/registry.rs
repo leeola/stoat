@@ -289,7 +289,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(FileFinderScopeToggle))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
-    add(Diff::DEF, |_| Ok(Box::new(Diff)));
+    add(Diff::DEF, |params| {
+        // The palette autospaces a submitted command, so a bare `diff` arrives
+        // with an empty argument. That means HEAD, not a revision literally
+        // named "".
+        let rev = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "rev",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .filter(|rev| !rev.is_empty())
+            .map(str::to_owned);
+        Ok(Box::new(Diff { rev }))
+    });
     add(ToggleDiff::DEF, |_| Ok(Box::new(ToggleDiff)));
     add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
     add(CloseConflict::DEF, |_| Ok(Box::new(CloseConflict)));
@@ -1510,6 +1526,33 @@ mod tests {
             let action = (entry.create)(&[]).expect(name);
             assert_eq!(action.kind(), entry.def.kind(), "kind mismatch for {name}");
         }
+    }
+
+    /// `:diff` reaches here as a revision or as nothing, and the palette
+    /// autospaces a submitted command, so a bare one arrives as an empty
+    /// argument rather than as no argument at all. All three have to land on
+    /// the two meanings the action has.
+    #[test]
+    fn diff_factory_reads_an_optional_rev() {
+        let entry = lookup("Diff").expect("Diff");
+        let built = |params: &[ParamValue]| {
+            (entry.create)(params)
+                .expect("create")
+                .as_any()
+                .downcast_ref::<Diff>()
+                .expect("downcast")
+                .rev
+                .clone()
+        };
+
+        assert_eq!(
+            (
+                built(&[]),
+                built(&[ParamValue::String("".into())]),
+                built(&[ParamValue::String("HEAD~2".into())]),
+            ),
+            (None, None, Some("HEAD~2".to_string())),
+        );
     }
 
     #[test]

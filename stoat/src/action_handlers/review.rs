@@ -18,7 +18,7 @@ use crate::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
     workspace::{
-        diff::{compute_base_highlights, BaseHighlightCache},
+        diff::{compute_base_highlights, BaseHighlightCache, DiffBase},
         Workspace,
     },
 };
@@ -948,6 +948,51 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// Either half being set counts as on, so this leaves a latched pane showing a
 /// clean file as readily as a diff itself.
+/// Open the diff against `rev`, or toggle the working-tree diff when `None`.
+///
+/// A revision points the whole workspace at that commit, so every buffer diffs
+/// against it and the change list spans everything committed since. Opening the
+/// view from a buffer with no hunks of its own then crosses into the first file
+/// in that list, which is what [`toggle_diff_view`] already does and what makes
+/// a revision land somewhere worth reading: with a base further back, the file
+/// the reader wants is rarely the one on screen.
+///
+/// A revision the repository cannot resolve changes nothing at all: it badges
+/// and leaves the view, the latch, and the base where they were. A command that
+/// half-applies leaves the reader worse off than one that refuses.
+pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
+    let Some(rev) = rev else {
+        // The bare command also drops any base a revision left installed, so
+        // closing the diff always returns to the working tree's own HEAD.
+        toggle_diff_view(stoat);
+        return UpdateEffect::Redraw;
+    };
+
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        emit_review_error_badge(stoat, "not in a git repository", None);
+        return UpdateEffect::Redraw;
+    };
+    let Some(sha) = repo.resolve_rev(rev) else {
+        emit_review_error_badge(
+            stoat,
+            "unknown revision",
+            Some(format!("no revision named {rev}")),
+        );
+        return UpdateEffect::Redraw;
+    };
+
+    stoat
+        .active_workspace_mut()
+        .set_diff_base(Some(DiffBase::Rev { sha: Some(sha) }));
+    // Turned on rather than toggled. Naming a revision asks to look at it, so a
+    // second `:diff <rev>` re-targets the view rather than closing it; only the
+    // bare command closes.
+    exit_diff_view(stoat);
+    toggle_diff_view(stoat);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
     let latched = {
         let panes = &stoat.active_workspace().panes;
@@ -994,6 +1039,7 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     };
 
     if exit_diff_view(stoat) {
+        stoat.active_workspace_mut().set_diff_base(None);
         return;
     }
 
@@ -2266,12 +2312,14 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
 #[cfg(test)]
 mod tests {
     use crate::{
+        badge::BadgeSource,
         debounce::{self, REVIEW_EXTERNAL_EDIT_DEBOUNCE},
         diff_cache::DiffCacheKey,
         editor_state::ScrollGlide,
         host::FsEventKind,
         review_session::ChunkStatus,
         test_harness::TestHarness,
+        workspace::diff::DiffBase,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2449,6 +2497,165 @@ mod tests {
         bs.rope().offset_to_point(bs.resolve_anchor(&head)).row
     }
 
+    /// A repo where `b.rs` matches HEAD and differs from commit `base0`, so it
+    /// is changed against the revision and against nothing else.
+    fn diff_rev_harness() -> (TestHarness, PathBuf) {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/repo");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        {
+            let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+            builder.head_file("b.rs", "fn b() {}\nfn b2() {}\n");
+            builder.commit("base0", &[("b.rs", "fn b() {}\n")]);
+        }
+        h.fake_fs()
+            .insert_file(workdir.join("b.rs"), b"fn b() {}\nfn b2() {}\n");
+        h.stoat.set_diff_warm_auto(true);
+        (h, workdir)
+    }
+
+    /// What the three pieces of `:diff <rev>` state currently read: the base
+    /// every buffer diffs against, whether the pane is latched into the diff
+    /// layout, and which file is open.
+    fn diff_state(h: &TestHarness) -> (Option<String>, bool, Option<PathBuf>) {
+        let base = match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Rev { sha }) => sha.clone(),
+            _ => None,
+        };
+        let panes = &h.stoat.active_workspace().panes;
+        let latched = panes.pane(panes.focus()).diff_mode;
+        let path = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .path_for(h.stoat.focused_editor_ids().expect("editor").1)
+            .map(Path::to_path_buf);
+        (base, latched, path)
+    }
+
+    /// A revision points the whole workspace at that commit and opens what
+    /// changed since it. Against HEAD `b.rs` is untouched, so nothing but the
+    /// revision could have brought the reader here.
+    #[test]
+    fn diff_with_a_rev_installs_the_base_and_opens_the_changed_file() {
+        let (mut h, workdir) = diff_rev_harness();
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::Diff {
+                rev: Some("base0".to_string()),
+            },
+        );
+        h.settle();
+
+        assert_eq!(
+            diff_state(&h),
+            (Some("base0".to_string()), true, Some(workdir.join("b.rs")),),
+        );
+    }
+
+    /// The bare command closes the diff, and a base a revision installed goes
+    /// with it. Leaving it behind would have every later diff silently measured
+    /// against a commit the reader thought they had closed.
+    #[test]
+    fn a_bare_diff_clears_the_base_a_rev_installed() {
+        let (mut h, _) = diff_rev_harness();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::Diff {
+                rev: Some("base0".to_string()),
+            },
+        );
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        h.settle();
+
+        let (base, latched, _) = diff_state(&h);
+        assert_eq!((base, latched), (None, false));
+    }
+
+    /// Naming a revision asks to look at it, so running it again re-targets the
+    /// view rather than closing it. Only the bare command closes, which is what
+    /// keeps `:diff <rev>` from being a toggle whose meaning depends on what
+    /// the reader last did.
+    #[test]
+    fn a_repeated_diff_rev_keeps_the_view_open() {
+        let (mut h, workdir) = diff_rev_harness();
+        let open = |h: &mut TestHarness| {
+            crate::action_handlers::dispatch(
+                &mut h.stoat,
+                &stoat_action::Diff {
+                    rev: Some("base0".to_string()),
+                },
+            );
+            h.settle();
+        };
+
+        open(&mut h);
+        open(&mut h);
+
+        assert_eq!(
+            diff_state(&h),
+            (Some("base0".to_string()), true, Some(workdir.join("b.rs")),),
+            "the second run lands on the same view rather than closing it",
+        );
+    }
+
+    /// The base holds the resolved commit, not the text the reader typed. A
+    /// revspec is a name for a commit at one moment: `main` moves, a prefix is
+    /// not a sha, and either would leave the base naming something that stops
+    /// meaning the commit it was chosen for.
+    #[test]
+    fn diff_stores_the_resolved_sha_rather_than_the_revspec() {
+        let (mut h, _) = diff_rev_harness();
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::Diff {
+                rev: Some("base".to_string()),
+            },
+        );
+        h.settle();
+
+        let (base, _, _) = diff_state(&h);
+        assert_eq!(
+            base.as_deref(),
+            Some("base0"),
+            "the prefix resolved to the commit it names",
+        );
+    }
+
+    /// A revision the repo cannot resolve changes nothing. Half-applying it
+    /// would leave the reader in a diff against a base they never named.
+    #[test]
+    fn an_unknown_rev_badges_and_changes_nothing() {
+        let (mut h, _) = diff_rev_harness();
+        let before = diff_state(&h);
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::Diff {
+                rev: Some("nosuch".to_string()),
+            },
+        );
+        h.settle();
+
+        assert_eq!(diff_state(&h), before, "no state moved");
+        let badge = h
+            .stoat
+            .active_workspace()
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| h.stoat.active_workspace().badges.get(id))
+            .map(|badge| badge.label.clone());
+        assert_eq!(
+            badge.as_deref(),
+            Some("unknown revision"),
+            "the refusal is reported rather than silent",
+        );
+    }
+
     #[test]
     fn toggle_diff_off_opens_the_real_file_at_the_cursor_line() {
         let mut h = TestHarness::with_size(80, 14);
@@ -2517,7 +2724,7 @@ mod tests {
             .head_file("a.txt", "a\nOLD\nc\n");
         h.stoat.active_workspace_mut().invalidate_all_diffs();
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
 
         assert_eq!(
             review_cursor_row(&mut h),

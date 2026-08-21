@@ -2944,7 +2944,7 @@ impl Stoat {
     /// Toggle the side-by-side diff view on the focused editor, as the `:diff`
     /// command does.
     pub fn toggle_diff_view(&mut self) {
-        action_handlers::dispatch(self, &Diff);
+        action_handlers::dispatch(self, &Diff { rev: None });
     }
 
     /// Open the working-tree diff for the `stoat review` entry point.
@@ -2955,7 +2955,7 @@ impl Stoat {
     /// first hunk with the view scrolled to it. With no changed files it sets
     /// the "no more changes" status and stays on the scratch.
     pub fn open_working_tree_diff(&mut self) {
-        action_handlers::dispatch(self, &Diff);
+        action_handlers::dispatch(self, &Diff { rev: None });
     }
 
     /// Open the three-way conflict resolve view for the `stoat conflict` entry
