@@ -27,6 +27,13 @@ use tokio::sync::mpsc::UnboundedSender;
 /// preserves fail-late behavior. Machines without a display server (CI,
 /// headless servers) surface the failure on the first clipboard use rather
 /// than at process startup.
+///
+/// On Linux the handle serves the Wayland data-control protocol when
+/// `WAYLAND_DISPLAY` is set, and falls back to X11 otherwise or when the
+/// compositor does not offer the protocol. Which one it picks decides which
+/// clipboard a paste reads: Xwayland keeps a clipboard of its own that a
+/// compositor need not sync, so a handle that fell back under Wayland reads
+/// back what this process last wrote rather than what another app copied.
 pub struct LocalClipboard {
     commands: Sender<Command>,
     /// The UI thread's ordered byte channel, which is where the OSC 52 escape

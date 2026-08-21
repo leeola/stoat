@@ -90,7 +90,7 @@ time = { version = "0.3", features = [
 ] }
 blake3 = "1"
 postcard = { version = "1", features = ["alloc"] }
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
 regex = "1"
 regex-cursor = { version = "0.1", default-features = false, features = [

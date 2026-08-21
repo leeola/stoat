@@ -748,9 +748,15 @@ struct State {
     /// `CursorMoved` extends it and the left release copies and clears it.
     native_drag: bool,
     /// The OS clipboard handle, opened lazily on the first copy and kept alive
-    /// so X11 selection ownership persists between copies. `None` until the
-    /// first copy, and reset to `None` after a failed copy so the next one
-    /// reopens it.
+    /// so selection ownership persists between copies. `None` until the first
+    /// copy, and reset to `None` after a failed copy so the next one reopens
+    /// it.
+    ///
+    /// On Linux it serves the Wayland data-control protocol when
+    /// `WAYLAND_DISPLAY` is set, and X11 otherwise or when the compositor does
+    /// not offer the protocol. The choice decides which clipboard a copy lands
+    /// on, since Xwayland keeps one of its own that a compositor need not sync
+    /// with the Wayland one.
     clipboard: Option<arboard::Clipboard>,
     /// When the previous `RedrawRequested` ran, so each frame's easing advances
     /// by the wall time actually elapsed rather than a fixed per-frame step.
