@@ -1218,6 +1218,34 @@ pub struct GpuContext {
     show_perf_hud: bool,
 }
 
+/// What a render call did with the frame it was handed.
+///
+/// A caller builds a frame by taking the terminal's damage, which reports the
+/// rows a projection rewrote and then forgets them. Both answers here name a
+/// way that frame can leave the GPU behind the grid, and both are repaired by
+/// one more frame rather than by anything the caller has to remember.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FrameOutcome {
+    /// Whether the frame reached the screen.
+    ///
+    /// A surface that timed out, went outdated or lost, or belongs to an
+    /// occluded window yields no drawable, so the call draws nothing. The rows
+    /// the caller's damage named never reach the GPU buffers and stay stale
+    /// until something else happens to change them.
+    pub presented: bool,
+    /// Whether the glyph atlas moved while the frame was being recorded,
+    /// leaving the buffers just presented pointing at where glyphs used to be.
+    pub atlas_stale: bool,
+}
+
+impl FrameOutcome {
+    /// The outcome of a call that found no drawable and drew nothing.
+    pub const SKIPPED: FrameOutcome = FrameOutcome {
+        presented: false,
+        atlas_stale: false,
+    };
+}
+
 /// The GPU handles one window's context was built on, for a second window to
 /// build on rather than requesting its own.
 ///
@@ -1588,7 +1616,7 @@ impl GpuContext {
     /// When the acquired drawable's size disagrees with the configured size,
     /// the frame adopts the drawable's size so a live resize cannot trip
     /// scissor validation.
-    pub fn render(&mut self, grid: &Grid, frame: Frame<'_>) {
+    pub fn render(&mut self, grid: &Grid, frame: Frame<'_>) -> FrameOutcome {
         self.perf.begin_frame();
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1596,11 +1624,11 @@ impl GpuContext {
             },
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return FrameOutcome::SKIPPED;
             },
             CurrentSurfaceTexture::Timeout
             | CurrentSurfaceTexture::Occluded
-            | CurrentSurfaceTexture::Validation => return,
+            | CurrentSurfaceTexture::Validation => return FrameOutcome::SKIPPED,
         };
         self.perf.mark_acquired();
 
@@ -1639,6 +1667,13 @@ impl GpuContext {
         if let Some(gpu) = self.renderer.take_gpu_time() {
             self.perf.attach_gpu(gpu);
         }
+
+        // A grow on this path lands in the prepare, before anything records
+        // against the atlas, so nothing this frame drew can hold a stale UV.
+        FrameOutcome {
+            presented: true,
+            atlas_stale: false,
+        }
     }
 
     /// Draw `live_grid` to the window surface, then composite each pool in
@@ -1661,11 +1696,10 @@ impl GpuContext {
     /// so its pool and cursor scissors stay within the render target during a
     /// live resize.
     ///
-    /// Returns `true` when the glyph atlas was still moving as the frame was
-    /// recorded, leaving the buffers just presented with stale UVs. A pool that
-    /// grows the atlas is healed within the frame by a second prepare sweep, so this
-    /// reports only a grow during that sweep. The caller should schedule another
-    /// frame, since without it an idle screen keeps the stale one.
+    /// The returned [`FrameOutcome`] reports an atlas that was still moving as
+    /// the frame was recorded, leaving the buffers just presented with stale
+    /// UVs. A pool that grows the atlas is healed within the frame by a second
+    /// prepare sweep, so this reports only a grow during that sweep.
     pub fn render_with_pools(
         &mut self,
         live_grid: &Grid,
@@ -1673,7 +1707,7 @@ impl GpuContext {
         pools: &[PoolComposite<'_>],
         anchored: &[AnchoredPanel],
         cursor_scissor: Option<[u32; 4]>,
-    ) -> bool {
+    ) -> FrameOutcome {
         self.perf.begin_frame();
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1681,11 +1715,11 @@ impl GpuContext {
             },
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return false;
+                return FrameOutcome::SKIPPED;
             },
             CurrentSurfaceTexture::Timeout
             | CurrentSurfaceTexture::Occluded
-            | CurrentSurfaceTexture::Validation => return false,
+            | CurrentSurfaceTexture::Validation => return FrameOutcome::SKIPPED,
         };
         self.perf.mark_acquired();
 
@@ -1840,7 +1874,10 @@ impl GpuContext {
             self.perf.attach_gpu(gpu);
         }
 
-        atlas_changed
+        FrameOutcome {
+            presented: true,
+            atlas_stale: atlas_changed,
+        }
     }
 
     /// Upload the live grid's buffers and every pool's, in the order they draw.

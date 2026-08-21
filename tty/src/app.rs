@@ -54,8 +54,8 @@ use stoatty_protocol::{
 };
 use stoatty_render::{
     gpu::{
-        AnchoredPanel, FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll, SharedFonts,
-        SharedGpu,
+        AnchoredPanel, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext, PoolComposite,
+        Scroll, SharedFonts, SharedGpu,
     },
     render,
 };
@@ -567,6 +567,8 @@ struct State {
     /// The base [`Self::ingest_at`] counts from, taken before the reader
     /// starts so every stamp it writes is positive.
     ingest_epoch: Instant,
+    /// Whether the next frame owes the screen a full redraw, per [`ForceFull`].
+    force_full: ForceFull,
     /// Set by the reader while a DEC 2026 synchronized update is buffering in the
     /// parser, so [`App::about_to_wait`] arms a wait until the update's timeout
     /// and flushes it if no ESU arrives. Cleared once the update flushes.
@@ -961,6 +963,7 @@ impl ApplicationHandler<PtyEvent> for App {
             dirty,
             ingest_at,
             ingest_epoch,
+            force_full: ForceFull::default(),
             sync_pending,
             grid,
             pty,
@@ -2231,6 +2234,9 @@ fn redraw(state: &mut State) {
         dt
     };
 
+    // Taken before the lock, since the latch names no terminal state.
+    let force_full = state.force_full.take();
+
     let (
         cursor,
         scroll_delta,
@@ -2274,6 +2280,8 @@ fn redraw(state: &mut State) {
             terminal.project(&mut state.grid)
         };
         let decoration_damage = terminal.take_decoration_damage();
+        let damage = forced_damage(force_full, damage);
+        let decoration_damage = forced_damage(force_full, decoration_damage);
         let mut pools = mem::take(&mut state.pools_scratch);
         terminal.pools_into(&mut pools);
 
@@ -2532,7 +2540,8 @@ fn redraw(state: &mut State) {
             // locally so a fraction-only frame needs no lock or compose.
             let scroll_offset = (state.scrollback_visual - state.scrollback_visual.floor()) - 1.0;
 
-            state.gpu.render(
+            let sb_damage = forced_damage(force_full, sb_damage);
+            let outcome = state.gpu.render(
                 &state.scrollback_grid,
                 Frame {
                     cursor: None,
@@ -2549,6 +2558,7 @@ fn redraw(state: &mut State) {
                     scrolled_rows: moved_rows,
                 },
             );
+            latch_skipped(state, outcome);
             // Read now, so the row flags go back for the next
             // projection to fill rather than being dropped and
             // allocated again a frame later.
@@ -2572,7 +2582,7 @@ fn redraw(state: &mut State) {
                 cursor_position(cursor),
                 dt,
             );
-            state.gpu.render(
+            let outcome = state.gpu.render(
                 &state.grid,
                 Frame {
                     cursor,
@@ -2594,6 +2604,7 @@ fn redraw(state: &mut State) {
                     scrolled_rows: scroll_delta as isize,
                 },
             );
+            latch_skipped(state, outcome);
             easing
         }
     } else {
@@ -2733,7 +2744,7 @@ fn redraw(state: &mut State) {
                 .map(|pool| region_scissor(pool.region, cw, ch)),
         };
 
-        if state.gpu.render_with_pools(
+        let outcome = state.gpu.render_with_pools(
             &state.grid,
             Frame {
                 cursor: base_cursor,
@@ -2752,7 +2763,9 @@ fn redraw(state: &mut State) {
             &composites,
             &anchored_panels,
             cursor_scissor,
-        ) {
+        );
+        latch_skipped(state, outcome);
+        if outcome.atlas_stale {
             // A pool composite grew or evicted from the atlas after
             // the live grid was drawn, so the live buffers now hold
             // stale UVs. Schedule the heal frame an idle screen would
@@ -2910,7 +2923,7 @@ fn redraw_aux(
     // A skipped recompose reuses last frame's instances, so empty partial damage
     // leaves them untouched.
     let damage = composed.unwrap_or(Damage::Partial(Vec::new()));
-    let heal = gpu.render_with_pools(
+    let outcome = gpu.render_with_pools(
         &aux.grid,
         Frame {
             cursor: None,
@@ -2930,7 +2943,62 @@ fn redraw_aux(
         &[],
         None,
     );
-    easing || heal
+    easing || outcome.atlas_stale
+}
+
+/// Whether the next frame must redraw the whole grid.
+///
+/// A frame takes the terminal's damage to build itself, and the terminal forgets
+/// those rows once reported. A render that finds no drawable then draws nothing,
+/// so the rows it was given never reach the GPU and stay stale until something
+/// else happens to change them. One full frame is what puts them back.
+#[derive(Default)]
+struct ForceFull(bool);
+
+impl ForceFull {
+    /// Arm the latch when `outcome` says the frame drew nothing, reporting
+    /// whether it armed.
+    ///
+    /// A caller that gets `true` asks for another frame. That request is what
+    /// makes the latch matter, since an idle screen schedules no frame of its
+    /// own and the stale rows would otherwise wait for the next keystroke.
+    fn arm(&mut self, outcome: FrameOutcome) -> bool {
+        if outcome.presented {
+            return false;
+        }
+        self.0 = true;
+        true
+    }
+
+    /// Take the latch for the frame about to draw, so the widening it causes
+    /// lasts exactly that one frame.
+    fn take(&mut self) -> bool {
+        mem::take(&mut self.0)
+    }
+}
+
+/// The damage a frame draws, widened to the whole grid when `force_full`.
+///
+/// A projection reports the rows it rewrote and the terminal then forgets them,
+/// so a frame that never reached the screen took its rows with it. Nothing
+/// names them again, and the screen holds what it had until something else
+/// happens to change the same rows. Redrawing everything once is what puts them
+/// back.
+fn forced_damage(force_full: bool, projected: Damage) -> Damage {
+    match force_full {
+        true => Damage::Full,
+        false => projected,
+    }
+}
+
+/// Arm the force-full latch when `outcome` says the frame drew nothing, and ask
+/// for the frame that acts on it.
+///
+/// An occluded window returns before any of this, so the retry cannot spin.
+fn latch_skipped(state: &mut State, outcome: FrameOutcome) {
+    if state.force_full.arm(outcome) {
+        state.window.request_redraw();
+    }
 }
 
 /// The sub-cell glide shift `frac` rounded so it moves the pool a whole number
@@ -3388,9 +3456,10 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
-        classify_window_open, compose_aux_grid, forwards_zoom, grid_pixels, selection_copy_text,
-        snap_shift_to_pixels, swallow_super_combo, ActivePool, Input, PendingResize, PoolView,
-        PtyWrite, Visibility, WindowOpenVerdict, MAX_AUX_WINDOWS,
+        classify_window_open, compose_aux_grid, forced_damage, forwards_zoom, grid_pixels,
+        selection_copy_text, snap_shift_to_pixels, swallow_super_combo, ActivePool, ForceFull,
+        FrameOutcome, Input, PendingResize, PoolView, PtyWrite, Visibility, WindowOpenVerdict,
+        MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -3407,6 +3476,64 @@ mod tests {
         theme::Theme,
     };
     use winit::keyboard::ModifiersState;
+
+    /// A frame that never reached the screen took its rows with it: the
+    /// projection reported them and the terminal forgot them, so nothing names
+    /// them again. Widening the next frame to everything is what puts them
+    /// back.
+    #[test]
+    fn a_forced_frame_covers_the_whole_grid() {
+        let one_row = || Damage::Partial(vec![Some((0, 3))]);
+
+        assert!(
+            matches!(forced_damage(true, one_row()), Damage::Full),
+            "a forced frame redraws every row, not the one the projection named"
+        );
+        assert!(
+            matches!(
+                forced_damage(false, one_row()),
+                Damage::Partial(rows) if rows == vec![Some((0, 3))]
+            ),
+            "an ordinary frame draws exactly what the projection reported"
+        );
+    }
+
+    /// The latch holds a skipped frame's debt until one frame pays it, and no
+    /// longer. Holding it past that would redraw everything forever; dropping
+    /// it early would leave the stale rows the skip left behind.
+    #[test]
+    fn a_skipped_frame_forces_the_next_frame_and_only_it() {
+        let presented = FrameOutcome {
+            presented: true,
+            atlas_stale: false,
+        };
+        let mut latch = ForceFull::default();
+        assert!(!latch.take(), "nothing forces a frame before one skips");
+
+        assert!(
+            latch.arm(FrameOutcome::SKIPPED),
+            "a skipped frame arms the latch and asks for the frame that pays it"
+        );
+        assert!(latch.take(), "that frame redraws everything");
+        assert!(!latch.take(), "and the one after it goes back to normal");
+
+        assert!(
+            !latch.arm(presented),
+            "a frame that reached the screen leaves nothing owing"
+        );
+        assert!(!latch.take());
+    }
+
+    /// A projection that reported nothing still has to widen when forced.
+    /// Passing the empty damage through would leave the stale rows alone, which
+    /// is the state the latch exists to leave behind.
+    #[test]
+    fn a_forced_frame_widens_even_an_empty_projection() {
+        assert!(matches!(
+            forced_damage(true, Damage::Partial(Vec::new())),
+            Damage::Full
+        ));
+    }
 
     /// A pool drawing a composite over its own region hides the base beneath it
     /// whole, so where the base holds that pool is not an input to anything on
