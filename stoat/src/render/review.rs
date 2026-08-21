@@ -2877,16 +2877,17 @@ mod tests {
     /// something to land on that the color cannot.
     #[test]
     fn diff_view_bolds_a_changed_char_inside_a_string() {
-        // The two literals share no chars, which keeps the tree pass from
-        // pairing them as one similar string and dropping the change.
+        // The two literals share most of their text, so the search reads them
+        // as one edited string. Bold marks the case the reader compares char by
+        // char, which is what a pair means and a delete beside an add does not.
         let h = diff_harness(
-            "fn f() {\n    g(\"aaaa\");\n}\n",
-            "fn f() {\n    g(\"zzzz\");\n}\n",
+            "fn f() {\n    g(\"one aaa three\");\n}\n",
+            "fn f() {\n    g(\"one zzz three\");\n}\n",
         );
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("zzzz"))
+            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("zzz"))
             .expect("the changed line rendered on the right");
         let bold = |cols: std::ops::Range<u16>| {
             cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
@@ -2895,8 +2896,8 @@ mod tests {
         };
         assert_eq!(
             (bold(68..buf.area.width), bold(8..59)),
-            ("zzzz".to_string(), "aaaa".to_string()),
-            "both columns bold their changed chars and nothing else of the literal"
+            ("zzz".to_string(), "aaa".to_string()),
+            "both columns bold their changed word and nothing else of the literal"
         );
     }
 

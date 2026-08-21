@@ -472,6 +472,11 @@ fn reconstruct_path(va: &VertexArena, end: u32) -> Vec<PathStep> {
 /// Nodes touched by Novel edges are left as `Pending`. The caller's
 /// downstream pass converts them into `DiffChange` byte ranges.
 ///
+/// Appends to `replaced` the `(lhs, rhs)` atom pair behind every
+/// replacement edge, in path order. Those two atoms are counterparts
+/// only because the search chose them, so this is the caller's one
+/// chance to learn the pairing.
+///
 /// Mirrors `references/difftastic/src/diff/graph.rs:796-847`
 /// `populate_change_map`.
 pub fn populate_change_map(
@@ -480,6 +485,7 @@ pub fn populate_change_map(
     path: &[PathStep],
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
+    replaced: &mut Vec<(SyntaxId, SyntaxId)>,
 ) {
     for step in path {
         match step.edge {
@@ -505,7 +511,15 @@ pub fn populate_change_map(
             // both Pending so the run pairing and the char refinement narrow
             // the pair to the chars that actually differ. Marking them
             // Unchanged would pair them and then hide what the pairing found.
-            Edge::ReplacedComment { .. } | Edge::ReplacedString { .. } => {},
+            //
+            // The pair is recorded here because this is the only place the two
+            // counterparts are known. Recovering it downstream means guessing
+            // from position, which pairs atoms the search never matched.
+            Edge::ReplacedComment { .. } | Edge::ReplacedString { .. } => {
+                if let (Some(lhs_id), Some(rhs_id)) = (step.lhs, step.rhs) {
+                    replaced.push((lhs_id, rhs_id));
+                }
+            },
 
             // Novel edges leave the node Pending. The downstream collector
             // emits it as a Novel DiffChange.
@@ -699,6 +713,7 @@ mod tests {
             &path,
             &mut lhs_changes,
             &mut rhs_changes,
+            &mut Vec::new(),
         );
         assert_eq!(lhs_changes.get(lhs_root), ChangeKind::Unchanged);
         assert_eq!(rhs_changes.get(rhs_root), ChangeKind::Unchanged);

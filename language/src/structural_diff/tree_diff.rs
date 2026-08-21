@@ -393,6 +393,11 @@ struct PreparedFile<'a> {
     /// [`finalize_per_file`] can char-refine each `Replaced` pair.
     lhs_text: &'a str,
     rhs_text: &'a str,
+    /// The atom pairs behind the search's replacement edges, gathered over
+    /// every section. [`pair_replaced_atoms`] turns these into `Replaced`
+    /// pairs, so a section whose search hit the graph limit contributes none
+    /// and its runs stay `Novel`.
+    replaced_atoms: Vec<(SyntaxId, SyntaxId)>,
 }
 
 /// Borrowed view of the arenas + line indices for one prepared file.
@@ -431,6 +436,7 @@ fn prepare_per_file<'a>(
     // can hit the graph cap. Take the sections out so the loop is free to
     // mutate the change maps in place.
     let sections = std::mem::take(&mut preprocess.sections);
+    let mut replaced_atoms = Vec::new();
     for (lhs_run, rhs_run) in &sections {
         // A section empty on one side is a pure insertion or deletion. Its
         // nodes stay Pending, and collect_changes emits them as Novel, so there
@@ -457,6 +463,7 @@ fn prepare_per_file<'a>(
                     &path,
                     &mut preprocess.lhs_changes,
                     &mut preprocess.rhs_changes,
+                    &mut replaced_atoms,
                 );
             },
             SearchOutcome::ExceededGraphLimit => {},
@@ -477,6 +484,7 @@ fn prepare_per_file<'a>(
         rhs_lines: LineIndex::new(rhs),
         lhs_text: lhs,
         rhs_text: rhs,
+        replaced_atoms,
     })
 }
 
@@ -515,7 +523,12 @@ fn finalize_per_file(
         &mut changes,
     );
     changes.sort_by_key(|c| (c.byte_range.start, c.byte_range.end));
-    pair_adjacent_replacements(&mut changes);
+    pair_replaced_atoms(
+        &mut changes,
+        &prepared.replaced_atoms,
+        &prepared.lhs_arena,
+        &prepared.rhs_arena,
+    );
     super::refine::refine_replaced_pairs(&mut changes, prepared.lhs_text, prepared.rhs_text);
 
     DiffResult {
@@ -526,8 +539,9 @@ fn finalize_per_file(
 
 /// Walk an arena depth-first and emit one [`DiffChange`] per maximal
 /// contiguous run of [`Syntax::Atom`] nodes with the same classification.
-/// Pending atoms become [`DiffChangeKind::Novel`] runs (later paired
-/// into `Replaced` by [`pair_adjacent_replacements`]); atoms tagged
+/// Pending atoms become [`DiffChangeKind::Novel`] runs (the ones the
+/// search matched are paired into `Replaced` by
+/// [`pair_replaced_atoms`], and the rest stay Novel); atoms tagged
 /// Moved by [`find_moves`] or sitting inside a moved subtree become
 /// [`DiffChangeKind::Moved`] runs with the shared
 /// [`MoveMetadata`] attached. A Moved run never coalesces with a
@@ -661,33 +675,71 @@ fn walk_emit_atoms(
     }
 }
 
-/// Convert a sorted [`DiffChange`] list so that an Lhs Novel run that
-/// is followed (in source order across the two inputs) by an Rhs Novel
-/// run becomes a `Replaced` pair. The line-diff path uses an explicit
-/// op stream to do this; the structural path discovers it post-hoc by
-/// adjacency in `(side, byte_range.start)` order. Moved entries are
-/// excluded: their pairing is already resolved in the `move_metadata`
-/// side-table and is independent of Novel/Replaced adjacency.
-fn pair_adjacent_replacements(changes: &mut [DiffChange]) {
-    let lhs_indices: Vec<usize> = changes
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.side == Side::Lhs && c.kind == DiffChangeKind::Novel)
-        .map(|(i, _)| i)
-        .collect();
-    let rhs_indices: Vec<usize> = changes
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.side == Side::Rhs && c.kind == DiffChangeKind::Novel)
-        .map(|(i, _)| i)
-        .collect();
-    let pair_count = lhs_indices.len().min(rhs_indices.len());
-    for k in 0..pair_count {
-        changes[lhs_indices[k]].kind = DiffChangeKind::Replaced;
-        changes[rhs_indices[k]].kind = DiffChangeKind::Replaced;
-        changes[lhs_indices[k]].pair_id = Some(k as u32);
-        changes[rhs_indices[k]].pair_id = Some(k as u32);
+/// Mark as a `Replaced` pair the two runs holding each atom pair the search
+/// matched through a replacement edge.
+///
+/// `pairs` comes from [`populate_change_map`], so a pair exists only where the
+/// search decided two atoms are counterparts. A weaker rule, such as taking the
+/// k-th deletion with the k-th addition, matches atoms that have nothing to do
+/// with each other. The char refinement then diffs two unrelated texts.
+///
+/// A pair is skipped when either atom sits in no unpaired `Novel` run. The
+/// slider and move passes run between the search and the run collection, so an
+/// atom the search paired sometimes arrives `Unchanged` or `Moved`.
+///
+/// Runs also coalesce byte-adjacent atoms, so one run holds two paired atoms at
+/// times and has only one `pair_id` to give. The first pair keeps it.
+fn pair_replaced_atoms(
+    changes: &mut [DiffChange],
+    pairs: &[(SyntaxId, SyntaxId)],
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+) {
+    let mut next_pair_id = 0u32;
+    for (lhs_id, rhs_id) in pairs {
+        let (Some(lhs_range), Some(rhs_range)) = (
+            atom_range(lhs_arena, *lhs_id),
+            atom_range(rhs_arena, *rhs_id),
+        ) else {
+            continue;
+        };
+        let (Some(lhs_idx), Some(rhs_idx)) = (
+            unpaired_run_covering(changes, Side::Lhs, &lhs_range),
+            unpaired_run_covering(changes, Side::Rhs, &rhs_range),
+        ) else {
+            continue;
+        };
+
+        for idx in [lhs_idx, rhs_idx] {
+            changes[idx].kind = DiffChangeKind::Replaced;
+            changes[idx].pair_id = Some(next_pair_id);
+        }
+        next_pair_id += 1;
     }
+}
+
+/// The byte range of the atom at `id`, or `None` when `id` names a list.
+fn atom_range(arena: &SyntaxArena, id: SyntaxId) -> Option<Range<usize>> {
+    match arena.get(id) {
+        Syntax::Atom(atom) => Some(atom.byte_range.clone()),
+        Syntax::List(_) => None,
+    }
+}
+
+/// The index of the `Novel` run on `side` that covers `range` and has no pair
+/// yet.
+fn unpaired_run_covering(
+    changes: &[DiffChange],
+    side: Side,
+    range: &Range<usize>,
+) -> Option<usize> {
+    changes.iter().position(|c| {
+        c.side == side
+            && c.kind == DiffChangeKind::Novel
+            && c.pair_id.is_none()
+            && c.byte_range.start <= range.start
+            && range.end <= c.byte_range.end
+    })
 }
 
 /// Per-arena map of `SyntaxId` to the shared [`MoveMetadata`] for the
@@ -943,6 +995,105 @@ mod tests {
         );
     }
 
+    /// Each pair gets an id of its own. The refinement keys its lookup on
+    /// `pair_id`, so two pairs sharing one id collide and only one of them
+    /// narrows.
+    #[test]
+    fn two_edited_comments_pair_separately() {
+        let lhs = "// aaa one\nfn f() {}\n// bbb one\n";
+        let rhs = "// aaa two\nfn f() {}\n// bbb two\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let pairs: Vec<(Option<u32>, &str, Vec<&str>)> = result
+            .changes
+            .iter()
+            .map(|c| {
+                let text = if c.side == Side::Lhs { lhs } else { rhs };
+                (
+                    c.pair_id,
+                    &text[c.byte_range.clone()],
+                    c.refined_spans
+                        .iter()
+                        .map(|r| &text[r.clone()])
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            pairs,
+            vec![
+                (Some(0), "// aaa one", vec!["ne"]),
+                (Some(0), "// aaa two", vec!["tw"]),
+                (Some(1), "// bbb one", vec!["ne"]),
+                (Some(1), "// bbb two", vec!["tw"]),
+            ],
+            "each comment narrows against its own counterpart",
+        );
+    }
+
+    /// An added import has no counterpart. The search says so by giving it a
+    /// Novel edge rather than a replacement edge, and nothing downstream is
+    /// entitled to pair it with a deletion elsewhere in the file.
+    #[test]
+    fn an_inserted_import_pairs_with_nothing() {
+        let lhs = "use a::{DfsId, DfsRw};\nfn f() { let memo = 1; }\n";
+        let rhs = "use a::{DemoIndex, DfsId, DfsRw};\nfn f() { let x = 1; }\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let paired: Vec<(&str, DiffChangeKind, Option<u32>)> = result
+            .changes
+            .iter()
+            .map(|c| {
+                let text = if c.side == Side::Lhs { lhs } else { rhs };
+                (&text[c.byte_range.clone()], c.kind, c.pair_id)
+            })
+            .filter(|(_, kind, _)| *kind != DiffChangeKind::Novel)
+            .collect();
+
+        assert_eq!(
+            paired,
+            vec![],
+            "no atom here is a replacement, so nothing pairs",
+        );
+    }
+
+    /// A deletion with no counterpart stays Novel while a genuine replacement
+    /// beside it still pairs. Pairing by file-wide position gave `// gone` the
+    /// `keep` comment's counterpart and char-diffed two unrelated comments.
+    #[test]
+    fn a_comment_pairs_with_its_own_counterpart_not_the_first_deletion() {
+        let lhs = "// gone\nfn f() {}\n// keep aaa\n";
+        let rhs = "fn f() {}\n// keep zzz\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let marks: Vec<(&str, DiffChangeKind, Vec<&str>)> = result
+            .changes
+            .iter()
+            .map(|c| {
+                let text = if c.side == Side::Lhs { lhs } else { rhs };
+                (
+                    &text[c.byte_range.clone()],
+                    c.kind,
+                    c.refined_spans
+                        .iter()
+                        .map(|r| &text[r.clone()])
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            marks,
+            vec![
+                ("// gone", DiffChangeKind::Novel, vec![]),
+                ("// keep zzz", DiffChangeKind::Replaced, vec!["zzz"]),
+                ("// keep aaa", DiffChangeKind::Replaced, vec!["aaa"]),
+            ],
+            "the deleted comment stands alone and the edited one narrows to its word",
+        );
+    }
+
     /// A string atom takes the same replacement edge a comment does, so a word
     /// edited inside a longer literal narrows the same way.
     #[test]
@@ -964,15 +1115,12 @@ mod tests {
         );
     }
 
-    /// A `Replaced` pair is not always two atoms of one kind. Pairing runs by
-    /// file-wide position, so a deleted comment pairs with whatever code atom
-    /// happens to sit at the same index on the other side. Refining that pair
-    /// char-diffs two texts with nothing to do with each other, so one prose
-    /// side is not enough to earn the narrowing.
+    /// A comment and an identifier are never counterparts, so the search emits
+    /// no replacement edge between them and neither run is paired. Both
+    /// orderings appear here, a comment before a rename and a rename before a
+    /// comment, since pairing by position matched each against the other.
     #[test]
-    fn a_pair_that_mixes_prose_and_code_marks_whole() {
-        // Both pairs come out mixed, one in each order, so the gate is read
-        // from the prose side and from the code side alike.
+    fn a_comment_never_pairs_with_an_identifier() {
         let lhs = "// one two\nfn keep() {}\n";
         let rhs = "fn renamed() {}\n// one two three\n";
         let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
@@ -994,18 +1142,22 @@ mod tests {
         assert_eq!(
             pairs,
             vec![
-                (Some(0), "// one two", true, 0),
-                (Some(0), "renamed", false, 0),
-                (Some(1), "keep", false, 0),
-                (Some(1), "// one two three", true, 0),
+                (None, "// one two", true, 0),
+                (None, "renamed", false, 0),
+                (None, "keep", false, 0),
+                (None, "// one two three", true, 0),
             ],
-            "each comment paired with an unrelated code atom, so neither pair refines",
+            "nothing here is a counterpart of anything else, so nothing pairs",
         );
     }
 
     /// An identifier has no internal boundary to mark against, so a rename
     /// marks the whole token. A char refinement marks `remov` and leaves the
     /// `e` unchanged, which reads as a typo rather than as an edit.
+    ///
+    /// The two sides stay `Novel`. Only a comment or a string takes a
+    /// replacement edge, so a rename is a deletion beside an addition, and the
+    /// renderers mark both the same way.
     #[test]
     fn a_renamed_identifier_marks_whole() {
         let lhs = "fn f() { remove(1); }\n";
@@ -1018,8 +1170,8 @@ mod tests {
                 refined(&result, Side::Rhs, rhs)
             ),
             (
-                (DiffChangeKind::Replaced, false, vec![]),
-                (DiffChangeKind::Replaced, false, vec![])
+                (DiffChangeKind::Novel, false, vec![]),
+                (DiffChangeKind::Novel, false, vec![])
             ),
             "neither side is prose, so neither carries a sub-token span",
         );
@@ -1079,49 +1231,34 @@ mod tests {
         );
     }
 
+    /// A rename marks exactly the identifier on each side, with no surrounding
+    /// bytes swept in.
+    ///
+    /// Both sides stay `Novel`. Only a comment or a string takes a replacement
+    /// edge, so two identifiers are a deletion beside an addition rather than a
+    /// pair, and the renderers mark the two kinds alike.
     #[test]
-    fn renamed_function_emits_replaced_atom_pair() {
-        let lang = rust_lang();
+    fn renamed_function_emits_a_novel_atom_on_each_side() {
         let lhs = "fn alpha() {}";
         let rhs = "fn beta() {}";
-        let result = diff_with_language(&lang, lhs, rhs).unwrap();
-        assert!(!result.changes.is_empty(), "must produce changes");
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
 
-        // The structural pass tags the renamed identifier as a
-        // Pending atom on each side. The pairing pass turns the lhs
-        // and rhs runs into a Replaced pair.
-        let lhs_changes: Vec<&DiffChange> = result
+        let marks: Vec<(Side, &str, DiffChangeKind, Option<u32>)> = result
             .changes
             .iter()
-            .filter(|c| c.side == Side::Lhs)
+            .map(|c| {
+                let text = if c.side == Side::Lhs { lhs } else { rhs };
+                (c.side, &text[c.byte_range.clone()], c.kind, c.pair_id)
+            })
             .collect();
-        let rhs_changes: Vec<&DiffChange> = result
-            .changes
-            .iter()
-            .filter(|c| c.side == Side::Rhs)
-            .collect();
-        assert!(!lhs_changes.is_empty());
-        assert!(!rhs_changes.is_empty());
-        assert!(lhs_changes
-            .iter()
-            .all(|c| c.kind == DiffChangeKind::Replaced));
-        assert!(rhs_changes
-            .iter()
-            .all(|c| c.kind == DiffChangeKind::Replaced));
 
-        // Verify the lhs change covers exactly "alpha" and the rhs
-        // covers exactly "beta" (no spurious surrounding bytes).
-        assert!(
-            lhs_changes
-                .iter()
-                .any(|c| &lhs[c.byte_range.clone()] == "alpha"),
-            "lhs change should cover the renamed identifier 'alpha'"
-        );
-        assert!(
-            rhs_changes
-                .iter()
-                .any(|c| &rhs[c.byte_range.clone()] == "beta"),
-            "rhs change should cover the renamed identifier 'beta'"
+        assert_eq!(
+            marks,
+            vec![
+                (Side::Rhs, "beta", DiffChangeKind::Novel, None),
+                (Side::Lhs, "alpha", DiffChangeKind::Novel, None),
+            ],
+            "each side marks its renamed identifier alone, paired with nothing",
         );
     }
 
