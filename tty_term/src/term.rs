@@ -584,6 +584,20 @@ fn push_capped<T>(list: &mut Vec<T>, item: T, warned: &mut bool) -> bool {
     true
 }
 
+/// The rows a slide of `moved_rows` uncovered in a window `rows` tall.
+///
+/// A positive move carries the content up the screen, so what enters does so at
+/// the bottom; a negative one carries it down and the rows enter at the top. A
+/// move at or past the height uncovers every row, though a caller that far out
+/// has nothing to carry and reprojects whole anyway.
+fn uncovered_rows(moved_rows: isize, rows: usize) -> Range<usize> {
+    let magnitude = moved_rows.unsigned_abs().min(rows);
+    match moved_rows > 0 {
+        true => rows - magnitude..rows,
+        false => 0..magnitude,
+    }
+}
+
 /// Whether a journal holding `entries` entries carrying `lines` line handles has
 /// stopped being the cheaper way to bring the grid's stores up to date.
 ///
@@ -2089,17 +2103,26 @@ impl Terminal {
     /// `damage`. A move clearing the whole window leaves nothing worth comparing
     /// against, so it rewrites every row and reports [`Damage::Full`].
     ///
-    /// A wrong `moved_rows` costs redundant dirty rows, never a wrong window. Every
-    /// row is projected and compared whatever it says.
-    ///
     /// Zero is the ordinary value for live output arriving while the window holds
     /// still, since the view is pinned to its content. Those frames leave almost
     /// every row clean.
+    ///
+    /// `vt_changed` says whether anything the VT holds moved since the last
+    /// compose. When it did not, a slide reads only the rows it uncovered at the
+    /// edge it vacated: the carried rows show history that did not change, and
+    /// the slide is what put them where they are. Every other frame reads and
+    /// compares the whole window.
+    ///
+    /// That makes `moved_rows` load-bearing on exactly those frames. Elsewhere a
+    /// wrong one costs redundant dirty rows and nothing else, since every row is
+    /// compared; on a slide the VT stood still through, a wrong one leaves a
+    /// stale row standing until some later frame reads the window whole.
     pub fn project_scrollback(
         &mut self,
         out: &mut Grid,
         visual: f32,
         moved_rows: isize,
+        vt_changed: bool,
         damage: &mut Damage,
     ) -> Option<f32> {
         *damage = Damage::Full;
@@ -2140,11 +2163,26 @@ impl Terminal {
             *damage = Damage::Partial(row_bounds(&mut self.row_flags_spare, out_rows));
         }
 
+        // A slide the VT stood still through carries every row it kept onto the
+        // same history it already held, so those rows need no reading at all.
+        // What is left is the rows the slide uncovered, which is a handful
+        // against the whole window a wheel would otherwise convert per frame. A
+        // move that cleared the window uncovered all of them, so the range comes
+        // back whole and the rewrite below runs as it always did.
+        //
+        // A rebuild asked for with neither a move nor a VT change is a caller
+        // contradicting itself: it wants the window redone and names nothing
+        // that changed. Reading it whole is the safe answer to that.
+        let reading = match !vt_changed && moved_rows != 0 {
+            true => uncovered_rows(moved_rows, out_rows),
+            false => 0..out_rows,
+        };
+
         // Row 0 is the straddle row one line older than the offset's top, so a
         // downward sub-cell shift always has an older row to reveal at the top.
         let top_line = -offset - 1;
         let mut projected = mem::take(&mut self.row_scratch);
-        for out_row in 0..out_rows {
+        for out_row in reading {
             let line = top_line + out_row as i32;
             let source = (line >= topmost && line <= bottommost).then(|| &grid[Line(line)]);
             let project = |col: usize| match source {
@@ -3193,8 +3231,8 @@ impl Dimensions for GridSize {
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_room, journal_past_bounds, mark_selection_change, whole_row, Arc, Cursor,
-        CursorShape, Damage, MinimapJournal, SelectionRange, TermEvent, Terminal, ESC,
+        insert_room, journal_past_bounds, mark_selection_change, uncovered_rows, whole_row, Arc,
+        Cursor, CursorShape, Damage, MinimapJournal, SelectionRange, TermEvent, Terminal, ESC,
         MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_JOURNAL, MAX_MINIMAP_JOURNAL_LINES,
         MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_MINIMAP_VIEWS, MAX_POOLS, PAGE_POOL_CAPACITY,
         XTVERSION_REPLY,
@@ -7090,7 +7128,7 @@ mod tests {
         let mut out = Grid::new(0, 0);
         let mut damage = Damage::Full;
 
-        terminal.project_scrollback(&mut out, 1.0, 0, &mut damage);
+        terminal.project_scrollback(&mut out, 1.0, 0, true, &mut damage);
         assert_eq!(
             [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
             ['c', 'd', 'e'],
@@ -7098,7 +7136,7 @@ mod tests {
 
         // One row deeper. The window slides down, so c and d keep their content
         // at rows one and two, and only the newly revealed b is written.
-        terminal.project_scrollback(&mut out, 2.0, -1, &mut damage);
+        terminal.project_scrollback(&mut out, 2.0, -1, true, &mut damage);
 
         let Damage::Partial(rows) = &damage else {
             panic!("a one-row step must not report the whole window damaged");
@@ -7130,14 +7168,14 @@ mod tests {
         let mut out = Grid::new(0, 0);
         let mut damage = Damage::Full;
 
-        terminal.project_scrollback(&mut out, 1.0, 0, &mut damage);
+        terminal.project_scrollback(&mut out, 1.0, 0, true, &mut damage);
         let window = |out: &Grid| [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch];
         assert_eq!(window(&out), ['c', 'd', 'e']);
 
         // One more line of output pushes e into history. The offset rises with it,
         // which is the pin keeping the window on the rows it already showed.
         terminal.advance(b"\r\ng");
-        terminal.project_scrollback(&mut out, 2.0, 0, &mut damage);
+        terminal.project_scrollback(&mut out, 2.0, 0, true, &mut damage);
 
         let Damage::Partial(rows) = &damage else {
             panic!("a still window must not report itself wholly damaged");
@@ -7152,6 +7190,95 @@ mod tests {
     /// A scrollback projection takes its row flags from the pool a recycled
     /// frame filled.
     ///
+    /// A slide the VT stood still through reads only the rows it uncovered, so a
+    /// carried row is taken on trust. Poisoning one is the only way to see the
+    /// difference between a row compared and found equal and a row never read,
+    /// and the difference is the whole change.
+    #[test]
+    fn a_slide_the_vt_stood_still_through_reads_only_what_it_uncovered() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+
+        let mut out = Grid::new(0, 0);
+        let mut damage = Damage::Full;
+        terminal.project_scrollback(&mut out, 1.0, 0, true, &mut damage);
+
+        // Row zero is carried down to row one by the step below, where the
+        // history says 'c'. A frame that read it would put 'c' back.
+        out.get_mut(0, 0).ch = 'X';
+        terminal.project_scrollback(&mut out, 2.0, -1, false, &mut damage);
+
+        let Damage::Partial(rows) = &damage else {
+            panic!("a one-row step must not report the whole window damaged");
+        };
+        assert_eq!(
+            (
+                [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+                rows.as_slice(),
+            ),
+            (['b', 'X', 'd'], [whole_row(4), None, None].as_slice()),
+            "the uncovered row is read, and the carried ones are left as they slid",
+        );
+
+        // Another step, this one with the VT reported changed. The poisoned row
+        // slides to the bottom, which a scoped read would leave alone, so only a
+        // whole-window read puts it right.
+        terminal.project_scrollback(&mut out, 3.0, -1, true, &mut damage);
+
+        let Damage::Partial(rows) = &damage else {
+            panic!("a one-row step must not report the whole window damaged");
+        };
+        assert_eq!(
+            (
+                [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+                rows.as_slice(),
+            ),
+            (
+                ['a', 'b', 'c'],
+                [whole_row(4), None, whole_row(4)].as_slice()
+            ),
+            "a step the VT touched reads every row, and corrects the carried one",
+        );
+    }
+
+    /// A rebuild with neither a move nor a VT change names nothing that could
+    /// have changed, and gets the window read whole rather than not at all.
+    #[test]
+    fn a_rebuild_naming_no_change_still_reads_the_window() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+
+        let mut out = Grid::new(0, 0);
+        let mut damage = Damage::Full;
+        terminal.project_scrollback(&mut out, 1.0, 0, true, &mut damage);
+
+        out.get_mut(1, 0).ch = 'X';
+        terminal.project_scrollback(&mut out, 1.0, 0, false, &mut damage);
+
+        assert_eq!(
+            [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+            ['c', 'd', 'e'],
+            "the window is read whole, so the row that drifted is put back",
+        );
+    }
+
+    /// Which end a slide vacates decides which rows there are to read, and
+    /// getting it backwards would read the rows that carried and trust the ones
+    /// that came in blank.
+    #[test]
+    fn a_slide_uncovers_the_edge_it_vacated() {
+        assert_eq!(
+            (
+                uncovered_rows(2, 8),
+                uncovered_rows(-2, 8),
+                uncovered_rows(9, 8),
+                uncovered_rows(-9, 8),
+            ),
+            (6..8, 0..2, 0..8, 0..8),
+            "content moving up uncovers the bottom, down uncovers the top, past the height uncovers all",
+        );
+    }
+
     /// Drawing from the pool only saves an allocation while something puts one
     /// back, since the pool falls back to a fresh buffer when it is empty. So
     /// the round trip is what this checks, not the draw alone.
@@ -7162,7 +7289,7 @@ mod tests {
 
         let mut out = Grid::new(0, 0);
         let mut damage = Damage::Partial(Vec::new());
-        terminal.project_scrollback(&mut out, 1.0, 0, &mut damage);
+        terminal.project_scrollback(&mut out, 1.0, 0, true, &mut damage);
         assert!(
             matches!(damage, Damage::Partial(_)),
             "the fixture has to reach the diffing path to produce a buffer",
@@ -7180,7 +7307,7 @@ mod tests {
         );
 
         terminal.advance(b"\r\ng");
-        terminal.project_scrollback(&mut out, 2.0, 0, &mut damage);
+        terminal.project_scrollback(&mut out, 2.0, 0, true, &mut damage);
         assert!(
             terminal.row_flags_spare.is_empty(),
             "the next projection filled its flags into the pooled buffer",
@@ -7198,7 +7325,7 @@ mod tests {
         let mut damage = Damage::Partial(vec![None; 3]);
 
         // Three rows of window, so a move of three has nothing left to keep.
-        terminal.project_scrollback(&mut out, 1.0, 3, &mut damage);
+        terminal.project_scrollback(&mut out, 1.0, 3, true, &mut damage);
 
         assert!(
             matches!(damage, Damage::Full),
@@ -7221,14 +7348,14 @@ mod tests {
 
         // At the live bottom nothing is scrolled back: fall back to the live grid.
         assert_eq!(
-            terminal.project_scrollback(&mut out, 0.0, 0, &mut Damage::Full),
+            terminal.project_scrollback(&mut out, 0.0, 0, true, &mut Damage::Full),
             None
         );
 
         // One row back: the window is the older straddle row (b) above the
         // offset-1 view (c, d), shifted up a whole row so the straddle hides.
         assert_eq!(
-            terminal.project_scrollback(&mut out, 1.0, 0, &mut Damage::Full),
+            terminal.project_scrollback(&mut out, 1.0, 0, true, &mut Damage::Full),
             Some(-1.0)
         );
         assert_eq!(
@@ -7243,7 +7370,7 @@ mod tests {
 
         // Half a row deeper keeps the same window, shifted by the sub-cell frac.
         assert_eq!(
-            terminal.project_scrollback(&mut out, 1.5, 0, &mut Damage::Full),
+            terminal.project_scrollback(&mut out, 1.5, 0, true, &mut Damage::Full),
             Some(-0.5)
         );
         assert_eq!(
@@ -7253,7 +7380,7 @@ mod tests {
 
         // At the oldest line the straddle falls above history and stays blank.
         assert_eq!(
-            terminal.project_scrollback(&mut out, 3.0, 0, &mut Damage::Full),
+            terminal.project_scrollback(&mut out, 3.0, 0, true, &mut Damage::Full),
             Some(-1.0)
         );
         assert_eq!(*out.get(0, 0), Cell::default(), "no row older than the top");

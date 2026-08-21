@@ -2543,6 +2543,7 @@ fn redraw(state: &mut State) {
                     &mut state.scrollback_grid,
                     state.scrollback_visual,
                     moved_rows,
+                    vt_changed,
                     &mut sb_damage,
                 );
             }
