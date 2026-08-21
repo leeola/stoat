@@ -290,10 +290,10 @@ impl ArgPicker {
     ) {
         let policy = match self.source {
             ValueSource::Buffers => PreviewPolicy::LiveBufferThenFile,
-            ValueSource::Directories
-            | ValueSource::Themes
-            | ValueSource::Walkthroughs
-            | ValueSource::Values(_) => PreviewPolicy::NoPreview,
+            ValueSource::Directories => PreviewPolicy::Directory,
+            ValueSource::Themes | ValueSource::Walkthroughs | ValueSource::Values(_) => {
+                PreviewPolicy::NoPreview
+            },
             _ => PreviewPolicy::File,
         };
         self.active_core()
@@ -964,7 +964,8 @@ pub(crate) fn refilter(
 mod tests {
     use super::*;
     use crate::{
-        buffer_registry::AutoReloadMode, input_history::InputHistory, test_harness::TestHarness,
+        buffer_registry::AutoReloadMode, input_history::InputHistory, picker::PREVIEW_DIR_LIMIT,
+        test_harness::TestHarness,
     };
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
@@ -3248,6 +3249,96 @@ mod tests {
             shown, "edited in memory\n",
             "buffer preview shows live in-memory text, not the disk file",
         );
+    }
+
+    /// What is rendered into the argument picker's preview pane.
+    fn arg_preview_text(h: &TestHarness) -> String {
+        let preview_id = arg_picker(h).active_core_ref().preview.buffer;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(preview_id)
+            .expect("preview buffer");
+        let guard = buffer.read().expect("poisoned");
+        guard.rope().to_string()
+    }
+
+    /// A directory row had nothing to preview, which is a gap rather than a
+    /// decision: what a reader wants to know about a directory is what is in
+    /// it. Directories lead, and the slash is what separates a name with a
+    /// directory behind it from one that merely has no extension.
+    #[test]
+    fn a_cd_row_previews_the_directorys_children() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs().insert_files([
+            (home.join("alpha/zeta.rs"), "z".as_bytes()),
+            (home.join("alpha/apple.rs"), "a".as_bytes()),
+        ]);
+        h.fake_fs().insert_dir(home.join("alpha/nested"));
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        // The first browse row under `~/` is `alpha`, which the picker selects
+        // and previews.
+        h.type_text(":cd ~/");
+        h.snapshot();
+        h.settle();
+
+        assert_eq!(
+            arg_preview_text(&h),
+            "nested/\napple.rs\nzeta.rs\n",
+            "the directory lists, directories first and then by name",
+        );
+    }
+
+    /// A listing past the cap says how much it left out. Silently stopping
+    /// would read as a directory holding exactly the cap.
+    #[test]
+    fn a_long_listing_says_how_much_it_left_out() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs().insert_files(
+            (0..PREVIEW_DIR_LIMIT + 3)
+                .map(|i| (home.join(format!("big/f{i:04}.rs")), b"x".as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/");
+        h.snapshot();
+        h.settle();
+
+        let shown = arg_preview_text(&h);
+        assert_eq!(
+            (
+                shown.lines().count(),
+                shown.lines().next(),
+                shown.lines().last(),
+            ),
+            (
+                PREVIEW_DIR_LIMIT + 1,
+                Some("f0000.rs"),
+                Some("... and 3 more"),
+            ),
+            "the cap holds and the tail names what is past it",
+        );
+    }
+
+    /// A file row still reads the file. The directory listing is a fall-through
+    /// for a read that could not have worked, not a new answer for every row.
+    #[test]
+    fn a_file_row_still_previews_its_contents() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "the file body\n")]);
+
+        h.type_text(":o ");
+        h.snapshot();
+        h.settle();
+
+        assert_eq!(arg_preview_text(&h), "the file body\n");
     }
 
     #[test]

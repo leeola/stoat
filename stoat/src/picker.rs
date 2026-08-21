@@ -852,7 +852,9 @@ pub(crate) enum PreviewPolicy {
     /// Preview the live in-memory buffer when the path has one open, else the
     /// disk file. The finder's Buffers scope and the palette's buffer picker.
     LiveBufferThenFile,
-    /// No preview -- e.g. a directory picker, which has nothing to show.
+    /// List the selected directory's immediate children.
+    Directory,
+    /// No preview, for a source whose rows name no path at all.
     NoPreview,
 }
 
@@ -1283,6 +1285,7 @@ impl PathPicker {
                 Some(id) => PreviewSource::Buffer(id),
                 None => PreviewSource::File(path),
             }),
+            PreviewPolicy::Directory => Some(PreviewSource::Directory(path)),
             PreviewPolicy::NoPreview => None,
         };
         match source {
@@ -1306,6 +1309,9 @@ impl PathPicker {
 #[derive(Debug, PartialEq)]
 pub(crate) enum PreviewSource {
     File(PathBuf),
+    /// The directory's immediate children, listed. A directory has no content
+    /// to read, and what a reader wants to know about one is what is in it.
+    Directory(PathBuf),
     /// Live in-memory buffer, so the preview reflects unsaved edits rather than
     /// the backing file. Used by the finder's Buffers scope and the palette's
     /// buffer argument picker.
@@ -1363,6 +1369,9 @@ impl Preview {
                 read_preview(fs_host, path),
                 language_registry.for_path(path),
             ),
+            // No language: a listing is names, not source, and highlighting it
+            // as code would read meaning into them that is not there.
+            PreviewSource::Directory(path) => (list_preview(fs_host, path), None),
             PreviewSource::Buffer(id) => {
                 let content = ws
                     .buffers
@@ -1466,6 +1475,40 @@ fn read_preview(fs_host: &dyn FsHost, path: &Path) -> String {
         },
     };
     sanitize::sanitize_preview_text(&raw)
+}
+
+/// Entries a directory listing shows before it stops counting.
+///
+/// A directory this wide is being scanned rather than read, and a reader
+/// looking for one name in five hundred reaches for the picker's own filter
+/// instead. The tail line says how much was left out so the listing never
+/// silently lies about its length.
+pub(crate) const PREVIEW_DIR_LIMIT: usize = 500;
+
+/// The directory at `path` as a listing: its immediate children, directories
+/// first and each marked with a trailing slash, then the rest by name.
+///
+/// Directories lead because they are where a reader goes next, and the slash is
+/// what tells a name with no extension from one with a directory behind it.
+fn list_preview(fs_host: &dyn FsHost, path: &Path) -> String {
+    let Ok(mut entries) = fs_host.list_dir(path) else {
+        return "<unreadable>".to_string();
+    };
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+
+    let shown = entries.len().min(PREVIEW_DIR_LIMIT);
+    let mut out = String::new();
+    for entry in &entries[..shown] {
+        out.push_str(&entry.name);
+        if entry.is_dir {
+            out.push('/');
+        }
+        out.push('\n');
+    }
+    if let Some(hidden) = entries.len().checked_sub(shown).filter(|n| *n > 0) {
+        out.push_str(&format!("... and {hidden} more\n"));
+    }
+    sanitize::sanitize_preview_text(&out)
 }
 
 /// Overwrite the preview scratch buffer with `text` and reset the editor's
