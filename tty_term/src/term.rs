@@ -127,6 +127,15 @@ const MAX_MINIMAP_STORES: usize = 256;
 /// strip per pane, the same order as [`MAX_POOLS`].
 const MAX_MINIMAP_VIEWS: usize = 64;
 
+/// Row-flag buffers [`Terminal::recycle_damage`] keeps for a later frame.
+///
+/// A frame carries two, its VT damage and its decoration damage, and hands both
+/// back before the next one asks for either. The pair in flight and the pair
+/// coming back therefore coexist, which is what this covers. A tighter bound
+/// would drop a buffer the very next frame wants, and a looser one holds
+/// allocations nothing is going to ask for.
+const MAX_ROW_FLAGS_SPARE: usize = 4;
+
 /// Store changes the journal holds before the projection gives up on replaying
 /// them.
 ///
@@ -376,8 +385,10 @@ pub struct Terminal {
     /// Row-flag buffers handed back by [`Terminal::recycle_damage`], for the next
     /// frame that needs one.
     ///
-    /// A frame carries at most two, the VT damage and the decoration damage, so
-    /// this settles at that depth rather than growing.
+    /// Bounded at [`MAX_ROW_FLAGS_SPARE`], because a frame gives its buffers
+    /// back whether or not anything took one: an animation frame over unchanged
+    /// content reads no damage and so asks for no buffer, and the pool would
+    /// grow by that frame's pair for as long as the animation ran.
     row_flags_spare: Vec<Vec<RowDamage>>,
     /// The byte buffer an open content capture streams into, held here between
     /// captures so a run of them shares one allocation.
@@ -1381,8 +1392,15 @@ impl Terminal {
     /// after it would then allocate again. Returning it instead is what makes
     /// that allocation once rather than per damaged frame. A caller that
     /// forgets simply pays what it paid before.
+    ///
+    /// Keeps a buffer only when it carries an allocation and the pool is under
+    /// [`MAX_ROW_FLAGS_SPARE`]. A frame that read no damage hands back an empty
+    /// vector, which has nothing to lend and would displace a buffer that does.
     pub fn recycle_damage(&mut self, damage: Damage) {
-        if let Damage::Partial(rows) = damage {
+        if let Damage::Partial(rows) = damage
+            && rows.capacity() > 0
+            && self.row_flags_spare.len() < MAX_ROW_FLAGS_SPARE
+        {
             self.row_flags_spare.push(rows);
         }
     }
@@ -3357,11 +3375,48 @@ mod tests {
             "a full damage names no rows, so it has no buffer to give back"
         );
 
+        // What a frame that read no damage hands back. It names no rows and
+        // holds no allocation, so a pool that took it would answer the next
+        // request by allocating anyway, over a real buffer sitting below it.
+        terminal.recycle_damage(Damage::Partial(Vec::new()));
+        assert!(
+            terminal.row_flags_spare.is_empty(),
+            "an empty vector has no allocation to lend"
+        );
+
         terminal.recycle_damage(Damage::Partial(vec![whole_row(4); 8]));
         assert_eq!(
             super::row_bounds(&mut terminal.row_flags_spare, 2),
             [None, None],
             "the returned buffer serves the next request"
+        );
+    }
+
+    /// A frame gives its buffers back whether or not anything took one, so
+    /// without a cap an animation over unchanged content grows the pool by that
+    /// frame's pair for as long as it runs.
+    ///
+    /// The cap still has to clear two frames' pairs. A frame hands its two back
+    /// before the next one asks for either, so the pair in flight and the pair
+    /// coming back coexist, and a cap under four would drop a buffer that is
+    /// about to be wanted.
+    #[test]
+    fn the_pool_holds_two_frames_of_buffers_and_no_more() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        for _ in 0..4 {
+            terminal.recycle_damage(Damage::Partial(vec![whole_row(4); 2]));
+        }
+        let two_frames = terminal.row_flags_spare.len();
+
+        for _ in 0..40 {
+            terminal.recycle_damage(Damage::Partial(vec![whole_row(4); 2]));
+        }
+
+        assert_eq!(
+            (two_frames, terminal.row_flags_spare.len()),
+            (4, 4),
+            "two frames' buffers are kept, and nothing past them"
         );
     }
 
