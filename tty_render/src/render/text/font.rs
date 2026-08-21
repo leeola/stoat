@@ -347,6 +347,33 @@ pub fn build_font_system() -> FontSystem {
     font_system
 }
 
+/// Shape every space-delimited word of `text` at `font_size`, returning the
+/// total glyph count.
+///
+/// The measurement entry point for what shaping costs, with no cache and no
+/// GPU between the caller and the work. A grid row shapes one run per word, so
+/// this is the same shaping a screenful of never-seen text drives, minus
+/// everything a frame does around it.
+///
+/// Every word is shaped afresh. The run cache the renderer keeps would turn a
+/// second pass over the same words into hits, and the miss is the cost worth
+/// knowing. The glyph count comes back so a caller cannot have the work
+/// optimized out from under it.
+///
+/// See also:
+/// - [`build_font_system`] for the font system to hand in, which is where the bundled faces this
+///   resolves against are registered.
+pub fn shape_words(font_system: &mut FontSystem, font_size: u32, text: &str) -> usize {
+    let primary = resolve_primary_family(font_system, &["JetBrains Mono".to_owned()]);
+    let family = shape_family(primary.as_deref());
+    let metrics = CellMetrics::from_font_size(font_size, 1.0);
+
+    text.split(' ')
+        .filter(|word| !word.is_empty())
+        .map(|word| shape_run(font_system, word, metrics, family).len())
+        .sum()
+}
+
 /// Register the bundled faces into `font_system`'s font database so they resolve
 /// regardless of which fonts are installed system-wide: the JetBrains Mono
 /// variable faces (the `JetBrains Mono` family) and the Symbols Nerd Font Mono
@@ -425,7 +452,7 @@ mod tests {
     use super::{
         build_font_system, font_covers, glyph_family, load_bundled_fonts, resolve_primary_family,
         resolve_primary_font, run_text_and_columns_into, shape_char, shape_family, shape_run,
-        shape_run_cached, RunShapeCache, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
+        shape_run_cached, shape_words, RunShapeCache, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -629,6 +656,19 @@ mod tests {
             held.iter().any(|&covered| covered) && held.iter().any(|&covered| !covered),
             "the sample must span covered and uncovered characters to mean anything: {held:?}"
         );
+    }
+
+    /// Words shape apart, and a ligature still forms inside one.
+    ///
+    /// Three words shape to four glyphs. The arrow is one glyph rather than two,
+    /// which is what says the split at spaces did not cost the contextual
+    /// alternate that makes it.
+    #[test]
+    fn shape_words_shapes_each_word_and_keeps_its_ligature() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+
+        assert_eq!(shape_words(&mut font_system, 15, "a => b"), 3 + 1);
     }
 
     #[test]

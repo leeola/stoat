@@ -9,7 +9,10 @@
 //! draws into any texture view, so a frame can target an off-screen texture as
 //! well as the window surface that [`GpuContext`] wraps.
 
-pub use crate::render::{text::build_font_system, AnchoredPanel, Frame, Scroll};
+pub use crate::render::{
+    text::{build_font_system, shape_words},
+    AnchoredPanel, Frame, Scroll,
+};
 use crate::{
     perf::FrameProfiler,
     render::{

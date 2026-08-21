@@ -31,3 +31,7 @@ divan = "0.1"
 [[bench]]
 name = "compose"
 harness = false
+
+[[bench]]
+name = "shape"
+harness = false

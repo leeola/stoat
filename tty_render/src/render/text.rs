@@ -38,7 +38,7 @@ use wgpu::{
 mod font;
 mod powerline;
 
-pub use font::build_font_system;
+pub use font::{build_font_system, shape_words};
 
 /// Instance buffer capacity, in glyphs, allocated up front. Grows by doubling
 /// when a frame exceeds it.
