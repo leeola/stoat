@@ -516,6 +516,12 @@ struct AuxWindow {
     /// The background this window's GPU clear was last set to, mirroring
     /// [`State::last_clear_bg`] so each window follows the override on its own.
     last_clear_bg: Option<Rgb>,
+    /// Whether this window's next frame owes it a full redraw, per
+    /// [`ForceFull`].
+    ///
+    /// Its own latch rather than the primary's, since the two windows present
+    /// independently and either can lose a frame while the other does not.
+    force_full: ForceFull,
 }
 
 /// The renderer-construction inputs an aux window needs, read from [`App`]
@@ -2112,6 +2118,7 @@ fn open_aux_window(
         last_content: None,
         pool_scratch: Vec::new(),
         last_clear_bg: None,
+        force_full: ForceFull::default(),
     });
 
     let size = window.inner_size();
@@ -2558,7 +2565,7 @@ fn redraw(state: &mut State) {
                     scrolled_rows: moved_rows,
                 },
             );
-            latch_skipped(state, outcome);
+            latch_skipped(&mut state.force_full, &state.window, outcome);
             // Read now, so the row flags go back for the next
             // projection to fill rather than being dropped and
             // allocated again a frame later.
@@ -2604,7 +2611,7 @@ fn redraw(state: &mut State) {
                     scrolled_rows: scroll_delta as isize,
                 },
             );
-            latch_skipped(state, outcome);
+            latch_skipped(&mut state.force_full, &state.window, outcome);
             easing
         }
     } else {
@@ -2764,7 +2771,7 @@ fn redraw(state: &mut State) {
             &anchored_panels,
             cursor_scissor,
         );
-        latch_skipped(state, outcome);
+        latch_skipped(&mut state.force_full, &state.window, outcome);
         if outcome.atlas_stale {
             // A pool composite grew or evicted from the atlas after
             // the live grid was drawn, so the live buffers now hold
@@ -2830,6 +2837,9 @@ fn redraw_aux(
     };
     let (rows, cols) = gpu.grid_size();
     let [cw, ch] = render::cell_size(font_size, scale);
+
+    // Taken before the lock, since the latch names no terminal state.
+    let force_full = aux.force_full.take();
 
     let mut easing = false;
     let mut active: Vec<ActivePool> = Vec::new();
@@ -2921,8 +2931,10 @@ fn redraw_aux(
         .collect::<Vec<_>>();
 
     // A skipped recompose reuses last frame's instances, so empty partial damage
-    // leaves them untouched.
-    let damage = composed.unwrap_or(Damage::Partial(Vec::new()));
+    // leaves them untouched. A frame that drew nothing left the grid ahead of
+    // the GPU instead, and no recompose will name those rows again, so that debt
+    // widens this frame to everything.
+    let damage = forced_damage(force_full, composed.unwrap_or(Damage::Partial(Vec::new())));
     let outcome = gpu.render_with_pools(
         &aux.grid,
         Frame {
@@ -2943,6 +2955,7 @@ fn redraw_aux(
         &[],
         None,
     );
+    latch_skipped(&mut aux.force_full, &aux.window, outcome);
     easing || outcome.atlas_stale
 }
 
@@ -2991,13 +3004,16 @@ fn forced_damage(force_full: bool, projected: Damage) -> Damage {
     }
 }
 
-/// Arm the force-full latch when `outcome` says the frame drew nothing, and ask
+/// Arm `force_full` when `outcome` says the frame drew nothing, and ask `window`
 /// for the frame that acts on it.
 ///
+/// Takes the latch and the window rather than either whole window state, since
+/// the primary and an aux window run the same repair over their own two.
+///
 /// An occluded window returns before any of this, so the retry cannot spin.
-fn latch_skipped(state: &mut State, outcome: FrameOutcome) {
-    if state.force_full.arm(outcome) {
-        state.window.request_redraw();
+fn latch_skipped(force_full: &mut ForceFull, window: &Window, outcome: FrameOutcome) {
+    if force_full.arm(outcome) {
+        window.request_redraw();
     }
 }
 
