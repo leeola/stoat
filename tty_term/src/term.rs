@@ -742,6 +742,13 @@ pub enum TermEvent {
     /// A program asked the host to step its font size by this many steps,
     /// positive to grow.
     FontStep(i32),
+    /// The child left the alternate screen, which is what a full-screen program
+    /// does on its way out and what a shell restored after one crashed does too.
+    ///
+    /// Carries nothing: what it means for the host depends on what the host was
+    /// holding on that program's behalf, not on anything the terminal knows
+    /// about the leave.
+    AltScreenLeft,
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -1034,6 +1041,7 @@ impl Terminal {
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
+        let was_alt_screen = self.is_alt_screen();
         let redraw = self.advance_inner(bytes);
         self.output_since_project |= redraw;
         self.damage_pending |= redraw;
@@ -1042,8 +1050,21 @@ impl Terminal {
         // The alternate screen is its own surface for placements, and nothing
         // reports entering or leaving it. Polled here rather than inside the
         // parse body, because the mode only changes once the parser has run.
-        self.images
-            .set_alt_screen(self.term.mode().contains(TermMode::ALT_SCREEN));
+        let alt_screen = self.is_alt_screen();
+        self.images.set_alt_screen(alt_screen);
+        // Polled rather than watched for as `1049l`, so the ways out that never
+        // name the mode are caught too: a reset leaves it, and so does `47l`.
+        //
+        // Reported after everything else this chunk produced, rather than where
+        // the leave fell among it. A program that claimed something earlier in
+        // the same chunk therefore loses the claim to its own exit, which is
+        // right, and one that claims after the leave loses it too, which is not.
+        // The second needs a program claiming from outside the alternate screen:
+        // one that enters it in this chunk ends the chunk inside it, and no
+        // leave is reported at all.
+        if was_alt_screen && !alt_screen {
+            self.pending_events.push(TermEvent::AltScreenLeft);
+        }
         redraw
     }
 
@@ -4117,6 +4138,42 @@ mod tests {
         // end in `q`, so it must not draw an XTVERSION reply.
         terminal.advance(b"\x1b[>4;1m");
         assert!(terminal.take_responses().is_empty());
+    }
+
+    /// A host holds things on a program's behalf while it runs full screen, and
+    /// leaving the alternate screen is when it has to let them go. Reporting the
+    /// enter as well would have the host drop them the moment the program
+    /// started.
+    #[test]
+    fn leaving_the_alternate_screen_is_reported_once() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b[?1049h");
+        assert_eq!(terminal.take_events(), [], "entering reports nothing");
+
+        terminal.advance(b"\x1b[?1049l");
+        assert_eq!(terminal.take_events(), [TermEvent::AltScreenLeft]);
+
+        terminal.advance(b"\x1b[?1049l");
+        assert_eq!(
+            terminal.take_events(),
+            [],
+            "leaving a screen already left reports nothing"
+        );
+    }
+
+    /// The mode is polled rather than watched for as `1049l`, which is what
+    /// catches the ways out that never name it. A crashed program leaves a shell
+    /// that resets rather than one that politely closes the screen it opened.
+    #[test]
+    fn a_reset_out_of_the_alternate_screen_is_a_leave() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b[?1049h");
+        terminal.take_events();
+
+        terminal.advance(b"\x1bc");
+        assert_eq!(terminal.take_events(), [TermEvent::AltScreenLeft]);
     }
 
     #[test]

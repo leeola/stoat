@@ -2046,6 +2046,14 @@ fn handle_term_events(
                 state.zoom_inband = inband;
             },
             TermEvent::FontStep(delta) => apply_font_step(state, delta),
+            // The claim belonged to the program that just left, and an inband
+            // one has nothing else to notice that. Without this, a stoat that
+            // exits or dies leaves every later zoom press typing escape bytes
+            // into the shell that outlived it.
+            TermEvent::AltScreenLeft => {
+                state.zoom_capture = false;
+                state.zoom_inband = false;
+            },
         }
     }
 }
