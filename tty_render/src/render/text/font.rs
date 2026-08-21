@@ -8,7 +8,8 @@
 use crate::render::CellMetrics;
 use cosmic_text::{
     fontdb::{Query, Weight},
-    Attrs, Buffer as CosmicBuffer, CacheKey, Family, Font, FontSystem, Metrics, Shaping,
+    Attrs, AttrsList, Buffer as CosmicBuffer, CacheKey, Family, Font, FontSystem, Hinting, Metrics,
+    ShapeLine, Shaping, Wrap,
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -74,21 +75,26 @@ pub(super) fn shape_run(
     metrics: CellMetrics,
     family: Family<'_>,
 ) -> Vec<(usize, CacheKey)> {
-    let mut buffer =
-        CosmicBuffer::new(font_system, Metrics::new(metrics.font_size, metrics.height));
-    buffer.set_text(
-        font_system,
-        text,
-        &Attrs::new().family(family),
-        Shaping::Advanced,
+    let attrs = AttrsList::new(&Attrs::new().family(family));
+    let line = ShapeLine::new(font_system, text, &attrs, Shaping::Advanced, TAB_WIDTH);
+    // No width bound, so the run lays out as one line and nothing wraps. The
+    // layout is cosmic-text's rather than ours because a fallback font whose
+    // monospace em width differs from the primary's has its size adjusted here,
+    // and that adjusted size is part of the cache key below.
+    let layout = line.layout(
+        metrics.font_size,
         None,
+        Wrap::None,
+        None,
+        None,
+        Hinting::Disabled,
     );
-    buffer.shape_until_scroll(font_system, false);
 
-    let Some(run) = buffer.layout_runs().next() else {
+    let Some(first) = layout.first() else {
         return Vec::new();
     };
-    run.glyphs
+    first
+        .glyphs
         .iter()
         .map(|glyph| {
             let pixel_aligned = (-(glyph.x + glyph.font_size * glyph.x_offset), 0.0);
@@ -96,6 +102,15 @@ pub(super) fn shape_run(
         })
         .collect()
 }
+
+/// Columns a tab advances by while shaping, matching [`CosmicBuffer`]'s own
+/// default.
+///
+/// A run reaching here holds one grid row's text, where the terminal has
+/// already expanded tabs into spaces, so nothing depends on this. It matches
+/// the buffer's default so a run that did carry one shapes the way it always
+/// has.
+const TAB_WIDTH: u16 = 8;
 
 /// The number of shaped runs the cache holds before it evicts to make room.
 ///
@@ -475,6 +490,90 @@ mod tests {
         assert_eq!(
             ligated[0].0, 0,
             "the ligature's first glyph maps back to the run's first column"
+        );
+    }
+
+    /// A character keys the same however far into the run it sits, because the
+    /// grid draws every glyph at an integer cell origin.
+    ///
+    /// Keying by the glyph's own position instead would sort each column into
+    /// its own subpixel bin, and one character would take as many atlas entries
+    /// as the row has columns.
+    #[test]
+    fn shape_run_keys_a_repeated_character_once() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+
+        let shaped = shape_run(
+            &mut font_system,
+            "aaaa",
+            metrics,
+            Family::Name("JetBrains Mono"),
+        );
+        assert_eq!(shaped.len(), 4, "one glyph per character");
+        assert!(
+            shaped.iter().all(|(_, key)| *key == shaped[0].1),
+            "every column keys the same entry: {:?}",
+            shaped.iter().map(|(_, key)| *key).collect::<Vec<_>>()
+        );
+    }
+
+    /// A glyph rasterizes at the font size the metrics name, not at the cell
+    /// height around it. The two differ by the line-height ratio, so passing
+    /// the wrong one renders every glyph a fifth too large with nothing else
+    /// out of place to notice.
+    #[test]
+    fn shape_run_keys_the_font_size_the_metrics_name() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+
+        for size in [11u32, 16, 30] {
+            let metrics = CellMetrics::from_font_size(size, 1.0);
+            let shaped = shape_run(
+                &mut font_system,
+                "a",
+                metrics,
+                Family::Name("JetBrains Mono"),
+            );
+            assert_eq!(
+                shaped[0].1.font_size_bits,
+                metrics.font_size.to_bits(),
+                "size {size} keys at the font size, not the cell height \
+                 {}",
+                metrics.height
+            );
+        }
+    }
+
+    /// A run of characters the primary family lacks shapes through the fallback
+    /// the font system finds, and each glyph still names the byte it came from.
+    ///
+    /// The cluster mapping is what puts a glyph in its column, so it has to
+    /// survive the fallback rather than collapsing to the run's start.
+    #[test]
+    fn shape_run_maps_clusters_through_a_fallback_font() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+
+        // Two Private-Use-Area powerline separators, which only the bundled
+        // symbols font carries. Three bytes each in UTF-8.
+        let shaped = shape_run(
+            &mut font_system,
+            "\u{e0b6}\u{e0b4}",
+            metrics,
+            Family::Name(SYMBOLS_FAMILY),
+        );
+        let offsets: Vec<usize> = shaped.iter().map(|(offset, _)| *offset).collect();
+        assert_eq!(
+            offsets,
+            [0, 3],
+            "each separator maps to its own source byte"
+        );
+        assert_ne!(
+            shaped[0].1.glyph_id, shaped[1].1.glyph_id,
+            "and the two separators are distinct glyphs rather than one repeated"
         );
     }
 
