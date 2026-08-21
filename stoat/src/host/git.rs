@@ -118,6 +118,20 @@ pub trait GitRepo: Send + Sync {
     fn workdir(&self) -> Option<PathBuf>;
     fn changed_files(&self) -> Vec<ChangedFile>;
 
+    /// The working tree diffed against the tree of commit `base_sha`.
+    ///
+    /// Where [`Self::changed_files`] reports what is uncommitted, this reports
+    /// what has happened since a named commit, which includes everything
+    /// committed on top of it. That is the list a reader sees when the
+    /// workspace points its diffs at that commit.
+    ///
+    /// Untracked files count as added, the same inclusion rule
+    /// [`Self::changed_files`] states, so the two lists differ by their base
+    /// and by nothing else. A `base_sha` the repository cannot resolve yields
+    /// an empty list rather than falling back to a different base, since a
+    /// wrong answer here sends the reader to the wrong file.
+    fn changed_files_from(&self, base_sha: &str) -> Vec<ChangedFile>;
+
     /// How many files carry staged changes and how many carry unstaged ones,
     /// as `(staged, unstaged)`.
     ///

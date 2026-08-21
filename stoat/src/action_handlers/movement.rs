@@ -13,7 +13,7 @@ use crate::{
         anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
         ResolvedRead, SelectionsCollection, SpanLanding,
     },
-    workspace::Workspace,
+    workspace::{diff::DiffBase, Workspace},
 };
 use std::{
     cmp::Ordering,
@@ -4231,11 +4231,19 @@ fn goto_change_across_files(
     let git_root = stoat.active_workspace().git_root.clone();
     let git_host = stoat.git_host.clone();
     let fs_host = stoat.fs_host.clone();
+    let base = stoat.active_workspace().diff_base().cloned();
     let redraw = stoat.redraw_notify.clone();
     let (tx, rx) = mpsc::channel();
 
     let task = stoat.executor.spawn_blocking(move || {
-        let found = scan_changed_file_jump(&git_host, &fs_host, &git_root, current_path, dir);
+        let found = scan_changed_file_jump(
+            &git_host,
+            &fs_host,
+            &git_root,
+            current_path,
+            dir,
+            base.as_ref(),
+        );
         let _ = tx.send(found);
         redraw.notify_one();
     });
@@ -4262,12 +4270,22 @@ fn scan_changed_file_jump(
     git_root: &Path,
     current_path: Option<PathBuf>,
     dir: ChangeDir,
+    base: Option<&DiffBase>,
 ) -> ChangedFileJump {
     let Some(repo) = git_host.discover(git_root) else {
         return ChangedFileJump::NoMoreChanges;
     };
-    let changed: Vec<PathBuf> = repo
-        .changed_files()
+    // The hop walks the list the reader is looking at. Under a revision base
+    // that is what has happened since that commit, not what is uncommitted --
+    // otherwise a file whose hunks are on screen cannot be reached by pressing
+    // `n`. A memory base supplies its text rather than a commit, so there is no
+    // revision to list against and the working tree's own list is the closest
+    // true answer.
+    let listed = match base {
+        Some(DiffBase::Rev { sha: Some(sha) }) => repo.changed_files_from(sha.as_str()),
+        _ => repo.changed_files(),
+    };
+    let changed: Vec<PathBuf> = listed
         .into_iter()
         .filter(|f| !f.untracked)
         .map(|f| f.path)

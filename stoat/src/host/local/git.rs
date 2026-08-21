@@ -140,6 +140,50 @@ impl GitRepo for LocalGitRepo {
         staged
     }
 
+    fn changed_files_from(&self, base_sha: &str) -> Vec<ChangedFile> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
+            return Vec::new();
+        };
+        let Ok(tree) = repo
+            .revparse_single(base_sha)
+            .and_then(|object| object.peel_to_commit())
+            .and_then(|commit| commit.tree())
+        else {
+            return Vec::new();
+        };
+
+        // Through the index rather than the working tree alone, so a staged
+        // change and the unstaged edit on top of it fold into the one entry
+        // this list is about: whether the file differs from the base.
+        let mut opts = DiffOptions::new();
+        opts.include_untracked(true).recurse_untracked_dirs(true);
+        let Ok(diff) = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts)) else {
+            return Vec::new();
+        };
+
+        let mut files: Vec<ChangedFile> = diff
+            .deltas()
+            .filter_map(|delta| {
+                let rel = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())?;
+                Some(ChangedFile {
+                    path: workdir.join(rel),
+                    // Staged-ness describes where an uncommitted change sits,
+                    // which says nothing about a file's distance from a commit
+                    // further back. Every entry here is simply changed.
+                    staged: false,
+                    untracked: delta.status() == git2::Delta::Untracked,
+                })
+            })
+            .collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files.dedup_by(|a, b| a.path == b.path);
+        files
+    }
+
     fn change_counts(&self) -> (usize, usize) {
         let repo = self.repo.lock().expect("git repo lock");
         let statuses = {

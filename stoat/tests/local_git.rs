@@ -148,6 +148,93 @@ fn workdir_returns_repo_workdir() {
     assert_eq!(repo.workdir().as_deref(), Some(tr.path()));
 }
 
+/// Against a named commit the list is what happened since it, which includes
+/// everything committed on top. The uncommitted list cannot answer that: with a
+/// clean tree it is empty however far back the base points.
+#[test]
+fn changed_files_from_lists_work_committed_since_the_base() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    let base = tr.head_sha();
+    tr.commit_file("b.rs", "new file");
+    tr.commit_file("a.rs", "v2");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert!(
+        repo.changed_files().is_empty(),
+        "the tree is clean, so nothing is uncommitted",
+    );
+    assert_eq!(
+        repo.changed_files_from(&base)
+            .iter()
+            .map(|f| f.path.strip_prefix(tr.path()).unwrap().to_path_buf())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("a.rs"), PathBuf::from("b.rs")],
+        "both commits since the base are in the list",
+    );
+}
+
+/// A working-tree edit and a commit since the base are the same answer to the
+/// question this list asks, so they appear alike and once each.
+#[test]
+fn changed_files_from_folds_the_worktree_in_with_the_commits() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    tr.commit_file("b.rs", "v1");
+    let base = tr.head_sha();
+    tr.commit_file("a.rs", "v2");
+    tr.write("a.rs", "v3");
+    tr.write("b.rs", "edited but never committed");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_eq!(
+        repo.changed_files_from(&base)
+            .iter()
+            .map(|f| f.path.strip_prefix(tr.path()).unwrap().to_path_buf())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("a.rs"), PathBuf::from("b.rs")],
+        "the file edited twice appears once, beside the one only edited",
+    );
+}
+
+/// A base the repository cannot resolve yields nothing rather than quietly
+/// answering against some other base, which would send a reader to a file that
+/// has not changed at all.
+#[test]
+fn changed_files_from_an_unknown_base_is_empty() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    tr.write("a.rs", "v2");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert!(!repo.changed_files().is_empty(), "the tree is dirty");
+    assert!(repo
+        .changed_files_from("0000000000000000000000000000000000000000")
+        .is_empty());
+}
+
+/// A change staged and then reverted on disk has still happened since the base,
+/// and the index is the only place that says so. Reading the working tree alone
+/// would call the file untouched and leave a staged hunk unreachable.
+#[test]
+fn changed_files_from_sees_a_staged_change_the_worktree_reverted() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    let base = tr.head_sha();
+    tr.write_and_stage("a.rs", "v2");
+    tr.write("a.rs", "v1");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_eq!(
+        repo.changed_files_from(&base)
+            .iter()
+            .map(|f| f.path.strip_prefix(tr.path()).unwrap().to_path_buf())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("a.rs")],
+        "the staged edit counts even with the working file back at the base",
+    );
+}
+
 #[test]
 fn changed_files_empty_when_clean() {
     let tr = TestRepo::new();

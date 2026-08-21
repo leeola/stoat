@@ -105,6 +105,63 @@ fn crossing_files_waits_for_the_scan_before_it_opens_anything() {
     );
 }
 
+/// The hop walks the list the reader is looking at. Under a revision base that
+/// is what happened since that commit, so a file whose hunks are on screen
+/// because it was committed on top of the base has to be reachable by pressing
+/// `n` -- against HEAD it is not changed at all.
+#[test]
+fn next_change_crosses_into_a_file_changed_only_against_the_base() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stoat.active_workspace_mut().git_root = workdir.clone();
+    {
+        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+        // `a.rs` is edited in the working tree, so both lists carry it.
+        builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        // `b.rs` matches HEAD and differs from the base commit, which is the
+        // whole case: committed since the base, uncommitted against nothing.
+        builder.head_file("b.rs", "d\nY\nf\n");
+        builder.commit("base0", &[("a.rs", "a\nb\nc\n"), ("b.rs", "d\ne\nf\n")]);
+    }
+    h.stoat.set_diff_warm_auto(true);
+
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.set_diff_view(true);
+        set_cursor_row(editor, 1);
+    }
+
+    // Against HEAD the hop has nowhere to go: `a.rs` is the only changed file.
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+    assert_eq!(
+        focused_buffer_path(&h.stoat),
+        workdir.join("a.rs"),
+        "against HEAD there is no second changed file to reach",
+    );
+
+    h.stoat
+        .active_workspace_mut()
+        .set_diff_base(Some(DiffBase::Rev {
+            sha: Some("base0".to_string()),
+        }));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        set_cursor_row(editor, 1);
+    }
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+    assert_eq!(
+        focused_buffer_path(&h.stoat),
+        workdir.join("b.rs"),
+        "under the base the hop reaches the file committed on top of it",
+    );
+}
+
 #[test]
 fn next_change_crosses_into_a_lone_changed_file_from_an_unchanged_buffer() {
     let mut h = TestHarness::with_size(40, 20);

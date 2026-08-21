@@ -840,6 +840,65 @@ impl GitRepo for FakeGitRepo {
         staged
     }
 
+    /// Composes the two things this fake knows into what happened since the
+    /// named commit: the paths its tree disagrees with, and the paths
+    /// registered as uncommitted.
+    ///
+    /// The tree comparison catches what was committed on top of the base and
+    /// what was dropped since. It reads the index blob where one is registered
+    /// and the HEAD blob otherwise, which is what [`GitRepo::index_content`]
+    /// answers and all this fake records for a committed file.
+    ///
+    /// The registrations catch the rest. A working-tree edit is seeded here as
+    /// a registration rather than as text, so no comparison could find it, and
+    /// it differs from the base whatever the commit held.
+    fn changed_files_from(&self, base_sha: &str) -> Vec<ChangedFile> {
+        let state = self.state.lock().unwrap();
+        let Some(commit) = state.commits.get(base_sha) else {
+            return Vec::new();
+        };
+
+        let committed_text = |rel: &PathBuf| -> Option<&String> {
+            match state.removed_index_entries.contains(rel) {
+                true => None,
+                false => state
+                    .index_contents
+                    .get(rel)
+                    .or_else(|| state.head_contents.get(rel)),
+            }
+        };
+        let paths: BTreeSet<&PathBuf> = commit
+            .tree
+            .keys()
+            .chain(state.index_contents.keys())
+            .chain(state.head_contents.keys())
+            .collect();
+
+        let mut files: Vec<ChangedFile> = paths
+            .into_iter()
+            .filter(|rel| {
+                committed_text(rel).map(String::as_str) != commit.tree.get(*rel).map(String::as_str)
+            })
+            .map(|rel| ChangedFile {
+                path: self.workdir.join(rel),
+                staged: false,
+                untracked: false,
+            })
+            .collect();
+        files.extend(state.changed.iter().map(|file| ChangedFile {
+            staged: false,
+            ..file.clone()
+        }));
+        files.extend(state.untracked.iter().map(|path| ChangedFile {
+            path: path.clone(),
+            staged: false,
+            untracked: true,
+        }));
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files.dedup_by(|a, b| a.path == b.path);
+        files
+    }
+
     /// Counted off the same `changed` and `untracked` registrations
     /// [`Self::changed_files`] reports, so the two never disagree. A
     /// registration carries one side, so no fake file counts in both.
@@ -1411,6 +1470,134 @@ mod tests {
             repo.index_content(&workdir().join("b.rs")).as_deref(),
             Some("only-head"),
             "an unseeded index falls back to HEAD content"
+        );
+    }
+
+    /// The list against a commit is the paths whose text differs from it, not
+    /// every path the repo knows. A file matching the commit has nothing to
+    /// show a reader, and listing it would send `n` to a diff with no hunks.
+    #[test]
+    fn changed_files_from_lists_only_what_differs_from_the_commit() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("same.rs", "unchanged")
+            .head_file("committed.rs", "after")
+            .modified("edited.rs", "after", "working")
+            .commit(
+                "base0",
+                &[
+                    ("same.rs", "unchanged"),
+                    ("committed.rs", "before"),
+                    ("edited.rs", "before"),
+                ],
+            );
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.changed_files_from("base0")
+                .iter()
+                .map(|f| f.path.strip_prefix(workdir()).unwrap().to_path_buf())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("committed.rs"), PathBuf::from("edited.rs"),],
+            "the file matching the commit is left out",
+        );
+    }
+
+    /// A path the commit held and the repo no longer does differs from it as
+    /// much as an edit does, and a reader walking the base's changes has to be
+    /// able to reach the deletion.
+    #[test]
+    fn changed_files_from_lists_a_path_the_commit_had_and_the_tree_lost() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("kept.rs", "same")
+            .commit("base0", &[("kept.rs", "same"), ("gone.rs", "was here")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.changed_files_from("base0")
+                .iter()
+                .map(|f| f.path.strip_prefix(workdir()).unwrap().to_path_buf())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("gone.rs")],
+        );
+    }
+
+    /// A base the fake never recorded yields nothing, the same refusal the real
+    /// host makes: answering against some other base would be a wrong list
+    /// rather than a missing one.
+    #[test]
+    fn changed_files_from_an_unknown_commit_is_empty() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).modified("a.rs", "head", "working");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert!(!repo.changed_files().is_empty(), "the tree is dirty");
+        assert!(repo.changed_files_from("nosuch").is_empty());
+    }
+
+    /// Staged text is what a committed file currently is, and HEAD is only the
+    /// fallback for one with nothing staged. Reading them the other way round
+    /// would call a file changed on the strength of a HEAD blob the index has
+    /// already superseded.
+    #[test]
+    fn changed_files_from_reads_the_staged_text_over_head() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "older")
+            .index_file("a.rs", "matches the base")
+            .commit("base0", &[("a.rs", "matches the base")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert!(
+            repo.changed_files_from("base0").is_empty(),
+            "the staged text is the base's, so nothing has happened since it",
+        );
+    }
+
+    /// A working-tree edit over a file the base already held is invisible to
+    /// the tree comparison: the committed text still matches. The registration
+    /// is the only evidence it happened, and a real repo reading the file off
+    /// disk would see it plainly, so this fake has to report it too.
+    #[test]
+    fn changed_files_from_lists_a_working_tree_edit_the_commit_matches() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .modified("a.rs", "committed", "edited on disk")
+            .commit("base0", &[("a.rs", "committed")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.changed_files_from("base0")
+                .iter()
+                .map(|f| f.path.strip_prefix(workdir()).unwrap().to_path_buf())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("a.rs")],
+            "the edit counts even though the commit holds what HEAD holds",
+        );
+    }
+
+    /// An untracked file counts as added, the inclusion rule the trait states
+    /// and the one [`GitRepo::changed_files`] already follows, so the two lists
+    /// differ by their base and by nothing else.
+    #[test]
+    fn changed_files_from_counts_an_untracked_file_as_added() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "same")
+            .untracked("new.rs")
+            .commit("base0", &[("a.rs", "same")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.changed_files_from("base0")
+                .iter()
+                .map(|f| (
+                    f.path.strip_prefix(workdir()).unwrap().to_path_buf(),
+                    f.untracked
+                ))
+                .collect::<Vec<_>>(),
+            [(PathBuf::from("new.rs"), true)],
         );
     }
 
