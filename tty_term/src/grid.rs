@@ -12,7 +12,10 @@ use std::{
     hash::{Hash, Hasher},
     mem,
     ops::{BitOr, BitOrAssign, Range},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use stoatty_protocol::command::{BarCommand, PolylineCommand, TextRunCommand};
 
@@ -26,6 +29,15 @@ pub(crate) mod from_command;
 /// and a palette class, which is what the renderer reads either way.
 pub use stoatty_protocol::command::{LineSummary, MinimapRun};
 
+/// Hands out [`Grid::id`], one per grid built for the life of the process.
+///
+/// A renderer caches against a grid's change counters, and one pass serves
+/// more than one grid: the live screen and the scrollback window take turns
+/// through the same one. Each grid counts only its own changes, so a cache
+/// keyed on a count alone reads two unrelated lists as one list whenever the
+/// two counts happen to meet. The id is what tells them apart.
+static NEXT_GRID_ID: AtomicU64 = AtomicU64::new(0);
+
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
 /// Stoatty's central render model: the terminal driver writes parsed content
@@ -33,6 +45,9 @@ pub use stoatty_protocol::command::{LineSummary, MinimapRun};
 /// single allocation, so [`Self::resize`] reallocates rather than preserving
 /// content.
 pub struct Grid {
+    /// Distinguishes this grid from every other one alive, for a cache keyed on
+    /// both this and a change counter. See [`NEXT_GRID_ID`].
+    id: u64,
     cells: Vec<Cell>,
     /// The distinct border sets this grid's cells refer to, indexed by
     /// [`BorderId`] less one. The borderless set is [`BorderId::NONE`] and is
@@ -69,13 +84,15 @@ pub struct Grid {
     /// is one row and starts on its own index.
     line_start_rows: Vec<usize>,
     /// Change counters bumped by [`crate::Terminal::project`] when it re-applies
-    /// the overlay/popover, off-grid text-run, or minimap decorations. A render
-    /// pass compares each against its last-seen value to skip rebuilding and
-    /// re-uploading a decoration that did not change. Monotonic across resizes,
-    /// since a resize re-applies every decoration and so bumps all three.
+    /// the overlay/popover, off-grid text-run, minimap, or stroked-path
+    /// decorations. A render pass compares each against its last-seen value to
+    /// skip rebuilding and re-uploading a decoration that did not change.
+    /// Monotonic across resizes, since a resize re-applies every decoration and
+    /// so bumps all four.
     popovers_epoch: u64,
     text_runs_epoch: u64,
     minimap_epoch: u64,
+    polylines_epoch: u64,
     /// Images placed on this grid, in declaration order.
     ///
     /// Held apart from the cells because a placement covers a box of them and
@@ -89,6 +106,7 @@ impl Grid {
     /// Create a `rows` by `cols` grid filled with [`Cell::default`].
     pub fn new(rows: usize, cols: usize) -> Grid {
         Grid {
+            id: NEXT_GRID_ID.fetch_add(1, Ordering::Relaxed),
             cells: vec![Cell::default(); rows * cols],
             border_table: Vec::new(),
             rows,
@@ -107,9 +125,20 @@ impl Grid {
             popovers_epoch: 0,
             text_runs_epoch: 0,
             minimap_epoch: 0,
+            polylines_epoch: 0,
             images: Vec::new(),
             images_epoch: 0,
         }
+    }
+
+    /// Distinguishes this grid from every other one alive.
+    ///
+    /// A renderer that serves more than one grid pairs this with a change
+    /// counter, so a cache built from one grid is never handed to another that
+    /// happens to have counted as far. Stable for the grid's whole life: a
+    /// resize keeps it, since a resized grid is still the same grid.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Change counter for the overlay/popover decorations, moved by every entry
@@ -139,6 +168,14 @@ impl Grid {
     /// reason.
     pub fn minimap_epoch(&self) -> u64 {
         self.minimap_epoch
+    }
+
+    /// Change counter for the off-grid stroked paths.
+    ///
+    /// Read like [`Self::popovers_epoch`], and maintained here for the same
+    /// reason.
+    pub fn polylines_epoch(&self) -> u64 {
+        self.polylines_epoch
     }
 
     /// Images placed on this grid, in declaration order.
@@ -272,6 +309,7 @@ impl Grid {
         self.popovers_epoch += 1;
         self.text_runs_epoch += 1;
         self.minimap_epoch += 1;
+        self.polylines_epoch += 1;
         self.images_epoch += 1;
     }
 
@@ -281,7 +319,7 @@ impl Grid {
     /// Unlike [`Self::resize`], the cell buffer is cleared in place rather than
     /// reallocated, so recycling a grid to hold new content allocates nothing.
     ///
-    /// Moves the three decoration epochs, as [`Self::resize`] does.
+    /// Moves the four decoration epochs, as [`Self::resize`] does.
     pub fn clear(&mut self) {
         self.clear_except(0, 0);
     }
@@ -293,7 +331,7 @@ impl Grid {
     /// the reason: a compose that adds each source's runs and bars to this
     /// grid's would otherwise stack this pass's on the last one's.
     ///
-    /// Moves the three decoration epochs, as [`Self::clear`] does, so a render
+    /// Moves the four decoration epochs, as [`Self::clear`] does, so a render
     /// pass gating on them rebuilds a decoration that changed however the cells
     /// compare.
     pub fn clear_decorations(&mut self) {
@@ -339,6 +377,7 @@ impl Grid {
         self.popovers_epoch += 1;
         self.text_runs_epoch += 1;
         self.minimap_epoch += 1;
+        self.polylines_epoch += 1;
     }
 
     /// Feed everything this grid's cells put on screen into `hasher`.
@@ -615,13 +654,20 @@ impl Grid {
     ///
     /// Grid-level like the bars, so the per-cell projection leaves them
     /// untouched and the caller sets the full list each frame it changes.
+    ///
+    /// Moves [`Self::polylines_epoch`].
     pub fn set_polylines(&mut self, polylines: Vec<Polyline>) {
         self.polylines = polylines;
+        self.polylines_epoch += 1;
     }
 
     /// The path list, for a caller rewriting it from another grid's. See
     /// [`Self::text_runs_mut`].
+    ///
+    /// Moves [`Self::polylines_epoch`] on the way out, for the reason
+    /// [`Self::text_runs_mut`] moves its own.
     pub fn polylines_mut(&mut self) -> &mut Vec<Polyline> {
+        self.polylines_epoch += 1;
         &mut self.polylines
     }
 
@@ -1900,8 +1946,8 @@ impl BitOrAssign for Flags {
 mod tests {
     use super::{
         Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid, HashMap, Icon,
-        IconKind, LineSummary, Minimap, MinimapRun, MinimapStrip, Overlay, PagePool, Rgb, Rgba,
-        Scale, ScrollRegion, TextRun,
+        IconKind, LineSummary, Minimap, MinimapRun, MinimapStrip, Overlay, PagePool, Polyline, Rgb,
+        Rgba, Scale, ScrollRegion, TextRun,
     };
 
     /// The rows the slide vacates have to come back blank rather than holding
@@ -2363,6 +2409,15 @@ mod tests {
         }])
     }
 
+    fn epoch_probe_polyline() -> Polyline {
+        Polyline {
+            points: vec![[0, 0], [16, 16]],
+            width: 16,
+            color: Rgb::new(1, 2, 3),
+            seq: 0,
+        }
+    }
+
     fn epoch_probe_overlay() -> Overlay {
         Overlay {
             top: 0,
@@ -2452,6 +2507,25 @@ mod tests {
             assert!(
                 grid.popovers_epoch() > before,
                 "{name} left popovers_epoch at {before}"
+            );
+        }
+
+        let polylines: [NamedChange; 4] = [
+            ("set_polylines", |g| g.set_polylines(vec![])),
+            ("polylines_mut", |g| g.polylines_mut().clear()),
+            ("resize", |g| g.resize(4, 4)),
+            ("clear", |g| g.clear()),
+        ];
+        for (name, change) in polylines {
+            let mut grid = Grid::new(4, 4);
+            grid.set_polylines(vec![epoch_probe_polyline()]);
+
+            let before = grid.polylines_epoch();
+            change(&mut grid);
+
+            assert!(
+                grid.polylines_epoch() > before,
+                "{name} left polylines_epoch at {before}"
             );
         }
     }

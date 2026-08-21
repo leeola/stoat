@@ -12,7 +12,7 @@ use crate::render::{
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
-use stoatty_term::grid::{Polyline, Rgb};
+use stoatty_term::grid::{Grid, Polyline, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
@@ -99,6 +99,20 @@ struct Globals {
     _pad1: [u32; 2],
 }
 
+/// Which grid declared the paths the live instances were built from, and where
+/// that grid's [`Grid::polylines_epoch`] stood at the time.
+///
+/// The id rides along because one pass serves more than one grid: the live
+/// screen and the scrollback window take turns through it. Each counts only its
+/// own changes, so an epoch alone would call two unrelated path lists the same
+/// list whenever the two counts happened to meet, and the pass would draw one
+/// grid's lanes over the other.
+#[derive(Clone, Copy, PartialEq)]
+struct PathVersion {
+    grid: u64,
+    epoch: u64,
+}
+
 /// The instanced stroked-path pipeline and its per-frame buffers.
 pub struct PolylinePass {
     pipeline: RenderPipeline,
@@ -114,6 +128,18 @@ pub struct PolylinePass {
     /// and changes on almost none of them, so building into a buffer the pass
     /// keeps spares an allocation the frame would otherwise discard.
     built: Vec<PolylineInstance>,
+    /// Where each path's endpoints are converted before they are chunked into
+    /// instances, reused across paths and across frames. A commit graph
+    /// declares a path per lane, so collecting each one fresh costs a vector
+    /// per lane per rebuild.
+    points_scratch: Vec<[f32; 2]>,
+    /// What the live instances were built from, or `None` before the first
+    /// build.
+    ///
+    /// An `Option` rather than a version starting at zero, because a fresh pass
+    /// and a grid that has never declared a path both start there, and the first
+    /// frame must build rather than trust a counter it has never read.
+    last_polylines: Option<PathVersion>,
     /// Where a composited pool's segments are built, separate from [`Self::built`] so
     /// a pool draw leaves the live comparison intact.
     ///
@@ -266,6 +292,8 @@ impl PolylinePass {
             instances,
             last_instances: Vec::new(),
             built: Vec::new(),
+            points_scratch: Vec::new(),
+            last_polylines: None,
             composite_built: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
@@ -291,14 +319,21 @@ impl PolylinePass {
     /// off-grid passes. Reallocates the instance or occluder buffer only when
     /// its count outgrows the current capacity, and skips the instance upload
     /// when they match what was last sent.
+    ///
+    /// A frame whose paths are unchanged rebuilds none of them, so the uniform
+    /// and the occluders are the whole cost of a graph that is only being
+    /// scrolled past. The grid is taken whole rather than its path list,
+    /// because the list and the counter that says whether it moved have to come
+    /// from the same place or the gate reads one grid about another.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
-        polylines: &[Polyline],
+        grid: &Grid,
         occluders: &[Occluder],
         resolution: [f32; 2],
     ) {
+        let polylines = grid.polylines();
         // With no path to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
         // that empties the list still runs, which is what drops the count to zero
@@ -322,7 +357,20 @@ impl PolylinePass {
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        build_polyline_instances_into(polylines, &mut self.built);
+        // The instances hold cell fractions the vertex stage scales by the live
+        // cell size, so neither a surface resize nor a font zoom moves one. Only
+        // the path list changing can, and the globals written above already
+        // carry everything that does move.
+        let version = PathVersion {
+            grid: grid.id(),
+            epoch: grid.polylines_epoch(),
+        };
+        if self.last_polylines == Some(version) {
+            return;
+        }
+        self.last_polylines = Some(version);
+
+        build_polyline_instances_into(polylines, &mut self.built, &mut self.points_scratch);
         self.count = self.built.len() as u32;
         if self.built.is_empty() {
             return;
@@ -432,7 +480,11 @@ impl PolylinePass {
             return;
         }
 
-        build_polyline_instances_into(polylines, &mut self.composite_built);
+        build_polyline_instances_into(
+            polylines,
+            &mut self.composite_built,
+            &mut self.points_scratch,
+        );
 
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.count = self.composite_built.len() as u32;
@@ -540,7 +592,10 @@ fn make_bind_group(
 /// scales by the cell size.
 ///
 /// `out` is cleared first, so a caller holding it across frames sees only this
-/// frame's segments.
+/// frame's segments. `points` is where one path's converted endpoints are staged
+/// on the way to its instances, cleared per path and left holding the last one's;
+/// a caller passes the same buffer every time so the conversion allocates nothing
+/// after the first long path.
 ///
 /// A single-point path yields one zero-length segment, which the capsule SDF
 /// draws as a dot. An empty path yields nothing.
@@ -548,16 +603,22 @@ fn make_bind_group(
 /// Endpoints are given as declared. A pool composite glides its paths through the
 /// `shift_rows` uniform rather than through their endpoints, so instances built
 /// here outlive every frame that only moves the pool.
-fn build_polyline_instances_into(polylines: &[Polyline], out: &mut Vec<PolylineInstance>) {
+fn build_polyline_instances_into(
+    polylines: &[Polyline],
+    out: &mut Vec<PolylineInstance>,
+    points: &mut Vec<[f32; 2]>,
+) {
     out.clear();
     for polyline in polylines {
         let half_width = f32::from(polyline.width) / SIXTEENTHS / 2.0;
         let color = rgb_f32(polyline.color);
-        let points: Vec<[f32; 2]> = polyline
-            .points
-            .iter()
-            .map(|&[x, y]| [f32::from(x) / SIXTEENTHS, f32::from(y) / SIXTEENTHS])
-            .collect();
+        points.clear();
+        points.extend(
+            polyline
+                .points
+                .iter()
+                .map(|&[x, y]| [f32::from(x) / SIXTEENTHS, f32::from(y) / SIXTEENTHS]),
+        );
 
         match points.as_slice() {
             [] => {},
@@ -630,7 +691,7 @@ mod tests {
         gpu::headless_device,
         render::{CellMetrics, PoolOccluders},
     };
-    use stoatty_term::grid::{Polyline, Rgb};
+    use stoatty_term::grid::{Grid, Polyline, Rgb};
     use wgpu::{
         naga::{
             front::wgsl,
@@ -667,7 +728,7 @@ mod tests {
     /// only want one frame's instances and have no buffer to reuse.
     fn build_polyline_instances(polylines: &[Polyline]) -> Vec<PolylineInstance> {
         let mut instances = Vec::new();
-        build_polyline_instances_into(polylines, &mut instances);
+        build_polyline_instances_into(polylines, &mut instances, &mut Vec::new());
         instances
     }
 
@@ -688,13 +749,151 @@ mod tests {
 
         let mut scratch = build_polyline_instances(&paths);
         scratch.extend(build_polyline_instances(&paths));
-        build_polyline_instances_into(&paths, &mut scratch);
+        build_polyline_instances_into(&paths, &mut scratch, &mut Vec::new());
 
         assert_eq!(
             bytemuck::cast_slice::<PolylineInstance, u8>(&scratch),
             bytemuck::cast_slice::<PolylineInstance, u8>(&build_polyline_instances(&paths)),
             "reuse clears the stale segments and rebuilds only the frame's own"
         );
+    }
+
+    /// What the pass would hand the GPU: the bytes of its last upload, and the
+    /// instance count its draw reads.
+    fn uploaded(pass: &PolylinePass) -> (Vec<u8>, u32) {
+        (
+            bytemuck::cast_slice::<PolylineInstance, u8>(&pass.last_instances).to_vec(),
+            pass.count,
+        )
+    }
+
+    /// What [`uploaded`] must report once `polylines` have reached the GPU.
+    fn segments(polylines: &[Polyline], count: u32) -> (Vec<u8>, u32) {
+        (
+            bytemuck::cast_slice::<PolylineInstance, u8>(&build_polyline_instances(polylines))
+                .to_vec(),
+            count,
+        )
+    }
+
+    /// A pass fresh from [`PolylinePass::new`], for the gate tests, which draw
+    /// nothing and so need no particular cell size.
+    fn gate_pass(device: &Device) -> PolylinePass {
+        PolylinePass::new(
+            device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics {
+                font_size: 10.0,
+                width: 6.0,
+                height: 12.0,
+                scale_factor: 1.0,
+            },
+        )
+    }
+
+    /// A grid declaring `polylines` and nothing else.
+    fn grid_of(polylines: &[Polyline]) -> Grid {
+        let mut grid = Grid::new(4, 4);
+        grid.set_polylines(polylines.to_vec());
+        grid
+    }
+
+    /// The live pass rebuilds its segments only when the grid reports the paths
+    /// moved, so a commit graph being scrolled past pays the uniform alone.
+    #[test]
+    fn the_live_pass_rebuilds_only_when_the_path_epoch_moves() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("polyline epoch test: no wgpu adapter, skipping");
+            return;
+        };
+        let mut pass = gate_pass(&device);
+
+        let declared = [path(&[[0, 16], [0, 32]])];
+        let mut grid = grid_of(&declared);
+        pass.prepare(&device, &queue, &grid, &[], [64.0, 64.0]);
+        assert_eq!(
+            uploaded(&pass),
+            segments(&declared, 1),
+            "the first frame has no version to compare against, so it builds",
+        );
+
+        // An upload trades the built segments with the ones it replaces, so the
+        // build buffer is empty after a frame that uploaded. Filling it again is
+        // the one thing only a rebuild does, since the second frame's paths are
+        // the same bytes and reach no further than the comparison.
+        pass.prepare(&device, &queue, &grid, &[], [64.0, 64.0]);
+        assert_eq!(
+            (pass.built.len(), uploaded(&pass)),
+            (0, segments(&declared, 1)),
+            "a grid that did not move its counter is not rebuilt",
+        );
+
+        // Two paths past the cap, so the rebuild shows in the count as well as
+        // the bytes.
+        let split: Vec<[i16; 2]> = (0..16).map(|step| [0, step * 16]).collect();
+        let moved = [path(&split)];
+        grid.set_polylines(moved.to_vec());
+        pass.prepare(&device, &queue, &grid, &[], [64.0, 64.0]);
+        assert_eq!(
+            uploaded(&pass),
+            segments(&moved, 2),
+            "a moved counter replaces the upload and its count",
+        );
+    }
+
+    /// The live screen and the scrollback window take turns through one pass and
+    /// each counts only its own changes, so two grids meet on a count routinely.
+    /// A pass that read the count alone would hold one grid's lanes over the
+    /// other for as long as they agreed.
+    #[test]
+    fn a_second_grid_holding_the_same_count_is_not_the_first() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("polyline grid-id test: no wgpu adapter, skipping");
+            return;
+        };
+        let mut pass = gate_pass(&device);
+
+        // Every grid starts its counters at zero, so both stand at one after
+        // their single declaration.
+        let declared = [path(&[[0, 16], [0, 32]])];
+        let other = [path(&[[16, 16], [16, 32], [32, 48]])];
+        let first = grid_of(&declared);
+        let second = grid_of(&other);
+        assert_eq!(
+            first.polylines_epoch(),
+            second.polylines_epoch(),
+            "the fixture needs two grids that agree on their count",
+        );
+
+        pass.prepare(&device, &queue, &first, &[], [64.0, 64.0]);
+        pass.prepare(&device, &queue, &second, &[], [64.0, 64.0]);
+        assert_eq!(
+            uploaded(&pass),
+            segments(&other, 1),
+            "the second grid's paths reach the GPU",
+        );
+    }
+
+    /// The scratch the endpoints are staged in is reused across the paths of one
+    /// build, so a path that does not clear it first strokes segments reaching
+    /// back through the path before it.
+    #[test]
+    fn a_second_path_in_one_build_inherits_no_points() {
+        let instances = build_polyline_instances(&[
+            path(&[[0, 0], [0, 16], [0, 32]]),
+            path(&[[16, 0], [16, 16]]),
+        ]);
+
+        assert_eq!(
+            instances.len(),
+            2,
+            "one instance a path, both under the cap"
+        );
+        assert_eq!(
+            instances[1].point_count, 2,
+            "the second path has two points"
+        );
+        assert_eq!(instances[1].points[..2], [[1.0, 0.0], [1.0, 1.0]]);
     }
 
     #[test]

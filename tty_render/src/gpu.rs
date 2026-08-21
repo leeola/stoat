@@ -571,7 +571,7 @@ impl Renderer {
         self.bar
             .prepare(device, queue, grid.bars(), &self.occluders, resolution);
         self.polyline
-            .prepare(device, queue, grid.polylines(), &self.occluders, resolution);
+            .prepare(device, queue, grid, &self.occluders, resolution);
         self.minimap
             .prepare(device, queue, grid, &self.occluders, resolution);
         self.image.prepare(device, queue, grid, resolution);
