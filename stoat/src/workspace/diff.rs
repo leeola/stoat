@@ -659,7 +659,7 @@ pub(super) fn compute_diff_map(
             )
             && !tree.fell_back_to_line_diff
         {
-            merge_structural_detail(&mut hunks, &tree.changes, buffer_text);
+            merge_structural_detail(&mut hunks, &tree.changes, base_text, buffer_text);
         }
         DiffMap::from_hunks(hunks, Some(base.head.clone()))
     };
@@ -1360,6 +1360,149 @@ mod tests {
             spans,
             [(1, 2)],
             "the reindented statements wash nothing, and only `if x` marks"
+        );
+    }
+
+    /// The statuses and extents a settled rust diff of `base` against `buffer`
+    /// produced, in hunk order.
+    fn hunk_shapes(base: &str, buffer: &str) -> Vec<(DiffHunkStatus, std::ops::Range<u32>)> {
+        let (h, buffer_id) = settled_rust_diff(base, buffer);
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        dm.hunks()
+            .map(|hunk| (hunk.status, hunk.buffer_line_range.clone()))
+            .collect()
+    }
+
+    /// Three functions with blank lines between them, one of which relocates.
+    const THREE_FNS: &str =
+        "fn a() {\n    let x = 1;\n}\n\nfn b() {\n    let y = 2;\n}\n\nfn c() {\n    let z = 3;\n}\n";
+
+    /// The tree differ marks tokens, so it can never reach a line holding none.
+    /// A relocated block carrying a blank line has to read as a move anyway, or
+    /// the separator between two functions decides that neither of them moved.
+    #[test]
+    fn a_move_carrying_a_blank_line_is_still_a_move() {
+        const MOVED: &str =
+            "fn c() {\n    let z = 3;\n}\n\nfn a() {\n    let x = 1;\n}\n\nfn b() {\n    let y = 2;\n}\n";
+
+        assert_eq!(
+            MOVED.lines().nth(3),
+            Some(""),
+            "the fixture needs the blank inside the relocated hunk",
+        );
+        assert_eq!(
+            hunk_shapes(THREE_FNS, MOVED),
+            [
+                (DiffHunkStatus::Moved, 0..4),
+                (DiffHunkStatus::Deleted, 10..10),
+            ],
+            "the four-line block reads as a move, blank line and all",
+        );
+    }
+
+    /// Half a relocated block is still an addition. Staging reads the extents,
+    /// so calling a hunk moved when only part of it came from somewhere else
+    /// would put a move chip on lines that were written here.
+    #[test]
+    fn a_hunk_only_partly_relocated_stays_an_addition() {
+        const PARTIAL: &str = "fn b() {\n    let y = 2;\n}\n\nfn c() {\n    let z = 3;\n}\n\nfn \
+                               a() {\n    let x = 1;\n}\n\nfn d() {\n    let w = 4;\n}\n";
+
+        assert_eq!(
+            hunk_shapes(THREE_FNS, PARTIAL),
+            [
+                (DiffHunkStatus::Moved, 0..0),
+                (DiffHunkStatus::Added, 6..14),
+            ],
+            "the added run holds one relocated function and one written here, so it is an addition",
+        );
+    }
+
+    /// A function relocated within a file is the one thing only the tree pass
+    /// sees. The line differ reads the old site as a deletion and the new one
+    /// as an addition, and nothing about either says they are halves of the
+    /// same thing -- which is what left the origin chips and the m/M jumps with
+    /// no data outside their own tests.
+    #[test]
+    fn a_function_moved_within_a_file_reads_as_a_move() {
+        const BASE: &str = "fn a() {\n    let x = 1;\n}\n\nfn b() {\n    let y = 2;\n}\n";
+        const BUFFER: &str = "fn b() {\n    let y = 2;\n}\n\nfn a() {\n    let x = 1;\n}\n";
+
+        let (h, buffer_id) = settled_rust_diff(BASE, BUFFER);
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+
+        let moved: Vec<_> = dm
+            .hunks()
+            .filter(|hunk| hunk.status == DiffHunkStatus::Moved)
+            .collect();
+        assert!(
+            !moved.is_empty(),
+            "a relocated function reads as a move: {:?}",
+            dm.hunks()
+                .map(|h| (h.status, h.buffer_start_line))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            moved.iter().any(
+                |hunk| hunk.token_detail.as_ref().is_some_and(|detail| detail
+                    .buffer_spans
+                    .iter()
+                    .chain(&detail.base_spans)
+                    .any(|span| span.move_metadata.is_some()))
+            ),
+            "and carries the metadata naming where it came from",
+        );
+    }
+
+    /// A move is a relabelling, not a re-extent. The staging siblings under this
+    /// parent read the line ranges, so an `s` on a hunk that just became a move
+    /// has to stage exactly what it staged as an addition.
+    #[test]
+    fn flipping_a_hunk_to_moved_leaves_its_extents_alone() {
+        const BASE: &str = "fn a() {\n    let x = 1;\n}\n\nfn b() {\n    let y = 2;\n}\n";
+        const BUFFER: &str = "fn b() {\n    let y = 2;\n}\n\nfn a() {\n    let x = 1;\n}\n";
+
+        let extents = |language: bool| {
+            let mut h = TestHarness::with_size(80, 24);
+            h.stage_review_scenario(
+                "/repo",
+                &[(
+                    match language {
+                        true => "a.rs",
+                        // No grammar, so the tree pass never runs and the line
+                        // pass's reading stands untouched.
+                        false => "a.txt",
+                    },
+                    BASE,
+                    BUFFER,
+                )],
+            );
+            h.stoat.set_diff_warm_auto(true);
+            h.open_file(Path::new(match language {
+                true => "/repo/a.rs",
+                false => "/repo/a.txt",
+            }));
+            h.settle_diff_jobs();
+            let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            let dm = guard.diff_map.as_ref().expect("diff map populated");
+            dm.hunks()
+                .map(|hunk| (hunk.buffer_line_range.clone(), hunk.unstaged_lines.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            extents(true),
+            extents(false),
+            "the tree pass renames the hunks and moves none of their lines",
         );
     }
 

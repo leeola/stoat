@@ -1387,51 +1387,89 @@ pub(crate) fn changes_to_hunks(
 /// whitespace-only row: gutter-marked, full strength, wash-free. `None` would
 /// instead mean "no detail resolved" and leave the row to the caller's default.
 ///
-/// `Added` and `Deleted` hunks keep `None`, which is what suppresses a
-/// whole-line wash on them.
+/// `Added` and `Deleted` hunks keep `None` unless the tree pass found the lines
+/// relocated, which is the one thing the line pass cannot see. A hunk the tree
+/// pass covers entirely becomes [`DiffHunkStatus::Moved`] and takes the spans
+/// naming where the content came from; a hunk it covers in part keeps its
+/// status and takes them anyway, since the renderer tints a `Moved` span with
+/// the move color wherever it sits. A hunk it does not reach keeps `None`,
+/// which is what suppresses a whole-line wash on it.
 ///
 /// Spans stay file-absolute, exactly as [`replaced_change_spans`] leaves them.
 pub(crate) fn merge_structural_detail(
     hunks: &mut [DiffHunk],
     tree_changes: &[stoat_language::structural_diff::DiffChange],
+    base_text: &str,
     buffer_text: &str,
 ) {
     use stoat_language::structural_diff::{ChangeKind as LangChangeKind, Side};
 
     let buffer_starts = line_starts(buffer_text);
+    let base_starts = line_starts(base_text);
     for hunk in hunks.iter_mut() {
-        if hunk.status != DiffHunkStatus::Modified {
+        let refining = hunk.status == DiffHunkStatus::Modified;
+        if !refining && !matches!(hunk.status, DiffHunkStatus::Added | DiffHunkStatus::Deleted) {
             continue;
         }
         let buffer_bytes =
             line_range_to_byte_range(&buffer_starts, buffer_text.len(), &hunk.buffer_line_range);
         let mut buffer_spans = Vec::new();
         let mut base_spans = Vec::new();
+        let mut moved_ranges = Vec::new();
         for change in tree_changes {
-            // A relocation is not a content change. The tree differ reports every
-            // token of a reindented block as moved, so washing those would mark
-            // a run of untouched statements more heavily than the line differ
-            // did -- the clutter this pass exists to remove. Whole-hunk moves
-            // are a separate status and keep their own cyan wash.
-            if change.kind == LangChangeKind::Moved {
+            let moved = change.kind == LangChangeKind::Moved;
+            // A relocation is not a content change, and inside a Modified hunk
+            // it is noise: the tree differ reports every token of a reindented
+            // block as moved, so washing those would mark a run of untouched
+            // statements more heavily than the line differ did -- the clutter
+            // this pass exists to remove.
+            if moved && refining {
                 continue;
             }
             let (bounds, out) = match change.side {
                 Side::Rhs => (&buffer_bytes, &mut buffer_spans),
                 Side::Lhs => (&hunk.base_byte_range, &mut base_spans),
             };
-            out.extend(
-                effective_ranges(change)
-                    .iter()
-                    .filter(|range| range.start < bounds.end && bounds.start < range.end)
-                    .map(|range| ChangeSpan {
-                        byte_range: range.clone(),
-                        kind: span_kind(change),
-                        move_metadata: change.move_metadata.clone(),
-                        prose: change.prose,
-                    }),
-            );
+            let overlapping = effective_ranges(change)
+                .iter()
+                .filter(|range| range.start < bounds.end && bounds.start < range.end);
+            // Kept at full width: the cover below asks only which of the hunk's
+            // own lines a range reaches, so how far past the hunk it runs says
+            // nothing. Only the side this hunk is about contributes at all --
+            // an Added hunk carries no base range and a Deleted one a
+            // zero-width buffer anchor, so the other side overlaps nothing.
+            if moved {
+                moved_ranges.extend(overlapping.clone().cloned());
+            }
+            out.extend(overlapping.map(|range| ChangeSpan {
+                byte_range: range.clone(),
+                kind: match moved {
+                    true => ChangeKind::Moved,
+                    false => span_kind(change),
+                },
+                move_metadata: change.move_metadata.clone(),
+                prose: change.prose,
+            }));
         }
+
+        // A hunk the relocation accounts for line by line is the other half of
+        // a move, and the line pass had no way to know it. One it accounts for
+        // in part is still an addition or a deletion, and keeps its status
+        // while the spans inside it tint as moved.
+        if !refining && !moved_ranges.is_empty() {
+            let (text, starts, lines) = match hunk.status {
+                DiffHunkStatus::Deleted => (
+                    base_text,
+                    &base_starts,
+                    byte_range_to_line_range(&base_starts, base_text.len(), &hunk.base_byte_range),
+                ),
+                _ => (buffer_text, &buffer_starts, hunk.buffer_line_range.clone()),
+            };
+            if lines_covered(&moved_ranges, starts, text, lines) {
+                hunk.status = DiffHunkStatus::Moved;
+            }
+        }
+
         hunk.marked_rows = marked_row_runs(&buffer_spans, |off| {
             line_of(&buffer_starts, off.min(buffer_text.len()))
         });
@@ -1440,6 +1478,30 @@ pub(crate) fn merge_structural_detail(
             base_spans,
         }));
     }
+}
+
+/// Whether every line of `lines` carrying content is touched by one of
+/// `ranges`.
+///
+/// Blank lines are skipped rather than counted against the cover. The tree
+/// differ marks tokens, and a line holding none can never be reached, so
+/// requiring it would let the blank separator between two relocated functions
+/// decide that neither of them moved.
+fn lines_covered(ranges: &[Range<usize>], starts: &[usize], text: &str, lines: Range<u32>) -> bool {
+    lines
+        .filter(|line| !line_is_blank(starts, text, *line))
+        .all(|line| {
+            let bounds = line_range_to_byte_range(starts, text.len(), &(line..line + 1));
+            ranges
+                .iter()
+                .any(|range| range.start < bounds.end && bounds.start < range.end)
+        })
+}
+
+/// Whether line `line` holds nothing but whitespace.
+fn line_is_blank(starts: &[usize], text: &str, line: u32) -> bool {
+    let bounds = line_range_to_byte_range(starts, text.len(), &(line..line + 1));
+    text[bounds].trim().is_empty()
 }
 
 /// The byte ranges a change actually marks.
@@ -1456,7 +1518,9 @@ fn effective_ranges(change: &stoat_language::structural_diff::DiffChange) -> &[R
 
 /// How a tree change washes.
 ///
-/// Only the two content kinds reach this. A moved change never becomes a span.
+/// Only the two content kinds reach this. A moved change takes
+/// [`ChangeKind::Moved`] at the call site, where whether it is a move at all
+/// has already been decided.
 fn span_kind(change: &stoat_language::structural_diff::DiffChange) -> ChangeKind {
     use stoat_language::structural_diff::ChangeKind as LangChangeKind;
     match change.kind {
