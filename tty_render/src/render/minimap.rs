@@ -254,10 +254,16 @@ impl MinimapPass {
     ///
     /// Invalidates the rebuild cache, since the strip layout is derived from the
     /// metrics and every cached instance now sits at the wrong pixel size.
+    ///
+    /// The draws packed from that cache go with it. They are the same state one
+    /// stage on, and the repack that would replace them runs only on a frame
+    /// with a strip to rebuild, so a grid that declares none would otherwise
+    /// leave them standing at the size the change just left behind.
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.metrics = metrics;
         self.last_build = None;
         self.built.clear();
+        self.strips.clear();
     }
 
     /// Upload the frame's uniform, panel occluders, and one instance per strip
@@ -917,6 +923,76 @@ mod tests {
             pass.strips.len(),
             2,
             "the second grid's strips are the ones drawn",
+        );
+    }
+
+    /// A metrics change invalidates every cached instance, but the draws are
+    /// packed from that cache one stage later. A grid declaring no strips gives
+    /// the next prepare nothing to rebuild and so no reason to repack, and
+    /// anything left in the draws is drawn scissored to where the strip sat at
+    /// the old cell size.
+    #[test]
+    fn a_metrics_change_leaves_no_strip_to_draw() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+
+        let mut grid = Grid::new(12, 24);
+        grid.set_minimaps(vec![strip(None)]);
+        grid.set_minimap_contents(HashMap::from([(1, summaries(lines(4)))]));
+
+        let resolution = [640.0, 480.0];
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+        assert_eq!(pass.strips.len(), 1, "the declared strip builds one draw");
+
+        pass.set_metrics(CellMetrics {
+            font_size: 20.0,
+            width: 12.0,
+            height: 24.0,
+            scale_factor: 1.0,
+        });
+        grid.set_minimaps(Vec::new());
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+
+        assert!(
+            pass.strips.is_empty(),
+            "a strip laid out at the old cell size is not drawn",
+        );
+    }
+
+    /// A grid that still declares its strip has to see it rebuilt at the new
+    /// cell size, and the build key a metrics change clears is the only thing
+    /// that sends the frame past the gate: the grid and its epoch are exactly
+    /// where the last frame left them.
+    #[test]
+    fn a_metrics_change_rebuilds_a_strip_the_grid_still_declares() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+
+        let mut grid = Grid::new(12, 24);
+        grid.set_minimaps(vec![strip(None)]);
+        grid.set_minimap_contents(HashMap::from([(1, summaries(lines(4)))]));
+
+        let resolution = [640.0, 480.0];
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+        let before = pass.built[0].scissor;
+
+        // Twice the cell box, so the strip's own box doubles with it.
+        pass.set_metrics(CellMetrics {
+            font_size: 20.0,
+            width: 12.0,
+            height: 24.0,
+            scale_factor: 1.0,
+        });
+        pass.prepare(&device, &queue, &grid, &[], resolution);
+
+        assert_eq!(
+            (pass.builds, before, pass.built[0].scissor),
+            (2, [60, 0, 48, 120], [120, 0, 96, 240]),
+            "the strip is built again, on a box the new cell size sets",
         );
     }
 
