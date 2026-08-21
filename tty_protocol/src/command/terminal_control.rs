@@ -73,20 +73,26 @@ pub fn encode_config_reload_into(out: &mut Vec<u8>) {
 
 /// Encode a [`Command::ZoomCapture`] as a full `Gstoatty;zoom_capture` frame for
 /// an emitter.
-pub fn encode_zoom_capture(on: bool) -> Vec<u8> {
+pub fn encode_zoom_capture(on: bool, inband: bool) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_zoom_capture_into(&mut out, on);
+    encode_zoom_capture_into(&mut out, on, inband);
     out
 }
 
-/// Append a `Gstoatty;zoom_capture` frame for `on` to `out`.
+/// Append a `Gstoatty;zoom_capture` frame for `on` to `out`, asking for PTY
+/// delivery when `inband`.
 ///
 /// The claim rides as the word `on` or `off` rather than a byte, since it is a
 /// once-per-session handshake and a readable frame is worth more there than a
-/// byte saved.
-pub fn encode_zoom_capture_into(out: &mut Vec<u8>, on: bool) {
+/// byte saved. The delivery mode rides the same way, as the word `inband`, and
+/// only on a claim that wants it: a release has no delivery to ask about, and a
+/// socket-mode claim keeps the one-argument frame every peer already reads.
+pub fn encode_zoom_capture_into(out: &mut Vec<u8>, on: bool, inband: bool) {
     frame::begin(out, "zoom_capture");
     frame::push_arg(out, |w| w.write_all(if on { b"on" } else { b"off" }));
+    if on && inband {
+        frame::push_arg(out, |w| w.write_all(b"inband"));
+    }
     frame::end(out);
 }
 
@@ -127,13 +133,24 @@ pub fn encode_hello_into(out: &mut Vec<u8>, command: &HelloCommand) {
     frame::end(out);
 }
 
+/// Read a `zoom_capture` frame, whose second argument names the delivery mode.
+///
+/// Anything there other than `inband` is not a claim for it, rather than a
+/// reason to drop the frame. The claim itself is still readable, and an
+/// extension this peer has not learned yet should cost it the extension and not
+/// the handshake. That is the same tolerance from the other side that lets a
+/// peer predating the mode read a frame carrying it.
 pub(super) fn decode_zoom_capture(args: &[Vec<u8>]) -> Option<Command> {
-    let [on, ..] = args else {
+    let [on, rest @ ..] = args else {
         return None;
     };
+    let inband = matches!(rest, [mode, ..] if mode.as_slice() == b"inband");
     match on.as_slice() {
-        b"on" => Some(Command::ZoomCapture { on: true }),
-        b"off" => Some(Command::ZoomCapture { on: false }),
+        b"on" => Some(Command::ZoomCapture { on: true, inband }),
+        b"off" => Some(Command::ZoomCapture {
+            on: false,
+            inband: false,
+        }),
         _ => None,
     }
 }
@@ -320,10 +337,71 @@ mod tests {
     fn zoom_capture_round_trips_both_states() {
         for on in [true, false] {
             assert_eq!(
-                decode(&encode_zoom_capture(on)),
-                Some(Command::ZoomCapture { on })
+                decode(&encode_zoom_capture(on, false)),
+                Some(Command::ZoomCapture { on, inband: false })
             );
         }
+    }
+
+    /// A release names no delivery, so it keeps the one-argument frame whatever
+    /// the caller asks for, and reads back as the socket-mode claim it is.
+    #[test]
+    fn zoom_capture_round_trips_an_inband_claim() {
+        assert_eq!(
+            encode_zoom_capture(true, true),
+            b"\x1b_Gstoatty;zoom_capture;b24=;aW5iYW5k\x1b\\",
+            "the mode rides as its own argument after the claim",
+        );
+        assert_eq!(
+            decode(&encode_zoom_capture(true, true)),
+            Some(Command::ZoomCapture {
+                on: true,
+                inband: true
+            })
+        );
+        assert_eq!(
+            (
+                encode_zoom_capture(false, true),
+                decode(&encode_zoom_capture(false, true)),
+            ),
+            (
+                encode_zoom_capture(false, false),
+                Some(Command::ZoomCapture {
+                    on: false,
+                    inband: false
+                })
+            ),
+            "a release carries no mode either way",
+        );
+
+        // A release naming a mode anyway, which no encoder writes. A peer
+        // contradicting itself is still released, and asks for nothing.
+        assert_eq!(
+            decode(b"Gstoatty;zoom_capture;b2Zm;aW5iYW5k"),
+            Some(Command::ZoomCapture {
+                on: false,
+                inband: false
+            }),
+            "a release asks for no delivery whatever it carries",
+        );
+    }
+
+    /// Both directions of the version gap run through this frame. A peer that
+    /// predates the mode reads a frame carrying it by ignoring the argument, and
+    /// a peer that has it reads an argument it does not know the same way.
+    /// Either one costs the extension, never the claim.
+    #[test]
+    fn a_zoom_capture_argument_neither_side_knows_is_still_a_claim() {
+        // "anVuaw==" is base64 for "junk", standing in for a mode from a peer
+        // this one is older than.
+        assert_eq!(
+            decode(b"Gstoatty;zoom_capture;b24=;anVuaw=="),
+            Some(Command::ZoomCapture {
+                on: true,
+                inband: false
+            }),
+            "an unreadable mode leaves the claim readable",
+        );
     }
 
     #[test]

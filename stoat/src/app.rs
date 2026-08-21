@@ -7610,7 +7610,7 @@ mod tests {
     fn the_zoom_claim_waits_for_the_socket_and_is_released_with_it() {
         let claim = |on: bool| {
             let mut out = Vec::new();
-            command::encode_zoom_capture_into(&mut out, on);
+            command::encode_zoom_capture_into(&mut out, on, false);
             out
         };
 

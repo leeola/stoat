@@ -734,7 +734,11 @@ pub enum TermEvent {
     /// A program claimed the platform zoom combo for its session, or released
     /// it. While claimed the host forwards each press upstream rather than
     /// stepping its own font size.
-    ZoomCapture(bool),
+    ///
+    /// `inband` asks for the press down the PTY rather than over the window
+    /// socket, which is the only route a program on the far end of a link has.
+    /// Always false on a release, which has no delivery to ask about.
+    ZoomCapture { on: bool, inband: bool },
     /// A program asked the host to step its font size by this many steps,
     /// positive to grow.
     FontStep(i32),
@@ -1624,7 +1628,9 @@ impl Terminal {
             // act on the window rather than the frame being composed, so
             // holding them behind an update would only defer what the user
             // pressed.
-            Command::ZoomCapture { on } => self.pending_events.push(TermEvent::ZoomCapture(on)),
+            Command::ZoomCapture { on, inband } => self
+                .pending_events
+                .push(TermEvent::ZoomCapture { on, inband }),
             Command::FontStep { delta } => self.pending_events.push(TermEvent::FontStep(delta)),
             // Graphics frames touch no grid state. They feed a store the client
             // places from later, and the reply goes back on the response path
@@ -5894,13 +5900,40 @@ mod tests {
     fn zoom_capture_command_surfaces_as_a_term_event() {
         let mut terminal = Terminal::new(4, 8, Theme::default());
 
-        terminal.advance(&encode_zoom_capture(true));
-        terminal.advance(&encode_zoom_capture(false));
+        terminal.advance(&encode_zoom_capture(true, false));
+        terminal.advance(&encode_zoom_capture(false, false));
 
         assert_eq!(
             terminal.take_events(),
-            vec![TermEvent::ZoomCapture(true), TermEvent::ZoomCapture(false)],
+            vec![
+                TermEvent::ZoomCapture {
+                    on: true,
+                    inband: false
+                },
+                TermEvent::ZoomCapture {
+                    on: false,
+                    inband: false
+                }
+            ],
             "a claim and its release both reach the host, in order"
+        );
+    }
+
+    /// The delivery mode is the whole reason the host hears about the claim at
+    /// all on a link, so it has to survive the trip rather than being flattened
+    /// to the socket default on the way through.
+    #[test]
+    fn an_inband_claim_reaches_the_host_asking_for_the_pty() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(&encode_zoom_capture(true, true));
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::ZoomCapture {
+                on: true,
+                inband: true
+            }],
         );
     }
 
@@ -5920,12 +5953,18 @@ mod tests {
         let mut terminal = Terminal::new(4, 8, Theme::default());
         terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
 
-        terminal.advance(&encode_zoom_capture(true));
+        terminal.advance(&encode_zoom_capture(true, false));
         terminal.advance(&encode_font_step(1));
 
         assert_eq!(
             terminal.take_events(),
-            vec![TermEvent::ZoomCapture(true), TermEvent::FontStep(1)],
+            vec![
+                TermEvent::ZoomCapture {
+                    on: true,
+                    inband: false
+                },
+                TermEvent::FontStep(1)
+            ],
             "both route past a fill redirect"
         );
     }

@@ -225,6 +225,15 @@ pub enum Command {
     /// back to.
     ZoomCapture {
         on: bool,
+        /// Whether the claim asks for the press down the PTY rather than over
+        /// the window socket.
+        ///
+        /// A program reached over a link never sees the socket, so the claim it
+        /// makes there is one the terminal cannot deliver on. Asking in band is
+        /// how such a program gets the press at all. False is the socket
+        /// delivery every claim meant before this existed, and what a released
+        /// claim carries, having no delivery to ask about.
+        inband: bool,
     },
     /// Step the terminal's font size by `delta`, positive to grow.
     ///
@@ -380,7 +389,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::WindowFocus(c) => encode_window_focus_into(out, c),
         Command::Reset => encode_reset_into(out),
         Command::ConfigReload => encode_config_reload_into(out),
-        Command::ZoomCapture { on } => encode_zoom_capture_into(out, *on),
+        Command::ZoomCapture { on, inband } => encode_zoom_capture_into(out, *on, *inband),
         Command::FontStep { delta } => encode_font_step_into(out, *delta),
         Command::Hello(c) => encode_hello_into(out, c),
         // Chunked, because a graphics payload routinely exceeds what one frame
@@ -630,7 +639,7 @@ mod tests {
     #[test]
     fn arg_counted_decoders_tolerate_a_later_versions_extra_argument() {
         let samples = [
-            ("zoom_capture", encode_zoom_capture(true)),
+            ("zoom_capture", encode_zoom_capture(true, false)),
             ("font_step", encode_font_step(-2)),
             (
                 "window_open",

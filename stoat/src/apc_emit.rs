@@ -126,7 +126,8 @@ pub(crate) fn emit_zoom_capture(stoat: &Stoat, on: bool) {
     };
 
     let mut out = Vec::new();
-    stoatty_protocol::command::encode_zoom_capture_into(&mut out, on);
+    // Socket delivery, which is the route this claim is gated on above.
+    stoatty_protocol::command::encode_zoom_capture_into(&mut out, on, false);
     let _ = apc_tx.send(out);
 }
 

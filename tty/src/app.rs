@@ -600,6 +600,12 @@ struct State {
     /// keeps the claim, since releasing on silence would make the combo flicker
     /// between meanings whenever the child was merely busy.
     zoom_capture: bool,
+    /// Whether the claiming program asked for the press down the PTY rather
+    /// than over the window socket.
+    ///
+    /// Meaningless while [`Self::zoom_capture`] is clear, since the two arrive
+    /// together and a release names no delivery.
+    zoom_inband: bool,
     /// Whether the primary window currently holds focus, tracked from
     /// `WindowEvent::Focused`. Combined with each aux window's focus into the
     /// app-wide DECSET 1004 report via [`reconcile_app_focus`].
@@ -996,6 +1002,7 @@ impl ApplicationHandler<PtyEvent> for App {
             scale_factor,
             modifiers: ModifiersState::empty(),
             zoom_capture: false,
+            zoom_inband: false,
             focused: true,
             app_focused: true,
             last_bell: None,
@@ -2002,7 +2009,10 @@ fn handle_term_events(
             // Filtered out before this fan-out, since re-applying a config
             // touches window state this function has no handle on.
             TermEvent::ConfigReload => {},
-            TermEvent::ZoomCapture(on) => state.zoom_capture = on,
+            TermEvent::ZoomCapture { on, inband } => {
+                state.zoom_capture = on;
+                state.zoom_inband = inband;
+            },
             TermEvent::FontStep(delta) => apply_font_step(state, delta),
         }
     }
