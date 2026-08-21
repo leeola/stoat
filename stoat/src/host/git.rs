@@ -361,7 +361,8 @@ pub trait GitRepo: Send + Sync {
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange>;
 
     /// Replace HEAD's tree (and optionally its message) with the given
-    /// values, creating a new commit and updating HEAD to point at it.
+    /// values, creating a new commit and writing the ref HEAD points
+    /// at, so an attached branch moves onto the new commit with it.
     /// Parents, author, and committer carry over; signatures are
     /// stripped; hooks are not invoked. Returns the new HEAD sha.
     ///
@@ -447,6 +448,17 @@ pub trait GitRepo: Send + Sync {
     /// the same way on local modifications, and errors when no local branch
     /// named `name` exists rather than leaving HEAD on an unborn branch.
     fn checkout_ref(&self, name: &str) -> Result<(), GitApplyError>;
+
+    /// Point local branch `name` at `sha`, leaving HEAD and the working
+    /// tree where they are.
+    ///
+    /// The ref-only counterpart to [`Self::checkout_ref`], for carrying a
+    /// branch onto a commit that replaced its tip while HEAD is detached
+    /// somewhere else. Moves the branch unconditionally, so the caller owns
+    /// the question of whether the commits it leaves behind are reachable.
+    ///
+    /// Fails when `sha` names no commit.
+    fn set_branch_target(&self, name: &str, sha: &str) -> Result<(), GitApplyError>;
 }
 
 /// Result of a [`GitRepo::rewrite_commit`] call.

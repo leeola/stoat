@@ -748,6 +748,49 @@ fn amend_head_replaces_tree_and_updates_head() {
     );
 }
 
+/// A review walk detaches HEAD before it amends, so the branch it returns to
+/// has to be carried onto the rewritten commit by ref alone.
+#[test]
+fn set_branch_target_moves_the_branch_and_leaves_head_detached() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1\n");
+    let c1 = tr.head_sha();
+    tr.commit_file("a.rs", "v1\nv2\n");
+    let c2 = tr.head_sha();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let branch = repo.head_branch().expect("the repo starts on a branch");
+    repo.checkout_detached(&c1).expect("detach onto c1");
+    repo.set_branch_target(&branch, &c1).expect("move branch");
+
+    assert_eq!(
+        (
+            repo.local_branches(),
+            repo.resolve_rev("HEAD"),
+            repo.head_branch()
+        ),
+        (vec![(branch, c1.clone())], Some(c1), None),
+        "the branch left {c2} for the detached commit and HEAD stayed detached",
+    );
+}
+
+#[test]
+fn set_branch_target_rejects_an_unknown_sha() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1\n");
+    let head = tr.head_sha();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let branch = repo.head_branch().expect("the repo starts on a branch");
+    let moved = repo.set_branch_target(&branch, &"0".repeat(40));
+
+    assert_eq!(
+        (moved.is_ok(), repo.local_branches()),
+        (false, vec![(branch, head)]),
+        "a branch must not be pointed at a commit that does not exist",
+    );
+}
+
 #[test]
 fn rewrite_commit_cherry_picks_descendants() {
     let tr = TestRepo::new();

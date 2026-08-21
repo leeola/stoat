@@ -1131,6 +1131,12 @@ impl GitRepo for FakeGitRepo {
         };
         state.commits.insert(new_sha.clone(), new_commit);
         state.head = Some(new_sha.clone());
+        // An amend writes the ref HEAD points at, so an attached branch moves
+        // with it. A branch left behind reports a tip with the replaced commit
+        // still on it, which reads as work stacked on top of HEAD.
+        if let Some(branch) = state.head_branch.clone() {
+            state.branches.insert(branch, new_sha.clone());
+        }
         state.amend_history.push(RecordedAmend {
             old_head: head_sha,
             new_head: new_sha.clone(),
@@ -1244,6 +1250,19 @@ impl GitRepo for FakeGitRepo {
         state.checkouts.push(format!("ref:{name}"));
         state.head = Some(tip);
         state.head_branch = Some(name.to_string());
+        Ok(())
+    }
+
+    fn set_branch_target(&self, name: &str, sha: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if !state.commits.contains_key(sha) {
+            return BackendSnafu {
+                reason: format!("unknown sha: {sha}"),
+            }
+            .fail();
+        }
+
+        state.branches.insert(name.to_string(), sha.to_string());
         Ok(())
     }
 
@@ -1996,6 +2015,62 @@ mod tests {
         assert_eq!(host.checkouts(&workdir()), ["detached:c1", "ref:main"]);
         assert_eq!(repo.resolve_rev("HEAD").as_deref(), Some("c2"));
         assert_eq!(repo.head_branch().as_deref(), Some("main"));
+    }
+
+    /// An amend writes the ref HEAD points at, so the branch moves with it. A
+    /// detached HEAD has no branch to move, which is what `set_branch_target`
+    /// covers instead.
+    #[test]
+    fn amend_head_carries_an_attached_branch() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .branch("main", "c1")
+            .set_head_branch("main");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let amended = repo.amend_head(&BTreeMap::new(), None).unwrap();
+        assert_eq!(
+            repo.local_branches(),
+            [("main".to_string(), amended)],
+            "main followed HEAD onto the amended commit",
+        );
+    }
+
+    #[test]
+    fn amend_head_leaves_every_branch_when_head_is_detached() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .branch("main", "c2");
+        let repo = host.discover(&workdir()).unwrap();
+        repo.checkout_detached("c2").unwrap();
+
+        repo.amend_head(&BTreeMap::new(), None).unwrap();
+        assert_eq!(
+            repo.local_branches(),
+            [("main".to_string(), "c2".to_string())],
+            "a detached amend moves no branch",
+        );
+    }
+
+    #[test]
+    fn set_branch_target_moves_one_branch_and_rejects_an_unknown_sha() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .branch("main", "c2");
+        let repo = host.discover(&workdir()).unwrap();
+
+        repo.set_branch_target("main", "c1").unwrap();
+        let refused = repo.set_branch_target("main", "nope");
+        assert_eq!(
+            (refused.is_ok(), repo.local_branches()),
+            (false, vec![("main".to_string(), "c1".to_string())]),
+            "the branch moved to c1 and the unknown sha left it there",
+        );
     }
 
     #[test]

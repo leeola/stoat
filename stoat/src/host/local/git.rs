@@ -677,6 +677,16 @@ impl GitRepo for LocalGitRepo {
         repo.set_head(&full_name).map_err(err_msg)
     }
 
+    fn set_branch_target(&self, name: &str, sha: &str) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
+        repo.find_commit(oid).map_err(err_msg)?;
+
+        repo.reference(&format!("refs/heads/{name}"), oid, true, "stoat: amend")
+            .map(|_| ())
+            .map_err(err_msg)
+    }
+
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
         let repo = self.repo.lock().expect("git repo lock");
         let Ok(oid) = git2::Oid::from_str(sha) else {

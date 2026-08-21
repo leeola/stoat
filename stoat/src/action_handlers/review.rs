@@ -1,4 +1,4 @@
-use super::movement::ChangeDir;
+use super::{amend::AmendRoute, movement::ChangeDir};
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
@@ -1221,6 +1221,28 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
         stoat.set_status("not in a git repository");
         return UpdateEffect::Redraw;
     };
+
+    // Decided before the hunk is resolved, so a refusal says why the transport
+    // is unavailable rather than reporting whatever sits under the cursor.
+    match super::amend::amend_route(stoat, &*repo) {
+        AmendRoute::Index => {},
+        AmendRoute::Commit(target) => {
+            let site = super::amend::HunkSite {
+                buffer_id,
+                path: &path,
+                cursor_row,
+                buffer_text: &buffer_text,
+            };
+            return super::amend::amend_hunk(stoat, &*repo, &target, mode, site);
+        },
+        AmendRoute::Refused => {
+            stoat.set_status(
+                "amend needs HEAD on the reviewed commit; use :rebase edit for older commits",
+            );
+            return UpdateEffect::Redraw;
+        },
+    }
+
     let Some(base_text) = repo.head_content(&path) else {
         stoat.set_status("no hunk under the cursor");
         return UpdateEffect::Redraw;
