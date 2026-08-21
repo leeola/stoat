@@ -53,10 +53,49 @@ pub(crate) enum PtyOutput<'a> {
 /// worker threads, so closing the window tears the shell down.
 pub(crate) struct Pty {
     master: Box<dyn MasterPty + Send>,
-    writer: Sender<Vec<u8>>,
-    write_queue_depth: Arc<AtomicUsize>,
+    writer: PtyWriter,
     child: Box<dyn Child + Send + Sync>,
     _reader: JoinHandle<()>,
+}
+
+/// A handle for queueing bytes into the shell's input, holdable from any
+/// thread.
+///
+/// The reader thread parses the host queries and owns their replies, so it
+/// writes them itself rather than posting them to the main thread and waiting
+/// for it. The main thread keeps its own handle for key presses. A queued write
+/// is a channel send, so the two are the same handle held twice rather than one
+/// behind a lock.
+///
+/// The sender and the backlog counter travel together because they are only
+/// correct together: the counter stands for what this sender queued, and a send
+/// that skipped it would under-report the backlog the stall warning watches.
+#[derive(Clone)]
+pub(crate) struct PtyWriter {
+    writer: Sender<Vec<u8>>,
+    queue_depth: Arc<AtomicUsize>,
+}
+
+impl PtyWriter {
+    /// Queue `bytes` for the shell's input, to be written and flushed by the
+    /// writer thread.
+    ///
+    /// Returns as soon as the bytes are queued and never blocks on the write
+    /// itself, so a child that has stopped draining its input cannot stall the
+    /// caller. An [`io::ErrorKind::BrokenPipe`] error means the writer thread
+    /// has exited.
+    pub(crate) fn queue(&self, bytes: Vec<u8>) -> io::Result<()> {
+        let queued = self.queue_depth.fetch_add(1, Ordering::Relaxed);
+        if queued == WRITE_STALL_THRESHOLD {
+            tracing::warn!(
+                queued = queued + 1,
+                "pty writer backlog crossed {WRITE_STALL_THRESHOLD}; the child is not draining its input"
+            );
+        }
+        self.writer
+            .send(bytes)
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
+    }
 }
 
 /// Queued-write count that trips the writer-stall warning. When this many chunks
@@ -81,8 +120,14 @@ impl Pty {
     /// A sink that would have to wait to take a chunk should say so rather than
     /// wait, since the reader cannot drain the pty while it is inside the sink
     /// and a full pty stops the child. Refused bytes are offered again.
+    ///
+    /// `sink` arrives as a builder, called once with this child's
+    /// [`PtyWriter`], because a sink that answers host queries writes them back
+    /// itself. The writer is made here, so a caller could not have captured one,
+    /// and the reader thread starts here too, so a slot filled afterwards would
+    /// race the child's first bytes.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn(
+    pub(crate) fn spawn<S>(
         program: &str,
         args: &[String],
         cwd: Option<&Path>,
@@ -94,8 +139,11 @@ impl Pty {
         cols: u16,
         pixel_width: u16,
         pixel_height: u16,
-        sink: impl FnMut(PtyOutput<'_>) -> bool + Send + 'static,
-    ) -> io::Result<Pty> {
+        sink: impl FnOnce(PtyWriter) -> S,
+    ) -> io::Result<Pty>
+    where
+        S: FnMut(PtyOutput<'_>) -> bool + Send + 'static,
+    {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -122,6 +170,15 @@ impl Pty {
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
         let poll_fd = dup_for_polling(pair.master.as_ref());
 
+        // Before the reader, so the sink it builds can answer a query in the
+        // child's very first chunk.
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let writer = PtyWriter {
+            writer: spawn_writer(master_writer, queue_depth.clone()),
+            queue_depth,
+        };
+
+        let sink = sink(writer.clone());
         let reader_thread = thread::spawn(move || {
             read_loop(
                 reader,
@@ -130,11 +187,9 @@ impl Pty {
             )
         });
 
-        let write_queue_depth = Arc::new(AtomicUsize::new(0));
         Ok(Pty {
             master: pair.master,
-            writer: spawn_writer(master_writer, write_queue_depth.clone()),
-            write_queue_depth,
+            writer,
             child,
             _reader: reader_thread,
         })
@@ -167,21 +222,11 @@ impl Pty {
     /// writer thread.
     ///
     /// Encoded key presses flow through here, so typing in the window reaches
-    /// the shell. The call returns as soon as the bytes are queued and never
-    /// blocks on the write itself, so a child that has stopped draining its
-    /// input cannot stall the UI thread. An [`io::ErrorKind::BrokenPipe`] error
-    /// means the writer thread has exited.
+    /// the shell. Copies what it is given, since a press is built into a
+    /// temporary; a caller that already owns its bytes reaches
+    /// [`PtyWriter::queue`] instead. See it for what queueing promises.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let queued = self.write_queue_depth.fetch_add(1, Ordering::Relaxed);
-        if queued == WRITE_STALL_THRESHOLD {
-            tracing::warn!(
-                queued = queued + 1,
-                "pty writer backlog crossed {WRITE_STALL_THRESHOLD}; the child is not draining its input"
-            );
-        }
-        self.writer
-            .send(bytes.to_vec())
-            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
+        self.writer.queue(bytes.to_vec())
     }
 
     /// Wait up to `timeout` for the child's exit status, or `None` if it has
@@ -663,7 +708,7 @@ mod tests {
         accumulate_loop, configure_child_env, dup_fd, dup_for_polling, fd_readable_now,
         prepend_path, push_tail, read_loop, shell_command, shell_or_default, spawn_writer,
         strip_escapes, wait_exit_status, AsRawFd, Child, CommandBuilder, ExitStatus, PtyOutput,
-        PtySize, HANDOFF_SLICE, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        PtySize, PtyWriter, HANDOFF_SLICE, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
     use portable_pty::ChildKiller;
     use std::{
@@ -675,7 +720,7 @@ mod tests {
             Arc, Condvar, Mutex,
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     fn shell(path: &str) -> Option<String> {
@@ -1084,12 +1129,26 @@ mod tests {
         assert!(eof, "ends with Eof");
     }
 
+    /// How long [`open_gate`] waits for the writer thread before giving up.
+    ///
+    /// Far longer than a handful of channel sends takes, so a machine under load
+    /// does not trip it, and short enough that a writer sending the wrong bytes
+    /// reports that rather than running out the suite's own timeout.
+    const GATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The lock and condvar a [`GatedWriter`] parks on until a test opens it.
+    type Gate = Arc<(Mutex<bool>, Condvar)>;
+
+    /// The bytes a [`GatedWriter`] has written, and the condvar it announces
+    /// each write on.
+    type Written = Arc<(Mutex<Vec<u8>>, Condvar)>;
+
     /// An in-memory [`Write`] that parks every write on a gate until it opens,
     /// then records the bytes, standing in for a PTY master whose child has
     /// stopped draining its input.
     struct GatedWriter {
-        gate: Arc<(Mutex<bool>, Condvar)>,
-        written: Arc<(Mutex<Vec<u8>>, Condvar)>,
+        gate: Gate,
+        written: Written,
     }
 
     impl Write for GatedWriter {
@@ -1112,48 +1171,95 @@ mod tests {
         }
     }
 
+    /// A writer over a [`GatedWriter`], beside the gate that releases it and the
+    /// bytes it has written.
+    fn gated_writer() -> (PtyWriter, Gate, Written) {
+        let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let written: Written = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let writer = PtyWriter {
+            writer: spawn_writer(
+                Box::new(GatedWriter {
+                    gate: gate.clone(),
+                    written: written.clone(),
+                }),
+                queue_depth.clone(),
+            ),
+            queue_depth,
+        };
+        (writer, gate, written)
+    }
+
+    /// Release a [`gated_writer`]'s writer thread and wait for it to write
+    /// `len` bytes, giving up after [`GATE_TIMEOUT`].
+    ///
+    /// Returns what arrived either way, so a writer that sends the wrong bytes
+    /// fails the caller's assertion rather than parking the suite here.
+    fn open_gate(gate: &Gate, written: &Written, len: usize) -> Vec<u8> {
+        let (open_lock, open_cvar) = &**gate;
+        *open_lock.lock().unwrap() = true;
+        open_cvar.notify_all();
+
+        let deadline = Instant::now() + GATE_TIMEOUT;
+        let (buf_lock, buf_cvar) = &**written;
+        let mut got = buf_lock.lock().unwrap();
+        while got.len() < len {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            got = buf_cvar.wait_timeout(got, left).unwrap().0;
+        }
+        got.clone()
+    }
+
     #[test]
-    fn spawn_writer_does_not_block_the_sender_on_a_parked_write() {
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let written = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
-        let depth = Arc::new(AtomicUsize::new(0));
-        let tx = spawn_writer(
-            Box::new(GatedWriter {
-                gate: gate.clone(),
-                written: written.clone(),
-            }),
-            depth.clone(),
-        );
+    fn a_queued_write_does_not_block_on_a_parked_writer() {
+        let (writer, gate, written) = gated_writer();
 
         for chunk in [b"foo".as_slice(), b"bar".as_slice()] {
-            depth.fetch_add(1, Ordering::Relaxed);
-            tx.send(chunk.to_vec()).unwrap();
+            writer.queue(chunk.to_vec()).unwrap();
         }
         assert!(
             written.0.lock().unwrap().is_empty(),
-            "the sender returns while the writer is parked, so nothing is written yet",
+            "queueing returns while the writer is parked, so nothing is written yet",
         );
         assert_eq!(
-            depth.load(Ordering::Relaxed),
+            writer.queue_depth.load(Ordering::Relaxed),
             2,
             "both queued chunks count toward the backlog while the writer is parked",
         );
 
-        {
-            let (open_lock, open_cvar) = &*gate;
-            *open_lock.lock().unwrap() = true;
-            open_cvar.notify_all();
-        }
-
-        let (buf_lock, buf_cvar) = &*written;
-        let mut got = buf_lock.lock().unwrap();
-        while got.len() < 6 {
-            got = buf_cvar.wait(got).unwrap();
-        }
         assert_eq!(
-            got.as_slice(),
+            open_gate(&gate, &written, 6).as_slice(),
             b"foobar",
             "the queued chunks are written in order once the gate opens",
+        );
+    }
+
+    /// The reader thread answers host queries with a clone of the writer the
+    /// main thread types through. Both have to reach the one writer thread and
+    /// count into the one backlog, or a reply goes somewhere else and the stall
+    /// warning watches only what was typed.
+    #[test]
+    fn a_cloned_writer_shares_the_queue_and_its_backlog() {
+        let (writer, gate, written) = gated_writer();
+        let replies = writer.clone();
+
+        writer.queue(b"keys".to_vec()).unwrap();
+        replies.queue(b"reply".to_vec()).unwrap();
+
+        assert_eq!(
+            (
+                writer.queue_depth.load(Ordering::Relaxed),
+                replies.queue_depth.load(Ordering::Relaxed),
+            ),
+            (2, 2),
+            "the clones count into one backlog, which either can read",
+        );
+        assert_eq!(
+            open_gate(&gate, &written, 9).as_slice(),
+            b"keysreply",
+            "both clones feed the one writer thread",
         );
     }
 
@@ -1177,7 +1283,7 @@ mod tests {
 
         let mut chunks = 0usize;
         let mut bytes = 0usize;
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         read_loop(
             reader,
             || false,

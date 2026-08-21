@@ -276,12 +276,10 @@ fn load_config() -> Config {
 ///
 /// The reader thread parses output into the shared [`Terminal`] itself, then
 /// sends these through the [`EventLoopProxy`] to wake the idle main thread for
-/// the follow-up it cannot do off-thread: writing query responses and redrawing.
+/// the follow-up it cannot do off-thread: redrawing the window, and the host
+/// actions that touch it such as the title and the clipboard. A query reply
+/// needs none of that, so the reader writes it back itself.
 enum PtyEvent {
-    /// Host-query responses a parse produced, for the main thread to write back
-    /// to the PTY. Sent only when a parse yields replies, so it never doubles as
-    /// the redraw signal.
-    Responses(Vec<u8>),
     /// The reader parsed output that changed the screen and asks for a redraw.
     /// Coalesced: the reader sends this on the clean-to-dirty edge of
     /// [`State::dirty`], so a burst of chunks collapses into one wakeup per
@@ -855,60 +853,68 @@ impl ApplicationHandler<PtyEvent> for App {
                 spawn_cols as u16,
                 pixel_width,
                 pixel_height,
-                move |output| match output {
-                    PtyOutput::Data { bytes, may_refuse } => {
-                        // Parse on the reader thread under the shared lock. The
-                        // main thread holds it to render, and waiting here would
-                        // stop the reader draining the pty, which stops the
-                        // child. Better to leave the bytes with the reader and
-                        // take them once the frame is out.
-                        let (redraw, responses, events) = {
-                            let Some(mut terminal) = (if may_refuse {
-                                terminal.try_lock_unfair()
-                            } else {
-                                Some(terminal.lock())
-                            }) else {
-                                return false;
+                move |replies| {
+                    move |output| match output {
+                        PtyOutput::Data { bytes, may_refuse } => {
+                            // Parse on the reader thread under the shared lock. The
+                            // main thread holds it to render, and waiting here would
+                            // stop the reader draining the pty, which stops the
+                            // child. Better to leave the bytes with the reader and
+                            // take them once the frame is out.
+                            let (redraw, responses, events) = {
+                                let Some(mut terminal) = (if may_refuse {
+                                    terminal.try_lock_unfair()
+                                } else {
+                                    Some(terminal.lock())
+                                }) else {
+                                    return false;
+                                };
+
+                                // Recorded once the bytes are ours, since refused
+                                // ones come back and would otherwise land twice.
+                                pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
+
+                                let redraw = terminal.advance(bytes);
+                                // A buffering synchronized update needs the main
+                                // thread to arm and drive its timeout flush.
+                                sync_pending
+                                    .store(terminal.sync_deadline().is_some(), Ordering::Relaxed);
+                                (redraw, terminal.take_responses(), terminal.take_events())
                             };
-
-                            // Recorded once the bytes are ours, since refused
-                            // ones come back and would otherwise land twice.
-                            pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
-
-                            let redraw = terminal.advance(bytes);
-                            // A buffering synchronized update needs the main
-                            // thread to arm and drive its timeout flush.
-                            sync_pending
-                                .store(terminal.sync_deadline().is_some(), Ordering::Relaxed);
-                            (redraw, terminal.take_responses(), terminal.take_events())
-                        };
-                        if !responses.is_empty() {
-                            let _ = proxy.send_event(PtyEvent::Responses(responses));
-                        }
-                        if !events.is_empty() {
-                            let _ = proxy.send_event(PtyEvent::Term(events));
-                        }
-                        // Wake the main thread to redraw, but only on the
-                        // clean-to-dirty edge so a burst of chunks collapses into
-                        // one wakeup per render cycle. A chunk wholly held in the
-                        // synchronized-update buffer changes nothing on screen, so
-                        // it skips the wakeup.
-                        if redraw && !dirty.swap(true, Ordering::Relaxed) {
-                            // Stamped on the same edge as the wakeup, so the
-                            // frame that services it measures from the first
-                            // byte of the burst rather than the last.
-                            ingest_at
-                                .store(ingest_epoch.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                            let _ = proxy.send_event(PtyEvent::Redraw);
-                        }
-                        true
-                    },
-                    PtyOutput::Eof => {
-                        tracing::info!("child closed the pty");
-                        let last_output = pty::strip_escapes(&String::from_utf8_lossy(&tail));
-                        let _ = proxy.send_event(PtyEvent::Exited { last_output });
-                        true
-                    },
+                            // Written from here rather than posted to the main
+                            // thread, which the parse would then wait on for every
+                            // query. A prompt probing at startup issues several,
+                            // and startup is when that thread is least available.
+                            if !responses.is_empty() {
+                                let _ = replies.queue(responses);
+                            }
+                            if !events.is_empty() {
+                                let _ = proxy.send_event(PtyEvent::Term(events));
+                            }
+                            // Wake the main thread to redraw, but only on the
+                            // clean-to-dirty edge so a burst of chunks collapses into
+                            // one wakeup per render cycle. A chunk wholly held in the
+                            // synchronized-update buffer changes nothing on screen, so
+                            // it skips the wakeup.
+                            if redraw && !dirty.swap(true, Ordering::Relaxed) {
+                                // Stamped on the same edge as the wakeup, so the
+                                // frame that services it measures from the first
+                                // byte of the burst rather than the last.
+                                ingest_at.store(
+                                    ingest_epoch.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                                let _ = proxy.send_event(PtyEvent::Redraw);
+                            }
+                            true
+                        },
+                        PtyOutput::Eof => {
+                            tracing::info!("child closed the pty");
+                            let last_output = pty::strip_escapes(&String::from_utf8_lossy(&tail));
+                            let _ = proxy.send_event(PtyEvent::Exited { last_output });
+                            true
+                        },
+                    }
                 },
             )
             .expect("spawn shell over pty")
@@ -1020,7 +1026,7 @@ impl ApplicationHandler<PtyEvent> for App {
 
         // Whatever the child said while the GPU was coming up. Replaying it
         // through the same arm that would have taken it live keeps one handling
-        // of each event kind, and an early query gets its reply.
+        // of each event kind.
         for event in mem::take(&mut self.pending_events) {
             self.user_event(event_loop, event);
         }
@@ -1033,9 +1039,6 @@ impl ApplicationHandler<PtyEvent> for App {
         };
 
         match event {
-            PtyEvent::Responses(responses) => {
-                let _ = state.pty.write(&responses);
-            },
             PtyEvent::Redraw => {
                 // Clear before requesting so a chunk parsed during this cycle
                 // re-arms the next wakeup; the redraw projects the latest state.
