@@ -56,7 +56,29 @@
           # The four project commands own testing, and the workspace tests need
           # the devshell's software-rasterizer setup.
           doCheck = false;
+          # Silence nixpkgs cc-wrapper's target-mismatch warning emitted
+          # when Rust's `cc` crate canonicalizes Apple triples before
+          # invoking clang (e.g. `aarch64-apple-darwin` -> `arm64-apple-macosx`).
+          NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING = "1";
         };
+
+        # The macOS icon, rendered from the same SVG the Linux desktop entry
+        # names so the two platforms never drift apart. A separate derivation
+        # keeps an icon edit from rebuilding the Rust workspace.
+        stoattyIcns =
+          pkgs.runCommand "stoatty.icns"
+            {
+              nativeBuildInputs = [
+                pkgs.resvg
+                pkgs.libicns
+              ];
+            }
+            ''
+              for size in 16 32 128 256 512; do
+                resvg -w $size -h $size ${./assets/stoatty.svg} icon_$size.png
+              done
+              png2icns $out icon_16.png icon_32.png icon_128.png icon_256.png icon_512.png
+            '';
 
         packages = rec {
           stoat = rustPlatform.buildRustPackage (
@@ -88,10 +110,23 @@
                 "stoat_bin"
               ];
 
-              postInstall = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                install -Dm444 assets/stoatty.desktop $out/share/applications/stoatty.desktop
-                install -Dm444 assets/stoatty.svg $out/share/icons/hicolor/scalable/apps/stoatty.svg
-              '';
+              # Linux gets a desktop entry, macOS an app bundle. The bundle's
+              # MacOS directory links to bin/ rather than holding a copy, so a
+              # Finder launch runs the same file as a shell launch and the
+              # sibling `stoat` lookup still lands next to it.
+              postInstall =
+                if pkgs.stdenv.hostPlatform.isDarwin then
+                  ''
+                    app=$out/Applications/Stoatty.app/Contents
+                    install -Dm444 assets/Info.plist $app/Info.plist
+                    install -Dm444 ${stoattyIcns} $app/Resources/stoatty.icns
+                    ln -s $out/bin $app/MacOS
+                  ''
+                else
+                  ''
+                    install -Dm444 assets/stoatty.desktop $out/share/applications/stoatty.desktop
+                    install -Dm444 assets/stoatty.svg $out/share/icons/hicolor/scalable/apps/stoatty.svg
+                  '';
 
               # An RPATH rather than a wrapper that sets a library path.
               # stoatty spawns shells, and a wrapper's environment leaks into
