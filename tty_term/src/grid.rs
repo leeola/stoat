@@ -245,6 +245,12 @@ impl Grid {
     ///
     /// Content is not preserved. The driver repopulates the grid afterward.
     ///
+    /// The minimap content stores are the exception, and survive. A line summary
+    /// names a run's column, length, and class, none of which the window size
+    /// moves, and they hold a whole buffer: dropping them would cost the driver a
+    /// clone of every store on every step of a window drag. Their versions stay
+    /// put with them, since nothing about them changed.
+    ///
     /// Moves every decoration epoch, since dropping those lists is as much a
     /// change as replacing them.
     pub fn resize(&mut self, rows: usize, cols: usize) {
@@ -260,7 +266,6 @@ impl Grid {
         self.bars.clear();
         self.polylines.clear();
         self.minimaps.clear();
-        self.minimap_contents.clear();
         self.line_start_rows.clear();
         self.images.clear();
 
@@ -322,7 +327,13 @@ impl Grid {
         self.bars.clear();
         self.polylines.clear();
         self.minimaps.clear();
+        // A recycled page must not carry the last one's stores, so unlike a
+        // resize this drops them. Their versions move with them, or a renderer
+        // caching per strip would read a cleared store as the one it built from.
         self.minimap_contents.clear();
+        for version in self.minimap_content_versions.values_mut() {
+            *version += 1;
+        }
         self.line_start_rows.clear();
 
         self.popovers_epoch += 1;
@@ -2240,6 +2251,72 @@ mod tests {
 
         grid.resize(2, 2);
         assert!(grid.text_runs().is_empty(), "resize clears the text runs");
+    }
+
+    /// A store of one line carrying one run, for the resize and clear cases.
+    fn one_line_store() -> HashMap<u32, Vec<LineSummary>> {
+        HashMap::from([(
+            7,
+            vec![LineSummary::from(vec![MinimapRun {
+                start_col: 0,
+                len: 4,
+                class: 1,
+            }])],
+        )])
+    }
+
+    /// A line summary names a run's column, length, and class, none of which the
+    /// window size moves. Dropping the stores on a resize would cost the driver
+    /// a clone of every one of them on every step of a window drag.
+    #[test]
+    fn minimap_content_survives_a_resize_and_goes_on_a_clear() {
+        let mut grid = Grid::new(4, 4);
+        grid.set_minimap_contents(one_line_store());
+        let version = grid.minimap_content_version(7);
+        assert_eq!(grid.minimap_content(7).len(), 1, "the store lands");
+
+        grid.resize(2, 2);
+        assert_eq!(
+            (
+                grid.minimap_content(7).len(),
+                grid.minimap_content_version(7)
+            ),
+            (1, version),
+            "a resize keeps the store and leaves its version alone"
+        );
+
+        // A recycled pool page clears rather than resizes, and must not carry
+        // the last page's stores into the next one.
+        grid.clear();
+        assert!(
+            grid.minimap_content(7).is_empty(),
+            "a clear drops the store"
+        );
+        assert_ne!(
+            grid.minimap_content_version(7),
+            version,
+            "and moves its version, so a cached strip does not read it as unchanged"
+        );
+    }
+
+    /// A strip can be declared over a store that does not exist yet, and it
+    /// builds against nothing. The store arriving has to move the version, or
+    /// that strip reads the empty slice it cached as still current.
+    #[test]
+    fn a_store_arriving_moves_its_version_off_the_absent_one() {
+        let mut grid = Grid::new(4, 4);
+        assert_eq!(
+            grid.minimap_content_version(7),
+            0,
+            "an id with no store reads zero"
+        );
+
+        grid.set_minimap_contents(one_line_store());
+        assert_ne!(
+            grid.minimap_content_version(7),
+            0,
+            "and the store arriving moves it off that"
+        );
     }
 
     /// A named mutation of a grid, for a table pinning what each one does.

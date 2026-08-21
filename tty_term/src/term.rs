@@ -279,6 +279,14 @@ pub struct Terminal {
     /// [`Self::project`], so the projection replays [`Self::minimap_journal`] into
     /// the grid only when the stores changed rather than on every viewport frame.
     minimap_content_dirty: bool,
+    /// Whether the grid's stores have to be rebuilt from these rather than by
+    /// replaying [`Self::minimap_journal`].
+    ///
+    /// The replay rests on the grid's stores equalling these as of the last
+    /// projection. Anything that breaks that has to say so here, and dropping
+    /// journal entries rather than replaying them is what will: the entries a
+    /// cap discards are the ones the grid never saw.
+    minimap_reclone: bool,
     /// The store changes since the last [`Self::project`], in arrival order. The
     /// grid's stores equal these stores as of that projection, so replaying the
     /// journal against them reproduces the current stores exactly while cloning
@@ -899,6 +907,7 @@ impl Terminal {
             minimap_contents: HashMap::new(),
             minimap_views: HashMap::new(),
             minimap_content_dirty: false,
+            minimap_reclone: false,
             minimap_journal: Vec::new(),
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
@@ -2887,15 +2896,19 @@ impl Terminal {
         // a walk of a short list, and a projection that skipped it would leave
         // the renderer drawing an image the client deleted.
         grid.set_images(self.placed_images(rows, cols));
-        // A resize empties the grid's stores, so re-clone them wholesale and drop
-        // the journal the clone subsumes. Otherwise replay only the splices and
-        // drops since the last projection. The grid's stores match the term's as
-        // of then, so the replay reproduces the current stores while cloning just
-        // each splice's lines. A viewport-only frame touches neither.
-        if resized {
+        // Normally replay only the splices and drops since the last projection.
+        // The grid's stores match the term's as of then, so the replay reproduces
+        // the current stores while cloning just each splice's lines. A
+        // viewport-only frame touches neither, and a resize keeps its stores so
+        // it replays like any other frame.
+        //
+        // Only a break in that equality forces the wholesale clone, which drops
+        // the journal it subsumes.
+        if self.minimap_reclone {
             grid.set_minimap_contents(self.minimap_contents.clone());
             self.minimap_journal.clear();
             self.minimap_content_dirty = false;
+            self.minimap_reclone = false;
         } else if self.minimap_content_dirty {
             for change in self.minimap_journal.drain(..) {
                 match change {
@@ -7505,6 +7518,38 @@ mod tests {
         );
     }
 
+    /// A resize keeps the grid's stores, so the projection replays the journal
+    /// across one the way it does across any other frame.
+    ///
+    /// Cloning every store instead is what a window drag used to cost, and the
+    /// splice below is what a replay has to carry that a dropped journal would
+    /// lose.
+    #[test]
+    fn a_resize_replays_the_journal_rather_than_recloning() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimap_content(9),
+            summaries(vec![vec![run(0, 2, 1)]]),
+            "the first projection lands the store"
+        );
+
+        // A splice and a resize in the same frame. The store the grid keeps is
+        // what the replay builds on, so losing either half loses the line.
+        terminal.advance(&splice(9, 1, 0, vec![vec![run(2, 2, 4)]]));
+        terminal.resize(6, 6);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.minimap_content(9),
+            summaries(vec![vec![run(0, 2, 1)], vec![run(2, 2, 4)]]),
+            "the resized frame carries both the kept line and the spliced one"
+        );
+    }
+
     #[test]
     fn reset_clears_minimap_strips_but_keeps_content_and_view() {
         let mut terminal = Terminal::new(4, 4, Theme::default());
@@ -7701,8 +7746,7 @@ mod tests {
     ///
     /// Every one of these hand-offs compares equal either way, so equality says
     /// nothing about which happened. A file's worth of lines is copied per
-    /// hand-off if they are not shared, and a resize copies the whole store
-    /// again on every frame of a window drag, so the identity is the point.
+    /// hand-off if they are not shared, so the identity is the point.
     #[test]
     fn a_line_reaches_the_grid_without_being_copied() {
         let mut terminal = Terminal::new(4, 4, Theme::default());
@@ -7717,13 +7761,13 @@ mod tests {
             "the projected line is the terminal's line",
         );
 
-        // A resize reclones the whole store rather than replaying, which is the
-        // path that would copy the file wholesale.
+        // A resize keeps the grid's store, so the line the grid holds is the one
+        // it already had, which is the one the terminal holds.
         terminal.resize(8, 8);
         terminal.project(&mut grid);
         assert!(
             Arc::ptr_eq(&grid.minimap_content(9)[0], &held),
-            "the store a resize reclones is still the terminal's lines",
+            "a resize leaves the grid holding the terminal's line",
         );
     }
 
@@ -7777,8 +7821,10 @@ mod tests {
         );
     }
 
+    /// A resize with nothing else pending leaves the grid's store where it was,
+    /// which is what makes the wholesale clone unnecessary.
     #[test]
-    fn a_resize_restores_the_grid_store_via_the_full_clone() {
+    fn a_resize_leaves_the_grid_store_matching_the_terminal() {
         let mut terminal = Terminal::new(4, 4, Theme::default());
         let mut grid = Grid::new(4, 4);
 
@@ -7790,13 +7836,12 @@ mod tests {
         ));
         terminal.project(&mut grid);
 
-        // A resize empties the grid stores, so the next projection re-clones them.
         terminal.resize(8, 8);
         terminal.project(&mut grid);
         assert_eq!(
             grid.minimap_content(9),
             &terminal.minimap_contents[&9][..],
-            "the resize fallback restores the grid store",
+            "the store the grid kept is still the terminal's",
         );
     }
 
