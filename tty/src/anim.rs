@@ -6,7 +6,7 @@
 //! clock rather than a running terminal.
 
 use crate::config::CursorAnimation;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stoatty_term::{
     grid::{Grid, Overlay, PoolRegion},
     term::{Cursor, CursorShape, PoolView, Terminal},
@@ -188,17 +188,71 @@ pub(crate) fn refresh_popover_overflows(
     overflows.extend(overlays.iter().map(popover_overflow));
 }
 
-/// Advance the ping-pong popover scroll by the elapsed frame time `dt` toward
-/// its current end, reversing direction when it settles.
+/// How long a popover's content rests at each end of its ping-pong before
+/// turning around.
 ///
-/// `down` eases the offset toward `max` (the overflow bottom); once settled it
-/// flips, easing back toward the top, so the content glides up and down while
-/// the popover is visible.
-pub(crate) fn step_popover_scroll(scroll: f32, down: bool, max: f32, dt: Duration) -> (f32, bool) {
+/// Long enough to read as the pause a marquee wants at each end, and long
+/// enough that the frames it saves are worth having: the loop presents nothing
+/// at all while it lasts, where without it an overflowing popover pins a
+/// vsync-paced loop for as long as it is on screen.
+pub(crate) const POPOVER_DWELL: Duration = Duration::from_millis(800);
+
+/// One popover's ping-pong scroll: where its content sits, which way it is
+/// heading, and whether it is resting.
+///
+/// Held together rather than as three lists indexed by overlay, since the three
+/// only mean anything as a set and a step writes all of them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct PopoverScroll {
+    /// Rows the content is scrolled down by, between zero and the overflow.
+    pub(crate) offset: f32,
+    /// Whether the content is heading toward the overflow bottom.
+    pub(crate) down: bool,
+    /// When the rest at the current end runs out, or `None` while gliding.
+    ///
+    /// A caller reads this twice: as "this popover wants no frame right now",
+    /// and as the moment the loop has to wake to turn it around.
+    pub(crate) dwell_until: Option<Instant>,
+}
+
+impl Default for PopoverScroll {
+    /// Resting at the top and about to glide down, which is where a popover
+    /// that has just appeared starts.
+    fn default() -> PopoverScroll {
+        PopoverScroll {
+            offset: 0.0,
+            down: true,
+            dwell_until: None,
+        }
+    }
+}
+
+/// Advance one popover's ping-pong scroll by the elapsed frame time `dt`,
+/// resting [`POPOVER_DWELL`] at each end before turning around.
+///
+/// The content eases toward `max` (the overflow bottom) or back toward the top.
+/// Reaching either end starts a dwell, and the call that finds the dwell spent
+/// turns around and glides in the same step, so the frame the loop woke for is
+/// one the content moves in.
+pub(crate) fn step_popover_scroll(
+    scroll: PopoverScroll,
+    max: f32,
+    dt: Duration,
+    now: Instant,
+) -> PopoverScroll {
+    let down = match scroll.dwell_until {
+        Some(until) if now < until => return scroll,
+        Some(_) => !scroll.down,
+        None => scroll.down,
+    };
+
     let target = if down { max } else { 0.0 };
-    let (next, settled) = ease([scroll, 0.0], [target, 0.0], dt);
-    let down = if settled { !down } else { down };
-    (next[0], down)
+    let (next, settled) = ease([scroll.offset, 0.0], [target, 0.0], dt);
+    PopoverScroll {
+        offset: next[0],
+        down,
+        dwell_until: settled.then(|| now + POPOVER_DWELL),
+    }
 }
 
 /// Advance the grid's eased vertical scroll by the elapsed frame time `dt`.
@@ -1197,19 +1251,67 @@ mod tests {
         );
     }
 
+    /// A popover part-way through its glide, heading `down` from `offset`.
+    fn gliding(offset: f32, down: bool) -> PopoverScroll {
+        PopoverScroll {
+            offset,
+            down,
+            dwell_until: None,
+        }
+    }
+
     #[test]
     fn popover_scroll_ping_pongs_between_ends() {
-        let (next, down) = step_popover_scroll(0.0, true, 2.0, EASE_BASELINE_FRAME);
-        assert!(next > 0.0 && next < 2.0, "eases down from the top");
-        assert!(down);
+        let now = Instant::now();
 
-        let (next, down) = step_popover_scroll(1.999, true, 2.0, EASE_BASELINE_FRAME);
-        assert_eq!(next, 2.0, "snaps onto the bottom");
-        assert!(!down, "reverses at the bottom");
+        let next = step_popover_scroll(gliding(0.0, true), 2.0, EASE_BASELINE_FRAME, now);
+        assert!(
+            next.offset > 0.0 && next.offset < 2.0,
+            "eases down from the top"
+        );
+        assert_eq!((next.down, next.dwell_until), (true, None));
 
-        let (next, down) = step_popover_scroll(0.001, false, 2.0, EASE_BASELINE_FRAME);
-        assert_eq!(next, 0.0, "snaps onto the top");
-        assert!(down, "reverses at the top");
+        let bottom = step_popover_scroll(gliding(1.999, true), 2.0, EASE_BASELINE_FRAME, now);
+        assert_eq!(
+            (bottom.offset, bottom.down, bottom.dwell_until),
+            (2.0, true, Some(now + POPOVER_DWELL)),
+            "snaps onto the bottom and rests there, still facing down",
+        );
+
+        let turned = step_popover_scroll(bottom, 2.0, EASE_BASELINE_FRAME, now + POPOVER_DWELL);
+        assert!(
+            turned.offset < 2.0 && turned.offset > 0.0,
+            "the spent dwell turns it around and glides in the same step"
+        );
+        assert_eq!((turned.down, turned.dwell_until), (false, None));
+
+        let top = step_popover_scroll(gliding(0.001, false), 2.0, EASE_BASELINE_FRAME, now);
+        assert_eq!(
+            (top.offset, top.down, top.dwell_until),
+            (0.0, false, Some(now + POPOVER_DWELL)),
+            "snaps onto the top and rests there too",
+        );
+    }
+
+    /// The dwell is what lets the loop stop presenting, so it has to hold for
+    /// its whole length and report no motion throughout. A dwell that ended a
+    /// frame early would pin the loop exactly as it did before.
+    #[test]
+    fn a_dwelling_popover_stands_still_until_its_rest_runs_out() {
+        let now = Instant::now();
+        let resting = step_popover_scroll(gliding(1.999, true), 2.0, EASE_BASELINE_FRAME, now);
+
+        for elapsed in [
+            Duration::ZERO,
+            POPOVER_DWELL / 2,
+            POPOVER_DWELL - EASE_BASELINE_FRAME,
+        ] {
+            assert_eq!(
+                step_popover_scroll(resting, 2.0, EASE_BASELINE_FRAME, now + elapsed),
+                resting,
+                "nothing moves {elapsed:?} into the rest",
+            );
+        }
     }
 
     #[test]

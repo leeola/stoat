@@ -14,7 +14,7 @@ use crate::{
         cursor_in_region, cursor_position, intersect_scissor, refresh_popover_overflows,
         region_scissor, seed_settle_flight, shift_scissor, step_cursor, step_grid_scroll,
         step_popover_scroll, step_region_scroll, step_scrollback_scroll, ActivePool, AnchorRide,
-        AnchoredCursor, PoolAnim, PoolStep, EASE_BASELINE_FRAME, MAX_EASE_DT,
+        AnchoredCursor, PoolAnim, PoolStep, PopoverScroll, EASE_BASELINE_FRAME, MAX_EASE_DT,
     },
     config::{self, Config, CursorAnimation},
     input::{
@@ -632,13 +632,20 @@ struct State {
     /// eases from its last anchored position to the landing cell instead of
     /// teleporting there.
     cursor_was_anchored: bool,
-    /// Each overlay's eased vertical scroll offset, in rows, indexed by overlay
-    /// order. An entry ping-pongs between the top and its overflow bottom while
-    /// that popover overflows its box, so several scroll independently.
-    popover_scrolls: Vec<f32>,
-    /// Each overlay's ping-pong direction: true while easing down toward the
-    /// overflow bottom, false while easing back up to the top.
-    popover_scroll_downs: Vec<bool>,
+    /// Each overlay's ping-pong scroll, indexed by overlay order, so several
+    /// popovers scroll independently.
+    popover_scrolls: Vec<PopoverScroll>,
+    /// The offsets [`Self::popover_scrolls`] currently sit at, in the same
+    /// order, because a frame takes them as one slice. A view of the state above
+    /// rather than state of its own, refilled by the step that produces it.
+    popover_offsets: Vec<f32>,
+    /// When the loop has to wake to turn a dwelling popover around, or `None`
+    /// when none is resting.
+    ///
+    /// The redraw keep-alive asks for the next frame while something is easing,
+    /// and a popover that is resting is by definition not easing, so nothing
+    /// else would bring the loop back.
+    popover_wake: Option<Instant>,
     /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
     /// per-frame scroll delta and eased toward zero so content glides into place.
     grid_scroll: f32,
@@ -991,7 +998,8 @@ impl ApplicationHandler<PtyEvent> for App {
             cursor_corner_anim: [[0.0, 0.0]; 4],
             cursor_was_anchored: false,
             popover_scrolls: Vec::new(),
-            popover_scroll_downs: Vec::new(),
+            popover_offsets: Vec::new(),
+            popover_wake: None,
             grid_scroll: 0.0,
             scrollback_visual: 0.0,
             scrollback_target: 0.0,
@@ -1115,8 +1123,16 @@ impl ApplicationHandler<PtyEvent> for App {
         reconcile_app_focus(state);
         apply_pending_resizes(state);
 
+        // The loop woke for this and nothing else will ask: the keep-alive
+        // requests a frame while something is easing, and a popover resting at
+        // an end is not.
+        if state.popover_wake.is_some_and(|at| at <= Instant::now()) {
+            state.popover_wake = None;
+            state.window.request_redraw();
+        }
+
         if !state.sync_pending.load(Ordering::Relaxed) {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            wait_until(event_loop, state.popover_wake);
             return;
         }
 
@@ -1156,14 +1172,11 @@ impl ApplicationHandler<PtyEvent> for App {
             }
         }
 
-        match deadline {
-            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
-            None => {
-                state.sync_pending.store(false, Ordering::Relaxed);
-                state.window.request_redraw();
-                event_loop.set_control_flow(ControlFlow::Wait);
-            },
+        if deadline.is_none() {
+            state.sync_pending.store(false, Ordering::Relaxed);
+            state.window.request_redraw();
         }
+        wait_until(event_loop, earliest(deadline, state.popover_wake));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -2453,26 +2466,14 @@ fn redraw(state: &mut State) {
         &mut state.last_popovers_epoch,
         &mut overflows,
     );
-    state.popover_scrolls.resize(overflows.len(), 0.0);
-    state.popover_scroll_downs.resize(overflows.len(), true);
-
-    let mut popover_scrolling = false;
-    for (index, overflow) in overflows.iter().copied().enumerate() {
-        match overflow {
-            Some(max) => {
-                let (next, down) = step_popover_scroll(
-                    state.popover_scrolls[index],
-                    state.popover_scroll_downs[index],
-                    max,
-                    dt,
-                );
-                state.popover_scrolls[index] = next;
-                state.popover_scroll_downs[index] = down;
-                popover_scrolling = true;
-            },
-            None => state.popover_scrolls[index] = 0.0,
-        }
-    }
+    let (popover_scrolling, popover_wake) = step_popovers(
+        &mut state.popover_scrolls,
+        &mut state.popover_offsets,
+        &overflows,
+        dt,
+        Instant::now(),
+    );
+    state.popover_wake = popover_wake;
     state.overflows_scratch = overflows;
 
     let (grid_scroll, grid_scrolling) = step_grid_scroll(state.grid_scroll, scroll_delta, dt);
@@ -2602,7 +2603,7 @@ fn redraw(state: &mut State) {
                         document: 0.0,
                         scrollback: 0.0,
                         region: state.region_scroll,
-                        popovers: &state.popover_scrolls,
+                        popovers: &state.popover_offsets,
                     },
                     damage: &damage,
                     decoration_damage: &decoration_damage,
@@ -2764,7 +2765,7 @@ fn redraw(state: &mut State) {
                     document: 0.0,
                     scrollback: 0.0,
                     region: state.region_scroll,
-                    popovers: &state.popover_scrolls,
+                    popovers: &state.popover_offsets,
                 },
                 damage: &damage,
                 decoration_damage: &decoration_damage,
@@ -3148,6 +3149,64 @@ fn compose_aux_grid(
     }
 }
 
+/// Step every overlay's ping-pong scroll, filling `offsets` with where each one
+/// landed, and report whether any is gliding and when the earliest rest runs
+/// out.
+///
+/// `overflows` carries one entry per overlay, `Some` with the rows its content
+/// runs past its box. An overlay that fits is reset to the top and asks for
+/// nothing.
+///
+/// The two answers drive the loop between them. Gliding asks for the next frame
+/// the way every other ease does. Resting asks for none, which is the whole
+/// point of the rest, so it names the moment the loop has to come back instead.
+fn step_popovers(
+    scrolls: &mut Vec<PopoverScroll>,
+    offsets: &mut Vec<f32>,
+    overflows: &[Option<f32>],
+    dt: Duration,
+    now: Instant,
+) -> (bool, Option<Instant>) {
+    scrolls.resize(overflows.len(), PopoverScroll::default());
+    offsets.clear();
+
+    let mut scrolling = false;
+    let mut wake = None;
+    for (scroll, overflow) in scrolls.iter_mut().zip(overflows) {
+        *scroll = match overflow {
+            Some(max) => step_popover_scroll(*scroll, *max, dt, now),
+            None => PopoverScroll::default(),
+        };
+        offsets.push(scroll.offset);
+
+        match (overflow, scroll.dwell_until) {
+            (Some(_), Some(until)) => wake = earliest(wake, Some(until)),
+            (Some(_), None) => scrolling = true,
+            (None, _) => {},
+        }
+    }
+    (scrolling, wake)
+}
+
+/// Idle until `deadline`, or until the next event when there is none.
+fn wait_until(event_loop: &ActiveEventLoop, deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+        None => event_loop.set_control_flow(ControlFlow::Wait),
+    }
+}
+
+/// The earlier of two wake deadlines, or whichever one there is.
+///
+/// Several things can want the loop back, and the loop wakes once: it has to
+/// wait for the first of them, then let the later one ask again.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Send a window-lifecycle event to the child over the window-event socket.
 ///
 /// A no-op when the socket did not bind. The line is only queued on the channel,
@@ -3475,16 +3534,19 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
-        classify_window_open, compose_aux_grid, forced_damage, forwards_zoom, grid_pixels,
-        selection_copy_text, snap_shift_to_pixels, swallow_super_combo, ActivePool, ForceFull,
-        FrameOutcome, Input, PendingResize, PoolView, PtyWrite, Visibility, WindowOpenVerdict,
-        MAX_AUX_WINDOWS,
+        classify_window_open, compose_aux_grid, earliest, forced_damage, forwards_zoom,
+        grid_pixels, selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo,
+        ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite, Visibility,
+        WindowOpenVerdict, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
         serve_window_events, window_socket_path, AtomicBool, Ordering, PathBuf, UnixListener,
     };
-    use crate::input::{alternate_scroll_bytes, sgr_motion_bytes, sgr_wheel_bytes};
+    use crate::{
+        anim::{PopoverScroll, EASE_BASELINE_FRAME, POPOVER_DWELL},
+        input::{alternate_scroll_bytes, sgr_motion_bytes, sgr_wheel_bytes},
+    };
     use alacritty_terminal::sync::FairMutex;
     #[cfg(unix)]
     use std::sync::{mpsc, Arc};
@@ -3546,6 +3608,91 @@ mod tests {
     /// A projection that reported nothing still has to widen when forced.
     /// Passing the empty damage through would leave the stale rows alone, which
     /// is the state the latch exists to leave behind.
+    /// A popover resting at an end must report no motion, or the loop keeps
+    /// presenting through the rest and the rest buys nothing. It still has to
+    /// name when the loop comes back, since nothing else will ask.
+    #[test]
+    fn a_resting_popover_asks_for_a_wake_rather_than_a_frame() {
+        let now = Instant::now();
+        let (mut scrolls, mut offsets) = (Vec::new(), Vec::new());
+
+        // One row of overflow, stepped until it settles at the bottom.
+        let mut answer = (true, None);
+        for _ in 0..64 {
+            answer = step_popovers(
+                &mut scrolls,
+                &mut offsets,
+                &[Some(1.0)],
+                EASE_BASELINE_FRAME,
+                now,
+            );
+            if !answer.0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            (answer, offsets.as_slice()),
+            ((false, Some(now + POPOVER_DWELL)), [1.0].as_slice()),
+            "settled at the bottom, it asks for a wake and no frame",
+        );
+    }
+
+    /// One popover resting does not excuse the loop from a frame another one
+    /// still wants, and an overlay whose content fits asks for nothing at all.
+    #[test]
+    fn a_gliding_popover_still_asks_for_the_next_frame() {
+        let now = Instant::now();
+        let (mut scrolls, mut offsets) = (Vec::new(), Vec::new());
+        let resting = PopoverScroll {
+            offset: 4.0,
+            down: true,
+            dwell_until: Some(now + POPOVER_DWELL),
+        };
+        // The third is left scrolled from when its content was longer, so the
+        // reset an overlay that now fits gets is visible.
+        let shrunk = PopoverScroll {
+            offset: 3.0,
+            down: false,
+            dwell_until: None,
+        };
+        scrolls.extend([resting, PopoverScroll::default(), shrunk]);
+
+        let answer = step_popovers(
+            &mut scrolls,
+            &mut offsets,
+            &[Some(4.0), Some(4.0), None],
+            EASE_BASELINE_FRAME,
+            now,
+        );
+
+        assert_eq!(
+            (answer, offsets[0], offsets[2]),
+            ((true, Some(now + POPOVER_DWELL)), 4.0, 0.0),
+            "the glider asks for the frame, the rester for the wake, the fitter for neither",
+        );
+    }
+
+    /// Several things can want the loop back at once and it wakes once, so it
+    /// has to wait for the first of them and let the later one ask again.
+    #[test]
+    fn the_earliest_wake_is_the_one_waited_for() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+
+        assert_eq!(
+            (
+                earliest(Some(now), Some(later)),
+                earliest(Some(later), Some(now)),
+                earliest(Some(now), None),
+                earliest(None, Some(now)),
+                earliest(None, None),
+            ),
+            (Some(now), Some(now), Some(now), Some(now), None),
+            "whichever deadline comes first, in either order, and none from none",
+        );
+    }
+
     #[test]
     fn a_forced_frame_widens_even_an_empty_projection() {
         assert!(matches!(
