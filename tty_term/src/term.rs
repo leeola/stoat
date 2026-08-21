@@ -138,6 +138,16 @@ const MAX_MINIMAP_VIEWS: usize = 64;
 /// and the clone reproduces them exactly, so nothing is lost by taking it.
 const MAX_MINIMAP_JOURNAL: usize = 4096;
 
+/// Line handles the journal's entries may hold between them.
+///
+/// The entry count alone bounds nothing: a splice replacing a whole store holds
+/// a handle per line, so a few thousand of those are worth many times the clone
+/// the journal exists to avoid. One store's worth is where the journal stops
+/// being the cheaper of the two, since past it the journal holds more handles
+/// than a full store does. A splice per edit carries a handful of lines, so
+/// ordinary use is nowhere near.
+const MAX_MINIMAP_JOURNAL_LINES: usize = MAX_MINIMAP_LINES;
+
 /// Line summaries one minimap content store may hold.
 ///
 /// A store grows by splices the writer sends, so without a ceiling one store id
@@ -303,6 +313,11 @@ pub struct Terminal {
     /// journal against them reproduces the current stores exactly while cloning
     /// only each splice's lines rather than every store.
     minimap_journal: Vec<MinimapJournal>,
+    /// Line handles [`Self::minimap_journal`]'s entries hold between them,
+    /// summed as they are recorded. Emptied with the journal by
+    /// [`Self::clear_minimap_journal`], which is the only thing that empties
+    /// either.
+    minimap_journal_lines: usize,
     /// Next seq to stamp, incremented per decoration and reset by a
     /// `Gstoatty;reset` frame. Starts at 1 so pool-composited content (seq 0)
     /// sorts below every declared decoration.
@@ -556,6 +571,20 @@ fn push_capped<T>(list: &mut Vec<T>, item: T, warned: &mut bool) -> bool {
 
     list.push(item);
     true
+}
+
+/// Whether a journal holding `entries` entries carrying `lines` line handles has
+/// stopped being the cheaper way to bring the grid's stores up to date.
+///
+/// Both bounds answer the same question from different ends. A drop is one entry
+/// and no handles, so a stream of them is bounded only by the count. A splice
+/// replacing a whole store is one entry and a store's worth of handles, so a
+/// stream of those is bounded only by the total.
+///
+/// Read as a function of two numbers rather than off the journal, because the
+/// line bound is far too large to reach in a test by pushing lines.
+fn journal_past_bounds(entries: usize, lines: usize) -> bool {
+    entries > MAX_MINIMAP_JOURNAL || lines > MAX_MINIMAP_JOURNAL_LINES
 }
 
 /// How many lines a splice may insert into a store of `store_len` before it
@@ -920,6 +949,7 @@ impl Terminal {
             minimap_content_dirty: false,
             minimap_reclone: false,
             minimap_journal: Vec::new(),
+            minimap_journal_lines: 0,
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
             output_since_project: false,
@@ -1673,9 +1703,9 @@ impl Terminal {
     /// Record `change` for the next projection to replay, or give up on
     /// replaying and ask it for the whole map instead.
     ///
-    /// Past [`MAX_MINIMAP_JOURNAL`] the journal goes and the reclone flag takes
-    /// over. Nothing is lost, since the clone reproduces exactly what the
-    /// replay would have. While that flag stands the journal is dead weight, so
+    /// Past either bound the journal goes and the reclone flag takes over.
+    /// Nothing is lost, since the clone reproduces exactly what the replay
+    /// would have. While that flag stands the journal is dead weight, so
     /// nothing more is recorded into it.
     fn journal_minimap(&mut self, change: MinimapJournal) {
         self.minimap_content_dirty = true;
@@ -1683,11 +1713,26 @@ impl Terminal {
             return;
         }
 
+        self.minimap_journal_lines += match &change {
+            MinimapJournal::Splice(command) => command.lines.len(),
+            MinimapJournal::Drop(_) => 0,
+        };
         self.minimap_journal.push(change);
-        if self.minimap_journal.len() > MAX_MINIMAP_JOURNAL {
-            self.minimap_journal.clear();
+
+        if journal_past_bounds(self.minimap_journal.len(), self.minimap_journal_lines) {
+            self.clear_minimap_journal();
             self.minimap_reclone = true;
         }
+    }
+
+    /// Empty the journal and forget what it was holding.
+    ///
+    /// The only thing that empties either, so the count cannot outlive the
+    /// entries it counted. Three paths reach here: the bounds above, the
+    /// projection's wholesale clone, and the projection's replay.
+    fn clear_minimap_journal(&mut self) {
+        self.minimap_journal.clear();
+        self.minimap_journal_lines = 0;
     }
 
     /// The length of store `content_id`, or `None` when it does not exist and
@@ -2934,7 +2979,7 @@ impl Terminal {
         // the journal it subsumes.
         if self.minimap_reclone {
             grid.set_minimap_contents(self.minimap_contents.clone());
-            self.minimap_journal.clear();
+            self.clear_minimap_journal();
             self.minimap_content_dirty = false;
             self.minimap_reclone = false;
         } else if self.minimap_content_dirty {
@@ -2949,6 +2994,7 @@ impl Terminal {
                     MinimapJournal::Drop(content_id) => grid.drop_minimap_content(content_id),
                 }
             }
+            self.clear_minimap_journal();
             self.minimap_content_dirty = false;
         }
 
@@ -3129,10 +3175,11 @@ impl Dimensions for GridSize {
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_room, mark_selection_change, whole_row, Arc, Cursor, CursorShape, Damage,
-        MinimapJournal, SelectionRange, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
-        MAX_DECORATIONS, MAX_MINIMAP_JOURNAL, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES,
-        MAX_MINIMAP_VIEWS, MAX_POOLS, PAGE_POOL_CAPACITY, XTVERSION_REPLY,
+        insert_room, journal_past_bounds, mark_selection_change, whole_row, Arc, Cursor,
+        CursorShape, Damage, MinimapJournal, SelectionRange, TermEvent, Terminal, ESC,
+        MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_JOURNAL, MAX_MINIMAP_JOURNAL_LINES,
+        MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_MINIMAP_VIEWS, MAX_POOLS, PAGE_POOL_CAPACITY,
+        XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -7849,6 +7896,26 @@ mod tests {
         );
     }
 
+    /// Counting entries alone leaves a writer sending whole-store splices
+    /// holding thousands of stores' worth of line handles, which is many times
+    /// the clone the journal exists to avoid. Counting handles alone leaves a
+    /// stream of drops unbounded, since a drop carries none.
+    #[test]
+    fn a_journal_gives_up_on_either_bound() {
+        assert!(
+            !journal_past_bounds(MAX_MINIMAP_JOURNAL, MAX_MINIMAP_JOURNAL_LINES),
+            "a journal at both bounds is still the cheaper way"
+        );
+        assert!(
+            journal_past_bounds(MAX_MINIMAP_JOURNAL + 1, 0),
+            "a stream of drops is caught by the entry count alone"
+        );
+        assert!(
+            journal_past_bounds(1, MAX_MINIMAP_JOURNAL_LINES + 1),
+            "and one whole-store splice by the line total alone"
+        );
+    }
+
     /// Nothing drains the journal while projections are skipped, and they are
     /// skipped for a scrolled-back view or an occluded window. Past the cap the
     /// entries cost more than the clone they exist to avoid, so the projection
@@ -7870,6 +7937,10 @@ mod tests {
         assert!(
             terminal.minimap_journal.is_empty() && terminal.minimap_reclone,
             "the journal gave up and asked for the whole map"
+        );
+        assert_eq!(
+            terminal.minimap_journal_lines, 0,
+            "and forgot what it was holding along with the entries"
         );
 
         // The clone reproduces whatever the stores hold when it runs, so an
@@ -7895,11 +7966,18 @@ mod tests {
         // The journal is trusted again from here, so the next splice replays.
         terminal.advance(&splice(9, 0, 1, vec![vec![run(3, 3, 7)]]));
         assert_eq!(
-            terminal.minimap_journal.len(),
-            1,
-            "the next change is journaled rather than dropped"
+            (
+                terminal.minimap_journal.len(),
+                terminal.minimap_journal_lines
+            ),
+            (1, 1),
+            "the next change is journaled rather than dropped, lines and all"
         );
         terminal.project(&mut grid);
+        assert_eq!(
+            terminal.minimap_journal_lines, 0,
+            "and the replay forgets its lines the way it forgets its entries"
+        );
         assert_eq!(
             grid.minimap_content(9),
             summaries(vec![vec![run(3, 3, 7)]]),
