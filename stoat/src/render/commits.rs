@@ -1,5 +1,5 @@
 use crate::{
-    commit_list::CommitListState,
+    commit_list::{CommitListState, Preview},
     diff_map::{BaseHighlights, ChangeKind},
     host::{CommitFileChange, CommitFileChangeKind},
     pane::Pane,
@@ -192,8 +192,15 @@ fn render_commit_detail_pane(
     match state.preview_sessions.get(sha) {
         // The commits view has no preview scroll of its own. Only the picker's
         // wheel handling moves one.
-        Some(session) => render_commit_preview(session, theme, preview_area, 0, buf, scene),
-        None => {
+        Preview::Built(document) => {
+            render_commit_preview(document, theme, preview_area, 0, buf, scene)
+        },
+        Preview::Empty => {
+            if preview_area.height > 0 {
+                write_str(buf, preview_area.x, preview_area.y, "no changes", dim);
+            }
+        },
+        Preview::Unbuilt => {
             if preview_area.height > 0 {
                 write_str(
                     buf,

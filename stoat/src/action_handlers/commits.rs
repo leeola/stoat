@@ -354,7 +354,55 @@ fn spawn_commit_preview_load(
 
 #[cfg(test)]
 mod tests {
-    use crate::app::Stoat;
+    use crate::{app::Stoat, commit_list::Preview};
+
+    /// The commits view shares the picker's preview cache, and shared the same
+    /// defect: a commit that changed nothing produced no document, the answer
+    /// was dropped, and the pump asked for the same build on every pass.
+    #[test]
+    fn a_commit_with_no_diff_stops_the_commits_view_asking() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("aaaa1111", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                (
+                    "bbbb2222",
+                    "chore: touch nothing",
+                    &[("a.rs", "fn a() {}\n")],
+                ),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "bbbb2222")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+
+        h.type_text(":commits");
+        h.type_keys("enter");
+        h.settle();
+
+        let state = h
+            .stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("commits state");
+        assert_eq!(
+            state.selected_sha(),
+            Some("bbbb2222"),
+            "the empty commit is the one selected",
+        );
+        assert!(
+            state.pending_preview.is_none(),
+            "no build is left in flight for a commit that has no diff",
+        );
+        assert!(
+            matches!(state.preview_sessions.get("bbbb2222"), Preview::Empty),
+            "the empty answer is cached, not left looking unbuilt",
+        );
+    }
 
     /// The commits screen ranks below the diff screen, so a list opened over an
     /// open diff would install its state and never paint. Opening the list
@@ -512,7 +560,7 @@ mod tests {
             .expect("commits state");
         let selected = state.selected_sha().expect("selection").to_string();
         assert!(
-            state.preview_sessions.get(&selected).is_some(),
+            matches!(state.preview_sessions.get(&selected), Preview::Built(_)),
             "the preview for the row the selection came to rest on is cached",
         );
     }

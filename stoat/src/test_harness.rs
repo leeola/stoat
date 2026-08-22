@@ -45,6 +45,14 @@ const DEFAULT_HEIGHT: u16 = 24;
 /// `files` is itself a slice of `(rel_path, content)` pairs.
 pub(crate) type CommitSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 
+/// Passes [`TestHarness::settle`] allows before it calls the run loop stuck.
+///
+/// A pump reports progress only while it has work left, so a settle converges in
+/// a handful of passes: three is the most any test in this crate needs. A pump
+/// that respawns the work it just finished never converges, and without a cap
+/// that hangs the whole test binary rather than failing one test.
+const SETTLE_MAX_PASSES: usize = 1000;
+
 pub struct TestHarness {
     pub(crate) stoat: Stoat,
     #[allow(dead_code)]
@@ -450,12 +458,16 @@ impl TestHarness {
     /// returning, every spawned task has been polled to suspension and every
     /// queued pump result has been routed through the main dispatch path.
     pub fn settle(&mut self) {
-        loop {
+        for _ in 0..SETTLE_MAX_PASSES {
             self.scheduler.run_until_parked();
             if !self.stoat.drive_pumps() {
-                break;
+                return;
             }
         }
+        panic!(
+            "settle did not converge in {SETTLE_MAX_PASSES} passes: a pump keeps reporting \
+             progress, which usually means one respawns the work it just finished"
+        );
     }
 
     /// Drive the background diff-populate job to completion for visible buffers.

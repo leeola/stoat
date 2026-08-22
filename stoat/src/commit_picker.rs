@@ -688,6 +688,7 @@ mod tests {
         app::{ModalKind, MIN_PREVIEW_ROWS},
         buffer::BufferId,
         commit_graph,
+        commit_list::Preview,
         editor_state::EditorId,
         host::CommitInfo,
         input_view::{InputView, SubmitTarget},
@@ -1534,7 +1535,7 @@ mod tests {
             .sha
             .clone();
         assert!(
-            picker.preview_sessions.get(&sha).is_some(),
+            matches!(picker.preview_sessions.get(&sha), Preview::Built(_)),
             "the selected commit's diff builds during settle"
         );
         h
@@ -1580,10 +1581,14 @@ mod tests {
         let h = harness_with_preview();
         let preview = layout(&h).preview.expect("the diff pane is present");
         let picker = h.stoat.commit_picker.as_ref().expect("open");
-        let session = picker
+        let sha = picker
             .selected_commit()
-            .and_then(|c| picker.preview_sessions.get(&c.sha))
-            .expect("built above");
+            .expect("a row is selected")
+            .sha
+            .clone();
+        let Preview::Built(session) = picker.preview_sessions.get(&sha) else {
+            panic!("the diff was built above");
+        };
 
         let area = ratatui::layout::Rect::new(0, 0, preview.width, preview.height);
         for page in [0u64, 1] {

@@ -691,15 +691,23 @@ fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut pending.task).poll(&mut cx) {
-        Poll::Ready(Some(session)) => {
+        Poll::Ready(Some(document)) => {
             if picker.requested_preview.as_deref() == Some(pending.sha.as_str()) {
                 picker
                     .preview_sessions
-                    .insert(pending.sha, Arc::new(session));
+                    .insert(pending.sha, Arc::new(document));
             }
             true
         },
-        Poll::Ready(None) => true,
+        // A commit that changed nothing yields no document, and that is a final
+        // answer. Recording it is what stops the pump asking again on the very
+        // next pass, which never converged.
+        Poll::Ready(None) => {
+            if picker.requested_preview.as_deref() == Some(pending.sha.as_str()) {
+                picker.preview_sessions.insert_empty(pending.sha);
+            }
+            true
+        },
         Poll::Pending => {
             picker.pending_preview = Some(pending);
             false
@@ -745,8 +753,8 @@ fn spawn_preview_load(
 mod tests {
     use super::{walk_navigate, ReturnRef, ReviewWalk};
     use crate::{
-        app::Stoat, badge::BadgeSource, commit_picker::CommitPickerRole, test_harness::TestHarness,
-        workspace::diff::DiffBase,
+        app::Stoat, badge::BadgeSource, commit_list::Preview, commit_picker::CommitPickerRole,
+        test_harness::TestHarness, workspace::diff::DiffBase,
     };
     use std::path::{Path, PathBuf};
 
@@ -938,6 +946,61 @@ mod tests {
         );
     }
 
+    /// A commit that changed nothing yields no diff to build, and the picker
+    /// has to remember that rather than ask again.
+    ///
+    /// The preview pump spawns a build when the cache has no answer for the
+    /// selected sha. An answer of "this commit has no diff" is still an answer:
+    /// dropping it leaves the pump asking for the same build on every pass,
+    /// which never converges.
+    #[test]
+    fn a_commit_with_no_diff_stops_the_picker_asking() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("aaaa1111", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                (
+                    "bbbb2222",
+                    "chore: touch nothing",
+                    &[("a.rs", "fn a() {}\n")],
+                ),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "bbbb2222")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+
+        {
+            let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+            assert_eq!(
+                picker.selected_commit().map(|c| c.sha.as_str()),
+                Some("bbbb2222"),
+                "the empty commit is the one selected",
+            );
+            assert!(
+                picker.pending_preview.is_none(),
+                "no build is left in flight for a commit that has no diff",
+            );
+            assert!(
+                matches!(picker.preview_sessions.get("bbbb2222"), Preview::Empty),
+                "the empty answer is cached, not left looking unbuilt",
+            );
+        }
+
+        h.snapshot();
+        assert!(
+            h.rendered_text().contains("no changes"),
+            "the preview says the commit is empty rather than that it is loading",
+        );
+    }
+
     #[test]
     fn git_review_opens_the_picker_over_the_refs_history() {
         let mut h = harness();
@@ -1120,7 +1183,7 @@ mod tests {
         let picker = h.stoat.commit_picker.as_ref().expect("picker");
         let selected = picker.selected_commit().expect("selection").sha.clone();
         assert!(
-            picker.preview_sessions.get(&selected).is_some(),
+            matches!(picker.preview_sessions.get(&selected), Preview::Built(_)),
             "the preview for the row the selection came to rest on is cached",
         );
     }

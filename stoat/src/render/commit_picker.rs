@@ -1,4 +1,5 @@
 use crate::{
+    commit_list::Preview,
     commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS},
     render::{
         file_finder::file_finder_layout,
@@ -11,7 +12,7 @@ use crate::{
     workspace::Workspace,
 };
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 use stoat_widgets::{polyline::Polyline, ApcScene};
 
 /// Rows the list keeps however small the body gets, so a short modal still
@@ -714,22 +715,36 @@ fn render_preview(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let session = picker
-        .selected_commit()
-        .and_then(|commit| picker.preview_sessions.get(&commit.sha))
-        .cloned();
-    match session {
-        Some(session) => {
+    let preview = match picker.selected_commit() {
+        Some(commit) => match picker.preview_sessions.get(&commit.sha) {
+            Preview::Built(document) => Some(Some(Arc::clone(document))),
+            Preview::Empty => Some(None),
+            Preview::Unbuilt => None,
+        },
+        None => None,
+    };
+    match preview {
+        Some(Some(document)) => {
             picker.preview_scroll =
-                clamped_preview_scroll(picker.preview_scroll, &session, area.height);
+                clamped_preview_scroll(picker.preview_scroll, &document, area.height);
             crate::render::commits::render_commit_preview(
-                &session,
+                &document,
                 theme,
                 area,
                 picker.preview_scroll,
                 buf,
                 scene,
             )
+        },
+        Some(None) => {
+            write_str_clipped(
+                buf,
+                area.x,
+                area.y,
+                "no changes",
+                theme.get(scope::UI_TEXT_MUTED),
+                area.width,
+            );
         },
         None => {
             write_str_clipped(

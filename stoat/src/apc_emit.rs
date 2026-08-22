@@ -14,6 +14,7 @@
 use crate::{
     action_handlers::view,
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
+    commit_list::Preview,
     display_map::{DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, ScrollGlide},
     input_view::InputView,
@@ -634,7 +635,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .filter(|picker| {
             picker
                 .selected_commit()
-                .is_some_and(|c| picker.preview_sessions.get(&c.sha).is_some())
+                .is_some_and(|c| matches!(picker.preview_sessions.get(&c.sha), Preview::Built(_)))
         })
         .and_then(|picker| {
             crate::render::commit_picker::commit_picker_layout(
@@ -1428,10 +1429,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
 
     if let (Some(rect), Some(picker)) = (commit_picker_preview, stoat.commit_picker.as_ref())
-        && let Some(session) = picker
-            .selected_commit()
-            .and_then(|c| picker.preview_sessions.get(&c.sha))
-            .cloned()
+        && let Some(session) =
+            picker
+                .selected_commit()
+                .and_then(|c| match picker.preview_sessions.get(&c.sha) {
+                    Preview::Built(document) => Some(Arc::clone(document)),
+                    Preview::Empty | Preview::Unbuilt => None,
+                })
     {
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,

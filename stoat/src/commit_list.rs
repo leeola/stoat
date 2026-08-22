@@ -77,9 +77,23 @@ pub(crate) struct PendingPreview {
 /// the same way. [`PendingPreview`] is the in-flight half of it.
 #[derive(Default)]
 pub(crate) struct PreviewCache {
-    sessions: HashMap<String, Arc<DiffDocument>>,
+    sessions: HashMap<String, Option<Arc<DiffDocument>>>,
     /// Cached shas, least recently used first, so eviction takes the front.
     recent: VecDeque<String>,
+}
+
+/// What [`PreviewCache`] knows about one commit's preview.
+pub(crate) enum Preview<'a> {
+    /// No build has finished for this commit, so a caller paints "loading".
+    Unbuilt,
+    /// A build finished and the commit changed nothing.
+    ///
+    /// Distinct from [`Self::Unbuilt`] because it is a final answer. A caller
+    /// that treats it as "still loading" waits forever, and a pump that does
+    /// so asks for the same build on every pass.
+    Empty,
+    /// The built diff.
+    Built(&'a Arc<DiffDocument>),
 }
 
 impl PreviewCache {
@@ -99,22 +113,38 @@ impl PreviewCache {
         true
     }
 
-    /// The session built for `sha`, without counting as a use.
+    /// What is known about `sha`'s preview, without counting as a use.
     ///
     /// Render reads this per frame for the selected commit alone, which would
     /// say nothing [`Self::mark_used`] has not already said for that same sha.
-    pub(crate) fn get(&self, sha: &str) -> Option<&Arc<DiffDocument>> {
-        self.sessions.get(sha)
+    pub(crate) fn get(&self, sha: &str) -> Preview<'_> {
+        match self.sessions.get(sha) {
+            None => Preview::Unbuilt,
+            Some(None) => Preview::Empty,
+            Some(Some(document)) => Preview::Built(document),
+        }
     }
 
-    /// Cache `session` as the most recently used, dropping the least recently
-    /// used when that puts the cache over the cap.
-    pub(crate) fn insert(&mut self, sha: String, session: Arc<DiffDocument>) {
+    /// Cache a built `document` for `sha` as the most recently used, dropping
+    /// the least recently used when that puts the cache over the cap.
+    pub(crate) fn insert(&mut self, sha: String, document: Arc<DiffDocument>) {
+        self.record(sha, Some(document));
+    }
+
+    /// Record that `sha` was built and produced no diff.
+    ///
+    /// Held like any other answer, and evicted like one, so a commit that
+    /// changed nothing is asked about once rather than on every pump pass.
+    pub(crate) fn insert_empty(&mut self, sha: String) {
+        self.record(sha, None);
+    }
+
+    fn record(&mut self, sha: String, document: Option<Arc<DiffDocument>>) {
         if let Some(at) = self.recent.iter().position(|held| *held == sha) {
             self.recent.remove(at);
         }
         self.recent.push_back(sha.clone());
-        self.sessions.insert(sha, session);
+        self.sessions.insert(sha, document);
 
         while self.recent.len() > PREVIEW_CACHE_CAP {
             if let Some(oldest) = self.recent.pop_front() {
@@ -236,11 +266,15 @@ impl CommitListState {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut pending.task).poll(&mut cx) {
-            Poll::Ready(Some(session)) => {
-                self.preview_sessions.insert(pending.sha, Arc::new(session));
+            Poll::Ready(Some(document)) => {
+                self.preview_sessions
+                    .insert(pending.sha, Arc::new(document));
                 true
             },
-            Poll::Ready(None) => true,
+            Poll::Ready(None) => {
+                self.preview_sessions.insert_empty(pending.sha);
+                true
+            },
             Poll::Pending => {
                 self.pending_preview = Some(pending);
                 false
@@ -251,7 +285,7 @@ impl CommitListState {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewCache, PREVIEW_CACHE_CAP};
+    use super::{Preview, PreviewCache, PREVIEW_CACHE_CAP};
     use crate::{
         app::Stoat,
         review_session::DiffDocument,
@@ -275,7 +309,9 @@ mod tests {
     }
 
     fn held(cache: &PreviewCache, shas: &[&str]) -> Vec<bool> {
-        shas.iter().map(|sha| cache.get(sha).is_some()).collect()
+        shas.iter()
+            .map(|sha| matches!(cache.get(sha), Preview::Built(_)))
+            .collect()
     }
 
     #[test]
@@ -493,7 +529,7 @@ mod tests {
         assert_eq!(state.selected, 1);
         let sha = state.commits[state.selected].sha.clone();
         assert!(
-            state.preview_sessions.get(&sha).is_some(),
+            matches!(state.preview_sessions.get(&sha), Preview::Built(_)),
             "preview for selected sha must be cached after settle"
         );
         assert!(
