@@ -35,6 +35,7 @@ use pool::{
 use popover::decode_popover;
 use scale::decode_scale;
 use scroll_region::decode_scroll_region;
+use sketch::decode_sketch;
 use terminal_control::{decode_font_step, decode_hello, decode_zoom_capture};
 use text_run::decode_text_run;
 use window::{decode_window_close, decode_window_focus, decode_window_open};
@@ -50,6 +51,7 @@ pub mod pool;
 pub mod popover;
 pub mod scale;
 pub mod scroll_region;
+pub mod sketch;
 pub mod terminal_control;
 pub mod text_run;
 pub mod window;
@@ -80,6 +82,10 @@ pub use popover::{
 };
 pub use scale::{encode_scale, encode_scale_into, ScaleCommand};
 pub use scroll_region::{encode_scroll_region, encode_scroll_region_into, ScrollRegionCommand};
+pub use sketch::{
+    encode_sketch, encode_sketch_into, SketchBounds, SketchCommand, SketchEasing, SketchEnd,
+    SketchFill, SketchFillStyle, SketchPhase, SketchShape, SketchSide, SketchStyle, SketchTiming,
+};
 pub use terminal_control::{
     decode_ident_reply, encode_config_reload, encode_config_reload_into, encode_font_step,
     encode_font_step_into, encode_hello, encode_hello_into, encode_ident_reply,
@@ -130,6 +136,8 @@ pub enum Command {
     TextRunEnd,
     Bar(BarCommand),
     Polyline(PolylineCommand),
+    /// Stroke a hand-drawn mark the terminal generates and animates itself.
+    Sketch(SketchCommand),
     LineLayout(LineLayoutCommand),
     /// Open the page-fill redirect onto a recycled pool slot.
     ///
@@ -372,6 +380,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::TextRunEnd => encode_text_run_end_into(out),
         Command::Bar(c) => encode_bar_into(out, c),
         Command::Polyline(c) => encode_polyline_into(out, c),
+        Command::Sketch(c) => encode_sketch_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
         Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
         Command::FillEnd => encode_fill_end_into(out),
@@ -420,6 +429,9 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "text_run_end" => Some(Command::TextRunEnd),
         "bar" => decode_bar(args).map(Command::Bar),
         "polyline" => decode_polyline(args).map(Command::Polyline),
+        "sketch_ellipse" | "sketch_rect" | "sketch_line" => {
+            decode_sketch(sub, args).map(Command::Sketch)
+        },
         "line_layout" => decode_line_layout(args).map(Command::LineLayout),
         "fill" => decode_fill(args).map(Command::Fill),
         "fill_end" => Some(Command::FillEnd),
@@ -760,6 +772,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
+            follow: 0,
+            anchor: None,
             text: "src/main.rs".to_owned(),
         };
 
@@ -848,6 +862,8 @@ mod tests {
                 scale: 16,
                 color: [1, 2, 3],
                 bg: None,
+                follow: 0,
+                anchor: None,
                 text: (),
             },
             |_| {},
@@ -861,6 +877,8 @@ mod tests {
                     scale: 16,
                     color: [1, 2, 3],
                     bg: None,
+                    follow: 0,
+                    anchor: None,
                     text: String::new(),
                 }),
                 Command::TextRunEnd
@@ -878,6 +896,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
+            follow: 0,
+            anchor: None,
             text: "src/main.rs".to_owned(),
         };
         let mut scoped = Vec::new();
@@ -929,6 +949,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
+            follow: 0,
+            anchor: None,
             text,
         }
     }

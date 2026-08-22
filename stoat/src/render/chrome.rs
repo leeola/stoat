@@ -564,6 +564,8 @@ mod tests {
             scale: 256,
             color: [1, 2, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: " hi ".to_owned(),
         });
         assert_eq!(scene.buffer(), &[panel, title].concat());
@@ -821,6 +823,8 @@ mod tests {
                 scale: 218,
                 color: [1, 2, 3],
                 bg: Some([9, 9, 9]),
+                follow: 0,
+                anchor: None,
                 text: "hi".to_owned(),
             })
         );

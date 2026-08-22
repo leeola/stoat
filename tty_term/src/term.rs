@@ -1459,6 +1459,10 @@ impl Terminal {
             | Command::ScrollRegion(_)
             | Command::Icon(_)
             | Command::LineLayout(_) => self.stage_or_apply(command),
+            // FIXME: Deferring sketch state. The decoder builds the command,
+            // but nothing here holds one, so a sketch is dropped as an
+            // older terminal drops any command it has no state for.
+            Command::Sketch(_) => {},
             Command::Popover(popover) => self.begin_capture(CaptureTarget::Popover(popover)),
             Command::PopoverEnd => self.commit_capture(),
             Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
@@ -1864,6 +1868,10 @@ impl Terminal {
     /// feed time in [`Self::apply_command`] and never route here.
     fn apply_decoration(&mut self, command: Command) {
         match command {
+            // FIXME: Deferring sketch state. Nothing routes one here, since
+            // `apply_command` drops it before staging, and there is no list to
+            // push it onto.
+            Command::Sketch(_) => {},
             Command::Border(border) => {
                 if push_capped(&mut self.borders, border, &mut self.warned_decoration_cap) {
                     self.decorations_dirty.borders = true;
@@ -4771,6 +4779,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([0, 0, 0]),
+            follow: 0,
+            anchor: None,
             text: "x".to_owned(),
         }));
         stream.extend_from_slice(&encode_bar(&BarCommand {
@@ -5091,6 +5101,8 @@ mod tests {
             scale: 192,
             color: [150, 160, 170],
             bg: Some([24, 26, 32]),
+            follow: 0,
+            anchor: None,
             text: "42".to_owned(),
         });
 
@@ -5125,6 +5137,8 @@ mod tests {
                 scale: 256,
                 color: [1, 2, 3],
                 bg: None,
+                follow: 0,
+                anchor: None,
                 text: text.to_owned(),
             })
         };
@@ -5154,6 +5168,8 @@ mod tests {
             scale: 256,
             color: [1, 2, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "ok".to_owned(),
         });
         // Replace the payload's second byte with a lone continuation byte,
@@ -5510,6 +5526,8 @@ mod tests {
             scale: 256,
             color: [150, 160, 170],
             bg: Some([0, 0, 0]),
+            follow: 0,
+            anchor: None,
             text: "4".to_owned(),
         });
         let bar = encode_bar(&BarCommand {
@@ -5618,6 +5636,8 @@ mod tests {
             scale: 256,
             color: [150, 160, 170],
             bg: Some([0, 0, 0]),
+            follow: 0,
+            anchor: None,
             text: "4".to_owned(),
         });
 
@@ -5759,6 +5779,8 @@ mod tests {
             scale: 160,
             color: [200, 200, 200],
             bg: Some([0, 0, 0]),
+            follow: 0,
+            anchor: None,
             text: text.to_owned(),
         })
     }
@@ -6546,6 +6568,8 @@ mod tests {
             scale: 160,
             color: [150, 160, 170],
             bg: Some([24, 26, 32]),
+            follow: 0,
+            anchor: None,
             text: "42".to_owned(),
         }));
         stream.extend_from_slice(&encode_fill_end());
@@ -6599,6 +6623,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([0, 0, 0]),
+            follow: 0,
+            anchor: None,
             text: "aa".to_owned(),
         }));
         stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
@@ -6608,6 +6634,8 @@ mod tests {
             scale: 160,
             color: [4, 5, 6],
             bg: Some([0, 0, 0]),
+            follow: 0,
+            anchor: None,
             text: "bb".to_owned(),
         }));
         stream.extend_from_slice(&encode_fill_end());

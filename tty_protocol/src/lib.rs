@@ -51,9 +51,15 @@
 /// streams an image to a terminal that will not draw it has sent a great many
 /// bytes for nothing.
 ///
+/// Version 3 strokes the `sketch_ellipse`, `sketch_rect`, and `sketch_line`
+/// marks, and reads the `follow` and anchor fields a text run appends. An
+/// emitter talking to an older terminal falls back to whatever presentation it
+/// had before the marks existed, since a terminal that predates them ignores
+/// those frames whole.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub mod command;
 pub mod detect;

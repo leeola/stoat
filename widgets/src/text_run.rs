@@ -65,6 +65,8 @@ impl StatefulWidget for TextRun<'_> {
                 scale: self.scale,
                 color: self.color,
                 bg: self.bg,
+                follow: 0,
+                anchor: None,
                 text: self.text,
             },
         );
@@ -99,6 +101,8 @@ mod tests {
             scale: 160,
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
+            follow: 0,
+            anchor: None,
             text: "42".to_owned(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
@@ -125,6 +129,8 @@ mod tests {
             scale: 160,
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
+            follow: 0,
+            anchor: None,
             text: "42".to_owned(),
         });
         assert_eq!(

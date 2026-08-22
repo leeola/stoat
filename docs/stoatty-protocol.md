@@ -113,6 +113,11 @@ A **persistent** command updates state the terminal keeps. A `reset` in front of
 it is wasteful or destructive: a re-declared `scroll_region` whose region was
 just cleared restarts its eased scroll from nothing rather than gliding.
 
+A `sketch_*` mark is a decoration and so is re-declared every frame, but its
+animation is not restarted by that. The terminal latches a mark's timing at the
+first sight of its `id`, and a re-declaration under the same id changes only
+geometry and style. Minting a new id is what starts a new draw.
+
 ## Command table
 
 Lane is `D` for decoration (cleared by `reset`), `P` for persistent, `C` for a
@@ -126,10 +131,13 @@ session control. "Head" is the fixed prefix of the first argument.
 | `popover` | D | 23 B | + streamed content, closed by `popover_end` |
 | `popover_end` | D | -- | Commits the capture |
 | `icon` | D | 9 B, 13 B with offset | Renderer-drawn status sigil |
-| `text_run` | D | 12 B legacy, 13 B with bg flag | + streamed text, closed by `text_run_end` |
+| `text_run` | D | 12 B legacy, 13 B with bg flag, 26 B with follow and anchor | + streamed text, closed by `text_run_end` |
 | `text_run_end` | D | -- | Commits the capture |
 | `bar` | D | 11 B | Thin rect in sixteenths of a cell |
 | `polyline` | D | 5 B + 4 B per point | Max 12283 points |
+| `sketch_ellipse` | D | 29 B, 37 B with anchor | Hand-drawn ellipse the terminal generates |
+| `sketch_rect` | D | 36 B, 44 B with anchor | Hand-drawn box, optionally filled |
+| `sketch_line` | D | 37 B, 45 B with anchor | Hand-drawn connector between points or components |
 | `line_layout` | D | 2 B per line | Max 24567 lines, replaced whole |
 | `minimap` | D | 29 B + palette arg | Strip declaration; its content store is persistent |
 | `scroll_region` | D | 10 B | Eased by the change between declarations |

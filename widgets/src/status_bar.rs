@@ -238,6 +238,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "ab".to_owned(),
         });
         let second_bar = encode_bar(&BarCommand {
@@ -253,6 +255,8 @@ mod tests {
             scale: 160,
             color: [7, 8, 9],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "c".to_owned(),
         });
         assert!(
@@ -307,6 +311,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "xy".to_owned(),
         });
         assert!(
@@ -357,6 +363,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "ab".to_owned(),
         });
         let cut = encode_text_run(&TextRunCommand {
@@ -365,6 +373,8 @@ mod tests {
             scale: 160,
             color: [7, 8, 9],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "LO".to_owned(),
         });
         let cut_bar = encode_bar(&BarCommand {
@@ -380,6 +390,8 @@ mod tests {
             scale: 160,
             color: [7, 8, 9],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "LONGISH".to_owned(),
         });
         let overrun_bar = encode_bar(&BarCommand {
@@ -444,6 +456,8 @@ mod tests {
             scale: 160,
             color: [3, 3, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "R".to_owned(),
         });
         let dropped_bar = encode_bar(&BarCommand {
@@ -597,6 +611,8 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "ab".to_owned(),
         });
         let separator = encode_bar(&BarCommand {

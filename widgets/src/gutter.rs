@@ -527,6 +527,8 @@ mod tests {
             scale: 160,
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
+            follow: 0,
+            anchor: None,
             text: "3".to_owned(),
         });
         let second_number = encode_text_run(&TextRunCommand {
@@ -535,6 +537,8 @@ mod tests {
             scale: 160,
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
+            follow: 0,
+            anchor: None,
             text: "2".to_owned(),
         });
         assert!(
