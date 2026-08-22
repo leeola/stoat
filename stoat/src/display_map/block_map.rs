@@ -5,11 +5,7 @@ use super::{
     wrap_map::{WrapPoint, WrapPointCursor, WrapSnapshot},
     Companion, DisplayMapId,
 };
-use crate::{
-    buffer::BufferId,
-    diff_map::DiffHunkStatus,
-    multi_buffer::{ExcerptId, ExcerptInfo, MultiBufferSnapshot},
-};
+use crate::{diff_map::DiffHunkStatus, multi_buffer::MultiBufferSnapshot};
 use ratatui::text::Line;
 use std::{
     cmp::Ordering,
@@ -91,9 +87,6 @@ pub struct BlockContext<'a> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BlockId {
     Custom(CustomBlockId),
-    ExcerptBoundary(ExcerptId),
-    BufferHeader(ExcerptId),
-    FoldedBuffer(ExcerptId),
     Spacer(SpacerId),
 }
 
@@ -258,18 +251,6 @@ impl std::fmt::Debug for CustomBlock {
 #[derive(Clone, Debug)]
 pub enum Block {
     Custom(Arc<CustomBlock>),
-    FoldedBuffer {
-        first_excerpt: ExcerptInfo,
-        height: u32,
-    },
-    ExcerptBoundary {
-        excerpt: ExcerptInfo,
-        height: u32,
-    },
-    BufferHeader {
-        excerpt: ExcerptInfo,
-        height: u32,
-    },
     Spacer {
         id: SpacerId,
         height: u32,
@@ -281,10 +262,7 @@ impl Block {
     pub fn height(&self) -> u32 {
         match self {
             Block::Custom(b) => b.height.unwrap_or(0),
-            Block::FoldedBuffer { height, .. }
-            | Block::ExcerptBoundary { height, .. }
-            | Block::BufferHeader { height, .. }
-            | Block::Spacer { height, .. } => *height,
+            Block::Spacer { height, .. } => *height,
         }
     }
 
@@ -303,11 +281,6 @@ impl Block {
         BlockContext {
             block_id: match self {
                 Block::Custom(b) => BlockId::Custom(b.id),
-                Block::FoldedBuffer { first_excerpt, .. } => {
-                    BlockId::FoldedBuffer(first_excerpt.id)
-                },
-                Block::ExcerptBoundary { excerpt, .. } => BlockId::ExcerptBoundary(excerpt.id),
-                Block::BufferHeader { excerpt, .. } => BlockId::BufferHeader(excerpt.id),
                 Block::Spacer { id, .. } => BlockId::Spacer(*id),
             },
             max_width: 256,
@@ -370,8 +343,6 @@ impl Block {
     fn placement(&self) -> BlockPlacement {
         match self {
             Block::Custom(b) => b.placement,
-            Block::FoldedBuffer { .. } => BlockPlacement::Replace { start: 0, end: 0 },
-            Block::ExcerptBoundary { .. } | Block::BufferHeader { .. } => BlockPlacement::Above(0),
             Block::Spacer { is_below, .. } => {
                 if *is_below {
                     BlockPlacement::Below(0)
@@ -385,7 +356,6 @@ impl Block {
     fn is_replacement(&self) -> bool {
         match self {
             Block::Custom(b) => matches!(b.placement, BlockPlacement::Replace { .. }),
-            Block::FoldedBuffer { .. } => true,
             _ => false,
         }
     }
@@ -397,7 +367,6 @@ impl Block {
                 BlockPlacement::Below(_) | BlockPlacement::Near(_)
             ),
             Block::Spacer { is_below, .. } => *is_below,
-            _ => false,
         }
     }
 }
@@ -628,10 +597,6 @@ pub struct BlockMap {
     /// which is the direction that matters.
     version: u64,
     deferred_edits: Patch<u32>,
-    buffer_header_height: u32,
-    excerpt_header_height: u32,
-    folded_buffers: HashSet<BufferId>,
-    buffers_with_disabled_headers: HashSet<BufferId>,
     carry_scratch: CarryScratch,
     /// Holds the block list [`BlockMap::sync`] hands to the transform build.
     ///
@@ -679,10 +644,6 @@ impl BlockMap {
             touched_placements: Vec::new(),
             version: 0,
             deferred_edits: Patch::empty(),
-            buffer_header_height: 1,
-            excerpt_header_height: 1,
-            folded_buffers: HashSet::new(),
-            buffers_with_disabled_headers: HashSet::new(),
             carry_scratch: CarryScratch::default(),
             blocks_scratch: Vec::new(),
         }
@@ -855,25 +816,6 @@ impl BlockMap {
         );
     }
 
-    pub fn folded_buffers(&self) -> &HashSet<BufferId> {
-        &self.folded_buffers
-    }
-
-    pub fn fold_buffer(&mut self, buffer_id: BufferId) {
-        self.folded_buffers.insert(buffer_id);
-        self.blocks_dirty = true;
-    }
-
-    pub fn unfold_buffer(&mut self, buffer_id: BufferId) {
-        self.folded_buffers.remove(&buffer_id);
-        self.blocks_dirty = true;
-    }
-
-    pub fn disable_header_for_buffer(&mut self, buffer_id: BufferId) {
-        self.buffers_with_disabled_headers.insert(buffer_id);
-        self.blocks_dirty = true;
-    }
-
     /// `buffer_row_edits` restates the same change as `wrap_edits` in buffer
     /// rows, which is the space custom block placements live in.
     pub fn sync(
@@ -980,18 +922,8 @@ impl BlockMap {
 
         let wrap_line_count = wrap_snapshot.line_count();
 
-        let buffer_snapshot = wrap_snapshot
-            .tab_snapshot()
-            .fold_snapshot()
-            .inlay_snapshot()
-            .buffer_snapshot();
         let mut blocks = std::mem::take(&mut self.blocks_scratch);
         blocks.extend(self.custom_blocks.iter().map(|b| Block::Custom(b.clone())));
-        blocks.extend(
-            self.header_and_footer_blocks(buffer_snapshot)
-                .into_iter()
-                .map(|(_placement, block)| block),
-        );
         if let Some(ref companion_view) = companion_view {
             blocks.extend(
                 self.spacer_blocks(&wrap_snapshot, companion_view)
@@ -1037,58 +969,6 @@ impl BlockMap {
         }
     }
 
-    fn header_and_footer_blocks(
-        &self,
-        buffer: &MultiBufferSnapshot,
-    ) -> Vec<(BlockPlacement, Block)> {
-        if !buffer.show_headers() {
-            return Vec::new();
-        }
-
-        let mut results = Vec::new();
-        for boundary in buffer.excerpt_boundaries_in_range(0..buffer.line_count()) {
-            if self
-                .buffers_with_disabled_headers
-                .contains(&boundary.next.buffer_id)
-            {
-                continue;
-            }
-
-            if boundary.starts_new_buffer() {
-                if self.folded_buffers.contains(&boundary.next.buffer_id) {
-                    results.push((
-                        BlockPlacement::Replace {
-                            start: boundary.row,
-                            end: boundary.row,
-                        },
-                        Block::FoldedBuffer {
-                            first_excerpt: boundary.next.clone(),
-                            height: self.buffer_header_height,
-                        },
-                    ));
-                } else {
-                    results.push((
-                        BlockPlacement::Above(boundary.row),
-                        Block::BufferHeader {
-                            excerpt: boundary.next,
-                            height: self.buffer_header_height,
-                        },
-                    ));
-                }
-            } else if boundary.prev.is_some() {
-                results.push((
-                    BlockPlacement::Above(boundary.row),
-                    Block::ExcerptBoundary {
-                        excerpt: boundary.next,
-                        height: self.excerpt_header_height,
-                    },
-                ));
-            }
-        }
-
-        results
-    }
-
     fn spacer_blocks(
         &self,
         wrap_snapshot: &WrapSnapshot,
@@ -1108,9 +988,7 @@ impl BlockMap {
             .buffer_snapshot();
 
         let convert_fn = companion.rows_to_companion(companion_view.display_map_id);
-        let excerpt_map = companion.excerpt_map(companion_view.display_map_id);
         let patches = convert_fn(
-            excerpt_map,
             companion_snapshot,
             our_snapshot,
             (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
@@ -1762,18 +1640,6 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
                     Ord::cmp(&a.priority, &b.priority).then_with(|| Ord::cmp(&a.id, &b.id))
                 },
                 (Block::Spacer { id: a, .. }, Block::Spacer { id: b, .. }) => Ord::cmp(a, b),
-                (
-                    Block::ExcerptBoundary { excerpt: a, .. }
-                    | Block::BufferHeader { excerpt: a, .. }
-                    | Block::FoldedBuffer {
-                        first_excerpt: a, ..
-                    },
-                    Block::ExcerptBoundary { excerpt: b, .. }
-                    | Block::BufferHeader { excerpt: b, .. }
-                    | Block::FoldedBuffer {
-                        first_excerpt: b, ..
-                    },
-                ) => Ord::cmp(&a.id, &b.id),
                 // Blocks of different kinds were already separated by rank.
                 _ => Ordering::Equal,
             })
@@ -1806,15 +1672,12 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
 /// Which kind of block goes first when two land on the same row with the same
 /// placement.
 ///
-/// Structural blocks rank ahead of decorative ones, so a header stays at the top
-/// of its excerpt whatever else was spliced onto the row.
+/// A spacer ranks ahead of a custom block, so the row a companion pane needs
+/// kept clear stays clear whatever else was spliced onto it.
 fn kind_rank(block: &Block) -> u8 {
     match block {
-        Block::FoldedBuffer { .. } => 0,
-        Block::BufferHeader { .. } => 1,
-        Block::ExcerptBoundary { .. } => 2,
-        Block::Spacer { .. } => 3,
-        Block::Custom(_) => 4,
+        Block::Spacer { .. } => 0,
+        Block::Custom(_) => 1,
     }
 }
 
@@ -2492,7 +2355,7 @@ mod tests {
     fn create_block_snapshot(content: &str, props: &[BlockProperties]) -> super::BlockSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -2510,7 +2373,7 @@ mod tests {
     fn block_map_over(content: &str) -> (BlockMap, Arc<super::WrapSnapshot>) {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -2597,7 +2460,7 @@ mod tests {
     ) -> super::BlockSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -3009,7 +2872,7 @@ mod tests {
     fn block_to_buffer_reverses_tabs() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "\thello");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -3102,7 +2965,7 @@ mod tests {
     fn create_wrap_snapshot(content: &str) -> Arc<super::WrapSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);

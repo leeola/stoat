@@ -14,7 +14,7 @@ use crate::{
     buffer::BufferId,
     diff_map::{DiffHunkStatus, DiffMap, TokenDetail},
     host::DiffStatus,
-    multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
+    multi_buffer::{MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{
     balancing_block, Block, BlockChunks, BlockContext, BlockId, BlockMap, BlockPlacement,
@@ -113,7 +113,6 @@ impl DisplayMapId {
 }
 
 pub type ConvertMultiBufferRows = fn(
-    excerpt_map: &HashMap<ExcerptId, ExcerptId>,
     companion_snapshot: &MultiBufferSnapshot,
     our_snapshot: &MultiBufferSnapshot,
     bounds: (std::ops::Bound<Point>, std::ops::Bound<Point>),
@@ -132,8 +131,6 @@ pub struct Companion {
     pub(crate) rhs_display_map_id: DisplayMapId,
     pub(crate) rhs_buffer_to_lhs_buffer: HashMap<BufferId, BufferId>,
     pub(crate) lhs_buffer_to_rhs_buffer: HashMap<BufferId, BufferId>,
-    pub(crate) rhs_excerpt_to_lhs_excerpt: HashMap<ExcerptId, ExcerptId>,
-    pub(crate) lhs_excerpt_to_rhs_excerpt: HashMap<ExcerptId, ExcerptId>,
     pub(crate) rhs_rows_to_lhs_rows: ConvertMultiBufferRows,
     pub(crate) lhs_rows_to_rhs_rows: ConvertMultiBufferRows,
     pub(crate) rhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
@@ -144,14 +141,6 @@ pub struct Companion {
 impl Companion {
     fn is_rhs(&self, id: DisplayMapId) -> bool {
         self.rhs_display_map_id == id
-    }
-
-    fn excerpt_map(&self, id: DisplayMapId) -> &HashMap<ExcerptId, ExcerptId> {
-        if self.is_rhs(id) {
-            &self.rhs_excerpt_to_lhs_excerpt
-        } else {
-            &self.lhs_excerpt_to_rhs_excerpt
-        }
     }
 
     fn rows_to_companion(&self, id: DisplayMapId) -> ConvertMultiBufferRows {
@@ -170,9 +159,7 @@ impl Companion {
         point: Point,
     ) -> Range<Point> {
         let convert_fn = self.rows_to_companion(display_map_id);
-        let excerpt_map = self.excerpt_map(display_map_id);
         let patches = convert_fn(
-            excerpt_map,
             companion_snapshot,
             our_snapshot,
             (
@@ -243,9 +230,8 @@ pub struct WrapSync {
     /// it how far an edit moved them, and by the time the wrap layer has run the
     /// buffer patch is gone.
     pub buffer_row_edits: Patch<u32>,
-    /// The buffer the whole sync ran against. Building another would rebuild the
-    /// excerpt tree against the live buffers to arrive at the same answer, this
-    /// sync leaving the multi-buffer untouched.
+    /// The buffer the whole sync ran against. Building another would read the
+    /// live buffer for the same answer, this sync leaving it untouched.
     pub buffer_snapshot: MultiBufferSnapshot,
     /// The buffer edits the sync computed, spanning from [`Self::since_version`]
     /// to the buffer's version now.
@@ -438,10 +424,6 @@ impl DisplayMap {
         self.pair_modified_hunks = pair;
         self.cached_snapshot = None;
         self.settings_generation += 1;
-    }
-
-    pub fn folded_buffers(&self) -> &std::collections::HashSet<BufferId> {
-        self.block_map.folded_buffers()
     }
 
     pub fn set_companion(&mut self, companion: Option<Companion>) {
@@ -1723,12 +1705,11 @@ mod tests {
     fn create_display_map(content: &str) -> DisplayMap {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         DisplayMap::new(multi_buffer, test_executor(), crate::test_notify())
     }
 
     fn no_companion_rows(
-        _: &std::collections::HashMap<super::ExcerptId, super::ExcerptId>,
         _: &crate::multi_buffer::MultiBufferSnapshot,
         _: &crate::multi_buffer::MultiBufferSnapshot,
         _: (std::ops::Bound<Point>, std::ops::Bound<Point>),
@@ -1741,8 +1722,6 @@ mod tests {
             rhs_display_map_id: super::DisplayMapId::next(),
             rhs_buffer_to_lhs_buffer: std::collections::HashMap::new(),
             lhs_buffer_to_rhs_buffer: std::collections::HashMap::new(),
-            rhs_excerpt_to_lhs_excerpt: std::collections::HashMap::new(),
-            lhs_excerpt_to_rhs_excerpt: std::collections::HashMap::new(),
             rhs_rows_to_lhs_rows: no_companion_rows,
             lhs_rows_to_rhs_rows: no_companion_rows,
             rhs_custom_block_to_balancing_block: std::collections::HashMap::new(),
@@ -1903,7 +1882,7 @@ mod tests {
         let mut buffer = TextBuffer::with_text(BufferId::new(0), content);
         buffer.diff_map = Some(diff_map);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.set_show_deleted_blocks(true);
         display_map
@@ -1940,7 +1919,7 @@ mod tests {
         let mut buffer = TextBuffer::with_text(BufferId::new(0), "line1\nline2");
         buffer.diff_map = Some(make_diff_with_deletion(0, base, 6..13, 1));
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.set_show_deleted_blocks(true);
 
@@ -1968,7 +1947,7 @@ mod tests {
         let mut buffer = TextBuffer::with_text(BufferId::new(0), "line1\nline2\nline3");
         buffer.diff_map = Some(make_diff_with_deletion(0, base, 6..13, 1));
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.set_show_deleted_blocks(true);
 
@@ -2011,7 +1990,7 @@ mod tests {
     fn crease_sync_tracks_only_buffer_edits() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut dm = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let range = {
@@ -2065,7 +2044,7 @@ mod tests {
     fn line_count_survives_successive_mid_buffer_inserts() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "aaaa\nbbbb\ncccc\ndddd\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let before = display_map.snapshot().line_count();
@@ -2112,7 +2091,7 @@ mod tests {
     fn a_repaint_that_changed_nothing_reuses_its_endpoints() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "let x = 1\nlet y = 2\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let mut cache = None;
@@ -2171,7 +2150,7 @@ mod tests {
         let text: String = (0..60).map(|i| format!("line{i}\n")).collect();
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
         let mut display_map = DisplayMap::new(
-            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            MultiBuffer::singleton(shared.clone()),
             test_executor(),
             crate::test_notify(),
         );
@@ -2269,14 +2248,14 @@ mod tests {
                 BufferId::new(0),
                 content,
             )));
-            let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+            let multi = MultiBuffer::singleton(shared);
             let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
             map.insert_blocks(blocks_at(shift));
             rows(&mut map)
         };
 
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.insert_blocks(blocks_at(0));
         assert_eq!(rows(&mut display_map), fresh(&text, 0), "before any edit");
@@ -2310,7 +2289,7 @@ mod tests {
     fn an_insert_at_the_buffer_end_adds_a_row() {
         let text: String = (0..5).map(|i| format!("line{i}\n")).collect();
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
         assert_eq!(
             map.snapshot().line_count(),
@@ -2321,7 +2300,7 @@ mod tests {
         let len = shared.read().expect("poisoned").rope().len();
         shared.write().expect("poisoned").edit(len..len, "zz\n");
 
-        let fresh_multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let fresh_multi = MultiBuffer::singleton(shared.clone());
         let mut fresh = DisplayMap::new(fresh_multi, test_executor(), crate::test_notify());
         assert_eq!(
             map.snapshot().line_count(),
@@ -2342,7 +2321,7 @@ mod tests {
     fn an_inlay_spliced_above_a_fold_leaves_it_folded() {
         let text: String = (0..30).map(|i| format!("line{i}\n")).collect();
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
 
         map.fold(vec![Point::new(5, 0)..Point::new(8, 0)]);
@@ -2375,7 +2354,7 @@ mod tests {
         };
 
         let fresh = |shared: &Arc<RwLock<TextBuffer>>| {
-            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi = MultiBuffer::singleton(shared.clone());
             let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
             fresh.fold(vec![Point::new(5, 0)..Point::new(8, 0)]);
             fresh.splice_inlays(
@@ -2405,7 +2384,7 @@ mod tests {
     fn a_fold_below_a_byte_neutral_row_merge_moves_up_a_row() {
         let text: String = (0..30).map(|i| format!("line{i} words\n")).collect();
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
 
         map.fold(vec![Point::new(15, 0)..Point::new(16, 0)]);
@@ -2437,7 +2416,7 @@ mod tests {
         };
 
         let fresh_rows = {
-            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi = MultiBuffer::singleton(shared.clone());
             let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
             fresh.fold(vec![Point::new(14, 0)..Point::new(15, 0)]);
             rows(&mut fresh)
@@ -2478,7 +2457,7 @@ mod tests {
         };
 
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
         map.insert_blocks(block());
         map.snapshot();
@@ -2494,7 +2473,7 @@ mod tests {
         }
 
         let fresh_rows = {
-            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi = MultiBuffer::singleton(shared.clone());
             let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
             fresh.insert_blocks(block());
             rows(&mut fresh)
@@ -2542,14 +2521,14 @@ mod tests {
                 BufferId::new(0),
                 content,
             )));
-            let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+            let multi = MultiBuffer::singleton(shared);
             let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
             map.insert_blocks(block());
             rows(&mut map)
         };
 
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.insert_blocks(block());
         assert_eq!(rows(&mut display_map), fresh(&text), "before any edit");
@@ -2574,7 +2553,7 @@ mod tests {
         let text: String = (0..20).map(|i| format!("line{i}\n")).collect();
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         display_map.insert_blocks(vec![BlockProperties::from_text(
@@ -2628,8 +2607,8 @@ mod tests {
         let text: String = (0..20).map(|i| format!("line{i}\n")).collect();
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
-        let rows = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
+        let rows = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         display_map.insert_blocks(vec![BlockProperties::from_text(
@@ -2701,7 +2680,7 @@ mod tests {
         let mut buffer = TextBuffer::with_text(BufferId::new(0), "line1\nline2");
         buffer.diff_map = Some(diff);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         let snapshot = display_map.snapshot();
 
@@ -2894,7 +2873,7 @@ mod tests {
                     fn gamma() { let z = 3; } and more text\n";
         let buffer = TextBuffer::with_text(BufferId::new(0), text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let hint_at = {
@@ -2995,7 +2974,7 @@ mod tests {
                     fn beta() { let y = 2; } trailing words to force a wrap\n";
         let buffer = TextBuffer::with_text(BufferId::new(0), text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let hint_at = {
@@ -3071,7 +3050,7 @@ mod tests {
 
         let buffer = TextBuffer::with_text(BufferId::new(0), "start\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, executor.clone(), redraw.clone());
         display_map.set_wrap_width(Some(30));
         let before = display_map.snapshot().max_point().row;
@@ -3106,7 +3085,7 @@ mod tests {
         let mut fresh = {
             let buffer = TextBuffer::with_text(BufferId::new(0), &format!("start\n{pasted}"));
             let shared = Arc::new(RwLock::new(buffer));
-            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+            let multi_buffer = MultiBuffer::singleton(shared);
             DisplayMap::new(multi_buffer, executor, crate::test_notify())
         };
         fresh.set_wrap_width(Some(30));
@@ -3133,7 +3112,7 @@ mod tests {
             .join("\n");
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         (
             scheduler,
             DisplayMap::new(multi_buffer, executor, crate::test_notify()),
@@ -3342,7 +3321,7 @@ mod tests {
             "fn alpha() {}\nfn beta() {}\n",
         )));
         let mut display_map = DisplayMap::new(
-            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            MultiBuffer::singleton(shared.clone()),
             test_executor(),
             crate::test_notify(),
         );
@@ -3528,7 +3507,7 @@ mod tests {
     fn inlay_survives_compaction() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let snap = display_map.multi_buffer.snapshot();
@@ -3561,7 +3540,7 @@ mod tests {
     fn mid_line_inlay_keeps_trailing_buffer_text() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "let x = 1\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let anchor = {
@@ -3595,7 +3574,7 @@ mod tests {
         let text: String = (0..200).map(|i| format!("let x{i:03} = {i}\n")).collect();
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.snapshot();
 
@@ -3637,7 +3616,7 @@ mod tests {
         let text: String = (0..200).map(|i| format!("let x{i:03} = {i}\n")).collect();
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.snapshot();
 
@@ -4145,7 +4124,7 @@ mod tests {
             "aaa\nbbb\nccc\nddd\n",
         )));
         let mut display_map = DisplayMap::new(
-            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            MultiBuffer::singleton(shared.clone()),
             test_executor(),
             crate::test_notify(),
         );
@@ -4206,7 +4185,7 @@ mod tests {
         let text = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\nfn delta() {}\nfn epsilon() {}\n";
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
         let mut display_map = DisplayMap::new(
-            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            MultiBuffer::singleton(shared.clone()),
             test_executor(),
             crate::test_notify(),
         );
@@ -4273,7 +4252,7 @@ mod tests {
             "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n",
         )));
         let mut display_map = DisplayMap::new(
-            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            MultiBuffer::singleton(shared.clone()),
             test_executor(),
             crate::test_notify(),
         );
@@ -4386,7 +4365,7 @@ mod tests {
             let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
 
             let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi = MultiBuffer::singleton(shared.clone());
             let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
 
             let wrap_width = match lcg(&mut state) % 3 {
@@ -4554,7 +4533,7 @@ mod tests {
                 };
 
                 let fresh_rows = {
-                    let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+                    let multi = MultiBuffer::singleton(shared.clone());
                     let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
                     fresh.set_wrap_width(wrap_width);
                     if !carried_folds.is_empty() {

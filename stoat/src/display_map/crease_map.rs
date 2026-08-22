@@ -593,7 +593,7 @@ mod tests {
     /// the shared buffer returned so a test can edit it.
     fn map_over(text: &str, ranges: &[Range<usize>]) -> (CreaseMap, SharedBuffer, MultiBuffer) {
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let snap = multi.snapshot();
 
         let mut map = CreaseMap::new();

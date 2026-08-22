@@ -1147,7 +1147,7 @@ mod tests {
             crate::test_notify(),
         ));
 
-        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let multi = MultiBuffer::singleton(buffer.clone());
         let multi_snap = multi.snapshot();
         let mut selections = SelectionsCollection::new();
         selections.insert_cursor(
@@ -1189,7 +1189,7 @@ mod tests {
             .expect("pane with editor view");
         let restored_bid = fresh.editors[restored_editor_id].buffer_id;
         let restored_buffer = fresh.buffers.get(restored_bid).expect("buffer missing");
-        let restored_multi = MultiBuffer::singleton(restored_bid, restored_buffer);
+        let restored_multi = MultiBuffer::singleton(restored_buffer);
         let restored_snap = restored_multi.snapshot();
         let offsets_after: Vec<usize> = fresh.editors[restored_editor_id]
             .selections
@@ -1269,7 +1269,7 @@ mod tests {
             exec.clone(),
             crate::test_notify(),
         ));
-        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let multi = MultiBuffer::singleton(buffer.clone());
         let multi_snap = multi.snapshot();
         let mut selections = SelectionsCollection::new();
         for offset in [3, OPS_COMPACT_THRESHOLD] {
@@ -1330,7 +1330,7 @@ mod tests {
             "the persisted log stays bounded across the restart"
         );
 
-        let restored_multi = MultiBuffer::singleton(restored_bid, restored_buffer);
+        let restored_multi = MultiBuffer::singleton(restored_buffer);
         let restored_snap = restored_multi.snapshot();
         let spans_after: Vec<(usize, usize)> = fresh.editors[restored_editor_id]
             .selections

@@ -1440,7 +1440,7 @@ mod tests {
     fn singleton(content: &str) -> MultiBuffer {
         let id = BufferId::new(0);
         let buffer = TextBuffer::with_text(id, content);
-        MultiBuffer::singleton(id, Arc::new(RwLock::new(buffer)))
+        MultiBuffer::singleton(Arc::new(RwLock::new(buffer)))
     }
 
     #[test]

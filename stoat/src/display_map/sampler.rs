@@ -167,7 +167,7 @@ pub(super) fn random_wrap_stack(seed: u64) -> (Sampler, Arc<WrapSnapshot>) {
         BufferId::new(0),
         &shape.text,
     )));
-    let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+    let multi_buffer = MultiBuffer::singleton(shared);
     let buffer_snapshot = multi_buffer.snapshot();
 
     let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
@@ -252,7 +252,7 @@ pub(super) fn random_display_map(seed: u64) -> DisplayMap {
         BufferId::new(0),
         &shape.text,
     )));
-    let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+    let multi_buffer = MultiBuffer::singleton(shared);
     let buffer_snapshot = multi_buffer.snapshot();
     let rope = buffer_snapshot.rope().clone();
     let buffer_rows = buffer_snapshot.line_count();

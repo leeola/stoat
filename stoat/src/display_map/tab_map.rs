@@ -1018,7 +1018,7 @@ mod tests {
     fn make_snapshot(content: &str) -> super::TabSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -1118,7 +1118,7 @@ mod tests {
     fn an_edit_inside_a_tabbed_line_invalidates_that_row() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "\tone\n\ttwo\n\tthree\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
@@ -1165,7 +1165,7 @@ mod tests {
     fn an_inserted_row_keeps_its_delta_in_the_emitted_edit() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "one\ntwo\nthree\n");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
@@ -1356,7 +1356,7 @@ mod tests {
         let tab_size = NonZeroU32::new(1 + sampler.below(4)).expect("nonzero");
 
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let rope = buffer_snapshot.rope();
         let offset = |sampler: &mut Sampler| {

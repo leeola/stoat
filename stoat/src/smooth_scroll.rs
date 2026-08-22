@@ -1179,7 +1179,7 @@ mod tests {
             text,
         ));
         let shared = Arc::new(RwLock::new(tb));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi = MultiBuffer::singleton(shared);
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let mut display_map = DisplayMap::new(multi, executor, crate::test_notify());
         display_map.set_show_deleted_blocks(true);
@@ -1515,7 +1515,7 @@ mod tests {
         tb.edit(0..0, "// header\n// header\n");
         let shared_buf = Arc::new(RwLock::new(tb));
 
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared_buf);
+        let multi = MultiBuffer::singleton(shared_buf);
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let mut display_map = DisplayMap::new(multi, executor, crate::test_notify());
         let snapshot = display_map.snapshot();

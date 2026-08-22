@@ -245,7 +245,7 @@ impl EditorState {
         executor: Executor,
         redraw: Arc<Notify>,
     ) -> Self {
-        let multi_buffer = MultiBuffer::singleton(buffer_id, buffer);
+        let multi_buffer = MultiBuffer::singleton(buffer);
         let mut selections = SelectionsCollection::new();
         selections.seed_cursor(&multi_buffer.snapshot());
         Self {

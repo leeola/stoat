@@ -333,10 +333,10 @@ mod tests {
 
         let path = PathBuf::from("/a");
         let other_id = stoat_text::BufferId::new(7);
-        let other = MultiBuffer::singleton(
+        let other = MultiBuffer::singleton(Arc::new(RwLock::new(TextBuffer::with_text(
             other_id,
-            Arc::new(RwLock::new(TextBuffer::with_text(other_id, "elsewhere\n"))),
-        )
+            "elsewhere\n",
+        ))))
         .snapshot();
 
         let snapshot = snapshot_over("alpha\nbravo\n");
@@ -376,7 +376,7 @@ mod tests {
         use std::sync::{Arc, RwLock};
         let id = stoat_text::BufferId::new(0);
         let buffer = TextBuffer::with_text(id, content);
-        MultiBuffer::singleton(id, Arc::new(RwLock::new(buffer))).snapshot()
+        MultiBuffer::singleton(Arc::new(RwLock::new(buffer))).snapshot()
     }
 
     /// A span anchored over `range` in `snapshot`, the way a publish against
@@ -594,7 +594,7 @@ mod tests {
         let path = PathBuf::from("/a");
         let id = stoat_text::BufferId::new(0);
         let buffer = Arc::new(RwLock::new(TextBuffer::with_text(id, "alpha\nbravo\n")));
-        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let multi = MultiBuffer::singleton(buffer.clone());
 
         // `bravo` is [6, 11), on the second line.
         let published = multi.snapshot();

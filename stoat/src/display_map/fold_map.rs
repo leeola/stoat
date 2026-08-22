@@ -2132,7 +2132,7 @@ mod tests {
     fn make_snapshot(content: &str) -> Arc<super::FoldSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -2150,7 +2150,7 @@ mod tests {
         let text = sampler.text(len);
 
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let rope = buffer_snapshot.rope();
         let offset = |sampler: &mut Sampler| {
@@ -2190,7 +2190,7 @@ mod tests {
     ) -> Arc<super::FoldSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -2220,7 +2220,7 @@ mod tests {
     ) -> (Arc<super::FoldSnapshot>, usize) {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let snap0 = multi_buffer.snapshot();
         let (mut inlay_map, inlay_snap0) = InlayMap::new(snap0.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snap0);
@@ -2251,7 +2251,7 @@ mod tests {
         let content = "aaaa\nbbbb\ncccc\ndddd\n";
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let snap0 = multi_buffer.snapshot();
 
         let fold_range = |snap: &crate::MultiBufferSnapshot| {
@@ -2321,7 +2321,7 @@ mod tests {
             BufferId::new(0),
             "abcdefgh\n",
         )));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi.snapshot();
 
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
@@ -2581,7 +2581,7 @@ mod tests {
     fn fold_then_unfold() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -2618,7 +2618,7 @@ mod tests {
     fn folded_row_geometry(placeholder: FoldPlaceholder) -> (u32, String, FoldPoint, InlayPoint) {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -2709,7 +2709,7 @@ mod tests {
                 .collect();
             let buffer = TextBuffer::with_text(BufferId::new(0), &text);
             let shared = Arc::new(RwLock::new(buffer));
-            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi_buffer = MultiBuffer::singleton(shared.clone());
 
             // A handful of folds at pseudo-random rows, kept disjoint so the
             // merge pass does not rewrite them out from under the comparison.
@@ -2789,7 +2789,7 @@ mod tests {
             .join("");
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -2844,7 +2844,7 @@ mod tests {
             .join("");
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
         fold_map.sync(inlay_snapshot, &Patch::empty(), None);
@@ -2939,7 +2939,7 @@ mod tests {
     fn overlapping_folds_merge() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -2975,7 +2975,7 @@ mod tests {
     fn overlapping_folds_measure_the_one_placeholder_they_paint() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -3019,7 +3019,7 @@ mod tests {
     fn a_fold_over_another_leaves_both_records_intact() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -3083,7 +3083,7 @@ mod tests {
 
             let text: String = (0..24).map(|i| format!("line{i} with words\n")).collect();
             let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
-            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi_buffer = MultiBuffer::singleton(shared.clone());
             let (mut inlay_map, mut inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
             let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
 
@@ -3163,7 +3163,7 @@ mod tests {
             BufferId::new(0),
             "fn a() {}\n",
         )));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
 
@@ -3264,7 +3264,7 @@ mod tests {
     fn fold_map_folds_in_range() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -3347,7 +3347,7 @@ mod tests {
     fn fold_stops_rendering_after_its_region_is_deleted() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3381,7 +3381,7 @@ mod tests {
     fn fold_preserved_after_adjacent_edit() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "aaabbbccc");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3408,7 +3408,7 @@ mod tests {
     fn fold_stops_rendering_when_its_endpoints_merge() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "abcXYZdef");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3442,7 +3442,7 @@ mod tests {
     fn undoing_the_delete_that_collapsed_a_fold_restores_it() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "abcXYZdef");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3489,7 +3489,7 @@ mod tests {
         // a fold that folded nothing costs that rebuild for no reason.
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3536,7 +3536,7 @@ mod tests {
             BufferId::new(0),
             "line0\nline1\nline2\n",
         )));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let buffer_snapshot = multi.snapshot();
         let at = |row: u32, col: u32| {
             buffer_snapshot
@@ -3586,7 +3586,7 @@ mod tests {
         // one a rebuild would produce.
         let text = "line0\nline1\nline2\n";
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let snap = multi.snapshot();
         let at = |row: u32, col: u32| {
             snap.rope()
@@ -3636,7 +3636,7 @@ mod tests {
         // can see.
         let text = "line0\nline1\nline2\n";
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
         let snap = multi.snapshot();
         let at = |row: u32, col: u32| {
             snap.rope()
@@ -3683,7 +3683,7 @@ mod tests {
         // just do not reach them, so the filter retains all of them.
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3713,7 +3713,7 @@ mod tests {
     fn fold_survives_edit_before() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
 
         let snap = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snap.clone());
@@ -3750,7 +3750,7 @@ mod tests {
             "let 名前 = 1\nfn 関数() {}\nlet x = 2\n終わり",
         );
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut inlay_map, inlay_snap) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snap);
@@ -3819,7 +3819,7 @@ mod tests {
     fn line_len_counts_inlay_text_on_a_folded_buffer() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "hello world\nsecond line");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut inlay_map, inlay_snap) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snap);
@@ -3909,7 +3909,7 @@ mod tests {
     fn fold_map_invalidates_on_inlay_splice() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut inlay_map, inlay_snap) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snap);
@@ -3934,7 +3934,7 @@ mod tests {
     fn the_first_fold_row_is_the_earliest_one_folded() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, unfolded) = FoldMap::new(inlay_snapshot.clone());
@@ -3975,7 +3975,7 @@ mod tests {
     fn non_overlapping_folds_no_merge() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());

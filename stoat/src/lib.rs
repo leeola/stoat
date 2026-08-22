@@ -114,10 +114,7 @@ pub use display_map::{
     WrapPoint, WrapSnapshot,
 };
 pub use host::DiffStatus;
-pub use multi_buffer::{
-    ExcerptBoundary, ExcerptId, ExcerptInfo, MultiBuffer, MultiBufferAnchor, MultiBufferPoint,
-    MultiBufferRow, MultiBufferSnapshot,
-};
+pub use multi_buffer::{MultiBuffer, MultiBufferSnapshot};
 pub use pane::{
     Axis, Direction, DockId, DockPanel, DockSide, DockVisibility, FocusTarget, Pane, PaneId,
     PaneTree, Placement, View,

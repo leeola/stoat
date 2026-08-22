@@ -1838,7 +1838,7 @@ mod tests {
             BufferId::new(0),
             "l0\nl1\nl2\nl3\nl4\n",
         )));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
 
         let mut dm = DiffMap::from_hunks([added_hunk(3..4)], None);
         dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
@@ -1881,7 +1881,7 @@ mod tests {
             BufferId::new(0),
             "l0\nl1\nl2\nl3\n",
         )));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
 
         let mut dm = DiffMap::from_hunks([added_hunk(2..3)], None);
         dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
@@ -1921,7 +1921,7 @@ mod tests {
 
         // The base holds "a\n" and the buffer appended "b" without a newline.
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
 
         let mut dm = DiffMap::from_hunks([added_hunk(1..2)], None);
         dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
@@ -1953,7 +1953,7 @@ mod tests {
             BufferId::new(0),
             "l0\nl1\nl2\nl3\nl4\nl5\n",
         )));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
 
         let moved = DiffHunk {
             status: DiffHunkStatus::Moved,
@@ -2002,7 +2002,7 @@ mod tests {
         // The base held "a\nb\nc" and the buffer dropped "c". The seam sits at
         // row 2, one past the buffer's last row.
         let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi = MultiBuffer::singleton(shared.clone());
 
         let mut dm = DiffMap::from_hunks([deleted_hunk(1, 4..6)], None);
         dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
@@ -2718,7 +2718,7 @@ mod tests {
         };
         let map = DiffMap::from_hunks(hunks, Some(Arc::new(text.to_string())));
         let tb = TextBuffer::with_text(BufferId::new(0), text);
-        let multi = MultiBuffer::singleton(BufferId::new(0), Arc::new(std::sync::RwLock::new(tb)));
+        let multi = MultiBuffer::singleton(Arc::new(std::sync::RwLock::new(tb)));
         let snapshot = multi.snapshot();
         let live = map.live_hunks(&snapshot);
         rows.map(|row| live.gutter_mark_for_line(row).map(|(status, _)| status))
@@ -2747,7 +2747,7 @@ mod tests {
         };
         let map = DiffMap::from_hunks(hunks, Some(Arc::new(text.to_string())));
         let tb = TextBuffer::with_text(BufferId::new(0), text);
-        let multi = MultiBuffer::singleton(BufferId::new(0), Arc::new(std::sync::RwLock::new(tb)));
+        let multi = MultiBuffer::singleton(Arc::new(std::sync::RwLock::new(tb)));
         map.live_hunks(&multi.snapshot()).change_stops()
     }
 

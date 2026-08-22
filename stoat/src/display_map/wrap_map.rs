@@ -1691,7 +1691,7 @@ mod tests {
     fn make_snapshot(content: &str, wrap_width: Option<u32>) -> Arc<super::WrapSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -1715,7 +1715,7 @@ mod tests {
     ) -> Arc<super::WrapSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
@@ -2168,7 +2168,7 @@ mod tests {
     ) -> (WrapMap, Arc<super::WrapSnapshot>, MultiBuffer) {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
@@ -2579,7 +2579,7 @@ mod tests {
             .collect();
         let buffer = TextBuffer::with_text(BufferId::new(0), &content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);

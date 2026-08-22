@@ -1241,7 +1241,7 @@ mod tests {
     fn make_snapshot(content: &str) -> Arc<super::InlaySnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, snapshot) = InlayMap::new(buffer_snapshot);
         snapshot
@@ -1292,7 +1292,7 @@ mod tests {
     ) -> Arc<super::InlaySnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
         let anchored_inlays = inlays
@@ -1420,7 +1420,7 @@ mod tests {
     fn splice_add_and_remove() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
 
@@ -1449,7 +1449,7 @@ mod tests {
     fn splicing_keeps_the_inlay_set_ordered() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "0123456789\nabcdefghij");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
 
@@ -1506,7 +1506,7 @@ mod tests {
             BufferId::new(0),
             "line0\nline1\n",
         )));
-        let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi.snapshot();
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
 
@@ -1549,7 +1549,7 @@ mod tests {
         let text: String = (0..200).map(|i| format!("line{i}\n")).collect();
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
         map.sync(buffer_snapshot.clone(), &Patch::empty());
@@ -1596,7 +1596,7 @@ mod tests {
             BufferId::new(0),
             "let x = 5;",
         )));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let before = multi_buffer.snapshot();
 
         let hint = (
@@ -1631,7 +1631,7 @@ mod tests {
     fn a_spliced_sync_agrees_with_a_full_rebuild() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "alpha beta\ngamma delta\nepsilon");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let multi_buffer = MultiBuffer::singleton(shared);
         let buffer_snapshot = multi_buffer.snapshot();
 
         let hint = |row: u32, column: u32, text: &str| {
@@ -1798,7 +1798,7 @@ mod tests {
     fn inlay_survives_edit() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
         let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let multi_buffer = MultiBuffer::singleton(shared.clone());
         let snap = multi_buffer.snapshot();
         let (mut map, _) = InlayMap::new(snap.clone());
 
@@ -2036,7 +2036,7 @@ mod tests {
 
         for (text, range, insert, want_old, want_new, what) in cases {
             let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
-            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let multi_buffer = MultiBuffer::singleton(shared.clone());
             let (mut map, _) = InlayMap::new(multi_buffer.snapshot());
 
             let before = multi_buffer.snapshot();
