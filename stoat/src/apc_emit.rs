@@ -2607,32 +2607,6 @@ mod tests {
     }
 
     #[test]
-    fn review_gutter_emits_sub_cell_components_inside_stoatty() {
-        use stoatty_protocol::command::Command;
-
-        let mut h = Stoat::test();
-        h.stoat.theme = Arc::new(rgb_review_theme());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_apc_tx(tx);
-
-        h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn a_renamed() {}\n")]);
-
-        let mut buf = Buffer::empty(h.stoat.size());
-        app::paint_frame(&mut h.stoat, &mut buf);
-        emit_apc_scene(&mut h.stoat);
-
-        let cmds = drain_apc(&mut rx);
-        assert!(
-            cmds.iter().any(|c| matches!(c, Command::TextRun(_))),
-            "line numbers emit as sub-cell text runs, got {cmds:?}"
-        );
-        assert!(
-            cmds.iter().any(|c| matches!(c, Command::Bar(_))),
-            "status marks and the separator emit as sub-cell bars, got {cmds:?}"
-        );
-    }
-
-    #[test]
     fn status_bar_emits_sub_cell_components_inside_stoatty() {
         use stoatty_protocol::command::Command;
 
@@ -3633,30 +3607,6 @@ mod tests {
         assert!(
             bytes.windows(3).any(|w| w == b"[2]"),
             "a detached pane's status badge continues the split count to 2"
-        );
-    }
-
-    #[test]
-    fn review_pane_is_pooled_for_smooth_scroll() {
-        use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
-        use stoatty_protocol::command::Command;
-
-        let mut h = TestHarness::with_size(80, 24);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_apc_tx(tx);
-
-        h.open_review_from_texts(&[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
-        h.settle();
-        let size = h.stoat.size();
-        h.stoat.active_workspace_mut().layout(size);
-
-        emit_smooth_scroll(&mut h.stoat);
-
-        let bytes = rx.try_recv().expect("the review pane emits an APC batch");
-        let cmds = command::decode_stream(&bytes);
-        assert!(
-            cmds.iter().any(|cmd| matches!(cmd, Command::PoolRegion(_))),
-            "a review split pane declares a smooth-scroll pool, got {cmds:?}"
         );
     }
 

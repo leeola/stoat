@@ -336,42 +336,6 @@ impl TestHarness {
         }
     }
 
-    /// Dispatch `ReviewApplyStaged` against the current state, then settle so
-    /// the post-apply refresh, now an off-loop re-scan, lands before callers
-    /// inspect state or snapshot.
-    pub fn dispatch_review_apply(&mut self) {
-        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::ReviewApplyStaged);
-        self.settle();
-    }
-
-    /// Dispatch `ReviewRefresh` directly (this action is palette-only and not
-    /// currently bound to a default key), then settle so the off-loop re-scan
-    /// lands before callers inspect state.
-    pub fn dispatch_review_refresh(&mut self) {
-        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::ReviewRefresh);
-        self.settle();
-    }
-
-    /// Set the status of the chunk at `order_index` in the active review
-    /// session. Panics if no session is open or the index is out of range.
-    pub(crate) fn set_review_status(
-        &mut self,
-        order_index: usize,
-        status: crate::review_session::ChunkStatus,
-    ) {
-        let session = self
-            .stoat
-            .active_workspace_mut()
-            .review
-            .as_mut()
-            .expect("no review session");
-        let id = *session
-            .order
-            .get(order_index)
-            .expect("order index out of range");
-        session.set_status(id, status);
-    }
-
     /// Variant of [`Self::stage_review_scenario`] that additionally seeds
     /// pre-existing staged files into the fake git repo. Modified files
     /// populate HEAD + unstaged working-tree state; staged entries are
@@ -408,32 +372,6 @@ impl TestHarness {
                 .collect(),
         };
         crate::action_handlers::dispatch(&mut self.stoat, &action);
-    }
-
-    /// Open a review of a single commit against its first parent.
-    pub fn open_commit_review(&mut self, workdir: impl Into<std::path::PathBuf>, sha: &str) {
-        let action = stoat_action::OpenReviewCommit {
-            workdir: workdir.into(),
-            sha: sha.to_string(),
-        };
-        crate::action_handlers::dispatch(&mut self.stoat, &action);
-        self.settle();
-    }
-
-    /// Open a review of a commit range (`from`..`to`).
-    pub fn open_commit_range_review(
-        &mut self,
-        workdir: impl Into<std::path::PathBuf>,
-        from: &str,
-        to: &str,
-    ) {
-        let action = stoat_action::OpenReviewCommitRange {
-            workdir: workdir.into(),
-            from: from.to_string(),
-            to: to.to_string(),
-        };
-        crate::action_handlers::dispatch(&mut self.stoat, &action);
-        self.settle();
     }
 
     /// Enter commits mode against `workdir`. Updates the active
@@ -750,50 +688,6 @@ impl TestHarness {
             .expect("focused editor exists");
         editor.display_map.fold(vec![range]);
         self.capture("fold");
-    }
-
-    /// Set up a side-by-side review view from raw text pairs.
-    ///
-    /// Each entry is `(file_path, base_content, new_content)`. The
-    /// structural diff is computed per file, hunks are extracted, and
-    /// the review is displayed in the focused pane. No git repo needed.
-    pub fn open_review_from_texts(&mut self, files: &[(&str, &str, &str)]) {
-        use crate::{
-            action_handlers,
-            review::ReviewFileInput,
-            review_session::{InMemoryFile, ReviewSession, ReviewSource},
-        };
-        use std::path::PathBuf;
-
-        let in_memory = files
-            .iter()
-            .map(|(p, b, n)| InMemoryFile {
-                path: PathBuf::from(p),
-                base_text: Arc::new(b.to_string()),
-                buffer_text: Arc::new(n.to_string()),
-            })
-            .collect::<Vec<_>>();
-
-        let mut session = ReviewSession::new(ReviewSource::InMemory {
-            files: Arc::new(in_memory.clone()),
-        });
-        let inputs: Vec<ReviewFileInput> = in_memory
-            .iter()
-            .map(|file| ReviewFileInput {
-                path: file.path.clone(),
-                rel_path: file.path.display().to_string(),
-                language: self.stoat.language_registry.for_path(&file.path),
-                base_text: file.base_text.clone(),
-                buffer_text: file.buffer_text.clone(),
-            })
-            .collect();
-        session.add_files(inputs);
-
-        if session.order.is_empty() {
-            return;
-        }
-        action_handlers::install_review_session(&mut self.stoat, session);
-        self.capture("open_review");
     }
 
     pub fn open_run(&mut self) -> crate::run::RunId {

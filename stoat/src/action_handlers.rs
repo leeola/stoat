@@ -54,8 +54,6 @@ pub(crate) use file_finder::{
 };
 pub(crate) use palette::sync_palette_picker;
 pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
-#[cfg(test)]
-pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{path::Path, sync::Arc};
 use stoat_action::{

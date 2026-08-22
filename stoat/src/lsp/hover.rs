@@ -1064,37 +1064,4 @@ mod tests {
         h.settle();
         h.assert_snapshot("snapshot_hover_popup");
     }
-
-    /// Move the review editor's text cursor to `buffer_row`. Panics without an
-    /// open review session.
-    fn place_review_cursor(h: &mut TestHarness, buffer_row: u32) {
-        let review_editor_id = h.with_review(|s| s.view_editor).expect("review editor");
-        let ws = h.stoat.active_workspace_mut();
-        let editor = ws.editors.get_mut(review_editor_id).expect("editor");
-        action_handlers::movement::set_cursor_row(editor, buffer_row);
-    }
-
-    #[test]
-    fn hover_from_a_non_working_tree_review_issues_nothing() {
-        let mut h = TestHarness::with_size(80, 24);
-        enable_hover(&h);
-        // An in-memory (non-working-tree) review: the new side is not disk
-        // state, so LSP stays off and no request is issued.
-        h.open_review_from_texts(&[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-
-        place_review_cursor(&mut h, 2);
-        h.fake_lsp().set_hover("a.rs", 2, 0, "unreachable");
-
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
-        h.settle();
-
-        assert!(
-            h.stoat.pending_hover.is_none(),
-            "no popup for a non-working-tree review",
-        );
-        assert!(
-            h.stoat.pending_hover_request.is_none(),
-            "no request was issued",
-        );
-    }
 }

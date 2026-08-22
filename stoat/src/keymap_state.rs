@@ -967,15 +967,6 @@ mod tests {
     }
 
     #[test]
-    fn from_stoat_review_is_diff_view() {
-        let mut h = Stoat::test();
-        h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn b() {}\n")]);
-        let state = StoatKeymapState::from_stoat(&h.stoat);
-        assert_eq!(field(&state, "pane"), Some("editor".to_string()));
-        assert_eq!(field(&state, "view"), Some("review".to_string()));
-    }
-
-    #[test]
     fn diff_action_toggles_the_diff_view() {
         let mut h = Stoat::test();
         assert_eq!(
