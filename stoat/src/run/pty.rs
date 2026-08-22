@@ -142,21 +142,24 @@ pub fn spawn_oneshot(
 /// returning its [`TerminalSession`].
 ///
 /// The caller owns the returned session, and dropping it closes the PTY.
-/// The child's env carries `STOAT_SESSION` (the uid) and `STOAT_AGENT_SOCK`
-/// (the [`agent_socket_path`]) so a hook callback resolves which session
-/// and socket to reach.
+///
+/// With `socket_path`, the child's env also carries `STOAT_SESSION` (the uid)
+/// and `STOAT_AGENT_SOCK` (that path), so a hook callback resolves which
+/// session and socket to reach. Carried in rather than resolved here, because
+/// the socket directory is a per-instance knob
+/// ([`crate::Stoat::set_agent_socket_dir`]).
 pub async fn spawn_claude(
     host: &dyn TerminalHost,
     uid: WorkspaceUid,
     cwd: &Path,
     diff: &[(String, Option<String>)],
+    socket_path: Option<&Path>,
 ) -> std::io::Result<Box<dyn TerminalSession>> {
-    let socket_path = agent_socket_path(uid)?;
     let editor_command = editor_bridge_command();
     host.spawn(claude_spawn_args(
         uid,
         cwd,
-        &socket_path,
+        socket_path,
         &editor_command,
         diff,
     ))
@@ -305,10 +308,16 @@ pub fn agent_socket_path_in(dir: &Path, uid: WorkspaceUid) -> PathBuf {
     dir.join(format!("agent-{uid}.sock"))
 }
 
+/// The spawn arguments for an owned Claude subshell.
+///
+/// `EDITOR` and `VISUAL` push whether or not `socket_path` is given: the
+/// agent's blocking-editor contract is how it composes a prompt, and does not
+/// depend on this instance having a socket directory. The session pair does
+/// depend on one, so it pushes only alongside a path.
 fn claude_spawn_args(
     uid: WorkspaceUid,
     cwd: &Path,
-    socket_path: &Path,
+    socket_path: Option<&Path>,
     editor_command: &str,
     diff: &[(String, Option<String>)],
 ) -> SpawnArgs {
@@ -322,12 +331,16 @@ fn claude_spawn_args(
         rows: 24,
     };
     merge_env_diff(&mut args, diff);
+    if let Some(socket_path) = socket_path {
+        args.env.extend([
+            ("STOAT_SESSION".into(), uid.to_string()),
+            (
+                "STOAT_AGENT_SOCK".into(),
+                socket_path.to_string_lossy().into_owned(),
+            ),
+        ]);
+    }
     args.env.extend([
-        ("STOAT_SESSION".into(), uid.to_string()),
-        (
-            "STOAT_AGENT_SOCK".into(),
-            socket_path.to_string_lossy().into_owned(),
-        ),
         ("EDITOR".into(), editor_command.to_string()),
         ("VISUAL".into(), editor_command.to_string()),
     ]);
@@ -392,6 +405,26 @@ async fn reader_task(
 mod tests {
     use super::*;
 
+    /// Without a socket directory there is no instance to name, but the agent
+    /// still composes prompts through the editor bridge.
+    #[test]
+    fn claude_args_keep_the_editor_pair_without_a_socket() {
+        let args = claude_spawn_args(
+            WorkspaceUid(0xABCD),
+            Path::new("/work"),
+            None,
+            "/usr/bin/stoat editor",
+            &[],
+        );
+        assert_eq!(
+            args.env,
+            vec![
+                ("EDITOR".to_string(), "/usr/bin/stoat editor".to_string()),
+                ("VISUAL".to_string(), "/usr/bin/stoat editor".to_string()),
+            ],
+        );
+    }
+
     #[test]
     fn claude_args_inject_session_socket_and_editor_env() {
         let uid = WorkspaceUid(0xABCD);
@@ -402,7 +435,7 @@ mod tests {
         let args = claude_spawn_args(
             uid,
             Path::new("/work"),
-            Path::new("/run/agent.sock"),
+            Some(Path::new("/run/agent.sock")),
             "/usr/bin/stoat editor",
             &diff,
         );
