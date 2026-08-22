@@ -42,9 +42,25 @@
           xorg.libXi
         ];
 
+        # The CPU the general-purpose packages compile for.
+        #
+        # x86-64-v3 (AVX2, FMA, BMI2) is every Intel from Haswell (2013) and
+        # every AMD from Zen (2017) onward, so the floor excludes no machine
+        # that runs a GPU terminal, and a named level keeps the build
+        # reproducible across builders. Apple Silicon gets no floor: the
+        # aarch64-apple-darwin target already defaults to the M1 feature set,
+        # which every Mac that runs this code has.
+        floorTargetCpu = if pkgs.stdenv.hostPlatform.isx86_64 then "x86-64-v3" else null;
+
+        # Derivation attributes shared by every package, compiled for
+        # `targetCpu`: a rustc `-C target-cpu` name, or null for the target's
+        # default. `native` works, but a derivation's hash does not cover the
+        # builder's CPU, so a native build that reaches another machine through
+        # a cache carries instructions that machine may lack.
+        #
         # pkg-config and zlib serve libgit2-sys and libz-sys, the workspace's
         # only crates that link native code.
-        commonPackage = {
+        commonPackage = targetCpu: mkPackage: {
           version = "0.1.0";
           # A git flake's source holds only tracked and staged files, so
           # `target/` and the untracked `.cargo/config.toml` (whose job limit
@@ -60,6 +76,11 @@
           # when Rust's `cc` crate canonicalizes Apple triples before
           # invoking clang (e.g. `aarch64-apple-darwin` -> `arm64-apple-macosx`).
           NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING = "1";
+          RUSTFLAGS = pkgs.lib.optionalString (targetCpu != null) "-C target-cpu=${targetCpu}";
+          # `pkg.withTargetCpu "znver4"` rebuilds the same package for a named
+          # CPU, for a consumer that wants a machine-specific build that stays
+          # reproducible.
+          passthru.withTargetCpu = mkPackage;
         };
 
         # The macOS icon, rendered from the same SVG the Linux desktop entry
@@ -80,9 +101,10 @@
               png2icns $out icon_16.png icon_32.png icon_128.png icon_256.png icon_512.png
             '';
 
-        packages = rec {
-          stoat = rustPlatform.buildRustPackage (
-            commonPackage
+        mkStoat =
+          targetCpu:
+          rustPlatform.buildRustPackage (
+            commonPackage targetCpu mkStoat
             // {
               pname = "stoat";
               cargoBuildFlags = [
@@ -96,11 +118,13 @@
             }
           );
 
-          # Both binaries in one derivation. stoatty resolves `stoat` as a
-          # sibling of its own executable before consulting PATH, so shipping
-          # them together needs no wrapper and cannot skew versions.
-          stoatty = rustPlatform.buildRustPackage (
-            commonPackage
+        # Both binaries in one derivation. stoatty resolves `stoat` as a
+        # sibling of its own executable before consulting PATH, so shipping
+        # them together needs no wrapper and cannot skew versions.
+        mkStoatty =
+          targetCpu:
+          rustPlatform.buildRustPackage (
+            commonPackage targetCpu mkStoatty
             // {
               pname = "stoatty";
               cargoBuildFlags = [
@@ -141,6 +165,15 @@
               };
             }
           );
+
+        packages = rec {
+          stoat = mkStoat floorTargetCpu;
+          stoatty = mkStoatty floorTargetCpu;
+
+          # The machine-specific channel. Built on the machine that runs them,
+          # these use every instruction its CPU has.
+          stoat-native = mkStoat "native";
+          stoatty-native = mkStoatty "native";
 
           default = stoatty;
         };
