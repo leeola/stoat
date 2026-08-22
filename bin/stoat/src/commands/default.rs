@@ -250,6 +250,7 @@ fn run_tui(
     // UI takeover that must then be unwound.
     let inputs = inputs
         .as_deref()
+        .or_else(|| fixture.as_deref().and_then(stoat_cli::default_inputs))
         .map(input_parse::parse_input_sequence)
         .transpose()
         .with_whatever_context(|e| format!("parse --inputs sequence: {e}"))?;

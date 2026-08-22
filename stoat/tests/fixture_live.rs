@@ -31,6 +31,10 @@ const DIFF_TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// A walkthrough step opens a file and glides to it, which is slower than a
+/// keystroke but nothing like an LSP round trip.
+const WALKTHROUGH_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[test]
 fn diff_view_shows_fixture_change() {
     let (_dir, _root, mut harness) = fixture_harness("basic-diff");
@@ -139,6 +143,95 @@ fn fixture_harness(name: &str) -> (TempDir, PathBuf, LiveHarness) {
     fixture::materialize(name, &root).expect("materialize fixture");
     let harness = LiveHarness::open(&root, Settings::default()).expect("open harness");
     (dir, root, harness)
+}
+
+/// The walkthrough fixture exists to give the player a stage, so this drives
+/// the whole tour over it: every step lands on the code its stop names, and
+/// none of them reports drift.
+///
+/// Stepping is what makes this worth running live. A stop's range is only
+/// right if the file on disk still matches what the fixture captured, and the
+/// player says so in the status line rather than by failing.
+#[test]
+fn walkthrough_fixture_plays_its_whole_tour() {
+    let (_dir, _root, mut harness) = fixture_harness("walkthrough");
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":walkthrough tour<Enter>")
+            .await
+            .expect("open the tour");
+        let frame = handle
+            .await_frame(
+                |text| text.contains("1/6: Entry point"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the tour opens on its first stop");
+        assert!(
+            !frame.contains("drifted"),
+            "the first stop still covers what it captured, got frame:\n{frame}",
+        );
+
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("enter walkthrough mode");
+
+        // Each stop names code in a different place, so the landing text is
+        // what proves the step went where the tour said rather than merely
+        // advancing a counter.
+        for (step, landing) in [
+            (2, "pub fn load"),
+            (3, "pub fn run"),
+            (4, "fn dispatch"),
+            (5, "pub fn handle"),
+        ] {
+            handle.send_keys("n").await.expect("step to the next stop");
+            let frame = handle
+                .await_frame(
+                    |text| text.contains(&format!("{step}/6")) && text.contains(landing),
+                    WALKTHROUGH_TIMEOUT,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("stop {step} lands on {landing:?}"));
+            assert!(
+                !frame.contains("drifted"),
+                "stop {step} still covers what it captured, got frame:\n{frame}",
+            );
+        }
+
+        // The fifth stop carries one annotation per match arm and a last one
+        // pointing into another file, so stepping through them ends up outside
+        // the stop's own buffer. Each step is awaited, since the next key press
+        // is what takes the narration popup down.
+        for at in 1..=5 {
+            handle.send_keys("a").await.expect("step to the annotation");
+            handle
+                .await_frame(
+                    |text| text.contains(&format!("{at}/5")),
+                    WALKTHROUGH_TIMEOUT,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("annotation {at} of 5 is reached"));
+        }
+        // Read off the status line rather than the buffer. The mode's key-hint
+        // overlay covers most of the width, so the annotated line itself is
+        // truncated on screen while the status still names both the file the
+        // jump opened and which annotation it landed on.
+        let frame = handle
+            .await_frame(
+                |text| text.contains("src/server.rs") && text.contains("a11 5/5"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the last annotation opens server.rs, the file it names");
+        assert!(
+            !frame.contains("drifted"),
+            "the cross-file annotation still covers what it captured, got frame:\n{frame}",
+        );
+
+        handle.send_keys("d").await.expect("end the tour");
+    });
 }
 
 /// The conflict view's three columns come from the on-disk index stages, which

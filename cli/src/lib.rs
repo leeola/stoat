@@ -46,7 +46,24 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "rust-diff",
         "the rust-lsp crate plus a live staged and unstaged rust diff",
     ),
+    (
+        "walkthrough",
+        "a four-file crate with a six-stop tour for the walkthrough player",
+    ),
 ];
+
+/// The input sequence a fixture opens itself with, for one whose point is a
+/// screen the reader would otherwise have to summon by hand.
+///
+/// Only the fixture knows what makes it worth looking at, so it names the
+/// sequence rather than every caller repeating it. An explicit `--inputs`
+/// outranks this, since the reader asked for something specific.
+pub fn default_inputs(name: &str) -> Option<&'static str> {
+    match name {
+        "walkthrough" => Some(":walkthrough tour<Enter>"),
+        _ => None,
+    }
+}
 
 /// A clap value parser accepting only the [`FIXTURES`] names, so an unknown
 /// fixture fails at parse time with a did-you-mean suggestion.
@@ -178,9 +195,33 @@ impl CommonArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_timeout, CommonArgs};
+    use super::{default_inputs, parse_timeout, CommonArgs, FIXTURES};
     use clap::Parser;
     use std::path::PathBuf;
+
+    /// A fixture whose point is a screen names the sequence that opens it, so
+    /// no caller has to know which one that is.
+    #[test]
+    fn only_the_walkthrough_fixture_opens_itself() {
+        assert_eq!(
+            default_inputs("walkthrough"),
+            Some(":walkthrough tour<Enter>"),
+        );
+        assert_eq!(default_inputs("basic-diff"), None);
+        assert_eq!(default_inputs("not-a-fixture"), None);
+    }
+
+    /// Every name that opens itself must be one the catalog carries, or the
+    /// sequence is dead text nothing can reach.
+    #[test]
+    fn every_self_opening_fixture_is_in_the_catalog() {
+        let named: Vec<&str> = FIXTURES
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| default_inputs(name).is_some())
+            .collect();
+        assert_eq!(named, ["walkthrough"]);
+    }
 
     #[derive(Parser)]
     struct Harness {
@@ -249,13 +290,13 @@ mod tests {
     #[test]
     fn ls_text_lists_every_fixture() {
         let text = super::ls_text();
-        for (name, description) in super::FIXTURES {
+        for (name, description) in FIXTURES {
             assert!(text.contains(name), "ls_text missing fixture {name}");
             assert!(
                 text.contains(description),
                 "ls_text missing description for {name}"
             );
         }
-        assert_eq!(text.lines().count(), super::FIXTURES.len());
+        assert_eq!(text.lines().count(), FIXTURES.len());
     }
 }
