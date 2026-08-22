@@ -96,6 +96,7 @@ fn hud_composites_over_a_frame_off_screen() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
+            sketch_progress: &[],
         },
     );
 

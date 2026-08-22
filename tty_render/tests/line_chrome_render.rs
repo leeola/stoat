@@ -110,6 +110,7 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
+            sketch_progress: &[],
         },
     );
 
@@ -237,6 +238,7 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
+            sketch_progress: &[],
         },
     );
 

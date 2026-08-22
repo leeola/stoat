@@ -2624,6 +2624,7 @@ fn redraw(state: &mut State) {
                     damage: &sb_damage,
                     decoration_damage: &sb_damage,
                     scrolled_rows: moved_rows,
+                    sketch_progress: &[],
                 },
             );
             latch_skipped(&mut state.force_full, &state.window, outcome);
@@ -2670,6 +2671,7 @@ fn redraw(state: &mut State) {
                     // rotate to match or the clean ones redraw from
                     // their pre-slide instances.
                     scrolled_rows: scroll_delta as isize,
+                    sketch_progress: &[],
                 },
             );
             latch_skipped(&mut state.force_full, &state.window, outcome);
@@ -2827,6 +2829,7 @@ fn redraw(state: &mut State) {
                 damage: &damage,
                 decoration_damage: &decoration_damage,
                 scrolled_rows: scroll_delta as isize,
+                sketch_progress: &[],
             },
             &composites,
             &anchored_panels,
@@ -3011,6 +3014,7 @@ fn redraw_aux(
             damage: &damage,
             decoration_damage: &damage,
             scrolled_rows: 0,
+            sketch_progress: &[],
         },
         &composites,
         &[],

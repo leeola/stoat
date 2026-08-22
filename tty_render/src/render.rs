@@ -88,6 +88,18 @@ pub struct Frame<'a> {
     /// for a frame that did not scroll, and for any grid whose caller does not
     /// track it.
     pub scrolled_rows: isize,
+    /// How much of each hand-drawn mark is revealed, one entry per
+    /// [`Grid::sketches`] index in declaration order.
+    ///
+    /// The terminal owns the clocks, so the renderer is told where each mark
+    /// stands rather than reading a clock of its own. The same grid and the
+    /// same fractions then always draw the same pixels, which is what makes a
+    /// frame reproducible.
+    ///
+    /// A short slice leaves the marks past its end complete, so `&[]` draws
+    /// every mark whole. A caller with no animation passes it and nothing else
+    /// changes.
+    pub sketch_progress: &'a [f32],
 }
 
 /// Cell layout metrics in physical pixels, derived from the configured logical

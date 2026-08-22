@@ -130,6 +130,7 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
                 damage: &Damage::Full,
                 decoration_damage: &Damage::Partial(Vec::new()),
                 scrolled_rows: 0,
+                sketch_progress: &[],
             },
         );
         read_back(&device, &queue, &target, width, height)

@@ -226,6 +226,7 @@ fn render_frame(
             damage,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
+            sketch_progress: &[],
         },
     );
 }

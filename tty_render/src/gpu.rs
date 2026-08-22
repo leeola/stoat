@@ -26,6 +26,7 @@ use crate::{
         overlay::OverlayPass,
         panel::PanelPass,
         polyline::PolylinePass,
+        sketch::SketchPass,
         text::TextPass,
         CellMetrics, Occluder, PoolOccluders,
     },
@@ -265,6 +266,7 @@ pub struct Renderer {
     icon: IconPass,
     bar: BarPass,
     polyline: PolylinePass,
+    sketch: SketchPass,
     minimap: MinimapPass,
     image: ImagePass,
     /// Perf HUD overlay pass, composited topmost. Present only under `perf`.
@@ -336,6 +338,7 @@ impl Renderer {
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
             polyline: PolylinePass::new(device, format, metrics),
+            sketch: SketchPass::new(device, format, metrics),
             minimap: MinimapPass::new(device, format, metrics),
             image: ImagePass::new(device, format, metrics),
             #[cfg(feature = "perf")]
@@ -387,6 +390,7 @@ impl Renderer {
         self.icon.set_metrics(metrics);
         self.bar.set_metrics(metrics);
         self.polyline.set_metrics(metrics);
+        self.sketch.set_metrics(metrics);
         self.minimap.set_metrics(metrics);
         self.image.set_metrics(metrics);
     }
@@ -575,6 +579,15 @@ impl Renderer {
             .prepare(device, queue, grid.bars(), &self.occluders, resolution);
         self.polyline
             .prepare(device, queue, grid, &self.occluders, resolution);
+        self.sketch.prepare(
+            device,
+            queue,
+            grid,
+            frame.sketch_progress,
+            anchored,
+            &self.occluders,
+            resolution,
+        );
         self.minimap
             .prepare(device, queue, grid, &self.occluders, resolution);
         self.image.prepare(device, queue, grid, resolution);
@@ -629,6 +642,7 @@ impl Renderer {
     /// that follow set their own.
     pub(crate) fn record_riding_panels(&self, render_pass: &mut RenderPass<'_>) {
         self.panel.draw_riding_under(render_pass);
+        self.sketch.draw_riding(render_pass);
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
     }
 
@@ -673,6 +687,9 @@ impl Renderer {
         // Stroked paths draw over the bars they share a layer with, so a
         // commit graph's lines sit above any gutter fill behind them.
         self.polyline.draw(render_pass);
+        // A hand-drawn mark annotates what the chrome beneath it shows, so it
+        // draws over the stroked paths rather than under them.
+        self.sketch.draw(render_pass);
         // The minimap strip sits over the bars and below the cursor. It
         // scissors to each strip, so restore the full surface before the
         // text runs and cursor that follow.
@@ -1927,6 +1944,7 @@ impl GpuContext {
                 damage: &full,
                 decoration_damage: &full,
                 scrolled_rows: 0,
+                sketch_progress: &[],
             };
             self.prepare_pool_frame(live_grid, &heal, pools, anchored);
             // A grow during the healing sweep leaves it stale in turn, and the
@@ -2234,6 +2252,7 @@ mod tests {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
+            sketch_progress: &[],
         };
 
         // The two pools take the lower bands, leaving the top one to the live grid.
@@ -2405,6 +2424,7 @@ mod tests {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
+            sketch_progress: &[],
         };
 
         // Covers the middle band, which the panel's left edge runs through.

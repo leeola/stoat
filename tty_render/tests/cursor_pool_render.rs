@@ -104,6 +104,7 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
+            sketch_progress: &[],
         };
         renderer.render_into(&device, &queue, &view, &base, plain);
         renderer.composite_pool(

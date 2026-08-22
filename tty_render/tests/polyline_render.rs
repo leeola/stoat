@@ -323,6 +323,7 @@ fn plain_frame() -> Frame<'static> {
         damage: &FULL_DAMAGE,
         decoration_damage: &NO_DECORATION,
         scrolled_rows: 0,
+        sketch_progress: &[],
     }
 }
 

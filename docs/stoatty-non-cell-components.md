@@ -151,8 +151,8 @@ gutter region rather than over body text.
 
 **Z-order is fixed by the pass chain, not by declaration order.** The frame
 records one pass per kind, in this order: background, panel bodies, grid text,
-region text, cell borders, bars, polylines, the minimap, text runs, panel frame
-strokes, the cursor, overlays, overlay text, icons. Cell borders and panel
+region text, cell borders, bars, polylines, sketches, the minimap, text runs,
+panel frame strokes, the cursor, overlays, overlay text, icons. Cell borders and panel
 strokes both sit above the grid text because they frame those cells. Glyph ink
 that reaches a cell edge would otherwise break the line around it.
 
@@ -160,6 +160,11 @@ A frame compositing pools defers the panel strokes along with the cursor, since
 the composites paint over the cells a frame sits on. That leaves those strokes
 above the overlays and icons the frame recorded earlier, an asymmetry the cursor
 has carried since pools existed.
+
+A sketch anchored to a pool defers the same way, for the same reason, and draws
+clipped to its host's region so it stops at the pane edge. A sketch is never
+drawn on a pool itself: a mark rides a pool through its anchor, so a page-local
+one would be pinned to its page and fight that.
 
 Declaration order decides the order *within* a kind, so one bar draws over
 another it was declared before. It has no say *across* kinds: a bar declared

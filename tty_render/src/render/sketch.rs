@@ -4,7 +4,11 @@
 //! generated here against the live cell metrics. That is what keeps a mark
 //! hand-drawn at every font size, and what lets the stroke reveal itself at the
 //! display refresh rate without the emitter sending a frame per step.
+//!
+//! [`rough`] turns one declaration into flattened polylines. [`pass`] uploads
+//! them and draws the part a reveal has reached.
 
-// FIXME: no draw pass consumes this geometry yet.
-#[allow(dead_code)]
+pub(crate) mod pass;
 pub(crate) mod rough;
+
+pub use pass::SketchPass;

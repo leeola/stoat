@@ -48,15 +48,6 @@ const BEND_FRACTION: f64 = 64.0;
 /// turns, so the curve reads as leaving a box rather than clipping its corner.
 const S_CURVE_REACH: f64 = 0.4;
 
-/// Where a component-anchored line end sits, in physical pixels.
-///
-/// A connector names the decoration it points at rather than a coordinate, so
-/// it tracks that thing as it moves. Resolving an id to a point needs the whole
-/// decoration set, which this module does not have, so the caller supplies it.
-/// An id nothing answers for drops that mark, because a connector to nowhere is
-/// worse than no connector.
-pub(crate) type ResolveEnd = dyn Fn(u32, SketchSide) -> Option<[f32; 2]>;
-
 /// Flattened geometry for one mark, ready to stroke.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Geometry {
@@ -178,7 +169,6 @@ enum Op {
     Move([f64; 2]),
     /// A cubic bezier's two control points and its endpoint.
     Curve([f64; 6]),
-    Line([f64; 2]),
 }
 
 /// The ellipse one pass rides, after the curve fitting has nudged its radii.
@@ -208,11 +198,14 @@ struct Connector {
 /// The same command and metrics always yield the same geometry. Nothing here
 /// reads a clock, so a mark regenerated on a zoom step does not appear to
 /// redraw itself.
-pub(crate) fn geometry(
+pub(crate) fn geometry<Resolve>(
     command: &SketchCommand,
     metrics: CellMetrics,
-    resolve: &ResolveEnd,
-) -> Geometry {
+    resolve: &Resolve,
+) -> Geometry
+where
+    Resolve: Fn(u32, SketchSide) -> Option<[f32; 2]>,
+{
     let (cw, ch) = (f64::from(metrics.width), f64::from(metrics.height));
     let mut random = Random::new(command.style.seed, command.id);
 
@@ -304,14 +297,17 @@ pub(crate) fn stroke_width(style: &SketchStyle, metrics: CellMetrics) -> f32 {
 }
 
 /// A connector, with the arrowheads its `heads` mask asks for.
-fn line_geometry(
+fn line_geometry<Resolve>(
     command: &SketchCommand,
     connector: Connector,
     cw: f64,
     ch: f64,
-    resolve: &ResolveEnd,
+    resolve: &Resolve,
     random: &mut Random,
-) -> Geometry {
+) -> Geometry
+where
+    Resolve: Fn(u32, SketchSide) -> Option<[f32; 2]>,
+{
     let Connector {
         from,
         to,
@@ -414,7 +410,10 @@ fn side_of(end: SketchEnd) -> SketchSide {
     }
 }
 
-fn resolve_end(end: SketchEnd, cw: f64, ch: f64, resolve: &ResolveEnd) -> Option<[f64; 2]> {
+fn resolve_end<Resolve>(end: SketchEnd, cw: f64, ch: f64, resolve: &Resolve) -> Option<[f64; 2]>
+where
+    Resolve: Fn(u32, SketchSide) -> Option<[f32; 2]>,
+{
     match end {
         SketchEnd::Point { x, y } => Some([
             f64::from(x) / CELL_FRACTION * cw,
@@ -839,10 +838,6 @@ fn flatten(ops: &[Op]) -> Vec<Stroke> {
                 } else {
                     current.clear();
                 }
-                pen = *to;
-                current.push([to[0] as f32, to[1] as f32]);
-            },
-            Op::Line(to) => {
                 pen = *to;
                 current.push([to[0] as f32, to[1] as f32]);
             },

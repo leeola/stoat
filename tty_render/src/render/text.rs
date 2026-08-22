@@ -5702,6 +5702,7 @@ mod tests {
                 damage,
                 decoration_damage: damage,
                 scrolled_rows: 0,
+                sketch_progress: &[],
             }
         }
 
@@ -6020,6 +6021,7 @@ mod tests {
                 damage: &Damage::Full,
                 decoration_damage: &Damage::Full,
                 scrolled_rows: 0,
+                sketch_progress: &[],
             },
             &[],
         );
@@ -6079,6 +6081,7 @@ mod tests {
                 damage,
                 decoration_damage: damage,
                 scrolled_rows,
+                sketch_progress: &[],
             }
         }
 
@@ -6167,6 +6170,7 @@ mod tests {
             damage: &Damage::Full,
             decoration_damage: &Damage::Full,
             scrolled_rows: 0,
+            sketch_progress: &[],
         }
     }
 
@@ -6314,6 +6318,7 @@ mod tests {
             damage: &Damage::Partial(vec![None; 4]),
             decoration_damage: &Damage::Partial(vec![None; 4]),
             scrolled_rows: 0,
+            sketch_progress: &[],
         };
         let build = |region: ScrollRegion| {
             let mut grid = Grid::new(4, 20);
@@ -6398,6 +6403,7 @@ mod tests {
                 damage,
                 decoration_damage: damage,
                 scrolled_rows,
+                sketch_progress: &[],
             }
         }
 
@@ -7001,6 +7007,7 @@ mod tests {
                 damage: idle,
                 decoration_damage: idle,
                 scrolled_rows: 0,
+                sketch_progress: &[],
             }
         }
 
@@ -7125,6 +7132,7 @@ mod tests {
                 damage: idle,
                 decoration_damage: idle,
                 scrolled_rows: 0,
+                sketch_progress: &[],
             }
         }
 
@@ -7221,6 +7229,7 @@ mod tests {
                 damage: idle,
                 decoration_damage: idle,
                 scrolled_rows: 0,
+                sketch_progress: &[],
             }
         }
         let tops = |pass: &TextPass| {
@@ -7381,6 +7390,7 @@ mod tests {
             damage,
             decoration_damage: &idle_damage,
             scrolled_rows: 0,
+            sketch_progress: &[],
         };
 
         // Warm the cache and atlas.
@@ -7450,6 +7460,7 @@ mod tests {
             damage,
             decoration_damage: &idle_damage,
             scrolled_rows: 0,
+            sketch_progress: &[],
         };
         let no_scroll = Scroll {
             grid: 0.0,

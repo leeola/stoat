@@ -93,6 +93,7 @@ fn powerline_separator_fills_the_cell() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
+            sketch_progress: &[],
         },
     );
 
