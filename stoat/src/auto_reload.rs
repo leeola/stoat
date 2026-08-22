@@ -35,6 +35,10 @@ use std::{
 };
 use stoat_text::{Bias, LineEnding, Rope, SelectionGoal};
 
+/// Environment variable stoatty exports to its children, carrying the log id
+/// its own log file is named after.
+const STOATTY_LOG_ID: &str = "STOATTY_LOG_ID";
+
 /// Arm the auto-reload poll if it is not already running.
 ///
 /// Spawns a timer loop sending a tick every [`crate::app::AUTO_RELOAD_POLL`],
@@ -408,23 +412,63 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
     }
 }
 
-/// Open this session's log file and follow it as new lines are written.
+/// Open a log file and follow it as new lines are written.
 ///
-/// Resolves `<log dir>/<ident file_stem>.log` from the identity the binary
-/// installed at startup and delegates to [`open_log_buffer`]. Reports via
-/// [`Stoat::pending_message`] when the log directory cannot be resolved, and
-/// when this session named no log file at all.
-pub(crate) fn open_logs(stoat: &mut Stoat) -> UpdateEffect {
+/// `target` is the `:logs` argument: [`None`] or `"stoat"` opens this
+/// session's own log, `"stoatty"` opens the enclosing terminal's. Resolves the
+/// file under `<log dir>` and delegates to [`open_log_buffer`]. Reports via
+/// [`Stoat::pending_message`] and opens nothing when the log directory cannot
+/// be resolved, when `target` names neither program, or when the named session
+/// wrote no log file.
+pub(crate) fn open_logs(stoat: &mut Stoat, target: Option<&str>) -> UpdateEffect {
     let Ok(dir) = stoat_log::log_dir() else {
         stoat.set_status("could not resolve the log directory");
         return UpdateEffect::Redraw;
     };
-    let stem = stoat_log::ident::get().map(|i| i.file_stem.as_str());
-    let Some(path) = session_log_path(&dir, stem) else {
+
+    let stem = target_log_stem(
+        target,
+        stoat_log::ident::get().map(|i| i.file_stem.as_str()),
+        stoat.env_host.var(STOATTY_LOG_ID).as_deref(),
+    );
+    let stem = match stem {
+        Ok(stem) => stem,
+        Err(status) => {
+            stoat.set_status(status);
+            return UpdateEffect::Redraw;
+        },
+    };
+
+    let Some(path) = session_log_path(&dir, stem.as_deref()) else {
         stoat.set_status("no log file for this session; started with --log-stderr?");
         return UpdateEffect::Redraw;
     };
     open_log_buffer(stoat, &path)
+}
+
+/// The log file stem `target` names, or the status to report instead.
+///
+/// `Ok(None)` means the named session wrote no log file, which is what
+/// `--log-stderr` produces; [`session_log_path`] turns that into no path.
+///
+/// Pure so every branch is testable. Its two inputs are otherwise unreachable
+/// from a test: `ident_stem` comes from a first-write-wins process global, and
+/// `stoatty_id` from the environment.
+fn target_log_stem(
+    target: Option<&str>,
+    ident_stem: Option<&str>,
+    stoatty_id: Option<&str>,
+) -> Result<Option<String>, &'static str> {
+    match target {
+        None | Some("stoat") => Ok(ident_stem.map(str::to_owned)),
+        // stoatty names its log after the same id it exports, so the stem is
+        // the variable with the prefix put back on.
+        Some("stoatty") => match stoatty_id {
+            Some(sid) => Ok(Some(format!("stoatty-{sid}"))),
+            None => Err("logs: not running inside stoatty"),
+        },
+        Some(_) => Err("logs: expected stoat or stoatty"),
+    }
 }
 
 /// The log file `stem` names under `dir`, or `None` when no stem was given.
@@ -682,9 +726,9 @@ fn editor_cursor_row(editor: &mut EditorState) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, open_log_buffer,
+        collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, open_log_buffer, open_logs,
         pump_auto_reload, reload_all, reload_focused, session_log_path, set_auto_reload_config,
-        set_buffer_auto_reload,
+        set_buffer_auto_reload, target_log_stem,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -1603,6 +1647,79 @@ mod tests {
 
         let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
         assert_eq!(buffer_text(&h, id), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn target_log_stem_resolves_each_target() {
+        let ident = Some("headless-stoat-20260718-143022-1");
+        let sid = Some("20260718-143022-7");
+
+        assert_eq!(
+            target_log_stem(None, ident, sid),
+            Ok(Some("headless-stoat-20260718-143022-1".to_string())),
+            "an omitted target is this stoat's own log",
+        );
+        assert_eq!(
+            target_log_stem(Some("stoat"), ident, sid),
+            Ok(Some("headless-stoat-20260718-143022-1".to_string())),
+            "the stoat target is the same as omitting it",
+        );
+        assert_eq!(
+            target_log_stem(Some("stoatty"), ident, sid),
+            Ok(Some("stoatty-20260718-143022-7".to_string())),
+            "the stoatty target puts the prefix back on the exported id",
+        );
+
+        assert_eq!(
+            target_log_stem(None, None, sid),
+            Ok(None),
+            "a stoat that named no log file resolves no stem",
+        );
+        assert_eq!(
+            target_log_stem(Some("stoatty"), ident, None),
+            Err("logs: not running inside stoatty"),
+            "no exported id means no enclosing stoatty",
+        );
+        assert_eq!(
+            target_log_stem(Some("x"), ident, sid),
+            Err("logs: expected stoat or stoatty"),
+            "an unknown target names neither program",
+        );
+    }
+
+    #[test]
+    fn open_logs_reports_a_stoatty_target_outside_stoatty() {
+        let mut h = Stoat::test();
+
+        assert_eq!(
+            open_logs(&mut h.stoat, Some("stoatty")),
+            UpdateEffect::Redraw
+        );
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("logs: not running inside stoatty"),
+        );
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "no poll is armed when nothing opened"
+        );
+    }
+
+    #[test]
+    fn open_logs_reports_an_unknown_target() {
+        let mut h = Stoat::test();
+
+        assert_eq!(open_logs(&mut h.stoat, Some("x")), UpdateEffect::Redraw);
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("logs: expected stoat or stoatty"),
+        );
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "no poll is armed when nothing opened"
+        );
     }
 
     #[test]

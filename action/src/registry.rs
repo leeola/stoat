@@ -181,7 +181,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(QuitAllConfirm::DEF, |_| Ok(Box::new(QuitAllConfirm)));
     add(QuitAllCancel::DEF, |_| Ok(Box::new(QuitAllCancel)));
     add(ShowVersion::DEF, |_| Ok(Box::new(ShowVersion)));
-    add(OpenLogs::DEF, |_| Ok(Box::new(OpenLogs)));
+    add(OpenLogs::DEF, |params| {
+        // The palette autospaces a submitted command, so a bare `logs` arrives
+        // with an empty argument. That means the default target, not a target
+        // literally named "".
+        let target = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "target",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .filter(|target| !target.is_empty())
+            .map(str::to_owned);
+        Ok(Box::new(OpenLogs { target }))
+    });
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
     add(SplitNewRight::DEF, |_| Ok(Box::new(SplitNewRight)));
@@ -1071,7 +1087,6 @@ mod tests {
         "QuitAllConfirm",
         "QuitAllCancel",
         "ShowVersion",
-        "OpenLogs",
         "SplitRight",
         "SplitDown",
         "SplitNewRight",
@@ -1471,6 +1486,29 @@ mod tests {
                 built(&[ParamValue::String("HEAD~2".into())]),
             ),
             (None, None, Some("HEAD~2".to_string())),
+        );
+    }
+
+    #[test]
+    fn open_logs_factory_reads_an_optional_target() {
+        let entry = lookup("OpenLogs").expect("OpenLogs");
+        let built = |params: &[ParamValue]| {
+            (entry.create)(params)
+                .expect("create")
+                .as_any()
+                .downcast_ref::<OpenLogs>()
+                .expect("downcast")
+                .target
+                .clone()
+        };
+
+        assert_eq!(
+            (
+                built(&[]),
+                built(&[ParamValue::String("".into())]),
+                built(&[ParamValue::String("stoatty".into())]),
+            ),
+            (None, None, Some("stoatty".to_string())),
         );
     }
 

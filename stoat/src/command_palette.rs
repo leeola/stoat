@@ -3111,6 +3111,14 @@ mod tests {
     }
 
     #[test]
+    fn arg_picker_lists_open_logs_targets() {
+        let mut h = Stoat::test();
+        h.type_text(":logs ");
+        h.snapshot();
+        assert_eq!(arg_rows(&h), ["stoat", "stoatty"]);
+    }
+
+    #[test]
     fn arg_picker_narrows_fixed_values_on_typing() {
         let mut h = Stoat::test();
         h.type_text(":auto-reload ff");

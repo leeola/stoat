@@ -57,8 +57,8 @@ pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
 use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
-    GotoTab, OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, RenameTab, RenameWorkspace,
-    Run, SetCwd, SetTheme, WalkthroughOpen,
+    GotoTab, OpenBuffer, OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab,
+    RenameWorkspace, Run, SetCwd, SetTheme, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -197,7 +197,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::QuitAllConfirm => quit_all_confirm(stoat),
         ActionKind::QuitAllCancel => quit_all_cancel(stoat),
         ActionKind::ShowVersion => show_version(stoat),
-        ActionKind::OpenLogs => auto_reload::open_logs(stoat),
+        ActionKind::OpenLogs => {
+            let open = action
+                .as_any()
+                .downcast_ref::<OpenLogs>()
+                .expect("OpenLogs action downcast");
+            auto_reload::open_logs(stoat, open.target.as_deref())
+        },
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
         ActionKind::SplitNewRight => pane::split_pane_new(stoat, Axis::Vertical),

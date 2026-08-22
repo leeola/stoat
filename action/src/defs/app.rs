@@ -1,4 +1,8 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
+};
+use std::any::Any;
 
 define_action!(
     QuitDef,
@@ -55,16 +59,44 @@ define_action!(
     command_name = "version"
 );
 
-define_action!(
+const OPEN_LOGS_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "target",
+    kind: ParamKind::String,
+    value_source: ValueSource::Values(&["stoat", "stoatty"]),
+    required: false,
+    description: "stoat (default) or stoatty",
+}];
+
+define_action_def!(
     OpenLogsDef,
-    OpenLogs,
     "OpenLogs",
     ActionKind::OpenLogs,
     "open the session log file",
-    "Open this session's log file in the focused pane and follow it as new lines are written, with the cursor on the last line. Use `:auto-reload off` to stop following. Reports in the status line when the session has no log file.",
+    "Open a log file in the focused pane and follow it as new lines are written, with the cursor on the last line. Omitted or `stoat` opens this stoat session's log; `stoatty` opens the enclosing terminal's stoatty-<id>.log. Use `:auto-reload off` to stop following. Reports in the status line when there is no such log file.",
     ActionPriority::Normal,
-    command_name = "logs"
+    command_name = "logs",
+    params = OPEN_LOGS_PARAMS
 );
+
+#[derive(Debug)]
+pub struct OpenLogs {
+    /// Whose log to open. [`None`] means this stoat session's own.
+    pub target: Option<String>,
+}
+
+impl OpenLogs {
+    pub const DEF: &OpenLogsDef = &OpenLogsDef;
+}
+
+impl Action for OpenLogs {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 #[cfg(test)]
 mod tests {
