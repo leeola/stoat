@@ -17,9 +17,9 @@ use crate::{
     multi_buffer::{MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{
-    balancing_block, Block, BlockChunks, BlockContext, BlockId, BlockMap, BlockPlacement,
-    BlockPoint, BlockProperties, BlockRow, BlockRowKind, BlockSnapshot, BlockStyle, CompanionView,
-    CustomBlock, CustomBlockId, RenderBlock,
+    Block, BlockChunks, BlockContext, BlockId, BlockMap, BlockPlacement, BlockPoint,
+    BlockProperties, BlockRow, BlockRowKind, BlockSnapshot, BlockStyle, CustomBlock, CustomBlockId,
+    RenderBlock,
 };
 pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
@@ -38,10 +38,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     mem,
     ops::Range,
-    sync::{
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
-        Arc, LazyLock,
-    },
+    sync::{Arc, LazyLock},
 };
 use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
@@ -101,112 +98,6 @@ impl DisplayPoint {
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisplayRow(pub u32);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct DisplayMapId(u64);
-
-static NEXT_DISPLAY_MAP_ID: AtomicU64 = AtomicU64::new(0);
-
-impl DisplayMapId {
-    pub fn next() -> Self {
-        Self(NEXT_DISPLAY_MAP_ID.fetch_add(1, AtomicOrdering::Relaxed))
-    }
-}
-
-pub type ConvertMultiBufferRows = fn(
-    companion_snapshot: &MultiBufferSnapshot,
-    our_snapshot: &MultiBufferSnapshot,
-    bounds: (std::ops::Bound<Point>, std::ops::Bound<Point>),
-) -> Vec<CompanionExcerptPatch>;
-
-#[derive(Debug)]
-pub struct CompanionExcerptPatch {
-    pub patch: Patch<Point>,
-    pub edited_range: Range<Point>,
-    pub source_excerpt_range: Range<Point>,
-    pub target_excerpt_range: Range<Point>,
-}
-
-#[allow(dead_code)]
-pub struct Companion {
-    pub(crate) rhs_display_map_id: DisplayMapId,
-    pub(crate) rhs_buffer_to_lhs_buffer: HashMap<BufferId, BufferId>,
-    pub(crate) lhs_buffer_to_rhs_buffer: HashMap<BufferId, BufferId>,
-    pub(crate) rhs_rows_to_lhs_rows: ConvertMultiBufferRows,
-    pub(crate) lhs_rows_to_rhs_rows: ConvertMultiBufferRows,
-    pub(crate) rhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
-    pub(crate) lhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
-}
-
-#[allow(dead_code)]
-impl Companion {
-    fn is_rhs(&self, id: DisplayMapId) -> bool {
-        self.rhs_display_map_id == id
-    }
-
-    fn rows_to_companion(&self, id: DisplayMapId) -> ConvertMultiBufferRows {
-        if self.is_rhs(id) {
-            self.rhs_rows_to_lhs_rows
-        } else {
-            self.lhs_rows_to_rhs_rows
-        }
-    }
-
-    fn convert_point_from_companion(
-        &self,
-        display_map_id: DisplayMapId,
-        our_snapshot: &MultiBufferSnapshot,
-        companion_snapshot: &MultiBufferSnapshot,
-        point: Point,
-    ) -> Range<Point> {
-        let convert_fn = self.rows_to_companion(display_map_id);
-        let patches = convert_fn(
-            companion_snapshot,
-            our_snapshot,
-            (
-                std::ops::Bound::Included(point),
-                std::ops::Bound::Included(point),
-            ),
-        );
-        match patches.into_iter().next() {
-            Some(ep) => {
-                for edit in ep.patch.edits() {
-                    if edit.old.start <= point && point <= edit.old.end {
-                        return edit.new.clone();
-                    }
-                }
-                ep.edited_range
-            },
-            None => Point::zero()..Point::new(our_snapshot.line_count(), 0),
-        }
-    }
-
-    pub fn custom_block_to_balancing_block(
-        &self,
-        id: DisplayMapId,
-    ) -> &HashMap<CustomBlockId, CustomBlockId> {
-        if self.is_rhs(id) {
-            &self.rhs_custom_block_to_balancing_block
-        } else {
-            &self.lhs_custom_block_to_balancing_block
-        }
-    }
-
-    pub fn insert_balancing_mapping(
-        &mut self,
-        id: DisplayMapId,
-        source: CustomBlockId,
-        balancing: CustomBlockId,
-    ) {
-        if self.is_rhs(id) {
-            self.rhs_custom_block_to_balancing_block
-                .insert(source, balancing);
-        } else {
-            self.lhs_custom_block_to_balancing_block
-                .insert(source, balancing);
-        }
-    }
-}
-
 /// Threshold for which diagnostic severities to display.
 ///
 /// Ordered by severity: Error < Warning < Information < Hint.
@@ -245,7 +136,6 @@ pub struct WrapSync {
 }
 
 pub struct DisplayMap {
-    id: DisplayMapId,
     multi_buffer: MultiBuffer,
     inlay_map: InlayMap,
     fold_map: FoldMap,
@@ -257,7 +147,6 @@ pub struct DisplayMap {
     semantic_token_highlights: SemanticTokensHighlights,
     lsp_token_highlights: SemanticTokensHighlights,
     inlay_highlights: Arc<InlayHighlights>,
-    companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
     masked: bool,
     /// When false, tree-sitter syntax coloring is suppressed for this
@@ -278,7 +167,7 @@ pub struct DisplayMap {
     last_buffer_snapshot: Option<MultiBufferSnapshot>,
     /// Buffer content version the crease map was last resolved against.
     ///
-    /// The crease sync in [`Self::snapshot_with_companion`] is skipped while
+    /// The crease sync in [`Self::snapshot`] is skipped while
     /// this matches the live buffer version. Anchor offsets move only on a
     /// buffer edit, and `insert`/`remove` resolve creases eagerly at the
     /// current version, so an unchanged version guarantees every crease is
@@ -321,7 +210,7 @@ pub struct DisplayMap {
     last_show_deleted_blocks: bool,
     cached_snapshot: Option<DisplaySnapshot>,
     /// Set when any highlight collection is mutated. Checked inside
-    /// [`DisplayMap::snapshot_with_companion`] so a single rebuild
+    /// [`DisplayMap::snapshot`] so a single rebuild
     /// covers any number of highlight setters fired in the same frame.
     highlights_dirty: bool,
     /// Counts the setter calls that changed what this map paints.
@@ -333,8 +222,8 @@ pub struct DisplayMap {
     ///
     /// Setters whose value compares cheaply move it only on a real change,
     /// because callers are invited to call some of them every frame. The rest
-    /// carry values with no equality to lean on, a companion or a token channel
-    /// or a folding-range set, and move it whenever the call does work. So
+    /// carry values with no equality to lean on, a token channel or a
+    /// folding-range set, and move it whenever the call does work. So
     /// installing the same tokens twice counts twice, which costs a repaint and
     /// never a wrong frame.
     settings_generation: u64,
@@ -355,7 +244,6 @@ impl DisplayMap {
         let block_map = BlockMap::new();
 
         Self {
-            id: DisplayMapId::next(),
             multi_buffer,
             inlay_map,
             fold_map,
@@ -367,7 +255,6 @@ impl DisplayMap {
             semantic_token_highlights: Arc::new(HashMap::new()),
             lsp_token_highlights: Arc::new(HashMap::new()),
             inlay_highlights: Arc::new(BTreeMap::new()),
-            companion: None,
             lsp_folding_crease_ids: HashMap::new(),
             masked: false,
             syntax_highlighting: true,
@@ -388,10 +275,6 @@ impl DisplayMap {
             highlights_dirty: false,
             settings_generation: 0,
         }
-    }
-
-    pub fn id(&self) -> DisplayMapId {
-        self.id
     }
 
     /// Version of the underlying buffer's diff map, or 0 when it has none.
@@ -423,25 +306,6 @@ impl DisplayMap {
         }
         self.pair_modified_hunks = pair;
         self.cached_snapshot = None;
-        self.settings_generation += 1;
-    }
-
-    pub fn set_companion(&mut self, companion: Option<Companion>) {
-        if companion.is_none() {
-            if let Some(old) = self.companion.take() {
-                let ids: std::collections::HashSet<CustomBlockId> = old
-                    .rhs_custom_block_to_balancing_block
-                    .values()
-                    .chain(old.lhs_custom_block_to_balancing_block.values())
-                    .copied()
-                    .collect();
-                self.block_map.remove(&ids);
-                self.settings_generation += 1;
-            }
-            return;
-        }
-        self.companion = companion;
-        self.block_map.mark_dirty();
         self.settings_generation += 1;
     }
 
@@ -486,7 +350,7 @@ impl DisplayMap {
         self.block_map.insert(blocks);
         // A block insert marks the block map dirty but touches no buffer, fold,
         // or inlay version, so the cached snapshot must be dropped explicitly or
-        // snapshot_with_companion short-circuits to it and the new blocks stay
+        // snapshot short-circuits to it and the new blocks stay
         // invisible until an unrelated version bump forces a rebuild.
         self.cached_snapshot = None;
     }
@@ -893,10 +757,6 @@ impl DisplayMap {
         }
     }
 
-    pub fn snapshot(&mut self) -> DisplaySnapshot {
-        self.snapshot_with_companion(None)
-    }
-
     /// The buffer as it stands now, without syncing the display layers.
     ///
     /// For a caller whose question is buffer-level -- where an anchor resolves,
@@ -908,10 +768,7 @@ impl DisplayMap {
         self.multi_buffer.snapshot()
     }
 
-    pub fn snapshot_with_companion(
-        &mut self,
-        companion_wrap_data: Option<(&WrapSnapshot, &Patch<u32>)>,
-    ) -> DisplaySnapshot {
+    pub fn snapshot(&mut self) -> DisplaySnapshot {
         let highlights_dirty = mem::take(&mut self.highlights_dirty);
         let buffer_version = self.multi_buffer.buffer_version();
         let diff_version_now = self.multi_buffer.diff_version();
@@ -923,7 +780,6 @@ impl DisplayMap {
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
             && !self.wrap_map.background_pending()
-            && companion_wrap_data.is_none()
             && let Some(cached) = self.cached_snapshot.clone()
         {
             // Highlights are the one thing a snapshot carries that no layer's
@@ -974,22 +830,9 @@ impl DisplayMap {
             self.last_show_deleted_blocks = self.show_deleted_blocks;
             self.last_pair_modified_hunks = self.pair_modified_hunks;
         }
-        let companion_view =
-            self.companion
-                .as_ref()
-                .zip(companion_wrap_data)
-                .map(|(c, (snap, edits))| CompanionView {
-                    display_map_id: self.id,
-                    companion_wrap_snapshot: snap,
-                    companion_wrap_edits: edits,
-                    companion: c,
-                });
-        let block_snapshot = self.block_map.sync(
-            wrap_snapshot,
-            &wrap_edits,
-            &buffer_row_edits,
-            companion_view,
-        );
+        let block_snapshot = self
+            .block_map
+            .sync(wrap_snapshot, &wrap_edits, &buffer_row_edits);
 
         if buffer_version != self.last_crease_sync_version {
             self.crease_map
@@ -998,7 +841,6 @@ impl DisplayMap {
         }
 
         let snapshot = DisplaySnapshot {
-            companion_display_snapshot: None,
             block_snapshot,
             diff_map,
             pairs_modified_hunks: self.pair_modified_hunks,
@@ -1036,7 +878,6 @@ impl DisplayMap {
 
 #[derive(Clone)]
 pub struct DisplaySnapshot {
-    companion_display_snapshot: Option<Arc<DisplaySnapshot>>,
     block_snapshot: BlockSnapshot,
     diff_map: Option<DiffMap>,
     text_highlights: TextHighlights,
@@ -1113,10 +954,6 @@ impl DisplaySnapshot {
 
     pub fn inlay_snapshot(&self) -> &InlaySnapshot {
         self.fold_snapshot().inlay_snapshot()
-    }
-
-    pub fn companion_snapshot(&self) -> Option<&DisplaySnapshot> {
-        self.companion_display_snapshot.as_deref()
     }
 
     pub fn fold_placeholder(&self) -> &FoldPlaceholder {
@@ -1709,26 +1546,6 @@ mod tests {
         DisplayMap::new(multi_buffer, test_executor(), crate::test_notify())
     }
 
-    fn no_companion_rows(
-        _: &crate::multi_buffer::MultiBufferSnapshot,
-        _: &crate::multi_buffer::MultiBufferSnapshot,
-        _: (std::ops::Bound<Point>, std::ops::Bound<Point>),
-    ) -> Vec<super::CompanionExcerptPatch> {
-        Vec::new()
-    }
-
-    fn bare_companion() -> super::Companion {
-        super::Companion {
-            rhs_display_map_id: super::DisplayMapId::next(),
-            rhs_buffer_to_lhs_buffer: std::collections::HashMap::new(),
-            lhs_buffer_to_rhs_buffer: std::collections::HashMap::new(),
-            rhs_rows_to_lhs_rows: no_companion_rows,
-            lhs_rows_to_rhs_rows: no_companion_rows,
-            rhs_custom_block_to_balancing_block: std::collections::HashMap::new(),
-            lhs_custom_block_to_balancing_block: std::collections::HashMap::new(),
-        }
-    }
-
     fn one_token(
         display_map: &DisplayMap,
     ) -> (Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>) {
@@ -1791,11 +1608,6 @@ mod tests {
             BlockStyle::Fixed,
         )]);
         assert_moved_once(&dm, &mut seen, "set_conflict_padding_blocks");
-
-        dm.set_companion(Some(bare_companion()));
-        assert_moved_once(&dm, &mut seen, "set_companion installing");
-        dm.set_companion(None);
-        assert_moved_once(&dm, &mut seen, "set_companion clearing");
 
         dm.set_semantic_token_highlights(buffer_id, tokens.clone(), interner.clone());
         assert_moved_once(&dm, &mut seen, "set_semantic_token_highlights");
@@ -4520,7 +4332,7 @@ mod tests {
                     blocks
                         .into_iter()
                         .map(|block| {
-                            let label = Block::Custom(Arc::clone(block)).get_line(0);
+                            let label = Block(Arc::clone(block)).get_line(0);
                             let mut props = BlockProperties::from_text(
                                 block.placement,
                                 vec![label],

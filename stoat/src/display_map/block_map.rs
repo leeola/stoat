@@ -3,7 +3,6 @@ use super::{
     highlights::Chunk,
     inlay_map::InlayPointCursor,
     wrap_map::{WrapPoint, WrapPointCursor, WrapSnapshot},
-    Companion, DisplayMapId,
 };
 use crate::{diff_map::DiffHunkStatus, multi_buffer::MultiBufferSnapshot};
 use ratatui::text::Line;
@@ -38,9 +37,6 @@ pub struct BlockRow(pub u32);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CustomBlockId(pub usize);
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SpacerId(pub usize);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum BlockStyle {
@@ -87,14 +83,6 @@ pub struct BlockContext<'a> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BlockId {
     Custom(CustomBlockId),
-    Spacer(SpacerId),
-}
-
-pub struct CompanionView<'a> {
-    pub display_map_id: DisplayMapId,
-    pub companion_wrap_snapshot: &'a WrapSnapshot,
-    pub companion_wrap_edits: &'a Patch<u32>,
-    pub companion: &'a Companion,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -248,29 +236,20 @@ impl std::fmt::Debug for CustomBlock {
     }
 }
 
+/// A block spliced into the display: extra rows the buffer does not contain.
+///
+/// Diff deletions, conflict padding, and review headers all reach the block map
+/// as one of these, carrying the rows to paint and where they sit.
 #[derive(Clone, Debug)]
-pub enum Block {
-    Custom(Arc<CustomBlock>),
-    Spacer {
-        id: SpacerId,
-        height: u32,
-        is_below: bool,
-    },
-}
+pub struct Block(pub Arc<CustomBlock>);
 
 impl Block {
     pub fn height(&self) -> u32 {
-        match self {
-            Block::Custom(b) => b.height.unwrap_or(0),
-            Block::Spacer { height, .. } => *height,
-        }
+        self.0.height.unwrap_or(0)
     }
 
     pub fn render_lines(&self, ctx: &BlockContext<'_>) -> Vec<Line<'static>> {
-        match self {
-            Block::Custom(b) => (b.render)(ctx),
-            _ => vec![Line::raw(String::new()); self.height() as usize],
-        }
+        (self.0.render)(ctx)
     }
 
     fn default_ctx(&self) -> BlockContext<'static> {
@@ -279,53 +258,37 @@ impl Block {
         static EMPTY_SNAPSHOT: LazyLock<MultiBufferSnapshot> =
             LazyLock::new(MultiBufferSnapshot::empty);
         BlockContext {
-            block_id: match self {
-                Block::Custom(b) => BlockId::Custom(b.id),
-                Block::Spacer { id, .. } => BlockId::Spacer(*id),
-            },
+            block_id: BlockId::Custom(self.0.id),
             max_width: 256,
             height: self.height(),
             selected: false,
             anchor_row: 0,
-            diff_status: match self {
-                Block::Custom(b) => b.diff_status,
-                _ => None,
-            },
+            diff_status: self.0.diff_status,
             buffer_snapshot: &EMPTY_SNAPSHOT,
         }
     }
 
-    /// Rendered content for this block, memoized on custom blocks.
+    /// Rendered content for this block, memoized on first call.
     ///
-    /// Custom blocks render with the constant [`Self::default_ctx`], so the
-    /// output never varies between calls. The diff and text block closures these
-    /// serve are pure over the lines captured at construction and ignore the
-    /// block context, so caching the first render is exact. Per-row callers
+    /// A block renders with the constant [`Self::default_ctx`], so the output
+    /// never varies between calls. The diff and text block closures these serve
+    /// are pure over the lines captured at construction and ignore the block
+    /// context, so caching the first render is exact. Per-row callers
     /// (`get_line`, `line_len`, `write_line`) then reuse one render instead of
-    /// re-running the closure for every line. Non-custom blocks carry no
-    /// rendered content here.
+    /// re-running the closure for every line.
     fn rendered_memo(&self) -> Arc<RenderedBlock> {
-        static EMPTY: LazyLock<Arc<RenderedBlock>> =
-            LazyLock::new(|| Arc::new(RenderedBlock::new(Vec::new())));
-        match self {
-            Block::Custom(b) => b
-                .rendered
-                .get_or_init(|| Arc::new(RenderedBlock::new((b.render)(&self.default_ctx()))))
-                .clone(),
-            _ => EMPTY.clone(),
-        }
+        self.0
+            .rendered
+            .get_or_init(|| Arc::new(RenderedBlock::new((self.0.render)(&self.default_ctx()))))
+            .clone()
     }
 
     pub fn get_line(&self, index: u32) -> String {
-        match self {
-            Block::Custom(_) => self
-                .rendered_memo()
-                .lines
-                .get(index as usize)
-                .map(|l| l.to_string())
-                .unwrap_or_default(),
-            _ => String::new(),
-        }
+        self.rendered_memo()
+            .lines
+            .get(index as usize)
+            .map(|l| l.to_string())
+            .unwrap_or_default()
     }
 
     pub fn line_len(&self, index: u32) -> u32 {
@@ -341,33 +304,18 @@ impl Block {
     }
 
     fn placement(&self) -> BlockPlacement {
-        match self {
-            Block::Custom(b) => b.placement,
-            Block::Spacer { is_below, .. } => {
-                if *is_below {
-                    BlockPlacement::Below(0)
-                } else {
-                    BlockPlacement::Above(0)
-                }
-            },
-        }
+        self.0.placement
     }
 
     fn is_replacement(&self) -> bool {
-        match self {
-            Block::Custom(b) => matches!(b.placement, BlockPlacement::Replace { .. }),
-            _ => false,
-        }
+        matches!(self.0.placement, BlockPlacement::Replace { .. })
     }
 
     fn place_below(&self) -> bool {
-        match self {
-            Block::Custom(b) => matches!(
-                b.placement,
-                BlockPlacement::Below(_) | BlockPlacement::Near(_)
-            ),
-            Block::Spacer { is_below, .. } => *is_below,
-        }
+        matches!(
+            self.0.placement,
+            BlockPlacement::Below(_) | BlockPlacement::Near(_)
+        )
     }
 }
 
@@ -562,7 +510,6 @@ impl BlockChunks<'_> {
 
 pub struct BlockMap {
     next_block_id: AtomicUsize,
-    next_spacer_id: AtomicUsize,
     /// Every custom block, ordered by start row, at the placement the edits
     /// have carried it to.
     ///
@@ -635,7 +582,6 @@ impl BlockMap {
     pub fn new() -> Self {
         Self {
             next_block_id: AtomicUsize::new(0),
-            next_spacer_id: AtomicUsize::new(0),
             custom_blocks: Vec::new(),
             custom_blocks_by_id: TreeMap::default(),
             transforms: None,
@@ -823,7 +769,6 @@ impl BlockMap {
         wrap_snapshot: Arc<WrapSnapshot>,
         wrap_edits: &Patch<u32>,
         buffer_row_edits: &Patch<u32>,
-        companion_view: Option<CompanionView<'_>>,
     ) -> BlockSnapshot {
         self.carry_block_placements(buffer_row_edits);
 
@@ -833,46 +778,6 @@ impl BlockMap {
             let deferred = std::mem::replace(&mut self.deferred_edits, Patch::empty());
             deferred.compose(wrap_edits.edits().iter().cloned())
         };
-
-        // Pull in companion edits: when the companion changes, we need to
-        // recompute spacer blocks in the affected region.
-        if let Some(ref cv) = companion_view
-            && !cv.companion_wrap_edits.is_empty()
-        {
-            let our_buffer = wrap_snapshot
-                .tab_snapshot()
-                .fold_snapshot()
-                .inlay_snapshot()
-                .buffer_snapshot();
-            let their_buffer = cv
-                .companion_wrap_snapshot
-                .tab_snapshot()
-                .fold_snapshot()
-                .inlay_snapshot()
-                .buffer_snapshot();
-
-            let mut merged = Patch::empty();
-            for edit in cv.companion_wrap_edits.edits() {
-                let companion_row =
-                    wrap_row_to_buffer_row(edit.new.start, cv.companion_wrap_snapshot);
-                let our_range = cv.companion.convert_point_from_companion(
-                    cv.display_map_id,
-                    our_buffer,
-                    their_buffer,
-                    Point::new(companion_row, 0),
-                );
-                let our_wrap_start = buffer_row_to_wrap_row(our_range.start.row, &wrap_snapshot);
-                let our_wrap_end = buffer_row_to_wrap_row(our_range.end.row, &wrap_snapshot)
-                    .max(our_wrap_start + 1);
-                merged.push(stoat_text::patch::Edit {
-                    old: our_wrap_start..our_wrap_end,
-                    new: our_wrap_start..our_wrap_end,
-                });
-            }
-            if !merged.is_empty() {
-                edits = edits.compose(merged.into_inner());
-            }
-        }
 
         // Rows whose block set changed, marked for rebuild the same way. These
         // placements name the post-edit buffer, so they compose onto the wrap
@@ -923,14 +828,7 @@ impl BlockMap {
         let wrap_line_count = wrap_snapshot.line_count();
 
         let mut blocks = std::mem::take(&mut self.blocks_scratch);
-        blocks.extend(self.custom_blocks.iter().map(|b| Block::Custom(b.clone())));
-        if let Some(ref companion_view) = companion_view {
-            blocks.extend(
-                self.spacer_blocks(&wrap_snapshot, companion_view)
-                    .into_iter()
-                    .map(|(_placement, block)| block),
-            );
-        }
+        blocks.extend(self.custom_blocks.iter().map(|b| Block(b.clone())));
 
         let can_incremental = !self.blocks_dirty && !edits.is_empty() && self.transforms.is_some();
 
@@ -967,91 +865,6 @@ impl BlockMap {
             total_rows: total_rows.0,
             version: self.version,
         }
-    }
-
-    fn spacer_blocks(
-        &self,
-        wrap_snapshot: &WrapSnapshot,
-        companion_view: &CompanionView<'_>,
-    ) -> Vec<(BlockPlacement, Block)> {
-        let companion = companion_view.companion;
-        let our_snapshot = wrap_snapshot
-            .tab_snapshot()
-            .fold_snapshot()
-            .inlay_snapshot()
-            .buffer_snapshot();
-        let companion_snapshot = companion_view
-            .companion_wrap_snapshot
-            .tab_snapshot()
-            .fold_snapshot()
-            .inlay_snapshot()
-            .buffer_snapshot();
-
-        let convert_fn = companion.rows_to_companion(companion_view.display_map_id);
-        let patches = convert_fn(
-            companion_snapshot,
-            our_snapshot,
-            (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
-        );
-
-        let mut spacers = Vec::new();
-        for patch in &patches {
-            let mut delta: i64 = 0;
-
-            for edit in patch.patch.edits() {
-                let our_start_wrap =
-                    buffer_row_to_wrap_row(edit.new.start.row, wrap_snapshot) as i64;
-                let our_end_wrap = buffer_row_to_wrap_row(edit.new.end.row, wrap_snapshot) as i64;
-                let companion_start_wrap = buffer_row_to_wrap_row(
-                    edit.old.start.row,
-                    companion_view.companion_wrap_snapshot,
-                ) as i64;
-                let companion_end_wrap = buffer_row_to_wrap_row(
-                    edit.old.end.row,
-                    companion_view.companion_wrap_snapshot,
-                ) as i64;
-
-                let our_rows = our_end_wrap - our_start_wrap;
-                let companion_rows = companion_end_wrap - companion_start_wrap;
-                let new_delta = delta + (companion_rows - our_rows);
-
-                if new_delta > delta {
-                    let height = (new_delta - delta) as u32;
-                    let spacer_id = SpacerId(
-                        self.next_spacer_id
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    );
-                    spacers.push((
-                        BlockPlacement::Above(edit.new.start.row),
-                        Block::Spacer {
-                            id: spacer_id,
-                            height,
-                            is_below: false,
-                        },
-                    ));
-                }
-
-                delta = new_delta;
-            }
-
-            if delta > 0
-                && let Some(last_edit) = patch.patch.edits().last()
-            {
-                let spacer_id = SpacerId(
-                    self.next_spacer_id
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                );
-                spacers.push((
-                    BlockPlacement::Below(last_edit.new.end.row),
-                    Block::Spacer {
-                        id: spacer_id,
-                        height: delta as u32,
-                        is_below: true,
-                    },
-                ));
-            }
-        }
-        spacers
     }
 }
 
@@ -1632,16 +1445,11 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
             // ties either way, so the same set of blocks could render in a
             // different order on any rebuild. What is left to separate two
             // blocks is which block each one is.
-            .then_with(|| kind_rank(block_a).cmp(&kind_rank(block_b)))
-            .then_with(|| match (block_a, block_b) {
+            .then_with(|| {
                 // Ids are minted in insertion order, so blocks left equal by
                 // priority render in the order they were added.
-                (Block::Custom(a), Block::Custom(b)) => {
-                    Ord::cmp(&a.priority, &b.priority).then_with(|| Ord::cmp(&a.id, &b.id))
-                },
-                (Block::Spacer { id: a, .. }, Block::Spacer { id: b, .. }) => Ord::cmp(a, b),
-                // Blocks of different kinds were already separated by rank.
-                _ => Ordering::Equal,
+                let (a, b) = (&block_a.0, &block_b.0);
+                Ord::cmp(&a.priority, &b.priority).then_with(|| Ord::cmp(&a.id, &b.id))
             })
     });
 
@@ -1667,18 +1475,6 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
         },
         _ => false,
     });
-}
-
-/// Which kind of block goes first when two land on the same row with the same
-/// placement.
-///
-/// A spacer ranks ahead of a custom block, so the row a companion pane needs
-/// kept clear stays clear whatever else was spliced onto it.
-fn kind_rank(block: &Block) -> u8 {
-    match block {
-        Block::Spacer { .. } => 0,
-        Block::Custom(_) => 1,
-    }
 }
 
 /// Where `block` sits in wrap space.
@@ -1951,7 +1747,7 @@ fn sync_incremental(
                 break;
             }
 
-            if let Some(Block::Custom(stale)) = item.block.as_ref()
+            if let Some(Block(stale)) = item.block.as_ref()
                 && let Some(current) = custom_blocks_by_id.get(&stale.id)
             {
                 let start = placement_wrap_rows(&current.placement, wrap_snapshot).start;
@@ -2207,46 +2003,6 @@ fn buffer_row_to_wrap_row(buffer_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 
     wrap_snapshot.to_wrap_point(tab_point).row()
 }
 
-pub fn balancing_block(
-    block: &CustomBlock,
-    our_snapshot: &MultiBufferSnapshot,
-    companion_snapshot: &MultiBufferSnapshot,
-    companion: &Companion,
-    display_map_id: DisplayMapId,
-) -> Option<BlockProperties> {
-    let our_row = block.placement.start_row();
-    let our_point = Point::new(our_row, 0);
-    let their_range = companion.convert_point_from_companion(
-        display_map_id,
-        our_snapshot,
-        companion_snapshot,
-        our_point,
-    );
-    let placement = match block.placement {
-        BlockPlacement::Above(_) => BlockPlacement::Above(their_range.start.row),
-        BlockPlacement::Below(_) => {
-            if their_range.start == their_range.end {
-                BlockPlacement::Above(their_range.start.row)
-            } else {
-                BlockPlacement::Below(their_range.start.row)
-            }
-        },
-        BlockPlacement::Near(_) | BlockPlacement::Replace { .. } => return None,
-    };
-    let height = block.height;
-    Some(BlockProperties {
-        placement,
-        height,
-        style: BlockStyle::Spacer,
-        render: Arc::new(move |_ctx| {
-            let h = height.unwrap_or(0) as usize;
-            vec![Line::raw(String::new()); h]
-        }),
-        diff_status: None,
-        priority: block.priority,
-    })
-}
-
 fn push_isomorphic(transforms: &mut SumTree<Transform>, rows: u32) {
     if rows == 0 {
         return;
@@ -2365,7 +2121,7 @@ mod tests {
             WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
-        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty())
     }
 
     /// A map and the wrap snapshot to sync it against, kept apart so a test can
@@ -2396,12 +2152,7 @@ mod tests {
         block_map: &mut BlockMap,
         wrap_snapshot: &Arc<super::WrapSnapshot>,
     ) -> super::BlockSnapshot {
-        block_map.sync(
-            wrap_snapshot.clone(),
-            &Patch::empty(),
-            &Patch::empty(),
-            None,
-        )
+        block_map.sync(wrap_snapshot.clone(), &Patch::empty(), &Patch::empty())
     }
 
     /// The version moves when the transforms are rebuilt and holds when the
@@ -2490,7 +2241,7 @@ mod tests {
         );
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
-        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty())
     }
 
     /// Wrap-space clipping answers on whichever row the position it chose lives
@@ -2585,7 +2336,7 @@ mod tests {
             },
             BlockStyle::Fixed,
         );
-        let block = super::Block::Custom(Arc::new(super::CustomBlock {
+        let block = super::Block(Arc::new(super::CustomBlock {
             id: super::CustomBlockId(0),
             placement: props.placement,
             height: props.height,
@@ -2773,7 +2524,7 @@ mod tests {
     /// lines differ in width is what would show the two coming apart.
     #[test]
     fn a_blocks_reported_lengths_describe_the_lines_it_renders() {
-        let block = super::Block::Custom(Arc::new(super::CustomBlock {
+        let block = super::Block(Arc::new(super::CustomBlock {
             id: super::CustomBlockId(0),
             placement: BlockPlacement::Below(0),
             height: Some(4),
@@ -2881,7 +2632,7 @@ mod tests {
         let (_, wrap_snapshot) =
             WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         let mut block_map = BlockMap::new();
-        let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
+        let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty());
 
         let buf = snapshot.block_to_buffer(BlockPoint::new(0, 5)).unwrap();
         assert_eq!(buf, Point::new(0, 2));
@@ -2892,7 +2643,7 @@ mod tests {
         let props = text_block(BlockPlacement::Below(0), "short\nlonger line\nx");
         let mut block_map = BlockMap::new();
         block_map.insert(vec![props]);
-        let block = super::Block::Custom(block_map.custom_blocks[0].clone());
+        let block = super::Block(block_map.custom_blocks[0].clone());
         for i in 0..block.height() {
             assert_eq!(
                 block.line_len(i),
@@ -2982,13 +2733,8 @@ mod tests {
         let mut block_map = BlockMap::new();
         block_map.insert(vec![text_block(BlockPlacement::Below(0), "deleted")]);
 
-        let snap1 = block_map.sync(
-            Arc::clone(&wrap_snapshot),
-            &Patch::empty(),
-            &Patch::empty(),
-            None,
-        );
-        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
+        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), &Patch::empty());
+        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty());
 
         assert_eq!(snap1.total_lines(), snap2.total_lines());
     }
@@ -2999,12 +2745,7 @@ mod tests {
         let mut block_map = BlockMap::new();
         let ids = block_map.insert(vec![text_block(BlockPlacement::Below(0), "deleted")]);
 
-        let snap1 = block_map.sync(
-            Arc::clone(&wrap_snapshot),
-            &Patch::empty(),
-            &Patch::empty(),
-            None,
-        );
+        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), &Patch::empty());
         assert_eq!(snap1.total_lines(), 3);
 
         block_map.remove(&ids.into_iter().collect());
@@ -3013,7 +2754,7 @@ mod tests {
             "deleted\nextra line",
         )]);
 
-        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
+        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty());
         assert_eq!(snap2.total_lines(), 4);
     }
 
@@ -3026,12 +2767,7 @@ mod tests {
         let content: String = (0..12).map(|i| format!("line{i}\n")).collect();
         let wrap_snapshot = create_wrap_snapshot(&content);
         let sync = |map: &mut BlockMap| {
-            map.sync(
-                Arc::clone(&wrap_snapshot),
-                &Patch::empty(),
-                &Patch::empty(),
-                None,
-            )
+            map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), &Patch::empty())
         };
 
         let mut block_map = BlockMap::new();
@@ -3390,16 +3126,11 @@ mod tests {
         ]);
         assert_eq!(ids.len(), 2);
 
-        let snap = block_map.sync(
-            Arc::clone(&wrap_snapshot),
-            &Patch::empty(),
-            &Patch::empty(),
-            None,
-        );
+        let snap = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), &Patch::empty());
         assert_eq!(snap.total_lines(), 5);
 
         block_map.remove(&[ids[0]].into_iter().collect());
-        let snap = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
+        let snap = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty());
         assert_eq!(snap.total_lines(), 4);
     }
 
@@ -3453,7 +3184,7 @@ mod tests {
 
         let mut block_map = BlockMap::new();
         block_map.insert(blocks);
-        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty())
     }
 
     /// A block's rows hold no buffer text, so clipping has to move off them and
