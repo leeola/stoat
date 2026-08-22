@@ -14,7 +14,7 @@ use stoat_log::{
     ident::{self, LogId, ProcessIdent},
     LogTarget,
 };
-use stoatty::cli::{Cli, TtyCommand};
+use stoatty_bin::cli::{Cli, TtyCommand};
 
 fn main() {
     let mut cli = Cli::parse();
@@ -79,7 +79,7 @@ fn main() {
         None => {},
     }
 
-    stoatty::app::run(
+    stoatty_bin::app::run(
         cli.command(),
         cli.working_directory,
         cli.common,

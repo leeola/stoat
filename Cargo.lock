@@ -4233,7 +4233,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "stoatty"
+name = "stoatty_bin"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",

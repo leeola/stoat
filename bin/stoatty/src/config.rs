@@ -14,7 +14,7 @@ use vscode_theme::{Rgba, VsCodeTheme};
 
 /// The default configuration, embedded from the repo root so a built binary
 /// carries it without the source tree.
-const DEFAULT_CONFIG: &str = include_str!("../../stoatty.toml");
+const DEFAULT_CONFIG: &str = include_str!("../../../stoatty.toml");
 
 /// The `terminal.ansi*` color keys in palette-index order, the 8 normal colors
 /// followed by the 8 bright ones.

@@ -263,7 +263,7 @@ terminal has to keep understanding the prefix it knows.
 | Every command and its payload | `tty_protocol/src/command.rs` |
 | Detection | `tty_protocol/src/detect.rs` |
 | Ratatui widgets that emit these frames | `widgets/` |
-| Runnable examples | `cargo run --example panel`, and its siblings in `tty/examples/` |
+| Runnable examples | `cargo run --example panel`, and its siblings in `bin/stoatty/examples/` |
 | Why non-cell components exist at all | `docs/stoatty-non-cell-components.md` |
 | Kitty graphics frames on the wire | `tty_protocol/src/kitty.rs` |
 | The iTerm2 inline-image escape | `tty_protocol/src/iterm.rs` |

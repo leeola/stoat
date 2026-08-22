@@ -8,10 +8,10 @@
 # tests that drive it (fixture_live, foreign_terminal) declare
 # required-features, so they are skipped rather than reported as uncovered.
 # This run covers stoat and stoat_bin over {none, fixture, perf,
-# fixture+perf} -- including stoat_bin's cfg(fixture) branches -- and stoatty
-# and stoatty_render over {none, perf}. cargo-hack derives the powerset from
-# the manifests, so a new feature or a new crate is covered without editing
-# this script.
+# fixture+perf} -- including stoat_bin's cfg(fixture) branches -- and
+# stoatty_bin and stoatty_render over {none, perf}. cargo-hack derives the
+# powerset from the manifests, so a new feature or a new crate is covered
+# without editing this script.
 #
 # check rather than clippy: the matrix guards compilation, while lint severity
 # stays on the default build's `cargo clippy --workspace --all-targets`.

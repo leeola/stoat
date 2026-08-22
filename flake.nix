@@ -129,7 +129,7 @@
               pname = "stoatty";
               cargoBuildFlags = [
                 "-p"
-                "stoatty"
+                "stoatty_bin"
                 "-p"
                 "stoat_bin"
               ];

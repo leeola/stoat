@@ -18,7 +18,7 @@ members = [
   "widgets",
   "tty_term",
   "tty_render",
-  "tty",
+  "bin/stoatty",
 ]
 
 [workspace.package]

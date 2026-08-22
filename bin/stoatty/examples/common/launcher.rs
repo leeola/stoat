@@ -37,7 +37,7 @@ const EMITTERS: &[(&str, &str)] = &[
 /// it shows.
 pub fn run(emitter: &str, size: [u16; 2]) {
     let program = build_emitter(emitter);
-    stoatty::app::run_with_shell(
+    stoatty_bin::app::run_with_shell(
         program.to_string_lossy().into_owned(),
         Vec::new(),
         Some(size),
