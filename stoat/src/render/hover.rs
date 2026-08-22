@@ -7,8 +7,12 @@ use ratatui::{
     widgets::{Block, Borders, StatefulWidget},
 };
 use stoat_widgets::{
+    sketch::SketchRect,
     text_run::{self, TextRun},
     ApcScene,
+};
+use stoatty_protocol::command::{
+    SketchBounds, SketchFill, SketchFillStyle, SketchStyle, SketchTiming,
 };
 
 /// A live text selection over the hover popup body.
@@ -21,6 +25,25 @@ pub(crate) struct HoverSelection {
     pub(crate) anchor: (usize, usize),
     pub(crate) head: (usize, usize),
     pub(crate) dragging: bool,
+}
+
+/// The border a hover popup draws.
+///
+/// A hover is transient chrome and wants the modal border every other floating
+/// box has. A walkthrough's narration card is the subject of the screen while
+/// it is up, so it draws itself on with the same pen as the marks around it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum HoverFrame {
+    Modal,
+    /// A hand-drawn box, which needs a terminal that draws one.
+    Sketch {
+        /// The mark's identity across frames, so a re-declared card does not
+        /// restart its own stroke.
+        id: u32,
+        stroke: [u8; 3],
+        fill: [u8; 3],
+        timing: SketchTiming,
+    },
 }
 
 /// Hover popup state ready to paint. Mirrors [`HoverResponse`] but
@@ -71,6 +94,23 @@ pub(crate) struct HoverPopup {
     /// there would walk every span of every line for a body that cannot have
     /// changed since the last frame asked.
     pub(crate) max_line_width: usize,
+    /// Whether an incidental key press leaves this popup up.
+    ///
+    /// A hover is dismissed by the next thing the reader does, which is what
+    /// makes it a hover. A narration card is the point of the screen while a
+    /// tour plays, so it stays until the reader takes it down or the tour ends.
+    ///
+    /// The deliberate dismissals -- Esc, Ctrl-c, a click outside, a focus
+    /// change -- go on working. A card that cannot be dismissed is worse than
+    /// one that vanishes.
+    pub(crate) pinned: bool,
+    /// Where the popup goes, overriding the cursor-anchored placement.
+    ///
+    /// A hover belongs beside the cursor. A card belongs where the slide layout
+    /// put it, which is a different question, so the layout takes this when set
+    /// and clamps it the same way.
+    pub(crate) placement: Option<Rect>,
+    pub(crate) frame: HoverFrame,
 }
 
 impl HoverPopup {
@@ -97,7 +137,64 @@ impl HoverPopup {
             inner: Rect::default(),
             selection: None,
             generation: crate::picker::next_generation(),
+            pinned: false,
+            placement: None,
+            frame: HoverFrame::Modal,
         }
+    }
+}
+
+/// Cell inset the sketch card's body keeps from its own stroke.
+///
+/// The stroke wobbles outward from the box it is given, so text against the
+/// declared edge sits under the pen rather than inside it.
+const SKETCH_CARD_INSET: u16 = 1;
+
+/// Corner rounding of the card's box, in sixteenths of a cell.
+const SKETCH_CARD_RADIUS: u8 = 4;
+
+/// Emit the card's hand-drawn box and return the interior its body draws in.
+///
+/// The fill is opaque. A card is read against whatever it floats over, and a
+/// translucent one leaves the code showing through the narration.
+#[allow(clippy::too_many_arguments)]
+fn sketch_frame(
+    area: Rect,
+    stroke: [u8; 3],
+    fill: [u8; 3],
+    timing: SketchTiming,
+    id: u32,
+    anchor: Option<(u32, f32)>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) -> Rect {
+    SketchRect {
+        id,
+        style: SketchStyle::marker(stroke),
+        timing,
+        // Area-relative, and the widget shifts it by the area it renders into,
+        // so a zero origin here places the box exactly on `area`.
+        bounds: SketchBounds {
+            x: 0,
+            y: 0,
+            w: area.width * 16,
+            h: area.height * 16,
+        },
+        radius: SKETCH_CARD_RADIUS,
+        fill: Some(SketchFill {
+            color: fill,
+            alpha: 255,
+            style: SketchFillStyle::Solid,
+        }),
+        anchor,
+    }
+    .render(area, buf, scene);
+
+    Rect {
+        x: area.x + SKETCH_CARD_INSET,
+        y: area.y + SKETCH_CARD_INSET,
+        width: area.width.saturating_sub(SKETCH_CARD_INSET * 2),
+        height: area.height.saturating_sub(SKETCH_CARD_INSET * 2),
     }
 }
 
@@ -111,6 +208,21 @@ const MIN_HEIGHT: u16 = 6;
 /// cap bites first. These bound the popup on a large one.
 const MAX_HEIGHT: u16 = 26;
 const MAX_WIDTH: u16 = 120;
+
+/// A rect pushed into `bounds`, shrunk first when it does not fit.
+///
+/// A placement handed in from elsewhere was computed against a pane, and the
+/// popup floats over the whole frame, so it can arrive hanging over an edge.
+fn clamp_into(rect: Rect, bounds: Rect) -> Rect {
+    let width = rect.width.min(bounds.width).max(1);
+    let height = rect.height.min(bounds.height).max(1);
+    Rect {
+        x: rect.x.clamp(bounds.x, bounds.x + bounds.width - width),
+        y: rect.y.clamp(bounds.y, bounds.y + bounds.height - height),
+        width,
+        height,
+    }
+}
 
 /// Paint the hover popup, if any, anchored to the focused editor's
 /// primary cursor.
@@ -147,16 +259,36 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     );
     let anchor = host_anchor(stoat, popup_area);
 
+    let frame_kind = stoat
+        .pending_hover
+        .as_ref()
+        .map_or(HoverFrame::Modal, |popup| popup.frame);
+
     crate::render::clear_themed(popup_area, buf, &stoat.theme);
-    let inner = crate::render::chrome::modal_frame_anchored(
-        buf,
-        popup_area,
-        modal_style,
-        &stoat.theme,
-        &mut *scene,
-        anchor,
-        run_bg,
-    );
+    let inner = match frame_kind {
+        HoverFrame::Modal => crate::render::chrome::modal_frame_anchored(
+            buf,
+            popup_area,
+            modal_style,
+            &stoat.theme,
+            &mut *scene,
+            anchor,
+            run_bg,
+        ),
+        HoverFrame::Sketch {
+            id,
+            stroke,
+            fill,
+            timing,
+        } => sketch_frame(popup_area, stroke, fill, timing, id, anchor, buf, scene),
+    };
+
+    // A card's body fades in with the box that holds it, so the text arrives as
+    // the pen closes rather than sitting there while it draws.
+    let follow = match frame_kind {
+        HoverFrame::Sketch { id, .. } => id,
+        HoverFrame::Modal => 0,
+    };
 
     // Clamp the half-page scroll to the content that overflows the interior, then
     // write the clamped counter back so scrolling up past the bottom takes effect
@@ -266,8 +398,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                             color,
                             bg: Some(bg),
                             text: seg_text,
-                            follow: 0,
-                            anchor: None,
+                            follow,
+                            anchor,
                         }
                         .render(Rect::new(inner.x, row, 1, 1), buf, scene);
                     }
@@ -513,11 +645,17 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
         cursor_screen.1.saturating_sub(popup_height).max(frame.y)
     };
 
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
+    // A card belongs where the slide layout put it rather than beside the
+    // cursor, so an override replaces the placement above and takes the same
+    // clamp. The interior below is computed once, either way.
+    let popup_area = match stoat.pending_hover.as_ref()?.placement {
+        Some(placed) => clamp_into(placed, frame),
+        None => Rect {
+            x: popup_x,
+            y: popup_y,
+            width: popup_width,
+            height: popup_height,
+        },
     };
     let inner = Block::default().borders(Borders::ALL).inner(popup_area);
     Some((popup_area, inner))

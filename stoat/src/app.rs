@@ -4290,8 +4290,16 @@ impl Stoat {
                     return UpdateEffect::Redraw;
                 }
             }
-            self.pending_hover = None;
-            self.pending_hover_request = None;
+            // A pinned card stays up through an incidental key. Esc below is
+            // deliberate, so it takes the card down like anything else.
+            let pinned = self
+                .pending_hover
+                .as_ref()
+                .is_some_and(|popup| popup.pinned);
+            if !pinned || matches!(key.code, KeyCode::Esc) {
+                self.pending_hover = None;
+                self.pending_hover_request = None;
+            }
             if matches!(key.code, KeyCode::Esc) {
                 return UpdateEffect::Redraw;
             }
@@ -4503,7 +4511,7 @@ impl Stoat {
             return UpdateEffect::None;
         };
 
-        self.run_bound_actions(&actions, captured_digit)
+        self.run_bound_actions(&actions, captured_digit, matches!(key.code, KeyCode::Esc))
     }
 
     /// Run a binding's resolved actions, applying the mode switches, variable
@@ -4514,10 +4522,17 @@ impl Stoat {
     ///
     /// Every input path that resolves a binding runs it through here, so a
     /// wheel gesture and a key press share one set of chord semantics.
+    /// `dismisses_pinned` says the input that produced these actions was a
+    /// deliberate dismissal, which is Esc and nothing else here.
+    ///
+    /// A mode binds Esc to an action, so it never reaches the plain-key branch
+    /// while that mode is active, and a pinned card would survive the one key
+    /// meant to take it down. The caller knows which key it was; this does not.
     pub(crate) fn run_bound_actions(
         &mut self,
         actions: &Arc<[ResolvedAction]>,
         captured_digit: Option<f64>,
+        dismisses_pinned: bool,
     ) -> UpdateEffect {
         let mut effect = UpdateEffect::None;
         let mut dispatched_action = false;
@@ -4578,10 +4593,23 @@ impl Stoat {
         // The chord is over, so a later dispatch from anywhere else seals its
         // own group again.
         self.group_held_for_insert = false;
+        // A deliberate dismissal takes the popup down whatever the binding did.
+        // It cannot ride the action-dependent clear below, because a mode binds
+        // Esc to a mode switch, which returns before anything counts as
+        // dispatched.
+        if dismisses_pinned {
+            self.pending_hover = None;
+            self.pending_hover_request = None;
+        }
         if dispatched_action {
             self.pending_count = None;
             if !dispatched_hover {
-                if self.pending_hover.as_ref().map(|popup| popup.generation) == hover_before {
+                let popup = self.pending_hover.as_ref();
+                let stale = popup.map(|popup| popup.generation) == hover_before;
+                // A pinned card outlives an action the same way it outlives a
+                // key press. The tour, not the last thing dispatched, decides
+                // when it goes.
+                if stale && !popup.is_some_and(|popup| popup.pinned) {
                     self.pending_hover = None;
                 }
                 self.pending_hover_request = None;

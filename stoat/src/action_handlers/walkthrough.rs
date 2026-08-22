@@ -2,12 +2,14 @@ use crate::{
     action_handlers::{self, read_string_via_host},
     app::{Stoat, UpdateEffect},
     code_index::{build, nav},
-    render::hover::HoverPopup,
+    render::hover::{HoverFrame, HoverPopup},
     walkthrough::{self, run::WalkthroughRun, store},
 };
 use codegraph::{EdgeKind, SymbolKey};
+use ratatui::{layout::Rect, style::Style};
 use std::path::{Path, PathBuf};
 use stoat_text::Rope;
+use stoatty_protocol::command::SketchTiming;
 
 /// One place a walkthrough sends the reader, being a stop's focus or one of its
 /// annotations.
@@ -69,13 +71,26 @@ pub(crate) fn prev_annotation(stoat: &mut Stoat) -> UpdateEffect {
     step_annotation(stoat, -1)
 }
 
-/// Raise the current stop's narration again after something dismissed it.
+/// Take the narration card down, or raise it again.
 ///
-/// The narration shares the hover popup, so the next key press takes it down.
-/// This puts it back without moving the reader off the stop.
+/// The card is pinned, so it stays through everything but a deliberate
+/// dismissal. That leaves one key to both hide it when it is in the way and
+/// bring it back afterward, which is what this is.
 pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().walkthrough.is_none() {
         stoat.set_status("no walkthrough is playing");
+        return UpdateEffect::Redraw;
+    }
+
+    // A card that is up came from this stop, so the reader asking again wants
+    // it out of the way rather than redrawn where it already is.
+    if stoat
+        .pending_hover
+        .as_ref()
+        .is_some_and(|popup| popup.pinned)
+    {
+        stoat.pending_hover = None;
+        stoat.pending_hover_request = None;
         return UpdateEffect::Redraw;
     }
 
@@ -326,6 +341,29 @@ fn stop_title(run: &WalkthroughRun) -> String {
 /// previous stop's up, so what is on screen always describes where the reader
 /// is. The popup itself is the one a hover raises, which is why the next key
 /// press dismisses it and [`show_narration_again`] exists to bring it back.
+/// Narrowest and widest the card gets, in cells.
+///
+/// Below the floor a wrapped line is more break than text. The ceiling and the
+/// half-pane bound below keep the card from becoming the screen.
+const CARD_MIN_WIDTH: u16 = 24;
+const CARD_MAX_WIDTH: u16 = 52;
+
+/// The card's own mark id.
+///
+/// Fixed rather than cycling, because a card re-declared on every frame of the
+/// same stop must not restart its stroke, and a new stop replaces the popup
+/// outright.
+const CARD_SKETCH_ID: u32 = 1;
+
+/// The protocol version that decodes a sketch. An older stoatty ignores the
+/// frames, so the card would draw no border at all.
+const SKETCH_PROTOCOL: u32 = 3;
+
+/// How the card draws itself on.
+fn card_timing() -> SketchTiming {
+    SketchTiming::after(0, 320)
+}
+
 fn show_narration(stoat: &mut Stoat, offset: usize) {
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return;
@@ -350,7 +388,70 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
         &stoat.language_registry,
     ));
 
-    stoat.pending_hover = Some(HoverPopup::new(lines, offset, editor_id));
+    // Wrapped to the card rather than clipped to it, since a narration is prose
+    // and a clipped sentence loses its end. The width is settled first, because
+    // the wrap needs it and the height falls out of the result.
+    let frame = stoat.size();
+    let width = card_width(&lines, frame.width);
+    let inner_width = usize::from(width.saturating_sub(2));
+    let wrapped: Vec<Vec<(String, Style)>> = lines
+        .iter()
+        .flat_map(|line| crate::render::text::wrap_styled(line, inner_width))
+        .collect();
+    let height = (wrapped.len() as u16 + 2)
+        .min(frame.height.saturating_sub(2))
+        .max(3);
+
+    let mut popup = HoverPopup::new(wrapped, offset, editor_id);
+    popup.pinned = true;
+    popup.placement = Some(Rect {
+        x: frame.x + frame.width.saturating_sub(width + 1),
+        y: frame.y + 1,
+        width,
+        height,
+    });
+    popup.frame = card_frame(stoat);
+    stoat.pending_hover = Some(popup);
+}
+
+/// The card's width, from the widest line it holds.
+///
+/// Bounded below so a short narration still reads as a card, and above by both
+/// a fixed ceiling and half the frame, so the card never takes the screen it is
+/// explaining.
+fn card_width(lines: &[Vec<(String, Style)>], frame_width: u16) -> u16 {
+    let widest = lines
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|(text, _)| text.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let ceiling = CARD_MAX_WIDTH.min((frame_width / 2).max(CARD_MIN_WIDTH));
+    (widest as u16)
+        .saturating_add(2)
+        .clamp(CARD_MIN_WIDTH, ceiling)
+}
+
+/// The border the card draws.
+///
+/// The hand-drawn box needs a terminal that decodes one. Everywhere else the
+/// card keeps the modal border, so the narration reads the same even where the
+/// marks around it do not draw.
+fn card_frame(stoat: &Stoat) -> HoverFrame {
+    if !stoat.stoatty || stoat.stoatty_protocol < SKETCH_PROTOCOL {
+        return HoverFrame::Modal;
+    }
+
+    let card = stoat.theme.get(crate::theme::scope::UI_WALKTHROUGH_CARD);
+    HoverFrame::Sketch {
+        id: CARD_SKETCH_ID,
+        stroke: crate::render::paint::style_rgb(card.fg).unwrap_or([255, 255, 255]),
+        fill: crate::render::paint::style_rgb(card.bg).unwrap_or([0, 0, 0]),
+        timing: card_timing(),
+    }
 }
 
 /// Lay the call-graph trail between the places `from` and `to`, and say how
@@ -464,12 +565,16 @@ fn drifted(stoat: &mut Stoat, range: walkthrough::Range, captured: &str) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{done, next, next_annotation, open, prev, prev_annotation, show_narration_again};
+    use super::{
+        done, next, next_annotation, open, prev, prev_annotation, show_narration_again,
+        CARD_MAX_WIDTH, CARD_MIN_WIDTH,
+    };
     use crate::{
         action_handlers,
         app::Stoat,
         code_index::{build, nav},
         host::FakeFs,
+        render::hover::HoverFrame,
         test_harness::TestHarness,
         walkthrough::{Location, Point, Range, Walkthrough},
     };
@@ -730,6 +835,115 @@ mod tests {
         next(&mut stoat);
 
         assert!(stoat.pending_hover.is_none());
+    }
+
+    /// A hover goes on the next key press, which is what makes it a hover. A
+    /// narration card is the point of the screen while a tour plays, so an
+    /// incidental key leaves it up.
+    #[test]
+    fn an_ordinary_key_leaves_the_card_up() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+        assert!(
+            h.stoat
+                .pending_hover
+                .as_ref()
+                .is_some_and(|popup| popup.pinned),
+            "the card is pinned",
+        );
+
+        h.type_keys("j");
+        assert_eq!(
+            popup_lines(&h.stoat),
+            ["first - 1/2", "The entry point."],
+            "and a movement key does not take it down",
+        );
+    }
+
+    /// A card that cannot be dismissed is worse than one that vanishes, so the
+    /// deliberate dismissals go on working.
+    #[test]
+    fn esc_takes_the_card_down() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        h.type_keys("escape");
+        assert!(h.stoat.pending_hover.is_none());
+    }
+
+    /// The card stays until it is dismissed, so one key both hides it when it
+    /// is in the way and brings it back.
+    /// Walkthrough mode binds Esc to an action, so it never reaches the plain
+    /// key branch while that mode is active. Without the action path knowing,
+    /// the card survives the one key meant to take it down.
+    #[test]
+    fn esc_takes_the_card_down_from_inside_walkthrough_mode() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        h.type_keys("space W");
+        assert_eq!(h.stoat.focused_mode(), "walkthrough", "the mode is entered");
+        assert!(
+            h.stoat.pending_hover.is_some(),
+            "and the card survived getting there",
+        );
+
+        h.type_keys("escape");
+        assert!(h.stoat.pending_hover.is_none(), "Esc takes it down");
+    }
+
+    #[test]
+    fn asking_again_toggles_the_card() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+
+        show_narration_again(&mut stoat);
+        assert!(stoat.pending_hover.is_none(), "a card that is up goes down");
+
+        show_narration_again(&mut stoat);
+        assert_eq!(
+            popup_lines(&stoat),
+            ["first - 1/2", "The entry point."],
+            "and asking once more brings it back",
+        );
+    }
+
+    /// A plain terminal draws no marks, so the card keeps the modal border and
+    /// the narration reads the same there.
+    #[test]
+    fn a_plain_terminal_keeps_the_modal_frame() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+
+        assert_eq!(
+            stoat.pending_hover.as_ref().map(|popup| popup.frame),
+            Some(HoverFrame::Modal),
+            "the harness is not a stoatty",
+        );
+    }
+
+    /// The card goes where the layout puts it rather than beside the cursor,
+    /// which is what keeps it clear of the code the stop is about.
+    #[test]
+    fn the_card_carries_its_own_placement() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        let frame = h.stoat.size();
+        let popup = h.stoat.pending_hover.as_ref().expect("a popup");
+        let placement = popup.placement.expect("the card places itself");
+
+        // The floor wins on a narrow frame, so the ceiling is stated the way
+        // the sizing states it rather than as a bare half-frame bound.
+        let ceiling = CARD_MAX_WIDTH.min((frame.width / 2).max(CARD_MIN_WIDTH));
+        assert!(
+            (CARD_MIN_WIDTH..=ceiling).contains(&placement.width),
+            "the card is between {CARD_MIN_WIDTH} and {ceiling}, got {placement:?}",
+        );
+        assert!(
+            placement.x + placement.width <= frame.x + frame.width,
+            "and stays inside the frame, got {placement:?} in {frame:?}",
+        );
     }
 
     #[test]

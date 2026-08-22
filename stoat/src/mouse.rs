@@ -977,7 +977,9 @@ fn wheel_binding(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     }
     stoat.wheel_binding_last = Some(now);
 
-    Some(stoat.run_bound_actions(&actions, None))
+    // A click is not a dismissal here. The click-outside path takes a popup
+    // down on its own, before ever reaching a binding.
+    Some(stoat.run_bound_actions(&actions, None, false))
 }
 
 /// Scrolls the pane under the wheel pointer.
