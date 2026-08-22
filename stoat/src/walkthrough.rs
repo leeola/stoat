@@ -24,6 +24,9 @@ use std::{
 };
 
 pub(crate) mod run;
+// FIXME: no draw path consumes a laid-out slide yet.
+#[allow(dead_code)]
+pub(crate) mod slide;
 pub mod store;
 
 /// One authored walkthrough, the whole contents of its JSON file.
