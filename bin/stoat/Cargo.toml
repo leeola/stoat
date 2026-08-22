@@ -3,9 +3,9 @@ name = "stoat_bin"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-readme = "../README.md"
+readme = "../../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
-license-file = "../LICENSE"
+license-file = "../../LICENSE"
 
 [[bin]]
 name = "stoat"
@@ -26,12 +26,12 @@ perf = ["stoat/perf"]
 fixture = ["stoat/fixture"]
 
 [dependencies]
-stoat = { path = "../stoat" }
-vscode_theme = { path = "../vscode_theme" }
-stoat_cli = { path = "../cli" }
-stoat_language = { path = "../language" }
-stoat_scheduler = { path = "../scheduler" }
-viewport = { path = "../viewport" }
+stoat = { path = "../../stoat" }
+vscode_theme = { path = "../../vscode_theme" }
+stoat_cli = { path = "../../cli" }
+stoat_language = { path = "../../language" }
+stoat_scheduler = { path = "../../scheduler" }
+viewport = { path = "../../viewport" }
 blake3 = { workspace = true }
 clap.workspace = true
 clap_complete.workspace = true
@@ -51,7 +51,7 @@ libc = { workspace = true }
 [dev-dependencies]
 git2 = { version = "0.21", default-features = false }
 insta = "1"
-stoat_host = { path = "../host", features = ["test-support"] }
-stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
+stoat_host = { path = "../../host", features = ["test-support"] }
+stoat_scheduler = { path = "../../scheduler", features = ["test-support"] }
 tokio-util.workspace = true
 bytes.workspace = true

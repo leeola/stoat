@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
   "action",
-  "bin",
+  "bin/stoat",
   "cli",
   "codegraph",
   "config",
