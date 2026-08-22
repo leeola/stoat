@@ -126,6 +126,18 @@ struct TextInstance {
     /// Zero for the draws that are not built per row, being the overlays, text
     /// runs and readouts, whose positions are already absolute and which the
     /// same arithmetic then leaves alone.
+    /// The high 16 bits carry the mark this glyph fades in with, as a slot in
+    /// the per-frame alpha array biased by one, or zero for a glyph that
+    /// follows nothing.
+    ///
+    /// Packed here rather than given a word of its own to hold the instance at
+    /// 32 bytes, which a frame that rewrites the whole grid pays thousands of
+    /// times over. A row slot is bounded by the grid height, so the high half
+    /// is free.
+    ///
+    /// A slot rather than the alpha itself, because the fraction moves every
+    /// frame while the instance does not. Baking it in would rebuild and
+    /// re-upload every glyph of a run on every frame of its fade.
     row: u32,
 }
 
@@ -162,6 +174,9 @@ struct RectInstance {
     /// Declaration-order seq the fragment shader occludes by, taken from the run
     /// this rect backs.
     seq: u32,
+    /// Slot of the mark this rect fades in with, biased by one. See
+    /// [`TextInstance::follow`].
+    follow: u32,
 }
 
 /// Uniform shared by every instance: the surface resolution the vertex shader
@@ -410,6 +425,17 @@ pub struct TextPass {
     /// globals bind groups. Read by the run-glyph and run-rect fragment shaders
     /// to discard run fragments a later box covers.
     occluders: OccluderBuffer,
+    /// One alpha per declared mark, rewritten every frame from the reveal
+    /// fractions and read by both fragment stages. Shared by every globals bind
+    /// group, since a run follows the same mark whichever draw carries it.
+    sketch_alpha: Buffer,
+    sketch_alpha_capacity: usize,
+    /// The alphas last uploaded, so a frame whose marks have not moved skips the
+    /// write. Most frames of a settled screen match.
+    last_sketch_alpha: Vec<f32>,
+    /// Where each frame's alphas are built before the comparison, held so a
+    /// frame that changes nothing allocates nothing.
+    sketch_alpha_scratch: Vec<f32>,
     /// The occluders the composited pools read, bound by
     /// [`Self::composite_globals_bind_group`].
     ///
@@ -436,7 +462,7 @@ pub struct TextPass {
     /// last built against, or `None` before the first build. `prepare` reuses
     /// those instances while this and the atlas epoch below both still match,
     /// since the runs are unchanged and their atlas UVs have not moved.
-    last_text_runs: Option<GridVersion>,
+    last_text_runs: Option<(GridVersion, u64)>,
     /// The [`Atlas::content_epoch`] those same instances resolved against.
     last_atlas_epoch: u64,
     /// How many times this pass has rebuilt the live text-run instances, and how
@@ -722,6 +748,16 @@ impl TextPass {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -793,6 +829,11 @@ impl TextPass {
         let composite_occluders =
             OccluderBuffer::new(device, "text composite occluders", INITIAL_CAPACITY);
 
+        // One alpha per declared mark, rewritten every frame from the reveal
+        // fractions. Shared by every globals bind group, since a run follows the
+        // same mark whichever draw carries it.
+        let sketch_alpha = alloc_sketch_alpha(device, INITIAL_SKETCH_ALPHA);
+
         // Three globals buffers share one layout but carry a different scroll_y,
         // so the plain, region, and screen-anchored draws each scroll correctly
         // within a single render pass.
@@ -802,6 +843,7 @@ impl TextPass {
             device,
             &globals_layout,
             &occluders.buffer,
+            &sketch_alpha,
             "text globals",
             GLOBALS_SLOTS,
         );
@@ -810,12 +852,14 @@ impl TextPass {
             &globals_layout,
             &globals,
             &composite_occluders.buffer,
+            &sketch_alpha,
             "text composite globals",
         );
         let (region_globals, region_globals_bind_group) = make_globals(
             device,
             &globals_layout,
             &occluders.buffer,
+            &sketch_alpha,
             "text region globals",
             1,
         );
@@ -823,6 +867,7 @@ impl TextPass {
             device,
             &globals_layout,
             &occluders.buffer,
+            &sketch_alpha,
             "text static globals",
             1,
         );
@@ -895,6 +940,10 @@ impl TextPass {
             globals_layout,
             occluders,
             composite_occluders,
+            sketch_alpha,
+            sketch_alpha_capacity: INITIAL_SKETCH_ALPHA,
+            last_sketch_alpha: Vec::new(),
+            sketch_alpha_scratch: Vec::new(),
             composite_globals_bind_group,
             atlas_layout,
             sampler,
@@ -1001,6 +1050,44 @@ impl TextPass {
         self.run_shape_cache.clear();
     }
 
+    /// Upload one alpha per declared mark, from this frame's reveal fractions.
+    ///
+    /// A run fades in over the back half of its mark's reveal, so the label
+    /// arrives as the box around it closes rather than before the pen has drawn
+    /// anything. The curve is the same smoothstep a filled box fades on.
+    ///
+    /// A mark past the end of `progress` reads as complete, matching the render
+    /// pass, so a caller with no clock draws every label at full alpha.
+    fn upload_sketch_alpha(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        progress: &[f32],
+    ) {
+        let mut alphas = mem::take(&mut self.sketch_alpha_scratch);
+        alphas.clear();
+        alphas.extend((0..grid.sketches().len()).map(|at| {
+            let revealed = progress.get(at).copied().unwrap_or(1.0);
+            smoothstep(FOLLOW_FADE_START, 1.0, revealed)
+        }));
+
+        if crate::render::upload_needed(&alphas, &self.last_sketch_alpha) {
+            if alphas.len() > self.sketch_alpha_capacity {
+                self.sketch_alpha_capacity = alphas.len().next_power_of_two();
+                self.sketch_alpha = alloc_sketch_alpha(device, self.sketch_alpha_capacity);
+                self.rebuild_globals_bind_groups(device);
+            }
+            if !alphas.is_empty() {
+                queue.write_buffer(&self.sketch_alpha, 0, bytemuck::cast_slice(&alphas));
+            }
+            self.last_sketch_alpha.clear();
+            self.last_sketch_alpha.extend_from_slice(&alphas);
+        }
+
+        self.sketch_alpha_scratch = alphas;
+    }
+
     /// Upload the live grid's panel occluders, rebuilding all three live
     /// globals bind groups when the list outgrows the buffer and it has to be
     /// replaced.
@@ -1013,11 +1100,21 @@ impl TextPass {
             return;
         }
 
+        self.rebuild_globals_bind_groups(device);
+    }
+
+    /// Rebuild the three live globals bind groups over whatever the occluder and
+    /// mark-alpha buffers now are.
+    ///
+    /// Either can reallocate under them, so a grow of one has to reach all
+    /// three or a later draw binds a buffer that no longer exists.
+    fn rebuild_globals_bind_groups(&mut self, device: &Device) {
         self.globals_bind_group = make_globals_bind_group(
             device,
             &self.globals_layout,
             &self.globals,
             &self.occluders.buffer,
+            &self.sketch_alpha,
             "text globals",
         );
         self.region_globals_bind_group = make_globals_bind_group(
@@ -1025,6 +1122,7 @@ impl TextPass {
             &self.globals_layout,
             &self.region_globals,
             &self.occluders.buffer,
+            &self.sketch_alpha,
             "text region globals",
         );
         self.static_globals_bind_group = make_globals_bind_group(
@@ -1032,7 +1130,16 @@ impl TextPass {
             &self.globals_layout,
             &self.static_globals,
             &self.occluders.buffer,
+            &self.sketch_alpha,
             "text static globals",
+        );
+        self.composite_globals_bind_group = make_globals_bind_group(
+            device,
+            &self.globals_layout,
+            &self.globals,
+            &self.composite_occluders.buffer,
+            &self.sketch_alpha,
+            "text composite globals",
         );
     }
 
@@ -1048,13 +1155,7 @@ impl TextPass {
             return;
         }
 
-        self.composite_globals_bind_group = make_globals_bind_group(
-            device,
-            &self.globals_layout,
-            &self.globals,
-            &self.composite_occluders.buffer,
-            "text composite globals",
-        );
+        self.rebuild_globals_bind_groups(device);
     }
 
     /// The locale and font database this pass shapes with, for another pass to
@@ -1116,6 +1217,7 @@ impl TextPass {
         // groups. Only the static globals carry a non-zero panel count, so only
         // the screen-anchored text-run draws occlude against these.
         self.upload_occluders(device, queue, occluders);
+        self.upload_sketch_alpha(device, queue, grid, frame.sketch_progress);
         let panel_count = occluders.len() as u32;
 
         // Each globals buffer carries its own scroll. The plain glyphs take the grid
@@ -1195,7 +1297,14 @@ impl TextPass {
         // The chrome the runs back changes rarely, so reuse the instances built
         // on an earlier frame while the run content and their atlas texels both
         // held. Such a frame skips the build and upload and keeps the counts.
-        let text_runs = GridVersion::new(grid, grid.text_runs_epoch());
+        // The mark epoch joins the key because a run's follow slot is an index
+        // into the mark list. A mark declared or dropped renumbers the slot of
+        // every run after it, leaving reused instances pointing at the wrong
+        // alpha.
+        let text_runs = (
+            GridVersion::new(grid, grid.text_runs_epoch()),
+            grid.sketches_epoch(),
+        );
         let runs_rebuilt = self.last_text_runs != Some(text_runs)
             || self.atlas.content_epoch() != self.last_atlas_epoch;
         if runs_rebuilt {
@@ -2110,6 +2219,7 @@ impl TextPass {
             }
             let col = f32::from(run.col) / 16.0;
             let row = f32::from(run.row) / 16.0;
+            let follow = follow_slot(grid, run.follow);
 
             for (index, ch) in run.text.chars().enumerate() {
                 if ch == ' ' {
@@ -2145,7 +2255,7 @@ impl TextPass {
                     texel_size,
                     fg: pack_fg(run.color, info.kind),
                     seq: run.seq,
-                    row: anchor,
+                    row: anchor | follow << FOLLOW_SHIFT,
                 });
             }
         }
@@ -2192,6 +2302,7 @@ impl TextPass {
                 dim: [width, self.metrics.height],
                 color: rgb_f32(bg),
                 seq: run.seq,
+                follow: follow_slot(grid, run.follow),
             });
         }
     }
@@ -3653,6 +3764,7 @@ fn build_rect_pipeline(
                     1 => Float32x2,
                     2 => Float32x3,
                     3 => Uint32,
+                    4 => Uint32,
                 ],
             }],
         },
@@ -3674,6 +3786,59 @@ fn build_rect_pipeline(
     })
 }
 
+/// The alpha slot a run's declared `follow` id resolves to, biased by one.
+///
+/// Zero for a run that follows nothing, and also for one naming an id no mark
+/// declared. A label whose subject never appeared reads at full alpha rather
+/// than never appearing itself, which is the safer way to be wrong.
+fn follow_slot(grid: &Grid, follow: u32) -> u32 {
+    if follow == 0 {
+        return 0;
+    }
+    grid.sketches()
+        .iter()
+        .position(|sketch| sketch.command.id == follow)
+        .map_or(0, |at| at as u32 + 1)
+        .min(MAX_FOLLOW_SLOT)
+}
+
+/// Bits the follow slot is shifted up by inside a glyph instance's row word.
+const FOLLOW_SHIFT: u32 = 16;
+
+/// The most marks a glyph can name, since the slot shares a word with the row.
+/// A grid declaring more than this draws the overflow at full alpha rather than
+/// wrapping onto another mark's fade.
+const MAX_FOLLOW_SLOT: u32 = (1 << FOLLOW_SHIFT) - 1;
+
+/// Where a followed run starts fading in, as a fraction of its mark's reveal. A
+/// label that appeared with the first pen stroke would name a shape not yet
+/// recognizable.
+const FOLLOW_FADE_START: f32 = 0.55;
+
+/// The classic smoothstep, easing a followed run in over the tail of its mark's
+/// reveal.
+fn smoothstep(from: f32, to: f32, at: f32) -> f32 {
+    let t = ((at - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Marks the alpha array holds before it has to grow. A stop draws a handful of
+/// them, so this is generous.
+const INITIAL_SKETCH_ALPHA: usize = 32;
+
+/// Allocate the per-frame mark-alpha storage buffer.
+///
+/// At least one element, because an empty storage binding is invalid and a grid
+/// with no mark is the ordinary case.
+fn alloc_sketch_alpha(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("text sketch alpha"),
+        size: (capacity.max(1) * size_of::<f32>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 /// Build a [`TextGlobals`] uniform buffer and its bind group over `layout`.
 ///
 /// The pass keeps three: one per distinct per-draw `scroll_y`, all sharing the
@@ -3682,6 +3847,7 @@ fn make_globals(
     device: &Device,
     layout: &BindGroupLayout,
     occluders: &Buffer,
+    sketch_alpha: &Buffer,
     label: &str,
     slots: usize,
 ) -> (Buffer, BindGroup) {
@@ -3691,18 +3857,21 @@ fn make_globals(
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let bind_group = make_globals_bind_group(device, layout, &buffer, occluders, label);
+    let bind_group =
+        make_globals_bind_group(device, layout, &buffer, occluders, sketch_alpha, label);
     (buffer, bind_group)
 }
 
-/// Bind a globals uniform (binding 0) and the shared panel-occluder storage
-/// buffer (binding 1) over `layout`. Rebuilt for each of the three globals
-/// buffers whenever the occluder buffer reallocates.
+/// Bind a globals uniform (binding 0), the shared panel-occluder storage buffer
+/// (binding 1), and the per-frame mark-alpha array (binding 2) over `layout`.
+/// Rebuilt for each of the three globals buffers whenever either storage buffer
+/// reallocates.
 fn make_globals_bind_group(
     device: &Device,
     layout: &BindGroupLayout,
     globals: &Buffer,
     occluders: &Buffer,
+    sketch_alpha: &Buffer,
     label: &str,
 ) -> BindGroup {
     device.create_bind_group(&BindGroupDescriptor {
@@ -3722,6 +3891,10 @@ fn make_globals_bind_group(
             BindGroupEntry {
                 binding: 1,
                 resource: occluders.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: sketch_alpha.as_entire_binding(),
             },
         ],
     })
@@ -4263,20 +4436,27 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_underline_row, cell_box, cell_box_rect, cell_glyph_scale, cell_rect_scissor,
-        cursor_cell, exposed_rows, fill_cell_box, fit_glyph_box, font, glyph_origin, grid_build,
-        inset_scissor, is_cell_fill, overlay_content_cells, pack_dim, pack_fg, region_split,
-        row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines,
-        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation,
-        RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS,
-        KIND_COLOR, KIND_MASK, OVERLAY_RING_PX, STYLE_DOTTED,
+        cursor_cell, exposed_rows, fill_cell_box, fit_glyph_box, follow_slot, font, glyph_origin,
+        grid_build, inset_scissor, is_cell_fill, overlay_content_cells, pack_dim, pack_fg,
+        region_split, row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build,
+        visible_lines, GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance,
+        RowRotation, RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance,
+        DIM_FRACTION_BITS, FOLLOW_SHIFT, KIND_COLOR, KIND_MASK, OVERLAY_RING_PX, STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
         render::{row_uploads, CellMetrics, Frame, PoolOccluders, Scroll},
     };
+    use stoatty_protocol::command::{
+        SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle,
+        SketchTiming,
+    };
     use stoatty_term::{
-        grid::{whole_row, Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
+        grid::{
+            whole_row, Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, Sketch, TextRun,
+            UnderlineStyle,
+        },
         term::Damage,
     };
     use wgpu::{
@@ -5308,6 +5488,124 @@ mod tests {
         );
     }
 
+    /// One mark, at the slot the run's declared id resolves to.
+    fn followed(id: u32, follow: u32) -> Grid {
+        let mut grid = Grid::new(2, 12);
+        grid.set_sketches(vec![test_sketch(7), test_sketch(id), test_sketch(9)]);
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(1, 2, 3),
+            bg: Some(Rgb::new(4, 5, 6)),
+            follow,
+            anchor: None,
+            text: "42".into(),
+            seq: 42,
+        }]);
+        grid
+    }
+
+    fn test_sketch(id: u32) -> Sketch {
+        Sketch {
+            command: SketchCommand {
+                id,
+                style: SketchStyle {
+                    color: [255, 0, 0],
+                    alpha: 255,
+                    width: 64,
+                    roughness: 64,
+                    seed: 1,
+                },
+                timing: SketchTiming {
+                    delay_ms: 0,
+                    duration_ms: 400,
+                    easing: SketchEasing::Linear,
+                    phase: SketchPhase::Enter,
+                },
+                shape: SketchShape::Ellipse(SketchBounds {
+                    x: 0,
+                    y: 0,
+                    w: 32,
+                    h: 32,
+                }),
+                anchor: None,
+            },
+            seq: id,
+        }
+    }
+
+    /// The shader indexes the alpha array by this, so the slot must be the
+    /// mark's position in the grid's own list, biased so zero can mean "none".
+    #[test]
+    fn a_followed_run_resolves_to_its_mark_s_slot() {
+        assert_eq!(follow_slot(&followed(5, 5), 5), 2, "the second of three");
+        assert_eq!(follow_slot(&followed(5, 7), 7), 1, "and the first");
+        assert_eq!(follow_slot(&followed(5, 9), 9), 3, "and the last");
+    }
+
+    /// A run that follows nothing, and one naming an id no mark declared, both
+    /// draw at full alpha. A label whose subject never appeared should be
+    /// readable rather than invisible.
+    #[test]
+    fn a_run_following_nothing_or_a_stranger_takes_no_slot() {
+        assert_eq!(follow_slot(&followed(5, 0), 0), 0, "following nothing");
+        assert_eq!(follow_slot(&followed(5, 99), 99), 0, "an undeclared id");
+    }
+
+    /// The slot rides the high half of the row word, so a glyph carries both
+    /// without widening the instance. Reading either back wrong puts the run on
+    /// the wrong row or fades it with the wrong mark.
+    #[test]
+    fn a_run_glyph_packs_its_follow_slot_above_its_row() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let grid = followed(5, 5);
+
+        let mut instances = Vec::new();
+        pass.build_text_run_instances_into(&device, &queue, &grid, [0.0; 2], 3, &mut instances);
+
+        assert!(!instances.is_empty(), "the run builds glyphs");
+        for instance in &instances {
+            assert_eq!(instance.row & 0xFFFF, 3, "the row slot it was given");
+            assert_eq!(instance.row >> FOLLOW_SHIFT, 2, "and its mark's slot");
+        }
+    }
+
+    /// The rect backs the run's glyphs, so it has to fade with them or an
+    /// opaque box appears before the label it backs.
+    #[test]
+    fn a_run_rect_follows_the_mark_its_glyphs_do() {
+        let Some((_device, _queue, pass)) = headless_text_pass() else {
+            return;
+        };
+
+        assert_eq!(pass.build_run_rects(&followed(5, 5))[0].follow, 2);
+        assert_eq!(pass.build_run_rects(&followed(5, 0))[0].follow, 0);
+    }
+
+    /// A run's slot is an index into the mark list, so a mark declared or
+    /// dropped renumbers every run after it. Reusing instances across that
+    /// change fades a label with the wrong mark.
+    #[test]
+    fn a_changed_mark_list_rebuilds_the_run_slots() {
+        let Some((_device, _queue, pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = followed(5, 5);
+
+        assert_eq!(pass.build_run_rects(&grid)[0].follow, 2);
+
+        // The mark it follows is now first, so its slot moved.
+        grid.set_sketches(vec![test_sketch(5), test_sketch(9)]);
+        assert_eq!(
+            pass.build_run_rects(&grid)[0].follow,
+            1,
+            "the same run resolves to the slot the new list puts its mark at",
+        );
+    }
+
     #[test]
     fn run_rect_carries_its_run_occlusion_seq() {
         let Some((_device, _queue, pass)) = headless_text_pass() else {
@@ -6232,6 +6530,83 @@ mod tests {
             (pass.run_builds, pass.overlay_builds),
             (2, 2),
             "a grid the pass has not seen rebuilds both",
+        );
+    }
+
+    /// A label arrives as the box around it closes, not with the first pen
+    /// stroke, which would name a shape not yet recognizable. The array the
+    /// fragment stage reads is what carries that, one entry per declared mark.
+    #[test]
+    fn a_label_fades_in_over_the_tail_of_its_mark_s_reveal() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("follow fade test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
+        grid.set_sketches(vec![test_sketch(5), test_sketch(7)]);
+
+        let alphas_at = |pass: &mut TextPass, progress: &[f32]| {
+            let frame = Frame {
+                sketch_progress: progress,
+                ..chrome_frame()
+            };
+            pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+            pass.last_sketch_alpha.clone()
+        };
+
+        assert_eq!(
+            alphas_at(&mut pass, &[0.0, 0.5]),
+            [0.0, 0.0],
+            "nothing shows through the first half of a reveal",
+        );
+        assert_eq!(
+            alphas_at(&mut pass, &[1.0, 0.55]),
+            [1.0, 0.0],
+            "a finished mark carries its label whole, and the curve starts at 0.55",
+        );
+
+        let [rising, _] = alphas_at(&mut pass, &[0.8, 0.0])
+            .try_into()
+            .expect("two marks");
+        assert!(
+            rising > 0.0 && rising < 1.0,
+            "and eases between, got {rising}",
+        );
+
+        assert_eq!(
+            alphas_at(&mut pass, &[]),
+            [1.0, 1.0],
+            "a caller with no clock draws every label whole",
+        );
+    }
+
+    /// A run's follow slot is an index into the mark list, so a mark declared
+    /// or dropped renumbers the slot of every run after it. A gate watching
+    /// only the run list reuses instances that now name the wrong mark's fade.
+    #[test]
+    fn a_changed_mark_list_rebuilds_the_runs_it_renumbers() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("mark renumber test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+
+        // One grid throughout, since the rebuild key names the grid as well as
+        // its epochs and a fresh one rebuilds for that reason alone.
+        let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
+        grid.set_sketches(vec![test_sketch(7), test_sketch(5)]);
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        assert_eq!(pass.run_builds, 1, "an unchanged mark list reuses");
+
+        grid.set_sketches(vec![test_sketch(5)]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        assert_eq!(
+            pass.run_builds, 2,
+            "dropping the mark ahead of it moved every later slot",
         );
     }
 

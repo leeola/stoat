@@ -44,6 +44,12 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> occluders: array<Occluder>;
 
+// One alpha per declared hand-drawn mark, rewritten every frame from the reveal
+// fractions. A glyph or rect that follows a mark scales its output by the entry
+// its instance names, so a label fades in as the box around it draws itself.
+@group(0) @binding(2)
+var<storage, read> sketch_alpha: array<f32>;
+
 @group(1) @binding(0) var mask_atlas: texture_2d<f32>;
 @group(1) @binding(1) var color_atlas: texture_2d<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
@@ -94,6 +100,11 @@ fn occluded(frag: vec2<f32>, seq: u32) -> bool {
 // its builder chose rather than grid rows, and an overlay taller than the
 // screen names rows past the bottom on purpose, which a wrap would fold back
 // over the box.
+// Bits the follow slot sits above inside a glyph instance's row word, and the
+// mask that recovers the row beneath it.
+const FOLLOW_SHIFT: u32 = 16u;
+const FOLLOW_MASK: u32 = 0xFFFFu;
+
 fn slot_row(slot: u32) -> u32 {
     if globals.rows == 0u {
         return slot;
@@ -107,6 +118,8 @@ struct VsOut {
     @location(1) @interpolate(flat) fg: vec3<f32>,
     @location(2) @interpolate(flat) kind: u32,
     @location(3) @interpolate(flat) seq: u32,
+    // The mark this glyph follows, biased by one, or zero for none.
+    @location(4) @interpolate(flat) follow: u32,
 }
 
 @vertex
@@ -127,6 +140,8 @@ fn vs_main(
     // Buffer slot holding the grid row `pos` is measured from. Zero for the
     // draws whose positions are already absolute, which leaves the term below
     // at zero for them.
+    // The low 16 bits are the row slot. The high 16 carry the mark this glyph
+    // fades in with, packed there to hold the instance at 32 bytes.
     @location(6) slot: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
@@ -140,7 +155,7 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     let quad = vec2<f32>(dim) / DIM_UNITS;
-    let row_y = f32(slot_row(slot)) * globals.cell_size.y;
+    let row_y = f32(slot_row(slot & FOLLOW_MASK)) * globals.cell_size.y;
     let pixel = pos + corner * quad + globals.origin_cells * globals.cell_size
         + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
@@ -164,7 +179,18 @@ fn vs_main(
     out.fg = unpack4x8unorm(fg).rgb;
     out.kind = kind;
     out.seq = seq;
+    out.follow = slot >> FOLLOW_SHIFT;
     return out;
+}
+
+// The alpha a followed mark has reached, or one for a glyph or rect that
+// follows nothing. The bias on the slot is what makes zero mean "none" without
+// a sentinel of its own.
+fn follow_alpha(follow: u32) -> f32 {
+    if follow == 0u {
+        return 1.0;
+    }
+    return sketch_alpha[follow - 1u];
 }
 
 @fragment
@@ -179,12 +205,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Premultiplied-alpha coverage. The pipeline blends this over the
     // framebuffer, and because the target is not sRGB, that fixed-function
     // blend is a per-channel sRGB-space mix from the destination to `fg`.
+    // The glyph is emitted premultiplied, so a fade scales the color and the
+    // coverage together rather than the alpha alone.
+    let fade = follow_alpha(in.follow);
     if in.kind == KIND_COLOR {
         let texel = textureSampleLevel(color_atlas, atlas_sampler, in.uv, 0.0);
-        return vec4<f32>(texel.rgb * texel.a, texel.a);
+        return vec4<f32>(texel.rgb * texel.a * fade, texel.a * fade);
     }
 
-    let coverage = textureSampleLevel(mask_atlas, atlas_sampler, in.uv, 0.0).r;
+    let coverage = textureSampleLevel(mask_atlas, atlas_sampler, in.uv, 0.0).r * fade;
     return vec4<f32>(in.fg * coverage, coverage);
 }
 
@@ -294,6 +323,7 @@ struct RectVsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) color: vec3<f32>,
     @location(1) @interpolate(flat) seq: u32,
+    @location(2) @interpolate(flat) follow: u32,
 }
 
 @vertex
@@ -303,6 +333,7 @@ fn vs_rect(
     @location(1) dim: vec2<f32>,
     @location(2) color: vec3<f32>,
     @location(3) seq: u32,
+    @location(4) follow: u32,
 ) -> RectVsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -325,6 +356,7 @@ fn vs_rect(
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.color = color;
     out.seq = seq;
+    out.follow = follow;
     return out;
 }
 
@@ -336,5 +368,7 @@ fn fs_rect(in: RectVsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    return vec4<f32>(in.color, 1.0);
+    // The rect is opaque, so its fade is the alpha alone. It blends straight
+    // rather than premultiplied, unlike the glyphs above it.
+    return vec4<f32>(in.color, follow_alpha(in.follow));
 }
