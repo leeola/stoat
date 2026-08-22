@@ -91,16 +91,6 @@ pub struct Settings {
     /// in-process, and the terminal is told to re-read its own when that file
     /// is the one saved.
     pub config_auto_reload: Option<bool>,
-    /// Whether an open review session follows the project as it changes:
-    /// external edits, git-state changes, and newly-changed files refresh it
-    /// automatically. `None` falls back to enabled. Set `review.follow = false;`
-    /// in stcfg to require a manual `r` instead.
-    pub review_follow: Option<bool>,
-    /// Whether a clean-tree diff view, when a rebase is paused (an external
-    /// `git rebase` stopped at edit or break), shows the just-applied commit's
-    /// diff and follows each rebase step. `None` falls back to enabled. Set
-    /// `review.rebase_head = false;` in stcfg to keep the empty clean-tree view.
-    pub review_rebase_head: Option<bool>,
     /// Whether the diff cache is warmed in the background so opening review is
     /// near-instant. `None` falls back to enabled. Set `review.precompute =
     /// false;` in stcfg to turn the background diffing off.
@@ -270,8 +260,6 @@ impl Settings {
             format_on_save: other.format_on_save.or(self.format_on_save),
             search_smart_case: other.search_smart_case.or(self.search_smart_case),
             config_auto_reload: other.config_auto_reload.or(self.config_auto_reload),
-            review_follow: other.review_follow.or(self.review_follow),
-            review_rebase_head: other.review_rebase_head.or(self.review_rebase_head),
             review_precompute: other.review_precompute.or(self.review_precompute),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
@@ -323,16 +311,6 @@ impl Settings {
             ["config", "auto_reload"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.config_auto_reload = Some(b);
-                }
-            },
-            ["review", "follow"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.review_follow = Some(b);
-                }
-            },
-            ["review", "rebase_head"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.review_rebase_head = Some(b);
                 }
             },
             ["review", "precompute"] => {
@@ -580,8 +558,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
@@ -610,21 +586,6 @@ mod tests {
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
-        );
-    }
-
-    #[test]
-    fn from_config_extracts_review_follow() {
-        let config = parse_ok("on init { review.follow = false; }");
-        assert_eq!(Settings::from_config(&config).review_follow, Some(false));
-    }
-
-    #[test]
-    fn from_config_extracts_review_rebase_head() {
-        let config = parse_ok("on init { review.rebase_head = false; }");
-        assert_eq!(
-            Settings::from_config(&config).review_rebase_head,
-            Some(false)
         );
     }
 
@@ -878,8 +839,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
@@ -921,8 +880,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
@@ -973,8 +930,6 @@ mod tests {
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
-            review_follow: None,
-            review_rebase_head: None,
             review_precompute: None,
             theme: None,
             mouse_capture: None,
@@ -1008,8 +963,6 @@ mod tests {
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
-            review_follow: None,
-            review_rebase_head: None,
             review_precompute: None,
             theme: None,
             mouse_capture: None,
@@ -1045,8 +998,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
@@ -1085,8 +1036,6 @@ mod tests {
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
-            review_follow: None,
-            review_rebase_head: None,
             review_precompute: None,
             theme: None,
             mouse_capture: None,
@@ -1123,8 +1072,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
@@ -1174,8 +1121,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
@@ -1217,8 +1162,6 @@ mod tests {
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
-                review_follow: None,
-                review_rebase_head: None,
                 review_precompute: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
@@ -1257,8 +1200,6 @@ mod tests {
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
-            review_follow: None,
-            review_rebase_head: None,
             review_precompute: None,
             theme: Some("a".into()),
             mouse_capture: None,
@@ -1292,8 +1233,6 @@ mod tests {
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
-            review_follow: None,
-            review_rebase_head: None,
             review_precompute: None,
             theme: Some("b".into()),
             mouse_capture: None,

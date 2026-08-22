@@ -201,16 +201,6 @@ on init {
     # default.
     config.auto_reload = true;
 
-    # Automatically follow an open working-tree review as the project changes
-    # on disk: external edits, commits, and newly-changed files refresh it. On
-    # by default. Set false to require a manual `r` instead.
-    review.follow = true;
-
-    # When a rebase pauses on a clean tree (an external `git rebase` stopped at
-    # edit or break), show the just-applied commit's diff and follow each step.
-    # On by default. Set false to keep the empty clean-tree view instead.
-    review.rebase_head = true;
-
     # Warm the diff cache in the background so opening review is near-instant. On
     # by default. Set false to turn the background diffing off.
     review.precompute = true;

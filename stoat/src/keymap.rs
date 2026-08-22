@@ -2400,8 +2400,6 @@ mod tests {
                 format_on_save: Some(false),
                 search_smart_case: Some(true),
                 config_auto_reload: Some(true),
-                review_follow: Some(true),
-                review_rebase_head: Some(true),
                 review_precompute: Some(true),
                 theme: Some("default_dark".to_string()),
                 mouse_capture: Some(MouseCapturePolicy::Auto),

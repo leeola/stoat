@@ -77,20 +77,6 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "true",
         },
         SettingDef {
-            path: &[Lit("review"), Lit("follow")],
-            shape: ValueShape::Bool,
-            doc: "Whether an open review session follows the project as files, git \
-                  state, and edits change.",
-            default: "true",
-        },
-        SettingDef {
-            path: &[Lit("review"), Lit("rebase_head")],
-            shape: ValueShape::Bool,
-            doc: "Whether a paused-rebase clean-tree diff shows the applied commit \
-                  and follows each step.",
-            default: "true",
-        },
-        SettingDef {
             path: &[Lit("review"), Lit("precompute")],
             shape: ValueShape::Bool,
             doc: "Whether the diff cache warms in the background so opening review \
