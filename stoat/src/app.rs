@@ -2968,6 +2968,16 @@ impl Stoat {
         action_handlers::dispatch(self, &Conflict);
     }
 
+    /// Open the workspace finder for a bare launch.
+    ///
+    /// A launch with nothing to show asks which project to enter rather than
+    /// landing on the scratch, so the finder comes up with the saved sessions
+    /// already listed. Escape dismisses it onto the scratch the launch shows
+    /// otherwise.
+    pub fn open_workspace_picker(&mut self) {
+        action_handlers::workspace::open_workspace_picker(self);
+    }
+
     /// Handle that makes [`Self::run`] quit at its next loop turn when
     /// notified via [`tokio::sync::Notify::notify_one`], regardless of the
     /// editor's current mode or focus. The `--timeout` self-driver holds a

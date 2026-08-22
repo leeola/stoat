@@ -45,10 +45,8 @@ use crate::{
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::FsHost,
-    input_view::{InputView, SubmitTarget},
     jumplist::JumpList,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
-    workspace_picker::WorkspacePicker,
 };
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::{
@@ -1100,29 +1098,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::NewWorkspace => workspace::new_workspace(stoat),
         ActionKind::CopyWorkspace => workspace::copy_workspace(stoat),
-        ActionKind::SwitchWorkspace => {
-            let inactive =
-                crate::workspace::registry::list_all(&*stoat.fs_host).unwrap_or_default();
-            stoat.set_focused_mode("normal".into());
-            let input = {
-                let executor = stoat.executor.clone();
-                InputView::create(
-                    stoat.active_workspace_mut(),
-                    executor,
-                    SubmitTarget::WorkspacePicker,
-                    "",
-                    "insert",
-                    1,
-                )
-            };
-            stoat.workspace_picker = Some(WorkspacePicker::new(
-                &stoat.workspaces,
-                stoat.active_workspace,
-                inactive,
-                input,
-            ));
-            UpdateEffect::Redraw
-        },
+        ActionKind::SwitchWorkspace => workspace::open_workspace_picker(stoat),
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),
         ActionKind::RenameWorkspace => {
             let action = action
@@ -2766,6 +2742,27 @@ mod tests {
         assert!(h.stoat.workspace_picker.is_some());
         let picker = h.stoat.workspace_picker.as_ref().unwrap();
         assert_eq!(picker.entries().len(), 2);
+    }
+
+    /// A bare launch reaches the same finder the key does, through the entry
+    /// point the binary calls rather than through a dispatch.
+    #[test]
+    fn the_bare_launch_entry_point_opens_the_picker() {
+        let mut h = Stoat::test();
+        assert!(h.stoat.workspace_picker.is_none());
+
+        h.stoat.open_workspace_picker();
+
+        let entries = h
+            .stoat
+            .workspace_picker
+            .as_ref()
+            .map(|picker| picker.entries().len());
+        assert_eq!(
+            entries,
+            Some(1),
+            "the finder lists the one workspace the launch started with",
+        );
     }
 
     #[test]

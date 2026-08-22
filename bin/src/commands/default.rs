@@ -200,6 +200,23 @@ fn forwardable(start: &TuiStart, common: &CommonArgs, working_dir: Option<&Path>
         && common.fixture.is_none()
 }
 
+/// Whether this launch names nothing to start on, so the workspace finder asks
+/// which project to enter instead of dropping onto the scratch.
+///
+/// A subcommand, a file list, a restore flag, a scripted `--inputs` run, a
+/// `--fixture` repo, and `--working-dir` each answer that question already.
+/// `--timeout` does not. It says when to stop rather than where to start, so a
+/// timed bare launch still gets the finder.
+fn bare_launch(start: &TuiStart, common: &CommonArgs, working_dir: Option<&Path>) -> bool {
+    matches!(start, TuiStart::Files)
+        && common.files.is_empty()
+        && working_dir.is_none()
+        && !common.continue_
+        && !common.resume
+        && common.inputs.is_none()
+        && common.fixture.is_none()
+}
+
 fn run_tui(
     text_proto_log: Option<bool>,
     common: CommonArgs,
@@ -214,6 +231,10 @@ fn run_tui(
     {
         return Ok(());
     }
+
+    // Read before `common` is spent, since the answer depends on flags the
+    // destructure moves out.
+    let bare = bare_launch(&start, &common, working_dir.as_deref());
 
     let CommonArgs {
         files,
@@ -449,20 +470,34 @@ fn run_tui(
             },
         }
 
-        if let Some(raw) = stoat.env_host().var("STOAT_DUMP_LOAD") {
-            let dump_path = PathBuf::from(&raw);
-            if dump_path.exists() {
-                match stoat::dump::hydrate(&mut stoat, &dump_path, &LocalFs) {
-                    Ok(()) => {
-                        tracing::info!(path = %raw, "hydrated workspace from dump");
+        let hydrated = match stoat.env_host().var("STOAT_DUMP_LOAD") {
+            Some(raw) => {
+                let dump_path = PathBuf::from(&raw);
+                match dump_path.exists() {
+                    true => match stoat::dump::hydrate(&mut stoat, &dump_path, &LocalFs) {
+                        Ok(()) => {
+                            tracing::info!(path = %raw, "hydrated workspace from dump");
+                            true
+                        },
+                        Err(e) => {
+                            tracing::error!(error = %e, path = %raw, "failed to hydrate dump");
+                            false
+                        },
                     },
-                    Err(e) => {
-                        tracing::error!(error = %e, path = %raw, "failed to hydrate dump");
+                    false => {
+                        tracing::warn!(path = %raw, "STOAT_DUMP_LOAD points at missing file");
+                        false
                     },
                 }
-            } else {
-                tracing::warn!(path = %raw, "STOAT_DUMP_LOAD points at missing file");
-            }
+            },
+            None => false,
+        };
+
+        // After the hydrate, never before it. The finder's input view lives in
+        // the active workspace, which a hydrate replaces wholesale. A hydrated
+        // dump is also a start state the caller chose, so it skips the finder.
+        if bare && !hydrated {
+            stoat.open_workspace_picker();
         }
 
         if let (Some(keys), Some(tx)) = (inputs, driver_tx) {
@@ -644,6 +679,89 @@ mod tests {
             ),
             "--fixture builds a repo of its own",
         );
+    }
+
+    /// Anything that names where to start answers the finder's question
+    /// already, so only a launch carrying none of them is bare.
+    #[test]
+    fn only_a_launch_naming_nothing_opens_the_finder() {
+        let empty = || CommonArgs {
+            files: Vec::new(),
+            ..bare_files()
+        };
+        assert!(bare_launch(&TuiStart::Files, &empty(), None));
+
+        assert!(
+            !bare_launch(&TuiStart::Files, &bare_files(), None),
+            "a file list is what to show",
+        );
+        assert!(
+            !bare_launch(&TuiStart::Review, &empty(), None),
+            "a subcommand starts somewhere other than a file list",
+        );
+        assert!(
+            !bare_launch(&TuiStart::Files, &empty(), Some(Path::new("/elsewhere"))),
+            "--working-dir names the root to start in",
+        );
+        assert!(
+            !bare_launch(
+                &TuiStart::Files,
+                &CommonArgs {
+                    continue_: true,
+                    ..empty()
+                },
+                None
+            ),
+            "--continue names the workspace to reopen",
+        );
+        assert!(
+            !bare_launch(
+                &TuiStart::Files,
+                &CommonArgs {
+                    resume: true,
+                    ..empty()
+                },
+                None
+            ),
+            "--resume names the workspace to reopen",
+        );
+        assert!(
+            !bare_launch(
+                &TuiStart::Files,
+                &CommonArgs {
+                    inputs: Some("ifoo<Esc>".into()),
+                    ..empty()
+                },
+                None
+            ),
+            "a scripted run expects the scratch as its start state",
+        );
+        assert!(
+            !bare_launch(
+                &TuiStart::Files,
+                &CommonArgs {
+                    fixture: Some("basic".into()),
+                    ..empty()
+                },
+                None
+            ),
+            "--fixture builds the repo to start in",
+        );
+    }
+
+    /// `--timeout` says when to stop, not where to start, so it leaves a bare
+    /// launch bare.
+    #[test]
+    fn a_timeout_still_leaves_a_launch_bare() {
+        assert!(bare_launch(
+            &TuiStart::Files,
+            &CommonArgs {
+                files: Vec::new(),
+                timeout: Some(1.0),
+                ..bare_files()
+            },
+            None
+        ));
     }
 
     #[test]

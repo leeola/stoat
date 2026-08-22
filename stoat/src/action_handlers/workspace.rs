@@ -1,6 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    input_view::{InputView, SubmitTarget},
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
+    workspace_picker::WorkspacePicker,
 };
 use std::path::{Path, PathBuf};
 
@@ -116,6 +118,39 @@ pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.workspace_picker.take() {
         picker.dispose(stoat.active_workspace_mut());
     }
+    UpdateEffect::Redraw
+}
+
+/// Open the workspace finder, listing the open workspaces and every saved
+/// session the registry knows.
+///
+/// Reached from `SwitchWorkspace` and from a bare launch, which has no files to
+/// show and so asks which project to enter. The finder opens even with nothing
+/// saved, since a lone row costs one Escape and a skip-when-empty rule depends
+/// on the real state dir.
+///
+/// The mode drops to normal first, because the picker's own input takes insert
+/// and the editor underneath must not keep a mode it no longer owns.
+pub(crate) fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let inactive = crate::workspace::registry::list_all(&*stoat.fs_host).unwrap_or_default();
+    stoat.set_focused_mode("normal".into());
+    let input = {
+        let executor = stoat.executor.clone();
+        InputView::create(
+            stoat.active_workspace_mut(),
+            executor,
+            SubmitTarget::WorkspacePicker,
+            "",
+            "insert",
+            1,
+        )
+    };
+    stoat.workspace_picker = Some(WorkspacePicker::new(
+        &stoat.workspaces,
+        stoat.active_workspace,
+        inactive,
+        input,
+    ));
     UpdateEffect::Redraw
 }
 
