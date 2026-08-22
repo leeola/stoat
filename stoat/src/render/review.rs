@@ -53,21 +53,27 @@ pub(crate) const MODIFIED_ROW_SOFTEN: f32 = 0.25;
 /// which disables softening outright and restores the paint from before it.
 pub(crate) const DIFF_SOFTEN_MIN: i8 = -4;
 
-/// Furthest the soften may be turned up, doubling how far context recedes.
-pub(crate) const DIFF_SOFTEN_MAX: i8 = 4;
+/// Furthest the soften turns up, landing the context blend on [`SOFTEN_CAP`].
+///
+/// The largest level that still moves a context row. One step further scales
+/// past the cap, where the trim takes the excess back and the row paints
+/// exactly as it did a step earlier.
+pub(crate) const DIFF_SOFTEN_MAX: i8 = 6;
 
 /// Ceiling on a scaled soften fraction, leaving a twentieth of the syntax color.
 ///
-/// Guards the formula rather than any level it currently reaches. A fraction of
-/// 1.0 would blend a foreground into the background exactly, which is text the
-/// user cannot read at all.
+/// Where the top level lands, and the readability floor the dial stops at. A
+/// fraction of 1.0 blends a foreground into the background exactly, which
+/// leaves text nobody reads.
 const SOFTEN_CAP: f32 = 0.95;
 
 /// Multiplier `level` applies to [`CONTEXT_SOFTEN`] and [`MODIFIED_ROW_SOFTEN`].
 ///
 /// Level 0 returns 1.0, so an untouched session paints the shipped fractions
-/// exactly. Each step is a quarter, which reaches both a full stop and a
-/// doubling within the four steps a user is willing to press.
+/// exactly. Each step is a quarter, so four steps down turn softening off and
+/// six steps up reach the readability floor. The ends sit at different
+/// distances because the scale starts at 1.0, which is nearer to zero than to
+/// the 2.5 the floor needs.
 ///
 /// A caller must skip [`soften_style`] entirely on a zero scale rather than pass
 /// it a zero amount, because that call drops bold whatever amount it is given.
@@ -3079,15 +3085,34 @@ mod tests {
             (shipped, deepest),
             (
                 blend(CONTEXT_SOFTEN),
-                blend(CONTEXT_SOFTEN * diff_soften_scale(DIFF_SOFTEN_MAX)),
+                blend((CONTEXT_SOFTEN * diff_soften_scale(DIFF_SOFTEN_MAX)).min(SOFTEN_CAP)),
             ),
-            "level 0 paints the shipped fraction and the top level doubles it",
+            "level 0 paints the shipped fraction and the top level lands on the floor",
         );
         assert_ne!(
             stopped, shipped,
             "the bottom level stops the blend rather than shrinking it",
         );
     }
+
+    /// The top level is chosen to be the last one that still moves a context
+    /// row. Raising either the level or the fraction past this point buys a
+    /// keypress that paints nothing, so both constants are pinned together.
+    #[test]
+    fn the_deepest_soften_level_is_the_last_one_that_moves_a_context_row() {
+        let below = CONTEXT_SOFTEN * diff_soften_scale(DIFF_SOFTEN_MAX - 1);
+        let deepest = CONTEXT_SOFTEN * diff_soften_scale(DIFF_SOFTEN_MAX);
+
+        assert!(
+            below < SOFTEN_CAP,
+            "the step before the top still has room to move: {below} is not under {SOFTEN_CAP}",
+        );
+        assert!(
+            deepest >= SOFTEN_CAP,
+            "the top step reaches the floor: {deepest} is under {SOFTEN_CAP}",
+        );
+    }
+
     #[test]
     fn diff_view_added_line_takes_no_line_wash() {
         // The second line is a pure insertion, so nothing is refined.
