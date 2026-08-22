@@ -2,8 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
+use stoatty_protocol::command::SketchShape;
 use stoatty_term::{
-    grid::{Grid, Panel},
+    grid::{Grid, Panel, Sketch},
     term::Damage,
 };
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
@@ -155,7 +156,7 @@ impl CellMetrics {
 /// declares. Occluding by the bare rect notches a square hole out of the chrome
 /// beneath each rounded corner.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug)]
 pub(crate) struct Occluder {
     cell: [f32; 2],
     size: [f32; 2],
@@ -578,12 +579,23 @@ pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
     rows.iter().map(Vec::len).sum()
 }
 
-/// Build into `out` one occluder per panel, in declaration order.
+/// Build into `out` one occluder per panel and per filled sketch box, in
+/// declaration order.
 ///
-/// Every pass that occludes reads the same list off the same panels, so a frame
-/// builds it once and lends it around. `out` is cleared first, so the frame's
-/// scratch holds only this frame's panels.
-pub(crate) fn build_occluders_into(panels: &[Panel], riding: &[u32], out: &mut Vec<Occluder>) {
+/// Every pass that occludes reads the same list off the same components, so a
+/// frame builds it once and lends it around. `out` is cleared first, so the
+/// frame's scratch holds only this frame's boxes.
+///
+/// A filled box hides what it covers whether it was declared as a panel or
+/// drawn by hand, so both go in the list. An open sketch does not: its stroke
+/// leaves the cells inside it showing, which is the point of drawing a circle
+/// around code rather than a box over it.
+pub(crate) fn build_occluders_into(
+    panels: &[Panel],
+    sketches: &[Sketch],
+    riding: &[u32],
+    out: &mut Vec<Occluder>,
+) {
     out.clear();
     out.extend(
         panels
@@ -591,7 +603,61 @@ pub(crate) fn build_occluders_into(panels: &[Panel], riding: &[u32], out: &mut V
             .filter(|panel| !rides(panel, riding))
             .map(panel_occluder),
     );
+    out.extend(
+        sketches
+            .iter()
+            .filter(|sketch| !sketch_rides(sketch, riding))
+            .filter_map(sketch_occluder),
+    );
 }
+
+/// Whether `sketch` is anchored to one of the pools in `riding`.
+///
+/// Such a mark draws shifted, after the composites, so its rect on the live grid
+/// is stale for the whole glide. The list drops it rather than punch a hole
+/// where it no longer is, exactly as [`rides`] does for a panel.
+fn sketch_rides(sketch: &Sketch, riding: &[u32]) -> bool {
+    sketch
+        .command
+        .anchor
+        .is_some_and(|(host, _)| riding.contains(&host))
+}
+
+/// The cells a filled sketch box covers, or `None` for anything that leaves
+/// them showing.
+///
+/// The box is rounded outward to whole cells, because an occluder is stated in
+/// cells and a mark that covers part of one covers what that cell draws. That
+/// is also why no cell size is needed here: a sketch already states its box in
+/// cell fractions.
+fn sketch_occluder(sketch: &Sketch) -> Option<Occluder> {
+    let SketchShape::Rect {
+        bounds,
+        fill: Some(_),
+        ..
+    } = sketch.command.shape
+    else {
+        return None;
+    };
+
+    let left = f32::from(bounds.x) / SKETCH_CELL_FRACTION;
+    let top = f32::from(bounds.y) / SKETCH_CELL_FRACTION;
+    let right = left + f32::from(bounds.w) / SKETCH_CELL_FRACTION;
+    let bottom = top + f32::from(bounds.h) / SKETCH_CELL_FRACTION;
+    let (left, top) = (left.floor(), top.floor());
+
+    Some(Occluder {
+        cell: [left, top],
+        size: [right.ceil() - left, bottom.ceil() - top],
+        seq: sketch.seq,
+        corner_radius: 0.0,
+        inset_x: 0.0,
+        _pad: 0,
+    })
+}
+
+/// Sixteenths of a cell, which is the unit a sketch states its box in.
+const SKETCH_CELL_FRACTION: f32 = 16.0;
 
 /// Collect into `out` the occluders a frame's pool composites upload, and report
 /// how many of them lead the list.
@@ -785,7 +851,11 @@ mod tests {
     fn a_surface_under_one_cell_still_holds_one() {
         assert_eq!(grid_size(1, 1, 15, 1.0), (1, 1));
     }
-    use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
+    use stoatty_protocol::command::{
+        SketchBounds, SketchCommand, SketchEasing, SketchFill, SketchFillStyle, SketchPhase,
+        SketchShape, SketchStyle, SketchTiming,
+    };
+    use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb, Sketch};
 
     /// Every pool reads its own aligned slot, and none reads the live grid's.
     #[test]
@@ -1138,7 +1208,7 @@ mod tests {
         pool_occluders_into(&panels, &[7], &mut occluders);
         let pool = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
-        build_occluders_into(&panels, &[7], &mut occluders);
+        build_occluders_into(&panels, &[], &[7], &mut occluders);
         let base = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
         assert_eq!(
@@ -1168,17 +1238,17 @@ mod tests {
     #[test]
     fn an_occluder_list_compares_equal_only_while_the_panels_hold() {
         let mut held = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &mut held);
+        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &[], &mut held);
 
         let mut again = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &mut again);
+        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &[], &mut again);
         assert!(
             !upload_needed(&again, &held),
             "an unchanged frame's panels build a list equal to the one held"
         );
 
         let mut moved = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &mut moved);
+        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &[], &mut moved);
         moved[1].cell[0] += 1.0;
         assert!(
             upload_needed(&moved, &held),
@@ -1186,18 +1256,124 @@ mod tests {
         );
 
         let mut resequenced = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(9, true)], &[], &mut resequenced);
+        build_occluders_into(
+            &[panel(1, false), panel(9, true)],
+            &[],
+            &[],
+            &mut resequenced,
+        );
         assert!(
             upload_needed(&resequenced, &held),
             "a panel's seq decides what it hides, so a new seq has to be re-sent"
         );
 
         let mut fewer = Vec::new();
-        build_occluders_into(&[panel(1, false)], &[], &mut fewer);
+        build_occluders_into(&[panel(1, false)], &[], &[], &mut fewer);
         assert!(
             upload_needed(&fewer, &held),
             "a closed box leaves a shorter list"
         );
+    }
+
+    fn sketch_box(seq: u32, fill: Option<SketchFill>, anchor: Option<(u32, f32)>) -> Sketch {
+        Sketch {
+            command: SketchCommand {
+                id: seq,
+                style: SketchStyle {
+                    color: [255, 0, 0],
+                    alpha: 255,
+                    width: 64,
+                    roughness: 64,
+                    seed: 1,
+                },
+                timing: SketchTiming {
+                    delay_ms: 0,
+                    duration_ms: 100,
+                    easing: SketchEasing::Linear,
+                    phase: SketchPhase::Enter,
+                },
+                shape: SketchShape::Rect {
+                    // Starts half a cell in and runs two and a quarter across, so
+                    // neither edge lands on a cell boundary and a rounding that
+                    // runs the wrong way shows in the result.
+                    bounds: SketchBounds {
+                        x: 8,
+                        y: 8,
+                        w: 36,
+                        h: 36,
+                    },
+                    radius: 0,
+                    fill,
+                },
+                anchor,
+            },
+            seq,
+        }
+    }
+
+    fn solid() -> Option<SketchFill> {
+        Some(SketchFill {
+            color: [0, 0, 255],
+            alpha: 255,
+            style: SketchFillStyle::Solid,
+        })
+    }
+
+    /// A filled box hides what it covers whether a panel declared it or a hand
+    /// drew it, so both go in the list an occluding shader reads.
+    ///
+    /// An open mark does not. Its stroke leaves the cells inside it showing,
+    /// which is the point of circling code rather than boxing over it.
+    #[test]
+    fn a_filled_mark_occludes_and_an_open_one_does_not() {
+        let mut filled = Vec::new();
+        build_occluders_into(&[], &[sketch_box(3, solid(), None)], &[], &mut filled);
+        assert_eq!(filled.len(), 1, "a filled box joins the list");
+        assert_eq!(filled[0].seq, 3, "carrying the seq that orders it");
+
+        let mut open = Vec::new();
+        build_occluders_into(&[], &[sketch_box(3, None, None)], &[], &mut open);
+        assert_eq!(open, Vec::new(), "an open one hides nothing");
+    }
+
+    /// An occluder is stated in whole cells, so a mark covering part of a cell
+    /// covers what that cell draws. Rounding inward leaves the glyph under the
+    /// mark's own edge showing through it.
+    #[test]
+    fn a_filled_mark_rounds_outward_to_whole_cells() {
+        let mut occluders = Vec::new();
+        build_occluders_into(&[], &[sketch_box(1, solid(), None)], &[], &mut occluders);
+
+        assert_eq!(occluders[0].cell, [0.0, 0.0], "half a cell in starts at 0");
+        assert_eq!(
+            occluders[0].size,
+            [3.0, 3.0],
+            "half through two and three quarters, rounded out, covers three",
+        );
+    }
+
+    /// A mark riding a gliding pool draws shifted, after the composites, so its
+    /// rect on the live grid is stale for the whole glide. The list drops it
+    /// rather than punch a hole where it no longer is.
+    #[test]
+    fn a_riding_mark_leaves_the_occluder_list() {
+        let mut riding = Vec::new();
+        build_occluders_into(
+            &[],
+            &[sketch_box(1, solid(), Some((7, 0.0)))],
+            &[7],
+            &mut riding,
+        );
+        assert_eq!(riding, Vec::new(), "its host is gliding, so it is dropped");
+
+        let mut still = Vec::new();
+        build_occluders_into(
+            &[],
+            &[sketch_box(1, solid(), Some((7, 0.0)))],
+            &[],
+            &mut still,
+        );
+        assert_eq!(still.len(), 1, "a host that is not gliding keeps it");
     }
 
     /// Stands in for a pass's globals struct, which are private to their own modules.

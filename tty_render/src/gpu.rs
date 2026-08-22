@@ -566,7 +566,12 @@ impl Renderer {
         // derives the same list from the same panels.
         self.riding.clear();
         self.riding.extend(anchored.iter().map(|ride| ride.host));
-        crate::render::build_occluders_into(grid.panels(), &self.riding, &mut self.occluders);
+        crate::render::build_occluders_into(
+            grid.panels(),
+            grid.sketches(),
+            &self.riding,
+            &mut self.occluders,
+        );
 
         self.text
             .prepare(device, queue, grid, resolution, frame, &self.occluders);
