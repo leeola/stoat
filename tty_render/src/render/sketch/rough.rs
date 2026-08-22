@@ -48,6 +48,9 @@ const BEND_FRACTION: f64 = 64.0;
 /// turns, so the curve reads as leaving a box rather than clipping its corner.
 const S_CURVE_REACH: f64 = 0.4;
 
+/// How far outside a mark's outline a connector's end sits, in pixels.
+const COMPONENT_GAP: f64 = 4.0;
+
 /// Flattened geometry for one mark, ready to stroke.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Geometry {
@@ -204,7 +207,7 @@ pub(crate) fn geometry<Resolve>(
     resolve: &Resolve,
 ) -> Geometry
 where
-    Resolve: Fn(u32, SketchSide) -> Option<[f32; 2]>,
+    Resolve: Fn(u32) -> Option<[f32; 4]>,
 {
     let (cw, ch) = (f64::from(metrics.width), f64::from(metrics.height));
     let mut random = Random::new(command.style.seed, command.id);
@@ -306,7 +309,7 @@ fn line_geometry<Resolve>(
     random: &mut Random,
 ) -> Geometry
 where
-    Resolve: Fn(u32, SketchSide) -> Option<[f32; 2]>,
+    Resolve: Fn(u32) -> Option<[f32; 4]>,
 {
     let Connector {
         from,
@@ -318,9 +321,18 @@ where
         strokes: Vec::new(),
         fill: None,
     };
-    let (Some(start), Some(end)) = (
-        resolve_end(from, cw, ch, resolve),
-        resolve_end(to, cw, ch, resolve),
+    // Each end's attachment needs the other end's position, and an end whose
+    // side is Auto has no position until that side is picked. The two centers
+    // break the circle: they are known before either side is.
+    let (Some(from_center), Some(to_center)) = (
+        end_center(from, cw, ch, resolve),
+        end_center(to, cw, ch, resolve),
+    ) else {
+        return empty;
+    };
+    let (Some((start, from_side)), Some((end, to_side))) = (
+        attach(from, cw, ch, to_center, resolve),
+        attach(to, cw, ch, from_center, resolve),
     ) else {
         return empty;
     };
@@ -337,7 +349,7 @@ where
     let mut ops = match (bend, both_components) {
         (0, false) => double_line(start[0], start[1], end[0], end[1], &mut options, random),
         (0, true) => {
-            let points = s_curve_points(start, end, from, to, chord);
+            let points = s_curve_points(start, end, from_side, to_side, chord);
             curve(&points, &options, random)
         },
         (bend, _) => {
@@ -373,8 +385,8 @@ where
 fn s_curve_points(
     start: [f64; 2],
     end: [f64; 2],
-    from: SketchEnd,
-    to: SketchEnd,
+    from_side: SketchSide,
+    to_side: SketchSide,
     chord: f64,
 ) -> Vec<[f64; 2]> {
     let reach = chord * S_CURVE_REACH;
@@ -397,32 +409,95 @@ fn s_curve_points(
 
     vec![
         start,
-        out(start, side_of(from), end),
-        out(end, side_of(to), start),
+        out(start, from_side, end),
+        out(end, to_side, start),
         end,
     ]
 }
 
-fn side_of(end: SketchEnd) -> SketchSide {
+/// Where one end sits before its side is chosen: a fixed point as itself, a
+/// component as the center of its box.
+fn end_center<Resolve>(end: SketchEnd, cw: f64, ch: f64, resolve: &Resolve) -> Option<[f64; 2]>
+where
+    Resolve: Fn(u32) -> Option<[f32; 4]>,
+{
     match end {
-        SketchEnd::Component { side, .. } => side,
-        SketchEnd::Point { .. } => SketchSide::Auto,
+        SketchEnd::Point { x, y } => Some(point_px(x, y, cw, ch)),
+        SketchEnd::Component { id, .. } => {
+            let [min_x, min_y, max_x, max_y] = resolve(id)?.map(f64::from);
+            Some([(min_x + max_x) / 2.0, (min_y + max_y) / 2.0])
+        },
     }
 }
 
-fn resolve_end<Resolve>(end: SketchEnd, cw: f64, ch: f64, resolve: &Resolve) -> Option<[f64; 2]>
+/// Where one end of a connector actually meets, and which side it met on.
+///
+/// `toward` is the other end's center, which is what an `Auto` side is chosen
+/// against. A fixed point reports `Auto`, since it has no box and so no side.
+fn attach<Resolve>(
+    end: SketchEnd,
+    cw: f64,
+    ch: f64,
+    toward: [f64; 2],
+    resolve: &Resolve,
+) -> Option<([f64; 2], SketchSide)>
 where
-    Resolve: Fn(u32, SketchSide) -> Option<[f32; 2]>,
+    Resolve: Fn(u32) -> Option<[f32; 4]>,
 {
     match end {
-        SketchEnd::Point { x, y } => Some([
-            f64::from(x) / CELL_FRACTION * cw,
-            f64::from(y) / CELL_FRACTION * ch,
-        ]),
+        SketchEnd::Point { x, y } => Some((point_px(x, y, cw, ch), SketchSide::Auto)),
         SketchEnd::Component { id, side } => {
-            resolve(id, side).map(|p| [f64::from(p[0]), f64::from(p[1])])
+            let bounds = resolve(id)?.map(f64::from);
+            let side = match side {
+                SketchSide::Auto => facing_side(bounds, toward),
+                named => named,
+            };
+            Some((side_midpoint(bounds, side), side))
         },
     }
+}
+
+/// The side of `bounds` that faces `toward`.
+///
+/// Compared as a fraction of each half-extent rather than in raw pixels, so a
+/// wide box does not claim its long sides for directions that clearly point at
+/// a short one.
+fn facing_side(bounds: [f64; 4], toward: [f64; 2]) -> SketchSide {
+    let [min_x, min_y, max_x, max_y] = bounds;
+    let dx = toward[0] - (min_x + max_x) / 2.0;
+    let dy = toward[1] - (min_y + max_y) / 2.0;
+    let half_w = ((max_x - min_x) / 2.0).max(f64::EPSILON);
+    let half_h = ((max_y - min_y) / 2.0).max(f64::EPSILON);
+
+    match (dx / half_w).abs() >= (dy / half_h).abs() {
+        true if dx >= 0.0 => SketchSide::Right,
+        true => SketchSide::Left,
+        false if dy >= 0.0 => SketchSide::Bottom,
+        false => SketchSide::Top,
+    }
+}
+
+/// The midpoint of one side of `bounds`, pushed out by [`COMPONENT_GAP`].
+///
+/// The gap is what keeps a connector from crossing the outline it points at. A
+/// line that touched the stroke would read as passing through the mark rather
+/// than arriving at it.
+fn side_midpoint(bounds: [f64; 4], side: SketchSide) -> [f64; 2] {
+    let [min_x, min_y, max_x, max_y] = bounds;
+    let center = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
+    match side {
+        SketchSide::Left => [min_x - COMPONENT_GAP, center[1]],
+        SketchSide::Right => [max_x + COMPONENT_GAP, center[1]],
+        SketchSide::Top => [center[0], min_y - COMPONENT_GAP],
+        SketchSide::Bottom | SketchSide::Auto => [center[0], max_y + COMPONENT_GAP],
+    }
+}
+
+fn point_px(x: i16, y: i16, cw: f64, ch: f64) -> [f64; 2] {
+    [
+        f64::from(x) / CELL_FRACTION * cw,
+        f64::from(y) / CELL_FRACTION * ch,
+    ]
 }
 
 /// Wobble one segment, as the base pass or as the overlay that doubles it.

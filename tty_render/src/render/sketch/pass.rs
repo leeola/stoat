@@ -14,7 +14,7 @@ use crate::render::{
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
-use stoatty_protocol::command::{SketchFillStyle, SketchShape, SketchSide};
+use stoatty_protocol::command::{SketchFillStyle, SketchShape};
 use stoatty_term::grid::{Grid, Sketch};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -39,10 +39,6 @@ const KIND_STROKE: u32 = 0;
 
 /// The instance kind that fills a convex quad.
 const KIND_FILL: u32 = 1;
-
-/// How far outside a component's outline a connector's end sits, in pixels, so
-/// the line stops short of the stroke it points at instead of crossing it.
-const COMPONENT_GAP: f32 = 4.0;
 
 /// The per-stroke instance data.
 ///
@@ -534,7 +530,7 @@ fn generate_marks(
     let mut points: Vec<[f32; 2]> = Vec::new();
 
     for sketch in sketches {
-        let resolve = |id: u32, side: SketchSide| resolve_component(sketches, id, side, metrics);
+        let resolve = |id: u32| component_bounds(sketches, id, metrics);
         let generated = rough::geometry(&sketch.command, metrics, &resolve);
 
         let mut strokes = Vec::with_capacity(generated.strokes.len());
@@ -575,33 +571,16 @@ fn ride_shift(
     Some((ride.dy_px, ride.scissor))
 }
 
-/// Resolve a connector's component end against the mark it names.
+/// The pixel box of the mark `id` names, for a connector pointing at it.
 ///
-/// The end lands on the named side's midpoint, pushed out by
-/// [`COMPONENT_GAP`] so the line stops short of the outline rather than
-/// crossing its stroke. An unknown id yields `None`, which drops the connector:
-/// a line to nowhere points at the wrong thing.
-fn resolve_component(
-    sketches: &[Sketch],
-    id: u32,
-    side: SketchSide,
-    metrics: CellMetrics,
-) -> Option<[f32; 2]> {
-    let target = sketches.iter().find(|s| s.command.id == id)?;
-    let bounds = shape_bounds(&target.command.shape, metrics)?;
-    let [min_x, min_y, max_x, max_y] = bounds;
-    let center = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
-
-    let side = match side {
-        SketchSide::Auto => SketchSide::Right,
-        named => named,
-    };
-    Some(match side {
-        SketchSide::Left => [min_x - COMPONENT_GAP, center[1]],
-        SketchSide::Right => [max_x + COMPONENT_GAP, center[1]],
-        SketchSide::Top => [center[0], min_y - COMPONENT_GAP],
-        SketchSide::Bottom | SketchSide::Auto => [center[0], max_y + COMPONENT_GAP],
-    })
+/// A connector names the decoration it points at rather than a coordinate, so
+/// it tracks that thing as it moves. Which side of the box the line meets is
+/// decided by the geometry generator, which sees both ends; this only says
+/// where the box is. An unknown id yields `None`, which drops the connector,
+/// because a line to nowhere points at the wrong thing.
+fn component_bounds(sketches: &[Sketch], id: u32, metrics: CellMetrics) -> Option<[f32; 4]> {
+    let target = sketches.iter().find(|sketch| sketch.command.id == id)?;
+    shape_bounds(&target.command.shape, metrics)
 }
 
 /// A boxed shape's pixel rectangle, or `None` for a connector, which has no box

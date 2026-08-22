@@ -204,7 +204,7 @@ fn command(shape: SketchShape, roughness: u8) -> SketchCommand {
     }
 }
 
-fn nothing_resolves(_: u32, _: SketchSide) -> Option<[f32; 2]> {
+fn nothing_resolves(_: u32) -> Option<[f32; 4]> {
     None
 }
 
@@ -442,9 +442,11 @@ fn two_components_are_joined_by_an_s_curve() {
             bend: 0,
             heads: 0,
         };
-        let resolve = |id: u32, _: SketchSide| match id {
-            1 => Some([0.0, 0.0]),
-            _ => Some([100.0, 0.0]),
+        // Two small boxes on one horizontal line, so an auto side has an
+        // unambiguous facing edge.
+        let resolve = |id: u32| match id {
+            1 => Some([0.0, 0.0, 8.0, 8.0]),
+            _ => Some([100.0, 0.0, 108.0, 8.0]),
         };
         geometry(&command(shape, 0), metrics(), &resolve)
     };

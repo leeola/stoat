@@ -3,8 +3,8 @@
 use super::*;
 use crate::gpu::headless_device;
 use stoatty_protocol::command::{
-    SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchStyle,
-    SketchTiming,
+    SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
+    SketchStyle, SketchTiming,
 };
 use wgpu::{
     naga::{
@@ -595,5 +595,84 @@ fn the_pen_tip_advances_inside_one_segment() {
         "the tip carries the stroke further, {} against {}",
         lit(late),
         lit(early),
+    );
+}
+
+/// An `auto` side picks the edge facing the connector's other end, so a line
+/// leaves the box on the side it is heading toward rather than always the same
+/// one.
+#[test]
+fn an_auto_side_faces_the_connector_s_other_end() {
+    let target = sketch(1, SketchShape::Ellipse(boxed(64, 32, 32, 32)));
+    let box_px = shape_bounds(&target.command.shape, metrics()).expect("an ellipse has bounds");
+
+    // The connector preserves its vertices at this roughness, so a stroke's last
+    // point is exactly where the line met the box.
+    let meeting = |x: i16, y: i16| {
+        let list = [
+            target.clone(),
+            sketch(
+                2,
+                SketchShape::Line {
+                    from: SketchEnd::Point { x, y },
+                    to: SketchEnd::Component {
+                        id: 1,
+                        side: SketchSide::Auto,
+                    },
+                    bend: 0,
+                    heads: 0,
+                },
+            ),
+        ];
+        let (points, geometry) = marks(&list);
+        let stroke = &geometry[1].strokes[0];
+        points[(stroke.point_offset + stroke.count - 1) as usize]
+    };
+    let [min_x, min_y, max_x, max_y] = box_px;
+    let center = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
+
+    let left = meeting(0, 48);
+    assert!(
+        left[0] < min_x && (left[1] - center[1]).abs() < 0.01,
+        "a line from the left meets the left edge's midpoint, got {left:?} \
+         for a box at {box_px:?}",
+    );
+
+    let right = meeting(400, 48);
+    assert!(
+        right[0] > max_x && (right[1] - center[1]).abs() < 0.01,
+        "a line from the right meets the right edge's midpoint, got {right:?}",
+    );
+
+    let above = meeting(80, 0);
+    assert!(
+        above[1] < min_y && (above[0] - center[0]).abs() < 0.01,
+        "a line from above meets the top edge's midpoint, got {above:?}",
+    );
+
+    let below = meeting(80, 200);
+    assert!(
+        below[1] > max_y && (below[0] - center[0]).abs() < 0.01,
+        "a line from below meets the bottom edge's midpoint, got {below:?}",
+    );
+
+    // A cell is twice as tall as it is wide, so this box is too. The side is
+    // chosen as a fraction of each half-extent rather than in raw pixels, and
+    // this direction is the one those two answers disagree on: it is nearer the
+    // vertical axis in pixels but well past the narrow side in proportion.
+    let (half_w, half_h) = ((max_x - min_x) / 2.0, (max_y - min_y) / 2.0);
+    let diagonal = [center[0] + half_w * 1.25, center[1] + half_h * 0.75];
+    assert!(
+        diagonal[0] - center[0] < diagonal[1] - center[1],
+        "the fixture leans vertical in raw pixels, {diagonal:?} from {center:?}",
+    );
+
+    let corner = meeting(
+        (diagonal[0] / metrics().width * 16.0) as i16,
+        (diagonal[1] / metrics().height * 16.0) as i16,
+    );
+    assert!(
+        corner[0] > max_x && (corner[1] - center[1]).abs() < 0.01,
+        "proportion wins, so it meets the right edge, got {corner:?}",
     );
 }
