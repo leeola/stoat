@@ -29,7 +29,10 @@ use crate::{
     editor_state::{EditorId, EditorState},
     lsp::sync,
 };
-use std::{ops::Range, path::Path};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 use stoat_text::{Bias, LineEnding, Rope, SelectionGoal};
 
 /// Arm the auto-reload poll if it is not already running.
@@ -407,16 +410,34 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
 
 /// Open this session's log file and follow it as new lines are written.
 ///
-/// Resolves `stoat_log::log_dir()/stoat-<pid>.log` and delegates to
-/// [`open_log_buffer`]. Reports via [`Stoat::pending_message`] when the log
-/// directory cannot be resolved.
+/// Resolves `<log dir>/<ident file_stem>.log` from the identity the binary
+/// installed at startup and delegates to [`open_log_buffer`]. Reports via
+/// [`Stoat::pending_message`] when the log directory cannot be resolved, and
+/// when this session named no log file at all.
 pub(crate) fn open_logs(stoat: &mut Stoat) -> UpdateEffect {
     let Ok(dir) = stoat_log::log_dir() else {
         stoat.set_status("could not resolve the log directory");
         return UpdateEffect::Redraw;
     };
-    let path = dir.join(format!("stoat-{}.log", std::process::id()));
+    let stem = stoat_log::ident::get().map(|i| i.file_stem.as_str());
+    let Some(path) = session_log_path(&dir, stem) else {
+        stoat.set_status("no log file for this session; started with --log-stderr?");
+        return UpdateEffect::Redraw;
+    };
     open_log_buffer(stoat, &path)
+}
+
+/// The log file `stem` names under `dir`, or `None` when no stem was given.
+///
+/// Split out from [`open_logs`] because the stem comes from a process-global
+/// identity that is first-write-wins (`stoat_log::ident::install`). A test
+/// cannot install one without fixing it for every later test in the binary, so
+/// the path logic takes the stem as a parameter instead of reading it.
+///
+/// A `None` stem means the binary never named a log file, which is what
+/// `--log-stderr` produces.
+fn session_log_path(dir: &Path, stem: Option<&str>) -> Option<PathBuf> {
+    Some(dir.join(format!("{}.log", stem?)))
 }
 
 /// Open `path` as an auto-reloading buffer tailing its end, or report when the
@@ -662,7 +683,7 @@ fn editor_cursor_row(editor: &mut EditorState) -> u32 {
 mod tests {
     use super::{
         collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, open_log_buffer,
-        pump_auto_reload, reload_all, reload_focused, set_auto_reload_config,
+        pump_auto_reload, reload_all, reload_focused, session_log_path, set_auto_reload_config,
         set_buffer_auto_reload,
     };
     use crate::{
@@ -1105,7 +1126,7 @@ mod tests {
     fn open_log_buffer_flags_auto_reload_and_tails() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/logs-open");
-        let path = root.join("stoat-1.log");
+        let path = root.join("headless-stoat-1.log");
         h.fake_fs().insert_file(&path, b"line1\nline2\nline3\n");
         h.stoat.active_workspace_mut().git_root = root;
 
@@ -1132,7 +1153,7 @@ mod tests {
     fn open_log_buffer_reports_a_missing_log_file() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/logs-missing");
-        let path = root.join("stoat-1.log");
+        let path = root.join("headless-stoat-1.log");
         h.stoat.active_workspace_mut().git_root = root;
 
         assert_eq!(open_log_buffer(&mut h.stoat, &path), UpdateEffect::Redraw);
@@ -1582,5 +1603,20 @@ mod tests {
 
         let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
         assert_eq!(buffer_text(&h, id), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn session_log_path_names_the_ident_stem() {
+        let dir = Path::new("/logs");
+        assert_eq!(
+            session_log_path(dir, Some("headless-stoat-20260718-143022-1")),
+            Some(PathBuf::from("/logs/headless-stoat-20260718-143022-1.log")),
+            "the stem names the file under the log dir",
+        );
+        assert_eq!(
+            session_log_path(dir, None),
+            None,
+            "a session that named no log file resolves no path",
+        );
     }
 }
