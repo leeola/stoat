@@ -242,14 +242,9 @@ where
 
             Geometry {
                 strokes: flatten(&ops),
-                fill: fill.map(|_| {
-                    [
-                        [x as f32, y as f32],
-                        [(x + w) as f32, y as f32],
-                        [(x + w) as f32, (y + h) as f32],
-                        [x as f32, (y + h) as f32],
-                    ]
-                }),
+                // Drawn after the stroke so the stroke's own geometry does not
+                // move when a box gains or loses its fill.
+                fill: fill.map(|_| jittered_quad(x, y, w, h, &options, &mut random)),
             }
         },
         SketchShape::Line {
@@ -267,6 +262,40 @@ where
             line_geometry(command, connector, cw, ch, resolve, &mut random)
         },
     }
+}
+
+/// The four corners of a filled box, each nudged like the stroke around it.
+///
+/// A crisp rectangle behind a wobbling outline reads machine-cut, which is the
+/// one place a fill gives the drawing away.
+///
+/// The nudge is capped at a quarter of the shorter side, because the shader
+/// resolves the fill as a convex quad and a corner that crossed its neighbour
+/// turns the shape inside out.
+fn jittered_quad(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    options: &Options,
+    random: &mut Random,
+) -> [[f32; 2]; 4] {
+    let reach = options
+        .max_randomness_offset
+        .min(w.abs().min(h.abs()) / 4.0);
+    let mut corner = |cx: f64, cy: f64| {
+        [
+            (cx + options.offset_opt(reach, random)) as f32,
+            (cy + options.offset_opt(reach, random)) as f32,
+        ]
+    };
+
+    [
+        corner(x, y),
+        corner(x + w, y),
+        corner(x + w, y + h),
+        corner(x, y + h),
+    ]
 }
 
 /// Turn a mark's declared box into a pixel rectangle.

@@ -512,3 +512,64 @@ fn a_rounded_box_strokes_its_corners_inside_its_bounds() {
         );
     }
 }
+
+/// A crisp rectangle behind a wobbling outline reads machine-cut, so the fill's
+/// corners are nudged like the stroke around them.
+///
+/// The shader resolves the fill as a convex quad, so a corner that crossed its
+/// neighbour would turn the shape inside out. The nudge stays inside the box's
+/// own quarter for that reason.
+#[test]
+fn a_fill_quad_is_nudged_and_stays_convex() {
+    let seeded = |w: u16, h: u16, seed: u32| {
+        let shape = SketchShape::Rect {
+            bounds: SketchBounds { x: 0, y: 0, w, h },
+            radius: 0,
+            fill: Some(SketchFill {
+                color: [0, 0, 255],
+                alpha: 255,
+                style: SketchFillStyle::Solid,
+            }),
+        };
+        let mut command = command(shape, 64);
+        command.style.seed = seed;
+        geometry(&command, metrics(), &nothing_resolves)
+            .fill
+            .expect("a filled box carries a quad")
+    };
+    let filled = |w: u16, h: u16| seeded(w, h, 7);
+
+    let quad = filled(64, 64);
+    let crisp = [[0.0, 0.0], [40.0, 0.0], [40.0, 80.0], [0.0, 80.0]];
+    assert_ne!(quad, crisp, "the corners do not sit on the declared box");
+
+    for quad in [quad, filled(4, 4), filled(2, 8)] {
+        let cross = |at: usize| {
+            let (a, b, c) = (quad[at], quad[(at + 1) % 4], quad[(at + 2) % 4]);
+            (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        };
+        let signs: Vec<bool> = (0..4).map(|at| cross(at) > 0.0).collect();
+        assert!(
+            signs.iter().all(|&sign| sign == signs[0]),
+            "every turn goes the same way, so the quad stays convex: {quad:?}",
+        );
+    }
+
+    // The cap is what keeps a box smaller than the nudge convex, so it is
+    // checked on its own. One seed proves little here, because an uncapped
+    // nudge only sometimes draws far enough to cross; a fixed spread of them
+    // makes the difference certain while staying reproducible.
+    let (w, h) = (4.0 / 16.0 * metrics().width, 4.0 / 16.0 * metrics().height);
+    let quarter = w.min(h) / 4.0;
+    let declared = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+    for seed in 1..=16 {
+        let tiny = seeded(4, 4, seed);
+        for (corner, declared) in tiny.iter().zip(&declared) {
+            assert!(
+                (corner[0] - declared[0]).abs() <= quarter + 1e-4
+                    && (corner[1] - declared[1]).abs() <= quarter + 1e-4,
+                "at seed {seed} corner {corner:?} strayed past {quarter} from {declared:?}",
+            );
+        }
+    }
+}
