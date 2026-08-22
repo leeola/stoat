@@ -13,6 +13,7 @@ workspace = true
 perf = []
 
 [dependencies]
+stoatty_protocol = { path = "../tty_protocol" }
 stoatty_term = { path = "../tty_term" }
 wgpu.workspace = true
 tracing.workspace = true
