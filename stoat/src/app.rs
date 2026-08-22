@@ -20,7 +20,7 @@ use crate::{
         ClipboardKind, EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost,
         NoopFsWatcher,
     },
-    keymap::{Keymap, ResolvedAction, StateValue},
+    keymap::{self, Keymap, ResolvedAction, StateValue},
     keymap_state::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
@@ -1853,7 +1853,7 @@ impl Stoat {
     pub(crate) fn active_keys_for_mode(
         &self,
         mode: &str,
-    ) -> Vec<(&crate::keymap::CompiledKey, &[ResolvedAction])> {
+    ) -> Vec<(&keymap::CompiledKey, &[ResolvedAction])> {
         let state = StoatKeymapState::new(mode);
         self.keymap.active_keys(&state)
     }
@@ -4034,7 +4034,18 @@ impl Stoat {
             actions = ?self
                 .keymap_lookup(&key, &mut lookup)
                 .as_ref()
-                .map(|(actions, _)| actions.iter().map(|a| &a.name).collect::<Vec<_>>()),
+                .map(|(actions, _)| {
+                    actions
+                        .iter()
+                        .map(|a| {
+                            if keymap::is_unknown_action(&a.name) {
+                                format!("{} (unknown)", a.name)
+                            } else {
+                                a.name.clone()
+                            }
+                        })
+                        .collect::<Vec<String>>()
+                }),
             "key dispatch"
         );
 
