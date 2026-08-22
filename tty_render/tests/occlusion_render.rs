@@ -119,6 +119,8 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         scale: 256,
         color: Rgb::new(0, 0, 0),
         bg: Some(run_bg),
+        follow: 0,
+        anchor: None,
         text: " ".repeat(cols).into(),
         seq: 2,
     }]);
@@ -453,6 +455,8 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         scale: 256,
         color: Rgb::new(0, 0, 0),
         bg: Some(run_bg),
+        follow: 0,
+        anchor: None,
         text: " ".repeat(cols).into(),
         seq: 50,
     }]);

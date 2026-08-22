@@ -179,6 +179,8 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         scale: 192,
         color: Rgb::new(150, 160, 170),
         bg: Some(Rgb::new(0, 0, 0)),
+        follow: 0,
+        anchor: None,
         text: "127".into(),
         seq: 0,
     }]);

@@ -27,8 +27,8 @@ use alacritty_terminal::{
 };
 use decorate::{
     apply_bars, apply_borders, apply_icons, apply_line_layout, apply_minimaps, apply_panels,
-    apply_polylines, apply_popovers, apply_scales, apply_scroll_region, apply_text_runs,
-    decoration_footprint, stamp_pool_decorations,
+    apply_polylines, apply_popovers, apply_scales, apply_scroll_region, apply_sketches,
+    apply_text_runs, decoration_footprint, stamp_pool_decorations,
 };
 use parking_lot::Mutex;
 use project::{
@@ -48,7 +48,7 @@ use stoatty_protocol::{
         self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
         LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
         PolylineCommand, PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
-        TextRunCommand, WindowOpenCommand,
+        SketchCommand, TextRunCommand, WindowOpenCommand,
     },
     frame::FrameScratch,
     iterm, kitty,
@@ -278,6 +278,10 @@ pub struct Terminal {
     /// polyline list by [`Self::project`]. Accumulated and grid-level like the
     /// bars.
     polylines: Vec<PolylineCommand>,
+    /// Hand-drawn marks set by `Gstoatty;sketch_*` frames, applied to the
+    /// grid's sketch list by [`Self::project`]. Accumulated and grid-level like
+    /// the polylines.
+    sketches: Vec<SketchCommand>,
     /// The logical-line layout set by `Gstoatty;line_layout` frames, applied to
     /// the grid by [`Self::project`]. Replaced, not accumulated, like the scroll
     /// region: the latest layout wins.
@@ -291,6 +295,7 @@ pub struct Terminal {
     text_run_seq: Vec<u32>,
     bar_seq: Vec<u32>,
     polyline_seq: Vec<u32>,
+    sketch_seq: Vec<u32>,
     /// Declared minimap strips set by `Gstoatty;minimap` frames, applied to the
     /// grid by [`Self::project`]. A decoration cleared by `Gstoatty;reset` like a
     /// border, with a parallel [`Self::minimap_seq`] for z-order.
@@ -502,6 +507,7 @@ struct DecorationDirty {
     text_runs: bool,
     bars: bool,
     polylines: bool,
+    sketches: bool,
     minimaps: bool,
 }
 
@@ -519,6 +525,7 @@ impl DecorationDirty {
             text_runs: true,
             bars: true,
             polylines: true,
+            sketches: true,
             minimaps: true,
         }
     }
@@ -551,6 +558,8 @@ struct ProjectedDecorations {
     bar_seq: Vec<u32>,
     polylines: Vec<PolylineCommand>,
     polyline_seq: Vec<u32>,
+    sketches: Vec<SketchCommand>,
+    sketch_seq: Vec<u32>,
     minimaps: Vec<MinimapCommand>,
     minimap_seq: Vec<u32>,
     /// Held because the minimap stamp reads the views as well as the strips, so
@@ -972,12 +981,14 @@ impl Terminal {
             text_runs: Vec::new(),
             bars: Vec::new(),
             polylines: Vec::new(),
+            sketches: Vec::new(),
             line_layout: None,
             panel_seq: Vec::new(),
             icon_seq: Vec::new(),
             text_run_seq: Vec::new(),
             bar_seq: Vec::new(),
             polyline_seq: Vec::new(),
+            sketch_seq: Vec::new(),
             minimaps: Vec::new(),
             minimap_seq: Vec::new(),
             minimap_contents: HashMap::new(),
@@ -1458,11 +1469,8 @@ impl Terminal {
             | Command::Scale(_)
             | Command::ScrollRegion(_)
             | Command::Icon(_)
-            | Command::LineLayout(_) => self.stage_or_apply(command),
-            // FIXME: Deferring sketch state. The decoder builds the command,
-            // but nothing here holds one, so a sketch is dropped as an
-            // older terminal drops any command it has no state for.
-            Command::Sketch(_) => {},
+            | Command::LineLayout(_)
+            | Command::Sketch(_) => self.stage_or_apply(command),
             Command::Popover(popover) => self.begin_capture(CaptureTarget::Popover(popover)),
             Command::PopoverEnd => self.commit_capture(),
             Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
@@ -1868,10 +1876,6 @@ impl Terminal {
     /// feed time in [`Self::apply_command`] and never route here.
     fn apply_decoration(&mut self, command: Command) {
         match command {
-            // FIXME: Deferring sketch state. Nothing routes one here, since
-            // `apply_command` drops it before staging, and there is no list to
-            // push it onto.
-            Command::Sketch(_) => {},
             Command::Border(border) => {
                 if push_capped(&mut self.borders, border, &mut self.warned_decoration_cap) {
                     self.decorations_dirty.borders = true;
@@ -1920,6 +1924,13 @@ impl Terminal {
                     self.polyline_seq.push(self.decoration_seq);
                     self.decoration_seq += 1;
                     self.decorations_dirty.polylines = true;
+                }
+            },
+            Command::Sketch(sketch) => {
+                if push_capped(&mut self.sketches, sketch, &mut self.warned_decoration_cap) {
+                    self.sketch_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.sketches = true;
                 }
             },
             Command::Popover(popover) => {
@@ -2558,6 +2569,11 @@ impl Terminal {
             (&self.polylines, &self.polyline_seq),
             (&mut last.polylines, &mut last.polyline_seq),
         );
+        reconcile_seq(
+            &mut dirty.sketches,
+            (&self.sketches, &self.sketch_seq),
+            (&mut last.sketches, &mut last.sketch_seq),
+        );
         // The strips alone are not the whole stamp. A view-only advance moves
         // the thumb over an unchanged strip list, so the views are part of what
         // decides whether this category still matches.
@@ -2584,11 +2600,13 @@ impl Terminal {
         self.text_runs.clear();
         self.bars.clear();
         self.polylines.clear();
+        self.sketches.clear();
         self.panel_seq.clear();
         self.icon_seq.clear();
         self.text_run_seq.clear();
         self.bar_seq.clear();
         self.polyline_seq.clear();
+        self.sketch_seq.clear();
         // A minimap declaration is a decoration and clears here. Its content
         // store is persistent state that survives, retired by its own drop.
         //
@@ -3041,6 +3059,9 @@ impl Terminal {
         if self.decorations_dirty.polylines || layout_changed {
             apply_polylines(grid, &self.polylines, &self.polyline_seq);
         }
+        if self.decorations_dirty.sketches || layout_changed {
+            apply_sketches(grid, &self.sketches, &self.sketch_seq);
+        }
         if self.decorations_dirty.minimaps || resized {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
         }
@@ -3275,8 +3296,8 @@ mod tests {
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
-            MinimapView, Overlay, Panel, PanelShadow, Polyline, Rgb, Scale, ScrollRegion, TextRun,
-            UnderlineStyle,
+            MinimapView, Overlay, Panel, PanelShadow, Polyline, Rgb, Scale, ScrollRegion, Sketch,
+            TextRun, UnderlineStyle,
         },
         theme::Theme,
     };
@@ -3290,14 +3311,15 @@ mod tests {
         encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
         encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor, encode_pool_drop,
         encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
-        encode_scroll, encode_scroll_region, encode_text_run, encode_window_open,
+        encode_scroll, encode_scroll_region, encode_sketch, encode_text_run, encode_window_open,
         encode_zoom_capture, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle,
         FillCommand, HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply,
         LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
         MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow,
         PolylineCommand, PoolAnchorCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
         PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand, WindowOpenCommand,
+        SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle,
+        SketchTiming, TextRunCommand, WindowOpenCommand,
     };
 
     /// Base64, for a test feeding a graphics payload.
@@ -5119,6 +5141,8 @@ mod tests {
                 scale: 192,
                 color: Rgb::new(150, 160, 170),
                 bg: Some(Rgb::new(24, 26, 32)),
+                follow: 0,
+                anchor: None,
                 text: "42".into(),
                 seq: 1,
             }]
@@ -6497,6 +6521,115 @@ mod tests {
         );
     }
 
+    /// A declared mark reaches the grid carrying its declaration order, which is
+    /// what the renderer occludes by.
+    #[test]
+    fn a_sketch_lands_on_the_live_grid_with_its_seq() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+        let command = test_sketch(7);
+
+        terminal.advance(&encode_sketch(&command));
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.sketches(), [Sketch { command, seq: 1 }]);
+    }
+
+    /// A mark is a decoration, so a reset takes it off the screen the way it
+    /// takes off a border. An emitter prefixes a reset to every re-stamp, so a
+    /// mark that survived one would never leave.
+    #[test]
+    fn a_reset_empties_the_sketch_list() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(&encode_sketch(&test_sketch(7)));
+        terminal.project(&mut grid);
+        assert_eq!(grid.sketches().len(), 1, "the mark is on the grid");
+
+        terminal.advance(&encode_reset());
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.sketches(), [], "the reset took it off");
+    }
+
+    /// An emitter re-declares its whole decoration set every frame. A scene that
+    /// did not change must leave the epoch alone, or a renderer caching on it
+    /// rebuilds every frame for nothing.
+    #[test]
+    fn an_identical_sketch_redeclaration_holds_the_epoch() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        let mut scene = encode_reset();
+        scene.extend_from_slice(&encode_sketch(&test_sketch(7)));
+
+        terminal.advance(&scene);
+        terminal.project(&mut grid);
+        let after_first = grid.sketches_epoch();
+
+        terminal.advance(&scene);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.sketches_epoch(),
+            after_first,
+            "a byte-identical scene re-stamps nothing",
+        );
+    }
+
+    /// The two fields a run grew are what tie a label to the mark it belongs to
+    /// and to the pane it glides with, so both have to survive the projection.
+    #[test]
+    fn a_text_run_carries_its_follow_and_anchor_to_the_grid() {
+        let mut terminal = Terminal::new(2, 8, Theme::default());
+        let mut grid = Grid::new(2, 8);
+
+        terminal.advance(&encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: [1, 2, 3],
+            bg: None,
+            follow: 7,
+            anchor: Some((3, 1.5)),
+            text: "label".to_string(),
+        }));
+        terminal.project(&mut grid);
+
+        let [run] = grid.text_runs() else {
+            panic!("one run reaches the grid, got {:?}", grid.text_runs());
+        };
+        assert_eq!((run.follow, run.anchor), (7, Some((3, 1.5))));
+    }
+
+    /// A mark with every field set, so a round trip that drops one shows up.
+    fn test_sketch(id: u32) -> SketchCommand {
+        SketchCommand {
+            id,
+            style: SketchStyle {
+                color: [220, 50, 47],
+                alpha: 200,
+                width: 64,
+                roughness: 64,
+                seed: 99,
+            },
+            timing: SketchTiming {
+                delay_ms: 120,
+                duration_ms: 480,
+                easing: SketchEasing::EaseOutCubic,
+                phase: SketchPhase::Enter,
+            },
+            shape: SketchShape::Ellipse(SketchBounds {
+                x: -16,
+                y: 32,
+                w: 240,
+                h: 48,
+            }),
+            anchor: Some((3, 2.5)),
+        }
+    }
+
     /// Reprojecting refills each path's point list where it sits, so the points must
     /// come out as declared rather than appended to what the last projection left.
     ///
@@ -6587,6 +6720,8 @@ mod tests {
                 scale: 160,
                 color: Rgb::new(150, 160, 170),
                 bg: Some(Rgb::new(24, 26, 32)),
+                follow: 0,
+                anchor: None,
                 text: "42".into(),
                 seq: 0,
             }]
@@ -6654,6 +6789,8 @@ mod tests {
                 scale: 160,
                 color: Rgb::new(4, 5, 6),
                 bg: Some(Rgb::new(0, 0, 0)),
+                follow: 0,
+                anchor: None,
                 text: "bb".into(),
                 seq: 0,
             }]

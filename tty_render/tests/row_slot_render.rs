@@ -276,6 +276,8 @@ fn a_pool_text_run_paints_on_its_own_row_after_the_live_grid_scrolls() {
         scale: 256,
         color: run_color,
         bg: None,
+        follow: 0,
+        anchor: None,
         text: "MMM".into(),
         seq: 0,
     }]);

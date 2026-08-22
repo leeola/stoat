@@ -17,7 +17,7 @@ use std::{
         Arc,
     },
 };
-use stoatty_protocol::command::{BarCommand, PolylineCommand, TextRunCommand};
+use stoatty_protocol::command::{BarCommand, PolylineCommand, SketchCommand, TextRunCommand};
 
 pub(crate) mod from_command;
 
@@ -62,6 +62,7 @@ pub struct Grid {
     text_runs: Vec<TextRun>,
     bars: Vec<Bar>,
     polylines: Vec<Polyline>,
+    sketches: Vec<Sketch>,
     /// Declared minimap strips, each joined with its viewport thumb. Kept apart
     /// from [`Self::minimap_contents`] so a viewport-only change re-projects this
     /// small list without re-cloning the line summaries.
@@ -93,6 +94,7 @@ pub struct Grid {
     text_runs_epoch: u64,
     minimap_epoch: u64,
     polylines_epoch: u64,
+    sketches_epoch: u64,
     /// Images placed on this grid, in declaration order.
     ///
     /// Held apart from the cells because a placement covers a box of them and
@@ -118,6 +120,7 @@ impl Grid {
             text_runs: Vec::new(),
             bars: Vec::new(),
             polylines: Vec::new(),
+            sketches: Vec::new(),
             minimaps: Vec::new(),
             minimap_content_versions: HashMap::new(),
             minimap_contents: HashMap::new(),
@@ -126,6 +129,7 @@ impl Grid {
             text_runs_epoch: 0,
             minimap_epoch: 0,
             polylines_epoch: 0,
+            sketches_epoch: 0,
             images: Vec::new(),
             images_epoch: 0,
         }
@@ -176,6 +180,10 @@ impl Grid {
     /// reason.
     pub fn polylines_epoch(&self) -> u64 {
         self.polylines_epoch
+    }
+
+    pub fn sketches_epoch(&self) -> u64 {
+        self.sketches_epoch
     }
 
     /// Images placed on this grid, in declaration order.
@@ -302,6 +310,7 @@ impl Grid {
         self.text_runs.clear();
         self.bars.clear();
         self.polylines.clear();
+        self.sketches.clear();
         self.minimaps.clear();
         self.line_start_rows.clear();
         self.images.clear();
@@ -310,6 +319,7 @@ impl Grid {
         self.text_runs_epoch += 1;
         self.minimap_epoch += 1;
         self.polylines_epoch += 1;
+        self.sketches_epoch += 1;
         self.images_epoch += 1;
     }
 
@@ -364,6 +374,7 @@ impl Grid {
         self.text_runs.clear();
         self.bars.clear();
         self.polylines.clear();
+        self.sketches.clear();
         self.minimaps.clear();
         // A recycled page must not carry the last one's stores, so unlike a
         // resize this drops them. Their versions move with them, or a renderer
@@ -378,6 +389,7 @@ impl Grid {
         self.text_runs_epoch += 1;
         self.minimap_epoch += 1;
         self.polylines_epoch += 1;
+        self.sketches_epoch += 1;
     }
 
     /// Feed everything this grid's cells put on screen into `hasher`.
@@ -650,6 +662,10 @@ impl Grid {
         &self.polylines
     }
 
+    pub fn sketches(&self) -> &[Sketch] {
+        &self.sketches
+    }
+
     /// Replace the off-grid stroked paths.
     ///
     /// Grid-level like the bars, so the per-cell projection leaves them
@@ -669,6 +685,27 @@ impl Grid {
     pub fn polylines_mut(&mut self) -> &mut Vec<Polyline> {
         self.polylines_epoch += 1;
         &mut self.polylines
+    }
+
+    /// Replace the hand-drawn marks.
+    ///
+    /// Grid-level like the paths, so the per-cell projection leaves them
+    /// untouched and the caller sets the full list each frame it changes.
+    ///
+    /// Moves [`Self::sketches_epoch`].
+    pub fn set_sketches(&mut self, sketches: Vec<Sketch>) {
+        self.sketches = sketches;
+        self.sketches_epoch += 1;
+    }
+
+    /// The mark list, for a caller rewriting it from another grid's. See
+    /// [`Self::text_runs_mut`].
+    ///
+    /// Moves [`Self::sketches_epoch`] on the way out, for the reason
+    /// [`Self::text_runs_mut`] moves its own.
+    pub fn sketches_mut(&mut self) -> &mut Vec<Sketch> {
+        self.sketches_epoch += 1;
+        &mut self.sketches
     }
 
     /// Copy `rows` rows of `src` in at (`top`, `left`), replacing whatever
@@ -1090,6 +1127,10 @@ impl PagePool {
     /// Written by the terminal when a fill commits, after [`Self::fill`] has
     /// recycled the slot and its cells are painted. The commands are page-local.
     /// The terminal translates them to the window when it projects the pool.
+    ///
+    /// A sketch declared inside a fill page is dropped rather than carried. A
+    /// mark names the pool it rides through its own anchor, so a page-local one
+    /// would be pinned to the page it was declared in and fight that anchor.
     pub fn set_decorations(
         &mut self,
         index: u64,
@@ -1697,7 +1738,10 @@ pub enum IconKind {
 /// the run can sit at a fractional position; [`Self::scale`] is the glyph size
 /// in 256ths of the cell size (256 = grid size). The run advances one scaled
 /// cell width per character and is vertically centered within the target row.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+// `Eq` and `Hash` are absent because the anchor carries a fractional row
+// offset and `f32` has neither. The decoration reconcile compares runs, which
+// `PartialEq` alone answers, and nothing keys a collection on one.
+#[derive(Clone, PartialEq, Debug)]
 pub struct TextRun {
     pub col: i16,
     pub row: i16,
@@ -1707,9 +1751,46 @@ pub struct TextRun {
     /// glyphs directly over the surface behind the run with no backing box.
     pub bg: Option<Rgb>,
     pub text: Arc<str>,
+    /// Sketch whose reveal this run fades in with, so a label appears as the
+    /// box it sits in draws itself. Zero fades the run in on its own.
+    pub follow: u32,
+    /// Pool this run rides, and the pool's top row, so the run glides with a
+    /// scrolling pane. `None` leaves it fixed to the screen.
+    pub anchor: Option<(u32, f32)>,
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
+}
+
+impl Hash for TextRun {
+    /// Hashed by hand because the anchor carries an `f32`, which has no
+    /// [`Hash`] of its own.
+    ///
+    /// The anchor goes in by its bits. That is not consistent with
+    /// [`PartialEq`] in the strict sense, since `-0.0` and `0.0` compare equal
+    /// while their bits differ, and the one caller is a page-content digest
+    /// deciding whether a slot needs repainting. The inconsistency only ever
+    /// makes two equal pages hash apart, which costs a repaint. The dangerous
+    /// direction, two different pages hashing alike, is what bit-hashing
+    /// prevents.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.col.hash(state);
+        self.row.hash(state);
+        self.scale.hash(state);
+        self.color.hash(state);
+        self.bg.hash(state);
+        self.text.hash(state);
+        self.follow.hash(state);
+        match self.anchor {
+            Some((host, top_rows)) => {
+                state.write_u8(1);
+                host.hash(state);
+                state.write_u32(top_rows.to_bits());
+            },
+            None => state.write_u8(0),
+        }
+        self.seq.hash(state);
+    }
 }
 
 /// A thin rectangle filled off the cell grid in a solid color.
@@ -1747,6 +1828,24 @@ pub struct Polyline {
     /// as a vertical and 16 draws exactly one column wide.
     pub width: u16,
     pub color: Rgb,
+    /// Monotonic declaration-order index across all non-cell components. See
+    /// [`Panel::seq`].
+    pub seq: u32,
+}
+
+/// A hand-drawn mark the renderer generates geometry for and animates.
+///
+/// Grid-level like [`Polyline`], but unlike every other decoration its shape is
+/// not what arrives on the wire. The command names an ellipse, a box, or a
+/// connector and says how rough and how fast; the wobbling stroke is generated
+/// at paint against the live cell metrics, which is what keeps a mark
+/// hand-drawn at every font size.
+///
+/// The command rides by value because it holds no text and no color type of its
+/// own, so there is nothing here to share or convert.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Sketch {
+    pub command: SketchCommand,
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
@@ -2288,6 +2387,8 @@ mod tests {
             scale: 192,
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
+            follow: 0,
+            anchor: None,
             text: "42".into(),
             seq: 0,
         };
@@ -2375,6 +2476,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "x".into(),
             seq: 0,
         }
@@ -2837,6 +2940,8 @@ mod region_blit_tests {
             scale: 16,
             color: Rgb::new(1, 2, 3),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "x".into(),
             seq: 0,
         }]);

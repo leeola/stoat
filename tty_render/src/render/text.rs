@@ -5320,6 +5320,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: Some(Rgb::new(4, 5, 6)),
+            follow: 0,
+            anchor: None,
             text: "42".into(),
             seq: 42,
         }]);
@@ -5345,6 +5347,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "42".into(),
             seq: 42,
         }]);
@@ -5367,6 +5371,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: Some(Rgb::new(4, 5, 6)),
+            follow: 0,
+            anchor: None,
             text: "42".into(),
             seq: 7,
         }]);
@@ -5396,6 +5402,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(255, 255, 255),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: (0x21u32..=0x7e)
                 .filter_map(char::from_u32)
                 .collect::<String>()
@@ -5495,6 +5503,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(255, 255, 255),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "42".into(),
             seq: 0,
         }]);
@@ -6167,6 +6177,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(200, 200, 200),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: text.into(),
             seq: 0,
         }
@@ -6598,6 +6610,8 @@ mod tests {
             scale: 160,
             color: Rgb::new(255, 255, 255),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "charlie".into(),
             seq: 0,
         }]);
@@ -6723,6 +6737,8 @@ mod tests {
             scale: 160,
             color: Rgb::new(255, 255, 255),
             bg: Some(Rgb::new(20, 20, 20)),
+            follow: 0,
+            anchor: None,
             text: "charlie".into(),
             seq: 0,
         };
@@ -6797,6 +6813,8 @@ mod tests {
             scale: 256,
             color: Rgb::new(255, 255, 255),
             bg: None,
+            follow: 0,
+            anchor: None,
             text: "42".into(),
             seq: 0,
         }]);

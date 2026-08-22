@@ -29,13 +29,17 @@ use stoatty_protocol::command::{
 /// owning a `String`. Every dirty projection hands the whole run list to the
 /// grid, so an owned string would be rebuilt into the grid's shared text once
 /// per frame per run, and a gutter declares one run per visible line.
-#[derive(Clone, PartialEq, Eq)]
+// `Eq` is absent for the reason [`crate::grid::TextRun`] gives: the anchor
+// carries an `f32`.
+#[derive(Clone, PartialEq)]
 pub(crate) struct StoredTextRun {
     pub(crate) col: i16,
     pub(crate) row: i16,
     pub(crate) scale: u16,
     pub(crate) color: [u8; 3],
     pub(crate) bg: Option<[u8; 3]>,
+    pub(crate) follow: u32,
+    pub(crate) anchor: Option<(u32, f32)>,
     pub(crate) text: Arc<str>,
 }
 
@@ -47,6 +51,8 @@ impl From<TextRunCommand> for StoredTextRun {
             scale: command.scale,
             color: command.color,
             bg: command.bg,
+            follow: command.follow,
+            anchor: command.anchor,
             text: Arc::from(command.text),
         }
     }
@@ -66,6 +72,8 @@ pub(crate) fn text_run_from_command(run: &StoredTextRun, row: i16, seq: u32) -> 
         scale: run.scale,
         color: Rgb::new(run.color[0], run.color[1], run.color[2]),
         bg: run.bg.map(|bg| Rgb::new(bg[0], bg[1], bg[2])),
+        follow: run.follow,
+        anchor: run.anchor,
         text: Arc::clone(&run.text),
         seq,
     }

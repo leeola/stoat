@@ -13,12 +13,12 @@ use crate::grid::{
         popover_overlay, text_run_from_command, StoredTextRun,
     },
     Bar, Border, BorderEdge, Grid, Icon, IconKind, Minimap, MinimapView, PagePool, Polyline, Rgb,
-    ScrollRegion, TextRun,
+    ScrollRegion, Sketch, TextRun,
 };
 use std::{collections::HashMap, mem};
 use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, IconCommand, LineLayoutCommand, MinimapCommand, PanelCommand,
-    PolylineCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+    PolylineCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, SketchCommand,
 };
 
 /// Mark the grid rows the damage-tracked decorations occupy, clamped to `rows`.
@@ -369,6 +369,23 @@ pub(super) fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32])
 /// Each path's point list is refilled where it sits rather than cloned from the
 /// command, since this re-runs on every line-layout change and a commit graph
 /// declares a path per lane.
+/// Project the declared hand-drawn marks onto `grid`.
+///
+/// The command rides by value, so unlike a polyline there is nothing to fill in
+/// place and the list is rebuilt each time.
+pub(super) fn apply_sketches(grid: &mut Grid, commands: &[SketchCommand], seqs: &[u32]) {
+    let sketches = commands
+        .iter()
+        .zip(seqs)
+        .map(|(command, &seq)| Sketch {
+            command: command.clone(),
+            seq,
+        })
+        .collect();
+
+    grid.set_sketches(sketches);
+}
+
 pub(super) fn apply_polylines(grid: &mut Grid, commands: &[PolylineCommand], seqs: &[u32]) {
     let mut polylines = mem::take(grid.polylines_mut());
 

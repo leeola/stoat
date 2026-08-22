@@ -100,6 +100,8 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         scale: 256,
         color: black,
         bg: Some(run_bg),
+        follow: 0,
+        anchor: None,
         text: "   ".into(),
         seq: 0,
     }]);
