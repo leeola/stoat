@@ -3,7 +3,11 @@ use crate::{
     app::{Stoat, UpdateEffect},
     code_index::{build, nav},
     render::hover::{HoverFrame, HoverPopup},
-    walkthrough::{self, run::WalkthroughRun, store},
+    walkthrough::{
+        self,
+        run::{part, WalkthroughRun},
+        store,
+    },
 };
 use codegraph::{EdgeKind, SymbolKey};
 use ratatui::{layout::Rect, style::Style};
@@ -41,7 +45,8 @@ pub(crate) fn open(stoat: &mut Stoat, slug: &str) -> UpdateEffect {
         },
     };
 
-    let Some(run) = WalkthroughRun::new(loaded) else {
+    stoat.walkthrough_runs_opened = stoat.walkthrough_runs_opened.wrapping_add(1);
+    let Some(run) = WalkthroughRun::new(loaded, stoat.walkthrough_runs_opened) else {
         stoat.set_status(format!("walkthrough '{slug}' has no stops"));
         return UpdateEffect::Redraw;
     };
@@ -348,13 +353,6 @@ fn stop_title(run: &WalkthroughRun) -> String {
 const CARD_MIN_WIDTH: u16 = 24;
 const CARD_MAX_WIDTH: u16 = 52;
 
-/// The card's own mark id.
-///
-/// Fixed rather than cycling, because a card re-declared on every frame of the
-/// same stop must not restart its stroke, and a new stop replaces the popup
-/// outright.
-const CARD_SKETCH_ID: u32 = 1;
-
 /// The protocol version that decodes a sketch. An older stoatty ignores the
 /// frames, so the card would draw no border at all.
 const SKETCH_PROTOCOL: u32 = 3;
@@ -380,6 +378,11 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
         return;
     };
+
+    // The card is one part of the slide, so it takes its id from the same
+    // scheme the marks do. A card re-declared on every frame of one stop must
+    // not restart its stroke.
+    let card_id = run.part_id(part::CARD);
 
     let mut lines = vec![vec![(heading, stoat.theme.get("syntax.markup.title"))]];
     lines.extend(crate::markdown::render_markdown(
@@ -410,7 +413,7 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
         width,
         height,
     });
-    popup.frame = card_frame(stoat);
+    popup.frame = card_frame(stoat, card_id);
     stoat.pending_hover = Some(popup);
 }
 
@@ -440,14 +443,14 @@ fn card_width(lines: &[Vec<(String, Style)>], frame_width: u16) -> u16 {
 /// The hand-drawn box needs a terminal that decodes one. Everywhere else the
 /// card keeps the modal border, so the narration reads the same even where the
 /// marks around it do not draw.
-fn card_frame(stoat: &Stoat) -> HoverFrame {
+fn card_frame(stoat: &Stoat, id: u32) -> HoverFrame {
     if !stoat.stoatty || stoat.stoatty_protocol < SKETCH_PROTOCOL {
         return HoverFrame::Modal;
     }
 
     let card = stoat.theme.get(crate::theme::scope::UI_WALKTHROUGH_CARD);
     HoverFrame::Sketch {
-        id: CARD_SKETCH_ID,
+        id,
         stroke: crate::render::paint::style_rgb(card.fg).unwrap_or([255, 255, 255]),
         fill: crate::render::paint::style_rgb(card.bg).unwrap_or([0, 0, 0]),
         timing: card_timing(),
@@ -918,7 +921,7 @@ mod tests {
         assert_eq!(
             stoat.pending_hover.as_ref().map(|popup| popup.frame),
             Some(HoverFrame::Modal),
-            "the harness is not a stoatty",
+            "the harness leaves the protocol at zero, which is the older-terminal case",
         );
     }
 

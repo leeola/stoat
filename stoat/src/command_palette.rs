@@ -2516,7 +2516,7 @@ mod tests {
     fn playing_harness() -> TestHarness {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().walkthrough =
-            crate::walkthrough::run::WalkthroughRun::new(one_stop_walkthrough());
+            crate::walkthrough::run::WalkthroughRun::new(one_stop_walkthrough(), 0);
         h
     }
 
@@ -2589,7 +2589,7 @@ mod tests {
     fn a_review_walk_keeps_the_tokens_from_a_walkthrough() {
         let mut h = walking_harness();
         h.stoat.active_workspace_mut().walkthrough =
-            crate::walkthrough::run::WalkthroughRun::new(one_stop_walkthrough());
+            crate::walkthrough::run::WalkthroughRun::new(one_stop_walkthrough(), 0);
 
         assert_eq!(
             palette_dispatch_name(&mut h, ":next"),

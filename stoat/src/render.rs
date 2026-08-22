@@ -38,6 +38,7 @@ pub(crate) mod table;
 pub(crate) mod term_pane;
 pub(crate) mod text;
 pub(crate) mod undercurl;
+pub(crate) mod walkthrough;
 pub(crate) mod workspace_picker;
 
 use self::undercurl::UndercurlBatch;
@@ -894,6 +895,9 @@ pub(crate) fn frame(
             );
         }
     }
+    // Before the hover, so the card the slide points at is already placed when
+    // the connector to it is emitted.
+    walkthrough::render_slide(stoat, buf, &mut *scene);
     hover::render_hover(stoat, buf, &mut *scene);
     signature_help::render_signature_help(stoat, buf, &mut *scene);
     completion::render_completion(stoat, buf, &mut *scene);

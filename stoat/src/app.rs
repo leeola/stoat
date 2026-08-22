@@ -1695,6 +1695,13 @@ pub struct Stoat {
     /// unless [`Self::stoatty`] is set, since a foreign terminal answers no
     /// handshake at all.
     pub(crate) stoatty_protocol: u32,
+    /// Walkthroughs opened this session, which distinguishes one run's mark ids
+    /// from the last one's.
+    ///
+    /// A tour opened while the previous one's strokes are still settling would
+    /// otherwise reuse its ids, and the terminal would read the new marks as
+    /// the old ones mid-draw.
+    pub(crate) walkthrough_runs_opened: u32,
     /// Reused per-frame APC decoration buffer. Widgets append their component
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
     /// flush so unchanged decoration costs no bytes. Empty until a widget appends.
@@ -2196,6 +2203,7 @@ impl Stoat {
             apc_tx: None,
             stoatty: false,
             stoatty_protocol: 0,
+            walkthrough_runs_opened: 0,
             apc_scene: ApcScene::new(),
             pending_undercurls: UndercurlBatch::default(),
             theme_epoch: 0,

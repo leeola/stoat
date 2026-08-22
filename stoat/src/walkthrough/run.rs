@@ -18,6 +18,37 @@ pub(crate) struct WalkthroughRun {
     /// at its head. That is what gives a step away from the focus somewhere to
     /// have come from, and a step back somewhere to return to.
     annotation_idx: Option<usize>,
+    /// Where this run's mark ids start.
+    ///
+    /// The terminal latches a mark's timing when its id first appears, so a
+    /// second tour opened while the first's strokes are still settling must not
+    /// reuse its ids. A base per run is what keeps them apart.
+    pub(crate) id_base: u32,
+}
+
+/// Where walkthrough mark ids start.
+///
+/// High enough that nothing else an emitter declares lands in the same range by
+/// accident, since a collision would have two things sharing one clock.
+pub(crate) const ID_SPACE: u32 = 0x5700_0000;
+
+/// Ids one stop reserves, which caps its drawn annotations at 60.
+///
+/// A slide with more marks than that is unreadable long before it runs out of
+/// room, so the cap costs nothing and keeps a stop's ids contiguous.
+pub(crate) const STOP_ID_STRIDE: u32 = 0x100;
+
+/// The parts of a slide, in the order their ids run.
+///
+/// Derived from the stop and the part rather than allocated, so a re-emitted
+/// scene comes out with the same ids and no state has to remember them.
+pub(crate) mod part {
+    pub(crate) const FOCUS_MARK: u32 = 0;
+    pub(crate) const CARD: u32 = 1;
+    pub(crate) const FOCUS_LINK: u32 = 2;
+    /// The first annotation's three ids, which then repeat every three.
+    pub(crate) const ANNOTATION_BASE: u32 = 3;
+    pub(crate) const ANNOTATION_STRIDE: u32 = 3;
 }
 
 impl WalkthroughRun {
@@ -25,12 +56,40 @@ impl WalkthroughRun {
     ///
     /// Refusing an empty tour here is what lets [`Self::current_stop`] always
     /// have a stop to answer with.
-    pub(crate) fn new(walkthrough: Walkthrough) -> Option<Self> {
+    ///
+    /// `run` distinguishes this run's mark ids from an earlier run's, so a
+    /// tour opened while another's strokes are still settling does not restart
+    /// them. See [`Self::id_base`].
+    pub(crate) fn new(walkthrough: Walkthrough, run: u32) -> Option<Self> {
         (!walkthrough.stops.is_empty()).then_some(Self {
             walkthrough,
             stop_idx: 0,
             annotation_idx: None,
+            id_base: ID_SPACE + (run << 16),
         })
+    }
+
+    /// The id of `part` for the stop the reader is on.
+    ///
+    /// See [`part`] for what the offsets name.
+    pub(crate) fn part_id(&self, part: u32) -> u32 {
+        self.id_base + self.stop_idx as u32 * STOP_ID_STRIDE + part
+    }
+
+    /// The mark, connector, and label ids of annotation `index`.
+    pub(crate) fn annotation_ids(&self, index: usize) -> (u32, u32, u32) {
+        let base = part::ANNOTATION_BASE + part::ANNOTATION_STRIDE * index as u32;
+        (
+            self.part_id(base),
+            self.part_id(base + 1),
+            self.part_id(base + 2),
+        )
+    }
+
+    /// How many of a stop's annotations fit its reserved ids.
+    pub(crate) fn drawable_annotations(&self) -> usize {
+        let room = STOP_ID_STRIDE - part::ANNOTATION_BASE;
+        (room / part::ANNOTATION_STRIDE) as usize
     }
 
     pub(crate) fn current_stop(&self) -> &Stop {
@@ -134,7 +193,7 @@ mod tests {
                 )
                 .expect("append needs no anchor");
         }
-        WalkthroughRun::new(walkthrough)
+        WalkthroughRun::new(walkthrough, 0)
     }
 
     #[test]
