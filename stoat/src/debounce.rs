@@ -22,22 +22,23 @@ use std::{
     sync::Arc,
 };
 
-/// Quiet window after the last filesystem-watch event for a path before the
-/// diffs it affects are rebuilt. Mirrors
+/// Quiet window after the last filesystem-watch event before the work that
+/// event triggers runs.
+///
+/// Paces every consumer of the watch: a `.git` write stales the open diffs, and
+/// an edited file is reindexed. Mirrors
 /// [`crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE`] so a formatter-on-save burst
-/// (or an agent edit chain) collapses into one diff rebuild rather than three.
-pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
-    std::time::Duration::from_millis(50);
+/// (or an agent edit chain) collapses into one pass rather than three.
+pub(crate) const FS_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Quiet window after the last parse of a buffer before its symbols are
 /// extracted again.
 ///
 /// An extract reads the whole file and its drain rebuilds the project's
 /// adjacency, so a burst of keystrokes must collapse into one rather than
-/// queue an extract each. Far longer than
-/// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`], which is sized for a
-/// formatter-on-save burst. Typing pauses less often than that, and nothing
-/// reads the symbol index between keystrokes.
+/// queue an extract each. Far longer than [`FS_WATCH_DEBOUNCE`], which is sized
+/// for a formatter-on-save burst. Typing pauses less often than that, and
+/// nothing reads the symbol index between keystrokes.
 pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// External-change paths [`drain_pending_index_edits`] hands to the
@@ -64,13 +65,15 @@ pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(300);
 
 /// Drain queued [`crate::host::FsWatchEvent`]s from the active
-/// [`FsWatchHost`]. Each event arms (or resets) a 50ms
-/// per-path debounce via
-/// [`arm_review_external_edit_debounce`] when a review
-/// session is active; the dispatch itself lands later from
-/// [`drain_pending_external_edits`] once the timer
-/// fires. Cap matches [`Stoat::drain_lsp_notifications`] so a
-/// pathological burst can't starve the event loop.
+/// [`FsWatchHost`], routing each to the debounce its path calls for.
+///
+/// A `.git` write goes to [`arm_diff_refresh_debounce`], a working-tree file to
+/// [`arm_diff_warm_file_debounce`] and [`arm_index_external_edit_debounce`].
+/// None of them does the work here: each arms a timer whose drain lands on the
+/// main loop later.
+///
+/// Cap matches [`Stoat::drain_lsp_notifications`] so a pathological burst
+/// cannot starve the event loop.
 pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let host = stoat.fs_watch_host.clone();
     let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
@@ -156,7 +159,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             // moved HEAD and staled every diff base, so it invalidates through
             // the shared debounce. Its drain clears the diff_warmed flag and
             // stales every open buffer's diff map.
-            arm_review_git_refresh_debounce(stoat);
+            arm_diff_refresh_debounce(stoat);
         } else if precompute && path.starts_with(&git_root) {
             // An edited working-tree file warms its own diff, unless
             // gitignored so build churn cannot thrash the recompute.
@@ -284,40 +287,41 @@ pub(crate) fn drain_pending_code_search(stoat: &mut Stoat) -> bool {
 /// The debounce is single-slot rather than per-path, so re-arming drops the
 /// prior task, which cancels its future at the [`Executor::timer`] await. A
 /// burst of `.git` writes from one commit then fires a single invalidation once
-/// the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The main loop drains
-/// it via [`drain_pending_git_refresh`], since async tasks cannot
-/// mutate `Stoat`.
-fn arm_review_git_refresh_debounce(stoat: &mut Stoat) {
+/// the [`FS_WATCH_DEBOUNCE`] window elapses. The main loop drains it via
+/// [`drain_pending_diff_refresh`], since async tasks cannot mutate `Stoat`.
+fn arm_diff_refresh_debounce(stoat: &mut Stoat) {
     let executor = stoat.executor.clone();
-    let tx = stoat.review_git_refresh_tx.clone();
+    let tx = stoat.diff_refresh_tx.clone();
     let redraw = stoat.redraw_notify.clone();
     let task = stoat.executor.spawn_with_redraw(redraw, async move {
-        executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+        executor.timer(FS_WATCH_DEBOUNCE).await;
         let _ = tx.send(()).await;
     });
-    stoat.review_pending_git_refresh = Some(task);
+    stoat.pending_diff_refresh = Some(task);
 }
 
-/// Schedule a debounced single-file diff warm for `path` edited while review
-/// is closed. Mirrors [`arm_review_external_edit_debounce`]: inserting
-/// into [`Stoat::pending_diff_warm_file`] drops any prior task for the same
-/// path, so only the latest burst event warms once its
-/// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The spawned task
-/// forwards `path` on [`Stoat::diff_warm_file_tx`], drained by
-/// [`drain_pending_diff_warm_files`], which spawns the warm off-thread.
+/// Schedule a debounced single-file diff warm for the edited `path`.
+///
+/// Per-path rather than single-slot, unlike [`arm_diff_refresh_debounce`],
+/// because one edited file stales only its own diff. Inserting into
+/// [`Stoat::pending_diff_warm_file`] drops any prior task for the same path, so
+/// only the latest burst event warms once its [`FS_WATCH_DEBOUNCE`] window
+/// elapses. The spawned task forwards `path` on [`Stoat::diff_warm_file_tx`],
+/// drained by [`drain_pending_diff_warm_files`], which spawns the warm
+/// off-thread.
 fn arm_diff_warm_file_debounce(stoat: &mut Stoat, path: PathBuf) {
     let executor = stoat.executor.clone();
     let tx = stoat.diff_warm_file_tx.clone();
     let redraw = stoat.redraw_notify.clone();
     let path_for_send = path.clone();
     let task = stoat.executor.spawn_with_redraw(redraw, async move {
-        executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+        executor.timer(FS_WATCH_DEBOUNCE).await;
         let _ = tx.send(path_for_send).await;
     });
     stoat.pending_diff_warm_file.insert(path, task);
 }
 
-/// Drain the git-refresh debounce marker, staling every diff the moved HEAD
+/// Drain the diff-refresh debounce marker, staling every diff the moved HEAD
 /// left describing a base that no longer exists.
 ///
 /// Diff maps are keyed by buffer version alone, so nothing else notices that a
@@ -329,25 +333,25 @@ fn arm_diff_warm_file_debounce(stoat: &mut Stoat, path: PathBuf) {
 ///
 /// Returns `false` always: the work here stales state for the next render
 /// rather than producing anything a settle loop waits on.
-pub(crate) fn drain_pending_git_refresh(stoat: &mut Stoat) -> bool {
+pub(crate) fn drain_pending_diff_refresh(stoat: &mut Stoat) -> bool {
     for _ in 0..256 {
-        let Ok(()) = stoat.review_git_refresh_rx.try_recv() else {
+        let Ok(()) = stoat.diff_refresh_rx.try_recv() else {
             break;
         };
-        stoat.review_pending_git_refresh = None;
+        stoat.pending_diff_refresh = None;
         stoat.active_workspace_mut().invalidate_all_diffs();
         stoat.active_workspace_mut().diff_warmed = false;
     }
     false
 }
 
-/// Drain the diff-warm debounce channel, spawning a single-file warm for
-/// each path edited while review was closed.
+/// Drain the diff-warm debounce channel, spawning a single-file warm for each
+/// edited path.
 ///
-/// Mirrors [`drain_pending_external_edits`]. Skips a path when review
-/// has since opened -- its own refresh covers the edit -- or when
-/// `review.precompute` or the warm auto-gate is off. Returns `true` if a
-/// warm spawned so the test harness settle loop re-iterates.
+/// Skips a path when `review.precompute` or the warm auto-gate is off, both
+/// read per path rather than once, so turning either off mid-burst stops the
+/// rest. Returns `true` if a warm spawned, so the test harness settle loop
+/// re-iterates.
 pub(crate) fn drain_pending_diff_warm_files(stoat: &mut Stoat) -> bool {
     let mut progressed = false;
     for _ in 0..256 {
@@ -366,10 +370,10 @@ pub(crate) fn drain_pending_diff_warm_files(stoat: &mut Stoat) -> bool {
 
 /// Collect `path` for a debounced reindex after an external change.
 ///
-/// Unlike [`arm_review_external_edit_debounce`], a burst shares one
-/// window rather than getting a timer each. The window opens on the first
-/// path and covers every path that arrives before it closes, so a checkout
-/// costs one task however many files it touches.
+/// Unlike [`arm_diff_warm_file_debounce`], a burst shares one window rather
+/// than getting a timer each. The window opens on the first path and covers
+/// every path that arrives before it closes, so a checkout costs one task
+/// however many files it touches.
 fn arm_index_external_edit_debounce(stoat: &mut Stoat, path: PathBuf) {
     let opening = stoat.index_pending_external_edits.is_empty();
     stoat.index_pending_external_edits.insert(path);
@@ -384,7 +388,7 @@ fn arm_index_external_edit_timer(stoat: &mut Stoat) {
     let tx = stoat.index_external_edit_tx.clone();
     let redraw = stoat.redraw_notify.clone();
     stoat.index_external_edit_timer = Some(stoat.executor.spawn_with_redraw(redraw, async move {
-        executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+        executor.timer(FS_WATCH_DEBOUNCE).await;
         let _ = tx.send(()).await;
     }));
 }

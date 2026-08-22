@@ -1279,14 +1279,15 @@ pub struct Stoat {
     /// [`debounce::drain_fs_watch_events`] so an external edit stales the
     /// diffs it affects.
     pub(crate) fs_watch_host: Arc<dyn FsWatchHost>,
-    /// Single-slot debounce for a whole-session diff refresh. A commit writes
-    /// many `.git` files at once, and this collapses that burst into one
-    /// invalidation. Re-arming replaces the task, cancelling the prior timer.
-    pub(crate) review_pending_git_refresh: Option<stoat_scheduler::Task<()>>,
-    /// Channel the git-refresh debounce task pushes onto once its timer fires,
-    /// drained by [`debounce::drain_pending_git_refresh`].
-    pub(crate) review_git_refresh_tx: Sender<()>,
-    pub(crate) review_git_refresh_rx: Receiver<()>,
+    /// Single-slot debounce for staling every open diff at once. A commit
+    /// writes many `.git` files in a burst, and one HEAD move stales them all,
+    /// so this collapses the burst into one invalidation. Re-arming replaces
+    /// the task, cancelling the prior timer.
+    pub(crate) pending_diff_refresh: Option<stoat_scheduler::Task<()>>,
+    /// Channel the debounce task pushes onto once its timer fires, drained by
+    /// [`debounce::drain_pending_diff_refresh`].
+    pub(crate) diff_refresh_tx: Sender<()>,
+    pub(crate) diff_refresh_rx: Receiver<()>,
     /// Per-path debounce tasks for the incremental diff-warm of an edited file.
     /// Re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
     /// its timer so only the latest burst event warms.
@@ -1317,7 +1318,7 @@ pub struct Stoat {
     /// [`Self::index_pending_external_edits`] holds.
     ///
     /// Armed when the set goes from empty to occupied, so the window closes a
-    /// fixed [`debounce::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] after a burst starts. Under a
+    /// fixed [`debounce::FS_WATCH_DEBOUNCE`] after a burst starts. Under a
     /// reset-per-event timer, a build emitting events faster than that window
     /// holds the index off for as long as it runs.
     pub(crate) index_external_edit_timer: Option<stoat_scheduler::Task<()>>,
@@ -1955,7 +1956,7 @@ impl Stoat {
         let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (window_ipc_tx, window_ipc_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (review_git_refresh_tx, review_git_refresh_rx) = tokio::sync::mpsc::channel(256);
+        let (diff_refresh_tx, diff_refresh_rx) = tokio::sync::mpsc::channel(256);
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
@@ -2122,9 +2123,9 @@ impl Stoat {
             last_motion: None,
             fs_host: Arc::new(LocalFs),
             fs_watch_host: Arc::new(NoopFsWatcher::new()),
-            review_pending_git_refresh: None,
-            review_git_refresh_tx,
-            review_git_refresh_rx,
+            pending_diff_refresh: None,
+            diff_refresh_tx,
+            diff_refresh_rx,
             pending_diff_warm_file: std::collections::HashMap::new(),
             diff_warm_file_tx,
             diff_warm_file_rx,
@@ -3799,12 +3800,12 @@ impl Stoat {
         crate::lsp::drain::drain_lsp_incoming_requests(self);
         crate::lsp::drain::install_pending_lsp_host(self);
 
-        let git_refresh = debounce::drain_pending_git_refresh(self);
+        let diff_refresh = debounce::drain_pending_diff_refresh(self);
         let code_search = debounce::drain_pending_code_search(self);
         let diff_warm_files = debounce::drain_pending_diff_warm_files(self);
         let index_edits = debounce::drain_pending_index_edits(self);
 
-        git_refresh || code_search || diff_warm_files || index_edits
+        diff_refresh || code_search || diff_warm_files || index_edits
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
@@ -7420,7 +7421,7 @@ mod tests {
             display_map_stamp, editor_page_content_version, osc_default_colors,
             window_content_version,
         },
-        debounce::{INDEX_EDIT_DEBOUNCE, REVIEW_EXTERNAL_EDIT_DEBOUNCE},
+        debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
         display_map::{DisplayPoint, PaintVersion},
         host::FsEventKind,
         input_view::{InputView, SubmitTarget},
@@ -9407,7 +9408,7 @@ mod tests {
         let drive = |stoat: &mut Stoat, kind: FsEventKind| {
             watcher.inject(&path, kind);
             debounce::drain_fs_watch_events(stoat);
-            scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+            scheduler.advance_clock(FS_WATCH_DEBOUNCE);
             debounce::drain_pending_index_edits(stoat);
             scheduler.run_until_parked();
             stoat.drain_index_updates();
@@ -9548,7 +9549,7 @@ mod tests {
         let drive = |stoat: &mut Stoat| {
             watcher.inject(&path, FsEventKind::Modified);
             debounce::drain_fs_watch_events(stoat);
-            scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+            scheduler.advance_clock(FS_WATCH_DEBOUNCE);
             debounce::drain_pending_index_edits(stoat);
             scheduler.run_until_parked();
             stoat.drain_index_updates();
@@ -9636,7 +9637,7 @@ mod tests {
         debounce::drain_fs_watch_events(&mut stoat);
 
         // Most of the window elapses, then the second path arrives inside it.
-        scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE / 2);
+        scheduler.advance_clock(FS_WATCH_DEBOUNCE / 2);
         watcher.inject(&b, FsEventKind::Modified);
         debounce::drain_fs_watch_events(&mut stoat);
         assert_eq!(
@@ -9645,7 +9646,7 @@ mod tests {
             "both paths wait on the same window",
         );
 
-        scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        scheduler.advance_clock(FS_WATCH_DEBOUNCE);
         assert!(
             debounce::drain_pending_index_edits(&mut stoat),
             "the window the first path opened closed and carried both",
@@ -14549,14 +14550,14 @@ mod tests {
             "the settled job leaves the buffer's diff current",
         );
 
-        // The gate that used to arm the git-refresh debounce does not apply
+        // The gate that used to arm the diff-refresh debounce does not apply
         // here, because precompute is off.
         h.stoat.set_diff_warm_auto(false);
 
         h.fake_fs_watcher()
             .inject(Path::new("/repo/.git/HEAD"), FsEventKind::Modified);
         debounce::drain_fs_watch_events(&mut h.stoat);
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
 
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),

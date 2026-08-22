@@ -312,9 +312,9 @@ mod tests {
     fn drive_fs_event(h: &mut TestHarness, path: &Path, kind: crate::host::FsEventKind) {
         h.fake_fs_watcher().inject(path, kind);
         debounce::drain_fs_watch_events(&mut h.stoat);
-        h.advance_clock(debounce::REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        h.advance_clock(debounce::FS_WATCH_DEBOUNCE);
         debounce::drain_pending_diff_warm_files(&mut h.stoat);
-        debounce::drain_pending_git_refresh(&mut h.stoat);
+        debounce::drain_pending_diff_refresh(&mut h.stoat);
         h.settle();
     }
 
