@@ -60,6 +60,10 @@ pub enum BadgeSource {
     /// One-shot version notice raised by `ShowVersion`, living in the
     /// app-level tray until the next key press dismisses it.
     Version,
+    /// A keymap binding whose action name the registry does not know, so the
+    /// key does nothing when pressed. At most one such badge exists app-wide,
+    /// and it stands until a config reload finds the binding repaired.
+    ConfigActions,
     /// A large file reading on the blocking pool before it opens. Dropped once
     /// every pending open installs.
     FileOpen,

@@ -101,6 +101,9 @@ pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼'
 /// forces the author to confront.
 struct ConfigArtifacts {
     keymap: Keymap,
+    /// The action names `keymap` binds that no registered action answers to,
+    /// sorted. Every one of them is a key that does nothing when pressed.
+    unknown_actions: Vec<String>,
     settings: Settings,
     theme: crate::theme::Theme,
     theme_pool: ThemePool,
@@ -191,7 +194,7 @@ fn build_config_artifacts(
         }
     };
 
-    let keymap = {
+    let (keymap, unknown_actions) = {
         let (keymap, warnings) = match config {
             Some(c) => Keymap::compile_with_warnings(&c),
             None => Keymap::compile_with_warnings(&stoat_config::Config {
@@ -202,7 +205,16 @@ fn build_config_artifacts(
         for warning in warnings {
             tracing::warn!(target: "stoat::keymap", "{warning}");
         }
-        keymap
+
+        let unknown_actions = keymap.unknown_actions();
+        for name in &unknown_actions {
+            tracing::warn!(
+                target: "stoat::keymap",
+                "config binds `{name}`, which is not a registered action",
+            );
+        }
+
+        (keymap, unknown_actions)
     };
 
     let syntax_styles = SyntaxStyles::from_theme(&theme);
@@ -210,6 +222,7 @@ fn build_config_artifacts(
 
     ConfigArtifacts {
         keymap,
+        unknown_actions,
         settings,
         theme,
         theme_pool,
@@ -1927,6 +1940,7 @@ impl Stoat {
 
         let ConfigArtifacts {
             keymap,
+            unknown_actions,
             settings,
             theme,
             theme_pool,
@@ -2237,6 +2251,7 @@ impl Stoat {
         if let Some(message) = config_error {
             stoat.set_status(message);
         }
+        stoat.raise_config_actions_badge(&unknown_actions);
 
         stoat
     }
@@ -2279,6 +2294,7 @@ impl Stoat {
 
         let ConfigArtifacts {
             keymap,
+            unknown_actions,
             settings,
             theme,
             theme_pool,
@@ -2305,7 +2321,36 @@ impl Stoat {
         // directly all just moved, and a parse failure returned above without
         // touching any of them.
         self.paint_generation += 1;
+        self.raise_config_actions_badge(&unknown_actions);
         self.set_status("config reloaded");
+    }
+
+    /// Stand up the notice that the config binds `unknown_actions`, replacing
+    /// whatever the previous config raised.
+    ///
+    /// A stale binding is a standing fault. The key does nothing every time
+    /// the user presses it, and a timed status message retires long before the
+    /// user meets that key. The badge stays until a reload finds the config
+    /// repaired, which an empty `unknown_actions` expresses by leaving none.
+    ///
+    /// Only the count reaches the badge, because a badge paints one label
+    /// line. The names go to the log, which `:logs` opens.
+    fn raise_config_actions_badge(&mut self, unknown_actions: &[String]) {
+        self.badges
+            .remove_by_source(crate::badge::BadgeSource::ConfigActions);
+        if unknown_actions.is_empty() {
+            return;
+        }
+
+        let count = unknown_actions.len();
+        let plural = if count == 1 { "" } else { "s" };
+        self.badges.insert(crate::badge::Badge {
+            source: crate::badge::BadgeSource::ConfigActions,
+            anchor: crate::badge::Anchor::BottomRight,
+            state: crate::badge::BadgeState::Error,
+            label: format!("config binds {count} unknown action{plural}"),
+            detail: None,
+        });
     }
 
     /// Look up a previously-cached diff by content hashes plus
@@ -13190,6 +13235,66 @@ mod tests {
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("user config parse failed; using built-in defaults")
+        );
+    }
+
+    /// A config naming an action the registry dropped parses clean, so nothing
+    /// but this badge tells the user why the key does nothing.
+    #[test]
+    fn a_startup_config_binding_an_unknown_action_raises_a_badge() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            Some("on key { Down -> WorkspacePickerNext(); }".to_string()),
+            Vec::new(),
+            None,
+        );
+
+        let id = stoat
+            .badges
+            .find_by_source(crate::badge::BadgeSource::ConfigActions)
+            .expect("a stale binding raises a badge");
+        assert_eq!(
+            stoat.badges.get(id).expect("badge").label,
+            "config binds 1 unknown action",
+        );
+    }
+
+    #[test]
+    fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+
+        stoat.reload_user_config(
+            r#"on key {
+                modal == "workspace_picker" {
+                    Down -> WorkspacePickerNext();
+                    Tab -> WorkspacePickerComplete();
+                }
+            }"#,
+        );
+        let id = stoat
+            .badges
+            .find_by_source(crate::badge::BadgeSource::ConfigActions)
+            .expect("a stale binding raises a badge");
+        assert_eq!(
+            stoat.badges.get(id).expect("badge").label,
+            "config binds 2 unknown actions",
+        );
+
+        stoat.reload_user_config(DEFAULT_KEYMAP);
+        assert_eq!(
+            stoat
+                .badges
+                .find_by_source(crate::badge::BadgeSource::ConfigActions),
+            None,
+            "a repaired config retires the badge",
         );
     }
 
