@@ -6,9 +6,13 @@
 //! clock rather than a running terminal.
 
 use crate::config::CursorAnimation;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
 use stoatty_term::{
-    grid::{Grid, Overlay, PoolRegion},
+    grid::{Grid, Overlay, PoolRegion, Sketch},
     term::{Cursor, CursorShape, PoolView, Terminal},
 };
 
@@ -802,11 +806,141 @@ pub(crate) fn advance_pool_glide(
     }
 }
 
+/// How long a sketch id survives without being declared before its clock is
+/// dropped.
+///
+/// A pty read can split a `reset` from the re-declaration that follows it, so a
+/// mark goes missing for a frame or two through no fault of the emitter.
+/// Pruning on first absence restarts the stroke every time that happens.
+pub(crate) const SKETCH_GRACE: Duration = Duration::from_millis(250);
+
+/// One mark's animation state, from the frame its id first appeared.
+struct SketchClock {
+    started: Instant,
+    /// When this id was last declared, so an absence past [`SKETCH_GRACE`]
+    /// drops the entry.
+    last_seen: Instant,
+    /// The timing as it stood when the id first appeared.
+    ///
+    /// Latched rather than re-read, because an emitter that re-declares its
+    /// whole decoration set every frame sends the same mark over and over. A
+    /// clock driven by each declaration restarts on every frame and the stroke
+    /// never finishes.
+    latched: SketchTiming,
+}
+
+/// Every live mark's clock, keyed by the id the emitter chose.
+#[derive(Default)]
+pub(crate) struct SketchClocks(HashMap<u32, SketchClock>);
+
+/// What one step of the sketch clocks asks of the event loop.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct SketchStep {
+    /// A mark is mid-draw, so the loop requests the next vsync frame.
+    pub(crate) animating: bool,
+    /// The earliest delayed start still ahead, so the loop idles until then
+    /// rather than spinning through the delay.
+    ///
+    /// Separate from [`Self::animating`] because they answer different
+    /// questions: a mark waiting out its delay is not animating, and one that
+    /// is drawing has no pending start.
+    pub(crate) wake: Option<Instant>,
+}
+
+/// Advance every mark's clock to `now` and write one reveal fraction per entry
+/// of `sketches`, in order.
+///
+/// A first-seen id starts its clock and latches its timing. A re-declaration
+/// whose phase differs restarts and re-latches, since enter to exit is a new
+/// animation rather than the same one continuing. Any other re-declaration
+/// leaves the clock alone.
+pub(crate) fn advance_sketches(
+    clocks: &mut SketchClocks,
+    sketches: &[Sketch],
+    now: Instant,
+    out: &mut Vec<f32>,
+) -> SketchStep {
+    out.clear();
+    let mut step = SketchStep {
+        animating: false,
+        wake: None,
+    };
+
+    for sketch in sketches {
+        let timing = sketch.command.timing;
+        let clock = clocks
+            .0
+            .entry(sketch.command.id)
+            .or_insert_with(|| SketchClock {
+                started: now,
+                last_seen: now,
+                latched: timing,
+            });
+
+        if clock.latched.phase != timing.phase {
+            clock.started = now;
+            clock.latched = timing;
+        }
+        clock.last_seen = now;
+
+        let elapsed = now.saturating_duration_since(clock.started);
+        let drawn = sketch_progress(elapsed, clock.latched);
+        out.push(match clock.latched.phase {
+            SketchPhase::Enter => drawn,
+            SketchPhase::Exit => 1.0 - drawn,
+        });
+
+        let delay = Duration::from_millis(u64::from(clock.latched.delay_ms));
+        let span = delay + Duration::from_millis(u64::from(clock.latched.duration_ms));
+        if elapsed < delay {
+            step.wake = earliest_instant(step.wake, Some(clock.started + delay));
+        } else if elapsed < span {
+            step.animating = true;
+        }
+    }
+
+    clocks
+        .0
+        .retain(|_, clock| now.saturating_duration_since(clock.last_seen) < SKETCH_GRACE);
+    step
+}
+
+/// How much of a mark is drawn after `elapsed`, under its latched timing.
+///
+/// Zero through the delay, one once the duration is spent, and the easing curve
+/// in between. A zero duration is complete the moment its delay is up, which is
+/// what an emitter that wants a mark drawn but not animated sends.
+pub(crate) fn sketch_progress(elapsed: Duration, timing: SketchTiming) -> f32 {
+    let delay = Duration::from_millis(u64::from(timing.delay_ms));
+    let Some(since_start) = elapsed.checked_sub(delay) else {
+        return 0.0;
+    };
+    if timing.duration_ms == 0 {
+        return 1.0;
+    }
+
+    let duration = Duration::from_millis(u64::from(timing.duration_ms));
+    let t = (since_start.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
+    match timing.easing {
+        SketchEasing::Linear => t,
+        SketchEasing::Smoothstep => t * t * (3.0 - 2.0 * t),
+        SketchEasing::EaseOutCubic => 1.0 - (1.0 - t).powi(3),
+    }
+}
+
+/// The earlier of two wake deadlines, or whichever one there is.
+fn earliest_instant(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use stoatty_protocol::command::{
         encode_fill, encode_fill_end, encode_pool_region, FillCommand, PoolRegionCommand,
+        SketchBounds, SketchCommand, SketchShape, SketchStyle,
     };
     use stoatty_term::{
         grid::{DocumentOffset, Rgb},
@@ -1387,5 +1521,320 @@ mod tests {
         let (next, easing) = step_document_scroll(4.0 - 0.0001, 4.0, 20.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 4.0, "snaps onto the target");
         assert!(!easing);
+    }
+
+    fn timing(delay_ms: u16, duration_ms: u16, phase: SketchPhase) -> SketchTiming {
+        SketchTiming {
+            delay_ms,
+            duration_ms,
+            easing: SketchEasing::Linear,
+            phase,
+        }
+    }
+
+    fn mark(id: u32, timing: SketchTiming) -> Sketch {
+        Sketch {
+            command: SketchCommand {
+                id,
+                style: SketchStyle {
+                    color: [255, 0, 0],
+                    alpha: 255,
+                    width: 64,
+                    roughness: 64,
+                    seed: 1,
+                },
+                timing,
+                shape: SketchShape::Ellipse(SketchBounds {
+                    x: 0,
+                    y: 0,
+                    w: 32,
+                    h: 32,
+                }),
+                anchor: None,
+            },
+            seq: id,
+        }
+    }
+
+    /// Nothing is drawn through the delay, everything after the duration, and
+    /// the easing curve in between.
+    #[test]
+    fn a_stroke_waits_out_its_delay_then_draws_over_its_duration() {
+        let timing = timing(100, 400, SketchPhase::Enter);
+        let at = |ms: u64| sketch_progress(Duration::from_millis(ms), timing);
+
+        assert_eq!(at(0), 0.0, "nothing before the delay is up");
+        assert_eq!(at(99), 0.0, "still nothing an instant short of it");
+        assert_eq!(at(100), 0.0, "the stroke starts at the delay");
+        assert_eq!(at(300), 0.5, "halfway through the duration, drawn half");
+        assert_eq!(at(500), 1.0, "complete when the duration is spent");
+        assert_eq!(at(9_000), 1.0, "and stays complete");
+    }
+
+    /// Each easing reaches the same ends and differs only on the way, which is
+    /// what makes one worth choosing over another.
+    #[test]
+    fn every_easing_runs_from_zero_to_one_by_its_own_curve() {
+        let midpoint = |easing| {
+            let timing = SketchTiming {
+                easing,
+                ..timing(0, 400, SketchPhase::Enter)
+            };
+            (
+                sketch_progress(Duration::ZERO, timing),
+                sketch_progress(Duration::from_millis(100), timing),
+                sketch_progress(Duration::from_millis(400), timing),
+            )
+        };
+
+        assert_eq!(midpoint(SketchEasing::Linear), (0.0, 0.25, 1.0));
+        assert_eq!(
+            midpoint(SketchEasing::Smoothstep),
+            (0.0, 0.15625, 1.0),
+            "smoothstep starts slow",
+        );
+        let (start, quarter, end) = midpoint(SketchEasing::EaseOutCubic);
+        assert_eq!((start, end), (0.0, 1.0));
+        assert!(
+            quarter > 0.57 && quarter < 0.58,
+            "ease-out-cubic starts fast, got {quarter}",
+        );
+    }
+
+    /// A zero duration means drawn, not animated, so it completes the moment its
+    /// delay is up rather than dividing by zero.
+    #[test]
+    fn a_zero_duration_completes_at_its_delay() {
+        let timing = timing(50, 0, SketchPhase::Enter);
+        assert_eq!(sketch_progress(Duration::from_millis(49), timing), 0.0);
+        assert_eq!(sketch_progress(Duration::from_millis(50), timing), 1.0);
+    }
+
+    /// An emitter that re-declares its whole decoration set every frame sends
+    /// the same mark over and over. A clock driven by each declaration restarts
+    /// on every frame and the stroke never finishes.
+    #[test]
+    fn a_re_declaration_leaves_a_running_stroke_alone() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+
+        advance_sketches(
+            &mut clocks,
+            &[mark(1, timing(0, 400, SketchPhase::Enter))],
+            start,
+            &mut out,
+        );
+        assert_eq!(out, [0.0], "the first frame starts the clock");
+
+        // The second declaration names a different duration, which the latch
+        // ignores: the mark is already drawing under the first one.
+        let step = advance_sketches(
+            &mut clocks,
+            &[mark(1, timing(0, 8_000, SketchPhase::Enter))],
+            start + Duration::from_millis(200),
+            &mut out,
+        );
+        assert_eq!(out, [0.5], "still halfway through the latched duration");
+        assert!(step.animating, "and still mid-draw");
+    }
+
+    /// Enter to exit is a new animation rather than the same one continuing, so
+    /// it restarts and runs the other way.
+    #[test]
+    fn a_phase_change_restarts_the_stroke_backwards() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+
+        advance_sketches(
+            &mut clocks,
+            &[mark(1, timing(0, 400, SketchPhase::Enter))],
+            start,
+            &mut out,
+        );
+        advance_sketches(
+            &mut clocks,
+            &[mark(1, timing(0, 400, SketchPhase::Exit))],
+            start + Duration::from_millis(400),
+            &mut out,
+        );
+        assert_eq!(out, [1.0], "an exit starts whole");
+
+        advance_sketches(
+            &mut clocks,
+            &[mark(1, timing(0, 400, SketchPhase::Exit))],
+            start + Duration::from_millis(600),
+            &mut out,
+        );
+        assert_eq!(out, [0.5], "and wipes itself off");
+    }
+
+    /// A pty read can split a reset from the re-declaration that follows it, so
+    /// a mark goes missing for a frame through no fault of the emitter. Pruning
+    /// on first absence restarts the stroke every time that happens.
+    #[test]
+    fn a_mark_missing_for_a_frame_keeps_its_clock() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+        let declared = [mark(1, timing(0, 400, SketchPhase::Enter))];
+
+        advance_sketches(&mut clocks, &declared, start, &mut out);
+        advance_sketches(
+            &mut clocks,
+            &[],
+            start + Duration::from_millis(100),
+            &mut out,
+        );
+        advance_sketches(
+            &mut clocks,
+            &declared,
+            start + Duration::from_millis(200),
+            &mut out,
+        );
+        assert_eq!(out, [0.5], "the clock survived the gap");
+
+        // Past the grace the id is gone, so the same declaration is a new mark.
+        advance_sketches(&mut clocks, &[], start + SKETCH_GRACE * 2, &mut out);
+        advance_sketches(&mut clocks, &declared, start + SKETCH_GRACE * 3, &mut out);
+        assert_eq!(out, [0.0], "a longer absence starts over");
+    }
+
+    /// The grace measures an *absence*, not an age. A long stroke stays
+    /// declared the whole time it draws, so a clock pruned by age alone
+    /// restarts every mark whose duration outlives the grace.
+    #[test]
+    fn a_long_stroke_declared_throughout_keeps_its_clock() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+        // Longer than the grace by a wide margin, which is an ordinary length
+        // for a stroke drawn to narration.
+        let declared = [mark(1, timing(0, 4_000, SketchPhase::Enter))];
+
+        for step in 0..8 {
+            advance_sketches(
+                &mut clocks,
+                &declared,
+                start + SKETCH_GRACE / 2 * step,
+                &mut out,
+            );
+        }
+
+        assert_eq!(out, [0.21875], "one clock, run from the frame it started");
+    }
+
+    /// A mark counting down its delay is not animating, so nothing else brings
+    /// the loop back to start it. The wake is what does.
+    #[test]
+    fn a_delayed_stroke_names_the_deadline_it_starts_at() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+        // The earlier deadline is declared first on purpose. Reversed, a rule
+        // that simply keeps the last pending start would agree with taking the
+        // earliest and the difference would not show.
+        let declared = [
+            mark(1, timing(100, 400, SketchPhase::Enter)),
+            mark(2, timing(300, 400, SketchPhase::Enter)),
+        ];
+
+        let step = advance_sketches(&mut clocks, &declared, start, &mut out);
+        assert_eq!(
+            step,
+            SketchStep {
+                animating: false,
+                wake: Some(start + Duration::from_millis(100)),
+            },
+            "neither is drawing yet, and the loop waits for the earlier start",
+        );
+
+        let step = advance_sketches(
+            &mut clocks,
+            &declared,
+            start + Duration::from_millis(150),
+            &mut out,
+        );
+        assert_eq!(
+            step,
+            SketchStep {
+                animating: true,
+                wake: Some(start + Duration::from_millis(300)),
+            },
+            "one draws while the other still waits",
+        );
+
+        let step = advance_sketches(
+            &mut clocks,
+            &declared,
+            start + Duration::from_millis(400),
+            &mut out,
+        );
+        assert_eq!(
+            step,
+            SketchStep {
+                animating: true,
+                wake: None,
+            },
+            "both have started, so there is no deadline left to wait for",
+        );
+    }
+
+    /// A settled mark asks the loop for nothing, which is what lets an idle
+    /// screen stop drawing frames.
+    #[test]
+    fn a_settled_stroke_asks_for_no_frame() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+        let declared = [mark(1, timing(0, 400, SketchPhase::Enter))];
+
+        advance_sketches(&mut clocks, &declared, start, &mut out);
+        let step = advance_sketches(
+            &mut clocks,
+            &declared,
+            start + Duration::from_millis(400),
+            &mut out,
+        );
+
+        assert_eq!(
+            (step, out.as_slice()),
+            (
+                SketchStep {
+                    animating: false,
+                    wake: None,
+                },
+                [1.0].as_slice(),
+            ),
+            "drawn whole, and done asking",
+        );
+    }
+
+    /// The fractions are read positionally against the grid's own list, so one
+    /// per mark in declaration order is the contract.
+    #[test]
+    fn one_fraction_lands_per_mark_in_order() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+
+        let declared = [
+            mark(1, timing(0, 400, SketchPhase::Enter)),
+            mark(2, timing(0, 0, SketchPhase::Enter)),
+            mark(3, timing(800, 400, SketchPhase::Enter)),
+        ];
+
+        // The clocks start on first sight, so all three are seeded here and
+        // read a frame later, each at a different point in its own timing.
+        advance_sketches(&mut clocks, &declared, start, &mut out);
+        advance_sketches(
+            &mut clocks,
+            &declared,
+            start + Duration::from_millis(200),
+            &mut out,
+        );
+
+        assert_eq!(out, [0.5, 1.0, 0.0], "drawing, drawn, and still waiting");
     }
 }

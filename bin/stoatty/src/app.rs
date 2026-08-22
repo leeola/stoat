@@ -10,11 +10,12 @@
 
 use crate::{
     anim::{
-        advance_pool_glide, anchored_cursor_pos, anchored_shift, block_corners, compose_gate,
-        cursor_in_region, cursor_position, intersect_scissor, refresh_popover_overflows,
-        region_scissor, seed_settle_flight, shift_scissor, step_cursor, step_grid_scroll,
-        step_popover_scroll, step_region_scroll, step_scrollback_scroll, ActivePool, AnchorRide,
-        AnchoredCursor, PoolAnim, PoolStep, PopoverScroll, EASE_BASELINE_FRAME, MAX_EASE_DT,
+        advance_pool_glide, advance_sketches, anchored_cursor_pos, anchored_shift, block_corners,
+        compose_gate, cursor_in_region, cursor_position, intersect_scissor,
+        refresh_popover_overflows, region_scissor, seed_settle_flight, shift_scissor, step_cursor,
+        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
+        ActivePool, AnchorRide, AnchoredCursor, PoolAnim, PoolStep, PopoverScroll, SketchClocks,
+        EASE_BASELINE_FRAME, MAX_EASE_DT,
     },
     config::{self, Config, CursorAnimation},
     input::{
@@ -495,6 +496,13 @@ struct AuxWindow {
     /// Wall-clock of the previous redraw, driving this window's own ease step.
     /// Aux windows redraw independently, so each keeps its own frame clock.
     last_redraw: Option<Instant>,
+    /// This window's own mark clocks. An aux window composes its own grid from
+    /// its own pools, so a mark declared in one is not the mark of the same id
+    /// in another.
+    sketch_clocks: SketchClocks,
+    /// How much of each of this window's marks is revealed, in
+    /// [`Grid::sketches`] order.
+    sketch_progress: Vec<f32>,
     /// Hash of where the last base compose put things: the pool set, their
     /// regions, and the window size. A move here changes which cells any pool
     /// covers at all, so the grid goes back to the window background and every
@@ -652,6 +660,21 @@ struct State {
     /// and a popover that is resting is by definition not easing, so nothing
     /// else would bring the loop back.
     popover_wake: Option<Instant>,
+    /// Each declared mark's animation clock, keyed by the id the emitter chose.
+    ///
+    /// The terminal owns these rather than the renderer, so a frame is
+    /// reproducible from its grid and the fractions handed to it.
+    sketch_clocks: SketchClocks,
+    /// How much of each mark is revealed, in [`Grid::sketches`] order, because a
+    /// frame takes them as one slice. A view of the clocks above rather than
+    /// state of its own, refilled by the step that produces it.
+    sketch_progress: Vec<f32>,
+    /// When the loop has to wake to start a delayed stroke, or `None` when none
+    /// is waiting.
+    ///
+    /// A mark counting down its delay is not animating, so the redraw
+    /// keep-alive does not bring the loop back for it.
+    sketch_wake: Option<Instant>,
     /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
     /// per-frame scroll delta and eased toward zero so content glides into place.
     grid_scroll: f32,
@@ -1013,6 +1036,9 @@ impl ApplicationHandler<PtyEvent> for App {
             popover_scrolls: Vec::new(),
             popover_offsets: Vec::new(),
             popover_wake: None,
+            sketch_clocks: SketchClocks::default(),
+            sketch_progress: Vec::new(),
+            sketch_wake: None,
             grid_scroll: 0.0,
             scrollback_visual: 0.0,
             scrollback_target: 0.0,
@@ -1143,9 +1169,15 @@ impl ApplicationHandler<PtyEvent> for App {
             state.popover_wake = None;
             state.window.request_redraw();
         }
+        // Same story for a stroke waiting out its delay: it is not animating
+        // yet, so nothing else brings the loop back to start it.
+        if state.sketch_wake.is_some_and(|at| at <= Instant::now()) {
+            state.sketch_wake = None;
+            state.window.request_redraw();
+        }
 
         if !state.sync_pending.load(Ordering::Relaxed) {
-            wait_until(event_loop, state.popover_wake);
+            wait_until(event_loop, earliest(state.popover_wake, state.sketch_wake));
             return;
         }
 
@@ -1189,7 +1221,10 @@ impl ApplicationHandler<PtyEvent> for App {
             state.sync_pending.store(false, Ordering::Relaxed);
             state.window.request_redraw();
         }
-        wait_until(event_loop, earliest(deadline, state.popover_wake));
+        wait_until(
+            event_loop,
+            earliest(deadline, earliest(state.popover_wake, state.sketch_wake)),
+        );
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -1267,8 +1302,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     {
                         // The ease step is the gap since the last frame, and the
                         // gap across a hiding is not one anyone watched, so the
-                        // resumed frame starts its clock fresh.
+                        // resumed frame starts its clock fresh. A mark restarts
+                        // for the same reason: half a stroke drawn behind
+                        // another window is not half a stroke anyone saw.
                         aux.last_redraw = None;
+                        aux.sketch_clocks = SketchClocks::default();
                         aux.window.request_redraw();
                     }
                     return;
@@ -1405,8 +1443,11 @@ impl ApplicationHandler<PtyEvent> for App {
                 if state.visibility.set_occluded(hidden) {
                     // The ease step is the gap since the last frame, and the gap
                     // across a hiding is not one anyone watched, so the resumed
-                    // frame starts its clock fresh.
+                    // frame starts its clock fresh. A mark restarts for the same
+                    // reason: half a stroke drawn behind another window is not
+                    // half a stroke anyone saw.
                     state.last_redraw = None;
+                    state.sketch_clocks = SketchClocks::default();
                     state.window.request_redraw();
                 }
             },
@@ -2186,6 +2227,8 @@ fn open_aux_window(
         wheel_pixels: 0.0,
         pool_anims: BTreeMap::new(),
         last_redraw: None,
+        sketch_clocks: SketchClocks::default(),
+        sketch_progress: Vec::new(),
         last_geometry: None,
         last_content: None,
         pool_scratch: Vec::new(),
@@ -2532,6 +2575,14 @@ fn redraw(state: &mut State) {
     state.popover_wake = popover_wake;
     state.overflows_scratch = overflows;
 
+    let sketch_step = advance_sketches(
+        &mut state.sketch_clocks,
+        state.grid.sketches(),
+        Instant::now(),
+        &mut state.sketch_progress,
+    );
+    state.sketch_wake = sketch_step.wake;
+
     let (grid_scroll, grid_scrolling) = step_grid_scroll(state.grid_scroll, scroll_delta, dt);
     state.grid_scroll = grid_scroll;
 
@@ -2671,7 +2722,7 @@ fn redraw(state: &mut State) {
                     // rotate to match or the clean ones redraw from
                     // their pre-slide instances.
                     scrolled_rows: scroll_delta as isize,
-                    sketch_progress: &[],
+                    sketch_progress: &state.sketch_progress,
                 },
             );
             latch_skipped(&mut state.force_full, &state.window, outcome);
@@ -2829,7 +2880,7 @@ fn redraw(state: &mut State) {
                 damage: &damage,
                 decoration_damage: &decoration_damage,
                 scrolled_rows: scroll_delta as isize,
-                sketch_progress: &[],
+                sketch_progress: &state.sketch_progress,
             },
             &composites,
             &anchored_panels,
@@ -2865,6 +2916,7 @@ fn redraw(state: &mut State) {
     let hud_streaming = false;
     if cursor_easing
         || popover_scrolling
+        || sketch_step.animating
         || grid_scrolling
         || scrollback_scrolling
         || region_scrolling
@@ -2904,6 +2956,13 @@ fn redraw_aux(
 
     // Taken before the lock, since the latch names no terminal state.
     let force_full = aux.force_full.take();
+
+    let sketch_step = advance_sketches(
+        &mut aux.sketch_clocks,
+        aux.grid.sketches(),
+        Instant::now(),
+        &mut aux.sketch_progress,
+    );
 
     let mut easing = false;
     let mut active: Vec<ActivePool> = Vec::new();
@@ -3014,14 +3073,14 @@ fn redraw_aux(
             damage: &damage,
             decoration_damage: &damage,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_progress: &aux.sketch_progress,
         },
         &composites,
         &[],
         None,
     );
     latch_skipped(&mut aux.force_full, &aux.window, outcome);
-    easing || outcome.atlas_stale
+    easing || sketch_step.animating || outcome.atlas_stale
 }
 
 /// Whether the next frame must redraw the whole grid.
@@ -3751,6 +3810,31 @@ mod tests {
             ),
             (Some(now), Some(now), Some(now), Some(now), None),
             "whichever deadline comes first, in either order, and none from none",
+        );
+    }
+
+    /// The loop folds three deadlines into the one wait it can make: a
+    /// synchronized update's flush, a resting popover's turn, and a delayed
+    /// stroke's start. A stroke waiting out its delay is not animating, so
+    /// dropping it from the fold leaves it never starting on an idle screen.
+    #[test]
+    fn a_delayed_stroke_joins_the_deadlines_the_loop_waits_on() {
+        let now = Instant::now();
+        let (soon, later) = (
+            now + Duration::from_millis(50),
+            now + Duration::from_secs(1),
+        );
+        let fold = |deadline, popover, sketch| earliest(deadline, earliest(popover, sketch));
+
+        assert_eq!(
+            (
+                fold(Some(later), Some(later), Some(soon)),
+                fold(None, None, Some(soon)),
+                fold(Some(soon), None, Some(later)),
+                fold(None, None, None),
+            ),
+            (Some(soon), Some(soon), Some(soon), None),
+            "the earliest of the three wins, whichever one it is",
         );
     }
 
