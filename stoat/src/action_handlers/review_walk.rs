@@ -3,7 +3,6 @@ use crate::{
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     host::CommitInfo,
-    review_session::ReviewSession,
     review_walk::{ReturnRef, ReviewWalk},
 };
 use std::{
@@ -727,7 +726,7 @@ fn spawn_preview_load(
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
     highlights: super::commits::PreviewHighlights,
-) -> stoat_scheduler::Task<Option<ReviewSession>> {
+) -> stoat_scheduler::Task<Option<crate::review_session::DiffDocument>> {
     executor.spawn_blocking(move || {
         let parent = repo.parent_sha(&sha);
         let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
@@ -744,7 +743,7 @@ fn spawn_preview_load(
                 )
                 .map(|mut session| {
                     highlights.attach(&mut session);
-                    session
+                    session.doc
                 })
             },
             None => None,

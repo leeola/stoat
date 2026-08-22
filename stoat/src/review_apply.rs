@@ -45,7 +45,7 @@ mod tests {
 
         let session = h.stoat.active_workspace().review.as_ref().unwrap();
         assert_eq!(
-            session.chunks[&session.order[0]].status,
+            session.doc.chunks[&session.order[0]].status,
             ChunkStatus::Staged,
             "refresh must carry staged status"
         );

@@ -1,6 +1,6 @@
 use crate::{
     host::{CommitFileChange, CommitInfo},
-    review_session::ReviewSession,
+    review_session::DiffDocument,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -25,8 +25,8 @@ const PREVIEW_CACHE_CAP: usize = 8;
 /// The log is virtualized: `commits` holds only the pages fetched so
 /// far, and a [`CommitListState::pending_load`] task is spawned when
 /// the cursor approaches the tail. Previews are likewise lazy: each
-/// selected sha triggers a background build of a [`ReviewSession`] that
-/// the right pane reuses via `render_review`.
+/// selected sha triggers a background build of a [`DiffDocument`] that
+/// the right pane paints.
 // FIXME: Commit list selection/scroll not persisted across workspace
 // save/load. `commits: Vec<CommitInfo>` is fetched asynchronously on open, so
 // save/restore must persist the saved selected commit's SHA (not its index),
@@ -58,23 +58,27 @@ pub(crate) struct CommitListState {
 
 pub(crate) struct PendingPreview {
     pub sha: String,
-    pub task: Task<Option<ReviewSession>>,
+    pub task: Task<Option<DiffDocument>>,
 }
 
 /// Built diff previews for the commits a surface's selection has rested on,
 /// capped so a long history cannot grow one without bound.
 ///
-/// A [`ReviewSession`] carries both sides' text and span vectors for every file
+/// A [`DiffDocument`] carries both sides' text and span vectors for every file
 /// its commit touched, so these are not cheap to keep and walking a few hundred
 /// commits would keep all of them. Past [`PREVIEW_CACHE_CAP`] the least
 /// recently used is dropped, and rebuilt from scratch if the selection returns
 /// to it.
 ///
+/// The document rather than a whole review session, because a preview reads a
+/// diff without staging anything in it. That is what lets these outlive the
+/// review machinery.
+///
 /// Shared by the commits view and the commit picker, which both build previews
 /// the same way. [`PendingPreview`] is the in-flight half of it.
 #[derive(Default)]
 pub(crate) struct PreviewCache {
-    sessions: HashMap<String, Arc<ReviewSession>>,
+    sessions: HashMap<String, Arc<DiffDocument>>,
     /// Cached shas, least recently used first, so eviction takes the front.
     recent: VecDeque<String>,
 }
@@ -100,13 +104,13 @@ impl PreviewCache {
     ///
     /// Render reads this per frame for the selected commit alone, which would
     /// say nothing [`Self::mark_used`] has not already said for that same sha.
-    pub(crate) fn get(&self, sha: &str) -> Option<&Arc<ReviewSession>> {
+    pub(crate) fn get(&self, sha: &str) -> Option<&Arc<DiffDocument>> {
         self.sessions.get(sha)
     }
 
     /// Cache `session` as the most recently used, dropping the least recently
     /// used when that puts the cache over the cap.
-    pub(crate) fn insert(&mut self, sha: String, session: Arc<ReviewSession>) {
+    pub(crate) fn insert(&mut self, sha: String, session: Arc<DiffDocument>) {
         if let Some(at) = self.recent.iter().position(|held| *held == sha) {
             self.recent.remove(at);
         }
@@ -252,18 +256,14 @@ mod tests {
     use crate::{
         app::Stoat,
         host::GitHost,
-        review_session::{ReviewSession, ReviewSource},
+        review_session::DiffDocument,
         test_harness::{CommitSpec, TestHarness},
     };
     use std::{path::PathBuf, sync::Arc};
 
     impl PreviewCache {
         fn cache_session(&mut self, sha: &str) {
-            let source = ReviewSource::Commit {
-                workdir: PathBuf::from("/repo"),
-                sha: sha.to_owned(),
-            };
-            self.insert(sha.to_owned(), Arc::new(ReviewSession::new(source)));
+            self.insert(sha.to_owned(), Arc::new(DiffDocument::default()));
         }
     }
 

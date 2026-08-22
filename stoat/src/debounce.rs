@@ -172,7 +172,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
                 .active_workspace()
                 .review
                 .as_ref()
-                .is_some_and(|s| s.files.iter().any(|f| f.path == path));
+                .is_some_and(|s| s.doc.files.iter().any(|f| f.path == path));
             if in_session {
                 // A tracked file keeps the per-path debounce, which scrolls
                 // the review to the edited chunk when the refresh lands.

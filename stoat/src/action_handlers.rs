@@ -1589,12 +1589,8 @@ mod tests {
         {
             let ws = h.stoat.active_workspace_mut();
             let commits = ws.commits.as_mut().expect("the commits view is open");
-            let session = Arc::new(crate::review_session::ReviewSession::new(
-                crate::review_session::ReviewSource::InMemory {
-                    files: Arc::new(Vec::new()),
-                },
-            ));
-            commits.preview_sessions.insert("a1b2c3d4".into(), session);
+            let doc = Arc::new(crate::review_session::DiffDocument::default());
+            commits.preview_sessions.insert("a1b2c3d4".into(), doc);
             commits.requested_preview = Some("a1b2c3d4".into());
             assert!(
                 commits.preview_sessions.mark_used("a1b2c3d4"),

@@ -168,13 +168,14 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
         let mut groups: std::collections::HashMap<usize, Vec<&crate::review_session::ReviewChunk>> =
             std::collections::HashMap::new();
         for id in &session.order {
-            if let Some(chunk) = session.chunks.get(id)
+            if let Some(chunk) = session.doc.chunks.get(id)
                 && chunk.status == ChunkStatus::Staged
             {
                 groups.entry(chunk.file_index).or_default().push(chunk);
             }
         }
         let tree_snapshot: Vec<(usize, String, Arc<String>, Arc<String>)> = session
+            .doc
             .files
             .iter()
             .enumerate()
@@ -625,11 +626,11 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
             .order
             .iter()
             .filter_map(|id| {
-                let c = session.chunks.get(id)?;
+                let c = session.doc.chunks.get(id)?;
                 if c.status != ChunkStatus::Staged {
                     return None;
                 }
-                let file = session.files.get(c.file_index)?;
+                let file = session.doc.files.get(c.file_index)?;
                 Some((*id, chunk_to_unified_diff(file, c, &workdir, false)))
             })
             .collect();
@@ -700,7 +701,7 @@ pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffe
         .active_workspace()
         .review
         .as_ref()
-        .is_some_and(|s| s.files.iter().any(|f| f.path == path));
+        .is_some_and(|s| s.doc.files.iter().any(|f| f.path == path));
     if !in_session {
         return UpdateEffect::None;
     }
@@ -793,7 +794,7 @@ fn carried_statuses(
         .order
         .iter()
         .filter_map(|id| {
-            let status = session.chunks.get(id)?.status;
+            let status = session.doc.chunks.get(id)?.status;
             if !status.is_decided() {
                 return None;
             }
@@ -859,6 +860,7 @@ fn post_refresh_sync(stoat: &mut Stoat, path: &Path) {
     let editor_id = session.view_editor;
     let progress = session.progress();
     let chunk_id = session
+        .doc
         .files
         .iter()
         .position(|f| f.path == path)
@@ -1623,8 +1625,8 @@ fn review_cursor_file_target(stoat: &mut Stoat) -> Option<(std::path::PathBuf, u
     let (chunk_id, _) = view.chunk_and_status_at_row(buffer_row)?;
 
     let session = ws.review.as_ref()?;
-    let file_index = session.chunks.get(&chunk_id)?.file_index;
-    let path = session.files.get(file_index)?.path.clone();
+    let file_index = session.doc.chunks.get(&chunk_id)?.file_index;
+    let path = session.doc.files.get(file_index)?.path.clone();
     Some((path, line))
 }
 
@@ -1680,8 +1682,8 @@ pub(super) fn review_cursor_file_position(
     let (chunk_id, _) = view.chunk_and_status_at_row(buffer_row)?;
 
     let session = ws.review.as_ref()?;
-    let file_index = session.chunks.get(&chunk_id)?.file_index;
-    let path = session.files.get(file_index)?.path.clone();
+    let file_index = session.doc.chunks.get(&chunk_id)?.file_index;
+    let path = session.doc.files.get(file_index)?.path.clone();
     Some((path, line.saturating_sub(1), col))
 }
 
@@ -1729,6 +1731,7 @@ pub(super) fn jump_to_move(stoat: &mut Stoat, dir: MoveJumpDir) -> UpdateEffect 
             return UpdateEffect::None;
         };
         session
+            .doc
             .files
             .iter()
             .position(|f| f.rel_path == prov.rel_path)
@@ -1809,11 +1812,11 @@ fn chunk_for_line(
     file_index: usize,
     line: u32,
 ) -> Option<crate::review_session::ReviewChunkId> {
-    let file = session.files.get(file_index)?;
+    let file = session.doc.files.get(file_index)?;
     file.chunks
         .iter()
         .find(|id| {
-            session.chunks.get(id).is_some_and(|c| {
+            session.doc.chunks.get(id).is_some_and(|c| {
                 c.base_line_range.contains(&line) || c.buffer_line_range.contains(&line)
             })
         })
@@ -1857,7 +1860,7 @@ fn toggle_diff_on(stoat: &mut Stoat) -> UpdateEffect {
         let path = ws.buffers.path_for(file_buffer_id).map(Path::to_path_buf);
         ws.review.as_ref().and_then(|session| {
             let path = path.as_ref()?;
-            let file_index = session.files.iter().position(|f| &f.path == path)?;
+            let file_index = session.doc.files.iter().position(|f| &f.path == path)?;
             session.chunk_containing_buffer_byte(file_index, file_byte)
         })
     };
@@ -2187,7 +2190,7 @@ pub(super) fn attach_preview_highlights(
     styles: &SyntaxStyles,
     cache: &BaseHighlightCache,
 ) {
-    for file in &mut session.files {
+    for file in &mut session.doc.files {
         let Some(language) = file.language.clone() else {
             continue;
         };
@@ -2224,7 +2227,7 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
     }
 
     if matches!(session.source, ReviewSource::WorkingTree { .. }) {
-        for file in &session.files {
+        for file in &session.doc.files {
             match fs_watch_host.watch(&file.path) {
                 Ok(token) => session.watch_tokens.push(token),
                 Err(err) => tracing::warn!(
@@ -2349,14 +2352,14 @@ pub(crate) fn populate_diff_cache_from(
     session: &ReviewSession,
     cancel: &AtomicBool,
 ) {
-    for file in &session.files {
+    for file in &session.doc.files {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
         let hunks: Vec<ReviewHunk> = file
             .chunks
             .iter()
-            .filter_map(|id| session.chunks.get(id).map(|c| c.hunk.clone()))
+            .filter_map(|id| session.doc.chunks.get(id).map(|c| c.hunk.clone()))
             .collect();
         let key = diff_cache_key(&file.base_text, &file.buffer_text, file.language.as_ref());
         cache
@@ -2369,10 +2372,10 @@ pub(crate) fn populate_diff_cache_from(
 fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<BlockProperties> {
     let mut blocks: Vec<BlockProperties> = Vec::with_capacity(view.chunk_row_ranges.len());
     for (chunk_id, range) in &view.chunk_row_ranges {
-        let Some(chunk) = session.chunks.get(chunk_id) else {
+        let Some(chunk) = session.doc.chunks.get(chunk_id) else {
             continue;
         };
-        let Some(file) = session.files.get(chunk.file_index) else {
+        let Some(file) = session.doc.files.get(chunk.file_index) else {
             continue;
         };
         let file_total = file.chunks.len();
@@ -3044,7 +3047,7 @@ mod tests {
     fn current_chunk_file(h: &TestHarness) -> usize {
         h.with_review(|s| {
             let id = s.cursor.current.expect("current chunk");
-            s.chunks.get(&id).expect("chunk").file_index
+            s.doc.chunks.get(&id).expect("chunk").file_index
         })
     }
 

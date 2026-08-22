@@ -792,7 +792,7 @@ pub(crate) fn render_commit_picker_list_page(
 /// scene onto the page, so they glide with the diff rows rather than staying
 /// pinned to the live grid.
 pub(crate) fn render_commit_picker_preview_page(
-    session: &crate::review_session::ReviewSession,
+    doc: &crate::review_session::DiffDocument,
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -807,7 +807,7 @@ pub(crate) fn render_commit_picker_preview_page(
         theme,
         |buf, area, skip_rows| {
             crate::render::commits::render_commit_preview(
-                session, theme, area, skip_rows, buf, &mut scene,
+                doc, theme, area, skip_rows, buf, &mut scene,
             )
         },
     );

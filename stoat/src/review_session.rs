@@ -200,14 +200,14 @@ impl ReviewViewState {
         let mut chunk_row_ranges: Vec<(ReviewChunkId, Range<u32>)> = Vec::new();
         let mut chunk_statuses: Vec<ChunkStatus> = Vec::new();
 
-        for file in &session.files {
+        for file in &session.doc.files {
             let base_lines = split_lines(&file.base_text);
             let buffer_lines = split_lines(&file.buffer_text);
             let mut base_cursor: u32 = 0;
             let mut buffer_cursor: u32 = 0;
 
             for chunk_id in &file.chunks {
-                let Some(chunk) = session.chunks.get(chunk_id) else {
+                let Some(chunk) = session.doc.chunks.get(chunk_id) else {
                     continue;
                 };
                 let (base_disp, buffer_disp) = hunk_display_ranges(&chunk.hunk);
@@ -261,6 +261,7 @@ impl ReviewViewState {
         self.chunk_statuses.reserve(self.chunk_row_ranges.len());
         for (id, _) in &self.chunk_row_ranges {
             let status = session
+                .doc
                 .chunks
                 .get(id)
                 .map(|c| c.status)
@@ -304,6 +305,21 @@ impl ReviewViewState {
 // `HashMap<ChunkFingerprint, ChunkStatus>`, and re-key on load. Chunks whose
 // fingerprint no longer matches (underlying file changed externally) degrade
 // to `Pending`.
+/// A built diff, as the files it covers and the chunks they are cut into.
+///
+/// This is everything a reader of a diff needs and nothing a reviewer of one
+/// does. The commit picker and the commits view show a commit's diff without
+/// staging anything in it, so they hold one of these rather than a whole
+/// [`ReviewSession`], whose cursor, staged status, view editor, watch tokens,
+/// and version counter answer questions a preview never asks.
+///
+/// Keeping the two apart is what lets a preview outlive the review machinery.
+#[derive(Default)]
+pub(crate) struct DiffDocument {
+    pub files: Vec<ReviewFile>,
+    pub chunks: HashMap<ReviewChunkId, ReviewChunk>,
+}
+
 pub(crate) struct ReviewSession {
     pub source: ReviewSource,
     /// True when the `:diff` command owns this session, so a git refresh
@@ -313,8 +329,8 @@ pub(crate) struct ReviewSession {
     ///
     /// [`Commit`]: ReviewSource::Commit
     pub auto_source: bool,
-    pub files: Vec<ReviewFile>,
-    pub chunks: HashMap<ReviewChunkId, ReviewChunk>,
+    /// The built diff itself, which a preview reads on its own.
+    pub doc: DiffDocument,
     pub order: Vec<ReviewChunkId>,
     pub cursor: ReviewCursor,
     pub view_editor: Option<EditorId>,
@@ -348,8 +364,7 @@ impl ReviewSession {
         Self {
             source,
             auto_source: false,
-            files: Vec::new(),
-            chunks: HashMap::new(),
+            doc: DiffDocument::default(),
             order: Vec::new(),
             cursor: ReviewCursor::default(),
             view_editor: None,
@@ -432,7 +447,7 @@ impl ReviewSession {
         file: ReviewFileInput,
         hunks: Vec<ReviewHunk>,
     ) -> Vec<ReviewChunkId> {
-        let file_index = self.files.len();
+        let file_index = self.doc.files.len();
 
         let base_offsets = line_byte_offsets(&split_lines(&file.base_text));
         let buffer_offsets = line_byte_offsets(&split_lines(&file.buffer_text));
@@ -444,7 +459,7 @@ impl ReviewSession {
             let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
             let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
 
-            self.chunks.insert(
+            self.doc.chunks.insert(
                 id,
                 ReviewChunk {
                     id,
@@ -462,7 +477,7 @@ impl ReviewSession {
             chunk_ids.push(id);
         }
 
-        self.files.push(ReviewFile {
+        self.doc.files.push(ReviewFile {
             path: file.path,
             rel_path: file.rel_path,
             language: file.language,
@@ -478,7 +493,7 @@ impl ReviewSession {
 
     #[allow(dead_code)]
     pub(crate) fn chunk(&self, id: ReviewChunkId) -> Option<&ReviewChunk> {
-        self.chunks.get(&id)
+        self.doc.chunks.get(&id)
     }
 
     /// Resolve an in-buffer byte offset to the chunk that should
@@ -493,10 +508,10 @@ impl ReviewSession {
         file_index: usize,
         buffer_byte: usize,
     ) -> Option<ReviewChunkId> {
-        let file = self.files.get(file_index)?;
+        let file = self.doc.files.get(file_index)?;
         let mut last: Option<ReviewChunkId> = None;
         for id in &file.chunks {
-            let chunk = self.chunks.get(id)?;
+            let chunk = self.doc.chunks.get(id)?;
             if chunk.buffer_byte_range.contains(&buffer_byte) {
                 return Some(*id);
             }
@@ -510,7 +525,7 @@ impl ReviewSession {
 
     #[allow(dead_code)]
     pub(crate) fn current(&self) -> Option<&ReviewChunk> {
-        self.cursor.current.and_then(|id| self.chunks.get(&id))
+        self.cursor.current.and_then(|id| self.doc.chunks.get(&id))
     }
 
     /// Advance the cursor to the next chunk. Clamps at the last chunk and
@@ -541,7 +556,7 @@ impl ReviewSession {
     }
 
     pub(crate) fn set_status(&mut self, id: ReviewChunkId, status: ChunkStatus) {
-        if let Some(chunk) = self.chunks.get_mut(&id) {
+        if let Some(chunk) = self.doc.chunks.get_mut(&id) {
             chunk.status = status;
             self.version += 1;
         }
@@ -551,7 +566,7 @@ impl ReviewSession {
     /// currently in `Pending` or `Skipped` flip to `Staged`, giving users
     /// a one-key path from "not looked at" into the accept lane.
     pub(crate) fn toggle_stage(&mut self, id: ReviewChunkId) {
-        if let Some(chunk) = self.chunks.get_mut(&id) {
+        if let Some(chunk) = self.doc.chunks.get_mut(&id) {
             chunk.status = match chunk.status {
                 ChunkStatus::Staged => ChunkStatus::Unstaged,
                 ChunkStatus::Unstaged | ChunkStatus::Pending | ChunkStatus::Skipped => {
@@ -569,7 +584,7 @@ impl ReviewSession {
             ..Default::default()
         };
         for id in &self.order {
-            if let Some(chunk) = self.chunks.get(id) {
+            if let Some(chunk) = self.doc.chunks.get(id) {
                 match chunk.status {
                     ChunkStatus::Staged => p.staged += 1,
                     ChunkStatus::Unstaged => p.unstaged += 1,
@@ -586,7 +601,7 @@ impl ReviewSession {
             && self
                 .order
                 .iter()
-                .filter_map(|id| self.chunks.get(id))
+                .filter_map(|id| self.doc.chunks.get(id))
                 .all(|c| c.status.is_decided())
     }
 
@@ -595,8 +610,8 @@ impl ReviewSession {
     /// so that a chunk surviving a refresh keeps its decision, while a
     /// chunk whose underlying content moved or changed is treated as new.
     pub(crate) fn identity_key(&self, id: ReviewChunkId) -> Option<ChunkIdentity> {
-        let chunk = self.chunks.get(&id)?;
-        let file = self.files.get(chunk.file_index)?;
+        let chunk = self.doc.chunks.get(&id)?;
+        let file = self.doc.files.get(chunk.file_index)?;
         let slice = file
             .base_text
             .get(chunk.base_byte_range.clone())
@@ -792,8 +807,8 @@ mod tests {
         assert_eq!(ids.len(), 1);
         assert_eq!(s.cursor.current, Some(ids[0]));
         assert_eq!(s.order, ids);
-        assert_eq!(s.files.len(), 1);
-        assert_eq!(s.files[0].chunks, ids);
+        assert_eq!(s.doc.files.len(), 1);
+        assert_eq!(s.doc.files[0].chunks, ids);
     }
 
     #[test]
@@ -858,16 +873,16 @@ mod tests {
         let mut s = in_memory_session();
         let ids = add(&mut s, "a.txt", "a\nb\n", "a\nB\n");
         let id = ids[0];
-        assert_eq!(s.chunks[&id].status, ChunkStatus::Pending);
+        assert_eq!(s.doc.chunks[&id].status, ChunkStatus::Pending);
 
         s.toggle_stage(id);
-        assert_eq!(s.chunks[&id].status, ChunkStatus::Staged);
+        assert_eq!(s.doc.chunks[&id].status, ChunkStatus::Staged);
 
         s.toggle_stage(id);
-        assert_eq!(s.chunks[&id].status, ChunkStatus::Unstaged);
+        assert_eq!(s.doc.chunks[&id].status, ChunkStatus::Unstaged);
 
         s.toggle_stage(id);
-        assert_eq!(s.chunks[&id].status, ChunkStatus::Staged);
+        assert_eq!(s.doc.chunks[&id].status, ChunkStatus::Staged);
     }
 
     #[test]
@@ -877,7 +892,7 @@ mod tests {
         let id = ids[0];
         s.set_status(id, ChunkStatus::Skipped);
         s.toggle_stage(id);
-        assert_eq!(s.chunks[&id].status, ChunkStatus::Staged);
+        assert_eq!(s.doc.chunks[&id].status, ChunkStatus::Staged);
     }
 
     #[test]
@@ -969,7 +984,7 @@ mod tests {
     fn line_and_byte_ranges_cover_changes() {
         let mut s = in_memory_session();
         let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
-        let chunk = &s.chunks[&ids[0]];
+        let chunk = &s.doc.chunks[&ids[0]];
         assert_eq!(chunk.base_line_range, 1..2);
         assert_eq!(chunk.buffer_line_range, 1..2);
         assert_eq!(chunk.base_byte_range, 2..5);
@@ -980,7 +995,7 @@ mod tests {
     fn pure_addition_has_empty_base_range() {
         let mut s = in_memory_session();
         let ids = add(&mut s, "a.txt", "a\nb\n", "a\nNEW\nb\n");
-        let chunk = &s.chunks[&ids[0]];
+        let chunk = &s.doc.chunks[&ids[0]];
         assert_eq!(chunk.base_line_range, 0..0);
         assert_eq!(chunk.buffer_line_range, 1..2);
     }
@@ -989,7 +1004,7 @@ mod tests {
     fn pure_deletion_has_empty_buffer_range() {
         let mut s = in_memory_session();
         let ids = add(&mut s, "a.txt", "a\nOLD\nb\n", "a\nb\n");
-        let chunk = &s.chunks[&ids[0]];
+        let chunk = &s.doc.chunks[&ids[0]];
         assert_eq!(chunk.base_line_range, 1..2);
         assert_eq!(chunk.buffer_line_range, 0..0);
     }
@@ -1260,7 +1275,7 @@ mod tests {
         let statuses = h.with_review(|s| {
             s.order
                 .iter()
-                .map(|id| s.chunks.get(id).unwrap().status)
+                .map(|id| s.doc.chunks.get(id).unwrap().status)
                 .collect::<Vec<_>>()
         });
         assert_eq!(
@@ -1297,7 +1312,7 @@ mod tests {
             .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
         h.open_commit_review("/work", "c2");
         let session = h.stoat.active_workspace().review.as_ref().unwrap();
-        assert_eq!(session.files[0].buffer_text.as_str(), "v2\n");
+        assert_eq!(session.doc.files[0].buffer_text.as_str(), "v2\n");
     }
 
     #[test]
@@ -1318,9 +1333,9 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session for commit");
-        assert_eq!(session.files.len(), 1);
-        assert_eq!(session.files[0].base_text.as_str(), "v1\n");
-        assert_eq!(session.files[0].buffer_text.as_str(), "v2\n");
+        assert_eq!(session.doc.files.len(), 1);
+        assert_eq!(session.doc.files[0].base_text.as_str(), "v1\n");
+        assert_eq!(session.doc.files[0].buffer_text.as_str(), "v2\n");
         match &session.source {
             ReviewSource::Commit { sha, .. } => {
                 assert_eq!(sha, "c2")
@@ -1346,8 +1361,8 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session for root commit");
-        assert_eq!(session.files[0].base_text.as_str(), "");
-        assert_eq!(session.files[0].buffer_text.as_str(), "initial\n");
+        assert_eq!(session.doc.files[0].base_text.as_str(), "");
+        assert_eq!(session.doc.files[0].buffer_text.as_str(), "initial\n");
     }
 
     #[test]
@@ -1374,7 +1389,12 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session for range");
-        let rels: Vec<_> = session.files.iter().map(|f| f.rel_path.as_str()).collect();
+        let rels: Vec<_> = session
+            .doc
+            .files
+            .iter()
+            .map(|f| f.rel_path.as_str())
+            .collect();
         assert!(rels.contains(&"a.rs"), "a.rs must be in range: {rels:?}");
         assert!(rels.contains(&"b.rs"), "b.rs must be in range: {rels:?}");
         assert!(rels.contains(&"c.rs"), "c.rs must be in range: {rels:?}");
@@ -1402,7 +1422,7 @@ mod tests {
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session survives refresh");
         assert_eq!(
-            session.chunks[&session.order[0]].status,
+            session.doc.chunks[&session.order[0]].status,
             ChunkStatus::Staged
         );
     }

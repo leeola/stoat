@@ -471,6 +471,7 @@ impl TestHarness {
                 .as_ref()
                 .expect("no review session");
             session
+                .doc
                 .files
                 .iter()
                 .find(|f| f.rel_path == rel)

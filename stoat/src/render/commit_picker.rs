@@ -6,7 +6,7 @@ use crate::{
         table::{self, Column, Width},
         text::write_str_clipped,
     },
-    review_session::ReviewSession,
+    review_session::DiffDocument,
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -546,9 +546,8 @@ const COLUMN_ORDER: [CommitColumn; COMMIT_COLUMNS] = [
 /// and the paging keys let the scroll run past the end and it is pulled back
 /// here. Split out from the renderer because a pooled preview page clamps
 /// against the same session without a live picker to mutate.
-pub(crate) fn clamped_preview_scroll(scroll: usize, session: &ReviewSession, height: u16) -> usize {
-    let last_page =
-        crate::render::commits::preview_row_count(session).saturating_sub(height as usize);
+pub(crate) fn clamped_preview_scroll(scroll: usize, doc: &DiffDocument, height: u16) -> usize {
+    let last_page = crate::render::commits::preview_row_count(doc).saturating_sub(height as usize);
     scroll.min(last_page)
 }
 

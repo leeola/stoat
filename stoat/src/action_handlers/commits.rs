@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     display_map::syntax_theme::SyntaxStyles,
-    review_session::{ReviewSession, ReviewSource},
+    review_session::{DiffDocument, ReviewSession, ReviewSource},
     workspace::diff::BaseHighlightCache,
 };
 use std::sync::Arc;
@@ -334,7 +334,7 @@ fn spawn_commit_preview_load(
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
     highlights: PreviewHighlights,
-) -> stoat_scheduler::Task<Option<ReviewSession>> {
+) -> stoat_scheduler::Task<Option<DiffDocument>> {
     executor.spawn_blocking(move || {
         let parent = repo.parent_sha(&sha);
         let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
@@ -351,7 +351,7 @@ fn spawn_commit_preview_load(
                 )
                 .map(|mut session| {
                     highlights.attach(&mut session);
-                    session
+                    session.doc
                 })
             },
             None => None,

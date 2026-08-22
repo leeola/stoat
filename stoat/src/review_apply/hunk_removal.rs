@@ -60,8 +60,11 @@ mod tests {
         let base = "a\nb\nOLD\nd\ne\n";
         let buffer = "a\nb\nNEW\nd\ne\n";
         let session = session_for(base, buffer);
-        let chunks: Vec<&ReviewChunk> =
-            session.order.iter().map(|id| &session.chunks[id]).collect();
+        let chunks: Vec<&ReviewChunk> = session
+            .order
+            .iter()
+            .map(|id| &session.doc.chunks[id])
+            .collect();
         let result = remove_chunks_from_buffer(base, buffer, &chunks);
         assert_eq!(result, base);
     }
@@ -74,7 +77,7 @@ mod tests {
         let buffer = "a\nX1\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\nY1\nt\nu\nv\nw\n";
         let session = session_for(base, buffer);
         assert_eq!(session.order.len(), 2, "should produce two chunks");
-        let second = vec![&session.chunks[&session.order[1]]];
+        let second = vec![&session.doc.chunks[&session.order[1]]];
         let result = remove_chunks_from_buffer(base, buffer, &second);
         assert!(result.contains("X1"), "first chunk preserved: {result}");
         assert!(!result.contains("Y1"), "second chunk reverted: {result}");
@@ -91,8 +94,11 @@ mod tests {
         let base = "";
         let buffer = "new\nfile\ncontents\n";
         let session = session_for(base, buffer);
-        let chunks: Vec<&ReviewChunk> =
-            session.order.iter().map(|id| &session.chunks[id]).collect();
+        let chunks: Vec<&ReviewChunk> = session
+            .order
+            .iter()
+            .map(|id| &session.doc.chunks[id])
+            .collect();
         let result = remove_chunks_from_buffer(base, buffer, &chunks);
         // The review's structural diff includes a trailing context row
         // in buffer_byte_range; the splice leaves that row in place.
@@ -116,7 +122,7 @@ mod tests {
         let result = remove_chunks_from_buffer(base, buffer, &[]);
         assert_eq!(result, buffer);
         // Statuses remain Pending; function cares about caller-supplied chunks only.
-        for c in session.chunks.values() {
+        for c in session.doc.chunks.values() {
             assert_eq!(c.status, ChunkStatus::Pending);
         }
     }
@@ -132,7 +138,7 @@ mod tests {
             .order
             .iter()
             .rev()
-            .map(|id| &session.chunks[id])
+            .map(|id| &session.doc.chunks[id])
             .collect();
         let result = remove_chunks_from_buffer(base, buffer, &reversed);
         assert_eq!(result, base);

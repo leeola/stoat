@@ -12,7 +12,7 @@ use crate::{
         FrameCtx,
     },
     review::{ReviewRow, ReviewSide},
-    review_session::ReviewSession,
+    review_session::DiffDocument,
 };
 use ratatui::{
     buffer::Buffer,
@@ -260,12 +260,11 @@ fn render_commit_summary(
 /// each chunk's header alongside its diff rows.
 ///
 /// A caller's `skip_rows` is measured in these, so this is what bounds it.
-pub(crate) fn preview_row_count(session: &ReviewSession) -> usize {
-    session
-        .files
+pub(crate) fn preview_row_count(doc: &DiffDocument) -> usize {
+    doc.files
         .iter()
         .flat_map(|file| file.chunks.iter())
-        .filter_map(|chunk_id| session.chunks.get(chunk_id))
+        .filter_map(|chunk_id| doc.chunks.get(chunk_id))
         .map(|chunk| 1 + chunk.hunk.rows.len())
         .sum()
 }
@@ -346,7 +345,7 @@ fn paint_preview_side(
 /// [`preview_row_count`] does, so a caller scrolls the diff by holding a row
 /// offset rather than by owning any of the painting.
 pub(crate) fn render_commit_preview(
-    session: &ReviewSession,
+    doc: &DiffDocument,
     theme: &crate::theme::Theme,
     area: Rect,
     skip_rows: usize,
@@ -389,9 +388,9 @@ pub(crate) fn render_commit_preview(
     // what it can see.
     let mut row = 0usize;
 
-    for file in &session.files {
+    for file in &doc.files {
         for chunk_id in &file.chunks {
-            let Some(chunk) = session.chunks.get(chunk_id) else {
+            let Some(chunk) = doc.chunks.get(chunk_id) else {
                 continue;
             };
             let file_total = file.chunks.len();
@@ -631,7 +630,7 @@ mod tests {
                         .collect(),
                 )
             };
-            let file = &mut session.files[0];
+            let file = &mut session.doc.files[0];
             file.base_highlights = Some(spans_for(base));
             file.buffer_highlights = Some(spans_for(buffer));
         }
@@ -643,7 +642,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 20);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
-        render_commit_preview(session, theme, area, 0, &mut buf, &mut scene);
+        render_commit_preview(&session.doc, theme, area, 0, &mut buf, &mut scene);
         buf
     }
 

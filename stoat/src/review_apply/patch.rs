@@ -467,8 +467,8 @@ mod tests {
     fn first_chunk_patch(path: &str, base: &str, buffer: &str) -> String {
         let session = session_with_file(path, base, buffer);
         let id = session.order[0];
-        let chunk = &session.chunks[&id];
-        let file = &session.files[chunk.file_index];
+        let chunk = &session.doc.chunks[&id];
+        let file = &session.doc.files[chunk.file_index];
         chunk_to_unified_diff(file, chunk, Path::new("/work"), false)
     }
 
@@ -488,7 +488,7 @@ mod tests {
         let base = "a\nOLD1\nOLD2\nb\n";
         let buffer = "a\nNEW1\nNEW2\nb\n";
         let session = session_with_file("a.txt", base, buffer);
-        let chunk = &session.chunks[&session.order[0]];
+        let chunk = &session.doc.chunks[&session.order[0]];
         // Buffer line 2 (1-based) is the OLD1/NEW1 row of a two-change hunk.
         let rows = line_restricted_rows(&chunk.hunk.rows, 2, true).expect("row 2 matched");
         let patch = rows_to_unified_diff(Path::new("a.txt"), base, buffer, &rows);
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn line_restricted_rows_returns_none_when_no_row_matches() {
         let session = session_with_file("a.txt", "a\nOLD\nb\n", "a\nNEW\nb\n");
-        let chunk = &session.chunks[&session.order[0]];
+        let chunk = &session.doc.chunks[&session.order[0]];
         assert!(line_restricted_rows(&chunk.hunk.rows, 99, true).is_none());
     }
 
@@ -608,8 +608,8 @@ mod tests {
             Arc::new("a\n".to_string()),
             Arc::new("b\n".to_string()),
         );
-        let chunk = &session.chunks[&session.order[0]];
-        let file = &session.files[chunk.file_index];
+        let chunk = &session.doc.chunks[&session.order[0]];
+        let file = &session.doc.files[chunk.file_index];
         let patch = chunk_to_unified_diff(file, chunk, Path::new("/work"), false);
         assert!(
             patch.starts_with(
@@ -683,8 +683,8 @@ mod tests {
             Arc::new("line1\nNEW\nline3\n".into()),
         );
         let id = session.order[0];
-        let chunk = &session.chunks[&id];
-        let file = &session.files[chunk.file_index];
+        let chunk = &session.doc.chunks[&id];
+        let file = &session.doc.files[chunk.file_index];
         let patch = chunk_to_unified_diff(file, chunk, &workdir, false);
 
         let host_repo = LocalGit::new().discover(&workdir).unwrap();
@@ -763,8 +763,8 @@ mod tests {
     }
     fn first_chunk_reverse_patch(path: &str, base: &str, buffer: &str) -> String {
         let session = session_with_file(path, base, buffer);
-        let chunk = &session.chunks[&session.order[0]];
-        let file = &session.files[chunk.file_index];
+        let chunk = &session.doc.chunks[&session.order[0]];
+        let file = &session.doc.files[chunk.file_index];
         chunk_to_unified_diff(file, chunk, Path::new("/work"), true)
     }
 
@@ -816,8 +816,8 @@ mod tests {
             Arc::new("line1\nOLD\nline3\n".into()),
             Arc::new("line1\nNEW\nline3\n".into()),
         );
-        let chunk = &session.chunks[&session.order[0]];
-        let file = &session.files[chunk.file_index];
+        let chunk = &session.doc.chunks[&session.order[0]];
+        let file = &session.doc.files[chunk.file_index];
 
         let host_repo = LocalGit::new().discover(&workdir).unwrap();
         host_repo
