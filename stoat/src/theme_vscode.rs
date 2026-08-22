@@ -314,6 +314,35 @@ mod tests {
         );
     }
 
+    /// The walkthrough scopes carry palette names rather than literals, which
+    /// is what lets an imported theme answer for them without knowing they
+    /// exist. Literals would draw a dark theme's amber over a light one.
+    #[test]
+    fn a_walkthrough_marker_inherits_the_imported_palette() {
+        let vt = parse(
+            r##"{
+                "colors": {
+                    "editor.background": "#101010",
+                    "editor.foreground": "#e0e0e0",
+                    "terminal.ansiRed": "#aa0000",
+                    "terminal.ansiGreen": "#00aa00",
+                    "terminal.ansiBlue": "#0000aa",
+                    "terminal.ansiCyan": "#00aaaa"
+                }
+            }"##,
+        )
+        .expect("fixture parses");
+
+        // default_dark assigns marker2 = success and success = green, and the
+        // converter has no walkthrough scope, so the color comes from the
+        // recolored let rather than from the dark theme's own green.
+        let theme = resolve("recolor", &vt);
+        assert_eq!(
+            theme.get(crate::theme::scope::UI_WALKTHROUGH_MARKERS[1]).fg,
+            Some(Color::Rgb(0x00, 0xaa, 0x00)),
+        );
+    }
+
     #[test]
     fn uncovered_scope_inherits_default_dark_recolored() {
         let vt = parse(

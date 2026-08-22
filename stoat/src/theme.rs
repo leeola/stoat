@@ -517,6 +517,31 @@ pub mod scope {
     pub const UI_BADGE_COMPLETE: &str = "ui.badge.complete";
     pub const UI_BADGE_ERROR: &str = "ui.badge.error";
 
+    /// The mark and connector that point at a walkthrough stop's subject.
+    ///
+    /// One stop has exactly one focus, so it gets a scope of its own rather
+    /// than a slot in the cycling markers below.
+    pub const UI_WALKTHROUGH_FOCUS: &str = "ui.walkthrough.focus";
+
+    /// The narration card and the label boxes, stroke in the foreground and
+    /// fill in the background.
+    pub const UI_WALKTHROUGH_CARD: &str = "ui.walkthrough.card";
+
+    /// Annotation colors, cycled.
+    ///
+    /// A stop annotates an unknown number of things, so the colors repeat
+    /// rather than being named by role: the layout cannot know in advance
+    /// which role an annotation plays. Six runs out of distinguishable hues
+    /// before it runs out of slots.
+    pub const UI_WALKTHROUGH_MARKERS: [&str; 6] = [
+        "ui.walkthrough.marker1",
+        "ui.walkthrough.marker2",
+        "ui.walkthrough.marker3",
+        "ui.walkthrough.marker4",
+        "ui.walkthrough.marker5",
+        "ui.walkthrough.marker6",
+    ];
+
     pub const UI_TABBAR_ACTIVE: &str = "ui.tabbar.active";
     pub const UI_TABBAR_INACTIVE: &str = "ui.tabbar.inactive";
 
@@ -922,5 +947,48 @@ mod tests {
             theme.try_get("ui.cursor").unwrap().fg,
             Some(Color::Indexed(42))
         );
+    }
+
+    /// A walkthrough draws its marks in whatever color it is handed, so a scope
+    /// the shipped theme leaves out draws in the fallback and reads as a bug in
+    /// the drawing rather than a missing color.
+    #[test]
+    fn the_shipped_theme_answers_for_every_walkthrough_scope() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+
+        let unanswered: Vec<&str> = [scope::UI_WALKTHROUGH_FOCUS, scope::UI_WALKTHROUGH_CARD]
+            .into_iter()
+            .chain(scope::UI_WALKTHROUGH_MARKERS)
+            .filter(|name| theme.try_get(name).and_then(|style| style.fg).is_none())
+            .collect();
+
+        assert_eq!(unanswered, Vec::<&str>::new(), "every scope has a color");
+    }
+
+    /// A card is a stroke around a fill, so it needs both halves. The other
+    /// seven are strokes alone.
+    #[test]
+    fn the_card_scope_carries_a_fill_as_well_as_a_stroke() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        let card = theme.try_get(scope::UI_WALKTHROUGH_CARD).expect("declared");
+
+        assert!(card.fg.is_some(), "the stroke");
+        assert!(card.bg.is_some(), "and the fill behind it");
+    }
+
+    /// Annotations cycle through the markers, so two adjacent ones drawing the
+    /// same color would read as one annotation in two places.
+    #[test]
+    fn every_marker_slot_is_a_distinct_color() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        let mut colors: Vec<Color> = scope::UI_WALKTHROUGH_MARKERS
+            .iter()
+            .map(|name| theme.try_get(name).and_then(|style| style.fg).expect(name))
+            .collect();
+
+        let declared = colors.len();
+        colors.sort_by_key(|color| format!("{color:?}"));
+        colors.dedup();
+        assert_eq!(colors.len(), declared, "no two slots share a color");
     }
 }

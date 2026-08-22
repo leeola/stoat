@@ -60,6 +60,15 @@ theme default_dark {
     ui.badge.complete.fg = success;
     ui.badge.error.fg = danger;
 
+    ui.walkthrough.focus.fg = danger;
+    ui.walkthrough.card = { fg: warning, bg: subtle };
+    ui.walkthrough.marker1.fg = primary;
+    ui.walkthrough.marker2.fg = success;
+    ui.walkthrough.marker3.fg = special;
+    ui.walkthrough.marker4.fg = info;
+    ui.walkthrough.marker5.fg = warning;
+    ui.walkthrough.marker6.fg = light_red;
+
     ui.statusbar.focused   = { fg: text, bg: muted };
     ui.statusbar.unfocused = { fg: muted, bg: black };
     ui.mode_label          = { fg: black, modifiers: [bold] };
