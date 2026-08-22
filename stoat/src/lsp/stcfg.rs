@@ -1177,6 +1177,23 @@ mod tests {
         assert_eq!(complete(&text, offset), Vec::new());
     }
 
+    /// The config stoat ships must name only settings the schema declares.
+    ///
+    /// The schema drives the unknown-setting warning, so a setting removed from
+    /// the schema but left in the shipped config puts a warning on the default
+    /// config every user starts from. The sibling guard in the config crate
+    /// proves each schema entry has an apply arm; this one closes the other
+    /// direction.
+    #[test]
+    fn the_shipped_config_names_only_known_settings() {
+        let diagnostics = diagnose(crate::app::DEFAULT_KEYMAP);
+        let messages: Vec<&str> = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(messages, Vec::<&str>::new(), "config.stcfg is not clean");
+    }
+
     #[test]
     fn unknown_setting_warns_at_path_span() {
         let text = "on init { editor.scrollofff = 3; }";
