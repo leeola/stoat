@@ -11,9 +11,9 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics, CompositeSlot,
-        CompositeSlots, Frame, GridVersion, Occluder, OccluderBuffer, PoolOccluders, GLOBALS_SLOTS,
-        GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        globals_offset, globals_slot_index, row_len, row_uploads, AnchoredPanel, CellMetrics,
+        CompositeSlot, CompositeSlots, Frame, GridVersion, Occluder, OccluderBuffer, PoolOccluders,
+        GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -21,7 +21,7 @@ use cosmic_text::{fontdb::Weight, CacheKey, Family, Font, FontSystem, SwashCache
 use rustc_hash::FxHashMap;
 use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
-    grid::{Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion, UnderlineStyle},
+    grid::{Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -177,6 +177,18 @@ struct RectInstance {
     /// Slot of the mark this rect fades in with, biased by one. See
     /// [`TextInstance::follow`].
     follow: u32,
+}
+
+/// One compositing host's riding text-run instances.
+///
+/// A span of the riding buffers rather than a vector of its own, so every
+/// host's draw reads one buffer at an offset and the frame uploads once.
+struct RidingRuns {
+    /// The host region's scissor, so the run is cut at the pane edge rather
+    /// than drawn over the neighbour.
+    scissor: [u32; 4],
+    glyphs: Range<u32>,
+    rects: Range<u32>,
 }
 
 /// Uniform shared by every instance: the surface resolution the vertex shader
@@ -436,6 +448,20 @@ pub struct TextPass {
     /// Where each frame's alphas are built before the comparison, held so a
     /// frame that changes nothing allocates nothing.
     sketch_alpha_scratch: Vec<f32>,
+    /// Hosts compositing this frame, so the base build leaves out the runs
+    /// anchored to them. Refilled every frame from the anchored list.
+    riding_hosts: Vec<u32>,
+    /// Where each riding host's instances sit in the riding buffers, in the
+    /// order the hosts were given.
+    riding_runs: Vec<RidingRuns>,
+    riding_instances: Buffer,
+    riding_capacity: usize,
+    riding_rects: Buffer,
+    riding_rect_capacity: usize,
+    /// Where the riding instances are built each frame, held so a glide that
+    /// rebuilds them every frame allocates nothing.
+    riding_glyph_scratch: Vec<TextInstance>,
+    riding_rect_scratch: Vec<RectInstance>,
     /// The occluders the composited pools read, bound by
     /// [`Self::composite_globals_bind_group`].
     ///
@@ -944,6 +970,22 @@ impl TextPass {
             sketch_alpha_capacity: INITIAL_SKETCH_ALPHA,
             last_sketch_alpha: Vec::new(),
             sketch_alpha_scratch: Vec::new(),
+            riding_hosts: Vec::new(),
+            riding_runs: Vec::new(),
+            riding_instances: alloc_instances(
+                device,
+                "riding text run instances",
+                instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+            ),
+            riding_capacity: INITIAL_CAPACITY,
+            riding_rects: alloc_instances(
+                device,
+                "riding text run rect instances",
+                instance_bytes::<RectInstance>(INITIAL_CAPACITY),
+            ),
+            riding_rect_capacity: INITIAL_CAPACITY,
+            riding_glyph_scratch: Vec::new(),
+            riding_rect_scratch: Vec::new(),
             composite_globals_bind_group,
             atlas_layout,
             sampler,
@@ -1197,6 +1239,7 @@ impl TextPass {
     /// has reached its final size, so normalized coordinates stay valid.
     /// Reallocates the instance buffer only when the glyph count outgrows the
     /// current capacity.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -1205,6 +1248,7 @@ impl TextPass {
         resolution: [f32; 2],
         frame: &Frame<'_>,
         occluders: &[Occluder],
+        anchored: &[AnchoredPanel],
     ) {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
@@ -1218,6 +1262,22 @@ impl TextPass {
         // the screen-anchored text-run draws occlude against these.
         self.upload_occluders(device, queue, occluders);
         self.upload_sketch_alpha(device, queue, grid, frame.sketch_progress);
+
+        // Which hosts glide decides which runs the base build leaves out, so it
+        // is refreshed before the gate below reads it. A change here has to
+        // rebuild the base instances, since a run moving between the two sets
+        // is a run appearing in or leaving the base buffer.
+        let riding_changed = self
+            .riding_hosts
+            .iter()
+            .copied()
+            .ne(anchored.iter().map(|ride| ride.host));
+        if riding_changed {
+            self.riding_hosts.clear();
+            self.riding_hosts
+                .extend(anchored.iter().map(|ride| ride.host));
+        }
+        self.build_riding_runs(device, queue, grid, anchored);
         let panel_count = occluders.len() as u32;
 
         // Each globals buffer carries its own scroll. The plain glyphs take the grid
@@ -1306,7 +1366,8 @@ impl TextPass {
             grid.sketches_epoch(),
         );
         let runs_rebuilt = self.last_text_runs != Some(text_runs)
-            || self.atlas.content_epoch() != self.last_atlas_epoch;
+            || self.atlas.content_epoch() != self.last_atlas_epoch
+            || riding_changed;
         if runs_rebuilt {
             let epoch_at_build = self.atlas.content_epoch();
             let mut instances = mem::take(&mut self.text_run_build_scratch);
@@ -2167,6 +2228,171 @@ impl TextPass {
         }
     }
 
+    /// Build and upload the runs anchored to a pool compositing this frame,
+    /// each shifted by its host's glide.
+    ///
+    /// Rebuilt every frame rather than cached, because the shift moves with the
+    /// glide while the base instances do not. The riding set is a label or two,
+    /// so the rebuild is cheap where rebuilding every run would not be.
+    ///
+    /// Grouped by host so each one's instances are contiguous and its draw is a
+    /// single range under a single scissor.
+    fn build_riding_runs(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        anchored: &[AnchoredPanel],
+    ) {
+        self.riding_runs.clear();
+        let mut glyphs = mem::take(&mut self.riding_glyph_scratch);
+        let mut rects = mem::take(&mut self.riding_rect_scratch);
+        glyphs.clear();
+        rects.clear();
+
+        if !anchored.is_empty() {
+            let runs = grid.text_runs().to_vec();
+            for ride in anchored {
+                let (glyph_start, rect_start) = (glyphs.len() as u32, rects.len() as u32);
+                for run in &runs {
+                    if run.anchor.map(|(host, _)| host) != Some(ride.host) {
+                        continue;
+                    }
+                    let follow = follow_slot(grid, run.follow);
+                    self.push_run_glyphs(
+                        device,
+                        queue,
+                        run,
+                        follow,
+                        [0.0; 2],
+                        0,
+                        ride.dy_px,
+                        &mut glyphs,
+                    );
+                    if let Some(rect) = self.run_rect(grid, run, ride.dy_px) {
+                        rects.push(rect);
+                    }
+                }
+
+                let (glyph_end, rect_end) = (glyphs.len() as u32, rects.len() as u32);
+                if glyph_end > glyph_start || rect_end > rect_start {
+                    self.riding_runs.push(RidingRuns {
+                        scissor: ride.scissor,
+                        glyphs: glyph_start..glyph_end,
+                        rects: rect_start..rect_end,
+                    });
+                }
+            }
+        }
+
+        upload_instances(
+            device,
+            queue,
+            &glyphs,
+            &mut self.riding_instances,
+            &mut self.riding_capacity,
+            "riding text run instances",
+        );
+        upload_instances(
+            device,
+            queue,
+            &rects,
+            &mut self.riding_rects,
+            &mut self.riding_rect_capacity,
+            "riding text run rect instances",
+        );
+
+        self.riding_glyph_scratch = glyphs;
+        self.riding_rect_scratch = rects;
+    }
+
+    /// One run's backing rect, shifted down by `dy` pixels, or `None` for a run
+    /// that carries no background or draws nothing.
+    fn run_rect(&self, grid: &Grid, run: &TextRun, dy: f32) -> Option<RectInstance> {
+        let bg = run.bg?;
+        let scale = f32::from(run.scale) / 256.0;
+        if scale <= 0.0 {
+            return None;
+        }
+        let width = run.text.chars().count() as f32 * scale * self.metrics.width;
+        if width <= 0.0 {
+            return None;
+        }
+
+        let col = f32::from(run.col) / 16.0;
+        let row = f32::from(run.row) / 16.0;
+        Some(RectInstance {
+            pos: [col * self.metrics.width, row * self.metrics.height + dy],
+            dim: [width, self.metrics.height],
+            color: rgb_f32(bg),
+            seq: run.seq,
+            follow: follow_slot(grid, run.follow),
+        })
+    }
+
+    /// Append one run's glyph instances to `out`, shifted down by `dy` pixels.
+    ///
+    /// Split out so the base build and the per-frame riding build share the
+    /// atlas walk. A non-positive scale draws nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn push_run_glyphs(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        run: &TextRun,
+        follow: u32,
+        origin: [f32; 2],
+        anchor: u32,
+        dy: f32,
+        out: &mut Vec<TextInstance>,
+    ) {
+        let scale = f32::from(run.scale) / 256.0;
+        if scale <= 0.0 {
+            return;
+        }
+        let col = f32::from(run.col) / 16.0;
+        let row = f32::from(run.row) / 16.0;
+
+        for (index, ch) in run.text.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let Some(key) = self.glyph_key(ch, scale, Weight::NORMAL) else {
+                continue;
+            };
+            let Some(info) = self.atlas.get_or_insert(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.swash_cache,
+                key,
+            ) else {
+                continue;
+            };
+
+            let (texel_origin, texel_size) = pack_atlas_rect(info);
+            let pos = text_run_origin(
+                col,
+                row,
+                index,
+                scale,
+                info.placement,
+                self.baseline,
+                self.metrics,
+                origin,
+            );
+            out.push(TextInstance {
+                pos: [pos[0], pos[1] + dy],
+                dim: pack_dim([info.size[0] as f32, info.size[1] as f32]),
+                texel_origin,
+                texel_size,
+                fg: pack_fg(run.color, info.kind),
+                seq: run.seq,
+                row: anchor | follow << FOLLOW_SHIFT,
+            });
+        }
+    }
+
     /// Build the glyph instances for the grid's off-grid text runs, into a
     /// vector of the caller's.
     #[cfg(test)]
@@ -2212,52 +2438,13 @@ impl TextPass {
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
-        for run in grid.text_runs() {
-            let scale = f32::from(run.scale) / 256.0;
-            if scale <= 0.0 {
+        let runs = grid.text_runs().to_vec();
+        for run in &runs {
+            if rides_a_pool(run, &self.riding_hosts) {
                 continue;
             }
-            let col = f32::from(run.col) / 16.0;
-            let row = f32::from(run.row) / 16.0;
             let follow = follow_slot(grid, run.follow);
-
-            for (index, ch) in run.text.chars().enumerate() {
-                if ch == ' ' {
-                    continue;
-                }
-                let Some(key) = self.glyph_key(ch, scale, Weight::NORMAL) else {
-                    continue;
-                };
-                let Some(info) = self.atlas.get_or_insert(
-                    device,
-                    queue,
-                    &mut self.font_system,
-                    &mut self.swash_cache,
-                    key,
-                ) else {
-                    continue;
-                };
-
-                let (texel_origin, texel_size) = pack_atlas_rect(info);
-                out.push(TextInstance {
-                    pos: text_run_origin(
-                        col,
-                        row,
-                        index,
-                        scale,
-                        info.placement,
-                        self.baseline,
-                        self.metrics,
-                        origin,
-                    ),
-                    dim: pack_dim([info.size[0] as f32, info.size[1] as f32]),
-                    texel_origin,
-                    texel_size,
-                    fg: pack_fg(run.color, info.kind),
-                    seq: run.seq,
-                    row: anchor | follow << FOLLOW_SHIFT,
-                });
-            }
+            self.push_run_glyphs(device, queue, run, follow, origin, anchor, 0.0, out);
         }
     }
 
@@ -2284,6 +2471,9 @@ impl TextPass {
     fn build_run_rects_into(&self, grid: &Grid, out: &mut Vec<RectInstance>) {
         out.clear();
         for run in grid.text_runs() {
+            if rides_a_pool(run, &self.riding_hosts) {
+                continue;
+            }
             let Some(bg) = run.bg else {
                 continue;
             };
@@ -2304,6 +2494,41 @@ impl TextPass {
                 seq: run.seq,
                 follow: follow_slot(grid, run.follow),
             });
+        }
+    }
+
+    /// Record the runs riding a compositing pool, each clipped to its host.
+    ///
+    /// Recorded after the host's composite rather than with the rest of the
+    /// chrome, so a label lands over the pooled surface it annotates instead of
+    /// being painted over by it. A no-op on a frame with no ride.
+    pub fn draw_riding_text_runs(&self, render_pass: &mut RenderPass<'_>) {
+        if self.riding_runs.is_empty() {
+            return;
+        }
+
+        for host in &self.riding_runs {
+            let [x, y, w, h] = host.scissor;
+            if w == 0 || h == 0 {
+                continue;
+            }
+            render_pass.set_scissor_rect(x, y, w, h);
+
+            // The opaque backing first, so the glyphs alpha-blend over it, the
+            // same order the base draw takes.
+            if !host.rects.is_empty() {
+                render_pass.set_pipeline(&self.rect_pipeline);
+                render_pass.set_bind_group(0, &self.static_globals_bind_group, &[0]);
+                render_pass.set_vertex_buffer(0, self.riding_rects.slice(..));
+                render_pass.draw(0..6, host.rects.clone());
+            }
+            if !host.glyphs.is_empty() {
+                render_pass.set_pipeline(&self.pipeline);
+                render_pass.set_bind_group(0, &self.static_globals_bind_group, &[0]);
+                render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.riding_instances.slice(..));
+                render_pass.draw(0..6, host.glyphs.clone());
+            }
         }
     }
 
@@ -3802,6 +4027,14 @@ fn follow_slot(grid: &Grid, follow: u32) -> u32 {
         .min(MAX_FOLLOW_SLOT)
 }
 
+/// Whether `run` is anchored to one of the pools compositing this frame.
+///
+/// Such a run draws shifted, after the composites, so the base draw leaves it
+/// out. The same split a riding panel makes, for the same reason.
+fn rides_a_pool(run: &TextRun, riding: &[u32]) -> bool {
+    run.anchor.is_some_and(|(host, _)| riding.contains(&host))
+}
+
 /// Bits the follow slot is shifted up by inside a glyph instance's row word.
 const FOLLOW_SHIFT: u32 = 16;
 
@@ -4446,7 +4679,7 @@ mod tests {
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
-        render::{row_uploads, CellMetrics, Frame, PoolOccluders, Scroll},
+        render::{row_uploads, AnchoredPanel, CellMetrics, Frame, PoolOccluders, Scroll},
     };
     use stoatty_protocol::command::{
         SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle,
@@ -6013,6 +6246,7 @@ mod tests {
             resolution,
             &frame(&Damage::Full),
             &[],
+            &[],
         );
 
         let mut second = build("aaaaaaaaaa");
@@ -6025,6 +6259,7 @@ mod tests {
             &second,
             resolution,
             &frame(&Damage::Partial(row_two)),
+            &[],
             &[],
         );
         let patched = (
@@ -6044,6 +6279,7 @@ mod tests {
             &second,
             resolution,
             &frame(&Damage::Full),
+            &[],
             &[],
         );
 
@@ -6322,6 +6558,7 @@ mod tests {
                 sketch_progress: &[],
             },
             &[],
+            &[],
         );
 
         let rows_of = |globals: Option<TextGlobals>| globals.expect("globals written").rows;
@@ -6401,6 +6638,7 @@ mod tests {
             resolution,
             &frame(&Damage::Full, 0),
             &[],
+            &[],
         );
         let mut last_row_only = vec![None; rows];
         last_row_only[rows - 1] = whole_row(20);
@@ -6411,6 +6649,7 @@ mod tests {
             resolution,
             &frame(&Damage::Partial(last_row_only), 1),
             &[],
+            &[],
         );
         pass.prepare(
             &device,
@@ -6418,6 +6657,7 @@ mod tests {
             &screen(1, after),
             resolution,
             &frame(&Damage::Partial(vec![None; rows]), 0),
+            &[],
             &[],
         );
 
@@ -6427,6 +6667,7 @@ mod tests {
             &screen(1, after),
             resolution,
             &frame(&Damage::Full, 0),
+            &[],
             &[],
         );
 
@@ -6516,8 +6757,8 @@ mod tests {
         let frame = chrome_frame();
         let grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
         assert_eq!(
             (pass.run_builds, pass.overlay_builds),
             (1, 1),
@@ -6525,12 +6766,149 @@ mod tests {
         );
 
         let moved = chrome_grid(vec![chrome_run("xx")], vec![chrome_overlay("xx")]);
-        pass.prepare(&device, &queue, &moved, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &moved, resolution, &frame, &[], &[]);
         assert_eq!(
             (pass.run_builds, pass.overlay_builds),
             (2, 2),
             "a grid the pass has not seen rebuilds both",
         );
+    }
+
+    /// A run anchored to a gliding pane draws after that pane composites,
+    /// shifted by its glide and clipped to it. The base draw leaves it out, or
+    /// the composite paints over it and the label vanishes mid-glide.
+    #[test]
+    fn an_anchored_run_leaves_the_base_draw_and_rides_shifted() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("riding run test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+
+        let mut anchored_run = chrome_run("x");
+        anchored_run.anchor = Some((3, 0.0));
+        anchored_run.bg = Some(Rgb::new(4, 5, 6));
+        let mut fixed_run = chrome_run("y");
+        fixed_run.row = 2 * 16;
+        let grid = chrome_grid(vec![anchored_run, fixed_run], Vec::new());
+
+        // Nothing composites, so both runs draw with the rest.
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        let settled = pass.text_run_count;
+        assert!(settled > 0, "both runs build glyphs");
+        assert!(pass.riding_runs.is_empty(), "and nothing rides");
+        assert_eq!(pass.rect_count, 1, "and the run's backing rect is drawn");
+        // The anchored run is declared first, so its glyphs lead the base
+        // buffer while nothing glides. Held to compare against the shifted one.
+        let unshifted = pass.text_run_build_scratch[0].pos[1];
+        let rect_unshifted = pass.run_rect_build_scratch[0].pos[1];
+
+        let anchored = [AnchoredPanel {
+            host: 3,
+            dy_px: -12.0,
+            scissor: [0, 0, 40, 40],
+        }];
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
+
+        assert!(
+            pass.text_run_count < settled,
+            "the base draw lost the anchored run's glyphs, {} of {settled}",
+            pass.text_run_count,
+        );
+        let [host] = pass.riding_runs.as_slice() else {
+            panic!(
+                "one gliding host takes one span, got {}",
+                pass.riding_runs.len()
+            );
+        };
+        assert_eq!(host.scissor, [0, 0, 40, 40], "clipped to its host");
+        assert!(!host.glyphs.is_empty(), "and carries the run's glyphs");
+        assert_eq!(host.rects.len(), 1, "and its backing rect");
+        assert_eq!(
+            pass.rect_count, 0,
+            "which the base draw gave up, or the backing paints twice",
+        );
+
+        let rect_riding = pass.riding_rect_scratch[host.rects.start as usize].pos[1];
+        assert_eq!(
+            rect_riding - rect_unshifted,
+            -12.0,
+            "the backing rides with the glyphs it backs",
+        );
+
+        let riding = pass.riding_glyph_scratch[host.glyphs.start as usize].pos[1];
+        assert_eq!(
+            riding - unshifted,
+            -12.0,
+            "the same run, shifted by its host's glide",
+        );
+    }
+
+    /// A run anchored to a pool that is not compositing this frame draws with
+    /// the rest, unshifted. Only a glide splits it out.
+    #[test]
+    fn a_run_whose_host_is_still_does_not_ride() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("still host test: no wgpu adapter available, skipping");
+            return;
+        };
+        let mut run = chrome_run("x");
+        run.anchor = Some((3, 0.0));
+        let grid = chrome_grid(vec![run], Vec::new());
+
+        // A different pool glides, so this run's host is not among them.
+        let elsewhere = [AnchoredPanel {
+            host: 9,
+            dy_px: -12.0,
+            scissor: [0, 0, 40, 40],
+        }];
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            [640.0, 480.0],
+            &chrome_frame(),
+            &[],
+            &elsewhere,
+        );
+
+        assert!(pass.riding_runs.is_empty(), "nothing rides");
+        assert!(pass.text_run_count > 0, "and the run draws with the rest");
+    }
+
+    /// A host that starts or stops gliding moves runs between the two sets, so
+    /// the base instances have to be rebuilt. Reusing them leaves the run drawn
+    /// twice, or not at all.
+    #[test]
+    fn a_host_starting_to_glide_rebuilds_the_base_runs() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("glide start test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+        let mut run = chrome_run("x");
+        run.anchor = Some((3, 0.0));
+        let grid = chrome_grid(vec![run], Vec::new());
+        let anchored = [AnchoredPanel {
+            host: 3,
+            dy_px: -12.0,
+            scissor: [0, 0, 40, 40],
+        }];
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        assert_eq!(pass.run_builds, 1, "a still frame reuses");
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
+        assert_eq!(pass.run_builds, 2, "the glide starting rebuilds");
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
+        assert_eq!(pass.run_builds, 2, "and mid-glide frames reuse again");
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        assert_eq!(pass.run_builds, 3, "the glide ending rebuilds too");
     }
 
     /// A label arrives as the box around it closes, not with the first pen
@@ -6551,7 +6929,7 @@ mod tests {
                 sketch_progress: progress,
                 ..chrome_frame()
             };
-            pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+            pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
             pass.last_sketch_alpha.clone()
         };
 
@@ -6598,12 +6976,12 @@ mod tests {
         let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
         grid.set_sketches(vec![test_sketch(7), test_sketch(5)]);
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
         assert_eq!(pass.run_builds, 1, "an unchanged mark list reuses");
 
         grid.set_sketches(vec![test_sketch(5)]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
         assert_eq!(
             pass.run_builds, 2,
             "dropping the mark ahead of it moved every later slot",
@@ -6633,8 +7011,8 @@ mod tests {
             "the fixture needs two grids that agree on their count",
         );
 
-        pass.prepare(&device, &queue, &first, resolution, &frame, &[]);
-        pass.prepare(&device, &queue, &second, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[]);
         assert_eq!(
             pass.text_run_count, 8,
             "the second grid's runs are the ones drawn",
@@ -6663,9 +7041,9 @@ mod tests {
             "the fixture needs two grids that agree on their count",
         );
 
-        pass.prepare(&device, &queue, &first, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[]);
         let one_glyph = pass.overlay_count;
-        pass.prepare(&device, &queue, &second, resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[]);
         assert_eq!(
             (one_glyph, pass.overlay_count),
             (1, 8),
@@ -6716,7 +7094,7 @@ mod tests {
             decoration_damage: &Damage::Full,
             ..frame
         };
-        pass.prepare(&device, &queue, &build(rect), resolution, &full, &[]);
+        pass.prepare(&device, &queue, &build(rect), resolution, &full, &[], &[]);
         let split = (
             row_len(&pass.plain_row_instances),
             row_len(&pass.region_row_instances),
@@ -6724,7 +7102,15 @@ mod tests {
 
         // An idle frame whose region only scrolled keeps the split it had.
         let scrolled = ScrollRegion { offset: 5, ..rect };
-        pass.prepare(&device, &queue, &build(scrolled), resolution, &frame, &[]);
+        pass.prepare(
+            &device,
+            &queue,
+            &build(scrolled),
+            resolution,
+            &frame,
+            &[],
+            &[],
+        );
         assert_eq!(
             (
                 row_len(&pass.plain_row_instances),
@@ -6736,7 +7122,7 @@ mod tests {
 
         // A wider rectangle takes cells from the plain side.
         let wider = ScrollRegion { width: 5, ..rect };
-        pass.prepare(&device, &queue, &build(wider), resolution, &frame, &[]);
+        pass.prepare(&device, &queue, &build(wider), resolution, &frame, &[], &[]);
         let resplit = (
             row_len(&pass.plain_row_instances),
             row_len(&pass.region_row_instances),
@@ -6793,6 +7179,7 @@ mod tests {
             resolution,
             &frame(&Damage::Full, 0),
             &[],
+            &[],
         );
 
         let mut scrolled = Grid::new(rows, 20);
@@ -6805,6 +7192,7 @@ mod tests {
             &scrolled,
             resolution,
             &frame(&Damage::Partial(last_row_only), 1),
+            &[],
             &[],
         );
         let rotated = pass.collect_grid_glyphs();
@@ -6819,6 +7207,7 @@ mod tests {
             &scrolled,
             resolution,
             &frame(&Damage::Full, 0),
+            &[],
             &[],
         );
         let fresh = fresh_pass.collect_grid_glyphs();
@@ -7393,6 +7782,7 @@ mod tests {
             resolution,
             &frame(&idle, &[0.0]),
             &[],
+            &[],
         );
         assert_eq!(
             pass.overlay_count, 2,
@@ -7412,6 +7802,7 @@ mod tests {
             resolution,
             &frame(&idle, &[0.0]),
             &[],
+            &[],
         );
         assert_eq!(
             pass.overlay_count, 2,
@@ -7425,6 +7816,7 @@ mod tests {
             &grid,
             resolution,
             &frame(&idle, &[0.5]),
+            &[],
             &[],
         );
         assert_eq!(
@@ -7444,6 +7836,7 @@ mod tests {
             &grid,
             resolution,
             &frame(&idle, &[0.0, 0.0]),
+            &[],
             &[],
         );
         assert_eq!(
@@ -7526,6 +7919,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&idle, &popovers),
+                &[],
                 &[],
             );
             pass.overlay_instance_scratch
@@ -7621,6 +8015,7 @@ mod tests {
             resolution,
             &frame(&idle, &[0.0]),
             &[],
+            &[],
         );
         let unscrolled = tops(&pass);
         assert_eq!(
@@ -7640,6 +8035,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&idle, &[scroll]),
+                &[],
                 &[],
             );
         }
@@ -7776,6 +8172,7 @@ mod tests {
             resolution,
             &frame(&full_damage),
             &[],
+            &[],
         );
 
         let iterations = 50;
@@ -7787,6 +8184,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&full_damage),
+                &[],
                 &[],
             );
         }
@@ -7800,6 +8198,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&idle_damage),
+                &[],
                 &[],
             );
         }
@@ -7853,6 +8252,7 @@ mod tests {
             resolution,
             &frame(no_scroll, &Damage::Full),
             &[],
+            &[],
         );
 
         // A changing scroll forces the full grid-glyph build -- every glyph's atlas
@@ -7874,6 +8274,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(scroll, &idle_damage),
+                &[],
                 &[],
             );
         }

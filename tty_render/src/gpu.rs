@@ -573,8 +573,15 @@ impl Renderer {
             &mut self.occluders,
         );
 
-        self.text
-            .prepare(device, queue, grid, resolution, frame, &self.occluders);
+        self.text.prepare(
+            device,
+            queue,
+            grid,
+            resolution,
+            frame,
+            &self.occluders,
+            anchored,
+        );
         self.panel
             .prepare(device, queue, grid, anchored, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
@@ -648,6 +655,7 @@ impl Renderer {
     pub(crate) fn record_riding_panels(&self, render_pass: &mut RenderPass<'_>) {
         self.panel.draw_riding_under(render_pass);
         self.sketch.draw_riding(render_pass);
+        self.text.draw_riding_text_runs(render_pass);
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
     }
 
