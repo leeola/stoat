@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
+use stoat_action::registry;
 use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
@@ -593,6 +594,30 @@ impl Keymap {
         (keymap, warnings)
     }
 
+    /// The bound action names no registered action answers to, sorted.
+    ///
+    /// A binding whose action name the registry does not know is a dead key:
+    /// the press resolves to nothing and the editor does not move. Renaming an
+    /// action leaves every user config that still names the old verb in that
+    /// state, so the keymap has to be able to say which names those are.
+    ///
+    /// Names are deduped, because one stale verb bound from six keys is one
+    /// thing for the user to fix, not six.
+    pub fn unknown_actions(&self) -> Vec<String> {
+        let mut unknown: HashSet<String> = HashSet::new();
+        for binding in &self.bindings {
+            for action in binding.actions.iter() {
+                if is_unknown_action(&action.name) {
+                    unknown.insert(action.name.clone());
+                }
+            }
+        }
+
+        let mut unknown: Vec<String> = unknown.into_iter().collect();
+        unknown.sort();
+        unknown
+    }
+
     pub fn lookup(
         &self,
         state: &dyn KeymapState,
@@ -721,6 +746,18 @@ impl Keymap {
         }
         results
     }
+}
+
+/// Reports whether `name` is an action name nothing will run.
+///
+/// `SetMode` and `SetVar` are known despite being absent from the registry:
+/// the dispatch loop intercepts both by name before any registry lookup
+/// happens, so they are bindable and the registry never carries them.
+///
+/// Free rather than a method, because a caller that already holds one action
+/// name needs the same answer with no [`Keymap`] in hand.
+pub(crate) fn is_unknown_action(name: &str) -> bool {
+    !matches!(name, "SetMode" | "SetVar") && registry::lookup(name).is_none()
 }
 
 fn predicate_eq_matches(pred: &Predicate, field: &str, value: &str) -> bool {
@@ -1636,6 +1673,48 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let (_, warnings) = Keymap::compile_with_warnings(&config);
         assert!(warnings.is_empty(), "shipped config warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn default_keymap_names_only_registered_actions() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        assert_eq!(
+            keymap.unknown_actions(),
+            Vec::<String>::new(),
+            "shipped config binds unknown actions"
+        );
+    }
+
+    #[test]
+    fn stale_picker_verbs_are_unknown() {
+        let keymap = Keymap::compile(&parse_config(
+            r#"on key {
+                modal == "workspace_picker" {
+                    Down -> WorkspacePickerNext();
+                    Tab -> WorkspacePickerComplete();
+                }
+            }"#,
+        ));
+        assert_eq!(
+            keymap.unknown_actions(),
+            ["WorkspacePickerComplete", "WorkspacePickerNext"],
+            "renamed picker verbs must read as unknown"
+        );
+    }
+
+    #[test]
+    fn set_mode_and_set_var_are_known() {
+        let keymap = Keymap::compile(&parse_config(
+            r#"on key {
+                i -> SetMode(insert);
+                x -> SetVar(sidebar, on);
+            }"#,
+        ));
+        assert_eq!(
+            keymap.unknown_actions(),
+            Vec::<String>::new(),
+            "SetMode and SetVar bypass the registry"
+        );
     }
 
     #[test]
