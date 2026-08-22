@@ -2,7 +2,10 @@ use crate::{
     action_handlers::{self, read_string_via_host},
     app::{Stoat, UpdateEffect},
     code_index::{build, nav},
-    render::hover::{HoverFrame, HoverPopup},
+    render::{
+        hover::{HoverFrame, HoverPopup},
+        walkthrough::EXIT_MS,
+    },
     walkthrough::{
         self,
         run::{part, WalkthroughRun},
@@ -11,7 +14,10 @@ use crate::{
 };
 use codegraph::{EdgeKind, SymbolKey};
 use ratatui::{layout::Rect, style::Style};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use stoat_text::Rope;
 use stoatty_protocol::command::SketchTiming;
 
@@ -142,6 +148,36 @@ fn refresh_narration(stoat: &mut Stoat) -> bool {
     true
 }
 
+/// Hand the stop the reader is leaving over to be un-drawn.
+///
+/// Its parts are re-declared with the exit phase for a moment, then dropped. A
+/// slide that simply stopped being re-declared would vanish between two frames,
+/// which reads as a glitch rather than as the reader moving on.
+///
+/// A step that stayed put retires nothing. The marks are the same marks, and
+/// un-drawing them only to draw them again reads as a flicker.
+fn retire_slide(stoat: &mut Stoat) {
+    let parts = match stoat.active_workspace_mut().walkthrough.as_mut() {
+        Some(run) => std::mem::take(&mut run.last_parts),
+        None => return,
+    };
+    if parts.marks.is_empty() && parts.runs.is_empty() {
+        return;
+    }
+
+    let now = stoat.executor.now();
+    stoat.active_workspace_mut().walkthrough_exit = Some((parts, now));
+
+    // An exit that ends while nothing else asks for a frame leaves the retired
+    // parts on screen until the next key press, so a timer retires them on an
+    // idle screen.
+    let exit = Duration::from_millis(u64::from(EXIT_MS));
+    let timer = stoat.executor.timer(exit);
+    stoat.walkthrough_exit_timer = Some(stoat.spawn_woken(async move {
+        timer.await;
+    }));
+}
+
 /// Move `delta` stops, lay the trail between the two, and jump to where that
 /// lands.
 ///
@@ -163,6 +199,7 @@ fn step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     }
 
     let to = current_anchor(run_of(stoat));
+    retire_slide(stoat);
     let note = install_step_trail(stoat, &from, &to);
     jump_to_stop(stoat, note)
 }
@@ -193,6 +230,13 @@ fn step_annotation(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     }
 
     let to = current_anchor(run_of(stoat));
+    // An annotation step within one file leaves the same marks on the same
+    // code, so nothing retires: un-drawing them to draw them again reads as a
+    // flicker. A step into another file leaves marks that no longer describe
+    // what is on screen.
+    if to.path != from.path {
+        retire_slide(stoat);
+    }
     let note = install_step_trail(stoat, &from, &to);
 
     match run_of(stoat).current_annotation().is_some() {

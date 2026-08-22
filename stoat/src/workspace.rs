@@ -23,7 +23,7 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
-    render::layout::split_pane_status,
+    render::{layout::split_pane_status, walkthrough::SlideParts},
     run::{RunId, RunState},
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermReturnFocus, TermSession},
@@ -45,7 +45,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use stoat_language::{LanguageRegistry, Tree};
 use stoat_scheduler::{Executor, Task};
@@ -228,6 +228,16 @@ pub struct Workspace {
     /// the marked anchors and, once both ends are set, the cached path that
     /// [`crate::code_index::nav`]'s trail actions step along.
     pub(crate) trail: Option<TrailState>,
+    /// The parts of the stop the reader just left, and when they started to go.
+    ///
+    /// A slide that simply stopped being re-declared would vanish between two
+    /// frames, which reads as a glitch rather than as the reader moving on.
+    /// These are re-declared with the exit phase until the stamp runs out.
+    ///
+    /// The emitted form rather than the geometry, because a retiring mark
+    /// cannot be recomputed: it was measured against the old scroll position,
+    /// and after a jump to another file against another buffer.
+    pub(crate) walkthrough_exit: Option<(SlideParts, Instant)>,
     /// Active three-way conflict resolve session (if any). Owned at the
     /// workspace level so a resolve outlives the pane showing it. Dropped on
     /// `CloseConflict`.
@@ -381,6 +391,7 @@ impl Workspace {
             #[cfg(test)]
             changed_ranges_recomputes: 0,
             trail: None,
+            walkthrough_exit: None,
             conflict: None,
             commits: None,
             review_walk: None,

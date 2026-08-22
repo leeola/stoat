@@ -26,15 +26,12 @@ use crate::{
         },
     },
 };
-use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-use std::collections::HashMap;
-use stoat_widgets::{
-    sketch::{SketchEllipse, SketchLine, SketchRect},
-    text_run::TextRun,
-    ApcScene,
-};
+use ratatui::{buffer::Buffer, layout::Rect};
+use std::{collections::HashMap, time::Duration};
+use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{
-    SketchBounds, SketchEnd, SketchFill, SketchFillStyle, SketchSide, SketchStyle, SketchTiming,
+    self, SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchFillStyle,
+    SketchPhase, SketchShape, SketchSide, SketchStyle, SketchTiming, TextRunCommand,
 };
 
 /// The protocol version that decodes a sketch. An older stoatty ignores the
@@ -64,6 +61,12 @@ const LINK_WIDTH: u16 = 48;
 /// Corner rounding of a label box, in sixteenths of a cell.
 const LABEL_RADIUS: u8 = 4;
 
+/// How long a retiring slide takes to un-draw itself.
+///
+/// Short enough that a reader stepping quickly is not waiting on it, long
+/// enough that the marks read as being taken back rather than cut.
+pub(crate) const EXIT_MS: u16 = 140;
+
 /// Emit the current stop's marks, connectors, and label boxes.
 ///
 /// A no-op with no walkthrough playing, under a terminal that draws no marks,
@@ -74,6 +77,14 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     }
     let Some(input) = measure(stoat) else {
         return;
+    };
+
+    // A retiring slide holds the screen while it goes, and the arriving one
+    // waits that out rather than drawing over it.
+    let retiring = retire(stoat, scene);
+    let input = SlideInput {
+        start_offset_ms: input.start_offset_ms + if retiring { EXIT_MS } else { 0 },
+        ..input
     };
 
     let slide = slide::layout(&input);
@@ -89,12 +100,64 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|annotation| (annotation.key, annotation.label_lines.clone()))
             .collect(),
         anchor: pool_anchor(stoat),
-        pane: input.pane,
         theme: &stoat.theme,
+        declared: SlideParts::default(),
     };
 
-    painter.focus(&slide, buf, scene);
-    painter.callouts(&slide, buf, scene);
+    // The painter borrows the theme, so it is scoped to the emit and hands back
+    // only what the run has to keep.
+    let declared = {
+        let mut painter = painter;
+        painter.focus(&slide, buf, scene);
+        painter.callouts(&slide, buf, scene);
+        painter.declared
+    };
+
+    if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
+        run.last_parts = declared;
+    }
+}
+
+/// Re-declare the retiring slide with the exit phase, and report whether one is
+/// still going.
+///
+/// The terminal restarts a mark's clock when its phase changes and only then,
+/// so the same ids draw themselves off without new ones and without the two
+/// runs interfering.
+fn retire(stoat: &mut Stoat, scene: &mut ApcScene) -> bool {
+    let now = stoat.executor.now();
+    let Some((parts, since)) = stoat.active_workspace().walkthrough_exit.clone() else {
+        return false;
+    };
+
+    if now.saturating_duration_since(since) >= Duration::from_millis(u64::from(EXIT_MS)) {
+        stoat.active_workspace_mut().walkthrough_exit = None;
+        return false;
+    }
+
+    let timing = SketchTiming {
+        delay_ms: 0,
+        duration_ms: EXIT_MS,
+        easing: SketchEasing::Smoothstep,
+        phase: SketchPhase::Exit,
+    };
+    for mark in &parts.marks {
+        command::encode_sketch_into(
+            scene.buffer(),
+            &SketchCommand {
+                timing,
+                ..mark.clone()
+            },
+        );
+    }
+    // The label text follows its box, so it fades with the box rather than
+    // vanishing the moment the box starts to go. It has to be re-declared for
+    // that, or it is simply absent from the frame.
+    for run in &parts.runs {
+        command::encode_text_run_into(scene.buffer(), run);
+    }
+
+    true
 }
 
 /// The ids one stop's parts draw under.
@@ -166,8 +229,23 @@ struct Painter<'a> {
     /// The pool the marks ride, so they glide with the pane rather than
     /// staying pinned to the screen.
     anchor: Option<(u32, f32)>,
-    pane: Rect,
     theme: &'a crate::theme::Theme,
+    /// What this frame declared, kept so a step can send it back with the exit
+    /// phase.
+    ///
+    /// A retiring mark cannot be recomputed. Its geometry was measured against
+    /// the old scroll position, and after a jump to another file against
+    /// another buffer, so the emitted form is the only honest record.
+    declared: SlideParts,
+}
+
+/// One slide's emitted parts, as they went on the wire.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub(crate) struct SlideParts {
+    pub(crate) marks: Vec<SketchCommand>,
+    /// The label text, which fades with the box it follows rather than
+    /// vanishing the moment the box starts to go.
+    pub(crate) runs: Vec<TextRunCommand>,
 }
 
 /// One part's stroke: which mark it is, in what color, at what weight, and
@@ -183,8 +261,20 @@ struct Stroke {
 }
 
 impl Painter<'_> {
+    /// Record and encode one mark.
+    fn declare(&mut self, command: SketchCommand, scene: &mut ApcScene) {
+        command::encode_sketch_into(scene.buffer(), &command);
+        self.declared.marks.push(command);
+    }
+
+    /// Record and encode one label run.
+    fn declare_run(&mut self, command: TextRunCommand, scene: &mut ApcScene) {
+        command::encode_text_run_into(scene.buffer(), &command);
+        self.declared.runs.push(command);
+    }
+
     /// Emit the focus mark and the connector to the card.
-    fn focus(&self, slide: &Slide, buf: &mut Buffer, scene: &mut ApcScene) {
+    fn focus(&mut self, slide: &Slide, buf: &mut Buffer, scene: &mut ApcScene) {
         let Some(mark) = slide.focus else {
             return;
         };
@@ -214,7 +304,7 @@ impl Painter<'_> {
     }
 
     /// Emit each annotation's mark, connector, and label box.
-    fn callouts(&self, slide: &Slide, buf: &mut Buffer, scene: &mut ApcScene) {
+    fn callouts(&mut self, slide: &Slide, buf: &mut Buffer, scene: &mut ApcScene) {
         for callout in &slide.callouts {
             let Some(&(mark_id, link_id, label_id)) = self.ids.annotations.get(callout.key) else {
                 continue;
@@ -230,6 +320,7 @@ impl Painter<'_> {
 
             // The box before its connector, so the line has something to
             // arrive at by the time it is drawn.
+            let lines = self.labels.get(&callout.key).cloned().unwrap_or_default();
             self.label(
                 callout.label,
                 Stroke {
@@ -238,7 +329,7 @@ impl Painter<'_> {
                     fill: Some(self.colors.fill),
                     ..stroke
                 },
-                self.labels.get(&callout.key).map_or(&[][..], Vec::as_slice),
+                &lines,
                 buf,
                 scene,
             );
@@ -260,59 +351,62 @@ impl Painter<'_> {
     }
 
     /// Emit one mark, as the ring or box its shape says.
-    fn mark(&self, mark: Mark, stroke: Stroke, buf: &mut Buffer, scene: &mut ApcScene) {
-        let style = mark_style(stroke);
-        // The layout works in surface coordinates, and the widget shifts by the
-        // area it renders into, so a zero-origin area passes them through.
-        let area = Rect::new(0, 0, self.pane.width, self.pane.height);
-
-        match mark {
-            Mark::Ellipse(rect) => SketchEllipse {
-                id: stroke.id,
-                style,
-                timing: stroke.timing,
-                bounds: bounds_of(rect),
-                anchor: self.anchor,
-            }
-            .render(area, buf, scene),
-            Mark::Rect(rect) => SketchRect {
-                id: stroke.id,
-                style,
-                timing: stroke.timing,
+    ///
+    /// The layout already works in surface coordinates, so the shape goes on
+    /// the wire as it comes out.
+    fn mark(&mut self, mark: Mark, stroke: Stroke, _buf: &mut Buffer, scene: &mut ApcScene) {
+        let shape = match mark {
+            Mark::Ellipse(rect) => SketchShape::Ellipse(bounds_of(rect)),
+            Mark::Rect(rect) => SketchShape::Rect {
                 bounds: bounds_of(rect),
                 radius: 0,
                 fill: None,
+            },
+        };
+        self.declare(
+            SketchCommand {
+                id: stroke.id,
+                style: mark_style(stroke),
+                timing: stroke.timing,
+                shape,
                 anchor: self.anchor,
-            }
-            .render(area, buf, scene),
-        }
+            },
+            scene,
+        );
     }
 
     /// Emit a connector between two marks.
     ///
     /// Both ends name a mark, so the connector tracks them as they move and
     /// leaves each on the side facing the other.
-    fn link(&self, stroke: Stroke, from: u32, to: u32, buf: &mut Buffer, scene: &mut ApcScene) {
+    fn link(
+        &mut self,
+        stroke: Stroke,
+        from: u32,
+        to: u32,
+        _buf: &mut Buffer,
+        scene: &mut ApcScene,
+    ) {
         let end = |id| SketchEnd::Component {
             id,
             side: SketchSide::Auto,
         };
-        SketchLine {
-            id: stroke.id,
-            style: SketchStyle {
-                width: LINK_WIDTH,
-                ..mark_style(stroke)
+        self.declare(
+            SketchCommand {
+                id: stroke.id,
+                style: SketchStyle {
+                    width: LINK_WIDTH,
+                    ..mark_style(stroke)
+                },
+                timing: stroke.timing,
+                shape: SketchShape::Line {
+                    from: end(from),
+                    to: end(to),
+                    bend: 0,
+                    heads: 0,
+                },
+                anchor: self.anchor,
             },
-            timing: stroke.timing,
-            from: end(from),
-            to: end(to),
-            bend: 0,
-            heads: 0,
-            anchor: self.anchor,
-        }
-        .render(
-            Rect::new(0, 0, self.pane.width, self.pane.height),
-            buf,
             scene,
         );
     }
@@ -323,7 +417,7 @@ impl Painter<'_> {
     /// and fill, both drawn by the terminal. Without the clear the code beneath
     /// shows through wherever the fill is not opaque.
     fn label(
-        &self,
+        &mut self,
         box_: Rect,
         stroke: Stroke,
         lines: &[String],
@@ -332,57 +426,56 @@ impl Painter<'_> {
     ) {
         crate::render::clear_themed(box_, buf, self.theme);
 
-        SketchRect {
-            id: stroke.id,
-            style: mark_style(stroke),
-            timing: stroke.timing,
-            bounds: SketchBounds {
-                x: 0,
-                y: 0,
-                w: box_.width * 16,
-                h: box_.height * 16,
+        self.declare(
+            SketchCommand {
+                id: stroke.id,
+                style: mark_style(stroke),
+                timing: stroke.timing,
+                shape: SketchShape::Rect {
+                    bounds: SketchBounds {
+                        x: box_.x as i16 * 16,
+                        y: box_.y as i16 * 16,
+                        w: box_.width * 16,
+                        h: box_.height * 16,
+                    },
+                    radius: LABEL_RADIUS,
+                    fill: stroke.fill.map(|color| SketchFill {
+                        color,
+                        alpha: 255,
+                        style: SketchFillStyle::Solid,
+                    }),
+                },
+                anchor: self.anchor,
             },
-            radius: LABEL_RADIUS,
-            fill: stroke.fill.map(|color| SketchFill {
-                color,
-                alpha: 255,
-                style: SketchFillStyle::Solid,
-            }),
-            anchor: self.anchor,
-        }
-        .render(box_, buf, scene);
+            scene,
+        );
 
-        self.label_text(box_, stroke, lines, buf, scene);
+        self.label_text(box_, stroke, lines, scene);
     }
 
     /// A label's own text, drawn inside its box.
     ///
     /// The runs carry the box's id, so a label fades in as the box that holds
     /// it closes rather than sitting there while the pen draws.
-    fn label_text(
-        &self,
-        box_: Rect,
-        stroke: Stroke,
-        lines: &[String],
-        buf: &mut Buffer,
-        scene: &mut ApcScene,
-    ) {
+    fn label_text(&mut self, box_: Rect, stroke: Stroke, lines: &[String], scene: &mut ApcScene) {
         for (offset, line) in lines.iter().enumerate() {
             let row = box_.y + 1 + offset as u16;
             if row + 1 >= box_.y + box_.height {
                 break;
             }
-            TextRun {
-                col: 0,
-                row: 0,
-                scale: TEXT_SCALE_POPUP,
-                color: stroke.color,
-                bg: None,
-                text: line,
-                follow: stroke.id,
-                anchor: self.anchor,
-            }
-            .render(Rect::new(box_.x + 1, row, 1, 1), buf, scene);
+            self.declare_run(
+                TextRunCommand {
+                    col: (box_.x as i16 + 1) * 16,
+                    row: row as i16 * 16,
+                    scale: TEXT_SCALE_POPUP,
+                    color: stroke.color,
+                    bg: None,
+                    text: line.clone(),
+                    follow: stroke.id,
+                    anchor: self.anchor,
+                },
+                scene,
+            );
         }
     }
 }
@@ -592,6 +685,7 @@ fn line_ends(
 
 #[cfg(test)]
 mod tests {
+    use super::EXIT_MS;
     use crate::{
         action_handlers::walkthrough::open,
         app::Stoat,
@@ -603,7 +697,7 @@ mod tests {
         },
     };
     use std::path::PathBuf;
-    use stoatty_protocol::command::{self, Command, SketchCommand, SketchShape};
+    use stoatty_protocol::command::{self, Command, SketchCommand, SketchPhase, SketchShape};
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
 
@@ -672,11 +766,15 @@ mod tests {
     ///
     /// The frame runs [`render_slide`] itself, so this reads what it wrote
     /// rather than calling it again, which would emit every part twice.
-    fn sketches(h: &mut TestHarness) -> Vec<SketchCommand> {
+    fn frame(h: &mut TestHarness) -> Vec<Command> {
         h.stoat.render();
         let bytes = h.stoat.apc_scene.bytes().to_vec();
 
         command::decode_stream(&bytes)
+    }
+
+    fn sketches(h: &mut TestHarness) -> Vec<SketchCommand> {
+        frame(h)
             .into_iter()
             .filter_map(|command| match command {
                 Command::Sketch(sketch) => Some(sketch),
@@ -900,6 +998,132 @@ mod tests {
             alphas(&mut h),
             [255, 110],
             "the one walked onto stays bright and the other recedes",
+        );
+    }
+
+    /// A slide that simply stopped being re-declared would vanish between two
+    /// frames, since the scene's leading reset clears whatever a frame leaves
+    /// out. Stepping sends the old parts back with the exit phase instead.
+    #[test]
+    fn stepping_un_draws_the_stop_it_leaves() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+
+        let leaving = part_id(&h, part::FOCUS_MARK);
+        // The first frame is what records the parts a step then retires.
+        sketches(&mut h);
+
+        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        let arriving = part_id(&h, part::FOCUS_MARK);
+        let emitted = sketches(&mut h);
+
+        let retiring = emitted
+            .iter()
+            .find(|sketch| sketch.id == leaving)
+            .expect("the stop being left is re-declared");
+        assert_eq!(
+            retiring.timing.phase,
+            SketchPhase::Exit,
+            "running its stroke back to nothing",
+        );
+        assert_eq!(retiring.timing.duration_ms, EXIT_MS);
+
+        let entering = emitted
+            .iter()
+            .find(|sketch| sketch.id == arriving)
+            .expect("and the stop being arrived at draws");
+        assert_eq!(
+            entering.timing.phase,
+            SketchPhase::Enter,
+            "the new stop draws itself on",
+        );
+        assert!(
+            entering.timing.delay_ms >= EXIT_MS,
+            "after the old one is gone, got {}",
+            entering.timing.delay_ms,
+        );
+    }
+
+    /// The exit is over after its own duration, and the parts go with it. Left
+    /// declared they would sit there half-drawn.
+    #[test]
+    fn a_retired_slide_is_gone_once_its_exit_runs_out() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+        let leaving = part_id(&h, part::FOCUS_MARK);
+        sketches(&mut h);
+
+        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        assert!(
+            sketches(&mut h).iter().any(|sketch| sketch.id == leaving),
+            "the frame right after the step still un-draws it",
+        );
+
+        h.advance_clock(std::time::Duration::from_millis(u64::from(EXIT_MS) + 10));
+        assert!(
+            !sketches(&mut h).iter().any(|sketch| sketch.id == leaving),
+            "and a later frame has let it go",
+        );
+        assert!(
+            h.stoat.active_workspace().walkthrough_exit.is_none(),
+            "with nothing left holding it",
+        );
+    }
+
+    /// An annotation step within one file leaves the same marks on the same
+    /// code. Un-drawing them only to draw them again reads as a flicker.
+    #[test]
+    fn walking_within_a_file_retires_nothing() {
+        let mut h = harness(&[(1, "one")]);
+        open(&mut h.stoat, "tour");
+        sketches(&mut h);
+
+        crate::action_handlers::walkthrough::next_annotation(&mut h.stoat);
+        assert!(
+            h.stoat.active_workspace().walkthrough_exit.is_none(),
+            "nothing retires",
+        );
+        assert!(
+            sketches(&mut h)
+                .iter()
+                .all(|sketch| sketch.timing.phase == SketchPhase::Enter),
+            "and every mark still draws itself on",
+        );
+    }
+
+    /// A label is declared to fade in with the box it sits in. Dropped from the
+    /// exit frame it disappears at once, leaving the box to run its stroke back
+    /// around where the text was.
+    #[test]
+    fn a_retiring_label_goes_with_its_box() {
+        let mut h = harness(&[(1, "one")]);
+        open(&mut h.stoat, "tour");
+        sketches(&mut h);
+
+        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        let emitted = frame(&mut h);
+
+        let exiting: Vec<u32> = emitted
+            .iter()
+            .filter_map(|command| match command {
+                Command::Sketch(sketch) if sketch.timing.phase == SketchPhase::Exit => {
+                    Some(sketch.id)
+                },
+                _ => None,
+            })
+            .collect();
+        let label = emitted
+            .iter()
+            .find_map(|command| match command {
+                Command::TextRun(run) if run.text == "one" => Some(run),
+                _ => None,
+            })
+            .expect("the label of the stop being left is re-declared");
+
+        assert!(
+            exiting.contains(&label.follow),
+            "fading out with the box it sits in, got follow {} of exiting {exiting:?}",
+            label.follow,
         );
     }
 

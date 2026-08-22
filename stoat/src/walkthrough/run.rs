@@ -1,5 +1,6 @@
 use crate::{
     badge::{Anchor, Badge, BadgeSource, BadgeState},
+    render::walkthrough::SlideParts,
     walkthrough::{Annotation, Stop, Walkthrough},
 };
 
@@ -18,6 +19,12 @@ pub(crate) struct WalkthroughRun {
     /// at its head. That is what gives a step away from the focus somewhere to
     /// have come from, and a step back somewhere to return to.
     annotation_idx: Option<usize>,
+    /// What the last frame declared for the stop the reader is on.
+    ///
+    /// Held so a step has something to un-draw. Replaced every frame, so it
+    /// always names the parts as they were last seen rather than as they were
+    /// first drawn.
+    pub(crate) last_parts: SlideParts,
     /// Where this run's mark ids start.
     ///
     /// The terminal latches a mark's timing when its id first appears, so a
@@ -65,6 +72,7 @@ impl WalkthroughRun {
             walkthrough,
             stop_idx: 0,
             annotation_idx: None,
+            last_parts: SlideParts::default(),
             id_base: ID_SPACE + (run << 16),
         })
     }

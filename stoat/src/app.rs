@@ -993,6 +993,10 @@ pub struct Stoat {
     /// idle screen retires the message without waiting for input.
     /// Replacing it cancels the prior timer.
     pub(crate) pending_message_expiry: Option<stoat_scheduler::Task<()>>,
+    /// The timer that wakes the run loop when a retiring walkthrough slide has
+    /// finished un-drawing itself, so an idle screen drops it without a key
+    /// press. Replacing it cancels the prior timer.
+    pub(crate) walkthrough_exit_timer: Option<stoat_scheduler::Task<()>>,
     /// When a modified wheel notch last ran a keymap binding, on the
     /// scheduler clock.
     ///
@@ -2077,6 +2081,7 @@ impl Stoat {
             pending_message: None,
             pending_message_deadline: None,
             pending_message_expiry: None,
+            walkthrough_exit_timer: None,
             wheel_binding_last: None,
             pending_count: None,
             pending_find: None,
