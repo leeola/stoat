@@ -365,19 +365,57 @@ pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: 
     });
 }
 
+/// Land an agent's proposed edits as unsaved buffer edits over their own base.
+///
+/// Each proposal replaces its file's buffer content, and the base texts become
+/// a [`DiffBase::Memory`] override, so `:diff` shows the proposal against what
+/// the agent read. The first edited file opens with the latch armed.
+///
+/// A proposal exists nowhere in git, which is what separates this from the
+/// commit openers. No revision holds what the agent read, so the base travels
+/// with the edits instead.
+///
+/// Landing the proposals as ordinary unsaved edits is what gives the reader the
+/// accept and reject verbs for free. Saving writes a file, `:reload` throws it
+/// away, and undo backs one file out at a time, because each proposal is a
+/// single edit.
+///
+/// Does nothing when no proposal opens.
 pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::AgentEdit]) {
-    let proposals: Vec<crate::review_session::AgentEditProposal> = edits
-        .iter()
-        .map(|e| crate::review_session::AgentEditProposal {
-            path: e.path.clone(),
-            base_text: e.base_text.clone(),
-            proposed_text: e.proposed_text.clone(),
-        })
-        .collect();
-    let Some(session) = scan_agent_edits(stoat, &proposals) else {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let mut base_texts: std::collections::HashMap<std::path::PathBuf, Arc<String>> =
+        std::collections::HashMap::new();
+    let mut first: Option<std::path::PathBuf> = None;
+
+    for edit in edits {
+        // Join rather than test for absoluteness, since an absolute proposal
+        // path comes back from the join unchanged.
+        let path = git_root.join(&edit.path);
+        let Some(buffer_id) = super::file::open_file(stoat, &path) else {
+            continue;
+        };
+        let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+            continue;
+        };
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            let len = guard.snapshot.visible_text.len();
+            guard.edit(0..len, &edit.proposed_text);
+        }
+
+        base_texts.insert(path.clone(), edit.base_text.clone());
+        first.get_or_insert(path);
+    }
+
+    let Some(first) = first else {
         return;
     };
-    install_review_session(stoat, session);
+    stoat
+        .active_workspace_mut()
+        .set_diff_base(Some(DiffBase::Memory { files: base_texts }));
+    super::file::open_file(stoat, &first);
+    enter_diff_view(stoat);
+    stoat.set_status("agent edits: save accepts, :reload rejects");
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -2387,6 +2425,133 @@ mod tests {
         path::{Path, PathBuf},
         sync::Arc,
     };
+
+    /// The text of the buffer open at `path`, which lets a test read a proposal
+    /// that landed in a file the pane no longer shows.
+    fn buffer_text_at(h: &TestHarness, path: &str) -> Option<String> {
+        let ws = h.stoat.active_workspace();
+        let id = ws.buffers.id_for_path(Path::new(path))?;
+        let shared = ws.buffers.get(id)?;
+        let text = shared.read().expect("buffer poisoned").rope().to_string();
+        Some(text)
+    }
+
+    /// The base texts a [`DiffBase::Memory`] override carries, by path.
+    fn memory_base(h: &TestHarness) -> Vec<(String, String)> {
+        let Some(DiffBase::Memory { files }) = h.stoat.active_workspace().diff_base() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, String)> = files
+            .iter()
+            .map(|(path, text)| (path.display().to_string(), text.to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A proposal lands as an unsaved edit on the real file's buffer rather
+    /// than in a screen of its own, so the editor's own verbs accept and reject
+    /// it.
+    #[test]
+    fn agent_edits_land_as_unsaved_buffer_edits() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_fs().insert_file("/work/a.rs", b"old\n");
+        h.fake_fs().insert_file("/work/b.rs", b"stale\n");
+
+        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n"), ("b.rs", "stale\n", "fresh\n")]);
+
+        assert_eq!(
+            (
+                buffer_text_at(&h, "/work/a.rs"),
+                buffer_text_at(&h, "/work/b.rs")
+            ),
+            (Some("new\n".to_string()), Some("fresh\n".to_string())),
+            "both proposals are sitting in their files, unsaved",
+        );
+    }
+
+    /// The base travels with the proposals, since no revision holds what the
+    /// agent read. It is keyed by absolute path, which is what the diff reads
+    /// back.
+    #[test]
+    fn agent_edits_install_their_own_base() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_fs().insert_file("/work/a.rs", b"old\n");
+
+        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n")]);
+
+        assert_eq!(
+            memory_base(&h),
+            vec![("/work/a.rs".to_string(), "old\n".to_string())],
+            "the agent's own base is what the proposal diffs against",
+        );
+    }
+
+    /// The landing matches the commit openers. The first changed file opens
+    /// with the latch armed, and a badge names the two verbs.
+    #[test]
+    fn agent_edits_land_on_the_first_file_with_the_latch_armed() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_fs().insert_file("/work/a.rs", b"old\n");
+        h.fake_fs().insert_file("/work/b.rs", b"stale\n");
+
+        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n"), ("b.rs", "stale\n", "fresh\n")]);
+
+        let panes = &h.stoat.active_workspace().panes;
+        assert_eq!(
+            (
+                crate::test_harness::editor::focused_buffer_path(&h.stoat),
+                panes.pane(panes.focus()).diff_mode,
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                PathBuf::from("/work/a.rs"),
+                true,
+                Some("agent edits: save accepts, :reload rejects"),
+            ),
+            "the first proposal is on screen, latched, with the verbs named",
+        );
+    }
+
+    /// Each proposal is one edit, so one undo backs one file out. That is the
+    /// fine-grained reject, and it costs no verb of its own.
+    #[test]
+    fn one_undo_rejects_one_file() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_fs().insert_file("/work/a.rs", b"old\n");
+
+        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+
+        assert_eq!(
+            buffer_text_at(&h, "/work/a.rs"),
+            Some("old\n".to_string()),
+            "the file is back to what the agent read",
+        );
+    }
+
+    /// A proposal for a file that does not exist yet opens empty and reads as a
+    /// whole-file addition, which is what its empty base says it is.
+    #[test]
+    fn a_proposed_new_file_opens_against_an_empty_base() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+
+        h.open_agent_edit_review(&[("new.rs", "", "added\n")]);
+
+        assert_eq!(
+            (buffer_text_at(&h, "/work/new.rs"), memory_base(&h)),
+            (
+                Some("added\n".to_string()),
+                vec![("/work/new.rs".to_string(), String::new())]
+            ),
+            "the proposal is in a buffer with nothing behind it",
+        );
+    }
 
     #[test]
     fn install_review_session_populates_diff_cache() {

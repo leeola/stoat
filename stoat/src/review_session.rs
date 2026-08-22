@@ -1288,19 +1288,6 @@ mod tests {
     }
 
     #[test]
-    fn open_agent_edit_review_via_helper_builds_session() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n"), ("b.rs", "", "added\n")]);
-        let session = h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .expect("session via helper");
-        assert_eq!(session.files.len(), 2);
-    }
-
-    #[test]
     fn open_commit_review_via_helper_builds_session() {
         let mut h = TestHarness::with_size(80, 14);
         h.stoat.active_workspace_mut().git_root = "/work".into();
@@ -1391,35 +1378,6 @@ mod tests {
         assert!(rels.contains(&"a.rs"), "a.rs must be in range: {rels:?}");
         assert!(rels.contains(&"b.rs"), "b.rs must be in range: {rels:?}");
         assert!(rels.contains(&"c.rs"), "c.rs must be in range: {rels:?}");
-    }
-
-    #[test]
-    fn scan_agent_edits_builds_session_without_repo() {
-        use std::sync::Arc;
-        let mut h = TestHarness::with_size(80, 14);
-        let action = stoat_action::OpenReviewAgentEdits {
-            edits: vec![
-                stoat_action::AgentEdit {
-                    path: PathBuf::from("/proposed/a.rs"),
-                    base_text: Arc::new("old text\n".to_string()),
-                    proposed_text: Arc::new("new text\n".to_string()),
-                },
-                stoat_action::AgentEdit {
-                    path: PathBuf::from("/proposed/b.rs"),
-                    base_text: Arc::new("".to_string()),
-                    proposed_text: Arc::new("added\n".to_string()),
-                },
-            ],
-        };
-        crate::action_handlers::dispatch(&mut h.stoat, &action);
-
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session for agent edits");
-        assert_eq!(session.files.len(), 2);
-        assert_eq!(session.files[0].base_text.as_str(), "old text\n");
-        assert_eq!(session.files[0].buffer_text.as_str(), "new text\n");
-        assert_eq!(session.files[1].base_text.as_str(), "");
-        assert_eq!(session.files[1].buffer_text.as_str(), "added\n");
     }
 
     #[test]
