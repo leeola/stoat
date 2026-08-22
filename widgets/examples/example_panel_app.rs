@@ -96,6 +96,8 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             color: TITLE_FG,
             bg: Some(EDITOR_BG),
             text: " Panel ",
+            follow: 0,
+            anchor: None,
         },
         dialog,
         scene,

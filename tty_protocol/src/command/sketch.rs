@@ -49,6 +49,24 @@ pub struct SketchStyle {
     pub seed: u32,
 }
 
+impl SketchStyle {
+    /// A marker's stroke: one cell-quarter wide, rough.js roughness 1.0, opaque,
+    /// and seeded from the mark's own id.
+    ///
+    /// The five fields are tuned together, and a mark that spells them out
+    /// per call drifts from the ones beside it. This names the one combination
+    /// an annotation wants.
+    pub fn marker(color: [u8; 3]) -> SketchStyle {
+        SketchStyle {
+            color,
+            alpha: 255,
+            width: 64,
+            roughness: 64,
+            seed: 0,
+        }
+    }
+}
+
 /// When a mark draws itself, and in which direction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SketchTiming {
@@ -58,6 +76,21 @@ pub struct SketchTiming {
     pub duration_ms: u16,
     pub easing: SketchEasing,
     pub phase: SketchPhase,
+}
+
+impl SketchTiming {
+    /// A stroke that waits `delay_ms`, then draws itself over `duration_ms`.
+    ///
+    /// Smoothstep and the enter phase, which is what a mark being drawn on
+    /// wants. Staggering several marks is a matter of their delays alone.
+    pub fn after(delay_ms: u16, duration_ms: u16) -> SketchTiming {
+        SketchTiming {
+            delay_ms,
+            duration_ms,
+            easing: SketchEasing::Smoothstep,
+            phase: SketchPhase::Enter,
+        }
+    }
 }
 
 /// The curve a mark's reveal follows over its duration.

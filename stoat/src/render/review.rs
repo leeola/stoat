@@ -1348,6 +1348,8 @@ fn draw_diff_num(
                 color: rg.colors.dim,
                 bg: Some(rg.colors.bg),
                 text: scratch,
+                follow: 0,
+                anchor: None,
             }
             .render(inner, buf, &mut *rg.scene);
         },

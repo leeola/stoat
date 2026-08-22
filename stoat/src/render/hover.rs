@@ -266,6 +266,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                             color,
                             bg: Some(bg),
                             text: seg_text,
+                            follow: 0,
+                            anchor: None,
                         }
                         .render(Rect::new(inner.x, row, 1, 1), buf, scene);
                     }
@@ -570,6 +572,8 @@ pub(crate) fn render_hover_page(
                 color,
                 bg: Some(run_bg),
                 text,
+                follow: 0,
+                anchor: None,
             }
             .render(Rect::new(0, row_idx, 1, 1), &mut scratch, &mut scene);
             chars_before += text.chars().count() as u16;

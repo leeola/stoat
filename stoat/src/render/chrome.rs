@@ -224,6 +224,8 @@ fn modal_frame_inner(
                     color: border,
                     bg: None,
                     text: title,
+                    follow: 0,
+                    anchor: None,
                 }
                 .render(area, buf, scene);
             }
@@ -395,6 +397,8 @@ pub(crate) fn text(
                 color,
                 bg: Some(bg),
                 text: content,
+                follow: 0,
+                anchor: None,
             }
             .render(Rect::new(x, y, 1, 1), buf, scene);
         },

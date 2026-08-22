@@ -43,5 +43,9 @@ name = "example_smooth_scroll_pages_app"
 path = "examples/example_smooth_scroll_pages_app.rs"
 
 [[example]]
+name = "example_sketch_app"
+path = "examples/example_sketch_app.rs"
+
+[[example]]
 name = "example_split_scroll_app"
 path = "examples/example_split_scroll_app.rs"

@@ -44,6 +44,7 @@ pub mod pool;
 pub mod popover;
 pub mod scale;
 pub mod scroll_region;
+pub mod sketch;
 pub mod status_bar;
 pub mod text_run;
 

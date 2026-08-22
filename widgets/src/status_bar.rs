@@ -153,6 +153,8 @@ impl StatusBar<'_> {
             color: seg.fg,
             bg: None,
             text: seg.text,
+            follow: 0,
+            anchor: None,
         }
         .render(area, buf, scene);
     }

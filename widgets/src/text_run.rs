@@ -28,6 +28,13 @@ pub struct TextRun<'a> {
     /// glyphs directly over the surface behind the run with no backing box.
     pub bg: Option<[u8; 3]>,
     pub text: &'a str,
+    /// Hand-drawn mark whose reveal this run fades in with, by its id, so a
+    /// label appears as the mark it names draws itself. Zero draws the run at
+    /// full alpha the moment it is declared.
+    pub follow: u32,
+    /// Pool this run rides, and that pool's top row, so the run glides with a
+    /// scrolling pane. `None` leaves it fixed to the screen.
+    pub anchor: Option<(u32, f32)>,
 }
 
 /// Sixteenths a run of `chars` advances at `scale`, the glyph size in 256ths of
@@ -65,8 +72,8 @@ impl StatefulWidget for TextRun<'_> {
                 scale: self.scale,
                 color: self.color,
                 bg: self.bg,
-                follow: 0,
-                anchor: None,
+                follow: self.follow,
+                anchor: self.anchor,
                 text: self.text,
             },
         );
@@ -92,6 +99,8 @@ mod tests {
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
             text: "42",
+            follow: 0,
+            anchor: None,
         }
         .render(Rect::new(3, 5, 2, 1), &mut buf, &mut scene);
 
@@ -103,6 +112,39 @@ mod tests {
             bg: Some([40, 44, 52]),
             follow: 0,
             anchor: None,
+            text: "42".to_owned(),
+        });
+        assert_eq!(scene.buffer().as_slice(), expected.as_slice());
+    }
+
+    /// A label names the mark it fades in with and the pool it rides. Both are
+    /// terminal-side ids rather than anything area-relative, so they reach the
+    /// wire as declared.
+    #[test]
+    fn a_follow_and_an_anchor_reach_the_wire_as_declared() {
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+
+        TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: [99, 109, 131],
+            bg: None,
+            text: "42",
+            follow: 7,
+            anchor: Some((3, 12.5)),
+        }
+        .render(Rect::new(1, 1, 2, 1), &mut buf, &mut scene);
+
+        let expected = encode_text_run(&TextRunCommand {
+            col: 16,
+            row: 16,
+            scale: 256,
+            color: [99, 109, 131],
+            bg: None,
+            follow: 7,
+            anchor: Some((3, 12.5)),
             text: "42".to_owned(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
@@ -120,6 +162,8 @@ mod tests {
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
             text: "42",
+            follow: 0,
+            anchor: None,
         }
         .render(Rect::new(3, 5, 2, 1), &mut buf, &mut scene);
 

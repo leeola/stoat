@@ -192,6 +192,8 @@ impl Gutter<'_> {
                 color: self.number_fg,
                 bg: Some(self.bg),
                 text,
+                follow: 0,
+                anchor: None,
             }
             .render(area, buf, scene);
 
