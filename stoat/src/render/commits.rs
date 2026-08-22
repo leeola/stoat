@@ -336,7 +336,7 @@ fn paint_preview_side(
         1.0,
     );
 }
-/// Render a compact preview of a [`ReviewSession`]: each chunk's rows
+/// Render a compact preview of a [`DiffDocument`]: each chunk's rows
 /// painted sequentially with a yellow file/chunk header, top-to-bottom
 /// within `area`. Does not rely on editor machinery; used by the
 /// commits view's right pane.
@@ -575,7 +575,8 @@ mod tests {
             paint::dim_rgb,
             review::{CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
         },
-        review_session::{ReviewSession, ReviewSource},
+        review::ReviewFileInput,
+        review_session::DiffDocument,
         theme::Theme,
     };
     use ratatui::{
@@ -605,19 +606,17 @@ mod tests {
     const TOKEN_FG: [u8; 3] = [0x11, 0x99, 0x44];
     const BG: [u8; 3] = [0x28, 0x2c, 0x34];
 
-    /// A session over one file, with `highlights` covering the first `lines`
+    /// A document over one file, with `highlights` covering the first `lines`
     /// lines of both sides at [`TOKEN_FG`] across the whole line.
-    fn session(base: &str, buffer: &str, highlights: bool) -> ReviewSession {
-        let mut session = ReviewSession::new(ReviewSource::InMemory {
-            files: Arc::new(Vec::new()),
-        });
-        session.add_file(
-            PathBuf::from("/w/a.rs"),
-            "a.rs".into(),
-            None,
-            Arc::new(base.to_string()),
-            Arc::new(buffer.to_string()),
-        );
+    fn session(base: &str, buffer: &str, highlights: bool) -> DiffDocument {
+        let mut doc = DiffDocument::default();
+        doc.add_files(vec![ReviewFileInput {
+            path: PathBuf::from("/w/a.rs"),
+            rel_path: "a.rs".into(),
+            language: None,
+            base_text: Arc::new(base.to_string()),
+            buffer_text: Arc::new(buffer.to_string()),
+        }]);
         if highlights {
             let style = HighlightStyle {
                 foreground: Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
@@ -630,19 +629,19 @@ mod tests {
                         .collect(),
                 )
             };
-            let file = &mut session.doc.files[0];
+            let file = &mut doc.files[0];
             file.base_highlights = Some(spans_for(base));
             file.buffer_highlights = Some(spans_for(buffer));
         }
-        session
+        doc
     }
 
     /// Render into a wide buffer so both columns fit, and hand back the grid.
-    fn rendered(session: &ReviewSession, theme: &Theme) -> Buffer {
+    fn rendered(doc: &DiffDocument, theme: &Theme) -> Buffer {
         let area = Rect::new(0, 0, 120, 20);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
-        render_commit_preview(&session.doc, theme, area, 0, &mut buf, &mut scene);
+        render_commit_preview(doc, theme, area, 0, &mut buf, &mut scene);
         buf
     }
 

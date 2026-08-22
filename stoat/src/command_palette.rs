@@ -341,8 +341,9 @@ pub struct Availability {
     pub in_rebase_reword: bool,
     /// The in-flight rebase is paused on [`RebasePause::Conflict`].
     pub in_conflict: bool,
-    /// `workspace.review.is_some()`.
-    pub review_open: bool,
+    /// The focused pane is an editor showing the side-by-side diff, so the
+    /// move-provenance actions have a hunk to resolve against.
+    pub diff_view_open: bool,
     /// `workspace.commits.is_some()`.
     pub commits_open: bool,
     /// `workspace.review_walk.is_some()`: a commit-by-commit review walk is
@@ -377,13 +378,17 @@ impl Availability {
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
         };
         let run_focused = matches!(focused_view, Some(View::Run(_))) || stoat.modal_run.is_some();
+        let diff_view_open = match &focused_view {
+            Some(View::Editor(id)) => ws.editors.get(*id).is_some_and(|e| e.diff_view),
+            _ => false,
+        };
 
         Self {
             in_rebase_plan: ws.rebase.is_some(),
             in_rebase_exec: ws.rebase_active.is_some(),
             in_rebase_reword,
             in_conflict,
-            review_open: ws.review.is_some(),
+            diff_view_open,
             commits_open: ws.commits.is_some(),
             review_walk_open: ws.review_walk.is_some(),
             walkthrough_open: ws.walkthrough.is_some(),
@@ -416,21 +421,11 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | RebaseConflictApply
         | RebaseConflictAbort => ctx.in_conflict,
 
-        ReviewNextChunk
-        | ReviewPrevChunk
-        | ReviewStageChunk
-        | ReviewUnstageChunk
-        | ReviewToggleStage
-        | ReviewSkipChunk
-        | ReviewRefresh
-        | ReviewApplyStaged
-        | CloseReview
-        | ReviewRemoveSelected
-        | JumpToMoveSource
+        JumpToMoveSource
         | JumpToMoveTarget
         | JumpToNextMoveSource
         | JumpToPrevMoveSource
-        | QueryMoveRelationships => ctx.review_open,
+        | QueryMoveRelationships => ctx.diff_view_open,
 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
@@ -1115,12 +1110,12 @@ mod tests {
     #[test]
     fn tiers_order_prefix_then_substring_then_fuzzy() {
         // For query `re`:
-        // - `ReviewRefresh` starts with "re" (prefix).
-        // - `CloseReview` contains "re" as a non-prefix substring.
+        // - `Reload` starts with "re" (prefix).
+        // - `GitReview` contains "re" as a non-prefix substring.
         // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
         let listed = names_for("re");
-        let prefix = pos_in(&listed, "review-refresh");
-        let substring = pos_in(&listed, "close-review");
+        let prefix = pos_in(&listed, "reload");
+        let substring = pos_in(&listed, "git-review");
         let fuzzy = pos_in(&listed, "run-interrupt");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
@@ -1149,8 +1144,8 @@ mod tests {
     #[test]
     fn alphabetical_within_same_priority() {
         let listed = names_for("");
-        assert!(pos_in(&listed, "close-commits") < pos_in(&listed, "close-review"));
-        assert!(pos_in(&listed, "close-review") < pos_in(&listed, "close-workspace"));
+        assert!(pos_in(&listed, "close-commits") < pos_in(&listed, "close-conflict"));
+        assert!(pos_in(&listed, "close-conflict") < pos_in(&listed, "close-workspace"));
     }
 
     #[test]
@@ -1318,14 +1313,21 @@ mod tests {
     }
 
     #[test]
-    fn active_scope_review_open_surfaces_review_actions() {
+    fn active_scope_diff_view_surfaces_move_actions() {
         let ctx = Availability {
-            review_open: true,
+            diff_view_open: true,
             ..Availability::default()
         };
         let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
-        for name in ["ReviewStageChunk", "ReviewApplyStaged", "CloseReview"] {
-            assert!(listed.contains(&name), "{name} missing when review_open");
+        for name in [
+            "JumpToMoveSource",
+            "JumpToMoveTarget",
+            "QueryMoveRelationships",
+        ] {
+            assert!(
+                listed.contains(&name),
+                "{name} missing when the diff view is open"
+            );
         }
         assert!(!listed.contains(&"CommitsNext"));
     }
@@ -1362,7 +1364,7 @@ mod tests {
             "AbortRebase",
             "RewordConfirm",
             "RebaseConflictApply",
-            "ReviewStageChunk",
+            "JumpToMoveSource",
             "CommitsNext",
             "RunSubmit",
         ] {
@@ -1388,7 +1390,7 @@ mod tests {
             in_rebase_exec: true,
             in_rebase_reword: true,
             in_conflict: true,
-            review_open: true,
+            diff_view_open: true,
             commits_open: true,
             review_walk_open: true,
             walkthrough_open: true,

@@ -70,9 +70,8 @@ pub(crate) struct PendingPreview {
 /// recently used is dropped, and rebuilt from scratch if the selection returns
 /// to it.
 ///
-/// The document rather than a whole review session, because a preview reads a
-/// diff without staging anything in it. That is what lets these outlive the
-/// review machinery.
+/// A [`DiffDocument`] rather than anything richer, because a preview reads a
+/// diff and stages nothing in it.
 ///
 /// Shared by the commits view and the commit picker, which both build previews
 /// the same way. [`PendingPreview`] is the in-flight half of it.

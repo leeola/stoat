@@ -222,9 +222,6 @@ fn build_semantic_tokens_request(
 ) -> Option<(BufferId, u64, Rope, SemanticTokensParams)> {
     let (buffer_id, version, rope) = {
         let editor = action_handlers::focused_editor_mut(stoat)?;
-        if editor.review_view.is_some() {
-            return None;
-        }
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         (

@@ -14,7 +14,7 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         paint::{dim_rgb, style_rgb},
-        review::{render_diff_view, render_review},
+        review::render_diff_view,
         undercurl::UndercurlBatch,
     },
 };
@@ -142,12 +142,6 @@ pub(crate) fn render_editor_with_overlay(
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
     editor.minimap_rect = None;
-
-    if editor.review_view.is_some() {
-        editor.display_map.set_wrap_width(None);
-        render_review(editor, inner, fallback_style, theme, buf, scene);
-        return;
-    }
 
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
@@ -2509,9 +2503,6 @@ fn visible_byte_range(
 /// mapping a display snapshot would sync are all beside the point. That matters
 /// because this runs per pane per frame from the status bar.
 pub(crate) fn editor_cursor_position(editor: &EditorState) -> Option<(u32, u32)> {
-    if editor.review_view.is_some() {
-        return None;
-    }
     let buffer = editor.display_map.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
     let rope = buffer.rope();

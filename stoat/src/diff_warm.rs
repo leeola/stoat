@@ -20,7 +20,7 @@ use crate::{
     diff_cache::DiffCache,
     host::{FsHost, GitHost},
     review::{extract_review_hunks_single, ReviewFileInput},
-    review_session::{ReviewSession, ReviewSource},
+    review_session::DiffDocument,
 };
 use std::{
     path::{Path, PathBuf},
@@ -39,15 +39,7 @@ use stoat_scheduler::Task;
 /// is no result to install, unlike [`crate::project_env`].
 pub(crate) struct PendingDiffWarm {
     _task: Task<()>,
-    cancel: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
-}
-
-impl PendingDiffWarm {
-    /// Signal a superseding review scan so the warm stops writing.
-    pub(crate) fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
 }
 
 /// An in-flight single-file diff warm, recomputing one edited file's hunks.
@@ -71,14 +63,11 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
     if !stoat.diff_warm_auto || !stoat.settings.review_precompute.unwrap_or(true) {
         return;
     }
-    if stoat.pending_diff_warm.is_some() || stoat.pending_review_scan.is_some() {
+    if stoat.pending_diff_warm.is_some() {
         return;
     }
-    {
-        let ws = stoat.active_workspace();
-        if ws.review.is_some() || ws.diff_warmed {
-            return;
-        }
+    if stoat.active_workspace().diff_warmed {
+        return;
     }
     stoat.active_workspace_mut().diff_warmed = true;
 
@@ -100,11 +89,7 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
             redraw.notify_one();
         })
     };
-    stoat.pending_diff_warm = Some(PendingDiffWarm {
-        _task: task,
-        cancel,
-        done,
-    });
+    stoat.pending_diff_warm = Some(PendingDiffWarm { _task: task, done });
 }
 
 /// Spawn a single-file diff warm for `path`, recomputing its HEAD-vs-worktree
@@ -180,7 +165,7 @@ fn warm(
     cache: &Mutex<DiffCache>,
     cancel: &AtomicBool,
 ) {
-    let Some((workdir, inputs)) = diff::scan_working_tree(git, fs, langs, git_root) else {
+    let Some((_workdir, inputs)) = diff::scan_working_tree(git, fs, langs, git_root) else {
         return;
     };
     if cancel.load(Ordering::Relaxed) {
@@ -206,9 +191,9 @@ fn warm(
         return;
     }
 
-    let mut session = ReviewSession::new(ReviewSource::WorkingTree { workdir });
-    session.add_files(missing);
-    review::populate_diff_cache_from(cache, &session, cancel);
+    let mut doc = DiffDocument::default();
+    doc.add_files(missing);
+    review::populate_diff_cache_from(cache, &doc, cancel);
 }
 
 /// Recompute one edited file's HEAD-vs-worktree hunks and write them to the

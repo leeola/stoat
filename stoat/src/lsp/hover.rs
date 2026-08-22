@@ -78,7 +78,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
-    let (anchor_offset, buffer_id, focused_rope, is_review) = {
+    let (anchor_offset, buffer_id, focused_rope) = {
         let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -88,12 +88,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         let tail_off = buf_snap.resolve_anchor(&sel.tail());
         let head_off = buf_snap.resolve_anchor(&sel.head());
         let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
-        (
-            offset,
-            editor.buffer_id,
-            buf_snap.rope().clone(),
-            editor.review_view.is_some(),
-        )
+        (offset, editor.buffer_id, buf_snap.rope().clone())
     };
 
     let hosts = hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Hover);
@@ -101,15 +96,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         return session::report_lsp_unavailable(stoat, "hover");
     }
 
-    // A review cursor requests against the real working-tree file, but the
-    // popup still anchors at the placeholder cursor cell, so `anchor_offset`
-    // stays the review-editor offset while the request uses the real file.
-    let (source_path, source_rope, cursor_offset) = if is_review {
-        match action_handlers::lsp::review_lsp_source(stoat) {
-            Some(resolved) => resolved,
-            None => return UpdateEffect::None,
-        }
-    } else {
+    let (source_path, source_rope, cursor_offset) = {
         let Some(path) = stoat
             .active_workspace()
             .buffers

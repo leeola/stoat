@@ -304,18 +304,13 @@ fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
 ///
 /// App screens are not editor modes. They are derived from the session state
 /// that already tracks them, resolved in the precedence order conflict > diff >
-/// reword > rebase_conflict > rebase > commits > file so that a screen stacked over another (a
-/// diff opened from the commit list, a reword paused mid-rebase) reports the
-/// topmost one. `file` is any focused editor with no screen over it. The value
-/// is absent when nothing is focused.
+/// reword > rebase_conflict > rebase > commits > file so that a screen stacked
+/// over another (a diff opened from the commit list, a reword paused
+/// mid-rebase) reports the topmost one. `file` is any focused editor with no screen over it. The
+/// value is absent when nothing is focused.
 pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
-    if let Some(View::Editor(id)) = focused_view(ws)
-        && ws.editors.get(*id).is_some_and(|e| e.review_view.is_some())
-    {
-        return Some("review");
-    }
     // The conflict resolve view is a swapped-in scratch editor with
-    // `conflict_view` set, checked after the review session for the same reason.
+    // `conflict_view` set rather than a pane variant of its own.
     if let Some(View::Editor(id)) = focused_view(ws)
         && ws
             .editors
@@ -324,8 +319,8 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     {
         return Some("conflict");
     }
-    // The live per-file diff view is a normal editor with `diff_view` set. It is
-    // checked after the session arm so a session screen keeps precedence.
+    // The live per-file diff view is a normal editor with `diff_view` set. It
+    // ranks below conflict, which swaps a whole editor in over it.
     if let Some(View::Editor(id)) = focused_view(ws)
         && ws.editors.get(*id).is_some_and(|e| e.diff_view)
     {

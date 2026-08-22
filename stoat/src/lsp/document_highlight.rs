@@ -35,15 +35,12 @@ const DOCUMENT_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(200);
 pub(crate) type DocumentHighlightResponse = (BufferId, Vec<(std::ops::Range<usize>, bool)>);
 
 /// The focused editor's `(buffer_id, version, cursor_offset)` document-highlight
-/// dedupe key, or `None` on a review view or absent editor.
+/// dedupe key, or `None` when no editor is focused.
 ///
 /// Mirrors [`build_document_highlight_request`]'s editor read without cloning
 /// the rope, so the trigger can bail before host resolution.
 fn document_highlight_key(stoat: &mut Stoat) -> Option<(BufferId, u64, usize)> {
     let editor = action_handlers::focused_editor_mut(stoat)?;
-    if editor.review_view.is_some() {
-        return None;
-    }
     let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
@@ -123,9 +120,6 @@ fn build_document_highlight_request(
 ) -> Option<(BufferId, u64, usize, Rope, DocumentHighlightParams)> {
     let (buffer_id, version, offset, rope) = {
         let editor = action_handlers::focused_editor_mut(stoat)?;
-        if editor.review_view.is_some() {
-            return None;
-        }
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         let sel = editor.selections.newest_anchor();

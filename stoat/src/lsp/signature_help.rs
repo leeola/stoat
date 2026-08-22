@@ -124,7 +124,7 @@ fn focused_edit_snapshot(stoat: &mut Stoat) -> Option<(BufferId, u64, Rope, usiz
 /// [`pump_lsp_signature_help`]. No-op when the pane is not an editor, the buffer
 /// has no path, or the server does not advertise the capability.
 fn request_signature_help(stoat: &mut Stoat) {
-    let (anchor_offset, buffer_id, focused_rope, is_review) = {
+    let (anchor_offset, buffer_id, focused_rope) = {
         let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
             return;
         };
@@ -134,12 +134,7 @@ fn request_signature_help(stoat: &mut Stoat) {
         let tail_off = buf_snap.resolve_anchor(&sel.tail());
         let head_off = buf_snap.resolve_anchor(&sel.head());
         let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
-        (
-            offset,
-            editor.buffer_id,
-            buf_snap.rope().clone(),
-            editor.review_view.is_some(),
-        )
+        (offset, editor.buffer_id, buf_snap.rope().clone())
     };
 
     let Some((_, host)) =
@@ -151,12 +146,7 @@ fn request_signature_help(stoat: &mut Stoat) {
     };
     let encoding = host.offset_encoding();
 
-    let (source_path, source_rope, cursor_offset) = if is_review {
-        match action_handlers::lsp::review_lsp_source(stoat) {
-            Some(resolved) => resolved,
-            None => return,
-        }
-    } else {
+    let (source_path, source_rope, cursor_offset) = {
         let Some(path) = stoat
             .active_workspace()
             .buffers

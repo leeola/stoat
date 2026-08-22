@@ -98,7 +98,7 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                 };
                 let editor = ws.editors.get(editor_id)?;
                 let included = if single {
-                    editor.review_view.is_none() && !editor.diff_view
+                    !editor.diff_view
                 } else {
                     editor.minimap_rect.is_some()
                 };

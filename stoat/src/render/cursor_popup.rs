@@ -177,9 +177,6 @@ fn cursor_screen_position(
     content_area: Rect,
     anchor_offset: usize,
 ) -> Option<(u16, u16)> {
-    if editor.review_view.is_some() {
-        return None;
-    }
     crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
 }
 

@@ -54,13 +54,11 @@ pub(crate) use file_finder::{
 };
 pub(crate) use palette::sync_palette_picker;
 pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
-pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
-    GotoTab, OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
-    OpenReviewCommitRange, RenameTab, RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
-    WalkthroughOpen,
+    GotoTab, OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, RenameTab, RenameWorkspace,
+    Run, SetCwd, SetTheme, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -393,7 +391,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("Diff action downcast");
             review::diff(stoat, action.rev.as_deref())
         },
-        ActionKind::ToggleDiff => review::toggle_diff(stoat),
         ActionKind::Conflict => {
             conflict_view::open_conflict(stoat);
             UpdateEffect::Redraw
@@ -904,19 +901,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ToggleDockRight => pane::toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => pane::toggle_dock(stoat, DockSide::Left),
         ActionKind::JumpToMoveSource => {
-            if focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some()) {
-                review::jump_to_move(stoat, review::MoveJumpDir::Source)
-            } else {
-                move_nav::navigate(stoat, move_nav::MoveNavigation::FirstSource)
-            }
+            move_nav::navigate(stoat, move_nav::MoveNavigation::FirstSource)
         },
-        ActionKind::JumpToMoveTarget => {
-            if focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some()) {
-                review::jump_to_move(stoat, review::MoveJumpDir::Target)
-            } else {
-                move_nav::navigate(stoat, move_nav::MoveNavigation::Target)
-            }
-        },
+        ActionKind::JumpToMoveTarget => move_nav::navigate(stoat, move_nav::MoveNavigation::Target),
         ActionKind::JumpToNextMoveSource => {
             move_nav::navigate(stoat, move_nav::MoveNavigation::NextSource)
         },
@@ -989,38 +976,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenWorkspaceSymbolPicker => lsp::open_workspace_symbol_picker(stoat),
         ActionKind::FormatSelections => lsp::format_selections(stoat),
         ActionKind::Format => lsp::format_document(stoat),
-        ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
-        ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
-        ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),
-        ActionKind::ReviewUnstageChunk => review::review_mark(stoat, review::ReviewMark::Unstage),
-        ActionKind::ReviewToggleStage => review::review_mark(stoat, review::ReviewMark::Toggle),
-        ActionKind::ReviewSkipChunk => review::review_mark(stoat, review::ReviewMark::Skip),
-        ActionKind::ReviewRefresh => review::review_refresh(stoat, None),
-        ActionKind::ReviewExternalEdit => {
-            let a = action
-                .as_any()
-                .downcast_ref::<ReviewExternalEdit>()
-                .expect("ReviewExternalEdit action downcast");
-            review::review_external_edit(stoat, &a.path)
-        },
-        ActionKind::ReviewApplyStaged => review::review_apply_staged(stoat),
-        ActionKind::CloseReview => review::close_review(stoat),
-        ActionKind::OpenReviewCommit => {
-            let a = action
-                .as_any()
-                .downcast_ref::<OpenReviewCommit>()
-                .expect("OpenReviewCommit action downcast");
-            review::open_review_commit(stoat, &a.workdir, &a.sha);
-            UpdateEffect::Redraw
-        },
-        ActionKind::OpenReviewCommitRange => {
-            let a = action
-                .as_any()
-                .downcast_ref::<OpenReviewCommitRange>()
-                .expect("OpenReviewCommitRange action downcast");
-            review::open_review_commit_range(stoat, &a.workdir, &a.from, &a.to);
-            UpdateEffect::Redraw
-        },
         ActionKind::OpenReviewAgentEdits => {
             let a = action
                 .as_any()
@@ -1039,7 +994,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitsLast => commits::commits_step(stoat, commits::CommitStep::Last),
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
-        ActionKind::ReviewRemoveSelected => review::review_remove_selected(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
         ActionKind::ExecuteRebase => rebase::execute_rebase(stoat),
@@ -1388,23 +1342,13 @@ pub(crate) fn focused_pane_jumplist(stoat: &mut Stoat) -> Option<&mut JumpList> 
     }
 }
 
-/// Remove `editor_id` from the workspace's editor store unless it is still
-/// live. An editor stays alive while a split pane shows it, or while it is
-/// the review editor parked off-screen by a toggled-off diff session (see
-/// [`crate::review_session::ReviewSession::toggled_off`]).
+/// Remove `editor_id` from the workspace's editor store unless a split pane
+/// still shows it.
 ///
-/// Editor-swapping sites (opening a file, rebuilding the review, closing a
-/// review) call this on the editor they displaced so a pane never leaves a
-/// dangling editor behind, while the parked review editor survives a toggle.
+/// Every editor-swapping site calls this on the editor it displaced, so a pane
+/// never leaves a dangling editor behind.
 pub(crate) fn gc_editor_if_unreferenced(ws: &mut crate::workspace::Workspace, editor_id: EditorId) {
     if ws.editor_referenced(editor_id) {
-        return;
-    }
-    let parked = ws
-        .review
-        .as_ref()
-        .is_some_and(|r| r.toggled_off && r.view_editor == Some(editor_id));
-    if parked {
         return;
     }
     ws.editors.remove(editor_id);

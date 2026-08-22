@@ -71,9 +71,6 @@ fn build_folding_range_request(
 ) -> Option<(BufferId, u64, Rope, FoldingRangeParams)> {
     let (buffer_id, version, rope) = {
         let editor = action_handlers::focused_editor_mut(stoat)?;
-        if editor.review_view.is_some() {
-            return None;
-        }
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         (

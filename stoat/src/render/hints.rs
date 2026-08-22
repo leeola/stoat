@@ -44,8 +44,8 @@ impl HintsCache {
 /// The hints box arranged into columns, with every cell's text already padded.
 ///
 /// Laying out rescans each column's widths and formats two strings per row. The
-/// box is always on over the review and conflict screens, so deriving that per
-/// frame would rebuild a few hundred strings for a box that did not move.
+/// box is always on over the conflict screen, so deriving that per frame would
+/// rebuild a few hundred strings for a box that did not move.
 struct HintsLayout {
     /// Everything the layout was derived from, so a frame that changed none of
     /// it paints from what is here.
@@ -60,9 +60,9 @@ struct HintsLayout {
 /// The inputs [`HintsLayout`] is derived from.
 ///
 /// The footer and title contribute their lengths rather than their text,
-/// because that is all the layout reads of them. A review footer counting
-/// chunks changes length as the review advances, so its presence alone would
-/// not catch a box that needs to be wider.
+/// because that is all the layout reads of them. A footer counting chunks
+/// changes length as the reader advances, so its presence alone would not
+/// catch a box that needs to be wider.
 #[derive(PartialEq, Eq)]
 struct LayoutKey {
     rows: u64,

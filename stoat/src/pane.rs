@@ -1554,8 +1554,8 @@ mod tests {
         let b = tree.split(Axis::Vertical);
         tree.pane_mut(a).view = View::Label("a".into());
         tree.pane_mut(b).view = View::Label("b".into());
-        // A latched review session belongs to the content, so pushing it into
-        // another slot has to take the latch along.
+        // A latched diff belongs to the content, so pushing it into another
+        // slot has to take the latch along.
         tree.pane_mut(b).diff_mode = true;
         let (a_area, a_index) = (tree.pane(a).area, tree.pane(a).index);
         let (b_area, b_index) = (tree.pane(b).area, tree.pane(b).index);

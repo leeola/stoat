@@ -158,7 +158,7 @@ pub(crate) enum LoadedCommits {
 /// that order rather than sorting. Commit order is the information the list
 /// carries.
 ///
-/// Previews are lazy, one background [`ReviewSession`] build per sha, so
+/// Previews are lazy, one background [`DiffDocument`] build per sha, so
 /// scrolling a long history does not diff every commit in it.
 pub(crate) struct CommitPicker {
     pub(crate) role: CommitPickerRole,

@@ -35,11 +35,10 @@ use crate::{
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
-        review::{paint_diff_rows, render_review_rows},
+        review::paint_diff_rows,
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
     },
-    review_session::ReviewViewState,
     symbol_finder::SymbolFinder,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
@@ -364,47 +363,6 @@ fn paint_page_gutter(
             (width, Vec::new())
         },
     }
-}
-
-/// Render review page `index` from owned parts and wrap it in the pool fill
-/// frames, so the returned bytes are a self-contained fill the terminal applies
-/// to slot `index`.
-///
-/// The review analogue of [`render_page_fill`]: it runs on a blocking worker
-/// from a cloned [`ReviewViewState`] plus an owned [`DisplaySnapshot`] and
-/// [`Theme`](crate::theme::Theme), all `Send`, so a pooled review page renders
-/// off the run loop and matches the live diff at that scroll position.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_review_page_from_parts(
-    snapshot: &DisplaySnapshot,
-    view: &ReviewViewState,
-    theme: &crate::theme::Theme,
-    pool: u32,
-    index: u64,
-    fallback_style: Style,
-    region_width: u16,
-    region_height: u16,
-) -> Vec<u8> {
-    let scroll_row = index
-        .saturating_mul(region_height as u64)
-        .min(u32::MAX as u64) as u32;
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-    render_review_rows(
-        snapshot,
-        view,
-        scroll_row,
-        area,
-        fallback_style,
-        theme,
-        &mut buf,
-        None,
-    );
-    let bytes = serialize_buffer(&buf);
-
-    let mut frame = Vec::with_capacity(bytes.len() + 16);
-    encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
-    frame
 }
 
 /// Render conflict-view page `index` from owned parts and wrap it in the pool

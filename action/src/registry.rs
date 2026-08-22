@@ -104,12 +104,10 @@ use crate::{
             SetRebaseOpSquash,
         },
         review::{
-            CloseReview, Diff, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
-            JumpToPrevMoveSource, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
-            ReviewApplyStaged, ReviewDone, ReviewNextChunk, ReviewNextCommit, ReviewPrevChunk,
-            ReviewPrevCommit, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
-            ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk, StageHunk, StageLine,
-            ToggleDiff, ToggleStageHunk, ToggleStageLine, UnstageHunk, UnstageLine,
+            Diff, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
+            JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone, ReviewNextCommit,
+            ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk, ToggleStageLine, UnstageHunk,
+            UnstageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -306,7 +304,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             .map(str::to_owned);
         Ok(Box::new(Diff { rev }))
     });
-    add(ToggleDiff::DEF, |_| Ok(Box::new(ToggleDiff)));
     add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
     add(CloseConflict::DEF, |_| Ok(Box::new(CloseConflict)));
     add(ConflictPickOurs::DEF, |_| Ok(Box::new(ConflictPickOurs)));
@@ -368,20 +365,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(FormatSelections::DEF, |_| Ok(Box::new(FormatSelections)));
     add(Format::DEF, |_| Ok(Box::new(Format)));
-    add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
-    add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
-    add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
-    add(ReviewUnstageChunk::DEF, |_| {
-        Ok(Box::new(ReviewUnstageChunk))
-    });
-    add(ReviewToggleStage::DEF, |_| Ok(Box::new(ReviewToggleStage)));
-    add(ReviewSkipChunk::DEF, |_| Ok(Box::new(ReviewSkipChunk)));
-    add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
-    add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
-    add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
-    add(ReviewRemoveSelected::DEF, |_| {
-        Ok(Box::new(ReviewRemoveSelected))
-    });
     add(ReviewNextCommit::DEF, |_| Ok(Box::new(ReviewNextCommit)));
     add(ReviewPrevCommit::DEF, |_| Ok(Box::new(ReviewPrevCommit)));
     add(ReviewDone::DEF, |_| Ok(Box::new(ReviewDone)));
@@ -396,59 +379,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             })?;
         Ok(Box::new(GitReview {
             reference: reference.to_owned(),
-        }))
-    });
-    add(OpenReviewCommit::DEF, |params| {
-        let workdir = params
-            .first()
-            .context(MissingSnafu { name: "workdir" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "workdir",
-                expected: ParamKind::String,
-            })?;
-        let sha = params
-            .get(1)
-            .context(MissingSnafu { name: "sha" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "sha",
-                expected: ParamKind::String,
-            })?;
-        Ok(Box::new(OpenReviewCommit {
-            workdir: PathBuf::from(workdir),
-            sha: sha.to_owned(),
-        }))
-    });
-    add(OpenReviewCommitRange::DEF, |params| {
-        let workdir = params
-            .first()
-            .context(MissingSnafu { name: "workdir" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "workdir",
-                expected: ParamKind::String,
-            })?;
-        let from = params
-            .get(1)
-            .context(MissingSnafu { name: "from" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "from",
-                expected: ParamKind::String,
-            })?;
-        let to = params
-            .get(2)
-            .context(MissingSnafu { name: "to" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "to",
-                expected: ParamKind::String,
-            })?;
-        Ok(Box::new(OpenReviewCommitRange {
-            workdir: PathBuf::from(workdir),
-            from: from.to_owned(),
-            to: to.to_owned(),
         }))
     });
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
@@ -1165,7 +1095,6 @@ mod tests {
         "FileFinderScopeToggle",
         "OpenHelp",
         "Diff",
-        "ToggleDiff",
         "Conflict",
         "CloseConflict",
         "JumpToMoveSource",
@@ -1261,19 +1190,9 @@ mod tests {
         "ToggleSyntaxHighlight",
         "ToggleLspStatus",
         "ToggleInlayHints",
-        "ReviewNextChunk",
-        "ReviewPrevChunk",
         "ReviewNextCommit",
         "ReviewPrevCommit",
         "ReviewDone",
-        "ReviewStageChunk",
-        "ReviewUnstageChunk",
-        "ReviewToggleStage",
-        "ReviewSkipChunk",
-        "ReviewRefresh",
-        "ReviewApplyStaged",
-        "CloseReview",
-        "ReviewRemoveSelected",
         "OpenCommits",
         "CloseCommits",
         "CommitsNext",
@@ -1764,7 +1683,6 @@ mod tests {
         // + 1 .
         // + 2 .
         // + 1 OpenBuffer.
-        // + 1 ToggleDiff.
         // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
         // + 3 StageLine, UnstageLine, ToggleStageLine.
         // + 1 OpenConfig.
@@ -1828,7 +1746,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 427);
+        assert_eq!(all().count(), 414);
     }
 
     #[test]
@@ -1844,10 +1762,7 @@ mod tests {
     /// Both are built programmatically with payloads no string parser produces,
     /// so there is nothing for a user to type and nothing for the palette to
     /// list. Every other kind must be reachable by name.
-    const UNREGISTERED: &[ActionKind] = &[
-        ActionKind::ReviewExternalEdit,
-        ActionKind::OpenReviewAgentEdits,
-    ];
+    const UNREGISTERED: &[ActionKind] = &[ActionKind::OpenReviewAgentEdits];
 
     /// An action added without a registry entry is unreachable by name and
     /// absent from the palette, and nothing else fails when that happens.

@@ -295,38 +295,6 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
 }
 
-/// Resolve a focused review editor's cursor to the real working-tree file it
-/// mirrors, readying that file for an LSP request.
-///
-/// Ensures the file's buffer is open and did-opened (no pane swap), then
-/// returns its path, rope, and the cursor's byte offset in it. This is what
-/// lets hover and goto work from the side-by-side diff, whose own buffer is a
-/// pathless placeholder the language server knows nothing about. `None` when
-/// the cursor is not on a new-side line or the source is not a working tree
-/// (see [`review::review_cursor_file_position`]).
-pub(crate) fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usize)> {
-    let (path, line, col) = super::review::review_cursor_file_position(stoat)?;
-    let content = super::read_string_via_host(&*stoat.fs_host, &path).ok()?;
-    let lang = stoat.language_registry.for_path(&path);
-
-    let (buffer_id, buffer) = {
-        let ws = stoat.active_workspace_mut();
-        let (buffer_id, buffer) = ws.buffers.open(&path, &content);
-        if let Some(lang) = lang
-            && ws.buffers.language_for(buffer_id).is_none()
-        {
-            ws.buffers.set_language(buffer_id, lang);
-        }
-        (buffer_id, buffer)
-    };
-    let workspace = stoat.active_workspace;
-    let rope = buffer.read().expect("buffer lock").rope().clone();
-    crate::lsp::session::notify_buffer_opened(stoat, workspace, buffer_id, &path, rope.clone());
-
-    let offset = rope.point_to_offset(Point::new(line, col));
-    Some((path, rope, offset))
-}
-
 /// The focused editor's cursor resolved to an LSP request site: the
 /// source file, its rope, and the cursor's byte offset into it.
 struct LspRequestSite {
@@ -339,12 +307,10 @@ struct LspRequestSite {
 /// Resolve the focused editor's cursor to an [`LspRequestSite`] for a
 /// position-based request.
 ///
-/// A working-tree review cursor resolves to the real file it mirrors via
-/// [`review_lsp_source`], so requests target disk content rather than the
-/// diff placeholder. Returns `None` when the focused pane is not an editor,
-/// its buffer has no path, or a review cursor does not map to a file line.
+/// Returns `None` when the focused pane is not an editor or its buffer has
+/// no path.
 fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
-    let (focused_offset, buffer_id, focused_rope, is_review) = {
+    let (focused_offset, buffer_id, focused_rope) = {
         let editor = crate::action_handlers::focused_editor_mut(stoat)?;
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
@@ -352,35 +318,21 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
         let tail_off = buf_snap.resolve_anchor(&sel.tail());
         let head_off = buf_snap.resolve_anchor(&sel.head());
         let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
-        (
-            offset,
-            editor.buffer_id,
-            buf_snap.rope().clone(),
-            editor.review_view.is_some(),
-        )
+        (offset, editor.buffer_id, buf_snap.rope().clone())
     };
 
-    if is_review {
-        let (path, rope, offset) = review_lsp_source(stoat)?;
-        Some(LspRequestSite {
-            buffer_id,
-            path,
-            rope,
-            offset,
-        })
-    } else {
-        let path = stoat
-            .active_workspace()
-            .buffers
-            .path_for(buffer_id)
-            .map(Path::to_path_buf)?;
-        Some(LspRequestSite {
-            buffer_id,
-            path,
-            rope: focused_rope,
-            offset: focused_offset,
-        })
-    }
+    let path = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)?;
+
+    Some(LspRequestSite {
+        buffer_id,
+        path,
+        rope: focused_rope,
+        offset: focused_offset,
+    })
 }
 
 /// Issue an LSP jump-style request (definition / type definition /
@@ -388,10 +340,6 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
 /// editor's primary cursor. The async response is stored on
 /// [`Stoat::pending_lsp_jump`] and applied by [`pump_lsp_jumps`] on
 /// the next render tick.
-///
-/// From a working-tree review the cursor resolves to the real file via
-/// [`review_lsp_source`], so the request targets disk content, not the diff
-/// placeholder.
 ///
 /// No-op when the focused pane is not an editor or the buffer has no
 /// path. When the server does not advertise the matching
@@ -625,15 +573,12 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
 }
 
 /// The focused editor's `(buffer_id, version, scroll_row, end_row)` inlay-hint
-/// dedupe key, or `None` on a review view, absent editor, or missing viewport.
+/// dedupe key, or `None` when no editor is focused or it has no viewport.
 ///
 /// Mirrors [`build_inlay_hint_request`]'s editor read without cloning the rope,
 /// so the trigger can bail before host resolution.
 fn inlay_hint_key(stoat: &mut Stoat) -> Option<(BufferId, u64, u32, u32)> {
     let editor = crate::action_handlers::focused_editor_mut(stoat)?;
-    if editor.review_view.is_some() {
-        return None;
-    }
     let viewport = editor.viewport_rows?;
     let scroll_row = editor.scroll_row;
     let snapshot = editor.display_map.snapshot();
@@ -736,9 +681,6 @@ fn build_inlay_hint_request(
 ) -> Option<InlayHintRequest> {
     let (buffer_id, version, scroll_row, end_row, rope, start_offset, end_offset) = {
         let editor = crate::action_handlers::focused_editor_mut(stoat)?;
-        if editor.review_view.is_some() {
-            return None;
-        }
         let viewport = editor.viewport_rows?;
         let scroll_row = editor.scroll_row;
         let snapshot = editor.display_map.snapshot();
@@ -2284,19 +2226,8 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
 /// Open `path` in the focused pane and collapse every selection onto
 /// `offset`. Opening is a no-op when the file is already the pane's
 /// buffer.
-///
-/// A jump issued from a diff review parks the review session first so
-/// the review editor survives the pane swap (the gc guard keeps parked
-/// editors) and R re-enters the diff.
 pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
-    let from_review =
-        crate::action_handlers::focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some());
-    if from_review {
-        super::review::park_review_session(stoat);
-        stoat.set_focused_mode("normal".to_string());
-    } else {
-        super::jump::push_jump(stoat);
-    }
+    super::jump::push_jump(stoat);
 
     let buffer_before =
         crate::action_handlers::focused_editor_mut(stoat).map(|editor| editor.buffer_id);

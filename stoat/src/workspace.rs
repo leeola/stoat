@@ -24,7 +24,6 @@ use crate::{
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::layout::split_pane_status,
-    review_session::ReviewSession,
     run::{RunId, RunState},
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermReturnFocus, TermSession},
@@ -229,19 +228,15 @@ pub struct Workspace {
     /// the marked anchors and, once both ends are set, the cached path that
     /// [`crate::code_index::nav`]'s trail actions step along.
     pub(crate) trail: Option<TrailState>,
-    /// Active review session (if any). Owned at the workspace level because
-    /// a review spans files and can be viewed by multiple panes in future
-    /// multi-pane review flows. Dropped on `CloseReview`.
-    pub(crate) review: Option<ReviewSession>,
     /// Active three-way conflict resolve session (if any). Owned at the
-    /// workspace level beside [`Self::review`]. Dropped on `CloseConflict`.
+    /// workspace level so a resolve outlives the pane showing it. Dropped on
+    /// `CloseConflict`.
     pub(crate) conflict: Option<ConflictSession>,
-    /// Active commit-listing state (if any). Parallel to [`Self::review`]:
-    /// populated while the user is in `"commits"` mode and dropped on
-    /// `CloseCommits`.
+    /// Active commit-listing state (if any). Populated while the user is in `"commits"` mode and
+    /// dropped on `CloseCommits`.
     pub(crate) commits: Option<CommitListState>,
-    /// Active commit-by-commit review walk (if any). Outlives the review
-    /// session it opens, so closing a diff leaves the walk in place and only
+    /// Active commit-by-commit review walk (if any). Outlives the diff view
+    /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
     pub(crate) review_walk: Option<crate::review_walk::ReviewWalk>,
     /// Walkthrough being played (if any). Opened by `WalkthroughOpen` and
@@ -386,7 +381,6 @@ impl Workspace {
             #[cfg(test)]
             changed_ranges_recomputes: 0,
             trail: None,
-            review: None,
             conflict: None,
             commits: None,
             review_walk: None,
@@ -583,14 +577,13 @@ impl Workspace {
 
     /// True when this workspace is structurally indistinguishable from the
     /// state produced by [`Self::new`]: one empty scratch buffer, one editor,
-    /// one un-split pane, and no auxiliary state (docks, review,
+    /// one un-split pane, and no auxiliary state (docks,
     /// commits, rebase, runs). Used by [`crate::app::Stoat::save_workspace`]
     /// to skip persisting workspaces the user opened but never used, so the
     /// on-disk directory does not fill up with empty session files now that
     /// each launch without `--continue` spawns a fresh workspace.
     pub(crate) fn is_fresh(&self) -> bool {
-        self.review.is_none()
-            && self.commits.is_none()
+        self.commits.is_none()
             && self.rebase.is_none()
             && self.rebase_active.is_none()
             && self.runs.is_empty()

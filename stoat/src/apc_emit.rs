@@ -759,12 +759,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // newly-entered page indices per pane, then spawns the renders after the
     // APC batch ships, so region and scroll always reach the terminal before
     // any fill.
-    // The review view and theme a pooled review page needs, boxed so the
-    // Review variant does not dwarf Editor.
-    struct ReviewFillParts {
-        view: Arc<crate::review_session::ReviewViewState>,
-        theme: Arc<crate::theme::Theme>,
-    }
     struct ConflictFillParts {
         state: Arc<crate::conflict_session::ConflictViewState>,
         theme: Arc<crate::theme::Theme>,
@@ -780,14 +774,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             diff_view: bool,
             dim: f32,
             soften_scale: f32,
-        },
-        Review {
-            snapshot: DisplaySnapshot,
-            parts: Box<ReviewFillParts>,
-            pages: Vec<u64>,
-            pool: u32,
-            width: u16,
-            height: u16,
         },
         Conflict {
             snapshot: DisplaySnapshot,
@@ -888,26 +874,23 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // edit and every layer reflow into the content hash below.
         let buffer_version = editor.display_map.buffer_snapshot().version();
         let paint_version = editor.display_map.snapshot().paint_version();
-        let content_version = match editor.review_view.as_ref() {
-            Some(view) => view.session_version,
-            None => editor_page_content_version(
-                editor_syntax(editor.diff_view),
-                editor.gutter_width,
-                editor.display_map.wrap_width(),
-                current_line,
-                editor
-                    .gutter_severity_cache
-                    .as_ref()
-                    .map_or(0, |cache| cache.version),
-                editor.diff_view,
-                editor.display_map.diff_version(),
-                dim,
-                soften_scale,
-                buffer_version,
-                paint_version,
-                theme_epoch,
-            ),
-        };
+        let content_version = editor_page_content_version(
+            editor_syntax(editor.diff_view),
+            editor.gutter_width,
+            editor.display_map.wrap_width(),
+            current_line,
+            editor
+                .gutter_severity_cache
+                .as_ref()
+                .map_or(0, |cache| cache.version),
+            editor.diff_view,
+            editor.display_map.diff_version(),
+            dim,
+            soften_scale,
+            buffer_version,
+            paint_version,
+            theme_epoch,
+        );
         let entered = pool::emit_into(
             &mut out,
             &mut stoat.smooth_scroll,
@@ -918,8 +901,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // focus dim, and diagnostics, so they hold the window until the
             // glide starts.
             true,
-            // Editor and review pages both fill asynchronously below, so the
-            // synchronous render emits nothing here.
+            // Editor pages fill asynchronously below, so the synchronous
+            // render emits nothing here.
             |_| Vec::new(),
         );
 
@@ -984,19 +967,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
         if !entered.is_empty() {
             let snapshot = editor.display_map.snapshot();
-            if let Some(view) = editor.review_view.as_ref() {
-                async_jobs.push(PoolFill::Review {
-                    snapshot,
-                    parts: Box::new(ReviewFillParts {
-                        view: view.clone(),
-                        theme: theme.clone(),
-                    }),
-                    pages: entered,
-                    pool: region.pool,
-                    width: region.width,
-                    height: region.height,
-                });
-            } else if let Some(state) = editor.conflict_view.as_ref() {
+            if let Some(state) = editor.conflict_view.as_ref() {
                 // The conflict pane is a View::Editor, so without its own
                 // arm it would fill through the plain-editor page and paint
                 // the bare center buffer, dropping the flanking columns.
@@ -1751,38 +1722,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         }
                     })
                     .detach();
-            },
-            PoolFill::Review {
-                snapshot,
-                parts,
-                pages,
-                pool,
-                width,
-                height,
-            } => {
-                let ReviewFillParts { view, theme } = *parts;
-                for index in pages {
-                    let snapshot = snapshot.clone();
-                    let view = view.clone();
-                    let theme = theme.clone();
-                    let apc_tx = apc_tx.clone();
-                    stoat
-                        .executor
-                        .spawn_blocking(move || {
-                            let fill = crate::smooth_scroll::render_review_page_from_parts(
-                                &snapshot,
-                                &view,
-                                &theme,
-                                pool,
-                                index,
-                                fallback_style,
-                                width,
-                                height,
-                            );
-                            let _ = apc_tx.send(fill);
-                        })
-                        .detach();
-                }
             },
             PoolFill::Conflict {
                 snapshot,

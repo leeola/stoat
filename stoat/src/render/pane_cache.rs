@@ -211,7 +211,7 @@ pub(crate) fn pane_cache_key(
         return None;
     };
     let editor = editors.get_mut(*editor_id)?;
-    if editor.review_view.is_some() || editor.diff_view || editor.conflict_view.is_some() {
+    if editor.diff_view || editor.conflict_view.is_some() {
         return None;
     }
 

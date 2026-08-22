@@ -899,41 +899,6 @@ on key {
         Alt-WheelDown -> GotoNextChange();
         Alt-WheelUp -> GotoPrevChange();
     }
-    view == review && mode == normal {
-        Escape -> CloseReview();
-        q -> CloseReview();
-        Tab -> ToggleDiff();
-        n -> ReviewNextChunk();
-        p -> ReviewPrevChunk();
-        m -> JumpToMoveSource();
-        M -> JumpToMoveTarget();
-        h -> MoveLeft();
-        j -> MoveDown();
-        k -> MoveUp();
-        l -> MoveRight();
-        w -> MoveNextWordStart();
-        e -> MoveNextWordEnd();
-        b -> MovePrevWordStart();
-        # Ctrl-f/Ctrl-b scroll a page and leave the cursor where it is,
-        # while Ctrl-u/Ctrl-d carry it along by half of one.
-        Ctrl-b -> PageUp();
-        Ctrl-f -> PageDown();
-        PageUp -> PageUp();
-        PageDown -> PageDown();
-        Ctrl-u -> HalfPageUp();
-        Ctrl-d -> HalfPageDown();
-        Home -> GotoLineStart();
-        0 -> GotoLineStart();
-        End -> GotoLineEnd();
-        s -> ReviewStageChunk();
-        u -> ReviewUnstageChunk();
-        Space -> ReviewToggleStage();
-        S -> ReviewSkipChunk();
-        A -> ReviewApplyStaged();
-        D -> ReviewRemoveSelected();
-        r -> ReviewRefresh();
-        : -> OpenCommandPalette();
-    }
     view == diff && rebase_exec {
         C -> RebaseContinue();
     }

@@ -21,13 +21,11 @@ use stoat_text::LineEnding;
 /// and build the [`ReviewFileInput`] vector that
 /// [`extract_review_hunks_changeset`] consumes. Returns `None` when no
 /// repo is found or the working tree is clean. The first tuple element
-/// is the discovered repository workdir; callers building a
-/// [`crate::review_session::ReviewSession`] use it for
-/// [`crate::review_session::ReviewSource::WorkingTree`].
+/// is the discovered repository workdir, which callers use to resolve the
+/// paths the inputs name.
 ///
 /// Per-file read failures are logged at `warn` level and the file is
-/// skipped, matching the behavior the TUI review path has shipped with
-/// since `open_review` first landed.
+/// skipped, so one unreadable file does not lose the whole scan.
 pub fn scan_working_tree(
     git: &dyn GitHost,
     fs: &dyn FsHost,

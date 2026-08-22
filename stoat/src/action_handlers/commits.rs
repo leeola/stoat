@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     display_map::syntax_theme::SyntaxStyles,
-    review_session::{DiffDocument, ReviewSession, ReviewSource},
+    review_session::DiffDocument,
     workspace::diff::BaseHighlightCache,
 };
 use std::sync::Arc;
@@ -313,11 +313,11 @@ impl PreviewHighlights {
 
     /// Bake both sides' spans into `session`, or nothing when highlighting is
     /// off.
-    pub(super) fn attach(&self, session: &mut ReviewSession) {
+    pub(super) fn attach(&self, doc: &mut DiffDocument) {
         if !self.enabled {
             return;
         }
-        super::review::attach_preview_highlights(session, &self.styles, &self.cache);
+        super::review::attach_preview_highlights(doc, &self.styles, &self.cache);
     }
 }
 /// Spawn the blocking diff build for `sha`, waking the run loop through `redraw`
@@ -339,20 +339,11 @@ fn spawn_commit_preview_load(
         let parent = repo.parent_sha(&sha);
         let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
             Some(changes) => {
-                let source = ReviewSource::Commit {
-                    workdir: workdir.clone(),
-                    sha: sha.clone(),
-                };
-                super::review::build_session_from_changes(
-                    &language_registry,
-                    source,
-                    &workdir,
-                    changes,
-                )
-                .map(|mut session| {
-                    highlights.attach(&mut session);
-                    session.doc
-                })
+                super::review::build_document_from_changes(&language_registry, &workdir, changes)
+                    .map(|mut doc| {
+                        highlights.attach(&mut doc);
+                        doc
+                    })
             },
             None => None,
         };

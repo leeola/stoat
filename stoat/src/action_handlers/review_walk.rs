@@ -495,9 +495,6 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
     stoat.active_workspace_mut().set_diff_base(None);
     super::review::exit_diff_view(stoat);
 
-    if stoat.active_workspace().review.is_some() {
-        super::review::close_review(stoat);
-    }
     UpdateEffect::Redraw
 }
 
@@ -633,7 +630,7 @@ fn pending_sha(stoat: &Stoat) -> Option<String> {
         .map(|p| p.sha.clone())
 }
 
-/// Spawn a background [`ReviewSession`] build for the selected commit unless
+/// Spawn a background [`DiffDocument`] build for the selected commit unless
 /// one is already cached, or any build is already in flight.
 ///
 /// One build at a time, whatever it is for. A dropped [`stoat_scheduler::Task`]
@@ -731,20 +728,11 @@ fn spawn_preview_load(
         let parent = repo.parent_sha(&sha);
         let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
             Some(changes) => {
-                let source = crate::review_session::ReviewSource::Commit {
-                    workdir: workdir.clone(),
-                    sha: sha.clone(),
-                };
-                super::review::build_session_from_changes(
-                    &language_registry,
-                    source,
-                    &workdir,
-                    changes,
-                )
-                .map(|mut session| {
-                    highlights.attach(&mut session);
-                    session.doc
-                })
+                super::review::build_document_from_changes(&language_registry, &workdir, changes)
+                    .map(|mut doc| {
+                        highlights.attach(&mut doc);
+                        doc
+                    })
             },
             None => None,
         };

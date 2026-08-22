@@ -467,9 +467,8 @@ pub struct RewriteResult {
     /// Sha of the new HEAD after the rewrite + cherry-pick chain.
     pub new_head: String,
     /// Map from the original sha (target + each descendant) to the
-    /// new sha it became. Callers that were pointing at an original
-    /// sha (e.g. a review session's `ReviewSource::Commit`) read this
-    /// to relocate.
+    /// new sha it became. A caller that was pointing at an original sha (a
+    /// commit diff, a review walk) reads this to relocate.
     pub mapping: std::collections::HashMap<String, String>,
 }
 

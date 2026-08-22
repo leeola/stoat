@@ -94,9 +94,6 @@ fn dropped_fields_for(workspace: &Workspace) -> Vec<String> {
     dropped.push("buffers".to_string());
     dropped.push("editors".to_string());
     dropped.push("panes".to_string());
-    if workspace.review.is_some() {
-        dropped.push("review".to_string());
-    }
     if workspace.commits.is_some() {
         dropped.push("commits".to_string());
     }

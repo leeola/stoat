@@ -172,6 +172,14 @@ impl SelectionsCollection {
         self.install(remapped);
     }
 
+    /// Add a cursor at `head`, merging it into whichever selection already
+    /// covers that point.
+    ///
+    /// No action reaches this today. It is the collection's only entry for
+    /// seeding a cursor at an arbitrary anchor, and the multi-cursor merge and
+    /// ordering invariants are pinned through it, so it outlives the screen
+    /// that used to call it.
+    #[allow(dead_code)]
     pub(crate) fn insert_cursor(
         &mut self,
         head: Anchor,
@@ -1208,6 +1216,7 @@ fn newest_index(selections: &[Selection<Anchor>]) -> usize {
 /// A shared list cannot be inserted into, so the whole list is rebuilt. The
 /// callers already walked it to find `at`, so this adds a pass rather than a
 /// complexity class.
+#[allow(dead_code)]
 fn insert_at(
     selections: &[Selection<Anchor>],
     at: usize,

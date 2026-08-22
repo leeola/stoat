@@ -15,20 +15,17 @@ use crate::{
     action_handlers,
     app::Stoat,
     host::{FsEventKind, GitRepo},
-    review_session::ReviewSource,
 };
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{ReviewExternalEdit, ReviewRefresh};
 
-/// Quiet window after the last filesystem-watch event for a path
-/// before [`ReviewExternalEdit`] dispatches. Mirrors
-/// [`crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE`] so a
-/// formatter-on-save burst (or an agent edit chain) collapses
-/// into one diff rebuild rather than three.
+/// Quiet window after the last filesystem-watch event for a path before the
+/// diffs it affects are rebuilt. Mirrors
+/// [`crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE`] so a formatter-on-save burst
+/// (or an agent edit chain) collapses into one diff rebuild rather than three.
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(50);
 
@@ -93,15 +90,9 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     if events.is_empty() {
         return;
     }
-    // `review.follow` gates every automatic refresh below. A manual `r`
-    // (ReviewRefresh) dispatches through a separate path and still works.
-    let review_active =
-        stoat.active_workspace().review.is_some() && stoat.settings.review_follow.unwrap_or(true);
-    // With no review open, keep the diff cache warm incrementally instead,
-    // gated the same as the full background warm.
-    let precompute = stoat.active_workspace().review.is_none()
-        && stoat.diff_warm_auto
-        && stoat.settings.review_precompute.unwrap_or(true);
+    // Keep the diff cache warm incrementally, gated the same as the full
+    // background warm.
+    let precompute = stoat.diff_warm_auto && stoat.settings.review_precompute.unwrap_or(true);
     let git_root = stoat.active_workspace().git_root.clone();
     let git_dir = git_root.join(".git");
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
@@ -162,30 +153,10 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
 
         if in_git_dir {
             // A .git write (a commit, reset, rebase step, or branch switch)
-            // moved HEAD and staled every diff base, so it refreshes through
-            // the shared debounce whatever the session state is. Its drain
-            // refreshes an open review, clears the diff_warmed flag, and
+            // moved HEAD and staled every diff base, so it invalidates through
+            // the shared debounce. Its drain clears the diff_warmed flag and
             // stales every open buffer's diff map.
             arm_review_git_refresh_debounce(stoat);
-        } else if review_active {
-            let in_session = stoat
-                .active_workspace()
-                .review
-                .as_ref()
-                .is_some_and(|s| s.doc.files.iter().any(|f| f.path == path));
-            if in_session {
-                // A tracked file keeps the per-path debounce, which scrolls
-                // the review to the edited chunk when the refresh lands.
-                arm_review_external_edit_debounce(stoat, path.clone());
-            } else if path.starts_with(&git_root) {
-                // A change to a working-tree file not yet in the session
-                // pulls it in on the next refresh, unless gitignored so
-                // build churn such as target/ cannot thrash the rescan.
-                let repo = repo.get_or_insert_with(|| stoat.git_host.discover(&git_root));
-                if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
-                    arm_review_git_refresh_debounce(stoat);
-                }
-            }
         } else if precompute && path.starts_with(&git_root) {
             // An edited working-tree file warms its own diff, unless
             // gitignored so build churn cannot thrash the recompute.
@@ -242,28 +213,6 @@ fn parent_dir_ignored(
         .ignored_dir_cache
         .insert(parent.to_path_buf(), ignored);
     ignored
-}
-
-/// Schedule a debounced [`ReviewExternalEdit`] dispatch for
-/// `path`. Inserting into [`Stoat::review_pending_external_edits`]
-/// drops any prior task for the same path, which cancels the
-/// spawned future at its [`Executor::timer`] await; only the
-/// most recent burst event proceeds. The spawned task forwards
-/// `path` on [`Stoat::review_external_edit_tx`] when its
-/// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses; the main
-/// loop drains the channel via
-/// [`drain_pending_external_edits`] and dispatches the
-/// action there because async tasks cannot mutate `Stoat`.
-fn arm_review_external_edit_debounce(stoat: &mut Stoat, path: PathBuf) {
-    let executor = stoat.executor.clone();
-    let tx = stoat.review_external_edit_tx.clone();
-    let redraw = stoat.redraw_notify.clone();
-    let path_for_send = path.clone();
-    let task = stoat.executor.spawn_with_redraw(redraw, async move {
-        executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
-        let _ = tx.send(path_for_send).await;
-    });
-    stoat.review_pending_external_edits.insert(path, task);
 }
 
 /// Point the code-search scan at `query`, debounced.
@@ -329,12 +278,12 @@ pub(crate) fn drain_pending_code_search(stoat: &mut Stoat) -> bool {
     progressed
 }
 
-/// Schedule a debounced whole-session [`ReviewRefresh`] after a git-state
-/// change under `<git_root>/.git`.
+/// Schedule a debounced diff invalidation after a git-state change under
+/// `<git_root>/.git`.
 ///
 /// The debounce is single-slot rather than per-path, so re-arming drops the
 /// prior task, which cancels its future at the [`Executor::timer`] await. A
-/// burst of `.git` writes from one commit then fires a single refresh once
+/// burst of `.git` writes from one commit then fires a single invalidation once
 /// the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The main loop drains
 /// it via [`drain_pending_git_refresh`], since async tasks cannot
 /// mutate `Stoat`.
@@ -368,67 +317,28 @@ fn arm_diff_warm_file_debounce(stoat: &mut Stoat, path: PathBuf) {
     stoat.pending_diff_warm_file.insert(path, task);
 }
 
-/// Drain every path the per-path debounce tasks have pushed onto
-/// [`Stoat::review_external_edit_tx`] since the last call. Each
-/// path becomes one [`ReviewExternalEdit`] dispatch when a review
-/// session is active; otherwise the path is dropped. Returns
-/// `true` if any dispatch fired so the test harness's settle
-/// loop can re-iterate. Cap matches
-/// [`drain_fs_watch_events`].
-pub(crate) fn drain_pending_external_edits(stoat: &mut Stoat) -> bool {
-    let mut progressed = false;
-    for _ in 0..256 {
-        let Ok(path) = stoat.review_external_edit_rx.try_recv() else {
-            break;
-        };
-        stoat.review_pending_external_edits.remove(&path);
-        if stoat.active_workspace().review.is_some() {
-            action_handlers::dispatch(stoat, &ReviewExternalEdit { path });
-            progressed = true;
-        }
-    }
-    progressed
-}
-
-/// Drain the git-refresh debounce marker and refresh the review when one
-/// fired since the last call.
+/// Drain the git-refresh debounce marker, staling every diff the moved HEAD
+/// left describing a base that no longer exists.
 ///
-/// Only a [`ReviewSource::WorkingTree`] session refreshes. Commit and
-/// commit-range sources are fixed snapshots the rebase edit-pause review
-/// relies on not churning, and in-memory agent-edit sources are not
-/// git-backed. With no working-tree review, a `.git` change instead re-arms
-/// the full background warm, since HEAD moved and staled every cached base.
+/// Diff maps are keyed by buffer version alone, so nothing else notices that a
+/// commit, reset, or branch switch moved the base under them. Gutter marks and
+/// the per-file `:diff` view then follow each rebase step instead of freezing
+/// at the pre-rebase base.
 ///
-/// Either way the drain stales every open buffer's diff map, since those are
-/// keyed by buffer version alone and a moved HEAD leaves them describing a
-/// base that no longer exists. Gutter marks and the per-file `:diff` view
-/// then follow each rebase step instead of freezing at the pre-rebase base.
+/// The background warm is re-armed with them, since every cached base moved.
 ///
-/// Returns `true` if a refresh dispatched so the test harness settle loop
-/// re-iterates.
+/// Returns `false` always: the work here stales state for the next render
+/// rather than producing anything a settle loop waits on.
 pub(crate) fn drain_pending_git_refresh(stoat: &mut Stoat) -> bool {
-    let mut progressed = false;
     for _ in 0..256 {
         let Ok(()) = stoat.review_git_refresh_rx.try_recv() else {
             break;
         };
         stoat.review_pending_git_refresh = None;
         stoat.active_workspace_mut().invalidate_all_diffs();
-        // A working-tree review refreshes on any git write. An auto_source
-        // session refreshes too even when it currently displays a Commit,
-        // so a rebase-fallback view re-decides and follows each rebase step.
-        let refreshes = matches!(
-            stoat.active_workspace().review.as_ref(),
-            Some(s) if matches!(s.source, ReviewSource::WorkingTree { .. }) || s.auto_source
-        );
-        if refreshes {
-            action_handlers::dispatch(stoat, &ReviewRefresh);
-            progressed = true;
-        } else {
-            stoat.active_workspace_mut().diff_warmed = false;
-        }
+        stoat.active_workspace_mut().diff_warmed = false;
     }
-    progressed
+    false
 }
 
 /// Drain the diff-warm debounce channel, spawning a single-file warm for
@@ -446,7 +356,7 @@ pub(crate) fn drain_pending_diff_warm_files(stoat: &mut Stoat) -> bool {
         };
         stoat.pending_diff_warm_file.remove(&path);
         let precompute = stoat.diff_warm_auto && stoat.settings.review_precompute.unwrap_or(true);
-        if precompute && stoat.active_workspace().review.is_none() {
+        if precompute {
             crate::diff_warm::spawn_file_warm(stoat, path);
             progressed = true;
         }

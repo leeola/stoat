@@ -3,7 +3,6 @@ use crate::{
     conflict_session::ConflictViewState,
     display_map::{CachedHighlightEndpoints, DisplayMap},
     multi_buffer::MultiBuffer,
-    review_session::ReviewViewState,
     selection::SelectionsCollection,
 };
 use ratatui::layout::Rect;
@@ -112,20 +111,9 @@ pub(crate) struct EditorState {
     /// editor's wrap mode regardless of the global `editor.wrap` setting; `None`
     /// follows the setting. Transient, not persisted.
     pub(crate) wrap_override: Option<WrapMode>,
-    /// When `Some`, this editor is a review view; `render_editor` dispatches
-    /// to the side-by-side renderer and flattened rows are read from the
-    /// cache here. The cache is rebuilt by action handlers whenever the
-    /// backing session's `version` advances past `review_view.session_version`.
-    ///
-    /// Held behind an [`Arc`] because every pooled page fill takes a handle on
-    /// it, and the state carries two `String`s per row of every file under
-    /// review. A mutator reaches it through [`Arc::make_mut`], which copies only
-    /// while a fill is still in flight over the same state.
-    pub(crate) review_view: Option<Arc<ReviewViewState>>,
     /// When set, `render_editor` paints this editor as a side-by-side diff: the
     /// right column is the normal syntax-highlighted buffer and the left column
-    /// shows the base (HEAD) text via the buffer's diff map. Unlike
-    /// [`Self::review_view`] there is no backing session -- the buffer stays the
+    /// shows the base (HEAD) text via the buffer's diff map. The buffer stays the
     /// real editable buffer, so input handling is unchanged. Set through
     /// [`Self::set_diff_view`], which also flips the display map's
     /// deleted-block splicing.
@@ -136,8 +124,8 @@ pub(crate) struct EditorState {
     /// truth. The editor stays a normal editable buffer on the merged text, so
     /// `view_predicate` reports "conflict" for keymap scoping.
     ///
-    /// Behind an [`Arc`] for the same reason as [`Self::review_view`]: every
-    /// pooled page fill takes a handle rather than a copy of the aligned rows.
+    /// Behind an [`Arc`] so every pooled page fill takes a handle rather than
+    /// a copy of the aligned rows.
     pub(crate) conflict_view: Option<Arc<ConflictViewState>>,
     pub(crate) selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
@@ -241,9 +229,7 @@ pub(crate) struct EditorState {
 ///
 /// Anchors in `selections` survive restore because [`crate::buffer::TextBuffer`]
 /// replays its op log on load, reassigning the same sequential timestamps.
-/// `display_map` and `review_view` are omitted: the display map rebuilds from
-/// the restored buffer, and review views depend on a review session (whose
-/// persistence is tracked separately).
+/// `display_map` is omitted, because it rebuilds from the restored buffer.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct EditorStateSnapshot {
     pub(crate) buffer_id: BufferId,
@@ -272,7 +258,6 @@ impl EditorState {
             pool_current_line: None,
             viewport_rows: None,
             wrap_override: None,
-            review_view: None,
             diff_view: false,
             conflict_view: None,
             selections,
@@ -315,7 +300,6 @@ impl EditorState {
             pool_current_line: None,
             viewport_rows: None,
             wrap_override: None,
-            review_view: None,
             diff_view: false,
             conflict_view: None,
             selections,

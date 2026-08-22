@@ -13,9 +13,9 @@ use stoat_language::{
     Language,
 };
 
-/// One file's contribution to a review session. Used both by the
-/// changeset entry point [`extract_review_hunks_changeset`] and as
-/// the input shape for [`crate::review_session::ReviewSession::add_files`].
+/// One file's contribution to a diff. Used both by the changeset entry point
+/// [`extract_review_hunks_changeset`] and as the input shape for
+/// [`crate::review_session::DiffDocument::add_files`].
 #[derive(Clone)]
 pub struct ReviewFileInput {
     pub path: PathBuf,
@@ -81,17 +81,6 @@ pub enum ReviewRow {
 impl ReviewRow {
     fn is_changed(&self) -> bool {
         matches!(self, ReviewRow::Changed { .. })
-    }
-
-    /// The text on the new (right) side of this row, used as the review
-    /// editor's buffer line so a cursor and motions have real content. Empty
-    /// for a deletion-only row, which has no right side.
-    pub(crate) fn right_text(&self) -> &str {
-        match self {
-            ReviewRow::Context { right, .. } => &right.text,
-            ReviewRow::Changed { right: Some(r), .. } => &r.text,
-            ReviewRow::Changed { right: None, .. } => "",
-        }
     }
 }
 

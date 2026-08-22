@@ -871,12 +871,6 @@ pub struct Stoat {
     /// steps. Only present under the `perf` feature.
     #[cfg(feature = "perf")]
     pub(crate) perf: crate::perf::PerfStats,
-    /// In-flight working-tree review scan. The git2 diff runs on a
-    /// blocking thread; [`pump_review_scan`](action_handlers::pump_review_scan)
-    /// polls the ready [`ReviewSession`](crate::review_session::ReviewSession)
-    /// off this task and installs it on the main loop, so opening a review
-    /// never stalls input on the scan.
-    pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
     pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
@@ -930,9 +924,6 @@ pub struct Stoat {
     /// Grouped hint rows cached for the current keymap-state hash, letting an
     /// unchanged frame skip the full keybinding walk and regrouping.
     pub(crate) hints_cache: Option<crate::render::hints::HintsCache>,
-    /// Review-screen hints footer cached against the review session version, so
-    /// the per-chunk `progress()` walk reruns only when the session changes.
-    pub(crate) review_footer_cache: Option<(u64, Option<crate::render::hints::HintsFooter>)>,
     /// Whether LSP inlay hints are requested and rendered for the focused
     /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
     pub(crate) inlay_hints_enabled: bool,
@@ -1285,35 +1276,19 @@ pub struct Stoat {
     /// [`NoopFsWatcher`]; the bin layer installs
     /// [`crate::host::LocalFsWatcher`] and tests install
     /// [`crate::host::FakeFsWatcher`]. Drained per-tick by
-    /// [`debounce::drain_fs_watch_events`] so external edits can flow
-    /// into the active review session.
+    /// [`debounce::drain_fs_watch_events`] so an external edit stales the
+    /// diffs it affects.
     pub(crate) fs_watch_host: Arc<dyn FsWatchHost>,
-    /// Pending [`ReviewExternalEdit`] debounce timer per path. Each
-    /// [`debounce::arm_review_external_edit_debounce`] call replaces the
-    /// entry, dropping the prior [`stoat_scheduler::Task`] which
-    /// cancels its spawned future before the timer fires; only the
-    /// most recent burst-event for a path proceeds to dispatch.
-    pub(crate) review_pending_external_edits:
-        std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
-    /// Channel the per-path debounce tasks push onto once their
-    /// 50ms timer fires. Decouples the spawned async work from the
-    /// main-thread action dispatch in
-    /// [`debounce::drain_pending_external_edits`].
-    pub(crate) review_external_edit_tx: Sender<PathBuf>,
-    pub(crate) review_external_edit_rx: Receiver<PathBuf>,
-    /// Single-slot debounce for a whole-session git refresh. A commit writes
-    /// many `.git` files at once, and unlike the per-path
-    /// [`Self::review_pending_external_edits`] this collapses that burst to one
-    /// [`ReviewRefresh`]. Re-arming replaces the task, cancelling the prior
-    /// timer.
+    /// Single-slot debounce for a whole-session diff refresh. A commit writes
+    /// many `.git` files at once, and this collapses that burst into one
+    /// invalidation. Re-arming replaces the task, cancelling the prior timer.
     pub(crate) review_pending_git_refresh: Option<stoat_scheduler::Task<()>>,
     /// Channel the git-refresh debounce task pushes onto once its timer fires,
     /// drained by [`debounce::drain_pending_git_refresh`].
     pub(crate) review_git_refresh_tx: Sender<()>,
     pub(crate) review_git_refresh_rx: Receiver<()>,
-    /// Per-path debounce tasks for the incremental diff-warm of a file edited
-    /// while review is closed. Mirrors [`Self::review_pending_external_edits`];
-    /// re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
+    /// Per-path debounce tasks for the incremental diff-warm of an edited file.
+    /// Re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
     /// its timer so only the latest burst event warms.
     pub(crate) pending_diff_warm_file:
         std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
@@ -1335,9 +1310,8 @@ pub struct Stoat {
     /// to be reindexed into the code graph.
     ///
     /// A set covered by one timer rather than a task per path, unlike
-    /// [`Self::review_pending_external_edits`]. A checkout or a formatter run
-    /// names thousands of files at once, and the burst is what this has to
-    /// survive.
+    /// [`Self::pending_diff_warm_file`]. A checkout or a formatter run names
+    /// thousands of files at once, and the burst is what this has to survive.
     pub(crate) index_pending_external_edits: std::collections::HashSet<PathBuf>,
     /// The one debounce timer covering whatever
     /// [`Self::index_pending_external_edits`] holds.
@@ -1981,7 +1955,6 @@ impl Stoat {
         let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (window_ipc_tx, window_ipc_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (review_git_refresh_tx, review_git_refresh_rx) = tokio::sync::mpsc::channel(256);
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
@@ -2062,7 +2035,6 @@ impl Stoat {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
-            pending_review_scan: None,
             pending_changed_file_jump: None,
             pending_diff_nav_jump: None,
             pending_code_search: None,
@@ -2080,7 +2052,6 @@ impl Stoat {
             lsp_badge_hovered: false,
             key_hints_visible: false,
             hints_cache: None,
-            review_footer_cache: None,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: Pending::default(),
             last_inlay_hint_key: None,
@@ -2151,9 +2122,6 @@ impl Stoat {
             last_motion: None,
             fs_host: Arc::new(LocalFs),
             fs_watch_host: Arc::new(NoopFsWatcher::new()),
-            review_pending_external_edits: std::collections::HashMap::new(),
-            review_external_edit_tx,
-            review_external_edit_rx,
             review_pending_git_refresh: None,
             review_git_refresh_tx,
             review_git_refresh_rx,
@@ -2336,9 +2304,8 @@ impl Stoat {
         Some(crate::diff_cache::serialize_hunks(&hunks))
     }
 
-    /// Shared handle on the in-memory diff cache. The cache-population
-    /// hook in [`crate::review_session::ReviewSession::add_files`]
-    /// inserts post-extraction hunks here so subsequent
+    /// Shared handle on the in-memory diff cache. A diff build inserts its
+    /// post-extraction hunks here so subsequent
     /// [`Stoat::handle_diff_lookup`] calls hit instead of recomputing.
     pub fn diff_cache(&self) -> Arc<std::sync::Mutex<crate::diff_cache::DiffCache>> {
         self.diff_cache.clone()
@@ -3832,13 +3799,12 @@ impl Stoat {
         crate::lsp::drain::drain_lsp_incoming_requests(self);
         crate::lsp::drain::install_pending_lsp_host(self);
 
-        let external_edits = debounce::drain_pending_external_edits(self);
         let git_refresh = debounce::drain_pending_git_refresh(self);
         let code_search = debounce::drain_pending_code_search(self);
         let diff_warm_files = debounce::drain_pending_diff_warm_files(self);
         let index_edits = debounce::drain_pending_index_edits(self);
 
-        external_edits || git_refresh || code_search || diff_warm_files || index_edits
+        git_refresh || code_search || diff_warm_files || index_edits
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
@@ -3881,10 +3847,6 @@ impl Stoat {
                     },
                     None => false,
                 };
-
-                if cursor_moved {
-                    self.sync_review_chunk_to_cursor();
-                }
 
                 if scrolled {
                     effect.merge(UpdateEffect::Redraw)
@@ -4797,55 +4759,6 @@ impl Stoat {
             buffer_snapshot.resolve_anchor(&sel.head()),
         );
         Some((editor.buffer_id, offset))
-    }
-
-    /// Point the review chunk cursor at the chunk under the focused review
-    /// editor's text cursor, so status actions act on the chunk the user is
-    /// looking at rather than the last `n`/`p` target.
-    ///
-    /// No-op unless the focused editor is a review editor. Called after a key
-    /// moved the text cursor. Both the chunk cursor and its highlight track the
-    /// text cursor, and `n`/`p` move the text cursor too, so they never diverge.
-    fn sync_review_chunk_to_cursor(&mut self) {
-        let buffer_row = {
-            let Some(editor) = action_handlers::focused_editor_mut(self) else {
-                return;
-            };
-            if editor.review_view.is_none() {
-                return;
-            }
-            let snapshot = editor.display_map.snapshot();
-            let buffer_snapshot = snapshot.buffer_snapshot();
-            let sel = editor.selections.newest_anchor();
-            let offset = stoat_text::cursor_offset(
-                buffer_snapshot.rope(),
-                buffer_snapshot.resolve_anchor(&sel.tail()),
-                buffer_snapshot.resolve_anchor(&sel.head()),
-            );
-            buffer_snapshot.rope().offset_to_point(offset).row
-        };
-
-        let ws = self.active_workspace_mut();
-        let Some(editor_id) = ws.review.as_ref().and_then(|s| s.view_editor) else {
-            return;
-        };
-        let Some(editor) = ws.editors.get_mut(editor_id) else {
-            return;
-        };
-        let Some(view) = editor.review_view.as_mut() else {
-            return;
-        };
-        let Some((chunk_id, _)) = view.chunk_and_status_at_row(buffer_row) else {
-            return;
-        };
-        let Some(session) = ws.review.as_mut() else {
-            return;
-        };
-        if session.cursor.current != Some(chunk_id) {
-            session.cursor.current = Some(chunk_id);
-            session.version += 1;
-            Arc::make_mut(view).refresh_from_session(session);
-        }
     }
 
     /// The scratch editor the open modal types into, or `None` when no modal is
@@ -7079,7 +6992,6 @@ impl Stoat {
         let commits = action_handlers::pump_commits(self);
         let commit_picker = action_handlers::review_walk::pump_commit_picker(self);
         action_handlers::review_walk::sync_commit_picker(self);
-        let review = action_handlers::pump_review_scan(self);
 
         let code_search = action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
@@ -7101,7 +7013,6 @@ impl Stoat {
         external
             || commits
             || commit_picker
-            || review
             || code_search
             || changed_file_jump
             || diff_nav_jump
@@ -14625,7 +14536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_git_write_stales_open_diffs_with_no_review_and_no_precompute() {
+    fn a_git_write_stales_open_diffs_with_no_precompute() {
         let mut h = Stoat::test();
         h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
         h.stoat.set_diff_warm_auto(true);
@@ -14638,10 +14549,9 @@ mod tests {
             "the settled job leaves the buffer's diff current",
         );
 
-        // Neither gate that used to arm the git-refresh debounce applies here.
-        // No review session is open, and precompute is off.
+        // The gate that used to arm the git-refresh debounce does not apply
+        // here, because precompute is off.
         h.stoat.set_diff_warm_auto(false);
-        assert!(h.stoat.active_workspace().review.is_none());
 
         h.fake_fs_watcher()
             .inject(Path::new("/repo/.git/HEAD"), FsEventKind::Modified);
@@ -14650,7 +14560,7 @@ mod tests {
 
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),
-            "a .git write stales the open buffer's diff map even with no review and no precompute",
+            "a .git write stales the open buffer's diff map even with no precompute",
         );
     }
 

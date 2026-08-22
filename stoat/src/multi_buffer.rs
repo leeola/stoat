@@ -254,13 +254,10 @@ struct LiveExcerpt {
     buffer: SharedBuffer,
 }
 
-// FIXME: Live MultiBuffer excerpt state not persisted across workspace
-// save/load. [`ExcerptId`] and [`MultiBufferAnchor`] already serialize; the
-// anchor-stability blocker (fragment-tree identity across restart) is resolved
-// by the op-log replay in [`crate::buffer::TextBuffer::from_history`]. What
-// remains is plumbing: multi-excerpt mode is only used by `ReviewSession`
-// today, and that session itself is not persisted yet, so wiring live excerpt
-// state into `EditorStateSnapshot` is deferred until review persistence lands.
+// FIXME: Multi-excerpt mode has no caller. Every construction site goes
+// through [`MultiBuffer::singleton`], so the excerpt tree, the live-excerpt
+// list, and their persistence gap are all unreached. Either a feature claims
+// multi-excerpt mode or it goes.
 pub struct MultiBuffer {
     live_excerpts: Vec<LiveExcerpt>,
     excerpt_tree: SumTree<ExcerptEntry>,

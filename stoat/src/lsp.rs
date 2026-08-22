@@ -56,9 +56,6 @@ impl LspSymbolKind {
 /// clone its request builder does.
 pub(crate) fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
     let editor = action_handlers::focused_editor_mut(stoat)?;
-    if editor.review_view.is_some() {
-        return None;
-    }
     Some(editor.display_map.snapshot().buffer_snapshot().version())
 }
 

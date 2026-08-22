@@ -798,7 +798,6 @@ pub(crate) fn frame(
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view
         && let Some(editor) = ws.editors.get(*editor_id)
-        && editor.review_view.is_none()
         && !editor.diff_view
         && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
     {
@@ -1269,16 +1268,14 @@ pub(crate) fn frame(
         let key = hints_cache_key(mode, screen, &flags, token, &focus, None);
 
         if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
-            // The review screen rides on normal mode, so scope to its own `view
-            // == review` bindings. A chord sub-mode owns its whole mode, so take
-            // them all.
+            // The conflict screen rides on normal mode, so scope to its own
+            // `view == conflict` bindings. A chord sub-mode owns its whole
+            // mode, so take them all.
             let state = StoatKeymapState::with_flags(mode, flags)
                 .with_view(screen)
                 .with_token(token)
                 .with_focus_flags(focus);
-            let raw = if screen == Some("review") {
-                stoat.keymap.scoped_bindings(&state, "view", "review")
-            } else if screen == Some("conflict") {
+            let raw = if screen == Some("conflict") {
                 stoat.keymap.scoped_bindings(&state, "view", "conflict")
             } else {
                 // Wheel gestures are left out. This overlay affords pressing
@@ -1305,21 +1302,6 @@ pub(crate) fn frame(
             ));
         }
 
-        // The review footer is cached against the session version so its
-        // per-chunk progress walk reruns only when the session mutates. The
-        // conflict footer is cheap enough to rebuild each frame.
-        if screen == Some("review") {
-            match ws.review.as_ref() {
-                Some(session) => {
-                    let version = session.version;
-                    if stoat.review_footer_cache.as_ref().map(|c| c.0) != Some(version) {
-                        let footer = build_review_footer(session, &stoat.theme);
-                        stoat.review_footer_cache = Some((version, Some(footer)));
-                    }
-                },
-                None => stoat.review_footer_cache = None,
-            }
-        }
         let conflict_footer = if screen == Some("conflict") {
             let conflict_state = match ws.panes.pane(ws.panes.focus()).view {
                 View::Editor(id) => ws.editors.get(id).and_then(|e| e.conflict_view.as_ref()),
@@ -1344,17 +1326,9 @@ pub(crate) fn frame(
         } else {
             None
         };
-        let footer = if screen == Some("review") {
-            stoat
-                .review_footer_cache
-                .as_ref()
-                .and_then(|c| c.1.as_ref())
-        } else {
-            conflict_footer.as_ref()
-        };
+        let footer = conflict_footer.as_ref();
 
         let hint_label = match screen {
-            Some("review") => "review",
             Some("conflict") => "conflict",
             _ => mode,
         };
@@ -1436,30 +1410,6 @@ fn cached_modal_hints(
     }
     let cache = cache.as_mut().expect("cache populated above");
     hints::render_hints_grouped(title.unwrap_or(modal), cache, None, theme, area, buf, scene);
-}
-
-/// Build the review-screen hints footer from the session progress and theme.
-fn build_review_footer(
-    session: &crate::review_session::ReviewSession,
-    theme: &crate::theme::Theme,
-) -> hints::HintsFooter {
-    let p = session.progress();
-    let complete = session.is_complete();
-    let text = if complete {
-        format!("all {} reviewed", p.total)
-    } else {
-        let current = p.current_index.unwrap_or(0);
-        format!(
-            "{}/{} · {} staged · {} unstaged · {} pending",
-            current, p.total, p.staged, p.unstaged, p.pending
-        )
-    };
-    let style = if complete {
-        theme.get(crate::theme::scope::UI_BADGE_COMPLETE)
-    } else {
-        theme.get(crate::theme::scope::UI_TEXT)
-    };
-    hints::HintsFooter { text, style }
 }
 
 /// Paint a large digit badge centered on each split pane while the

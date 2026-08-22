@@ -40,7 +40,7 @@ pub enum BadgeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BadgeSource {
     Run(RunId),
-    /// Notification attached to the active review session. At most one
+    /// Notification attached to a diff or a review walk. At most one
     /// Review-sourced badge exists per workspace.
     Review,
     /// Status of the owned Claude subshell, re-derived each frame from the
