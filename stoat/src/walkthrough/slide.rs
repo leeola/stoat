@@ -487,12 +487,6 @@ fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
-/// Whether `box_` covers any of `rows`.
-fn covers_rows(box_: Rect, rows: &[u16]) -> bool {
-    rows.iter()
-        .any(|row| *row >= box_.y && *row < box_.y + box_.height)
-}
-
 /// Whether `box_` covers the text on any of `rows`.
 ///
 /// Sharing a row is not enough. A label placed past where that row's text ends
