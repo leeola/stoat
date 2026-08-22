@@ -503,6 +503,12 @@ struct AuxWindow {
     /// How much of each of this window's marks is revealed, in
     /// [`Grid::sketches`] order.
     sketch_progress: Vec<f32>,
+    /// When the loop has to wake to start a delayed stroke in this window.
+    ///
+    /// An aux window asks for its next frame through [`redraw_aux`]'s return,
+    /// which reports motion rather than a deadline, so a stroke still counting
+    /// down its delay needs this to bring the loop back.
+    sketch_wake: Option<Instant>,
     /// Hash of where the last base compose put things: the pool set, their
     /// regions, and the window size. A move here changes which cells any pool
     /// covers at all, so the grid goes back to the window background and every
@@ -1169,15 +1175,29 @@ impl ApplicationHandler<PtyEvent> for App {
             state.popover_wake = None;
             state.window.request_redraw();
         }
-        // Same story for a stroke waiting out its delay: it is not animating
+        // Same story for a stroke waiting out its delay. It is not animating
         // yet, so nothing else brings the loop back to start it.
-        if state.sketch_wake.is_some_and(|at| at <= Instant::now()) {
+        let now = Instant::now();
+        if state.sketch_wake.is_some_and(|at| at <= now) {
             state.sketch_wake = None;
             state.window.request_redraw();
         }
+        for aux in &mut state.aux {
+            if aux.sketch_wake.is_some_and(|at| at <= now) {
+                aux.sketch_wake = None;
+                aux.window.request_redraw();
+            }
+        }
 
         if !state.sync_pending.load(Ordering::Relaxed) {
-            wait_until(event_loop, earliest(state.popover_wake, state.sketch_wake));
+            let aux_wake = state
+                .aux
+                .iter()
+                .fold(None, |wake, aux| earliest(wake, aux.sketch_wake));
+            wait_until(
+                event_loop,
+                earliest(state.popover_wake, earliest(state.sketch_wake, aux_wake)),
+            );
             return;
         }
 
@@ -1221,9 +1241,16 @@ impl ApplicationHandler<PtyEvent> for App {
             state.sync_pending.store(false, Ordering::Relaxed);
             state.window.request_redraw();
         }
+        let aux_wake = state
+            .aux
+            .iter()
+            .fold(None, |wake, aux| earliest(wake, aux.sketch_wake));
         wait_until(
             event_loop,
-            earliest(deadline, earliest(state.popover_wake, state.sketch_wake)),
+            earliest(
+                deadline,
+                earliest(state.popover_wake, earliest(state.sketch_wake, aux_wake)),
+            ),
         );
     }
 
@@ -1307,6 +1334,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         // another window is not half a stroke anyone saw.
                         aux.last_redraw = None;
                         aux.sketch_clocks = SketchClocks::default();
+                        aux.sketch_wake = None;
                         aux.window.request_redraw();
                     }
                     return;
@@ -1448,6 +1476,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     // half a stroke anyone saw.
                     state.last_redraw = None;
                     state.sketch_clocks = SketchClocks::default();
+                    state.sketch_wake = None;
                     state.window.request_redraw();
                 }
             },
@@ -2229,6 +2258,7 @@ fn open_aux_window(
         last_redraw: None,
         sketch_clocks: SketchClocks::default(),
         sketch_progress: Vec::new(),
+        sketch_wake: None,
         last_geometry: None,
         last_content: None,
         pool_scratch: Vec::new(),
@@ -2963,6 +2993,7 @@ fn redraw_aux(
         Instant::now(),
         &mut aux.sketch_progress,
     );
+    aux.sketch_wake = sketch_step.wake;
 
     let mut easing = false;
     let mut active: Vec<ActivePool> = Vec::new();
@@ -3835,6 +3866,24 @@ mod tests {
             ),
             (Some(soon), Some(soon), Some(soon), None),
             "the earliest of the three wins, whichever one it is",
+        );
+
+        // Every aux window folds into the same wait, so one window's delayed
+        // stroke is not left waiting on another's.
+        let across = |windows: &[Option<Instant>]| {
+            windows
+                .iter()
+                .fold(None, |wake, window| earliest(wake, *window))
+        };
+        assert_eq!(
+            (
+                across(&[Some(later), None, Some(soon)]),
+                across(&[Some(soon), Some(later)]),
+                across(&[None, None]),
+                across(&[]),
+            ),
+            (Some(soon), Some(soon), None, None),
+            "in any order, and none from a window list with nothing pending",
         );
     }
 
