@@ -594,6 +594,46 @@ impl Keymap {
         (keymap, warnings)
     }
 
+    /// Compile a keymap where `user`'s bindings rank ahead of `default`'s.
+    ///
+    /// A user config states the keys that user cares about, not a replacement
+    /// for every key stoat ships. Layering keeps the shipped binding for every
+    /// key the user never mentions, so a config written against an older
+    /// release still leaves the rest of the editor working.
+    ///
+    /// A user binding whose action name no registered action answers to is
+    /// dropped rather than layered. Such a binding otherwise wins its key and
+    /// holds it dead, which is the failure layering exists to end. The
+    /// `default` binding for that key takes over instead.
+    ///
+    /// A `default` binding is dropped when a surviving user binding claims the
+    /// same key under the same predicates. The lookup never reaches it, and
+    /// [`Self::bindings`] must not offer help for a binding nothing triggers.
+    pub fn layered(user: Keymap, default: Keymap) -> Self {
+        let mut bindings: Vec<CompiledBinding> = user
+            .bindings
+            .into_iter()
+            .filter(|binding| {
+                !binding
+                    .actions
+                    .iter()
+                    .any(|action| is_unknown_action(&action.name))
+            })
+            .collect();
+
+        let from_user = bindings.len();
+        for binding in default.bindings {
+            let shadowed = bindings[..from_user]
+                .iter()
+                .any(|kept| kept.key == binding.key && kept.predicates == binding.predicates);
+            if !shadowed {
+                bindings.push(binding);
+            }
+        }
+
+        Self { bindings }
+    }
+
     /// The bound action names no registered action answers to, sorted.
     ///
     /// A binding whose action name the registry does not know is a dead key:
@@ -1631,6 +1671,81 @@ mod tests {
         // Both bindings match with one atom each, so the earlier one wins.
         let actions = keymap.lookup(&state, &event).expect("should match");
         assert_eq!(actions[0].name, "MoveLeft");
+    }
+
+    fn layered_keymap(user: &str, default: &str) -> Keymap {
+        Keymap::layered(
+            Keymap::compile(&parse_config(user)),
+            Keymap::compile(&parse_config(default)),
+        )
+    }
+
+    fn normal_state() -> TestState {
+        TestState::new().set("mode", StateValue::String("normal".into()))
+    }
+
+    #[test]
+    fn layered_user_binding_wins_its_key() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "normal" { q -> MoveLeft(); } }"#,
+            r#"on key { mode == "normal" { q -> MoveRight(); } }"#,
+        );
+
+        let actions = keymap
+            .lookup(
+                &normal_state(),
+                &key_event(KeyCode::Char('q'), KeyModifiers::NONE),
+            )
+            .expect("should match");
+        assert_eq!(actions[0].name, "MoveLeft");
+    }
+
+    #[test]
+    fn layered_default_fills_an_unbound_key() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "normal" { q -> MoveLeft(); } }"#,
+            r#"on key { mode == "normal" { x -> MoveRight(); } }"#,
+        );
+
+        let actions = keymap
+            .lookup(
+                &normal_state(),
+                &key_event(KeyCode::Char('x'), KeyModifiers::NONE),
+            )
+            .expect("the default fills a key the user never bound");
+        assert_eq!(actions[0].name, "MoveRight");
+    }
+
+    /// A stale user binding outranks the default for its key, so layering it
+    /// keeps that key as dead as replacing the config wholesale did.
+    #[test]
+    fn layered_drops_a_user_binding_naming_an_unknown_action() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "normal" { Down -> WorkspacePickerNext(); } }"#,
+            r#"on key { mode == "normal" { Down -> PickerNext(); } }"#,
+        );
+
+        let actions = keymap
+            .lookup(
+                &normal_state(),
+                &key_event(KeyCode::Down, KeyModifiers::NONE),
+            )
+            .expect("the default takes over the key");
+        assert_eq!(actions[0].name, "PickerNext");
+    }
+
+    #[test]
+    fn layered_hides_the_default_a_user_binding_shadows() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "normal" { q -> MoveLeft(); } }"#,
+            r#"on key { mode == "normal" { q -> MoveRight(); } }"#,
+        );
+
+        assert_eq!(
+            keymap.bindings().count(),
+            1,
+            "help must not list a default binding nothing triggers"
+        );
     }
 
     #[test]
