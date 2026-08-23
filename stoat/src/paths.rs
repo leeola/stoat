@@ -71,6 +71,10 @@ where
 /// `config.stcfg` under the XDG config home (typically
 /// `~/.config/stoat/config.stcfg`).
 ///
+/// The file layers over the embedded default rather than replacing it, so it
+/// needs to state only what the user changes. Every key, setting, and theme it
+/// leaves alone keeps the shipped value.
+///
 /// Returns [`None`] when the base-directory strategy cannot resolve a
 /// config home, in which case startup falls back to the embedded
 /// default config. The path is not guaranteed to exist. Callers read

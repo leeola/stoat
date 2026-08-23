@@ -1,3 +1,18 @@
+# This is the config stoat ships with. A user config at
+# ~/.config/stoat/config.stcfg layers over this one instead of replacing it.
+#
+# Only what the user config states changes. Every key it never binds, every
+# setting it never sets, and every theme it never defines keeps what this file
+# gives it, so a config written against an older release stays usable.
+#
+# A user binding outranks the one here when both carry the same predicates. A
+# more specific predicate still wins, so a binding meant to replace one below
+# needs that binding's own predicates.
+#
+# A user binding naming an action stoat does not know is dropped, and the
+# binding here takes the key back. An error badge names how many such bindings
+# the config holds, and the log names each one.
+
 theme default_dark {
     let black         = "#282c34";
     let red           = "#e06c75";
