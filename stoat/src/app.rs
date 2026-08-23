@@ -111,12 +111,13 @@ struct ConfigArtifacts {
     minimap_class_table: crate::minimap::ClassTable,
 }
 
-/// Resolve `config` into the artifacts the editor runs on.
+/// Resolve `embedded` and the optional `user` config into the artifacts the
+/// editor runs on.
 ///
-/// `embedded` is the built-in config when `config` came from the user, so its
-/// theme blocks can sit underneath as inheritable parents. It is [`None`] when
-/// `config` *is* the embedded default, which is also how the theme precedence
-/// below tells a user-chosen theme from the shipped one.
+/// `user` layers over `embedded` rather than replacing it. A user config states
+/// the keys, settings, and themes that user cares about, so everything it never
+/// mentions keeps working from the shipped config. That is what lets a config
+/// written against an older release stay usable.
 ///
 /// `imported` are the VSCode themes, slotted between the embedded and user
 /// blocks so a user config's own `theme` block still wins. They are carried as
@@ -129,8 +130,8 @@ struct ConfigArtifacts {
 /// survives. A reload passes [`None`], since the environment is read once at
 /// startup.
 fn build_config_artifacts(
-    config: Option<stoat_config::Config>,
-    embedded: Option<stoat_config::Config>,
+    user: Option<stoat_config::Config>,
+    embedded: stoat_config::Config,
     imported: &[Arc<VscodeSource>],
     cli_settings: Settings,
     env_theme: Option<String>,
@@ -139,15 +140,13 @@ fn build_config_artifacts(
     // runtime, and so an `inherits PARENT` sees every candidate parent.
     let theme_pool = {
         let mut pool = ThemePool::default();
-        if let Some(base) = embedded.as_ref() {
-            for block in &base.themes {
-                pool.push_parsed(block.clone());
-            }
+        for block in &embedded.themes {
+            pool.push_parsed(block.clone());
         }
         for source in imported {
             pool.push_vscode(source.clone());
         }
-        if let Some(c) = config.as_ref() {
+        if let Some(c) = user.as_ref() {
             for block in &c.themes {
                 pool.push_parsed(block.clone());
             }
@@ -157,17 +156,15 @@ fn build_config_artifacts(
 
     let settings = {
         let cli_theme_set = cli_settings.theme.is_some();
-        let from_config = config
-            .as_ref()
-            .map(Settings::from_config)
-            .unwrap_or_default();
-        // A clean user config replaces the embedded one wholesale, so the
-        // config's own theme is an explicit choice only when it came from the
-        // user source. The embedded default sets `theme = default_dark`
-        // unconditionally, which an inherited theme is meant to beat.
-        let user_theme_set = embedded.is_some() && from_config.theme.is_some();
+        let from_user = user.as_ref().map(Settings::from_config);
+        // The embedded default sets `theme = default_dark` unconditionally,
+        // which an inherited theme is meant to beat. Only a theme the user's
+        // own config names counts as the explicit choice that outranks it.
+        let user_theme_set = from_user.as_ref().is_some_and(|s| s.theme.is_some());
 
-        let mut settings = from_config.merge(cli_settings);
+        let mut settings = Settings::from_config(&embedded)
+            .merge(from_user.unwrap_or_default())
+            .merge(cli_settings);
         if !cli_theme_set
             && !user_theme_set
             && let Some(name) = env_theme
@@ -195,26 +192,35 @@ fn build_config_artifacts(
     };
 
     let (keymap, unknown_actions) = {
-        let (keymap, warnings) = match config {
-            Some(c) => Keymap::compile_with_warnings(&c),
-            None => Keymap::compile_with_warnings(&stoat_config::Config {
-                blocks: vec![],
-                themes: vec![],
-            }),
-        };
+        let (default_keymap, warnings) = Keymap::compile_with_warnings(&embedded);
         for warning in warnings {
             tracing::warn!(target: "stoat::keymap", "{warning}");
         }
 
-        let unknown_actions = keymap.unknown_actions();
-        for name in &unknown_actions {
-            tracing::warn!(
-                target: "stoat::keymap",
-                "config binds `{name}`, which is not a registered action",
-            );
-        }
+        match user {
+            None => (default_keymap, Vec::new()),
+            Some(user) => {
+                let (user_keymap, warnings) = Keymap::compile_with_warnings(&user);
+                for warning in warnings {
+                    tracing::warn!(target: "stoat::keymap", "{warning}");
+                }
 
-        (keymap, unknown_actions)
+                // Counted before layering, because layering is what drops these
+                // bindings. The layered keymap reports none of them.
+                let unknown_actions = user_keymap.unknown_actions();
+                for name in &unknown_actions {
+                    tracing::warn!(
+                        target: "stoat::keymap",
+                        "config binds `{name}`, which is not a registered action",
+                    );
+                }
+
+                (
+                    Keymap::layered(user_keymap, default_keymap),
+                    unknown_actions,
+                )
+            },
+        }
     };
 
     let syntax_styles = SyntaxStyles::from_theme(&theme);
@@ -1878,15 +1884,16 @@ impl Stoat {
         )
     }
 
-    /// Construct a [`Stoat`], preferring `user_config` over the embedded default when it parses
-    /// clean.
+    /// Construct a [`Stoat`], layering `user_config` over the embedded default
+    /// when it parses clean.
     ///
     /// `user_config` is the raw text of the user's `config.stcfg` (located via
     /// [`user_config_path`](crate::user_config_path)), or [`None`] to use only the
-    /// built-in default. A user source that parses without errors replaces the
-    /// embedded config wholesale. One that fails to parse is discarded in favour
-    /// of the embedded default, logged, and surfaced as a transient status
-    /// message. CLI settings layer over the resolved config either way.
+    /// built-in default. A user source that parses without errors ranks ahead of
+    /// the embedded config, which still supplies every key and setting the user
+    /// never mentions. One that fails to parse is discarded in favour of the
+    /// embedded default, logged, and surfaced as a transient status message.
+    /// CLI settings layer over the resolved config either way.
     ///
     /// `user_themes` are `(stem, JSON)` pairs of VSCode color themes from the
     /// user's theme dir. They join the pool after the built-in themes and before
@@ -1907,25 +1914,25 @@ impl Stoat {
         user_themes: Vec<(String, String)>,
         env_theme: Option<String>,
     ) -> Self {
-        let (config, theme_base, config_error) = match user_config {
+        let (config, config_error) = match user_config {
             Some(source) => {
                 let (parsed, errors) = stoat_config::parse(&source);
                 if errors.is_empty() {
-                    (parsed, Self::parse_default_keymap(), None)
+                    (parsed, None)
                 } else {
                     tracing::error!(
                         "user config parse failed; using built-in defaults: {}",
                         stoat_config::format_errors(&source, &errors)
                     );
                     (
-                        Self::parse_default_keymap(),
                         None,
                         Some("user config parse failed; using built-in defaults".to_string()),
                     )
                 }
             },
-            None => (Self::parse_default_keymap(), None, None),
+            None => (None, None),
         };
+        let embedded = Self::parse_default_keymap().expect("the embedded config parses");
 
         // Retaining the sources lets a mid-session reload rebuild the identical
         // pool without re-reading the theme directory, and lets a theme already
@@ -1948,7 +1955,7 @@ impl Stoat {
             minimap_class_table,
         } = build_config_artifacts(
             config,
-            theme_base,
+            embedded,
             &imported_themes,
             cli_settings.clone(),
             env_theme,
@@ -2302,7 +2309,7 @@ impl Stoat {
             minimap_class_table,
         } = build_config_artifacts(
             config,
-            Self::parse_default_keymap(),
+            Self::parse_default_keymap().expect("the embedded config parses"),
             &self.imported_themes,
             self.cli_settings.clone(),
             None,
@@ -13159,6 +13166,69 @@ mod tests {
         assert_eq!(
             stoat.pending_message, None,
             "a clean parse shows no message"
+        );
+    }
+
+    fn stoat_with_user_config(source: &str) -> Stoat {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            Some(source.to_string()),
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// A user config names the keys that user cares about, so every key it
+    /// leaves alone must keep the binding stoat ships.
+    #[test]
+    fn a_user_keymap_keeps_every_default_binding() {
+        let stoat = stoat_with_user_config("on key { !modal && mode == normal { q -> Quit(); } }");
+        let state = StoatKeymapState::new("normal");
+        let bound = |code| {
+            stoat
+                .keymap
+                .lookup(&state, &KeyEvent::new(code, KeyModifiers::NONE))
+                .map(|actions| actions[0].name.clone())
+        };
+
+        assert_eq!(
+            bound(KeyCode::Char('q')).as_deref(),
+            Some("Quit"),
+            "the user's own binding wins its key"
+        );
+        assert_eq!(
+            bound(KeyCode::Char('i')).as_deref(),
+            Some("EnterInsertMode"),
+            "a key the user never bound keeps the shipped binding"
+        );
+    }
+
+    /// The layer drops a user binding naming a renamed action, so the shipped
+    /// binding takes the key back rather than leaving it dead. The badge still
+    /// counts it, because the count is taken before layering.
+    #[test]
+    fn a_stale_user_binding_falls_back_to_the_default() {
+        let stoat = stoat_with_user_config(
+            "on key { modal == workspace_picker { Down -> WorkspacePickerNext(); } }",
+        );
+
+        let state = StoatKeymapState::new("insert").with_modal("workspace_picker");
+        let actions = stoat
+            .keymap
+            .lookup(&state, &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .expect("the shipped binding takes the key back");
+        assert_eq!(actions[0].name, "PickerNext");
+
+        let id = stoat
+            .badges
+            .find_by_source(crate::badge::BadgeSource::ConfigActions)
+            .expect("the badge still names the stale binding");
+        assert_eq!(
+            stoat.badges.get(id).expect("badge").label,
+            "config binds 1 unknown action",
         );
     }
 
