@@ -13206,6 +13206,41 @@ mod tests {
         );
     }
 
+    /// The shipped `q` sits under a `!modal` guard, and a user who wants `q`
+    /// back writes the block they care about rather than copying that guard.
+    /// A negation scores no specificity, so the two tie and the user's layer
+    /// wins on source order. A scoring change that ranked the guard would take
+    /// the key back without failing anything else.
+    #[test]
+    fn a_bare_user_binding_beats_the_guarded_default_for_its_key() {
+        let stoat = stoat_with_user_config("on key { mode == normal { q -> Quit(); } }");
+
+        let actions = stoat
+            .keymap
+            .lookup(
+                &StoatKeymapState::new("normal"),
+                &KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            )
+            .expect("q stays bound");
+        assert_eq!(actions[0].name, "Quit");
+    }
+
+    /// The counterpart to the tie rule: a block naming its context positively
+    /// carries more atoms than a broad user block and must keep outranking it.
+    /// Without that, one `mode == insert` binding hijacks the same key in every
+    /// picker, which is the dead-picker class layering exists to end.
+    #[test]
+    fn a_positively_scoped_default_still_beats_a_broader_user_binding() {
+        let stoat = stoat_with_user_config("on key { mode == insert { Down -> MoveDown(); } }");
+
+        let state = StoatKeymapState::new("insert").with_modal("workspace_picker");
+        let actions = stoat
+            .keymap
+            .lookup(&state, &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .expect("the picker keeps its Down");
+        assert_eq!(actions[0].name, "PickerNext");
+    }
+
     /// The layer drops a user binding naming a renamed action, so the shipped
     /// binding takes the key back rather than leaving it dead. The badge still
     /// counts it, because the count is taken before layering.

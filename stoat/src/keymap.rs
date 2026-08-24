@@ -670,11 +670,14 @@ impl Keymap {
     /// Resolve `event` against `state` to the winning binding's actions and the
     /// digit it captured, if the winning key is a `num` placeholder.
     ///
-    /// Bindings rank by predicate specificity first. On a tie an exact key beats
-    /// a placeholder, so `3 -> ...` overrides `num -> ...` for the `3` press,
-    /// and equally-ranked matches keep source order. The captured digit is
-    /// `Some` only when the winning key is the placeholder, so a `$num` argument
-    /// binds a value exactly when a placeholder matched.
+    /// Bindings rank by predicate specificity first. A `!` guard adds none, per
+    /// [`predicate_atoms`], so a block guarded against a state ties one that
+    /// never mentions it. On a tie an exact key beats a placeholder, so `3 ->
+    /// ...` overrides `num -> ...` for the `3` press, and equally-ranked matches
+    /// keep source order.
+    ///
+    /// The captured digit is `Some` only when the winning key is the placeholder,
+    /// so a `$num` argument binds a value exactly when a placeholder matched.
     pub fn lookup_with_capture(
         &self,
         state: &dyn KeymapState,
@@ -1698,6 +1701,29 @@ mod tests {
             )
             .expect("should match");
         assert_eq!(actions[0].name, "MoveLeft");
+    }
+
+    /// A user replacing a shipped binding writes the block they care about,
+    /// not a copy of the guard the shipped block carries. `predicate_atoms`
+    /// scores a `Not` as zero for that to hold, so a scoring change that gave
+    /// the guard a rank would silently take the key back.
+    #[test]
+    fn layered_bare_user_binding_wins_the_tie_with_a_guarded_default() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "normal" { q -> MoveLeft(); } }"#,
+            r#"on key { !modal && mode == "normal" { q -> MoveRight(); } }"#,
+        );
+
+        let actions = keymap
+            .lookup(
+                &normal_state(),
+                &key_event(KeyCode::Char('q'), KeyModifiers::NONE),
+            )
+            .expect("should match");
+        assert_eq!(
+            actions[0].name, "MoveLeft",
+            "the guard adds no rank, so the tie still falls to the user's layer"
+        );
     }
 
     #[test]

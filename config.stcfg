@@ -6,8 +6,14 @@
 # gives it, so a config written against an older release stays usable.
 #
 # A user binding outranks the one here when both carry the same predicates. A
-# more specific predicate still wins, so a binding meant to replace one below
-# needs that binding's own predicates.
+# `!` guard adds no rank, so a user block that names only the state it cares
+# about still ties a guarded block below and wins: to take `q` back from
+# `!modal && mode == normal`, write `mode == normal { q -> ...; }`.
+#
+# A block naming its context positively carries more predicates and still wins.
+# A `modal ==`, `view ==`, or `pane ==` block below therefore keeps its keys
+# against a broader user binding, so one `mode == insert` line cannot take the
+# same key away from every picker.
 #
 # A user binding naming an action stoat does not know is dropped, and the
 # binding here takes the key back. An error badge names how many such bindings
