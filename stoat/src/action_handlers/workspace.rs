@@ -1,7 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    host::FsHost,
     input_view::{InputView, SubmitTarget},
-    workspace::{Workspace, WorkspaceId, WorkspaceUid},
+    workspace::{registry, state_path_for, Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
 };
 use std::path::{Path, PathBuf};
@@ -56,15 +57,8 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat.persistence_disabled {
         let ws = &stoat.workspaces[active_id];
         stoat.save_workspace_now(ws);
-        if let Ok(path) = crate::workspace::state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
-            let meta_path = crate::workspace::registry::meta_path_for(&path);
-            for target in [path, meta_path] {
-                if stoat.fs_host.exists(&target)
-                    && let Err(err) = stoat.fs_host.remove_file(&target)
-                {
-                    tracing::warn!(?target, ?err, "failed to delete workspace file");
-                }
-            }
+        if let Ok(path) = state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
+            remove_session_files(&*stoat.fs_host, &path);
         }
     }
 
@@ -114,6 +108,72 @@ pub(super) fn workspace_picker_complete(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Delete the session under the workspace picker's selection.
+///
+/// An inactive row loses the state file and meta sidecar it would restore
+/// from. An open background row loses those files and leaves the running
+/// instance too. The active workspace is refused with a status message,
+/// because the picker's own input lives in it and `close_workspace` refuses
+/// the last workspace for the same reason.
+///
+/// An open row's files resolve against the real state directory, so their
+/// deletion sits behind [`Stoat::persistence_disabled`], which the test
+/// harness sets to keep `$XDG_STATE_HOME` pristine. An inactive row carries
+/// its own state path, so that deletion is unconditional.
+pub(super) fn workspace_picker_delete(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((id, state_path, basename)) = stoat
+        .workspace_picker
+        .as_ref()
+        .and_then(WorkspacePicker::selected_entry)
+        .map(|entry| (entry.id, entry.state_path.clone(), entry.basename.clone()))
+    else {
+        return UpdateEffect::None;
+    };
+
+    if id == Some(stoat.active_workspace) {
+        stoat.set_status("cannot delete the active workspace");
+        return UpdateEffect::Redraw;
+    }
+
+    match (id, state_path) {
+        (Some(id), _) => {
+            // Dropping the held task is what keeps a deferred write from
+            // landing after the files are gone and resurrecting the session.
+            stoat.pending_workspace_saves.remove(&id);
+
+            if !stoat.persistence_disabled {
+                let ws = &stoat.workspaces[id];
+                if let Ok(path) = state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
+                    remove_session_files(&*stoat.fs_host, &path);
+                }
+            }
+
+            stoat.workspaces.remove(id);
+        },
+        (None, Some(state_path)) => remove_session_files(&*stoat.fs_host, &state_path),
+        (None, None) => return UpdateEffect::None,
+    }
+
+    if let Some(picker) = stoat.workspace_picker.as_mut() {
+        picker.remove_selected();
+    }
+    stoat.set_status(format!("deleted session {basename}"));
+    UpdateEffect::Redraw
+}
+
+/// Remove a workspace's state file and its meta sidecar, skipping either if it
+/// is already absent and reporting a failed removal to the log.
+fn remove_session_files(fs: &dyn FsHost, state_path: &Path) {
+    let meta_path = registry::meta_path_for(state_path);
+    for target in [state_path, meta_path.as_path()] {
+        if fs.exists(target)
+            && let Err(err) = fs.remove_file(target)
+        {
+            tracing::warn!(?target, ?err, "failed to delete workspace file");
+        }
+    }
+}
+
 pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.workspace_picker.take() {
         picker.dispose(stoat.active_workspace_mut());
@@ -132,7 +192,7 @@ pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// The mode drops to normal first, because the picker's own input takes insert
 /// and the editor underneath must not keep a mode it no longer owns.
 pub(crate) fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let inactive = crate::workspace::registry::list_all(&*stoat.fs_host).unwrap_or_default();
+    let inactive = registry::list_all(&*stoat.fs_host).unwrap_or_default();
     stoat.set_focused_mode("normal".into());
     let input = {
         let executor = stoat.executor.clone();
@@ -348,6 +408,19 @@ mod tests {
         )
     }
 
+    /// The picker's rows by display name, so a test asserts the whole list
+    /// rather than only the row it expects to have changed.
+    fn picker_rows(stoat: &Stoat) -> Vec<String> {
+        stoat
+            .workspace_picker
+            .as_ref()
+            .expect("picker open")
+            .entries()
+            .iter()
+            .map(|entry| entry.basename.clone())
+            .collect()
+    }
+
     #[test]
     fn selecting_inactive_row_activates_it_with_the_metas_uid_and_spawns_a_restore() {
         let mut harness = Stoat::test();
@@ -400,6 +473,136 @@ mod tests {
                 .find_by_source(BadgeSource::SessionRestore)
                 .is_some(),
             "a session restore was spawned for the reactivated workspace"
+        );
+    }
+
+    /// Persistence stays disabled, the harness default, so the deletion under
+    /// test is the inactive row's own `state_path` rather than a path resolved
+    /// against the real state directory.
+    #[test]
+    fn deleting_an_inactive_row_removes_its_state_and_meta_files() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let state_path = PathBuf::from("/state/hash/1.ron");
+        let meta_path = registry::meta_path_for(&state_path);
+        harness.seed_fixture(&state_path, b"()");
+        harness.seed_fixture(&meta_path, b"()");
+
+        let stoat = &mut harness.stoat;
+        let entry = RegistryEntry {
+            meta: WorkspaceMeta {
+                uid: WorkspaceUid(424242),
+                name: "proj".to_string(),
+                git_root: PathBuf::from("/proj"),
+                buffer_count: 1,
+            },
+            state_path: state_path.clone(),
+            mtime: UNIX_EPOCH,
+        };
+
+        let input = picker_input(stoat);
+        let mut picker = WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![entry],
+            input,
+        );
+        picker.select_next();
+        stoat.workspace_picker = Some(picker);
+
+        assert_eq!(workspace_picker_delete(stoat), UpdateEffect::Redraw);
+
+        assert_eq!(
+            (
+                stoat.fs_host.exists(&state_path),
+                stoat.fs_host.exists(&meta_path)
+            ),
+            (false, false),
+            "the session's state file and its meta sidecar are both gone"
+        );
+        assert_eq!(
+            picker_rows(stoat),
+            ["alpha"],
+            "only the active workspace's row is left"
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("deleted session proj"),
+            "the status names the deleted session"
+        );
+    }
+
+    #[test]
+    fn deleting_the_active_row_is_refused() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+
+        let input = picker_input(stoat);
+        let picker =
+            WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, Vec::new(), input);
+        stoat.workspace_picker = Some(picker);
+        let before = stoat.workspaces.len();
+
+        assert_eq!(workspace_picker_delete(stoat), UpdateEffect::Redraw);
+
+        assert_eq!(stoat.workspaces.len(), before, "no workspace is dropped");
+        assert_eq!(
+            picker_rows(stoat),
+            ["alpha"],
+            "the refused row stays in the list"
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("cannot delete the active workspace"),
+            "the status explains the refusal"
+        );
+    }
+
+    #[test]
+    fn deleting_an_open_background_row_removes_the_workspace() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+
+        let second = {
+            let ws = Workspace::new(
+                PathBuf::from("/tmp/beta"),
+                &stoat.executor,
+                stoat.redraw_notify.clone(),
+            );
+            let id = stoat.workspaces.insert(ws);
+            stoat.workspaces[id].id = id;
+            stoat.workspaces[id].name = "beta".to_string();
+            id
+        };
+
+        let input = picker_input(stoat);
+        let mut picker =
+            WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, Vec::new(), input);
+        picker.select_next();
+        assert_eq!(
+            picker.selected_entry().map(|e| e.id),
+            Some(Some(second)),
+            "selection sits on the open background row"
+        );
+        stoat.workspace_picker = Some(picker);
+
+        assert_eq!(workspace_picker_delete(stoat), UpdateEffect::Redraw);
+
+        assert!(
+            !stoat.workspaces.contains_key(second),
+            "the background workspace leaves the running instance"
+        );
+        assert_eq!(
+            picker_rows(stoat),
+            ["alpha"],
+            "the deleted workspace's row is gone"
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("deleted session beta"),
+            "the status names the deleted session"
         );
     }
 }

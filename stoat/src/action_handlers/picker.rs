@@ -79,6 +79,18 @@ pub(super) fn picker_complete(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
+/// Delete the open list modal's selected row and whatever it stands for.
+///
+/// Only the workspace picker lists rows with a life outside the modal. The
+/// rest hold views onto state the picker does not own, so they do nothing
+/// rather than reporting an error.
+pub(super) fn picker_delete(stoat: &mut Stoat) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_delete(stoat),
+        _ => UpdateEffect::None,
+    }
+}
+
 /// Scroll the open list modal's preview pane half a pane in `dir`.
 ///
 /// Each modal holds its preview differently. Help and the commit picker keep

@@ -281,6 +281,27 @@ impl WorkspacePicker {
         Some(basename)
     }
 
+    /// Drop the selected row's entry from the list and re-rank what remains.
+    ///
+    /// A no-op on an empty list. The selection lands on the row that took the
+    /// deleted one's place, or on the new last row when the deleted one was
+    /// last.
+    ///
+    /// [`Self::filtered`] holds indices into `entries`, so removing an entry
+    /// invalidates every index past it. The cached query is replayed through
+    /// [`Self::refilter`] to rebuild the ranking against the shrunk lists,
+    /// which re-clamps the selection as a side effect.
+    pub(crate) fn remove_selected(&mut self) {
+        let Some(&entry_idx) = self.filtered.get(self.selected) else {
+            return;
+        };
+        self.entries.remove(entry_idx);
+        self.haystacks.remove(entry_idx);
+
+        let query = self.last_filter_query.take().unwrap_or_default();
+        self.refilter(&query);
+    }
+
     /// Free the filter input's editor and scratch buffer. Called when the picker
     /// closes so the transient input leaves no unsaved buffer behind.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
@@ -469,6 +490,69 @@ mod tests {
             Some("ab"),
             "the completed workspace stays selected"
         );
+    }
+
+    /// The three names are chosen so the survivors both still match an empty
+    /// query and stay in entry order, which is what proves the rebuilt
+    /// `filtered` indexes the shrunk `entries` rather than the old list.
+    #[test]
+    fn remove_selected_drops_the_row_and_reranks() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
+
+        picker.select_next();
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("beta"),
+            "the middle row is highlighted before removing"
+        );
+
+        picker.remove_selected();
+
+        assert_eq!(
+            picker
+                .entries()
+                .iter()
+                .map(|e| e.basename.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "gamma"],
+            "the removed row is gone and the survivors keep their order"
+        );
+        assert_eq!(
+            picker.filtered(),
+            [0, 1],
+            "the ranking is rebuilt against the shrunk entry list"
+        );
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("gamma"),
+            "the selection lands on the row that took the removed one's place"
+        );
+    }
+
+    #[test]
+    fn remove_selected_on_the_last_row_clamps_the_selection() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta"]);
+        picker.select_next();
+
+        picker.remove_selected();
+
+        assert_eq!(picker.entries().len(), 1, "only the first row survives");
+        assert_eq!(
+            picker.selected(),
+            0,
+            "the cursor moves up rather than pointing past the end"
+        );
+    }
+
+    #[test]
+    fn remove_selected_on_an_empty_list_does_nothing() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta"]);
+        picker.refilter("zzzznomatch");
+        assert!(picker.filtered().is_empty(), "the query matches nothing");
+
+        picker.remove_selected();
+
+        assert_eq!(picker.entries().len(), 2, "no entry is dropped");
     }
 
     #[test]

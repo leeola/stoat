@@ -100,6 +100,17 @@ define_action!(
 );
 
 define_action!(
+    PickerDeleteDef,
+    PickerDelete,
+    "PickerDelete",
+    ActionKind::PickerDelete,
+    "delete the picker row's session",
+    "In the workspace picker, delete the selected session: its saved state and, for an open background workspace, the running workspace too. The active workspace is refused, because the picker's own input lives in it. Other list modals have nothing to delete and do nothing.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CommitPickerNextBranchDef,
     CommitPickerNextBranch,
     "CommitPickerNextBranch",

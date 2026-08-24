@@ -681,6 +681,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PickerLast => picker::picker_end(stoat, true),
         ActionKind::PickerDetailDown => picker::picker_detail(stoat, 1),
         ActionKind::PickerDetailUp => picker::picker_detail(stoat, -1),
+        ActionKind::PickerDelete => picker::picker_delete(stoat),
         ActionKind::GitReview => {
             let action = action
                 .as_any()

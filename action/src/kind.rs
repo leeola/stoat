@@ -145,6 +145,7 @@ action_kinds! {
     PickerLast,
     PickerDetailDown,
     PickerDetailUp,
+    PickerDelete,
     CommitPickerNextBranch,
     CommitPickerPrevBranch,
     CommitPickerColumnCycle,

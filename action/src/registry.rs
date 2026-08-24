@@ -88,8 +88,8 @@ use crate::{
         picker::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchSelect, CommitPickerBack,
             CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNextBranch,
-            CommitPickerPrevBranch, PickerComplete, PickerDetailDown, PickerDetailUp, PickerFirst,
-            PickerLast, PickerNext, PickerPageDown, PickerPageUp, PickerPrev,
+            CommitPickerPrevBranch, PickerComplete, PickerDelete, PickerDetailDown, PickerDetailUp,
+            PickerFirst, PickerLast, PickerNext, PickerPageDown, PickerPageUp, PickerPrev,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PromptHistoryNext, PromptHistoryPrev,
@@ -479,6 +479,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PickerLast::DEF, |_| Ok(Box::new(PickerLast)));
     add(PickerDetailDown::DEF, |_| Ok(Box::new(PickerDetailDown)));
     add(PickerDetailUp::DEF, |_| Ok(Box::new(PickerDetailUp)));
+    add(PickerDelete::DEF, |_| Ok(Box::new(PickerDelete)));
     add(CommitPickerNextBranch::DEF, |_| {
         Ok(Box::new(CommitPickerNextBranch))
     });
@@ -1264,6 +1265,7 @@ mod tests {
         "PickerLast",
         "PickerDetailDown",
         "PickerDetailUp",
+        "PickerDelete",
         "CommitPickerNextBranch",
         "CommitPickerPrevBranch",
         "CommitPickerColumnCycle",
@@ -1784,7 +1786,8 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 414);
+        // + 1 PickerDelete.
+        assert_eq!(all().count(), 415);
     }
 
     #[test]

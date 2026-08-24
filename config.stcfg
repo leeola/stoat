@@ -348,6 +348,8 @@ on key {
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
+        # Shadows the input's forward-delete. Backspace still edits the query.
+        Delete -> PickerDelete();
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }
