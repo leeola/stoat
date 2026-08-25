@@ -956,6 +956,30 @@ impl DiffMap {
             .collect()
     }
 
+    /// How many hunks the map holds.
+    ///
+    /// The denominator of the status bar's position, and the live answer for
+    /// the focused file, which the repo-wide tally can lag by a keystroke.
+    pub fn hunk_count(&self) -> usize {
+        self.hunks.iter().count()
+    }
+
+    /// One-based position of the hunk at buffer `row` among this map's hunks,
+    /// or `None` when `row` sits before the first one.
+    ///
+    /// A row between two hunks answers the one before it. A jump lands the
+    /// cursor inside a hunk, so the previous hunk is where the walk stands
+    /// until the next one is reached, and a position that blanked out between
+    /// hunks would flicker as the reader moved.
+    pub fn hunk_index_at(&self, row: u32) -> Option<usize> {
+        let at_or_before = self
+            .hunks
+            .iter()
+            .take_while(|hunk| hunk.buffer_start_line <= row)
+            .count();
+        (at_or_before > 0).then_some(at_or_before)
+    }
+
     /// All hunks in buffer-start order.
     ///
     /// Unlike [`Self::hunks_in_range`], this includes moved-away seam hunks whose
@@ -2067,6 +2091,30 @@ mod tests {
         });
         assert_eq!(dm.staged_counts(), (2, 1));
         assert_eq!(dm.staged_counts(), recount(&dm), "and still agrees");
+    }
+
+    /// A row between two hunks answers the one before it rather than the one
+    /// ahead, which is what keeps the status bar's position from blanking out
+    /// as the reader walks the gap between them.
+    #[test]
+    fn the_hunk_at_a_row_is_the_one_containing_or_before_it() {
+        let dm = DiffMap::from_hunks([added_hunk(2..4), added_hunk(8..9)], None);
+        assert_eq!(dm.hunk_count(), 2, "both hunks counted");
+
+        let at = |row| dm.hunk_index_at(row);
+        assert_eq!(at(0), None, "above the first hunk nothing is behind it");
+        assert_eq!(at(1), None, "and still nothing on the row before it");
+        assert_eq!(at(2), Some(1), "the first hunk's own start");
+        assert_eq!(at(3), Some(1), "and its later rows");
+        assert_eq!(at(5), Some(1), "the gap answers the hunk behind it");
+        assert_eq!(at(8), Some(2), "the second hunk's start steps the count");
+        assert_eq!(at(400), Some(2), "and every row past it stays there");
+
+        assert_eq!(
+            DiffMap::from_hunks([], None).hunk_index_at(0),
+            None,
+            "an empty map has no position to report"
+        );
     }
 
     fn deleted_hunk(after_line: u32, base_byte_range: std::ops::Range<usize>) -> DiffHunk {

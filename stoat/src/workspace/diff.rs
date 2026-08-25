@@ -11,6 +11,7 @@
 //! [`Workspace`](super::Workspace) keeps the driving loop, since scheduling a
 //! diff needs the buffer registry and the pane layout as well as this state.
 
+use super::Workspace;
 use crate::{
     buffer::BufferId,
     buffer_registry::{self, BufferRegistry},
@@ -23,9 +24,11 @@ use crate::{
     },
     display_map::syntax_theme::SyntaxStyles,
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
+    pane::View,
 };
 use codegraph::FileId;
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     future::Future,
     ops::Range,
@@ -517,6 +520,60 @@ pub(super) struct DiffJobOutput {
     pub(super) repo_hunk_tallies: Option<HunkTallies>,
 }
 
+/// Where the cursor sits among every hunk in the repository, as
+/// `(position, total)`, or `None` when the focused pane is not a diff view over
+/// a file the repo tracks.
+///
+/// The position is `None` for a cursor above the focused file's first hunk,
+/// which is the one place the walk has no hunk behind it. The total counts the
+/// focused file through its live diff map rather than through the stored
+/// tally, because the map is what the reader is looking at and the tally is
+/// refreshed a beat later.
+pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize)> {
+    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    let editor = ws.editors.get(editor_id)?;
+    if !editor.diff_view {
+        return None;
+    }
+    let path = ws.buffers.path_for(editor.buffer_id)?;
+    let relative = path
+        .strip_prefix(&ws.git_root)
+        .unwrap_or(path)
+        .to_path_buf();
+    let totals = ws.repo_hunk_totals()?;
+
+    let buffer = ws.buffers.get(editor.buffer_id)?;
+    let guard = buffer.read().ok()?;
+    let diff_map = guard.diff_map.as_ref()?;
+    let cursor_row = {
+        let snapshot = &guard.snapshot;
+        let sel = editor.selections.newest_anchor();
+        let offset = stoat_text::cursor_offset(
+            &snapshot.visible_text,
+            snapshot.resolve_anchor(&sel.tail()),
+            snapshot.resolve_anchor(&sel.head()),
+        );
+        snapshot.visible_text.offset_to_point(offset).row
+    };
+
+    let (before, total) = totals.iter().fold(
+        (0, diff_map.hunk_count()),
+        |(before, total), (path, count)| match path.cmp(&relative) {
+            Ordering::Less => (before + count, total + count),
+            // The live map already answered for this file.
+            Ordering::Equal => (before, total),
+            Ordering::Greater => (before, total + count),
+        },
+    );
+
+    Some((
+        diff_map.hunk_index_at(cursor_row).map(|k| before + k),
+        total,
+    ))
+}
+
 /// A file's HEAD and index blobs as git last reported them.
 ///
 /// Neither can change without a write under `.git`, which is watched, so a
@@ -929,12 +986,12 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_byte_ranges, compute_base_highlights, scan_changed_ranges, BaseHighlightMemo,
-        DiffBase, DIFF_SETTLE,
+        changed_byte_ranges, compute_base_highlights, repo_hunk_position, scan_changed_ranges,
+        BaseHighlightMemo, DiffBase, DIFF_SETTLE,
     };
     use crate::{
         buffer::BufferId,
-        diff_map::{DiffHunkStatus, DiffMap},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
         pane::View,
@@ -945,6 +1002,7 @@ mod tests {
     };
     use std::{
         collections::HashMap,
+        ops::Range,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -976,6 +1034,74 @@ mod tests {
             Some([(PathBuf::from("a.rs"), 3), (PathBuf::from("b.rs"), 1)].as_slice()),
             "and the per-file counts come off the same tally",
         );
+    }
+
+    /// The reader walks the focused file's own map, so the position counts
+    /// through it while the stored tally answers for the files ahead of it.
+    /// The two disagree for a beat after an edit, and the map is the half that
+    /// matches what is on screen.
+    #[test]
+    fn the_hunk_position_counts_the_focused_file_through_its_own_map() {
+        let mut h = TestHarness::with_size(40, 16);
+        let workdir = PathBuf::from("/position");
+        let working: String = (0..12).map(|n| format!("line {n}\n")).collect();
+        let head = working.replace("line 2\n", "old 2\n");
+        h.stage_review_scenario(
+            &workdir,
+            &[("a.rs", "one\n", "ONE\n"), ("b.rs", &head, &working)],
+        );
+        h.fake_git().add_repo(&workdir).hunks("a.rs", 3);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+
+        let editor_id = {
+            let ws = h.stoat.active_workspace();
+            let View::Editor(id) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the opened file focuses an editor pane");
+            };
+            id
+        };
+        let buffer_id = {
+            let ws = h.stoat.active_workspace_mut();
+            ws.editors[editor_id].set_diff_view(true);
+            ws.editors[editor_id].buffer_id
+        };
+        let install = |h: &mut TestHarness| {
+            let map = DiffMap::from_hunks([added_hunk(2..3), added_hunk(8..9)], None);
+            h.stoat
+                .active_workspace_mut()
+                .install_test_diff_map(buffer_id, map);
+        };
+
+        install(&mut h);
+        assert_eq!(
+            repo_hunk_position(h.stoat.active_workspace()),
+            Some((None, 5)),
+            "the cursor opens above the first hunk, and the total counts a.rs \
+             through the tally and b.rs through its map",
+        );
+
+        h.type_keys("j j j j j j j j");
+        install(&mut h);
+        assert_eq!(
+            repo_hunk_position(h.stoat.active_workspace()),
+            Some((Some(5), 5)),
+            "the second of b.rs's own hunks, offset by the three a.rs carries",
+        );
+    }
+
+    fn added_hunk(line_range: Range<u32>) -> DiffHunk {
+        DiffHunk {
+            status: DiffHunkStatus::Added,
+            unstaged_lines: vec![line_range.clone()],
+            marked_rows: Vec::new(),
+            buffer_start_line: line_range.start,
+            buffer_line_range: line_range,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        }
     }
 
     /// Bucketing the base spans is O(spans) with a style clone per line each
@@ -1391,7 +1517,7 @@ mod tests {
 
     /// The statuses and extents a settled rust diff of `base` against `buffer`
     /// produced, in hunk order.
-    fn hunk_shapes(base: &str, buffer: &str) -> Vec<(DiffHunkStatus, std::ops::Range<u32>)> {
+    fn hunk_shapes(base: &str, buffer: &str) -> Vec<(DiffHunkStatus, Range<u32>)> {
         let (h, buffer_id) = settled_rust_diff(base, buffer);
         let ws = h.stoat.active_workspace();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");

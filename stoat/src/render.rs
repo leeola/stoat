@@ -58,7 +58,7 @@ use crate::{
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
-    workspace::{Workspace, WorkspaceId},
+    workspace::{diff, Workspace, WorkspaceId},
 };
 use ratatui::{
     buffer::{Buffer, Cell},
@@ -247,6 +247,14 @@ pub(crate) struct FrameCtx<'a> {
     /// outside a repo, which drops the segment back to the focused file's own
     /// hunk counts.
     pub(crate) repo_change_counts: Option<(usize, usize)>,
+    /// Where the cursor sits among every hunk in the repo, as
+    /// `(position, total)`, which the focused pane's bar names after its staged
+    /// segment. `None` when the focused pane shows no diff view, which is what
+    /// keeps the segment off a pane with no hunks to walk.
+    ///
+    /// The position is `None` above the focused file's first hunk, the one
+    /// place the walk has nothing behind it, and the bar prints `-` for it.
+    pub(crate) hunk_position: Option<(Option<usize>, usize)>,
     /// What the bar names the workspace's diff base, when that is not the
     /// working tree. It replaces [`Self::repo_change_counts`], which describes
     /// a working tree the pane is then not showing.
@@ -681,6 +689,7 @@ pub(crate) fn frame(
         lsp_servers,
         diff_warm_busy,
         repo_change_counts: ws.repo_change_counts(),
+        hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
         lsp_pending,
         lsp_message: stoat

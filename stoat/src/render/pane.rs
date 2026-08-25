@@ -925,6 +925,7 @@ fn status_segments(
             frame.diff_base,
             frame.repo_change_counts,
             status.staged_counts,
+            frame.hunk_position,
         ) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
@@ -1133,7 +1134,30 @@ fn focused_diagnostic_label(
 /// rather than joining it. The tally counts what git status reports, which
 /// describes a working tree the pane is then not showing. The base always
 /// shows, even for a file with no hunks, since it says what is under review.
+///
+/// A `hunk` position closes the label with ` · hunk K/N`, which says how far
+/// through the review the cursor stands. `K` prints as `-` above the focused
+/// file's first hunk, where the walk has nothing behind it. The position rides
+/// on a label the counts produced, so a scope with nothing to count shows
+/// nothing at all.
 fn focused_staged_label(
+    base_lead: Option<&str>,
+    repo: Option<(usize, usize)>,
+    file: Option<(usize, usize)>,
+    hunk: Option<(Option<usize>, usize)>,
+) -> Option<String> {
+    let body = staged_label_body(base_lead, repo, file)?;
+    let Some((at, total)) = hunk else {
+        return Some(format!(" {body} "));
+    };
+
+    let at = at.map_or_else(|| "-".to_string(), |k| k.to_string());
+    Some(format!(" {body} · hunk {at}/{total} "))
+}
+
+/// The counts half of [`focused_staged_label`], unpadded so the hunk position
+/// appends behind it.
+fn staged_label_body(
     base_lead: Option<&str>,
     repo: Option<(usize, usize)>,
     file: Option<(usize, usize)>,
@@ -1142,23 +1166,23 @@ fn focused_staged_label(
 
     if let Some(lead) = base_lead {
         return Some(match file {
-            Some((staged, unstaged)) => format!(" {lead} · file {staged}/{unstaged} "),
-            None => format!(" {lead} "),
+            Some((staged, unstaged)) => format!("{lead} · file {staged}/{unstaged}"),
+            None => lead.to_string(),
         });
     }
 
     let Some((repo_staged, repo_unstaged)) = repo else {
         let (staged, unstaged) = file?;
-        return Some(format!(" {staged} staged / {unstaged} unstaged "));
+        return Some(format!("{staged} staged / {unstaged} unstaged"));
     };
     if repo_staged == 0 && repo_unstaged == 0 && file.is_none() {
         return None;
     }
 
-    let repo_part = format!(" repo {repo_staged} staged / {repo_unstaged} unstaged");
+    let repo_part = format!("repo {repo_staged} staged / {repo_unstaged} unstaged");
     Some(match file {
-        Some((staged, unstaged)) => format!("{repo_part} · file {staged}/{unstaged} "),
-        None => format!("{repo_part} "),
+        Some((staged, unstaged)) => format!("{repo_part} · file {staged}/{unstaged}"),
+        None => repo_part,
     })
 }
 
@@ -1927,56 +1951,87 @@ mod tests {
     #[test]
     fn the_staged_label_pairs_the_repo_hunks_with_the_focused_file() {
         assert_eq!(
-            focused_staged_label(None, Some((2, 3)), Some((1, 4))).as_deref(),
+            focused_staged_label(None, Some((2, 3)), Some((1, 4)), None).as_deref(),
             Some(" repo 2 staged / 3 unstaged · file 1/4 "),
             "both pairs read side by side"
         );
         assert_eq!(
-            focused_staged_label(None, Some((2, 3)), None).as_deref(),
+            focused_staged_label(None, Some((2, 3)), None, None).as_deref(),
             Some(" repo 2 staged / 3 unstaged "),
             "a file with no diff map drops its half"
         );
         assert_eq!(
-            focused_staged_label(None, Some((2, 3)), Some((0, 0))).as_deref(),
+            focused_staged_label(None, Some((2, 3)), Some((0, 0)), None).as_deref(),
             Some(" repo 2 staged / 3 unstaged "),
             "and so does a file whose diff map holds no hunks"
         );
         assert_eq!(
-            focused_staged_label(None, None, Some((1, 4))).as_deref(),
+            focused_staged_label(None, None, Some((1, 4)), None).as_deref(),
             Some(" 1 staged / 4 unstaged "),
             "no repo tally yet falls back to the file's own counts"
         );
         assert_eq!(
-            focused_staged_label(None, None, None),
+            focused_staged_label(None, None, None, None),
             None,
             "nothing to say without either"
         );
         assert_eq!(
-            focused_staged_label(None, Some((0, 0)), Some((0, 0))),
+            focused_staged_label(None, Some((0, 0)), Some((0, 0)), None),
             None,
             "a clean repo and an unchanged file hide the segment"
         );
         assert_eq!(
-            focused_staged_label(None, Some((0, 0)), Some((1, 0))).as_deref(),
+            focused_staged_label(None, Some((0, 0)), Some((1, 0)), None).as_deref(),
             Some(" repo 0 staged / 0 unstaged · file 1/0 "),
             "a stale zero tally still shows against a file that has hunks"
         );
     }
 
     #[test]
+    fn the_staged_label_closes_with_the_hunk_under_the_cursor() {
+        assert_eq!(
+            focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some((Some(2), 7))).as_deref(),
+            Some(" repo 2 staged / 3 unstaged · file 1/4 · hunk 2/7 "),
+            "the position closes the label the counts opened"
+        );
+        assert_eq!(
+            focused_staged_label(None, Some((2, 3)), None, Some((Some(2), 7))).as_deref(),
+            Some(" repo 2 staged / 3 unstaged · hunk 2/7 "),
+            "and follows the repo pair with no file half between them"
+        );
+        assert_eq!(
+            focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some((None, 7))).as_deref(),
+            Some(" repo 2 staged / 3 unstaged · file 1/4 · hunk -/7 "),
+            "a cursor above the first hunk stands at no position"
+        );
+        assert_eq!(
+            focused_staged_label(Some("diff vs abc1234"), None, None, Some((Some(1), 3)))
+                .as_deref(),
+            Some(" diff vs abc1234 · hunk 1/3 "),
+            "a named base carries the position too"
+        );
+        assert_eq!(
+            focused_staged_label(None, None, None, Some((Some(1), 3))),
+            None,
+            "nothing to count hides the position with the rest of the label"
+        );
+    }
+
+    #[test]
     fn a_diff_base_takes_the_repo_tally_s_place_in_the_label() {
         assert_eq!(
-            focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), Some((1, 4))).as_deref(),
+            focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), Some((1, 4)), None)
+                .as_deref(),
             Some(" diff vs abc1234 · file 1/4 "),
             "the base replaces the repo pair rather than joining it"
         );
         assert_eq!(
-            focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), None).as_deref(),
+            focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), None, None).as_deref(),
             Some(" diff vs abc1234 "),
             "a file with no hunks still says what is under review"
         );
         assert_eq!(
-            focused_staged_label(Some("diff vs abc1234"), None, Some((0, 0))).as_deref(),
+            focused_staged_label(Some("diff vs abc1234"), None, Some((0, 0)), None).as_deref(),
             Some(" diff vs abc1234 "),
             "and so does one whose diff map holds none"
         );

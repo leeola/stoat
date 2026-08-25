@@ -739,9 +739,6 @@ impl Workspace {
     /// The same tally [`Self::repo_change_counts`] reads its totals from, so a
     /// list showing per-file counts and the bar showing the totals never
     /// disagree.
-    // Stored ahead of the position indicator that reads it, which is what keeps
-    // the per-file half of the tally from being computed twice.
-    #[allow(dead_code)]
     pub(crate) fn repo_hunk_totals(&self) -> Option<&[(PathBuf, usize)]> {
         self.diff
             .repo_hunk_tallies

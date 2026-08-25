@@ -21,7 +21,7 @@ use crate::{
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, Placement, View},
     render::undercurl::UndercurlBatch,
-    workspace::Workspace,
+    workspace::{diff, Workspace},
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::{
@@ -274,6 +274,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         lsp_servers: &[],
         diff_warm_busy: false,
         repo_change_counts: ws.repo_change_counts(),
+        hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
         lsp_pending,
         lsp_message: stoat
