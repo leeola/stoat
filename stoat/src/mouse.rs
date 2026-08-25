@@ -611,7 +611,16 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         mouse.kind,
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     ) {
-        return handle_mouse_scroll(stoat, mouse);
+        // A notch is one line of travel, the unit every wheel consumer here
+        // already spends.
+        return handle_mouse_scroll(
+            stoat,
+            mouse,
+            match mouse.kind {
+                MouseEventKind::ScrollDown => 1.0,
+                _ => -1.0,
+            },
+        );
     }
     if let MouseEventKind::Moved = mouse.kind {
         return handle_hover(stoat, mouse.column, mouse.row);
@@ -1036,7 +1045,32 @@ fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
     UpdateEffect::None
 }
 
-fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
+/// Whole notches `lines` of travel makes, holding the remainder on `stoat` for
+/// the reports that follow.
+///
+/// A notch is the unit every wheel consumer but an editor pane spends, and a
+/// trackpad reports far less than one at a time. Accruing rather than rounding
+/// is what makes a slow drag over a list eventually step it, instead of
+/// throwing every report away.
+fn take_whole_notches(stoat: &mut Stoat, lines: f32) -> i32 {
+    stoat.wheel_line_remainder += lines;
+    let whole = stoat.wheel_line_remainder.trunc();
+    stoat.wheel_line_remainder -= whole;
+    whole as i32
+}
+
+/// Route `lines` of wheel travel, positive scrolling the content down, to
+/// whatever sits under the pointer.
+///
+/// An editor pane takes the travel as it is and can rest between rows. Every
+/// other surface steps by whole notches, so travel worth less than one accrues
+/// on the session rather than falling through to the pane beneath it, which
+/// would scroll the wrong thing under the pointer.
+pub(crate) fn handle_mouse_scroll(
+    stoat: &mut Stoat,
+    mouse: MouseEvent,
+    lines: f32,
+) -> UpdateEffect {
     if let Some(effect) = wheel_binding(stoat, mouse) {
         return effect;
     }
@@ -1045,33 +1079,43 @@ fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     // event never reaches the pane it covers. Over the preview it scrolls that
     // pane, and anywhere else it walks the list.
     if let Some(surfaces) = boxed_modal_surfaces(stoat) {
-        let down = match mouse.kind {
-            MouseEventKind::ScrollDown => true,
-            MouseEventKind::ScrollUp => false,
-            _ => return UpdateEffect::None,
-        };
+        let steps = take_whole_notches(stoat, lines);
+        if steps == 0 {
+            return UpdateEffect::None;
+        }
+        let down = steps > 0;
         let over_preview = surfaces
             .preview
             .is_some_and(|rect| rect.contains(Position::new(mouse.column, mouse.row)));
 
         if over_preview {
-            return scroll_modal_preview(stoat, down);
+            let mut effect = UpdateEffect::None;
+            for _ in 0..steps.unsigned_abs() {
+                effect = scroll_modal_preview(stoat, down);
+            }
+            return effect;
         }
-        return action_handlers::picker::picker_step(stoat, if down { 1 } else { -1 });
+        return action_handlers::picker::picker_step(stoat, steps);
     }
 
     // A wheel over the open hover popup scrolls the popup, not the pane
     // beneath it. The bump mirrors the Ctrl-d/Ctrl-u path. render_hover
     // clamps it to the content height.
-    if let Some(popup) = stoat.pending_hover.as_mut()
-        && popup.area.contains(Position::new(mouse.column, mouse.row))
-    {
-        match mouse.kind {
-            MouseEventKind::ScrollDown => popup.scroll_half_pages += 1,
-            MouseEventKind::ScrollUp => {
-                popup.scroll_half_pages = popup.scroll_half_pages.saturating_sub(1)
-            },
-            _ => {},
+    let over_popup = stoat
+        .pending_hover
+        .as_ref()
+        .is_some_and(|popup| popup.area.contains(Position::new(mouse.column, mouse.row)));
+    if over_popup {
+        let steps = take_whole_notches(stoat, lines);
+        if steps == 0 {
+            return UpdateEffect::None;
+        }
+        if let Some(popup) = stoat.pending_hover.as_mut() {
+            let by = steps.unsigned_abs() as usize;
+            popup.scroll_half_pages = match steps > 0 {
+                true => popup.scroll_half_pages + by,
+                false => popup.scroll_half_pages.saturating_sub(by),
+            };
         }
         return UpdateEffect::Redraw;
     }
@@ -1094,41 +1138,42 @@ fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
         },
     };
 
-    scroll_view_at(
-        stoat,
-        view,
-        area,
-        matches!(mouse.kind, MouseEventKind::ScrollDown),
-    )
+    scroll_view_at(stoat, view, area, lines)
 }
 
-/// Advance the wheel-scroll target of `view` (occupying `area`), scrolling
-/// down when `down`.
+/// Advance the wheel-scroll target of `view` (occupying `area`) by `lines` of
+/// travel, positive scrolling the content down.
 ///
 /// The pane-resolved half of the wheel path, shared by the primary hit-test
-/// and an aux window's wheel events. An editor only moves its glide target,
-/// so it reports no redraw -- the frame tick eases and renders, and a
-/// trackpad flick of ~100 events must not repaint per event.
+/// and an aux window's wheel events. An editor takes the travel whole and only
+/// moves its glide target, so it reports no redraw -- the frame tick eases and
+/// renders, and a trackpad flick of ~100 events must not repaint per event. A
+/// run pane scrolls by whole notches, so its share accrues on the session.
 pub(crate) fn scroll_view_at(
     stoat: &mut Stoat,
     view: View,
     area: Rect,
-    down: bool,
+    lines: f32,
 ) -> UpdateEffect {
-    let ws = stoat.active_workspace_mut();
     match view {
         View::Editor(id) => {
-            let Some(editor) = ws.editors.get_mut(id) else {
+            let Some(editor) = stoat.active_workspace_mut().editors.get_mut(id) else {
                 return UpdateEffect::None;
             };
-            action_handlers::view::wheel_scroll(editor, down);
+            action_handlers::view::wheel_scroll_by(editor, lines);
             UpdateEffect::None
         },
         View::Run(id) => {
-            let Some(run_state) = ws.runs.get_mut(id) else {
+            let steps = take_whole_notches(stoat, lines);
+            if steps == 0 {
+                return UpdateEffect::None;
+            }
+            let Some(run_state) = stoat.active_workspace_mut().runs.get_mut(id) else {
                 return UpdateEffect::None;
             };
-            run_state.wheel_scroll(down, (area.height as usize).saturating_sub(1));
+            for _ in 0..steps.unsigned_abs() {
+                run_state.wheel_scroll(steps > 0, (area.height as usize).saturating_sub(1));
+            }
             UpdateEffect::Redraw
         },
         _ => UpdateEffect::None,
@@ -1778,6 +1823,7 @@ mod tests {
         handle_mouse_scroll(
             &mut h.stoat,
             wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+            1.0,
         );
 
         assert_eq!(
@@ -1796,6 +1842,7 @@ mod tests {
             handle_mouse_scroll(
                 &mut h.stoat,
                 wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+                1.0,
             );
         }
 
@@ -1814,6 +1861,7 @@ mod tests {
         handle_mouse_scroll(
             &mut h.stoat,
             wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+            1.0,
         );
         // Backdate the gate rather than sleeping, so the test stays pure.
         h.stoat.wheel_binding_last = h
@@ -1823,6 +1871,7 @@ mod tests {
         handle_mouse_scroll(
             &mut h.stoat,
             wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+            1.0,
         );
 
         assert_eq!(
@@ -1843,11 +1892,13 @@ mod tests {
         handle_mouse_scroll(
             &mut h.stoat,
             wheel(MouseEventKind::ScrollDown, KeyModifiers::CONTROL),
+            1.0,
         );
         let after_unbound = h.cursor_display_positions();
         handle_mouse_scroll(
             &mut h.stoat,
             wheel(MouseEventKind::ScrollDown, KeyModifiers::NONE),
+            1.0,
         );
 
         assert_eq!(

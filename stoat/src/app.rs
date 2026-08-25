@@ -45,7 +45,9 @@ use crate::{
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use futures::FutureExt;
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
@@ -1034,6 +1036,16 @@ pub struct Stoat {
     /// burst walks a hundred jumps. A notch inside [`WHEEL_BINDING_COOLDOWN`]
     /// of this scrolls instead of dispatching.
     pub(crate) wheel_binding_last: Option<std::time::Instant>,
+    /// Sub-notch wheel travel held for the consumers that step by whole
+    /// notches: a keymap wheel binding, the boxed modals, the hover popup, and
+    /// a run pane.
+    ///
+    /// A trackpad reports travel worth a fraction of a line, which those
+    /// surfaces have no smaller unit to spend. Accruing it here is what turns a
+    /// stream of small reports into the notch they each expect, rather than
+    /// dropping every one of them. An editor pane never reads this: it consumes
+    /// the fraction directly and rests between rows.
+    pub(crate) wheel_line_remainder: f32,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal mode; consumed once via
@@ -2116,6 +2128,7 @@ impl Stoat {
             pending_message_expiry: None,
             walkthrough_exit_timer: None,
             wheel_binding_last: None,
+            wheel_line_remainder: 0.0,
             pending_count: None,
             pending_find: None,
             pending_mark: None,
@@ -2527,6 +2540,20 @@ impl Stoat {
             return self.handle_zoom_step(delta);
         }
 
+        // Precision wheel travel routes through the same surfaces a notch does,
+        // and both reads borrow more of self than the pane-tree borrow below
+        // leaves reachable.
+        if let WindowIpcEvent::Wheel {
+            window,
+            col,
+            row,
+            mods,
+            lines,
+        } = event
+        {
+            return self.handle_window_wheel(window, col, row, mods, lines);
+        }
+
         // The diff chords read the focused view, which the pane-tree borrow
         // below leaves unreachable for the same reason.
         if let WindowIpcEvent::Chord { ch, .. } = event {
@@ -2569,11 +2596,47 @@ impl Stoat {
             // Another digit is a chord the terminal forwarded on the claim and
             // nothing here answers.
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
-            // FIXME: nothing routes precision wheel travel yet, so the pane
-            // under the pointer does not scroll from it.
-            WindowIpcEvent::Wheel { .. } => return UpdateEffect::None,
+            WindowIpcEvent::Wheel { .. } => unreachable!("wheel events return above"),
         }
         UpdateEffect::Redraw
+    }
+
+    /// Route `lines` of precision wheel travel from `window` at cell `col`,
+    /// `row`, with `mods` as the modifier bitmask.
+    ///
+    /// The primary window runs the same routing a notch takes, so a binding, a
+    /// modal, a popup, and a pane each answer the way they always have. An aux
+    /// window scrolls the pane it holds without focusing it, as its notch path
+    /// does.
+    fn handle_window_wheel(
+        &mut self,
+        window: u32,
+        col: u16,
+        row: u16,
+        mods: u8,
+        lines: f32,
+    ) -> UpdateEffect {
+        if window == 0 {
+            let mouse = MouseEvent {
+                kind: match lines >= 0.0 {
+                    true => MouseEventKind::ScrollDown,
+                    false => MouseEventKind::ScrollUp,
+                },
+                column: col,
+                row,
+                modifiers: ipc_modifiers(mods),
+            };
+            return mouse::handle_mouse_scroll(self, mouse, lines);
+        }
+
+        let Some(pane_id) = pane_for_window(&self.active_workspace().panes, window) else {
+            return UpdateEffect::None;
+        };
+        let (view, area) = {
+            let pane = self.active_workspace().panes.pane(pane_id);
+            (pane.view.clone(), pane.area)
+        };
+        mouse::scroll_view_at(self, view, area, lines)
     }
 
     /// Flip the diff view's syntax coloring, or do nothing outside it.
@@ -2720,7 +2783,11 @@ impl Stoat {
                 let pane = self.active_workspace().panes.pane(pane_id);
                 (pane.view.clone(), pane.area)
             };
-            return mouse::scroll_view_at(self, view, area, matches!(kind, MouseKind::WheelDown));
+            let lines = match matches!(kind, MouseKind::WheelDown) {
+                true => 1.0,
+                false => -1.0,
+            };
+            return mouse::scroll_view_at(self, view, area, lines);
         }
 
         let Some(kind) = mouse_event_kind(kind) else {
@@ -7521,6 +7588,26 @@ fn control_byte(c: char) -> Option<u8> {
         .then(|| (c.to_ascii_lowercase() as u8) - b'a' + 1)
 }
 
+/// Crossterm modifiers from a window-IPC modifier bitmask.
+///
+/// The socket packs shift at `0x1`, control at `0x2`, alt at `0x4`, and super
+/// at `0x8`, which is this project's own layout rather than the terminal's, so
+/// the mapping back belongs on this side of the wire.
+fn ipc_modifiers(mods: u8) -> KeyModifiers {
+    let mut out = KeyModifiers::empty();
+    for (bit, modifier) in [
+        (0x1, KeyModifiers::SHIFT),
+        (0x2, KeyModifiers::CONTROL),
+        (0x4, KeyModifiers::ALT),
+        (0x8, KeyModifiers::SUPER),
+    ] {
+        if mods & bit != 0 {
+            out |= modifier;
+        }
+    }
+    out
+}
+
 /// The detached pane bound to aux window `window`, or `None` when none is.
 fn pane_for_window(panes: &PaneTree, window: u32) -> Option<PaneId> {
     panes
@@ -7654,6 +7741,112 @@ mod tests {
         assert_eq!(
             stoat.active_workspace().panes.pane(detached).area,
             Rect::new(0, 0, 50, 20),
+        );
+    }
+
+    /// Travel worth a fraction of a line reaches the editor whole, which is
+    /// what lets the view rest between two rows.
+    #[test]
+    fn window_ipc_wheel_moves_the_editor_target_by_its_fraction() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let target = |h: &mut crate::test_harness::TestHarness| {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.scroll_row as f32 + editor.scroll_frac
+        };
+
+        // Three rows to a line, so a fifth of a line is 0.6 of a row.
+        h.stoat.handle_window_ipc(wheel_ipc(0.2));
+        assert!(
+            (target(&mut h) - 0.6).abs() < 1e-5,
+            "one fraction of travel moves a fraction of a row",
+        );
+
+        h.stoat.handle_window_ipc(wheel_ipc(0.2));
+        assert!(
+            (target(&mut h) - 1.2).abs() < 1e-5,
+            "and the next accrues on it rather than restarting",
+        );
+    }
+
+    /// A list steps by whole notches, so sub-notch travel over one accrues
+    /// until it makes a step rather than being thrown away or falling through
+    /// to the pane underneath.
+    #[test]
+    fn window_ipc_wheel_steps_a_picker_once_per_notch() {
+        use stoat_action::OpenFileFinder;
+
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        let root = std::path::PathBuf::from("/wheel-ipc-finder");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .file_finder
+                .as_ref()
+                .expect("finder open")
+                .active_core_ref()
+                .picklist
+                .selected
+        };
+
+        for _ in 0..4 {
+            h.stoat.handle_window_ipc(wheel_ipc(0.2));
+        }
+        assert_eq!(
+            selected(&h),
+            0,
+            "four fifths of a line is short of a notch, so the list holds",
+        );
+
+        h.stoat.handle_window_ipc(wheel_ipc(0.2));
+        assert_eq!(
+            selected(&h),
+            1,
+            "and the fifth completes it, stepping exactly once",
+        );
+    }
+
+    /// A notch is one line of travel, so the precision path and the notch path
+    /// land the same target for the same distance.
+    #[test]
+    fn window_ipc_wheel_lands_where_the_same_notches_land() {
+        let landed = |precision: bool| {
+            let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+            let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+            let path = h.write_file("long.rs", &body);
+            h.open_file(&path);
+            for _ in 0..3 {
+                match precision {
+                    true => {
+                        h.stoat.handle_window_ipc(wheel_ipc(1.0));
+                    },
+                    false => {
+                        h.stoat.update(Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::ScrollDown,
+                            column: 1,
+                            row: 1,
+                            modifiers: KeyModifiers::NONE,
+                        }));
+                    },
+                }
+            }
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            (editor.scroll_row, editor.scroll_frac)
+        };
+
+        assert_eq!(
+            landed(true),
+            landed(false),
+            "three lines of travel and three notches reach one place",
         );
     }
 
@@ -7812,6 +8005,17 @@ mod tests {
 
     fn chord(ch: char) -> WindowIpc {
         WindowIpc::Event(WindowIpcEvent::Chord { window: 0, ch })
+    }
+
+    /// Precision wheel travel at the primary window's first cell.
+    fn wheel_ipc(lines: f32) -> WindowIpc {
+        WindowIpc::Event(WindowIpcEvent::Wheel {
+            window: 0,
+            col: 1,
+            row: 1,
+            mods: 0,
+            lines,
+        })
     }
 
     /// A width-120 harness over one `.rs` file whose second line changed,
