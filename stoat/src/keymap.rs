@@ -2258,6 +2258,28 @@ mod tests {
         );
     }
 
+    /// The toggle is bound at the root of `on key`, so no mode block opts in
+    /// and every mode answers the key. A pinned chord matters most: it hides
+    /// the box, and this is how the reader asks for it back.
+    #[test]
+    fn ctrl_question_toggles_the_key_hints_from_every_mode() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let ctrl_question = key_event(KeyCode::Char('?'), KeyModifiers::CONTROL);
+
+        for mode in ["normal", "insert", "space_goto"] {
+            let state = TestState::new().set("mode", StateValue::String(mode.into()));
+            let bound = keymap
+                .lookup(&state, &ctrl_question)
+                .unwrap_or_else(|| panic!("Ctrl-? is bound in {mode} mode"));
+            assert_eq!(
+                (bound.len(), bound[0].name.as_str()),
+                (1, "ToggleKeyHints"),
+                "Ctrl-? toggles the hints in {mode} mode and switches no mode",
+            );
+        }
+    }
+
     #[test]
     fn ctrl_a_enters_the_prefix_from_insert_but_not_from_a_prompt() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

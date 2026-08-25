@@ -323,6 +323,10 @@ on init {
 # with `0 -> GotoTab(10)` routes 0 to the tenth item while 1-9 flow through
 # `$num`.
 on key {
+    # The mini-help toggle, bound at the root so every mode answers it. A
+    # pinned chord hides the box, and this is the one key that asks for it back.
+    Ctrl-? -> ToggleKeyHints();
+
     # The modes named here bind `?` to something of their own. This block
     # outranks theirs on atom count, so a mode that takes the key has to be
     # excluded here rather than out-specified there.
