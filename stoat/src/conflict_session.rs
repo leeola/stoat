@@ -640,7 +640,7 @@ mod tests {
         dispatch_conflict(&mut h);
         assert_eq!(cursor_row(&mut h), 1, "opens on the first chunk");
 
-        // The git hunk-jump chords (space g n, git_pin n, ]c) all dispatch
+        // The git hunk-jump chords (space g n, the pinned space_git n, ]c) all dispatch
         // GotoNextChange, which walks conflict chunks in the conflict view
         // rather than no-opping against the scratch center's absent diff map.
         pick(&mut h, &GotoNextChange);

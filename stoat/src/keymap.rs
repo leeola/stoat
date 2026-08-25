@@ -2423,6 +2423,10 @@ mod tests {
         assert_eq!(ctrl_a[0].args[0].value, Value::Ident("normal".into()));
     }
 
+    /// The pin key holds the mode it is already in, so the chord's own arms
+    /// repeat. Each arm chains SetMode(normal), which is what releases the
+    /// chord unpinned and what the pin drops; Escape carries the switch alone,
+    /// so it releases either way.
     #[test]
     fn space_capital_g_twice_pins_the_git_mode_and_holds_it() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
@@ -2442,37 +2446,39 @@ mod tests {
                 &key_event(KeyCode::Char('G'), KeyModifiers::NONE),
             )
             .expect("G is bound in space_git mode");
-        assert_eq!(g[0].name, "SetMode");
-        assert_eq!(g[0].args[0].value, Value::Ident("git_pin".into()));
-
-        let pinned = TestState::new().set("mode", StateValue::String("git_pin".into()));
-
-        let n = keymap
-            .lookup(&pinned, &key_event(KeyCode::Char('n'), KeyModifiers::NONE))
-            .expect("n is bound in git_pin mode");
         assert_eq!(
-            n.len(),
-            1,
-            "hopping holds the mode, resetting nothing so presses repeat"
+            (g.len(), g[0].name.as_str()),
+            (1, "PinMode"),
+            "the second G pins the mode it is already in",
         );
-        assert_eq!(n[0].name, "GotoNextChange");
 
-        let s = keymap
-            .lookup(&pinned, &key_event(KeyCode::Char('s'), KeyModifiers::NONE))
-            .expect("s is bound in git_pin mode");
-        assert_eq!(s.len(), 1, "staging holds the mode too");
-        assert_eq!(s[0].name, "StageHunk");
+        for (key, action) in [('n', "GotoNextChange"), ('s', "StageHunk")] {
+            let bound = keymap
+                .lookup(
+                    &space_git,
+                    &key_event(KeyCode::Char(key), KeyModifiers::NONE),
+                )
+                .expect("the key is bound in space_git mode");
+            assert_eq!(
+                (bound.len(), bound[0].name.as_str(), bound[1].name.as_str()),
+                (2, action, "SetMode"),
+                "the work runs first, and the switch a pin drops rides behind it",
+            );
+        }
 
         let esc = keymap
-            .lookup(&pinned, &key_event(KeyCode::Esc, KeyModifiers::NONE))
-            .expect("Escape is bound in git_pin mode");
-        assert_eq!(esc[0].name, "SetMode");
+            .lookup(&space_git, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in space_git mode");
+        assert_eq!(
+            (esc.len(), esc[0].name.as_str()),
+            (1, "SetMode"),
+            "Escape switches and nothing else, which is what releases a pin",
+        );
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
-    /// The pinned twin of `space G G`. `space g` releases after one key because
-    /// each of its arms chains SetMode(normal); dropping that chain is what
-    /// holds the mode, so n and p walk the changes until Escape.
+    /// The pinned twin of `space G G`, spelled with the doubled letter the
+    /// same way.
     #[test]
     fn space_g_twice_pins_the_goto_mode_and_holds_it() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
@@ -2492,33 +2498,38 @@ mod tests {
                 &key_event(KeyCode::Char('g'), KeyModifiers::NONE),
             )
             .expect("g is bound in space_goto mode");
-        assert_eq!(g[0].name, "SetMode");
-        assert_eq!(g[0].args[0].value, Value::Ident("goto_pin".into()));
+        assert_eq!(
+            (g.len(), g[0].name.as_str()),
+            (1, "PinMode"),
+            "the second g pins the mode it is already in",
+        );
 
-        let pinned = TestState::new().set("mode", StateValue::String("goto_pin".into()));
-
-        for (key, action) in [('n', "GotoNextChange"), ('p', "GotoPrevChange")] {
-            let hop = keymap
-                .lookup(&pinned, &key_event(KeyCode::Char(key), KeyModifiers::NONE))
-                .expect("the hop is bound in goto_pin mode");
+        for (key, action) in [
+            ('n', "GotoNextChange"),
+            ('p', "GotoPrevChange"),
+            ('a', "GotoLastAccessed"),
+        ] {
+            let bound = keymap
+                .lookup(
+                    &space_goto,
+                    &key_event(KeyCode::Char(key), KeyModifiers::NONE),
+                )
+                .expect("the key is bound in space_goto mode");
             assert_eq!(
-                hop.len(),
-                1,
-                "hopping holds the mode, resetting nothing so presses repeat"
+                (bound.len(), bound[0].name.as_str(), bound[1].name.as_str()),
+                (2, action, "SetMode"),
+                "the work runs first, and the switch a pin drops rides behind it",
             );
-            assert_eq!(hop[0].name, action);
         }
 
-        let a = keymap
-            .lookup(&pinned, &key_event(KeyCode::Char('a'), KeyModifiers::NONE))
-            .expect("a is bound in goto_pin mode");
-        assert_eq!(a.len(), 1, "reaching the last buffer holds the mode too");
-        assert_eq!(a[0].name, "GotoLastAccessed");
-
         let esc = keymap
-            .lookup(&pinned, &key_event(KeyCode::Esc, KeyModifiers::NONE))
-            .expect("Escape is bound in goto_pin mode");
-        assert_eq!(esc[0].name, "SetMode");
+            .lookup(&space_goto, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in space_goto mode");
+        assert_eq!(
+            (esc.len(), esc[0].name.as_str()),
+            (1, "SetMode"),
+            "Escape switches and nothing else, which is what releases a pin",
+        );
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
