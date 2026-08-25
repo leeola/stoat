@@ -776,6 +776,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             diff_view: bool,
             dim: f32,
             soften_scale: f32,
+            tint_amount: f32,
         },
         Conflict {
             snapshot: DisplaySnapshot,
@@ -831,6 +832,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             inactive_dim
         };
         let soften_scale = crate::render::review::diff_soften_scale(stoat.diff_soften);
+        let tint_amount = crate::render::review::diff_tint_amount(stoat.diff_tint);
         // scroll_row is the source of truth for the pool page. The wheel
         // glide refines it sub-row through scroll_offset, but cursor-follow
         // and jumps move scroll_row without the fraction, so trust the offset
@@ -889,6 +891,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             editor.display_map.diff_version(),
             dim,
             soften_scale,
+            tint_amount,
             buffer_version,
             paint_version,
             theme_epoch,
@@ -1006,6 +1009,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     ),
                     diff_view: editor.diff_view,
                     soften_scale,
+                    tint_amount,
                     dim,
                 });
             }
@@ -1110,8 +1114,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.diff_view,
                 editor.display_map.diff_version(),
                 0.0,
-                // A modal preview is not the diff view the knob turns.
+                // A modal preview is not the diff view the knobs turn. Their
+                // neutral values differ: the soften scale rests at 1.0 and the
+                // tint amount at 0.0.
                 1.0,
+                0.0,
                 editor.display_map.buffer_snapshot().version(),
                 editor.display_map.snapshot().paint_version(),
                 theme_epoch,
@@ -1150,8 +1157,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         None,
                     ),
                     diff_view,
-                    // A modal preview is not the diff view the knob turns.
+                    // A modal preview is not the diff view the knobs turn.
+                    // Their neutral values differ: the soften scale rests at
+                    // 1.0 and the tint amount at 0.0.
                     soften_scale: 1.0,
+                    tint_amount: 0.0,
                     dim: 0.0,
                 });
             }
@@ -1676,6 +1686,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 diff_view,
                 dim,
                 soften_scale,
+                tint_amount,
             } => {
                 // One job for the whole refill rather than one per page.
                 // Every page reads the same highlight endpoints and the same
@@ -1718,6 +1729,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                                 diff_view,
                                 dim,
                                 soften_scale,
+                                tint_amount,
                                 endpoints.clone(),
                                 live.as_ref(),
                             );
@@ -1995,8 +2007,8 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// A page stays cached while the surface scrolls, but must repaint when the
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
 /// the gutter, a gutter-width or wrap-width change reflows the text, the
-/// cursor's buffer line moves under relative numbering, the diff view's soften
-/// level moves, or the theme changes every color on the page.
+/// cursor's buffer line moves under relative numbering, either of the diff
+/// view's dials moves, or the theme changes every color on the page.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -2008,6 +2020,7 @@ pub(crate) fn editor_page_content_version(
     diff_version: usize,
     dim: f32,
     soften_scale: f32,
+    tint_amount: f32,
     buffer_version: u64,
     paint_version: PaintVersion,
     theme_epoch: u64,
@@ -2022,6 +2035,7 @@ pub(crate) fn editor_page_content_version(
     diff_version.hash(&mut hasher);
     ((dim * 1000.0) as u32).hash(&mut hasher);
     ((soften_scale * 1000.0) as u32).hash(&mut hasher);
+    ((tint_amount * 1000.0) as u32).hash(&mut hasher);
     // A typed character and a fold both change page pixels and reach nothing
     // else here, so without the mapping stamp a file outside git (diff_version
     // stuck at 0) with no diagnostics glides pre-edit text.
@@ -4430,10 +4444,13 @@ mod tests {
         );
     }
 
-    /// The pooled pages hold rendered text, so a toggle that recolors every row
+    /// The pooled pages hold rendered text, so anything that recolors every row
     /// has to reach their content hash or the pool glides the old colors.
-    #[test]
-    fn a_diff_syntax_toggle_reenters_the_pool_pages() {
+    ///
+    /// `change` is the recolor under test, applied between two scrolls: the
+    /// first proves an untouched surface re-enters nothing, and the second
+    /// proves the change reaches the hash.
+    fn pool_reenters_after(change: impl FnOnce(&mut Stoat)) {
         use stoatty_protocol::command::{Command, FillCommand};
         use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -4478,16 +4495,28 @@ mod tests {
         emit_smooth_scroll(&mut h.stoat);
         assert!(
             drain_fills(&mut rx).is_empty(),
-            "a same-window scroll with the toggle untouched re-enters nothing"
+            "a same-window scroll with nothing changed re-enters nothing"
         );
 
-        h.stoat.diff_syntax = false;
+        change(&mut h.stoat);
         scroll(&mut h.stoat, 0.9);
         emit_smooth_scroll(&mut h.stoat);
         assert!(
             !drain_fills(&mut rx).is_empty(),
-            "the toggle recolors the page, so the pool re-enters it"
+            "the change recolors the page, so the pool re-enters it"
         );
+    }
+
+    #[test]
+    fn a_diff_syntax_toggle_reenters_the_pool_pages() {
+        pool_reenters_after(|stoat| stoat.diff_syntax = false);
+    }
+
+    /// The tint dial recolors every changed char, so a step has to re-enter the
+    /// buffered pages rather than let them glide the colors from before it.
+    #[test]
+    fn a_diff_tint_step_reenters_the_pool_pages() {
+        pool_reenters_after(|stoat| stoat.diff_tint = 2);
     }
 
     #[test]

@@ -17893,6 +17893,7 @@ mod tests {
             0,
             0.0,
             1.0,
+            0.0,
             0,
             paint,
             0,
@@ -17909,6 +17910,7 @@ mod tests {
                 0,
                 0.0,
                 1.0,
+                0.0,
                 0,
                 paint,
                 0
@@ -17927,6 +17929,7 @@ mod tests {
                 0,
                 0.0,
                 1.0,
+                0.0,
                 0,
                 paint,
                 0
@@ -17935,7 +17938,9 @@ mod tests {
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 1.0, 0, paint, 0),
+            editor_page_content_version(
+                true, 3, None, None, 0, false, 0, 0.0, 1.0, 0.0, 0, paint, 0
+            ),
             "switching to absolute numbering refills"
         );
         assert_ne!(
@@ -17950,6 +17955,7 @@ mod tests {
                 0,
                 0.0,
                 1.0,
+                0.0,
                 0,
                 paint,
                 0
@@ -17958,7 +17964,21 @@ mod tests {
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 1.0, 0, paint, 0),
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                true,
+                7,
+                0.0,
+                1.0,
+                0.0,
+                0,
+                paint,
+                0
+            ),
             "a diff-view hunk change refills buffered pages"
         );
         assert_ne!(
@@ -17973,6 +17993,7 @@ mod tests {
                 0,
                 0.0,
                 1.5,
+                0.0,
                 0,
                 paint,
                 0
@@ -17991,6 +18012,7 @@ mod tests {
                 0,
                 0.25,
                 1.0,
+                0.0,
                 0,
                 paint,
                 0
@@ -18009,6 +18031,7 @@ mod tests {
                 0,
                 0.0,
                 1.0,
+                0.0,
                 1,
                 paint,
                 0
@@ -18027,6 +18050,7 @@ mod tests {
                 0,
                 0.0,
                 1.0,
+                0.0,
                 0,
                 paint,
                 1
@@ -18077,6 +18101,7 @@ mod tests {
                     0,
                     0.0,
                     1.0,
+                    0.0,
                     buffer_version,
                     paint_version,
                     0,
