@@ -1545,9 +1545,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                // A digit chord has no terminal encoding, so a program can only
-                // hear it over the socket. Without that route it falls through
-                // to encode_key, which yields nothing for it, exactly as before.
+                // A digit chord means something to the program rather than to
+                // the terminal, so it goes over the socket where there is one.
+                // Without that route it falls through to encode_key, which
+                // sends the digit's own CSI-u bytes.
                 if primary
                     && let Some(ch) = chord_char(platform_mod_held, &event.logical_key)
                     && route() == ZoomRoute::Socket

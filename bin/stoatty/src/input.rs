@@ -149,7 +149,7 @@ pub(crate) fn encode_key(key: &Key, ctrl: bool, shift: bool) -> Option<Vec<u8>> 
         Key::Named(NamedKey::F10) => Some(b"\x1b[21~".to_vec()),
         Key::Named(NamedKey::F11) => Some(b"\x1b[23~".to_vec()),
         Key::Named(NamedKey::F12) => Some(b"\x1b[24~".to_vec()),
-        Key::Character(s) if ctrl => ctrl_byte(s),
+        Key::Character(s) if ctrl => ctrl_byte(s).or_else(|| csi_u_ctrl(s)),
         Key::Character(s) => Some(s.as_str().as_bytes().to_vec()),
         _ => None,
     }
@@ -165,6 +165,28 @@ fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
     }
 
     Some(vec![(c.to_ascii_uppercase() as u8) & 0x1f])
+}
+
+/// The CSI-u bytes for Ctrl held with a single character that has no C0 byte,
+/// or `None` when `s` is not one such character.
+///
+/// Only the letters carry a control byte, so every other ctrl combo has no
+/// terminal encoding of its own and reaches the child as nothing without this.
+/// `ESC [ cp ; 5 u` names the character by codepoint instead, which is what
+/// lets a chord such as `Ctrl-?` be bound at all.
+///
+/// The modifier field is 5, which is ctrl alone in the `1 + bitmask` encoding
+/// CSI-u uses. Shift is dropped because the logical character already embodies
+/// it: the press that produced `?` reaches the program as `?` with ctrl, not as
+/// `/` with ctrl and shift.
+fn csi_u_ctrl(s: &str) -> Option<Vec<u8>> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || c.is_ascii_alphabetic() {
+        return None;
+    }
+
+    Some(format!("\x1b[{};5u", c as u32).into_bytes())
 }
 
 /// Encode clipboard `text` for the PTY on paste.
@@ -608,10 +630,29 @@ mod tests {
         assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
         assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
         assert_eq!(ctrl("C"), Some(vec![0x03]), "folds case");
+    }
+
+    /// A ctrl combo with no control byte has nothing else to write, so without
+    /// CSI-u the child never hears the press. Naming the character by codepoint
+    /// is what makes such a combo bindable.
+    #[test]
+    fn encode_key_maps_ctrl_punctuation_to_csi_u() {
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), true, false);
+
+        assert_eq!(
+            ctrl("?"),
+            Some(b"\x1b[63;5u".to_vec()),
+            "Ctrl-? names codepoint 63, with ctrl alone as the modifier",
+        );
         assert_eq!(
             ctrl("1"),
+            Some(b"\x1b[49;5u".to_vec()),
+            "a digit takes the same encoding",
+        );
+        assert_eq!(
+            ctrl("ab"),
             None,
-            "Ctrl with a non-letter has no control byte"
+            "a multi-character key names no single codepoint",
         );
     }
 
