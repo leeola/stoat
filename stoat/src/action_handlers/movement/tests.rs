@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     action_handlers::dispatch,
+    keymap::{ResolvedAction, ResolvedArg},
     pane::View,
     test_harness::{
         editor,
@@ -8,13 +9,15 @@ use crate::{
         stoat, TestHarness,
     },
 };
+use std::sync::Arc;
 use stoat_action::{
     AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
     ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
     ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown,
     MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
-    MoveUp, SelectAll,
+    MoveUp, PinMode, SelectAll,
 };
+use stoat_config::Value;
 
 /// Seed a repo with two changed files, each carrying one hunk at line 1.
 /// `changed_files` sorts by path, so a.rs is index 0 and b.rs is index 1.
@@ -106,6 +109,88 @@ fn last_accessed_holds_the_goto_pin() {
         (focused_buffer_path(&h.stoat), h.stoat.focused_mode()),
         (workdir.join("a.rs"), "goto_pin"),
         "the hop back to a.rs kept the pin",
+    );
+}
+
+/// One action of a binding, with no arguments.
+fn bound_action(name: &str) -> ResolvedAction {
+    ResolvedAction {
+        name: name.to_string(),
+        args: Vec::new(),
+    }
+}
+
+/// The mode switch a binding carries, which is the whole of what Escape binds
+/// and the tail of what a chord's own keys bind.
+fn bound_set_mode(target: &str) -> ResolvedAction {
+    ResolvedAction {
+        name: "SetMode".to_string(),
+        args: vec![ResolvedArg {
+            name: None,
+            value: Value::Ident(target.to_string()),
+        }],
+    }
+}
+
+/// `PinMode()` holds the mode with no `_pin` block to copy. A binding that
+/// acts and then switches keeps the mode, so the chord's keys repeat, and a
+/// binding that does nothing but switch is what releases it.
+#[test]
+fn a_pin_holds_the_mode_against_a_chained_switch() {
+    let mut h = TestHarness::with_size(40, 20);
+    h.stoat.set_focused_mode("goto".into());
+    dispatch(&mut h.stoat, &PinMode);
+    assert!(
+        h.stoat.focused_editor_pinned(),
+        "the action pins the focused editor",
+    );
+
+    let chained: Arc<[ResolvedAction]> =
+        Arc::from(vec![bound_action("MoveDown"), bound_set_mode("normal")]);
+    let _ = h.stoat.run_bound_actions(&chained, None, false);
+    assert_eq!(
+        (h.stoat.focused_mode(), h.stoat.focused_editor_pinned()),
+        ("goto", true),
+        "a switch riding along with real work is dropped",
+    );
+
+    let pure: Arc<[ResolvedAction]> = Arc::from(vec![bound_set_mode("normal")]);
+    let _ = h.stoat.run_bound_actions(&pure, None, false);
+    assert_eq!(
+        (h.stoat.focused_mode(), h.stoat.focused_editor_pinned()),
+        ("normal", false),
+        "a binding that only switches releases the pin",
+    );
+}
+
+/// The flag crosses a file hop the way the `_pin` name does. The walk swaps
+/// the pane's editor, and a flag left behind on the old one releases the chord
+/// mid-walk.
+#[test]
+fn next_change_across_files_carries_the_pin_flag() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.set_diff_view(true);
+        set_cursor_row(editor, 1);
+    }
+    h.stoat.set_focused_mode("goto".into());
+    dispatch(&mut h.stoat, &PinMode);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            h.stoat.focused_mode(),
+            h.stoat.focused_editor_pinned(),
+        ),
+        (workdir.join("b.rs"), "goto", true),
+        "the walk crossed to b.rs and the pin came with it",
     );
 }
 

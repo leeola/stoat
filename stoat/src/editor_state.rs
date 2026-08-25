@@ -82,6 +82,13 @@ pub(crate) struct EditorState {
     /// per-editor so the mode survives focus moving to another pane and back,
     /// rather than living in one global slot shared by every pane.
     pub(crate) mode: String,
+    /// Whether [`Self::mode`] is held until a pure mode switch releases it.
+    ///
+    /// A chord such as goto or git binds keys that act and then return to
+    /// normal. While this is set that return is dropped, so the chord's keys
+    /// repeat until Escape. The mode name itself is untouched, so the
+    /// statusline and every other visual read as the unpinned mode does.
+    pub(crate) pinned: bool,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
     /// Fractional top row for inertial scroll. [`Self::scroll_row`] stays
@@ -251,6 +258,7 @@ impl EditorState {
         Self {
             buffer_id,
             mode: "normal".into(),
+            pinned: false,
             display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
             scroll_offset: 0.0,
@@ -293,6 +301,7 @@ impl EditorState {
         Self {
             buffer_id,
             mode: "normal".into(),
+            pinned: false,
             display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
             scroll_offset: 0.0,

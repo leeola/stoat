@@ -338,6 +338,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.key_hints_visible = !stoat.key_hints_visible;
             UpdateEffect::Redraw
         },
+        ActionKind::PinMode => match stoat.set_focused_pinned(true) {
+            true => UpdateEffect::Redraw,
+            false => UpdateEffect::None,
+        },
         ActionKind::DismissKeyHints => {
             if stoat.key_hints_visible {
                 stoat.key_hints_visible = false;

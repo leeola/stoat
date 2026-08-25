@@ -1,7 +1,7 @@
 use crate::{
     defs::{
         agent::SpawnClaude,
-        app::{OpenLogs, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
+        app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, GitLs, OpenCommits,
@@ -533,6 +533,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleWrap::DEF, |_| Ok(Box::new(ToggleWrap)));
     add(ToggleKeyHints::DEF, |_| Ok(Box::new(ToggleKeyHints)));
     add(DismissKeyHints::DEF, |_| Ok(Box::new(DismissKeyHints)));
+    add(PinMode::DEF, |_| Ok(Box::new(PinMode)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(GotoLastAccessed::DEF, |_| Ok(Box::new(GotoLastAccessed)));
@@ -1787,7 +1788,8 @@ mod tests {
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
         // + 1 PickerDelete.
-        assert_eq!(all().count(), 415);
+        // + 1 PinMode.
+        assert_eq!(all().count(), 416);
     }
 
     #[test]

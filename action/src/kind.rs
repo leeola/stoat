@@ -60,6 +60,7 @@ action_kinds! {
     ToggleWrap,
     ToggleKeyHints,
     DismissKeyHints,
+    PinMode,
     OpenBuffer,
     OpenFileFinder,
     OpenFileFinderHSplit,

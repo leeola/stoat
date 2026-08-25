@@ -314,9 +314,13 @@ fn finish_open(
 /// The displaced buffer becomes the pane's last accessed one, which is what
 /// [`goto_last_accessed`] switches back to.
 ///
-/// A pinned mode on the displaced editor carries onto the new one, so a chord
-/// the user still holds survives the swap. Every other mode is dropped, since
-/// the new editor starts on a different buffer. See [`app::is_pinned_mode`].
+/// A pinned mode on the displaced editor carries onto the new one, and the pin
+/// travels with it, so a chord the user still holds survives the swap. Every
+/// other mode is dropped, since the new editor starts on a different buffer.
+///
+/// [`EditorState::pinned`] is what marks a mode as pinned. A user config that
+/// still ships `*_pin` mode blocks marks it by name instead, which
+/// [`app::is_pinned_mode`] answers for.
 pub(crate) fn show_buffer_in_pane(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
@@ -342,12 +346,13 @@ pub(crate) fn show_buffer_in_pane(
     };
     let carried_mode = old
         .and_then(|eid| ws.editors.get(eid))
-        .map(|editor| editor.mode.clone())
-        .filter(|mode| app::is_pinned_mode(mode));
+        .filter(|editor| editor.pinned || app::is_pinned_mode(&editor.mode))
+        .map(|editor| (editor.mode.clone(), editor.pinned));
 
     let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
-    if let Some(mode) = carried_mode {
+    if let Some((mode, pinned)) = carried_mode {
         editor.mode = mode;
+        editor.pinned = pinned;
     }
     let new_editor_id = ws.editors.insert(editor);
 

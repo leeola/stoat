@@ -59,6 +59,22 @@ define_action!(
     command_name = "version"
 );
 
+define_action!(
+    PinModeDef,
+    PinMode,
+    "PinMode",
+    ActionKind::PinMode,
+    "pin the current mode",
+    "Hold the focused editor's current mode until Escape, or until another \
+     binding that does nothing but switch modes. While the mode is pinned, a \
+     binding that runs a real action keeps the mode instead of returning to \
+     normal, so a chord such as goto or git repeats under one key. The mode \
+     name itself does not change, so the statusline and every other visual \
+     read exactly as they do unpinned.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
 const OPEN_LOGS_PARAMS: &[ParamDef] = &[ParamDef {
     name: "target",
     kind: ParamKind::String,

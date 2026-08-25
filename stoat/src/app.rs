@@ -4631,8 +4631,19 @@ impl Stoat {
                     .and_then(keymap_state::arg_as_str)
                     .is_some_and(|mode| mode.as_str() == "insert")
         });
+        // A pinned mode outlives every binding that rides a mode switch on top
+        // of real work, so that switch is dropped and the chord's keys repeat.
+        // A binding that switches and nothing else -- Escape -- is the release,
+        // so its switch runs.
+        let holds_mode = self.focused_editor_pinned()
+            && !actions
+                .iter()
+                .all(|ra| ra.name == "SetMode" || ra.name == "SetVar");
         for ra in actions.iter() {
             if ra.name == "SetMode" {
+                if holds_mode {
+                    continue;
+                }
                 if let Some(mode_name) = ra.args.first().and_then(keymap_state::arg_as_str) {
                     self.transition_mode(mode_name);
                     effect = UpdateEffect::Redraw;
@@ -5264,6 +5275,33 @@ impl Stoat {
         self.fallback_mode = mode;
     }
 
+    /// Whether the focused editor holds its mode against a chained switch.
+    ///
+    /// A focused terminal, or nothing focused at all, reports `false`. Only an
+    /// editor's bindings chain a mode switch onto real work, so only an editor
+    /// carries a pin.
+    pub(crate) fn focused_editor_pinned(&self) -> bool {
+        self.focused_editor_ids()
+            .and_then(|(editor_id, _)| self.active_workspace().editors.get(editor_id))
+            .is_some_and(|editor| editor.pinned)
+    }
+
+    /// Pin or release the focused editor's mode, reporting whether an editor
+    /// took the value.
+    ///
+    /// Reads the same target [`Self::set_focused_mode`] writes, so a pin and
+    /// the mode it holds always belong to one editor.
+    pub(crate) fn set_focused_pinned(&mut self, pinned: bool) -> bool {
+        let Some((editor_id, _)) = self.focused_editor_ids() else {
+            return false;
+        };
+        let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id) else {
+            return false;
+        };
+        editor.pinned = pinned;
+        true
+    }
+
     /// The foreground app screen as the `view` predicate reports it, or `None`
     /// for a plain editor with nothing focused. Screens (review/commits/rebase/
     /// reword/conflict) are derived from session state rather than the mode.
@@ -5443,6 +5481,10 @@ impl Stoat {
             self.current_insert_run = Some(String::new());
             self.begin_insert_undo_group();
         }
+        // Every switch that reaches here releases the pin. The dispatch loop
+        // drops the switches a pinned mode holds, so what arrives is a switch
+        // the pin does not survive.
+        self.set_focused_pinned(false);
         self.set_focused_mode(next);
     }
 
@@ -7221,17 +7263,22 @@ fn is_insert_run_mode(mode: &str) -> bool {
     mode == "insert"
 }
 
-/// Whether `mode` is a pinned chord, which holds until Escape rather than
-/// releasing after one key.
+/// Whether `mode` is named as a pinned chord, which holds until Escape rather
+/// than releasing after one key.
+///
+/// [`EditorState::pinned`] is the primary mark, set by the `PinMode` action.
+/// This is the compat path for a user config that still ships a copied `*_pin`
+/// mode block, whose bindings hold the mode by leaving the switch out rather
+/// than by setting the flag.
 ///
 /// A pinned chord outlives the editor that was focused when the user entered
-/// it. `goto_pin` walks changes across files and `git_pin` stages hunks across
-/// them (config.stcfg:1137,1165), so both routinely hop to another file
-/// mid-chord, and the swap that opens it must not drop the mode.
+/// it. A goto chord walks changes across files and a git chord stages hunks
+/// across them, so both routinely hop to another file mid-chord, and the swap
+/// that opens it must not drop the mode.
 ///
 /// Keyed on the `_pin` naming convention rather than a list, the way
-/// [`Stoat::in_select_mode`] keys on the `select_` prefix. A new pinned chord
-/// gets the behavior by being named for it.
+/// [`Stoat::in_select_mode`] keys on the `select_` prefix. A named chord gets
+/// the behavior by being named for it.
 pub(crate) fn is_pinned_mode(mode: &str) -> bool {
     mode.ends_with("_pin")
 }
