@@ -400,6 +400,66 @@ pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     scrolled
 }
 
+/// Center the view on the cursor after a jump, biased `center_off` rows toward
+/// the side the jump arrived from, and report whether the view moved.
+///
+/// A jump takes the reader somewhere they were not looking, so the landing is
+/// worth putting in the middle of the screen rather than at the edge the
+/// ordinary follow leaves it on. `down` says which way the jump went, and the
+/// bias keeps that many rows of where the reader came from on screen, so the
+/// move reads as a direction rather than a teleport.
+///
+/// The band is one-sided for a landing already on screen. Such a jump arrives
+/// from one direction, so the far side needs no guard, and a landing past the
+/// target sits where it is rather than pulling the view back under a reader who
+/// can already see it.
+///
+/// A landing off screen centers whichever way it came. A cross-file hop opens
+/// its target at the top of the file, so the one-sided band would leave a
+/// backward hop's landing below the last visible row.
+///
+/// `center_off` is capped at half the viewport, and the result is clamped to
+/// `max_scroll`, so a landing near the document end pins to the bottom rather
+/// than scrolling blank space into view. A move over one row seeds the glide
+/// from the pre-jump row, exactly as [`follow_jump`] does.
+pub(crate) fn center_jump_on_cursor(editor: &mut EditorState, down: bool, center_off: u32) -> bool {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let sel = editor.selections.newest_anchor().clone();
+    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+    let cursor = cursor_offset(rope, tail_off, head_off);
+    let cursor_row = snapshot.buffer_to_display(rope.offset_to_point(cursor)).row;
+
+    let center = viewport / 2;
+    let center_off = center_off.min(viewport.saturating_sub(1) / 2);
+    let target = match down {
+        true => center + center_off,
+        false => center.saturating_sub(center_off),
+    };
+    let max_scroll = max_scroll_row(snapshot.line_count(), viewport);
+
+    let prev = editor.scroll_row;
+    let sits_past = match down {
+        true => cursor_row > prev + target,
+        false => cursor_row < prev + target,
+    };
+    let on_screen = (prev..prev + viewport).contains(&cursor_row);
+    if !sits_past && on_screen {
+        return false;
+    }
+    editor.scroll_row = cursor_row.saturating_sub(target).min(max_scroll);
+
+    if prev.abs_diff(editor.scroll_row) > 1 {
+        editor.scroll_offset = prev as f32;
+        editor.scroll_glide = ScrollGlide::Page;
+    }
+    editor.scroll_row != prev
+}
+
 /// The display row the primary cursor's caret sits on.
 ///
 /// Resolves the newest selection's caret to a buffer offset and maps it through
@@ -640,6 +700,146 @@ mod tests {
             editor.scroll_glide,
             ScrollGlide::Page,
             "a far jump arms the glide that ships the cursor anchor"
+        );
+    }
+
+    /// A jump lands in the middle rather than at the edge the walk arrived
+    /// from, and the bias keeps rows of where the reader came from on screen.
+    #[test]
+    fn center_jump_lands_the_cursor_at_center_plus_the_bias() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        // Viewport 10, so the center row is 5 and a bias of 2 lands 7 or 3.
+        editor.viewport_rows = Some(10);
+
+        movement::set_cursor_row(editor, 50);
+        editor.scroll_row = 0;
+        editor.scroll_offset = 0.0;
+        editor.scroll_glide = ScrollGlide::None;
+
+        assert!(center_jump_on_cursor(editor, true, 2), "a far jump scrolls");
+        assert_eq!(
+            editor.scroll_row, 43,
+            "a downward landing sits two rows past center, so what stays on \
+             screen above it is where the reader came from",
+        );
+        assert_eq!(
+            (editor.scroll_offset, editor.scroll_glide),
+            (0.0, ScrollGlide::Page),
+            "and the glide starts from the pre-jump row, as every jump follow does",
+        );
+
+        movement::set_cursor_row(editor, 8);
+        editor.scroll_row = 43;
+        assert!(
+            center_jump_on_cursor(editor, false, 2),
+            "the reversal scrolls too"
+        );
+        assert_eq!(
+            editor.scroll_row, 5,
+            "an upward landing sits two rows short of center",
+        );
+    }
+
+    /// A cross-file hop opens its target at the top, so a backward landing
+    /// sits below every visible row. The band is one-sided only for a landing
+    /// the reader can already see.
+    #[test]
+    fn center_jump_centers_an_off_screen_landing_either_way() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        movement::set_cursor_row(editor, 50);
+        editor.scroll_row = 0;
+
+        assert!(
+            center_jump_on_cursor(editor, false, 2),
+            "a backward hop onto a row past the last visible one still scrolls",
+        );
+        assert_eq!(
+            editor.scroll_row, 47,
+            "and it lands two rows short of center, the way a backward jump does",
+        );
+    }
+
+    /// A hop the reader can already see stays put, so the view does not pull
+    /// itself out from under them for a row or two.
+    #[test]
+    fn center_jump_leaves_a_landing_short_of_the_band() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        movement::set_cursor_row(editor, 3);
+        editor.scroll_row = 0;
+
+        assert!(
+            !center_jump_on_cursor(editor, true, 2),
+            "a landing above the band leaves the view alone",
+        );
+        assert_eq!(editor.scroll_row, 0, "and the view stays where it was");
+    }
+
+    /// The last rows of a file cannot be centered without scrolling blank
+    /// space into view, so the landing pins to the bottom instead.
+    #[test]
+    fn center_jump_clamps_at_the_document_end() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        movement::set_cursor_row(editor, 99);
+        editor.scroll_row = 0;
+        let max = max_scroll_row(editor.display_map.snapshot().line_count(), 10);
+
+        assert!(center_jump_on_cursor(editor, true, 2));
+        assert_eq!(
+            editor.scroll_row, max,
+            "the view stops at the last full screen",
+        );
+        assert!(
+            max < 99 - 7,
+            "which is short of the row centering alone would ask for",
+        );
+    }
+
+    /// A bias past half the viewport would put the landing off screen, so it
+    /// caps at the half.
+    #[test]
+    fn center_jump_caps_the_bias_at_half_the_viewport() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        movement::set_cursor_row(editor, 50);
+        editor.scroll_row = 0;
+
+        assert!(center_jump_on_cursor(editor, true, 99));
+        assert_eq!(
+            editor.scroll_row, 41,
+            "the bias caps at four, so the landing sits on the last row of the \
+             ten the viewport holds",
         );
     }
 

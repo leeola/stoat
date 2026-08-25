@@ -3994,6 +3994,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
     let count = count as usize;
     let extend = stoat.in_select_mode();
+    let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
     let origin = super::jump::live_entry(stoat);
     let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {
         stoat
@@ -4067,6 +4068,12 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
         });
     if let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
+    }
+    // The landing goes to the middle of the screen rather than the edge the
+    // walk arrived at. The key epilogue's follow then finds the cursor deep
+    // inside its margin and leaves both the view and this glide alone.
+    if let Some(editor) = focused_editor_mut(stoat) {
+        view::center_jump_on_cursor(editor, matches!(dir, ChangeDir::Next), center_off);
     }
     UpdateEffect::Redraw
 }
@@ -4204,6 +4211,10 @@ pub(crate) struct PendingChangedFileJump {
     /// The jumplist entry for where the hop started, pushed once it lands so a
     /// scan that finds nowhere to go records no jump.
     origin: Option<JumpEntry>,
+    /// Which way the hop went, which the landing needs to bias its centering
+    /// toward the file the reader came from. The scan lands long after the
+    /// keypress that knew this.
+    dir: ChangeDir,
 }
 
 /// What a changed-file scan decided.
@@ -4262,6 +4273,7 @@ fn goto_change_across_files(
         _task: task,
         source_diff_view,
         origin,
+        dir,
     });
     UpdateEffect::Redraw
 }
@@ -4427,7 +4439,7 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         editor.set_diff_view(true);
     }
 
-    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
     if let Some(target_row) = line
         && let Some(editor) = focused_editor_mut(stoat)
     {
@@ -4446,8 +4458,10 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
             )
         });
         // Pull the view onto the landed hunk here, so a startup or mouse
-        // dispatch that skips the Key-event epilogue still lands scrolled.
-        view::ensure_cursor_in_view(editor, scrolloff);
+        // dispatch that skips the Key-event epilogue still lands scrolled. The
+        // hop centers its landing the way the in-file walk does, biased toward
+        // the file the reader crossed from.
+        view::center_jump_on_cursor(editor, matches!(pending.dir, ChangeDir::Next), center_off);
     }
 
     if let Some(entry) = pending.origin {

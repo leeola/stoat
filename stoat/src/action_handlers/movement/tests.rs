@@ -17,7 +17,7 @@ use stoat_action::{
     MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
     MoveUp, PinMode, SelectAll,
 };
-use stoat_config::Value;
+use stoat_config::{Settings, Value};
 
 /// Seed a repo with two changed files, each carrying one hunk at line 1.
 /// `changed_files` sorts by path, so a.rs is index 0 and b.rs is index 1.
@@ -5660,6 +5660,42 @@ fn goto_next_change_selects_a_multi_line_hunk_whole() {
         h.selection_spans(),
         vec![(4, 10, true)],
         "rows 2 through 4, not the first row alone",
+    );
+}
+
+/// A jump takes the reader to code they were not looking at, so the landing
+/// belongs in the middle of the screen rather than at the edge the walk came
+/// from. The bias setting moves it off center toward that edge.
+#[test]
+fn a_hunk_jump_centers_its_landing() {
+    let landing = |bias: Option<u32>| {
+        let settings = Settings {
+            jump_scrolloff: bias,
+            ..Settings::default()
+        };
+        let mut h = TestHarness::new_with_settings(40, 20, settings);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+        install_diff_hunk_rows(&mut h, &[50..51, 60..61]);
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .viewport_rows = Some(10);
+
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        let row = focused_head_row(&mut h.stoat);
+        (
+            row,
+            focused_editor_mut(&mut h.stoat).expect("editor").scroll_row,
+        )
+    };
+
+    // Viewport 10, so the center row is 5 and the landing row is 50.
+    assert_eq!(
+        (landing(None), landing(Some(2))),
+        ((50, 45), (50, 43)),
+        "the hunk lands centered by default, and two rows below center with \
+         the bias, which keeps the rows it came from in view",
     );
 }
 
