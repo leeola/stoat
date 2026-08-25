@@ -133,6 +133,9 @@ pub(crate) fn render_page_fill(
         diff_view,
         dim,
         soften_scale,
+        // FIXME: no dial reaches the pooled pages yet, so a page paints at the
+        // tint's off amount.
+        0.0,
         endpoints,
         live,
     );
@@ -177,6 +180,7 @@ pub(crate) fn render_page_from_snapshot(
     diff_view: bool,
     dim: f32,
     soften_scale: f32,
+    tint_amount: f32,
     endpoints: Arc<[HighlightEndpoint]>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
@@ -199,6 +203,7 @@ pub(crate) fn render_page_from_snapshot(
             scene.as_mut(),
             dim,
             soften_scale,
+            tint_amount,
             None,
             None,
         );
@@ -888,6 +893,7 @@ mod tests {
                 false,
                 0.0,
                 1.0,
+                0.0,
                 page_endpoints(&snapshot, top_row, 4),
                 None,
             );
@@ -968,6 +974,7 @@ mod tests {
             false,
             0.0,
             1.0,
+            0.0,
             page_endpoints(&snapshot, 0, 2),
             None,
         );
@@ -1059,6 +1066,7 @@ mod tests {
             false,
             0.0,
             1.0,
+            0.0,
             page_endpoints(&snapshot, 0, 3),
             None,
         );
@@ -1118,6 +1126,7 @@ mod tests {
             false,
             0.0,
             1.0,
+            0.0,
             page_endpoints(&snapshot, 0, 4),
             None,
         );
@@ -1131,6 +1140,7 @@ mod tests {
             false,
             0.5,
             1.0,
+            0.0,
             page_endpoints(&snapshot, 0, 4),
             None,
         );
@@ -1207,6 +1217,7 @@ mod tests {
             None,
             0.0,
             1.0,
+            0.0,
             None,
             None,
         );
@@ -1222,6 +1233,7 @@ mod tests {
             true,
             0.0,
             1.0,
+            0.0,
             page_endpoints(&snapshot, 0, 8),
             None,
         );
@@ -1631,6 +1643,7 @@ mod tests {
             false,
             0.0,
             1.0,
+            0.0,
             page_endpoints(&snapshot, 6, 3),
             None,
         );

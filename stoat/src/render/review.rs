@@ -5,8 +5,8 @@ use super::{
 use crate::{
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus},
     display_map::{
-        highlights::HighlightStyle, BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot,
-        RowHighlightCursor,
+        highlights::HighlightStyle, syntax_theme::DiffTheme, BlockRowKind,
+        CachedHighlightEndpoints, DisplaySnapshot, RowHighlightCursor,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -90,6 +90,7 @@ pub(crate) fn diff_soften_scale(level: i8) -> f32 {
 /// Lays its columns out per [`DiffLayout::DIFF_VIEW`]. When a `scene` is
 /// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
 /// components, otherwise it falls back to the ASCII gutter.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
     inner: Rect,
@@ -98,6 +99,7 @@ pub(crate) fn render_diff_view(
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
     soften_scale: f32,
+    tint_amount: f32,
 ) {
     let stoatty = scene.is_some();
     // The base rows pair with the live ones only where there are two columns to
@@ -117,6 +119,7 @@ pub(crate) fn render_diff_view(
         scene,
         0.0,
         soften_scale,
+        tint_amount,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
     );
@@ -456,6 +459,7 @@ pub(crate) fn paint_diff_rows(
     scene: Option<&mut ApcScene>,
     dim: f32,
     soften_scale: f32,
+    tint_amount: f32,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
 ) {
@@ -561,6 +565,7 @@ pub(crate) fn paint_diff_rows(
                     (del_style, dim_style),
                     theme,
                     soften_scale,
+                    tint_amount,
                 );
                 base_line += 1;
             },
@@ -586,6 +591,14 @@ pub(crate) fn paint_diff_rows(
                     DiffStatus::Modified | DiffStatus::Moved => tints.as_ref().map(|t| t.bg),
                     _ => None,
                 };
+                // A Modified or Moved row carries spans that color themselves,
+                // and a whitespace-only row the refinement never reached has
+                // nothing visible to color, so only a wholly added row takes a
+                // row-wide tint.
+                let tint_row = match status {
+                    DiffStatus::Added => tints.as_ref().map(|t| t.added),
+                    _ => None,
+                };
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -596,10 +609,12 @@ pub(crate) fn paint_diff_rows(
                     fallback_style,
                     inlay_style,
                     changes,
-                    tints.is_some(),
+                    tints.as_ref(),
                     soften_row,
                     soften_gaps,
                     soften_scale,
+                    tint_amount,
+                    tint_row,
                     &mut row_cursor,
                 );
                 if status == DiffStatus::Moved
@@ -664,10 +679,12 @@ pub(crate) fn paint_diff_rows(
                         token_spans,
                         dim_style,
                         &[],
-                        tints.is_some(),
+                        tints.as_ref(),
                         soften_row,
                         None,
                         soften_scale,
+                        tint_amount,
+                        None,
                     );
                     base_line += 1;
                 } else if row_state.paired {
@@ -690,6 +707,7 @@ pub(crate) fn paint_diff_rows(
                         (del_style, dim_style),
                         theme,
                         soften_scale,
+                        tint_amount,
                     );
                     base_line += 1;
                 }
@@ -716,27 +734,43 @@ pub(crate) fn paint_diff_rows(
     }
 }
 
-/// The editor background the diff view's softening blends toward, present only
-/// on an RGB theme.
+/// The colors one diff paint blends toward: the editor background its softening
+/// recedes into, and the status color each changed char tints toward.
 ///
-/// Resolved once per paint. A theme whose background is not an RGB color has no
-/// channels to blend, so it softens nothing and marks its change spans with
-/// [`Modifier::UNDERLINED`] instead, which is what an absent value means to
-/// every caller.
+/// Resolved once per paint, and present only on an RGB theme. A theme whose
+/// background is not an RGB color has no channels to blend, so it softens
+/// nothing and marks its change spans with [`Modifier::UNDERLINED`] instead,
+/// which is what an absent value means to every caller.
 pub(crate) struct DiffTints {
     pub(crate) bg: [u8; 3],
+    pub(crate) added: Color,
+    pub(crate) deleted: Color,
+    pub(crate) modified: Color,
+    pub(crate) moved: Color,
 }
 
-/// Resolve the background the softening blends toward, or `None` when the
-/// theme's is not an RGB color.
+/// Resolve the colors one paint blends toward, or `None` when the theme's
+/// background is not an RGB color.
 ///
 /// A `None` turns off softening for the whole frame and puts the diff view on
 /// the underline fallback for change spans, which is how an indexed-color theme
 /// still marks what changed.
+///
+/// The status colors come from [`DiffTheme`], so a tinted char, the gutter bars
+/// and the status glyphs all read one palette. A status color the theme leaves
+/// unset takes that palette's default, which is a named color no tint can blend
+/// toward.
 pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
     use crate::theme::scope as s;
     let bg = style_rgb(theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg))?;
-    Some(DiffTints { bg })
+    let status = DiffTheme::from_theme(theme);
+    Some(DiffTints {
+        bg,
+        added: status.added,
+        deleted: status.deleted,
+        modified: status.modified,
+        moved: status.moved,
+    })
 }
 
 /// Mark a cell `style` as inside a change span.
@@ -753,14 +787,29 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 ///
 /// A theme that cannot blend has no receding to lead against, so it underlines
 /// the span, which is the only mark left to it.
-fn mark_span(style: Style, kind: &ChangeKind, prose: bool, rgb: bool) -> Style {
+///
+/// `tint` carries the span's status color and the dial amount, and is `None`
+/// where the dial is off. It is what makes a changed char's own color say
+/// added, deleted, modified, or moved, rather than leaving the status to the
+/// gutter bars alone.
+fn mark_span(
+    style: Style,
+    kind: &ChangeKind,
+    prose: bool,
+    rgb: bool,
+    tint: Option<(Color, f32)>,
+) -> Style {
     let style = match rgb {
         true => style,
         false => style.add_modifier(Modifier::UNDERLINED),
     };
-    match prose && matches!(kind, ChangeKind::Replaced) {
+    let style = match prose && matches!(kind, ChangeKind::Replaced) {
         true => style.add_modifier(Modifier::BOLD),
         false => style,
+    };
+    match tint {
+        Some((target, amount)) => tint_style(style, target, amount),
+        None => style,
     }
 }
 
@@ -782,6 +831,47 @@ fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
     style.remove_modifier(Modifier::BOLD)
 }
 
+/// Shift `style`'s foreground toward `target` by `amount`, keeping its weight.
+///
+/// An amount at or under zero is the dial's off position and returns the style
+/// as it was, so an untouched session paints exactly the shipped colors. A full
+/// amount replaces the foreground outright, which is the flat form: the theme
+/// tunes its `diff.*` colors per palette, so a changed char may take one whole
+/// rather than only lean toward it.
+///
+/// A foreground or a target that is not an RGB color has no channels to
+/// interpolate, so every amount above zero snaps it to the flat form rather
+/// than leaving the char untinted.
+fn tint_style(style: Style, target: Color, amount: f32) -> Style {
+    if amount <= 0.0 {
+        return style;
+    }
+    match (style_rgb(style.fg), style_rgb(Some(target))) {
+        (Some(fg), Some(target_rgb)) if amount < 1.0 => {
+            let [r, g, b] = dim_rgb(fg, target_rgb, amount);
+            style.fg(Color::Rgb(r, g, b))
+        },
+        _ => style.fg(target),
+    }
+}
+
+/// The status color a change span tints toward.
+///
+/// `base_side` is what splits a novel span. The left column carries the base
+/// text, where novel content is what the change removed, and the right column
+/// carries the live text, where it is what the change added. A replaced or
+/// moved span reads the same from both sides.
+fn span_tint_color(tints: &DiffTints, kind: &ChangeKind, base_side: bool) -> Color {
+    match kind {
+        ChangeKind::Moved => tints.moved,
+        ChangeKind::Replaced => tints.modified,
+        ChangeKind::Novel => match base_side {
+            true => tints.deleted,
+            false => tints.added,
+        },
+    }
+}
+
 /// Paint base text with per-token syntax styles for the diff view's left
 /// column.
 ///
@@ -790,10 +880,10 @@ fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
 /// between tokens still read as part of the diff.
 ///
 /// `change_spans` mark the changed chars of a modified or moved base line, as
-/// line-local base byte ranges tagged by [`ChangeKind`]. On an RGB theme
-/// (`rgb`) a byte inside one is left as it is, at full strength, and the
-/// softening of everything around it is what marks it. A theme that cannot
-/// blend underlines the span instead, per [`mark_span`].
+/// line-local base byte ranges tagged by [`ChangeKind`]. On a theme that can
+/// blend (`tints`) a byte inside one keeps its syntax color, and the softening
+/// of everything around it is what marks it. A theme that cannot blend
+/// underlines the span instead, per [`mark_span`].
 ///
 /// `soften_row` recedes the whole row behind the changed rows around it, by
 /// blending every foreground toward the given background per [`soften_style`].
@@ -803,6 +893,12 @@ fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
 /// lighter [`MODIFIED_ROW_SOFTEN`], so a refined row's changed chars lead their
 /// own line. An empty `change_spans` no-ops it, which keeps a row the
 /// refinement never reached at full strength.
+///
+/// `tint_amount` shifts each changed char toward its status color per
+/// [`tint_style`], and `tint_row` does the same for every char of a row that
+/// carries no change spans at all, which is what makes a wholly deleted base
+/// line read as deleted. An amount of zero leaves both inert, so the dial's off
+/// position paints exactly the colors from before it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_base_row(
     buf: &mut Buffer,
@@ -813,10 +909,12 @@ pub(crate) fn paint_base_row(
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
-    rgb: bool,
+    tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
     soften_scale: f32,
+    tint_amount: f32,
+    tint_row: Option<Color>,
 ) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
@@ -828,6 +926,7 @@ pub(crate) fn paint_base_row(
     );
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
+    let span_tints = tints.filter(|_| tint_amount > 0.0);
     let mut token_cursor = 0;
     let mut span_cursor = 0;
     paint_style_runs(buf, start_x, y, text, max_cols, |byte_idx| {
@@ -844,6 +943,9 @@ pub(crate) fn paint_base_row(
         if let Some(bg) = soften_row.filter(|_| soften_scale > 0.0) {
             style = soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP));
         }
+        if let Some(target) = tint_row {
+            style = tint_style(style, target, tint_amount);
+        }
 
         while change_spans
             .get(span_cursor)
@@ -853,7 +955,8 @@ pub(crate) fn paint_base_row(
         }
         match change_spans.get(span_cursor) {
             Some((range, kind, prose)) if range.start <= byte_idx => {
-                style = mark_span(style, kind, *prose, rgb);
+                let tint = span_tints.map(|t| (span_tint_color(t, kind, true), tint_amount));
+                style = mark_span(style, kind, *prose, tints.is_some(), tint);
             },
             _ => {
                 if let Some(bg) = soften_gaps.filter(|_| soften_scale > 0.0) {
@@ -945,6 +1048,7 @@ fn paint_base_side(
     styles: (Style, Style),
     theme: &crate::theme::Theme,
     soften_scale: f32,
+    tint_amount: f32,
 ) {
     use crate::theme::scope as s;
     let (num_x, status_x, text_x, content_w) = columns;
@@ -969,6 +1073,13 @@ fn paint_base_side(
     let staged = snapshot
         .diff_map()
         .and_then(|dm| dm.base_line_staged(base_line));
+    // A base line the refinement left without spans is wholly deleted, so it
+    // has no changed chars of its own to color and the row takes the deleted
+    // color entire.
+    let tint_row = match changes.is_empty() {
+        true => tints.map(|t| t.deleted),
+        false => None,
+    };
     paint_base_row(
         buf,
         text_x,
@@ -978,10 +1089,12 @@ fn paint_base_side(
         token_spans,
         del_style,
         changes,
-        tints.is_some(),
+        tints,
         None,
         tints.map(|t| t.bg),
         soften_scale,
+        tint_amount,
+        tint_row,
     );
 
     if let Some(staged) = staged {
@@ -1016,8 +1129,8 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// `start_x`, clamped to `max_cols` and the buffer's right edge.
 ///
 /// `change_spans` mark the changed chars of a modified or moved row, as
-/// display-column ranges tagged by [`ChangeKind`]. On an RGB theme (`rgb`) a
-/// cell inside one is left as it is, at full strength, and the softening of
+/// display-column ranges tagged by [`ChangeKind`]. On a theme that can blend
+/// (`tints`) a cell inside one keeps its syntax color, and the softening of
 /// everything around it is what marks it. A theme that cannot blend underlines
 /// the span instead, per [`mark_span`]. Columns, not byte offsets, are used
 /// because the chunks expand tabs, so the counter tracks display cells.
@@ -1030,6 +1143,12 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// lighter [`MODIFIED_ROW_SOFTEN`], so a refined row's changed cells lead their
 /// own line. An empty `change_spans` no-ops it, which keeps a row the
 /// refinement never reached at full strength.
+///
+/// `tint_amount` shifts each changed cell toward its status color per
+/// [`tint_style`], and `tint_row` does the same for every cell of a row that
+/// carries no change spans at all, which is what makes a wholly added line read
+/// as added. An amount of zero leaves both inert, so the dial's off position
+/// paints exactly the colors from before it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
@@ -1041,10 +1160,12 @@ pub(crate) fn paint_highlighted_row(
     fallback_style: Style,
     inlay_style: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
-    rgb: bool,
+    tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
     soften_scale: f32,
+    tint_amount: f32,
+    tint_row: Option<Color>,
     row_cursor: &mut RowHighlightCursor,
 ) {
     debug_assert!(
@@ -1053,6 +1174,7 @@ pub(crate) fn paint_highlighted_row(
     );
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
+    let span_tints = tints.filter(|_| tint_amount > 0.0);
     let mut col = 0usize;
     let mut span_cursor = 0;
     for chunk in snapshot.row_chunks(display_row, row_cursor) {
@@ -1067,6 +1189,10 @@ pub(crate) fn paint_highlighted_row(
         };
         let style = match soften_row.filter(|_| soften_scale > 0.0) {
             Some(bg) => soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP)),
+            None => style,
+        };
+        let style = match tint_row {
+            Some(target) => tint_style(style, target, tint_amount),
             None => style,
         };
         // Both variants resolve per chunk rather than per cell, because a
@@ -1096,7 +1222,8 @@ pub(crate) fn paint_highlighted_row(
             }
             let cell_style = match change_spans.get(span_cursor) {
                 Some((range, kind, prose)) if range.start <= col => {
-                    mark_span(style, kind, *prose, rgb)
+                    let tint = span_tints.map(|t| (span_tint_color(t, kind, false), tint_amount));
+                    mark_span(style, kind, *prose, tints.is_some(), tint)
                 },
                 _ => gap_style,
             };
@@ -1706,6 +1833,12 @@ mod tests {
         editor
     }
 
+    /// The tints [`rgb_diff_theme`] resolves to, for the row painters that take
+    /// them and for the status colors a tinted char lands on.
+    fn rgb_tints() -> DiffTints {
+        resolve_diff_tints(&rgb_diff_theme()).expect("an rgb theme resolves its tints")
+    }
+
     /// A minimal theme whose diff colors resolve to RGB, so the change washes
     /// engage when rendering a hand-built diff editor off the harness.
     fn rgb_diff_theme() -> Theme {
@@ -1766,6 +1899,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         // The right buffer status column follows its five-cell number gutter, so
@@ -1838,6 +1972,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
@@ -1878,6 +2013,7 @@ mod tests {
             &mut rich_buf,
             Some(&mut scene),
             1.0,
+            0.0,
         );
 
         assert!(
@@ -1944,6 +2080,7 @@ mod tests {
             &mut ascii_buf,
             None,
             1.0,
+            0.0,
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
@@ -1982,6 +2119,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         // Width 120 is wide enough for the two-column layout. Left text spans
@@ -2046,6 +2184,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         let left = |y| line_text(&buf, y, 8..59);
@@ -2108,6 +2247,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         let left = |y| line_text(&buf, y, 8..59);
@@ -2152,6 +2292,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         // The gutter/code separator is painted at col 7, but a unified view has
@@ -2731,7 +2872,16 @@ mod tests {
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        render_diff_view(&mut editor, area, fallback, &theme, &mut buf, None, 1.0);
+        render_diff_view(
+            &mut editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            None,
+            1.0,
+            0.0,
+        );
 
         // At this sub-threshold width the diff is unified, so the moved buffer
         // row "bb" paints at the single text column. It sits on display row 1.
@@ -2845,6 +2995,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         let row = buffer_text(&buf, 1);
@@ -2874,6 +3025,7 @@ mod tests {
             &mut buf,
             None,
             1.0,
+            0.0,
         );
 
         let row = buffer_text(&buf, 1);
@@ -2902,10 +3054,12 @@ mod tests {
             &[],
             Style::default(),
             &change_spans,
-            true,
+            Some(&rgb_tints()),
             None,
             None,
             1.0,
+            0.0,
+            None,
         );
 
         for x in 0..8 {
@@ -2915,6 +3069,124 @@ mod tests {
                 "col {x} carries neither a background nor an underline",
             );
         }
+    }
+
+    /// The dial walks a changed char from its syntax color to its status color,
+    /// which is what makes the color itself say modified or deleted rather than
+    /// leaving that to the gutter bars.
+    #[test]
+    fn the_tint_amount_walks_a_change_span_toward_its_status_color() {
+        let tints = rgb_tints();
+        let fg = [200, 100, 50];
+        let change_spans = vec![
+            (0..3, ChangeKind::Replaced, false),
+            (3..6, ChangeKind::Novel, false),
+        ];
+
+        let paint = |amount: f32| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+            paint_base_row(
+                &mut buf,
+                0,
+                0,
+                "abcdefgh",
+                8,
+                &[],
+                Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
+                &change_spans,
+                Some(&tints),
+                None,
+                None,
+                1.0,
+                amount,
+                None,
+            );
+            [0u16, 3, 6].map(|x| buf[(x, 0)].style().fg)
+        };
+
+        let blend = |target: Color| {
+            let target = style_rgb(Some(target)).expect("an rgb status color");
+            let [r, g, b] = dim_rgb(fg, target, 0.5);
+            Some(Color::Rgb(r, g, b))
+        };
+        let syntax = Some(Color::Rgb(fg[0], fg[1], fg[2]));
+
+        assert_eq!(
+            paint(0.0),
+            [syntax; 3],
+            "the off position leaves every char its syntax color",
+        );
+        assert_eq!(
+            paint(0.5),
+            [blend(tints.modified), blend(tints.deleted), syntax],
+            "a mid level leans a replaced span toward modified and a base novel \
+             span toward deleted, and leaves the chars outside them alone",
+        );
+        assert_eq!(
+            paint(1.0),
+            [Some(tints.modified), Some(tints.deleted), syntax],
+            "the top level hands each span its status color outright",
+        );
+    }
+
+    /// A wholly added or deleted line carries no change spans, so the row
+    /// itself has to take the status color. Without this the dial colors every
+    /// refined line and leaves the plainest ones -- a pure insertion or
+    /// deletion -- reading as unchanged text.
+    #[test]
+    fn a_full_tint_paints_a_span_less_row_its_row_status_color() {
+        let tints = rgb_tints();
+        let theme = rgb_diff_theme();
+        let area = Rect::new(0, 0, 120, 6);
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+
+        let mut editor = diff_editor("keep\ntail\n", "keep\nadded\ntail\n");
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            None,
+            1.0,
+            1.0,
+        );
+
+        let rx = right_text_x(area);
+        let row = (0..area.height)
+            .find(|&y| buffer_text(&buf, y).contains("added"))
+            .expect("the added line renders");
+        let colors: Vec<_> = (rx..rx + 5).map(|x| buf[(x, row)].style().fg).collect();
+        assert_eq!(
+            colors,
+            vec![Some(tints.added); 5],
+            "every char of a pure insertion takes the added color",
+        );
+
+        let mut editor = diff_editor("keep\ngone\ntail\n", "keep\ntail\n");
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            None,
+            1.0,
+            1.0,
+        );
+
+        let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let row = (0..area.height)
+            .find(|&y| buffer_text(&buf, y).contains("gone"))
+            .expect("the deleted base line renders");
+        let colors: Vec<_> = (lx..lx + 4).map(|x| buf[(x, row)].style().fg).collect();
+        assert_eq!(
+            colors,
+            vec![Some(tints.deleted); 4],
+            "every char of a pure deletion takes the deleted color",
+        );
     }
 
     /// A zero scale must skip the soften call rather than pass it a zero
@@ -2937,10 +3209,12 @@ mod tests {
                 &[],
                 bold,
                 &[],
-                true,
+                Some(&rgb_tints()),
                 Some(bg),
                 None,
                 scale,
+                0.0,
+                None,
             );
             (buf[(0, 0)].style().fg, buf[(0, 0)].modifier)
         };
@@ -2975,10 +3249,12 @@ mod tests {
             &[],
             Style::default(),
             &change_spans,
-            false,
+            None,
             None,
             None,
             1.0,
+            0.0,
+            None,
         );
 
         for x in 0..6 {

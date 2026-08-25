@@ -333,14 +333,15 @@ fn paint_preview_side(
         token_spans,
         Style::default(),
         spans,
-        // Reached only where the tints resolved, which is the RGB theme this
-        // flag stands for.
-        true,
+        Some(tints),
         soften_row,
         soften_gaps,
-        // The commit preview is its own screen, so the diff view's soften knob
-        // never reaches it and its fractions stay as shipped.
+        // The commit preview is its own screen, so neither the diff view's
+        // soften knob nor its tint dial reaches it. The fractions stay as
+        // shipped and a changed span keeps its syntax color.
         1.0,
+        0.0,
+        None,
     );
 }
 /// Render a compact preview of a [`DiffDocument`]: each chunk's rows

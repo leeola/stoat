@@ -290,11 +290,15 @@ fn paint_conflict_rows(
                     fallback_style,
                     inlay_style,
                     &[],
-                    true,
+                    // No change span reaches a conflict row, so the span mark
+                    // and the tint that rides it never engage.
+                    None,
                     None,
                     None,
                     // This row softens nothing, so the scale it takes never applies.
                     1.0,
+                    0.0,
+                    None,
                     &mut row_cursor,
                 );
             },

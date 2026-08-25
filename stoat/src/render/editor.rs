@@ -153,6 +153,9 @@ pub(crate) fn render_editor_with_overlay(
             buf,
             scene,
             soften_scale,
+            // FIXME: no dial reaches the frame yet, so the diff view paints at
+            // the tint's off amount.
+            0.0,
         );
         return;
     }
