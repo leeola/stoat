@@ -107,13 +107,18 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
 }
 
 /// Encode a key press into the bytes a terminal sends to the shell, or `None`
-/// for a key with no terminal encoding (a bare modifier, a function key) so the
-/// caller writes nothing.
+/// for a key with no terminal encoding, such as a bare modifier, so the caller
+/// writes nothing.
 ///
 /// `ctrl` is whether Ctrl is held: with it, an ASCII letter becomes its C0
-/// control byte (Ctrl-C is `0x03`). Cursor keys use the normal-mode `CSI` forms
-/// (`\x1b[A` through `\x1b[D`); printable keys pass through as their own UTF-8
-/// bytes.
+/// control byte (Ctrl-C is `0x03`). Printable keys pass through as their own
+/// UTF-8 bytes.
+///
+/// The named editing, navigation, and function keys send their xterm
+/// normal-mode sequences, which is what the child terminal parser decodes back
+/// into the matching key. Only the plain forms are sent: a modified navigation
+/// key writes its unmodified sequence, matching the cursor keys, which have no
+/// application-mode form here either.
 pub(crate) fn encode_key(key: &Key, ctrl: bool, shift: bool) -> Option<Vec<u8>> {
     match key {
         Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
@@ -126,6 +131,24 @@ pub(crate) fn encode_key(key: &Key, ctrl: bool, shift: bool) -> Option<Vec<u8>> 
         Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
         Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
         Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
+        Key::Named(NamedKey::Insert) => Some(b"\x1b[2~".to_vec()),
+        Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
+        Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
+        Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
+        Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
+        Key::Named(NamedKey::F1) => Some(b"\x1bOP".to_vec()),
+        Key::Named(NamedKey::F2) => Some(b"\x1bOQ".to_vec()),
+        Key::Named(NamedKey::F3) => Some(b"\x1bOR".to_vec()),
+        Key::Named(NamedKey::F4) => Some(b"\x1bOS".to_vec()),
+        Key::Named(NamedKey::F5) => Some(b"\x1b[15~".to_vec()),
+        Key::Named(NamedKey::F6) => Some(b"\x1b[17~".to_vec()),
+        Key::Named(NamedKey::F7) => Some(b"\x1b[18~".to_vec()),
+        Key::Named(NamedKey::F8) => Some(b"\x1b[19~".to_vec()),
+        Key::Named(NamedKey::F9) => Some(b"\x1b[20~".to_vec()),
+        Key::Named(NamedKey::F10) => Some(b"\x1b[21~".to_vec()),
+        Key::Named(NamedKey::F11) => Some(b"\x1b[23~".to_vec()),
+        Key::Named(NamedKey::F12) => Some(b"\x1b[24~".to_vec()),
         Key::Character(s) if ctrl => ctrl_byte(s),
         Key::Character(s) => Some(s.as_str().as_bytes().to_vec()),
         _ => None,
@@ -552,7 +575,30 @@ mod tests {
         assert_eq!(named(NamedKey::ArrowRight), Some(b"\x1b[C".to_vec()));
         assert_eq!(named(NamedKey::ArrowLeft), Some(b"\x1b[D".to_vec()));
 
-        assert_eq!(named(NamedKey::F1), None, "unmapped named key");
+        assert_eq!(named(NamedKey::Delete), Some(b"\x1b[3~".to_vec()));
+        assert_eq!(named(NamedKey::Insert), Some(b"\x1b[2~".to_vec()));
+        assert_eq!(named(NamedKey::Home), Some(b"\x1b[H".to_vec()));
+        assert_eq!(named(NamedKey::End), Some(b"\x1b[F".to_vec()));
+        assert_eq!(named(NamedKey::PageUp), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(named(NamedKey::PageDown), Some(b"\x1b[6~".to_vec()));
+
+        assert_eq!(
+            named(NamedKey::F1),
+            Some(b"\x1bOP".to_vec()),
+            "F1-F4 are SS3"
+        );
+        assert_eq!(
+            named(NamedKey::F5),
+            Some(b"\x1b[15~".to_vec()),
+            "F5 up are CSI-tilde"
+        );
+        assert_eq!(named(NamedKey::F12), Some(b"\x1b[24~".to_vec()));
+
+        assert_eq!(
+            named(NamedKey::Shift),
+            None,
+            "a bare modifier writes nothing"
+        );
     }
 
     #[test]
