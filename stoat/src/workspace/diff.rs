@@ -310,7 +310,8 @@ impl DiffState {
         }
 
         if let Some(repo) = git_host.discover(git_root) {
-            self.repo_change_counts = Some(repo.change_counts());
+            let tallies = repo.hunk_tallies();
+            self.repo_change_counts = Some((tallies.staged, tallies.unstaged));
         }
 
         // A file with no language has no colors to wait for, so its map is
@@ -468,9 +469,10 @@ impl DiffState {
                         diff_map.anchor_hunks(&buffer_snapshot);
                         (diff_map, base)
                     });
-                    let repo_change_counts = git_host
-                        .discover(&git_root)
-                        .map(|repo| repo.change_counts());
+                    let repo_change_counts = git_host.discover(&git_root).map(|repo| {
+                        let tallies = repo.hunk_tallies();
+                        (tallies.staged, tallies.unstaged)
+                    });
                     redraw.notify_one();
                     let (diff_map, base) = match computed {
                         Some((diff_map, base)) => (Some(diff_map), Some(base)),

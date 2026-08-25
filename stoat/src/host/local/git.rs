@@ -3,8 +3,8 @@ mod tree;
 
 use crate::host::git::{
     BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-    CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
-    RewriteResult,
+    CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, RebaseError,
+    RebaseTodo, RewriteResult,
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Diff, DiffOptions, Repository,
@@ -184,24 +184,48 @@ impl GitRepo for LocalGitRepo {
         files
     }
 
-    fn change_counts(&self) -> (usize, usize) {
+    fn hunk_tallies(&self) -> HunkTallies {
         let repo = self.repo.lock().expect("git repo lock");
-        let statuses = {
-            let mut opts = StatusOptions::new();
-            opts.include_untracked(true).recurse_untracked_dirs(true);
-            match repo.statuses(Some(&mut opts)) {
-                Ok(s) => s,
-                Err(_) => return (0, 0),
-            }
+        // An orphan branch has no tree to diff against, and `None` is how git2
+        // spells the empty one, so everything reads as added.
+        let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+
+        // Zero context and no interhunk merging, so the count is of edits
+        // rather than of the windows a reader would see around them.
+        let hunk_only = || {
+            let mut opts = DiffOptions::new();
+            opts.context_lines(0).interhunk_lines(0);
+            opts
+        };
+        let with_untracked = || {
+            let mut opts = hunk_only();
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .show_untracked_content(true);
+            opts
         };
 
-        statuses.iter().fold((0, 0), |(staged, unstaged), entry| {
-            let status = entry.status();
-            (
-                staged + usize::from(status.intersects(STAGED)),
-                unstaged + usize::from(status.intersects(UNSTAGED)),
-            )
-        })
+        let staged = repo
+            .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut hunk_only()))
+            .map_or(0, |diff| count_hunks(&diff, &mut |_, _| {}));
+        let unstaged = repo
+            .diff_index_to_workdir(None, Some(&mut with_untracked()))
+            .map_or(0, |diff| count_hunks(&diff, &mut |_, _| {}));
+
+        let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        if let Ok(diff) =
+            repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut with_untracked()))
+        {
+            count_hunks(&diff, &mut |path, hunks| {
+                *per_file.entry(path).or_default() += hunks;
+            });
+        }
+
+        HunkTallies {
+            staged,
+            unstaged,
+            per_file: per_file.into_iter().collect(),
+        }
     }
 
     fn has_tracked_changes(&self) -> bool {
@@ -1055,6 +1079,45 @@ fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApp
         });
     }
     Ok(out)
+}
+
+/// Hunks in `diff`, reporting each delta's path and its own count to `per_file`
+/// along the way.
+///
+/// The hunk callback is the only one asked for, so libgit2 never walks the
+/// lines a count does not read. A delta names its new path, except a deletion,
+/// which has only an old one.
+fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usize {
+    let mut total = 0;
+    let mut current: Option<(PathBuf, usize)> = None;
+    let _ = diff.foreach(
+        &mut |_, _| true,
+        None,
+        Some(&mut |delta, _| {
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(Path::to_path_buf);
+            total += 1;
+            match (&mut current, path) {
+                (Some((held, count)), Some(path)) if *held == path => *count += 1,
+                (held, Some(path)) => {
+                    if let Some((done, count)) = held.take() {
+                        per_file(done, count);
+                    }
+                    *held = Some((path, 1));
+                },
+                (_, None) => {},
+            }
+            true
+        }),
+        None,
+    );
+    if let Some((done, count)) = current {
+        per_file(done, count);
+    }
+    total
 }
 
 #[cfg(test)]

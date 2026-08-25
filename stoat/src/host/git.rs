@@ -21,6 +21,29 @@ pub enum DiffStatus {
     Moved,
 }
 
+/// Hunk counts across a repository, as [`GitRepo::hunk_tallies`] reports them.
+///
+/// The two sides are counted independently: `staged` diffs the index against
+/// HEAD and `unstaged` diffs the working tree against the index. A hunk staged
+/// in part therefore counts once on each side, each diff seeing its own
+/// remainder, which is why staging half a hunk raises `staged + unstaged` by
+/// one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HunkTallies {
+    /// Hunks the index carries over HEAD.
+    pub staged: usize,
+    /// Hunks the working tree carries over the index.
+    pub unstaged: usize,
+    /// Hunks each changed file carries between HEAD and the working tree,
+    /// sorted by path. Both sides of the index are folded together here,
+    /// because a file list shows one number per path.
+    ///
+    /// Paths are repo-relative, unlike [`ChangedFile::path`], which is
+    /// absolute. These come straight off the diff deltas, and a list showing
+    /// them wants the short form anyway.
+    pub per_file: Vec<(PathBuf, usize)>,
+}
+
 /// One changed path in a repository's working tree or index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangedFile {
@@ -132,15 +155,16 @@ pub trait GitRepo: Send + Sync {
     /// wrong answer here sends the reader to the wrong file.
     fn changed_files_from(&self, base_sha: &str) -> Vec<ChangedFile>;
 
-    /// How many files carry staged changes and how many carry unstaged ones,
-    /// as `(staged, unstaged)`.
+    /// How many hunks sit on each side of the index, and how many each changed
+    /// file carries against HEAD.
     ///
-    /// The two sides are counted independently, so a partly staged file counts
-    /// in both. This is what the status bar's repo-wide tally reads, where the
-    /// question is how much work sits on each side rather than how many files
-    /// are touched. Untracked files count as unstaged, matching
-    /// [`Self::changed_files`].
-    fn change_counts(&self) -> (usize, usize);
+    /// This is what the status bar's repo-wide tally reads, where the question
+    /// is how much work is staged and how much is not. Hunks answer that where
+    /// a file count cannot: one file with a dozen edits and one with a single
+    /// edit read alike by file, and nothing like alike by hunk.
+    ///
+    /// Untracked files count as unstaged, matching [`Self::changed_files`].
+    fn hunk_tallies(&self) -> HunkTallies;
 
     /// Whether the repository has index or working-tree changes to *tracked*
     /// files. Untracked files are excluded, because no stoat git operation

@@ -287,7 +287,7 @@ fn changed_files_deduplicates_staged_and_unstaged() {
 /// file to one side. A half-staged file is work waiting on both, so the bar's
 /// tally has to see it twice.
 #[test]
-fn change_counts_tallies_each_side_independently() {
+fn hunk_tallies_count_each_side_independently() {
     let tr = TestRepo::new();
     tr.commit_file("staged.rs", "v1")
         .commit_file("unstaged.rs", "v1")
@@ -299,8 +299,9 @@ fn change_counts_tallies_each_side_independently() {
     tr.write_and_stage("both.rs", "v2").write("both.rs", "v3");
 
     let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let tallies = repo.hunk_tallies();
     assert_eq!(
-        repo.change_counts(),
+        (tallies.staged, tallies.unstaged),
         (2, 3),
         "both.rs counts on each side, and the untracked file counts as unstaged"
     );
@@ -341,12 +342,72 @@ fn content_at_is_none_off_the_commit() {
     );
 }
 
+/// Two edits with untouched lines between them are two hunks, which is the
+/// whole point of counting hunks rather than files: one file can hold any
+/// amount of work.
 #[test]
-fn change_counts_zero_on_a_clean_repo() {
+fn hunk_tallies_count_separated_edits_apart() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\ntwo\nthree\nfour\nfive\n");
+    tr.write("a.rs", "ONE\ntwo\nthree\nfour\nFIVE\n");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let tallies = repo.hunk_tallies();
+    assert_eq!(
+        (tallies.staged, tallies.unstaged),
+        (0, 2),
+        "the first and last lines are two hunks, not one changed file",
+    );
+    assert_eq!(
+        tallies.per_file,
+        vec![(PathBuf::from("a.rs"), 2)],
+        "and the file carries both against HEAD, named the way a diff names it",
+    );
+}
+
+/// Staging one of two edits splits them across the index. Each side diffs
+/// against its own neighbour, so each sees one hunk and the total rises.
+#[test]
+fn hunk_tallies_split_a_half_staged_file_across_both_sides() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\ntwo\nthree\nfour\nfive\n");
+    tr.write_and_stage("a.rs", "ONE\ntwo\nthree\nfour\nfive\n");
+    tr.write("a.rs", "ONE\ntwo\nthree\nfour\nFIVE\n");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let tallies = repo.hunk_tallies();
+    assert_eq!(
+        (tallies.staged, tallies.unstaged),
+        (1, 1),
+        "one edit sits in the index and one in the working tree",
+    );
+    assert_eq!(
+        tallies.per_file,
+        vec![(PathBuf::from("a.rs"), 2)],
+        "while against HEAD the file still carries both",
+    );
+}
+
+/// An untracked file has no HEAD blob, so its whole content is the work. It
+/// counts as unstaged, the same side `changed_files` puts it on.
+#[test]
+fn hunk_tallies_count_an_untracked_file_as_unstaged() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\n");
+    tr.write("new.rs", "fresh\n");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let tallies = repo.hunk_tallies();
+    assert_eq!((tallies.staged, tallies.unstaged), (0, 1));
+    assert_eq!(tallies.per_file, vec![(PathBuf::from("new.rs"), 1)]);
+}
+
+#[test]
+fn hunk_tallies_are_zero_on_a_clean_repo() {
     let tr = TestRepo::new();
     tr.commit_file("a.rs", "v1");
     let repo = LocalGit::new().discover(tr.path()).unwrap();
-    assert_eq!(repo.change_counts(), (0, 0));
+    assert_eq!(repo.hunk_tallies(), Default::default());
 }
 
 #[test]

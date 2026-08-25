@@ -4,8 +4,8 @@ use crate::host::{
     fake::FakeFs,
     git::{
         BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-        CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
-        RewriteResult,
+        CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, RebaseError,
+        RebaseTodo, RewriteResult,
     },
 };
 use std::{
@@ -279,18 +279,35 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Set how many hunks the registration for `rel_path` stands for, which is
+    /// what [`GitRepo::hunk_tallies`] counts.
+    ///
+    /// A registration means one edit until this says otherwise, so a fixture
+    /// written before hunks were counted reads the same. Silently does nothing
+    /// for a path with no registration, since the builder's other methods are
+    /// what create one.
+    pub fn hunks(&mut self, rel_path: impl AsRef<Path>, count: usize) -> &mut Self {
+        let abs = self.workdir.join(rel_path.as_ref());
+        self.mutate_repo(|state| {
+            if let Some(change) = state.changed.iter_mut().find(|c| c.file.path == abs) {
+                change.hunks = count;
+            }
+        });
+        self
+    }
+
     /// Record `rel_path` as modified in the working tree. Writes `working`
     /// to the attached [`FakeFs`] at the absolute path if one was attached.
     pub fn unstaged_file(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
         let rel = rel_path.as_ref().to_path_buf();
         let abs = self.workdir.join(&rel);
         self.mutate_repo(|state| {
-            state.changed.retain(|f| f.path != abs);
-            state.changed.push(ChangedFile {
+            state.changed.retain(|c| c.file.path != abs);
+            state.changed.push(FakeChange::new(ChangedFile {
                 path: abs.clone(),
                 staged: false,
                 untracked: false,
-            });
+            }));
         });
         if let Some(fs) = self.fs {
             fs.insert_file(&abs, working.as_bytes());
@@ -304,12 +321,12 @@ impl<'a> FakeRepoBuilder<'a> {
         let rel = rel_path.as_ref().to_path_buf();
         let abs = self.workdir.join(&rel);
         self.mutate_repo(|state| {
-            state.changed.retain(|f| f.path != abs);
-            state.changed.push(ChangedFile {
+            state.changed.retain(|c| c.file.path != abs);
+            state.changed.push(FakeChange::new(ChangedFile {
                 path: abs.clone(),
                 staged: true,
                 untracked: false,
-            });
+            }));
         });
         if let Some(fs) = self.fs {
             fs.insert_file(&abs, working.as_bytes());
@@ -347,12 +364,12 @@ impl<'a> FakeRepoBuilder<'a> {
         let abs = self.workdir.join(&rel);
         self.head_file(&rel, head);
         self.mutate_repo(|state| {
-            state.changed.retain(|f| f.path != abs);
-            state.changed.push(ChangedFile {
+            state.changed.retain(|c| c.file.path != abs);
+            state.changed.push(FakeChange::new(ChangedFile {
                 path: abs,
                 staged: false,
                 untracked: false,
-            });
+            }));
         });
         self
     }
@@ -604,6 +621,24 @@ pub struct FakeGitRepo {
     state: Mutex<FakeRepoState>,
 }
 
+/// A changed-file registration and the hunks it stands for.
+///
+/// The tallies count hunks, so a fixture meaning "two separated edits in one
+/// file" has to say so through [`FakeRepoBuilder::hunks`]. Every registration
+/// means one until then, which keeps a fixture written before hunks were
+/// counted reading exactly as it did.
+#[derive(Clone, Debug)]
+struct FakeChange {
+    file: ChangedFile,
+    hunks: usize,
+}
+
+impl FakeChange {
+    fn new(file: ChangedFile) -> FakeChange {
+        FakeChange { file, hunks: 1 }
+    }
+}
+
 #[derive(Default)]
 struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
@@ -616,7 +651,7 @@ struct FakeRepoState {
     /// these read as absent rather than falling back to HEAD. This is what a
     /// staged deletion looks like to [`GitRepo::index_content`].
     removed_index_entries: HashSet<PathBuf>,
-    changed: Vec<ChangedFile>,
+    changed: Vec<FakeChange>,
     /// Absolute paths reported as untracked (working-tree new files), seeded via
     /// [`FakeRepoBuilder::untracked`]. Kept apart from `changed` so
     /// [`GitRepo::has_tracked_changes`] can exclude them while
@@ -821,13 +856,17 @@ impl GitRepo for FakeGitRepo {
 
     fn changed_files(&self) -> Vec<ChangedFile> {
         let state = self.state.lock().unwrap();
-        let mut staged: Vec<ChangedFile> =
-            state.changed.iter().filter(|f| f.staged).cloned().collect();
+        let mut staged: Vec<ChangedFile> = state
+            .changed
+            .iter()
+            .filter(|c| c.file.staged)
+            .map(|c| c.file.clone())
+            .collect();
         let mut unstaged: Vec<ChangedFile> = state
             .changed
             .iter()
-            .filter(|f| !f.staged)
-            .cloned()
+            .filter(|c| !c.file.staged)
+            .map(|c| c.file.clone())
             .collect();
         unstaged.extend(state.untracked.iter().map(|path| ChangedFile {
             path: path.clone(),
@@ -885,10 +924,16 @@ impl GitRepo for FakeGitRepo {
                 untracked: false,
             })
             .collect();
-        files.extend(state.changed.iter().map(|file| ChangedFile {
-            staged: false,
-            ..file.clone()
-        }));
+        files.extend(
+            state
+                .changed
+                .iter()
+                .map(|c| &c.file)
+                .map(|file| ChangedFile {
+                    staged: false,
+                    ..file.clone()
+                }),
+        );
         files.extend(state.untracked.iter().map(|path| ChangedFile {
             path: path.clone(),
             staged: false,
@@ -901,12 +946,40 @@ impl GitRepo for FakeGitRepo {
 
     /// Counted off the same `changed` and `untracked` registrations
     /// [`Self::changed_files`] reports, so the two never disagree. A
-    /// registration carries one side, so no fake file counts in both.
-    fn change_counts(&self) -> (usize, usize) {
+    /// registration carries one side and a hunk count, one by default, so no
+    /// fake file counts in both and every fixture reads as one edit until it
+    /// says otherwise.
+    fn hunk_tallies(&self) -> HunkTallies {
         let state = self.state.lock().unwrap();
-        let staged = state.changed.iter().filter(|f| f.staged).count();
-        let unstaged = state.changed.iter().filter(|f| !f.staged).count() + state.untracked.len();
-        (staged, unstaged)
+        let side = |staged: bool| {
+            state
+                .changed
+                .iter()
+                .filter(|c| c.file.staged == staged)
+                .map(|c| c.hunks)
+                .sum::<usize>()
+        };
+
+        // The trait reports these repo-relative while the fake registers
+        // absolute paths, so the workdir prefix comes off here.
+        let relative = |path: &Path| {
+            path.strip_prefix(&self.workdir)
+                .unwrap_or(path)
+                .to_path_buf()
+        };
+        let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        for change in &state.changed {
+            *per_file.entry(relative(&change.file.path)).or_default() += change.hunks;
+        }
+        for path in &state.untracked {
+            *per_file.entry(relative(path)).or_default() += 1;
+        }
+
+        HunkTallies {
+            staged: side(true),
+            unstaged: side(false) + state.untracked.len(),
+            per_file: per_file.into_iter().collect(),
+        }
     }
 
     fn has_tracked_changes(&self) -> bool {
@@ -1330,6 +1403,35 @@ fn line_delta(base: &str, new: &str) -> (u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    /// A fixture means one edit per registration until it says otherwise, so
+    /// the tallies read the count rather than the number of files.
+    #[test]
+    fn registered_hunk_counts_are_what_the_tallies_report() {
+        let git = FakeGit::new();
+        git.add_repo("/repo")
+            .modified("a.rs", "one\n", "ONE\n")
+            .staged_file("b.rs", "two\n")
+            .hunks("a.rs", 3)
+            .untracked("c.rs");
+        let repo = git.discover(Path::new("/repo")).expect("repo");
+
+        let tallies = repo.hunk_tallies();
+        assert_eq!(
+            (tallies.staged, tallies.unstaged),
+            (1, 4),
+            "the three edits in a.rs and the untracked file are unstaged work",
+        );
+        assert_eq!(
+            tallies.per_file,
+            vec![
+                (PathBuf::from("a.rs"), 3),
+                (PathBuf::from("b.rs"), 1),
+                (PathBuf::from("c.rs"), 1),
+            ],
+            "and each path carries its own count, repo-relative",
+        );
+    }
+
     use super::*;
 
     fn workdir() -> PathBuf {
