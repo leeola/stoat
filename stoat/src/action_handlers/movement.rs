@@ -4045,10 +4045,16 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             let (start, end, reversed) = if extend {
                 extend_span(rope, tail_offset, target)
             } else {
-                // The walk sets the direction, so a forward step leaves its
-                // cursor on the hunk's last row and a backward step on its
-                // first. A repeat then carries on the way it went.
-                (target.start, target.end, matches!(dir, ChangeDir::Prev))
+                // One landing point per hunk, whichever way the walk arrived:
+                // the selection covers the stop and the cursor sits on its
+                // first row. A hunk that presented two faces made a reversal
+                // land the same hunk again rather than step to its neighbor.
+                //
+                // The repeat still steps out from that row. `Next` keeps stops
+                // starting past the cursor, and a stop's own start never is,
+                // while `Prev` keeps stops ending at or before it, which a
+                // non-empty stop's own end never is.
+                (target.start, target.end, true)
             };
 
             Selection {
@@ -4160,7 +4166,10 @@ fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     editor.selections.set_single_range(
         buffer_snapshot.anchor_at(target.start, Bias::Left),
         buffer_snapshot.anchor_at(target.end, Bias::Right),
-        false,
+        // The same one landing point the stepping walk lands: the cursor on the
+        // stop's first row, so an edge jump and a step onto the same hunk leave
+        // the reader in the same place.
+        true,
         SelectionGoal::None,
     );
     UpdateEffect::Redraw

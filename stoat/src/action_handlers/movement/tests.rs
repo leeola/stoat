@@ -5400,24 +5400,24 @@ fn goto_last_change_reaches_the_end_past_the_cursor() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 6, false)],
+        vec![(4, 6, true)],
         "test setup: on the first hunk",
     );
 
     dispatch(&mut h.stoat, &stoat_action::GotoLastChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
+    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
 
     dispatch(&mut h.stoat, &stoat_action::GotoFirstChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 6, false)],
+        vec![(4, 6, true)],
         "and the first reaches back",
     );
 
     dispatch(&mut h.stoat, &stoat_action::JumpBackward);
     assert_eq!(
         h.selection_spans(),
-        vec![(10, 12, false)],
+        vec![(10, 12, true)],
         "the origin went on the jumplist before the landing",
     );
 }
@@ -5458,13 +5458,13 @@ fn goto_next_change_jumps_forward() {
     install_diff_hunks(&mut h, &[2, 5]);
 
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(4, 6, false)]);
+    assert_eq!(h.selection_spans(), vec![(4, 6, true)]);
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
+    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(10, 12, false)],
+        vec![(10, 12, true)],
         "the last hunk holds when there is no next one",
     );
 }
@@ -5501,7 +5501,7 @@ fn goto_next_change_lands_on_the_gutter_row_after_an_insert_above() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(14, 16, false)],
+        vec![(14, 16, true)],
         "and the jump lands on that row, not the one the diff recorded",
     );
 }
@@ -5520,12 +5520,12 @@ fn repeat_last_motion_replays_a_change_jump() {
     h.type_keys("f c");
     assert_eq!(h.primary_head_offset(), 4, "the find lands first");
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
+    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
 
     dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
     assert_eq!(
         h.selection_spans(),
-        vec![(12, 14, false)],
+        vec![(12, 14, true)],
         "the next hunk, not the c the earlier find would have reached",
     );
 }
@@ -5541,7 +5541,7 @@ fn goto_next_change_uses_a_background_populated_diff_map() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(2, 4, false)],
+        vec![(2, 4, true)],
         "the background-populated diff map drives GotoNextChange to the modified row",
     );
 }
@@ -5593,7 +5593,7 @@ fn count_prefix_goto_next_change_jumps_n_changes() {
     h.open_file(&path);
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("2 ] g");
-    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
+    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
 }
 
 /// `]c` means comment, where change keeps `]g` to itself.
@@ -5645,7 +5645,7 @@ fn count_prefix_goto_next_change_clamps_at_last() {
     h.open_file(&path);
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("9 ] g");
-    assert_eq!(h.selection_spans(), vec![(16, 18, false)]);
+    assert_eq!(h.selection_spans(), vec![(16, 18, true)]);
 }
 
 #[test]
@@ -5658,8 +5658,68 @@ fn goto_next_change_selects_a_multi_line_hunk_whole() {
     h.type_keys("] g");
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 10, false)],
+        vec![(4, 10, true)],
         "rows 2 through 4, not the first row alone",
+    );
+}
+
+/// A hunk is one stop, so it has one landing point. Arriving from either side
+/// leaves the cursor on the same row, which is what lets a reversal read as
+/// stepping to the neighbor rather than as landing the same hunk twice.
+// One hunk is the point of the fixture, so the single-range slice is deliberate
+// rather than a range that lost its second bound.
+#[allow(clippy::single_range_in_vec_init)]
+#[test]
+fn a_landing_has_one_edge() {
+    // `g k` is this config's file start and `g j` its file end, so each walk
+    // starts on the far side of the hunk from the one it steps toward.
+    let hunk = |start: &str, keys: &str| {
+        let mut h = TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+        h.open_file(&path);
+        install_diff_hunk_rows(&mut h, &[2..5]);
+        h.type_keys(start);
+        h.type_keys(keys);
+        h.selection_spans()
+    };
+
+    assert_eq!(
+        (hunk("g k", "] g"), hunk("g j", "[ g")),
+        (vec![(4, 10, true)], vec![(4, 10, true)]),
+        "the hunk over rows 2 through 4 lands its first row from above and \
+         from below alike",
+    );
+}
+
+/// The walk alternates between neighbors on a reversal. A landing edge that
+/// followed the direction made the reversal re-select the hunk the reader was
+/// standing on, so the neighbor never came back.
+#[test]
+fn a_reversal_alternates_between_neighbor_hunks() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, &[2..3, 5..6]);
+
+    h.type_keys("] g");
+    let first = h.selection_spans();
+    h.type_keys("] g");
+    let second = h.selection_spans();
+    h.type_keys("[ g");
+    let back = h.selection_spans();
+    h.type_keys("] g");
+    let forward_again = h.selection_spans();
+
+    assert_eq!(
+        (first, second, back, forward_again),
+        (
+            vec![(4, 6, true)],
+            vec![(10, 12, true)],
+            vec![(4, 6, true)],
+            vec![(10, 12, true)],
+        ),
+        "each press steps to the neighbor, and the reversal returns to the \
+         hunk before it rather than re-landing the one in hand",
     );
 }
 
@@ -5672,7 +5732,7 @@ fn goto_next_change_selects_one_cell_at_a_deletion() {
     install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
 
     h.type_keys("] g");
-    assert_eq!(h.selection_spans(), vec![(6, 7, false)]);
+    assert_eq!(h.selection_spans(), vec![(6, 7, true)]);
 }
 
 /// The backward step leaves the hunk the cursor is inside rather than
@@ -5765,7 +5825,7 @@ fn goto_next_change_walks_every_cursor_to_its_own_hunk() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(2, 4, false), (10, 12, false)],
+        vec![(2, 4, true), (10, 12, true)],
         "row 0 reaches the first hunk, row 1 the second",
     );
 }
