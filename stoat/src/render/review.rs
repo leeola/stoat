@@ -77,6 +77,25 @@ pub(crate) fn diff_soften_scale(level: i8) -> f32 {
     1.0 + 0.25 * f32::from(level.clamp(DIFF_SOFTEN_MIN, DIFF_SOFTEN_MAX))
 }
 
+/// Furthest the tint dial turns up, landing a changed char on its status color
+/// outright.
+///
+/// Four steps of a quarter each. The top is where the syntax color is gone
+/// entirely, which is the readable flat form the theme already tunes its
+/// `diff.*` colors for, so nothing above it would say more.
+pub(crate) const DIFF_TINT_MAX: i8 = 4;
+
+/// Fraction a changed char's foreground shifts toward its status color at
+/// `level`.
+///
+/// Level 0 is off and paints exactly the colors from before the dial, which is
+/// where a session starts. The mid levels lean the syntax color toward the
+/// status hue, and level 4 replaces it. A level below zero is the same as off,
+/// so the dial's bottom needs no separate floor.
+pub(crate) fn diff_tint_amount(level: i8) -> f32 {
+    0.25 * f32::from(level.clamp(0, DIFF_TINT_MAX))
+}
+
 /// Paint an editor as a side-by-side diff, with base (HEAD) text on the left and
 /// the live syntax-highlighted buffer on the right, row-aligned through the
 /// display map's deleted-block splicing.

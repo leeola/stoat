@@ -876,6 +876,7 @@ mod tests {
                 None,
                 0.0,
                 1.0,
+                0.0,
                 WrapMode::None,
                 80,
             );
@@ -958,6 +959,7 @@ mod tests {
             None,
             0.0,
             1.0,
+            0.0,
             WrapMode::None,
             80,
         );
@@ -1050,6 +1052,7 @@ mod tests {
             None,
             0.0,
             1.0,
+            0.0,
             WrapMode::None,
             80,
         );

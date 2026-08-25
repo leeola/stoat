@@ -678,6 +678,17 @@ pub struct Stoat {
     /// whole session rather than one per editor, because how hard to recede is
     /// a reading preference rather than a property of any one file.
     pub(crate) diff_soften: i8,
+    /// How far the diff view shifts a changed char toward its status color,
+    /// as a level [`crate::render::review::diff_tint_amount`] turns into a
+    /// fraction. Level 0 is off, and the ctrl-9 and ctrl-0 chords step it.
+    ///
+    /// Color is the cue the soften leaves free. The soften says where a change
+    /// is, and this says what kind it is, so added, deleted, modified, and
+    /// moved read apart without the gutter.
+    ///
+    /// Session-scoped and deliberately not persisted, for [`Self::diff_soften`]'s
+    /// reason: the level answers what is on screen right now.
+    pub(crate) diff_tint: i8,
     /// Whether the diff view paints syntax color, in both of its columns.
     ///
     /// The diff view marks a change by contrast: the chars around it recede and
@@ -2016,6 +2027,7 @@ impl Stoat {
             imported_themes,
             modal_zoom: std::collections::BTreeMap::new(),
             diff_soften: 0,
+            diff_tint: 0,
             diff_syntax: true,
             modal_split: std::collections::BTreeMap::new(),
             command_palette: None,
@@ -2515,10 +2527,15 @@ impl Stoat {
             return self.handle_zoom_step(delta);
         }
 
-        // The syntax chord reads the focused view, which the pane-tree borrow
+        // The diff chords read the focused view, which the pane-tree borrow
         // below leaves unreachable for the same reason.
-        if let WindowIpcEvent::Chord { ch: '9', .. } = event {
-            return self.handle_diff_syntax_toggle();
+        if let WindowIpcEvent::Chord { ch, .. } = event {
+            match ch {
+                '8' => return self.handle_diff_syntax_toggle(),
+                '9' => return self.handle_diff_tint_step(-1),
+                '0' => return self.handle_diff_tint_step(1),
+                _ => {},
+            }
         }
 
         let panes = &mut self.active_workspace_mut().panes;
@@ -2548,8 +2565,9 @@ impl Stoat {
             },
             WindowIpcEvent::Mouse { .. } => unreachable!("mouse events return above"),
             WindowIpcEvent::Zoom { .. } => unreachable!("zoom events return above"),
-            // Only `9` is spoken for. Another digit is a chord the terminal
-            // forwarded on the claim and nothing here answers.
+            // Only `8`, `9` and `0` are spoken for, and each returns above.
+            // Another digit is a chord the terminal forwarded on the claim and
+            // nothing here answers.
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
         }
         UpdateEffect::Redraw
@@ -2566,6 +2584,23 @@ impl Stoat {
             return UpdateEffect::None;
         }
         self.diff_syntax = !self.diff_syntax;
+        UpdateEffect::Redraw
+    }
+
+    /// Step the diff view's tint dial by `delta` levels, or do nothing outside
+    /// it.
+    ///
+    /// Off the diff view there is no tint to step, so the level holds and the
+    /// frame is left alone, exactly as [`Self::handle_diff_syntax_toggle`]
+    /// answers there. The level is clamped rather than saturated, so a press
+    /// past either end is remembered as the end itself and the next press the
+    /// other way moves the paint immediately.
+    fn handle_diff_tint_step(&mut self, delta: i32) -> UpdateEffect {
+        if keymap_state::view_predicate(self.active_workspace()) != Some("diff") {
+            return UpdateEffect::None;
+        }
+        let stepped = i32::from(self.diff_tint).saturating_add(delta);
+        self.diff_tint = stepped.clamp(0, crate::render::review::DIFF_TINT_MAX.into()) as i8;
         UpdateEffect::Redraw
     }
 
@@ -7942,7 +7977,7 @@ mod tests {
             "every row starts out carrying token colors"
         );
 
-        assert_eq!(h.stoat.handle_window_ipc(chord('9')), UpdateEffect::Redraw);
+        assert_eq!(h.stoat.handle_window_ipc(chord('8')), UpdateEffect::Redraw);
         h.snapshot();
         assert_eq!(
             (
@@ -7957,11 +7992,50 @@ mod tests {
              marking rather than syntax"
         );
 
-        h.stoat.handle_window_ipc(chord('9'));
+        h.stoat.handle_window_ipc(chord('8'));
         h.snapshot();
         assert!(
             h.stoat.diff_syntax && row_colors(&h, 68..120, "fn keep") > 1,
             "a second chord brings the color back"
+        );
+    }
+
+    /// The tint is the diff view's own dial, so it answers only there, and each
+    /// end holds rather than wrapping or running away.
+    #[test]
+    fn the_nine_and_zero_chords_step_the_tint_dial() {
+        let mut h = diff_syntax_harness();
+        assert_eq!(h.stoat.diff_tint, 0, "a session opens with the tint off");
+
+        for _ in 0..5 {
+            assert_eq!(h.stoat.handle_window_ipc(chord('0')), UpdateEffect::Redraw);
+        }
+        assert_eq!(
+            h.stoat.diff_tint,
+            crate::render::review::DIFF_TINT_MAX,
+            "four presses reach the top and the fifth holds there",
+        );
+
+        for _ in 0..5 {
+            assert_eq!(h.stoat.handle_window_ipc(chord('9')), UpdateEffect::Redraw);
+        }
+        assert_eq!(
+            h.stoat.diff_tint, 0,
+            "the same count back down lands on off"
+        );
+
+        h.stoat.diff_tint = 2;
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+        assert_eq!(
+            (
+                h.stoat.handle_window_ipc(chord('0')),
+                h.stoat.handle_window_ipc(chord('9')),
+                h.stoat.diff_tint,
+            ),
+            (UpdateEffect::None, UpdateEffect::None, 2),
+            "off the diff view both chords leave the level alone",
         );
     }
 
@@ -7975,7 +8049,7 @@ mod tests {
             .set_diff_view(false);
 
         assert_eq!(
-            (h.stoat.handle_window_ipc(chord('9')), h.stoat.diff_syntax),
+            (h.stoat.handle_window_ipc(chord('8')), h.stoat.diff_syntax),
             (UpdateEffect::None, true),
             "a chord over a plain pane leaves the flag and the frame alone"
         );
@@ -7986,7 +8060,7 @@ mod tests {
     #[test]
     fn a_plain_pane_keeps_its_color_while_the_diff_toggle_is_off() {
         let mut h = diff_syntax_harness();
-        h.stoat.handle_window_ipc(chord('9'));
+        h.stoat.handle_window_ipc(chord('8'));
         h.snapshot();
         assert!(!h.stoat.diff_syntax, "the toggle is off");
 
@@ -8006,14 +8080,15 @@ mod tests {
         );
     }
 
-    /// Another digit is a chord the terminal forwarded on the claim that
-    /// nothing here answers, so it must not redraw or move any state.
+    /// A digit outside the three the diff view claims is a chord the terminal
+    /// forwarded on the claim that nothing here answers, so it must not redraw
+    /// or move any state.
     #[test]
     fn an_unclaimed_digit_chord_is_a_no_op() {
         let mut h = diff_syntax_harness();
 
         assert_eq!(
-            (h.stoat.handle_window_ipc(chord('8')), h.stoat.diff_syntax),
+            (h.stoat.handle_window_ipc(chord('7')), h.stoat.diff_syntax),
             (UpdateEffect::None, true),
             "an unspoken-for digit changes nothing"
         );

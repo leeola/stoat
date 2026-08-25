@@ -296,6 +296,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         wrap_column: 80,
         inactive_dim: 0.0,
         diff_soften_scale: 1.0,
+        diff_tint_amount: 0.0,
         images_capable: false,
         minimap_enabled: false,
         minimap_chrome: None,

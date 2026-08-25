@@ -319,6 +319,11 @@ pub(crate) struct FrameCtx<'a> {
     /// [`review::diff_soften_scale`]. `1.0` paints the shipped
     /// fractions and `0.0` disables softening. Read only by diff-view panes.
     pub(crate) diff_soften_scale: f32,
+    /// Fraction the diff view shifts a changed char toward its status color,
+    /// resolved from [`crate::app::Stoat::diff_tint`] per
+    /// [`review::diff_tint_amount`]. `0.0` paints the syntax color untouched
+    /// and `1.0` replaces it. Read only by diff-view panes.
+    pub(crate) diff_tint_amount: f32,
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.
     pub(crate) images_capable: bool,
@@ -700,6 +705,7 @@ pub(crate) fn frame(
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         inactive_dim,
         diff_soften_scale: review::diff_soften_scale(stoat.diff_soften),
+        diff_tint_amount: review::diff_tint_amount(stoat.diff_tint),
         images_capable: stoat.stoatty && stoat.stoatty_protocol >= 2,
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
