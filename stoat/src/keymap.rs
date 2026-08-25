@@ -2657,6 +2657,7 @@ mod tests {
                 theme: Some("default_dark".to_string()),
                 mouse_capture: Some(MouseCapturePolicy::Auto),
                 scrolloff: Some(3),
+                jump_scrolloff: Some(0),
                 editor_line_numbers: Some(LineNumbers::Relative),
                 editor_minimap: None,
                 editor_auto_pairs: Some(true),

@@ -312,6 +312,7 @@ fn run_tui(
         theme: None,
         mouse_capture: None,
         scrolloff: None,
+        jump_scrolloff: None,
         editor_line_numbers: None,
         editor_minimap: None,
         editor_auto_pairs: None,

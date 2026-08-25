@@ -120,6 +120,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "3",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("jump_scrolloff")],
+            shape: ValueShape::Number,
+            doc: "Rows kept between a diff-hunk jump landing and the viewport \
+                  center, biased toward the side the jump came from.",
+            default: "0",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("highlight_retention")],
             shape: ValueShape::Number,
             doc: "How many hidden buffers keep their full highlight state before \

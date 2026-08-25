@@ -105,6 +105,13 @@ pub struct Settings {
     /// edge when following it. `None` falls back to 3. Set via
     /// `editor.scrolloff = N;` in stcfg.
     pub scrolloff: Option<u32>,
+    /// Rows the view keeps between a diff-hunk jump landing and the viewport
+    /// center, on the side the jump arrived from. `None` falls back to 0, an
+    /// exact center. Set via `editor.jump_scrolloff = N;` in stcfg.
+    ///
+    /// A jump lands the reader somewhere new, so a few rows of where they came
+    /// from stay on screen to say which way they moved.
+    pub jump_scrolloff: Option<u32>,
     /// How the editor gutter numbers lines. `None` falls back to
     /// [`LineNumbers::Relative`]. Set `editor.line_numbers = relative | absolute
     /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
@@ -274,6 +281,7 @@ impl Settings {
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
+            jump_scrolloff: other.jump_scrolloff.or(self.jump_scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
             editor_auto_pairs: other.editor_auto_pairs.or(self.editor_auto_pairs),
@@ -362,6 +370,11 @@ impl Settings {
             ["editor", "scrolloff"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.scrolloff = Some(n as u32);
+                }
+            },
+            ["editor", "jump_scrolloff"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.jump_scrolloff = Some(n as u32);
                 }
             },
             ["editor", "highlight_retention"] => {
@@ -578,6 +591,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -728,6 +742,28 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_jump_scrolloff() {
+        let jump = |src: &str| Settings::from_config(&parse_ok(src)).jump_scrolloff;
+        assert_eq!(jump("on init { editor.jump_scrolloff = 2; }"), Some(2));
+        assert_eq!(jump("on init { editor.jump_scrolloff = 0; }"), Some(0));
+        assert_eq!(jump("on init { }"), None, "absent falls back at consumer");
+
+        let left = Settings {
+            jump_scrolloff: Some(1),
+            ..Settings::default()
+        };
+        let right = Settings {
+            jump_scrolloff: Some(4),
+            ..Settings::default()
+        };
+        assert_eq!(
+            left.merge(right).jump_scrolloff,
+            Some(4),
+            "the right side wins, which is how the CLI layers over the config",
+        );
+    }
+
+    #[test]
     fn from_config_extracts_highlight_retention() {
         let config = parse_ok("on init { editor.highlight_retention = 8; }");
         assert_eq!(Settings::from_config(&config).highlight_retention, Some(8));
@@ -860,6 +896,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -902,6 +939,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -953,6 +991,7 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -987,6 +1026,7 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1023,6 +1063,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1062,6 +1103,7 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1099,6 +1141,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1149,6 +1192,7 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1191,6 +1235,7 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
+                jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1230,6 +1275,7 @@ mod tests {
             theme: Some("a".into()),
             mouse_capture: None,
             scrolloff: None,
+            jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1264,6 +1310,7 @@ mod tests {
             theme: Some("b".into()),
             mouse_capture: None,
             scrolloff: None,
+            jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
