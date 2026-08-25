@@ -4257,6 +4257,22 @@ fn goto_change_across_files(
     UpdateEffect::Redraw
 }
 
+/// Whether `a` and `b` name the same file, each resolved through the
+/// filesystem before the comparison.
+///
+/// The changed list holds libgit2's `workdir.join(rel)` while a buffer holds
+/// the path it was opened with, so a symlinked component or any other spelling
+/// of the same file makes a raw comparison miss. A path that will not resolve
+/// falls back to itself, which is the raw comparison again.
+fn same_file(fs_host: &Arc<dyn FsHost>, a: &Path, b: &Path) -> bool {
+    let resolve = |path: &Path| {
+        fs_host
+            .canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    resolve(a) == resolve(b)
+}
+
 /// Pick the changed file `dir` leads to from `current_path`, and the row in it
 /// to land on.
 ///
@@ -4292,10 +4308,11 @@ fn scan_changed_file_jump(
         .collect();
     let current_index = current_path
         .as_deref()
-        .and_then(|path| changed.iter().position(|c| c == path));
+        .and_then(|path| changed.iter().position(|c| same_file(fs_host, c, path)));
     // Cross into a lone changed file when the current buffer is not itself in
-    // the list. Only bail when nothing changed, or the current buffer is the
-    // sole changed file and there is nowhere else to go.
+    // the list, which the canonical comparison above decides. Only bail
+    // when nothing changed, or the current buffer is the sole changed file and
+    // there is nowhere else to go.
     if changed.is_empty() || (current_index.is_some() && changed.len() < 2) {
         return ChangedFileJump::NoMoreChanges;
     }
@@ -4309,6 +4326,16 @@ fn scan_changed_file_jump(
         (None, ChangeDir::Prev) => (changed.len() - 1, false),
     };
     let path = changed[target_index].clone();
+    // A hop exists to leave the file. Landing back on the one the reader is
+    // already in restarts the walk at its first hunk, which reads as the same
+    // hunks coming round again rather than as a wrap. Any identity miss the
+    // resolve above could not close surfaces here as the end of the walk.
+    if current_path
+        .as_deref()
+        .is_some_and(|current| same_file(fs_host, &path, current))
+    {
+        return ChangedFileJump::NoMoreChanges;
+    }
     let line = first_hunk_row(&*repo, fs_host, &path, dir);
 
     ChangedFileJump::To {

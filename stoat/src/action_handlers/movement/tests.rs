@@ -34,6 +34,63 @@ fn stage_two_changed_files(h: &mut TestHarness) -> PathBuf {
     workdir
 }
 
+/// A buffer opened through a symlink holds a path the changed list does not,
+/// so the walk cannot find the reader's place by spelling alone. Landing the
+/// first changed file then puts the reader back where they are, and every
+/// press after it walks the same hunks again.
+#[test]
+fn next_change_past_the_end_of_a_symlinked_file_reports_no_more_changes() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+    h.fake_fs()
+        .insert_symlink("/alias/a.rs", workdir.join("a.rs"));
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(Path::new("/alias/a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            h.stoat.pending_message.as_deref(),
+        ),
+        (PathBuf::from("/alias/a.rs"), Some("no more changes")),
+        "the alias resolves to the one changed file, so the walk ends rather \
+         than landing that file again",
+    );
+}
+
+/// The same resolution has to find the reader's *place* in the list, not only
+/// that they are in it, or the hop crosses to the first entry rather than to
+/// the next one.
+#[test]
+fn next_change_from_a_symlinked_file_crosses_to_the_other_file() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.fake_fs()
+        .insert_symlink("/alias/a.rs", workdir.join("a.rs"));
+    h.open_file(Path::new("/alias/a.rs"));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.set_diff_view(true);
+        set_cursor_row(editor, 1);
+    }
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        focused_buffer_path(&h.stoat),
+        workdir.join("b.rs"),
+        "crossed to b.rs rather than back to the aliased a.rs",
+    );
+}
+
 #[test]
 fn next_change_crosses_to_next_file_first_hunk() {
     let mut h = TestHarness::with_size(40, 20);
