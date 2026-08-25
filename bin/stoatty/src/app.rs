@@ -2467,7 +2467,11 @@ fn redraw(state: &mut State) {
             if matches!(step, PoolStep::Settled) {
                 continue;
             }
-            pool_easing = true;
+            // A rested pool holds its composite without asking for frames: the
+            // ease has arrived, and only the sub-cell shift keeps the base grid
+            // from painting the same thing. It still counts as glided, so an
+            // anchored popup keeps its ride over the shifted text.
+            pool_easing |= !matches!(step, PoolStep::Resting(_));
             glided.push(pool.id);
 
             // While the focused pane glides it ships the primary
@@ -2489,7 +2493,7 @@ fn redraw(state: &mut State) {
                 });
             }
 
-            if let PoolStep::Gliding(tile) = step {
+            if let PoolStep::Gliding(tile) | PoolStep::Resting(tile) = step {
                 active.push(tile);
             }
         }
@@ -2964,9 +2968,13 @@ fn redraw(state: &mut State) {
 ///
 /// A [`compose_aux_grid`] base holds every pool at its target, so a settled pool
 /// shows there while the gliding ones composite over their regions at the eased
-/// offset -- a pool drops its composite the instant it settles and the base's
+/// offset. A pool drops its composite the instant it settles and the base's
 /// target content (its rested position) shows through, with no live grid to hand
 /// back to.
+///
+/// A target resting between two rows never settles. The base paints whole cells,
+/// so that pool keeps its composite at the resting fraction, asking for no
+/// further frames.
 ///
 /// The terminal is locked only for the read-only compose and step, then released
 /// before the GPU present, so the reader thread and the primary redraw path are
@@ -3033,6 +3041,9 @@ fn redraw_aux(
                     easing = true;
                     active.push(tile);
                 },
+                // A rest holds its composite over the base without asking for
+                // the next frame, since nothing moves from here.
+                PoolStep::Resting(tile) => active.push(tile),
             }
         }
 

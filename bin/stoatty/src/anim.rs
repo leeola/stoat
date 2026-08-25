@@ -646,6 +646,16 @@ pub(crate) enum PoolStep {
     Degraded,
     /// Still gliding with a composite ready at [`ActivePool::frac`].
     Gliding(ActivePool),
+    /// The ease arrived on a target resting between two rows, so the composite
+    /// stays on screen at [`ActivePool::frac`] and the pool asks for no further
+    /// frames.
+    ///
+    /// The base grid paints whole cells at the floored row, so handing the
+    /// region back would snap the content by the fraction the target rests on.
+    /// Nothing is moving any more, which is what separates this from
+    /// [`Self::Gliding`]: the composite is re-pushed on whatever frame comes
+    /// next, and none is asked for on its account.
+    Resting(ActivePool),
 }
 
 /// What a pool's composed rows rest on this frame, and whether any of it moved
@@ -721,9 +731,13 @@ impl PoolAnim {
 /// handles the cursor and z-ordered blit around this.
 ///
 /// A [`PoolStep::Settled`] result means the region hands off to the base, so the
-/// caller drops the pool from its composite set. The recompose is skipped while
-/// only the sub-cell fraction moves, so a settled or shift-only pool costs no
-/// projection.
+/// caller drops the pool from its composite set. That is the arrival on a whole
+/// row, which the base paints identically. An arrival between two rows answers
+/// [`PoolStep::Resting`] instead, keeping the composite on screen at its
+/// fraction rather than snapping to the cell grid.
+///
+/// The recompose is skipped while only the sub-cell fraction moves, so a
+/// settled or shift-only pool costs no projection.
 pub(crate) fn advance_pool_glide(
     anim: &mut PoolAnim,
     pool: &PoolView,
@@ -756,7 +770,12 @@ pub(crate) fn advance_pool_glide(
     let (scroll, easing) = step_document_scroll(anim.scroll, target_pages, page_rows, dt);
     let scroll_settled = anim.target_stable_for >= HANDOFF_STABLE_TIME;
     anim.scroll = scroll;
-    if !easing && scroll_settled {
+    // A target within a hundredth of a row of a cell boundary is one the base
+    // paints the same way, so it hands off. Anything further in rests
+    // composited, since the handoff would snap the content by that fraction.
+    let arrived = !easing && scroll_settled;
+    let rest_frac = (scroll * page_rows).fract();
+    if arrived && !(0.01..=0.99).contains(&rest_frac) {
         // The base owns the region once it hands off. Drop any held composite so
         // a later re-glide cannot resurrect content the base has since replaced.
         anim.held_frac = None;
@@ -781,9 +800,13 @@ pub(crate) fn advance_pool_glide(
         anim.last_buffered
     };
 
+    let still = |tile| match arrived {
+        true => PoolStep::Resting(tile),
+        false => PoolStep::Gliding(tile),
+    };
     if buffered {
         anim.held_frac = Some(gate.frac);
-        PoolStep::Gliding(ActivePool {
+        still(ActivePool {
             id: pool.id,
             region: pool.region,
             frac: gate.frac,
@@ -794,7 +817,7 @@ pub(crate) fn advance_pool_glide(
         // The window is not buffered this frame. Re-push the last good composite
         // at its held offset so the region holds it instead of snapping back to
         // the base grid.
-        PoolStep::Gliding(ActivePool {
+        still(ActivePool {
             id: pool.id,
             region: pool.region,
             frac: held,
@@ -802,6 +825,8 @@ pub(crate) fn advance_pool_glide(
             scrolled_rows: None,
         })
     } else {
+        // Nothing to hold on screen, so the loop keeps ticking until the app's
+        // fill lands, a rested target included.
         PoolStep::Degraded
     }
 }
@@ -995,6 +1020,44 @@ mod tests {
         assert!(!drifted.content_changed, "the same rows at a new fraction");
         assert_eq!(drifted.scrolled_rows, Some(0), "and they moved no rows");
         assert!((drifted.frac - 0.4).abs() < 1e-5, "got {}", drifted.frac);
+    }
+
+    /// The base grid paints whole cells, so a target resting between two rows
+    /// cannot hand off: the region would snap by the fraction it rests on.
+    /// A target on a row boundary hands off exactly as it always has.
+    #[test]
+    fn an_arrival_between_rows_rests_composited() {
+        let arrive = |fraction: f32, buffered: bool| {
+            let (mut view, mut terminal) = gated_pool();
+            if buffered {
+                // Two pages, so a compose at the top of the document has every
+                // row it reads, the straddle row included.
+                fill_page(&mut terminal, 1, 0, b"row");
+                fill_page(&mut terminal, 1, 1, b"row");
+            }
+            view.scroll_target = DocumentOffset { page: 0, fraction };
+            let mut anim = PoolAnim::new(view.scroll_target.pages());
+            advance_pool_glide(&mut anim, &view, &terminal, None, HANDOFF_STABLE_TIME)
+        };
+
+        // Eight rows to a page: 0.3 pages is 2.4 rows, and 0.25 is exactly 2.
+        match arrive(0.3, true) {
+            PoolStep::Resting(tile) => assert!(
+                (tile.frac - 0.4).abs() < 1e-5,
+                "the rest holds the fraction the target sits at, got {}",
+                tile.frac,
+            ),
+            _ => panic!("a mid-cell arrival keeps its composite"),
+        }
+        assert!(
+            matches!(arrive(0.25, true), PoolStep::Settled),
+            "an arrival on a row boundary still hands the region back",
+        );
+        assert!(
+            matches!(arrive(0.3, false), PoolStep::Degraded),
+            "with nothing composed there is nothing to rest, so the loop keeps \
+             ticking until the fill lands",
+        );
     }
 
     #[test]
