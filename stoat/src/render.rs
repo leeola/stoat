@@ -242,10 +242,10 @@ pub(crate) struct FrameCtx<'a> {
     /// True while a background diff warm runs, driving the focused pane's
     /// transient ` <spinner> diff ` status-bar segment. False when idle.
     pub(crate) diff_warm_busy: bool,
-    /// Files with staged and with unstaged changes across the repo, which the
-    /// focused pane's bar leads its staged segment with. `None` before the
-    /// first diff lands and outside a repo, which drops the segment back to the
-    /// focused file's own hunk counts.
+    /// Hunks staged and unstaged across the repo, which the focused pane's bar
+    /// leads its staged segment with. `None` before the first diff lands and
+    /// outside a repo, which drops the segment back to the focused file's own
+    /// hunk counts.
     pub(crate) repo_change_counts: Option<(usize, usize)>,
     /// What the bar names the workspace's diff base, when that is not the
     /// working tree. It replaces [`Self::repo_change_counts`], which describes

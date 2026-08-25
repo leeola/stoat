@@ -22,7 +22,7 @@ use crate::{
         DiffHunk, DiffHunkStatus, DiffMap,
     },
     display_map::syntax_theme::SyntaxStyles,
-    host::{FsHost, GitHost, GitRepo},
+    host::{git::HunkTallies, FsHost, GitHost, GitRepo},
 };
 use codegraph::FileId;
 use std::{
@@ -132,13 +132,13 @@ pub(crate) struct DiffState {
     /// what actually changed. Shared with the blocking job, which is where the
     /// parses run.
     pub(super) tree_cache: TreeCache,
-    /// Files with staged and with unstaged changes across the whole repo, as
-    /// the status bar's repo-wide tally reads them.
+    /// Hunks staged and unstaged across the whole repo, plus the count each
+    /// changed file carries, as the status bar's repo-wide tally reads them.
     ///
     /// `None` until a diff lands, and for a workspace root outside any repo.
     /// Refreshed wherever a diff map does, since the same events move both: an
     /// edit, a save, a staging action, and a write under `.git`.
-    pub(super) repo_change_counts: Option<(usize, usize)>,
+    pub(super) repo_hunk_tallies: Option<HunkTallies>,
     /// The version each buffer is currently settling on, and when that version
     /// was first seen. Read by [`Self::settled`].
     settle: HashMap<BufferId, (u64, Instant)>,
@@ -310,8 +310,7 @@ impl DiffState {
         }
 
         if let Some(repo) = git_host.discover(git_root) {
-            let tallies = repo.hunk_tallies();
-            self.repo_change_counts = Some((tallies.staged, tallies.unstaged));
+            self.repo_hunk_tallies = Some(repo.hunk_tallies());
         }
 
         // A file with no language has no colors to wait for, so its map is
@@ -380,8 +379,8 @@ impl DiffState {
             }
         });
         for out in completed {
-            if let Some(counts) = out.repo_change_counts {
-                self.repo_change_counts = Some(counts);
+            if let Some(tallies) = out.repo_hunk_tallies {
+                self.repo_hunk_tallies = Some(tallies);
             }
             if let Some(base) = out.base {
                 self.base_text.insert(out.path, base);
@@ -469,10 +468,8 @@ impl DiffState {
                         diff_map.anchor_hunks(&buffer_snapshot);
                         (diff_map, base)
                     });
-                    let repo_change_counts = git_host.discover(&git_root).map(|repo| {
-                        let tallies = repo.hunk_tallies();
-                        (tallies.staged, tallies.unstaged)
-                    });
+                    let repo_hunk_tallies =
+                        git_host.discover(&git_root).map(|repo| repo.hunk_tallies());
                     redraw.notify_one();
                     let (diff_map, base) = match computed {
                         Some((diff_map, base)) => (Some(diff_map), Some(base)),
@@ -484,7 +481,7 @@ impl DiffState {
                         target_version: cur_version,
                         diff_map,
                         base,
-                        repo_change_counts,
+                        repo_hunk_tallies,
                     }
                 }
             });
@@ -515,9 +512,9 @@ pub(super) struct DiffJobOutput {
     /// content could not be read and there was nothing to diff.
     pub(super) base: Option<DiffBaseText>,
     /// The repo-wide tally read while the job held the repo, `None` outside a
-    /// repo. Read here rather than on the run loop, since it costs a full
-    /// `git status` walk.
-    pub(super) repo_change_counts: Option<(usize, usize)>,
+    /// repo. Read here rather than on the run loop, since it costs a walk of
+    /// every diff in the repository.
+    pub(super) repo_hunk_tallies: Option<HunkTallies>,
 }
 
 /// A file's HEAD and index blobs as git last reported them.
@@ -952,6 +949,34 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use stoat_language::LanguageRegistry;
+
+    /// The bar reads the totals and a file list reads the per-file counts, so
+    /// both come off one stored tally rather than two walks that could disagree.
+    #[test]
+    fn the_stored_tally_answers_both_the_totals_and_the_per_file_counts() {
+        let mut h = TestHarness::with_size(40, 12);
+        let workdir = PathBuf::from("/tally");
+        h.stage_review_scenario(
+            &workdir,
+            &[("a.rs", "one\n", "ONE\n"), ("b.rs", "two\n", "TWO\n")],
+        );
+        h.fake_git().add_repo(&workdir).hunks("a.rs", 3);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.repo_change_counts(),
+            Some((0, 4)),
+            "the totals are the hunks each side carries",
+        );
+        assert_eq!(
+            ws.repo_hunk_totals(),
+            Some([(PathBuf::from("a.rs"), 3), (PathBuf::from("b.rs"), 1)].as_slice()),
+            "and the per-file counts come off the same tally",
+        );
+    }
 
     /// Bucketing the base spans is O(spans) with a style clone per line each
     /// span touches, and it ran per recompute over a base text and a style

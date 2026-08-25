@@ -720,15 +720,33 @@ impl Workspace {
         self.diff.base_override.as_ref()
     }
 
-    /// Files with staged and with unstaged changes across the repo, as
-    /// `(staged, unstaged)`, or `None` before the first diff lands and for a
-    /// root outside any repo.
+    /// Hunks staged and unstaged across the repo, as `(staged, unstaged)`, or
+    /// `None` before the first diff lands and for a root outside any repo.
     ///
     /// Refreshed by the diff pipeline rather than read on demand, since the
-    /// answer costs a full `git status` walk and the status bar asks every
-    /// frame.
+    /// answer costs a walk of every diff in the repository and the status bar
+    /// asks every frame.
     pub(crate) fn repo_change_counts(&self) -> Option<(usize, usize)> {
-        self.diff.repo_change_counts
+        self.diff
+            .repo_hunk_tallies
+            .as_ref()
+            .map(|tallies| (tallies.staged, tallies.unstaged))
+    }
+
+    /// Hunks each changed file carries against HEAD, sorted by repo-relative
+    /// path, or `None` before the first diff lands and outside a repo.
+    ///
+    /// The same tally [`Self::repo_change_counts`] reads its totals from, so a
+    /// list showing per-file counts and the bar showing the totals never
+    /// disagree.
+    // Stored ahead of the position indicator that reads it, which is what keeps
+    // the per-file half of the tally from being computed twice.
+    #[allow(dead_code)]
+    pub(crate) fn repo_hunk_totals(&self) -> Option<&[(PathBuf, usize)]> {
+        self.diff
+            .repo_hunk_tallies
+            .as_ref()
+            .map(|tallies| tallies.per_file.as_slice())
     }
 
     /// Install `diff_map` on `id` as if a job had produced it. See

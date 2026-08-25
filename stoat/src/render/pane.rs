@@ -1117,13 +1117,13 @@ fn focused_diagnostic_label(
     Some((format!(" {} ", parts.join(" ")), worst))
 }
 
-/// Statusline label leading with the repo's changed-file counts and appending
-/// the focused buffer's hunk counts, or `None` when neither has anything.
+/// Statusline label leading with the repo's hunk counts and appending the
+/// focused buffer's, or `None` when neither has anything.
 ///
-/// `repo` counts files on each side, `file` counts diff hunks, so the label
-/// names both rather than running them together. A repo with nothing changed
-/// still shows while the focused file has hunks, since a tally the file
-/// contradicts is worth seeing.
+/// Both halves count hunks and differ only in scope: `repo` is every changed
+/// file and `file` is the one on screen. The label names them apart rather than
+/// running them together, and a repo with nothing changed still shows while the
+/// focused file has hunks, since a tally the file contradicts is worth seeing.
 ///
 /// With no repo pair the label falls back to the file's counts alone. That
 /// covers a buffer outside a repo and the window before the first diff lands,
@@ -1925,7 +1925,7 @@ mod tests {
     }
 
     #[test]
-    fn the_staged_label_pairs_repo_files_with_the_focused_file() {
+    fn the_staged_label_pairs_the_repo_hunks_with_the_focused_file() {
         assert_eq!(
             focused_staged_label(None, Some((2, 3)), Some((1, 4))).as_deref(),
             Some(" repo 2 staged / 3 unstaged · file 1/4 "),
