@@ -52,6 +52,16 @@ pub(crate) fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
     ]
 }
 
+/// Perceived brightness of `rgb`, from black at `0.0` to white at `1.0`.
+///
+/// Rec.601 weights, which read green as most of the brightness and blue as
+/// least. The distance between two of these answers how far apart a foreground
+/// and a background read, which a channel-wise difference does not: a saturated
+/// blue and the background can differ in every channel and still both look dark.
+pub(crate) fn luma(rgb: [u8; 3]) -> f32 {
+    (0.299 * rgb[0] as f32 + 0.587 * rgb[1] as f32 + 0.114 * rgb[2] as f32) / 255.0
+}
+
 /// Paint `num` right-aligned in the five-cell number field at `x`.
 ///
 /// `scratch` holds the formatted field. Callers paint one number per row of a
@@ -342,6 +352,21 @@ mod tests {
             dim_rgb(fg, [0, 0, 0], 2.0),
             [0, 0, 0],
             "amount clamps above 1"
+        );
+    }
+
+    /// The weights are what make this a brightness rather than an average, so
+    /// the three primaries at full strength must land far apart.
+    #[test]
+    fn luma_weighs_green_over_red_over_blue() {
+        assert_eq!((luma([0, 0, 0]), luma([255, 255, 255])), (0.0, 1.0));
+        assert!(
+            luma([0, 255, 0]) > luma([255, 0, 0]) && luma([255, 0, 0]) > luma([0, 0, 255]),
+            "green reads brightest and blue darkest at equal strength",
+        );
+        assert!(
+            (luma([128, 128, 128]) - 128.0 / 255.0).abs() < 1e-6,
+            "a gray reads at its own level, since the weights sum to one",
         );
     }
 }

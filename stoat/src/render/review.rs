@@ -1,5 +1,5 @@
 use super::{
-    paint::{dim_rgb, paint_style_runs, render_side_num, style_rgb},
+    paint::{dim_rgb, luma, paint_style_runs, render_side_num, style_rgb},
     TEXT_SCALE_COMPACT,
 };
 use crate::{
@@ -62,6 +62,19 @@ pub(crate) const DIFF_SOFTEN_MAX: i8 = 6;
 /// fraction of 1.0 blends a foreground into the background exactly, which
 /// leaves text nobody reads.
 const SOFTEN_CAP: f32 = 0.95;
+
+/// Luma distance from the background under which a changed char is lifted
+/// toward the theme's bright pole.
+///
+/// A palette is free to put a color near its own background. Onedark's comment
+/// gray sits about 0.215 from it, so a changed comment reads about as dim as
+/// the context receding behind it and the diff's own marking is lost. The floor
+/// is what puts a lower bound on how far a changed char stands off its
+/// background, whatever the palette chose.
+///
+/// Set above the muted range it exists to catch and below the ordinary syntax
+/// colors, which sit past it and so paint exactly as the theme wrote them.
+const FAINT_CONTRAST_FLOOR: f32 = 0.30;
 
 /// Multiplier `level` applies to [`CONTEXT_SOFTEN`] and [`MODIFIED_ROW_SOFTEN`].
 ///
@@ -811,6 +824,9 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 /// where the dial is off. It is what makes a changed char's own color say
 /// added, deleted, modified, or moved, rather than leaving the status to the
 /// gutter bars alone.
+///
+/// The caller lifts the result per [`brighten_style`] where softening is on, so
+/// a color this leaves too near the background still reads against it.
 fn mark_span(
     style: Style,
     kind: &ChangeKind,
@@ -874,6 +890,35 @@ fn tint_style(style: Style, target: Color, amount: f32) -> Style {
     }
 }
 
+/// Lift `style`'s foreground away from `bg` when it sits too close to read.
+///
+/// A foreground already [`FAINT_CONTRAST_FLOOR`] or further from the background
+/// comes back untouched, which is every ordinary syntax color. A closer one
+/// blends toward the pole its background is furthest from, white on a dark
+/// theme and black on a light one, by the share of the floor it falls short.
+/// The blend is proportional, so a barely-faint color moves barely and one
+/// painted in the background color itself goes the whole way.
+///
+/// A non-RGB foreground has no channels to measure, so it comes back unchanged
+/// the way it does from every other blend here.
+fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
+    let Some(fg) = style_rgb(style.fg) else {
+        return style;
+    };
+    let distance = (luma(fg) - luma(bg)).abs();
+    if distance >= FAINT_CONTRAST_FLOOR {
+        return style;
+    }
+
+    let pole = match luma(bg) < 0.5 {
+        true => [255, 255, 255],
+        false => [0, 0, 0],
+    };
+    let share = (FAINT_CONTRAST_FLOOR - distance) / FAINT_CONTRAST_FLOOR;
+    let [r, g, b] = dim_rgb(fg, pole, share);
+    style.fg(Color::Rgb(r, g, b))
+}
+
 /// The status color a change span tints toward.
 ///
 /// `base_side` is what splits a novel span. The left column carries the base
@@ -918,6 +963,11 @@ fn span_tint_color(tints: &DiffTints, kind: &ChangeKind, base_side: bool) -> Col
 /// carries no change spans at all, which is what makes a wholly deleted base
 /// line read as deleted. An amount of zero leaves both inert, so the dial's off
 /// position paints exactly the colors from before it.
+///
+/// A changed char whose color lands too near the background is then lifted per
+/// [`brighten_style`], so a muted one still stands off the context receding
+/// behind it. The lift rides on the softening, so a zero `soften_scale` turns
+/// it off with everything else.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_base_row(
     buf: &mut Buffer,
@@ -946,6 +996,9 @@ pub(crate) fn paint_base_row(
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
     let span_tints = tints.filter(|_| tint_amount > 0.0);
+    // Only a changed char lifts, and only against a receding surround: with
+    // softening off nothing recedes, so nothing has to stand off it.
+    let lift_bg = tints.map(|t| t.bg).filter(|_| soften_scale > 0.0);
     let mut token_cursor = 0;
     let mut span_cursor = 0;
     paint_style_runs(buf, start_x, y, text, max_cols, |byte_idx| {
@@ -964,6 +1017,9 @@ pub(crate) fn paint_base_row(
         }
         if let Some(target) = tint_row {
             style = tint_style(style, target, tint_amount);
+            if let Some(bg) = lift_bg {
+                style = brighten_style(style, bg);
+            }
         }
 
         while change_spans
@@ -976,6 +1032,9 @@ pub(crate) fn paint_base_row(
             Some((range, kind, prose)) if range.start <= byte_idx => {
                 let tint = span_tints.map(|t| (span_tint_color(t, kind, true), tint_amount));
                 style = mark_span(style, kind, *prose, tints.is_some(), tint);
+                if let Some(bg) = lift_bg {
+                    style = brighten_style(style, bg);
+                }
             },
             _ => {
                 if let Some(bg) = soften_gaps.filter(|_| soften_scale > 0.0) {
@@ -1168,6 +1227,11 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// carries no change spans at all, which is what makes a wholly added line read
 /// as added. An amount of zero leaves both inert, so the dial's off position
 /// paints exactly the colors from before it.
+///
+/// A changed cell whose color lands too near the background is then lifted per
+/// [`brighten_style`], so a muted one still stands off the context receding
+/// behind it. The lift rides on the softening, so a zero `soften_scale` turns
+/// it off with everything else.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
@@ -1194,6 +1258,9 @@ pub(crate) fn paint_highlighted_row(
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
     let span_tints = tints.filter(|_| tint_amount > 0.0);
+    // Only a changed cell lifts, and only against a receding surround: with
+    // softening off nothing recedes, so nothing has to stand off it.
+    let lift_bg = tints.map(|t| t.bg).filter(|_| soften_scale > 0.0);
     let mut col = 0usize;
     let mut span_cursor = 0;
     for chunk in snapshot.row_chunks(display_row, row_cursor) {
@@ -1211,7 +1278,13 @@ pub(crate) fn paint_highlighted_row(
             None => style,
         };
         let style = match tint_row {
-            Some(target) => tint_style(style, target, tint_amount),
+            Some(target) => {
+                let tinted = tint_style(style, target, tint_amount);
+                match lift_bg {
+                    Some(bg) => brighten_style(tinted, bg),
+                    None => tinted,
+                }
+            },
             None => style,
         };
         // Both variants resolve per chunk rather than per cell, because a
@@ -1242,7 +1315,11 @@ pub(crate) fn paint_highlighted_row(
             let cell_style = match change_spans.get(span_cursor) {
                 Some((range, kind, prose)) if range.start <= col => {
                     let tint = span_tints.map(|t| (span_tint_color(t, kind, false), tint_amount));
-                    mark_span(style, kind, *prose, tints.is_some(), tint)
+                    let marked = mark_span(style, kind, *prose, tints.is_some(), tint);
+                    match lift_bg {
+                        Some(bg) => brighten_style(marked, bg),
+                        None => marked,
+                    }
                 },
                 _ => gap_style,
             };
@@ -3090,9 +3167,183 @@ mod tests {
         }
     }
 
+    /// A palette is free to put a color near its own background, and receding
+    /// the context around such a char leaves it just as dim as the context. The
+    /// lift is what keeps a changed char legible whatever the palette chose.
+    #[test]
+    fn a_faint_changed_char_lifts_toward_the_bright_pole() {
+        let tints = rgb_tints();
+        // Onedark's comment gray on its own background, the case that motivates
+        // the floor, against one of its ordinary syntax colors.
+        let faint = [92, 99, 112];
+        let vivid = [200, 100, 50];
+
+        let paint = |fg: [u8; 3], soften_scale: f32| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+            paint_base_row(
+                &mut buf,
+                0,
+                0,
+                "abcd",
+                4,
+                &[],
+                Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
+                &[(0..4, ChangeKind::Replaced, false)],
+                Some(&tints),
+                None,
+                None,
+                soften_scale,
+                0.0,
+                None,
+            );
+            buf[(0, 0)].style().fg
+        };
+
+        let lifted = {
+            let short = FAINT_CONTRAST_FLOOR - (luma(faint) - luma(tints.bg)).abs();
+            let [r, g, b] = dim_rgb(faint, [255, 255, 255], short / FAINT_CONTRAST_FLOOR);
+            [r, g, b]
+        };
+        assert_eq!(
+            paint(faint, 1.0),
+            Some(Color::Rgb(lifted[0], lifted[1], lifted[2])),
+            "a faint char moves toward white by the share of the floor it falls short",
+        );
+        assert!(
+            luma(lifted) > luma(faint),
+            "and the move is away from the dark background, not toward it",
+        );
+
+        assert_eq!(
+            paint(vivid, 1.0),
+            Some(Color::Rgb(200, 100, 50)),
+            "a color already past the floor paints exactly as the theme wrote it",
+        );
+        assert_eq!(
+            paint(faint, 0.0),
+            Some(Color::Rgb(92, 99, 112)),
+            "with softening off nothing recedes, so nothing needs lifting",
+        );
+    }
+
+    /// A wholly added or deleted row has no spans of its own, and its row tint
+    /// is inert until the dial turns up. The lift has to reach it there too,
+    /// since that is the row a muted palette hides most.
+    #[test]
+    fn a_faint_spanless_row_lifts_at_the_tint_dial_off_position() {
+        let tints = rgb_tints();
+        let faint = [92, 99, 112];
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        paint_base_row(
+            &mut buf,
+            0,
+            0,
+            "abcd",
+            4,
+            &[],
+            Style::default().fg(Color::Rgb(faint[0], faint[1], faint[2])),
+            &[],
+            Some(&tints),
+            None,
+            None,
+            1.0,
+            0.0,
+            Some(tints.deleted),
+        );
+
+        let short = FAINT_CONTRAST_FLOOR - (luma(faint) - luma(tints.bg)).abs();
+        let [r, g, b] = dim_rgb(faint, [255, 255, 255], short / FAINT_CONTRAST_FLOOR);
+        assert_eq!(
+            buf[(0, 0)].style().fg,
+            Some(Color::Rgb(r, g, b)),
+            "the row lifts even though the tint amount leaves its color alone",
+        );
+    }
+
+    /// The lift measures the color the dial produced rather than the one the
+    /// theme wrote, so a status color that is itself dark lifts too. Red reads
+    /// dark by luma however saturated it is, which is why the deleted color at
+    /// the top of the dial still moves off a dark background.
+    #[test]
+    fn the_lift_reads_the_color_the_tint_dial_produced() {
+        let tints = rgb_tints();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        paint_base_row(
+            &mut buf,
+            0,
+            0,
+            "abcd",
+            4,
+            &[],
+            Style::default().fg(Color::Rgb(200, 100, 50)),
+            &[(0..4, ChangeKind::Novel, false)],
+            Some(&tints),
+            None,
+            None,
+            1.0,
+            1.0,
+            None,
+        );
+
+        let flat = style_rgb(Some(tints.deleted)).expect("an rgb status color");
+        let short = FAINT_CONTRAST_FLOOR - (luma(flat) - luma(tints.bg)).abs();
+        let [r, g, b] = dim_rgb(flat, [255, 255, 255], short / FAINT_CONTRAST_FLOOR);
+        assert_eq!(
+            buf[(0, 0)].style().fg,
+            Some(Color::Rgb(r, g, b)),
+            "the flat deleted color lifts, because the dial's output is what the \
+             floor measures",
+        );
+    }
+
+    /// The pole is whichever end the background is furthest from, so a light
+    /// theme darkens a faint char rather than washing it out further.
+    #[test]
+    fn a_light_background_lifts_a_faint_char_toward_black() {
+        let tints = DiffTints {
+            bg: [250, 250, 250],
+            ..rgb_tints()
+        };
+        let faint = [200, 200, 200];
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        paint_base_row(
+            &mut buf,
+            0,
+            0,
+            "abcd",
+            4,
+            &[],
+            Style::default().fg(Color::Rgb(faint[0], faint[1], faint[2])),
+            &[(0..4, ChangeKind::Replaced, false)],
+            Some(&tints),
+            None,
+            None,
+            1.0,
+            0.0,
+            None,
+        );
+
+        let short = FAINT_CONTRAST_FLOOR - (luma(faint) - luma(tints.bg)).abs();
+        let [r, g, b] = dim_rgb(faint, [0, 0, 0], short / FAINT_CONTRAST_FLOOR);
+        assert_eq!(
+            buf[(0, 0)].style().fg,
+            Some(Color::Rgb(r, g, b)),
+            "a faint char on a light theme moves toward black",
+        );
+        assert!(
+            luma([r, g, b]) < luma(faint),
+            "which is away from its background"
+        );
+    }
+
     /// The dial walks a changed char from its syntax color to its status color,
     /// which is what makes the color itself say modified or deleted rather than
     /// leaving that to the gutter bars.
+    ///
+    /// Softening is off throughout, which turns the contrast lift off with it,
+    /// so what these expectations read is the dial's own arithmetic.
     #[test]
     fn the_tint_amount_walks_a_change_span_toward_its_status_color() {
         let tints = rgb_tints();
@@ -3116,7 +3367,7 @@ mod tests {
                 Some(&tints),
                 None,
                 None,
-                1.0,
+                0.0,
                 amount,
                 None,
             );
@@ -3152,6 +3403,9 @@ mod tests {
     /// itself has to take the status color. Without this the dial colors every
     /// refined line and leaves the plainest ones -- a pure insertion or
     /// deletion -- reading as unchanged text.
+    ///
+    /// Rendered with softening off, which turns the contrast lift off with it,
+    /// so each row reads the status color exactly rather than a lifted one.
     #[test]
     fn a_full_tint_paints_a_span_less_row_its_row_status_color() {
         let tints = rgb_tints();
@@ -3168,7 +3422,7 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            1.0,
+            0.0,
             1.0,
         );
 
@@ -3192,7 +3446,7 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            1.0,
+            0.0,
             1.0,
         );
 

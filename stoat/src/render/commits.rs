@@ -580,7 +580,7 @@ mod tests {
     use crate::{
         display_map::highlights::HighlightStyle,
         render::{
-            paint::dim_rgb,
+            paint::{dim_rgb, luma},
             review::{CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
         },
         review::ReviewFileInput,
@@ -682,6 +682,11 @@ mod tests {
     /// A changed span is the one thing on the row that recedes nowhere, and it
     /// carries no color behind it, which is what makes a commit diff read
     /// like `:diff`.
+    ///
+    /// This fixture's token color sits near the background, so the span takes
+    /// the contrast lift as well. What it keeps is the theme's own color,
+    /// standing further off the background than the theme wrote it rather than
+    /// taking any color of the diff's.
     #[test]
     fn a_changed_span_keeps_its_token_color_and_takes_no_wash() {
         let session = session("ctx\nold\n", "ctx\nnew\n", true);
@@ -689,13 +694,23 @@ mod tests {
 
         let cell = cell_with(&buf, 2, "n");
         assert_eq!(
-            (cell.style().fg, cell.style().bg, cell.modifier),
-            (
-                Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
-                Some(Color::Reset),
-                Modifier::empty()
-            ),
-            "the changed token keeps full-strength syntax color, no wash, and no underline"
+            (cell.style().bg, cell.modifier),
+            (Some(Color::Reset), Modifier::empty()),
+            "the changed token takes no wash and no underline"
+        );
+
+        let Some(Color::Rgb(r, g, b)) = cell.style().fg else {
+            panic!(
+                "the changed token paints an rgb color, got {:?}",
+                cell.style().fg
+            );
+        };
+        let context = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN);
+        assert!(
+            luma([r, g, b]) > luma(TOKEN_FG) && luma(TOKEN_FG) > luma(context),
+            "it stands above the color the theme wrote, which already stands above \
+             the receded context: {:?} over {TOKEN_FG:?} over {context:?}",
+            [r, g, b],
         );
     }
 
