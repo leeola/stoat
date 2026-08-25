@@ -123,6 +123,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     let target_offset = rope.point_to_offset(target_buffer_pt);
 
     editor.scroll_row = new_scroll;
+    editor.scroll_frac = 0.0;
     // In select mode the page motion grows the selection by holding the anchor
     // and moving the head to the target row like Helix.
     movement::move_cursors(&mut editor.selections, buffer_snapshot, extend, |_| {
@@ -191,6 +192,7 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
         return false;
     }
     editor.scroll_row = new_scroll;
+    editor.scroll_frac = 0.0;
     editor.scroll_offset = new_scroll as f32;
     editor.scroll_glide = ScrollGlide::None;
     true
@@ -199,26 +201,36 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 /// Advance `editor`'s wheel scroll one report, down when `down` and up
 /// otherwise, arming a [`ScrollGlide::Wheel`] ease toward the new target.
 ///
-/// Each report moves `scroll_row` a fixed three rows -- matching the scrollback
-/// and run-pane wheel steps -- toward the document bound, and the tick eases
+/// One report is one line of travel, which [`wheel_scroll_by`] turns into the
+/// three rows a notch moves.
+pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool) {
+    wheel_scroll_by(editor, if down { 1.0 } else { -1.0 });
+}
+
+/// Move `editor`'s wheel scroll target by `lines` of travel, positive going
+/// down the document, arming a [`ScrollGlide::Wheel`] ease toward it.
+///
+/// Each line moves the target a fixed three rows -- matching the scrollback and
+/// run-pane wheel steps -- toward the document bound, and the tick eases
 /// `scroll_offset` up to it, so steady wheel input yields steady speed. The
 /// selection stays anchored to its buffer line while the glide moves fast,
 /// sliding out of view with the content. Once the glide slows below its re-home
 /// velocity the cursor lands in the scrolloff band, ahead of the settle.
 ///
+/// Fractional travel lands a fractional target: the whole part goes to
+/// `scroll_row` and the remainder to `scroll_frac`, so the rest can sit between
+/// two rows rather than snapping to one.
+///
 /// Reseeds `scroll_offset` from `scroll_row` only when no glide is in flight and
 /// another path moved the integer row out from under the fraction. Mid-glide the
 /// offset legitimately lags the target, so it must not be reseeded.
-pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool) {
-    const STEP: u32 = 3;
+pub(crate) fn wheel_scroll_by(editor: &mut EditorState, lines: f32) {
+    const STEP: f32 = 3.0;
 
-    let max_scroll = max_scroll_offset(editor) as u32;
-    let target = if down {
-        editor.scroll_row.saturating_add(STEP).min(max_scroll)
-    } else {
-        editor.scroll_row.saturating_sub(STEP)
-    };
-    if target == editor.scroll_row && editor.scroll_glide == ScrollGlide::None {
+    let max_scroll = max_scroll_offset(editor);
+    let from = editor.scroll_row as f32 + editor.scroll_frac;
+    let target = (from + lines * STEP).clamp(0.0, max_scroll);
+    if target == from && editor.scroll_glide == ScrollGlide::None {
         return;
     }
 
@@ -227,7 +239,8 @@ pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool) {
     {
         editor.scroll_offset = editor.scroll_row as f32;
     }
-    editor.scroll_row = target;
+    editor.scroll_row = target.floor() as u32;
+    editor.scroll_frac = target.fract();
     editor.scroll_glide = ScrollGlide::Wheel;
 }
 
@@ -328,6 +341,7 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     };
     let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
     editor.scroll_row = desired_scroll.min(max_scroll);
+    editor.scroll_frac = 0.0;
     UpdateEffect::Redraw
 }
 
@@ -373,6 +387,11 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
         editor.scroll_row = (cursor_row + bottom + 1)
             .saturating_sub(viewport)
             .min(max_scroll);
+    }
+    if editor.scroll_row != before {
+        // Following the cursor is a row-aligned move, so it lands on the grid
+        // rather than inheriting whatever fraction the wheel rested on.
+        editor.scroll_frac = 0.0;
     }
     editor.scroll_row != before
 }
@@ -452,6 +471,8 @@ pub(crate) fn center_jump_on_cursor(editor: &mut EditorState, down: bool, center
         return false;
     }
     editor.scroll_row = cursor_row.saturating_sub(target).min(max_scroll);
+    // A jump lands on the row grid, whatever fraction the wheel last rested on.
+    editor.scroll_frac = 0.0;
 
     if prev.abs_diff(editor.scroll_row) > 1 {
         editor.scroll_offset = prev as f32;
@@ -1410,6 +1431,93 @@ mod tests {
         let path = h.write_file("glide.rs", &body);
         h.open_file(&path);
         h
+    }
+
+    /// Trackpad travel worth less than a line still moves the target, and the
+    /// remainder rests between two rows rather than rounding to one.
+    #[test]
+    fn fractional_wheel_travel_rests_between_two_rows() {
+        let mut h = harness_with_long_buffer();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        // Three rows to a line, so a fifth of a line is 0.6 of a row.
+        wheel_scroll_by(editor, 0.2);
+        assert_eq!(
+            (editor.scroll_row, editor.scroll_glide),
+            (0, ScrollGlide::Wheel),
+            "the first travel stays inside row zero and arms the glide",
+        );
+        assert!(
+            (editor.scroll_frac - 0.6).abs() < 1e-5,
+            "resting six tenths of a row down, got {}",
+            editor.scroll_frac,
+        );
+
+        wheel_scroll_by(editor, 0.2);
+        assert_eq!(editor.scroll_row, 1, "the second travel crosses a row");
+        assert!(
+            (editor.scroll_frac - 0.2).abs() < 1e-5,
+            "and carries the remainder, got {}",
+            editor.scroll_frac,
+        );
+    }
+
+    /// The document bounds hold for fractional travel the way they do for a
+    /// notch, so a trackpad cannot drift the target past either end.
+    #[test]
+    fn fractional_wheel_travel_clamps_at_both_ends() {
+        let mut h = harness_with_long_buffer();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        wheel_scroll_by(editor, -0.5);
+        assert_eq!(
+            (editor.scroll_row, editor.scroll_frac),
+            (0, 0.0),
+            "travel up from the top rests on the first row",
+        );
+
+        let max = max_scroll_offset(editor);
+        wheel_scroll_by(editor, 1000.0);
+        assert_eq!(
+            editor.scroll_row as f32 + editor.scroll_frac,
+            max,
+            "and travel past the tail rests exactly on the bound",
+        );
+    }
+
+    /// A notch is one line of travel, so the whole-row step every wheel report
+    /// has always taken is unchanged.
+    #[test]
+    fn a_notch_still_steps_three_whole_rows() {
+        let mut h = harness_with_long_buffer();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        wheel_scroll(editor, true);
+        assert_eq!((editor.scroll_row, editor.scroll_frac), (3, 0.0));
+    }
+
+    /// Only wheel travel rests unaligned. A keyboard motion after one lands on
+    /// the row grid rather than inheriting the fraction.
+    #[test]
+    fn a_page_motion_clears_a_resting_fraction() {
+        let mut h = harness_with_long_buffer();
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            wheel_scroll_by(editor, 0.2);
+            assert_ne!(editor.scroll_frac, 0.0, "the wheel rests off the grid");
+        }
+
+        page_motion(&mut h.stoat, PageDir::Down, false);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert_eq!(
+            editor.scroll_frac, 0.0,
+            "the page motion lands on a whole row",
+        );
     }
 
     #[test]

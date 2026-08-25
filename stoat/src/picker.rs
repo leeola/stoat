@@ -1430,6 +1430,7 @@ impl Preview {
         if let Some(editor) = ws.editors.get_mut(self.editor) {
             let scroll_row = line.saturating_sub((rows / 3) as u32);
             editor.scroll_row = scroll_row;
+            editor.scroll_frac = 0.0;
             editor.scroll_offset = scroll_row as f32;
             editor.scroll_glide = ScrollGlide::None;
         }

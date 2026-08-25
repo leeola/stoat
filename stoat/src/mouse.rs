@@ -834,6 +834,7 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
 
     let prev = editor.scroll_row;
     editor.scroll_row = target_row;
+    editor.scroll_frac = 0.0;
     if editor.scroll_offset.floor() as u32 != prev {
         editor.scroll_offset = prev as f32;
     }
@@ -1579,7 +1580,10 @@ pub(crate) fn editor_screen_to_offset(
     }
     let ws = stoat.active_workspace_mut();
     let editor = ws.editors.get_mut(editor_id)?;
-    let scroll_row = editor.scroll_row;
+    // At an unaligned rest the composite draws document row r in the cell that
+    // `r - offset` rounds to, so a click reads through the row holding the
+    // majority of its cell.
+    let scroll_row = editor.scroll_row + u32::from(editor.scroll_frac >= 0.5);
     // The conflict view is three columns. A click in the center text maps to
     // its cell; a click in either side column (or a gutter) drops to col 0 so
     // the cursor lands on the aligned center row's start.

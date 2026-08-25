@@ -3357,7 +3357,7 @@ impl Stoat {
                 ScrollGlide::Wheel => WHEEL_EASE,
             };
             let was = editor.scroll_glide;
-            let target = editor.scroll_row as f32;
+            let target = editor.scroll_row as f32 + editor.scroll_frac;
             let viewport = editor
                 .viewport_rows
                 .unwrap_or(action_handlers::view::DEFAULT_VIEWPORT_ROWS)
@@ -9241,6 +9241,41 @@ mod tests {
             editor.scroll_offset, 10.0,
             "the offset settles on the target"
         );
+    }
+
+    /// A wheel rest between two rows is a target like any other, so the glide
+    /// eases onto it and stops rather than rounding to the row grid.
+    #[test]
+    fn glide_tick_settles_on_a_fractional_target() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("glide.rs", &body);
+        h.open_file(&path);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_row = 10;
+            editor.scroll_frac = 0.5;
+            editor.scroll_offset = 0.0;
+            editor.scroll_glide = ScrollGlide::Wheel;
+        }
+
+        for _ in 0..1000 {
+            if !h.stoat.is_animating() {
+                break;
+            }
+            h.stoat.tick_scroll_anim(0.016);
+        }
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert_eq!(
+            (editor.scroll_offset, editor.scroll_glide),
+            (10.5, ScrollGlide::None),
+            "the offset rests half a row down and the glide is over",
+        );
+        assert!(!h.stoat.is_animating(), "so nothing asks for another tick");
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
     // leave a second one at the top of the file.
     editor.selections.set_block_cursor(offset, buffer_snapshot);
     editor.scroll_row = snapshot.buffer_to_display(point).row.saturating_sub(2);
+    editor.scroll_frac = 0.0;
 }
 
 #[derive(Copy, Clone, Debug)]

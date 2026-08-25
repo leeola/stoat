@@ -91,6 +91,15 @@ pub(crate) struct EditorState {
     pub(crate) pinned: bool,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
+    /// Sub-row part of the wheel scroll target, which the glide eases
+    /// [`Self::scroll_offset`] toward as `scroll_row as f32 + scroll_frac`.
+    ///
+    /// Only wheel travel produces one. Every other writer of
+    /// [`Self::scroll_row`] clears it, so a keyboard motion, a jump, a picker,
+    /// and a session restore all land on the row grid. A nonzero value is what
+    /// makes the rest unaligned, which the terminal holds as a composite rather
+    /// than handing back to its cell grid.
+    pub(crate) scroll_frac: f32,
     /// Fractional top row for inertial scroll. [`Self::scroll_row`] stays
     /// equal to `scroll_offset.floor()` and drives the integer-row render and
     /// pool paths. The fraction carries sub-row glide between animation frames.
@@ -261,6 +270,7 @@ impl EditorState {
             pinned: false,
             display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
+            scroll_frac: 0.0,
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
             pool_current_line: None,
@@ -304,6 +314,7 @@ impl EditorState {
             pinned: false,
             display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
+            scroll_frac: 0.0,
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
             pool_current_line: None,

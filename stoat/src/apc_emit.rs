@@ -945,9 +945,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // off-view at the last paint) skips the emit, so the terminal falls
         // back to its plain ease. A detached pane's cursor is handled just
         // below instead, so it is excluded here.
+        //
+        // An unaligned rest ships it too. The terminal holds its composite at
+        // that fraction rather than handing the region back, so the drawn
+        // cursor has to ride the shifted content after the glide ends.
         if region.window == 0
             && focused_editor == Some(*editor_id)
-            && editor.scroll_glide != ScrollGlide::None
+            && (editor.scroll_glide != ScrollGlide::None || editor.scroll_frac != 0.0)
             && let Some((col, _)) = editor.cursor_screen_cell
         {
             let row = view::cursor_display_row(editor) as u64;

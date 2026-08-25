@@ -134,6 +134,7 @@ pub(super) fn picker_detail(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     };
     let scroll_row = editor.scroll_row.saturating_add_signed(step);
     editor.scroll_row = scroll_row;
+    editor.scroll_frac = 0.0;
     editor.scroll_offset = scroll_row as f32;
     editor.scroll_glide = crate::editor_state::ScrollGlide::Page;
     UpdateEffect::Redraw
