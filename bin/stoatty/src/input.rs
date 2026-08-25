@@ -260,6 +260,20 @@ pub(crate) fn wheel_lines(delta: MouseScrollDelta, pixels: &mut f64, cell_height
     lines
 }
 
+/// Resolve a wheel `delta` to fractional lines of travel, positive scrolling up
+/// into history, for a child that takes travel rather than notches.
+///
+/// Nothing accumulates here: a program hearing fractions reads every event, so
+/// the remainder [`wheel_lines`] carries between events has no reason to exist.
+/// A `LineDelta` is already in lines, and a `PixelDelta` divides by the cell
+/// height to reach them.
+pub(crate) fn wheel_travel(delta: MouseScrollDelta, cell_height: f64) -> f64 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+        MouseScrollDelta::PixelDelta(position) => position.y / cell_height.max(1.0),
+    }
+}
+
 /// Encode `lines` of wheel scroll as the application-cursor arrow keys an
 /// alt-screen pager reads under alternate-scroll mode: one `ESC O A` (up) per
 /// line when `lines` is positive, one `ESC O B` (down) per line when negative.
@@ -405,6 +419,30 @@ mod tests {
             (zoom_csi_u(1), zoom_csi_u(-1)),
             (b"\x1b[61;9u".as_slice(), b"\x1b[45;9u".as_slice()),
             "`=` and `-` under modifier 9, which is super alone",
+        );
+    }
+
+    #[test]
+    fn wheel_travel_keeps_the_fraction_a_notch_count_loses() {
+        // A whole notch is one line whatever the cell height.
+        assert_eq!(
+            wheel_travel(MouseScrollDelta::LineDelta(0.0, 3.0), 20.0),
+            3.0,
+        );
+        // A tenth of a cell is a tenth of a line, where a notch count reads
+        // zero and waits for the rest.
+        assert!(
+            (wheel_travel(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 2.0)),
+                20.0,
+            ) - 0.1)
+                .abs()
+                < 1e-9,
+        );
+        assert_eq!(
+            wheel_travel(MouseScrollDelta::LineDelta(0.0, -0.5), 20.0),
+            -0.5,
+            "and travel down the document keeps its sign",
         );
     }
 

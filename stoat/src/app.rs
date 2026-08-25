@@ -2569,6 +2569,9 @@ impl Stoat {
             // Another digit is a chord the terminal forwarded on the claim and
             // nothing here answers.
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
+            // FIXME: nothing routes precision wheel travel yet, so the pane
+            // under the pointer does not scroll from it.
+            WindowIpcEvent::Wheel { .. } => return UpdateEffect::None,
         }
         UpdateEffect::Redraw
     }

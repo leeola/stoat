@@ -13,7 +13,7 @@
 ///
 /// `window` is the aux-window id, matching a pool region's window binding, and
 /// `0` is the primary window.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum WindowIpcEvent {
     /// The window gained OS focus.
     Focused { window: u32 },
@@ -46,6 +46,20 @@ pub enum WindowIpcEvent {
     /// program hears it, and it travels the same claim the zoom combo does. A
     /// program that never claims the combo never sees this.
     Chord { window: u32, ch: char },
+    /// Wheel travel at cell `col`, `row` with modifiers `mods`, as `lines` of
+    /// fractional travel, positive scrolling the content down.
+    ///
+    /// The SGR wheel protocol carries whole notches, so a trackpad's sub-line
+    /// travel cannot reach a child through it at all. This is what a program
+    /// holding the zoom claim hears instead, and it is sent only to such a
+    /// program: without the claim the notch path stays exactly as it was.
+    Wheel {
+        window: u32,
+        col: u16,
+        row: u16,
+        mods: u8,
+        lines: f32,
+    },
 }
 
 /// A pointer gesture carried by [`WindowIpcEvent::Mouse`].
@@ -144,6 +158,13 @@ impl WindowIpcEvent {
             },
             WindowIpcEvent::Zoom { window, delta } => format!("zoom {window} {delta}"),
             WindowIpcEvent::Chord { window, ch } => format!("chord {window} {ch}"),
+            WindowIpcEvent::Wheel {
+                window,
+                col,
+                row,
+                mods,
+                lines,
+            } => format!("wheel {window} {col} {row} {mods} {lines}"),
         }
     }
 }
@@ -196,6 +217,13 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
                 return None;
             }
             WindowIpcEvent::Chord { window, ch }
+        },
+        "wheel" => WindowIpcEvent::Wheel {
+            window: parts.next()?.parse().ok()?,
+            col: parts.next()?.parse().ok()?,
+            row: parts.next()?.parse().ok()?,
+            mods: parts.next()?.parse().ok()?,
+            lines: parts.next()?.parse().ok()?,
         },
         _ => return None,
     };
@@ -292,6 +320,47 @@ mod tests {
             "chord 0 9",
             "the character rides the wire bare"
         );
+    }
+
+    #[test]
+    fn wheel_events_round_trip_with_their_fraction() {
+        for event in [
+            WindowIpcEvent::Wheel {
+                window: 0,
+                col: 4,
+                row: 9,
+                mods: 0,
+                lines: 0.25,
+            },
+            WindowIpcEvent::Wheel {
+                window: 2,
+                col: 0,
+                row: 0,
+                mods: 5,
+                lines: -1.5,
+            },
+        ] {
+            assert_eq!(parse_line(&event.encode_line()), Some(event));
+        }
+        assert_eq!(
+            WindowIpcEvent::Wheel {
+                window: 0,
+                col: 4,
+                row: 9,
+                mods: 0,
+                lines: -0.5,
+            }
+            .encode_line(),
+            "wheel 0 4 9 0 -0.5",
+            "the travel rides the wire with its sign and its fraction",
+        );
+    }
+
+    #[test]
+    fn malformed_wheel_lines_yield_none() {
+        assert_eq!(parse_line("wheel 0 4 9 0"), None, "missing travel");
+        assert_eq!(parse_line("wheel 0 4 9 0 up"), None, "non-numeric travel");
+        assert_eq!(parse_line("wheel 0 4 9 0 1 2"), None, "trailing token");
     }
 
     #[test]

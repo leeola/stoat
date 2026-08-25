@@ -21,7 +21,8 @@ use crate::{
     input::{
         alternate_scroll_bytes, cell_at, chord_char, encode_key, font_step, ipc_button,
         modifier_bits, paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes,
-        sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines, zoom_csi_u,
+        sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines, wheel_travel,
+        zoom_csi_u,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -487,9 +488,6 @@ struct AuxWindow {
     pointer_cell: (u16, u16),
     /// The button held down, so a `CursorMoved` while pressed reports a drag.
     pressed: Option<MouseButton>,
-    /// Sub-line wheel remainder, so pixel-precise trackpad deltas accumulate
-    /// into whole-line scroll reports rather than rounding each event to zero.
-    wheel_pixels: f64,
     /// Per-pool ease state for this window's pools, in ascending-id (z) order,
     /// so a scroll glides toward its target rather than jumping like the primary.
     pool_anims: BTreeMap<u32, PoolAnim>,
@@ -1415,35 +1413,27 @@ impl ApplicationHandler<PtyEvent> for App {
                     let cell_height =
                         render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
                     let mods = modifier_bits(state.modifiers);
-                    let report = state
+                    // An aux window always has the upstream channel, so its
+                    // travel goes as one fractional event rather than a burst of
+                    // whole-notch reports.
+                    let at = state
                         .aux
-                        .iter_mut()
+                        .iter()
                         .find(|aux| aux.window.id() == id)
-                        .and_then(|aux| {
-                            let lines = wheel_lines(delta, &mut aux.wheel_pixels, cell_height);
-                            (lines != 0).then(|| {
-                                let kind = if lines > 0 {
-                                    MouseKind::WheelUp
-                                } else {
-                                    MouseKind::WheelDown
-                                };
-                                let (col, row) = aux.pointer_cell;
-                                (aux.id, kind, col, row, lines.unsigned_abs())
-                            })
-                        });
-                    if let Some((window, kind, col, row, count)) = report {
-                        for _ in 0..count {
-                            send_window_event(
-                                state,
-                                WindowIpcEvent::Mouse {
-                                    window,
-                                    kind,
-                                    col,
-                                    row,
-                                    mods,
-                                },
-                            );
-                        }
+                        .map(|aux| (aux.id, aux.pointer_cell));
+                    if let Some((window, (col, row))) = at {
+                        send_window_event(
+                            state,
+                            WindowIpcEvent::Wheel {
+                                window,
+                                col,
+                                row,
+                                mods,
+                                // Positive travel is up into history here and
+                                // down the document on the wire.
+                                lines: -wheel_travel(delta, cell_height) as f32,
+                            },
+                        );
                     }
                     return;
                 },
@@ -1635,6 +1625,29 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let cell_height =
                     render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
+
+                // A child on the upstream channel takes travel rather than
+                // notches, so a trackpad's fraction reaches it whole instead of
+                // being rounded away by the wheel protocol. The pixel
+                // accumulator is left untouched, since the fallback below still
+                // needs its remainder.
+                if state.window_event_tx.is_some() && mouse_reporting(state) {
+                    let (col, row) = state.pointer_cell;
+                    send_window_event(
+                        state,
+                        WindowIpcEvent::Wheel {
+                            window: 0,
+                            col: col as u16,
+                            row: row as u16,
+                            mods: modifier_bits(state.modifiers),
+                            // Positive travel is up into history here and down
+                            // the document on the wire.
+                            lines: -wheel_travel(delta, cell_height) as f32,
+                        },
+                    );
+                    return;
+                }
+
                 let lines = wheel_lines(delta, &mut state.wheel_pixels, cell_height);
                 if lines != 0 {
                     let moved = Input {
@@ -2254,7 +2267,6 @@ fn open_aux_window(
         visibility: Visibility::default(),
         pointer_cell: (0, 0),
         pressed: None,
-        wheel_pixels: 0.0,
         pool_anims: BTreeMap::new(),
         last_redraw: None,
         sketch_clocks: SketchClocks::default(),
@@ -3375,6 +3387,16 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 /// A no-op when the socket did not bind. The line is only queued on the channel,
 /// so this never blocks on socket IO. The serving thread forwards it to the
 /// connected child.
+/// Whether the child asked for mouse reports in the SGR encoding, which is what
+/// says the wheel belongs to it rather than to stoatty's own scrollback.
+///
+/// Reads the routing mode under one lock, the same read [`Input::wheel`] takes
+/// before it decides where a notch goes.
+fn mouse_reporting(state: &State) -> bool {
+    let terminal = state.terminal.lock();
+    terminal.mouse_mode() && terminal.sgr_mouse()
+}
+
 fn send_window_event(state: &State, event: WindowIpcEvent) {
     if let Some(tx) = &state.window_event_tx {
         let _ = tx.send(event.encode_line());
