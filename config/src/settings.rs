@@ -142,6 +142,16 @@ pub struct Settings {
     /// disables dimming. Set `ui.inactive_dim = 0.4;` in stcfg. The raw value
     /// is stored here and clamped to 0.0..=1.0 at the consumer.
     pub ui_inactive_dim: Option<f64>,
+    /// Whether a pinned chord mode hides the key-hints overlay it would
+    /// otherwise auto-show. `None` falls back to enabled. Set
+    /// `ui.pin_hides_hints = false;` in stcfg to keep the box through a pinned
+    /// run.
+    ///
+    /// An unpinned chord takes one key, so the box names what that key can be
+    /// and then goes. A pinned chord repeats until Escape, so the same box
+    /// would sit over the text for the whole run. `ToggleKeyHints` still forces
+    /// it on whatever this says.
+    pub ui_pin_hides_hints: Option<bool>,
     /// How many hidden buffers keep their full highlight state (syntax tree,
     /// tokens) before the least-recently-shown are evicted. `None` falls back to
     /// 64. `0` drops a buffer's state as soon as it is hidden. Set via
@@ -272,6 +282,7 @@ impl Settings {
             editor_wrap_column: other.editor_wrap_column.or(self.editor_wrap_column),
             ui_tab_bar: other.ui_tab_bar.or(self.ui_tab_bar),
             ui_inactive_dim: other.ui_inactive_dim.or(self.ui_inactive_dim),
+            ui_pin_hides_hints: other.ui_pin_hides_hints.or(self.ui_pin_hides_hints),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
@@ -321,6 +332,11 @@ impl Settings {
             ["theme"] => {
                 if let Value::Ident(s) | Value::String(s) = &setting.value.node {
                     self.theme = Some(s.clone());
+                }
+            },
+            ["ui", "pin_hides_hints"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_pin_hides_hints = Some(b);
                 }
             },
             ["ui", "mode_badge", name] => {
@@ -570,6 +586,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -851,6 +868,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -892,6 +910,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -942,6 +961,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_pin_hides_hints: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -975,6 +995,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_pin_hides_hints: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -1010,6 +1031,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -1048,6 +1070,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_pin_hides_hints: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -1084,6 +1107,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -1133,6 +1157,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -1174,6 +1199,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -1212,6 +1238,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_pin_hides_hints: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -1245,6 +1272,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_pin_hides_hints: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,

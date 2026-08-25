@@ -49,8 +49,8 @@ use crate::{
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     keymap_state::{
-        active_modal, binding_display_desc, cursor_token, focus_flags, ActiveModal, Flags,
-        FocusFlags, StoatKeymapState,
+        active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
+        ActiveModal, Flags, FocusFlags, StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
@@ -1250,9 +1250,15 @@ pub(crate) fn frame(
         | None => {},
     }
 
+    // A pinned chord repeats until Escape, so the box it auto-shows would sit
+    // over the text for the whole run rather than for the one press an unpinned
+    // chord takes. The toggle read below still forces it on.
+    let pin_hidden = stoat.settings.ui_pin_hides_hints.unwrap_or(true)
+        && (focused_pane_pinned(ws) || app::is_pinned_mode(mode));
+
     if !painted_modal.is_some_and(ActiveModal::paints_own_box)
         && mode != "space_pane_display"
-        && (!PRIMARY_MODES.contains(&mode)
+        && ((!PRIMARY_MODES.contains(&mode) && !pin_hidden)
             || screen == Some("review")
             || screen == Some("conflict")
             || stoat.key_hints_visible)

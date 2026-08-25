@@ -281,6 +281,12 @@ on init {
     # user-defined mode shows something clearer than `---`.
     # ui.mode_badge.mymode = "MYM";
 
+    # Keep the key-hints box up through a pinned chord. A chord auto-shows the
+    # box, and a pinned one repeats until Escape, so by default the box goes
+    # rather than cover the text for the whole run. The key-hints toggle shows
+    # it either way.
+    # ui.pin_hides_hints = false;
+
     # Named finder scope: globs relative to the workspace root that Shift-Tab
     # cycles to after All and Modified.
     # finder.scope.src = ["src/**"];

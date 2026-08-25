@@ -217,6 +217,15 @@ pub(crate) fn cursor_token(ws: &Workspace) -> Option<Option<LspSymbolKind>> {
     ws.buffers.lsp_symbol_kind_at(buffer_id, offset)
 }
 
+/// Whether the focused pane's editor holds its mode pinned.
+///
+/// `false` when the focused pane is not an editor, which a terminal pane or an
+/// empty split is. Neither carries a pin, because only an editor's bindings
+/// chain the mode switch a pin drops.
+pub(crate) fn focused_pane_pinned(ws: &Workspace) -> bool {
+    resolve_focus(ws).is_some_and(|(editor, _)| editor.pinned)
+}
+
 /// Resolve the focused split pane to its editor and buffer, the shared lookup
 /// [`cursor_token`] and [`focus_flags`] both derive their fields from.
 ///

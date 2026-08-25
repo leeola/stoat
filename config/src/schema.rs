@@ -98,6 +98,15 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "mode default",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("pin_hides_hints")],
+            shape: ValueShape::Bool,
+            doc: "Whether a pinned chord hides the key-hints overlay it would \
+                  otherwise auto-show. A pinned chord repeats until Escape, so \
+                  the box would sit over the text for the whole run. The \
+                  key-hints toggle still forces it on.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("mouse"), Lit("capture")],
             shape: ValueShape::Enum(&["auto", "always", "never"]),
             doc: "Mouse-capture policy at terminal startup.",

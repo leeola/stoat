@@ -320,6 +320,7 @@ fn run_tui(
         editor_wrap_column: None,
         ui_tab_bar: None,
         ui_inactive_dim: None,
+        ui_pin_hides_hints: None,
         highlight_retention: None,
         terminal_shell: None,
         terminal_args: None,

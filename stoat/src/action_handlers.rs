@@ -1511,13 +1511,14 @@ mod tests {
         FocusPane, MoveDown, MovePaneLeft, MovePaneNext, MovePaneRight, Quit, QuitAll,
         RenameWorkspace, SaveSelection, SetTheme, SplitNewRight, SplitRight,
     };
+    use stoat_config::Settings;
     use stoat_scheduler::TestScheduler;
 
     fn stoat_with_config(user: Option<String>) -> Stoat {
         let scheduler = Arc::new(TestScheduler::new());
         let mut stoat = Stoat::new_with_user_config(
             scheduler.executor(),
-            stoat_config::Settings::default(),
+            Settings::default(),
             std::path::PathBuf::new(),
             user,
             Vec::new(),
@@ -2464,6 +2465,61 @@ mod tests {
         assert!(
             !hint_box_visible(&mut h.stoat, "space_pane_display"),
             "the display chord suppresses the hint box so only the badges show",
+        );
+    }
+
+    /// A chord auto-shows its hint box for the one press it takes. Pinning it
+    /// turns it into a run, so the box goes rather than cover the text until
+    /// Escape.
+    #[test]
+    fn a_pinned_chord_hides_the_hint_box() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 60);
+
+        h.type_keys("space g");
+        assert!(
+            hint_box_visible(&mut h.stoat, "space_goto"),
+            "the unpinned chord auto-shows its hint box",
+        );
+
+        h.type_keys("g");
+        assert!(
+            !hint_box_visible(&mut h.stoat, "space_goto"),
+            "pinning the chord takes the box down",
+        );
+    }
+
+    /// The reader who wants the box through the run says so once in the config.
+    #[test]
+    fn pin_hides_hints_off_keeps_the_box_through_a_pinned_chord() {
+        let settings = Settings {
+            ui_pin_hides_hints: Some(false),
+            ..Settings::default()
+        };
+        let mut h = crate::test_harness::TestHarness::new_with_settings(160, 60, settings);
+
+        h.type_keys("space g g");
+        assert!(
+            hint_box_visible(&mut h.stoat, "space_goto"),
+            "the setting keeps the box up while the chord is pinned",
+        );
+    }
+
+    /// The toggle is a session flag the paint reads last, so it reaches a box
+    /// the pin took down.
+    #[test]
+    fn the_key_hints_toggle_shows_the_box_a_pin_hid() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 60);
+
+        h.type_keys("space g g");
+        assert!(
+            !hint_box_visible(&mut h.stoat, "space_goto"),
+            "the pinned chord starts with no box",
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(
+            hint_box_visible(&mut h.stoat, "space_goto"),
+            "the toggle forces the box back on while the pin holds",
         );
     }
 

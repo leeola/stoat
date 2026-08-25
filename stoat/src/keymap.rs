@@ -2643,6 +2643,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: Some(TabBarMode::Auto),
                 ui_inactive_dim: None,
+                ui_pin_hides_hints: None,
                 highlight_retention: Some(64),
                 terminal_shell: None,
                 terminal_args: None,
