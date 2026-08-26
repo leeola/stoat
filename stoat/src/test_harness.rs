@@ -325,6 +325,30 @@ impl TestHarness {
         }
     }
 
+    /// Seed a repo where `old_rel` moved to `new_rel`, the way `git mv` leaves
+    /// it. HEAD holds `head` under the old path only, and the working tree
+    /// holds `working` at the new one.
+    ///
+    /// Pass the same text for both to model a pure move. Pass different text to
+    /// model a move that also edits.
+    pub fn stage_rename_scenario(
+        &mut self,
+        workdir: impl Into<std::path::PathBuf>,
+        old_rel: &str,
+        new_rel: &str,
+        head: &str,
+        working: &str,
+    ) {
+        let workdir = workdir.into();
+        self.stoat.active_workspace_mut().git_root = workdir.clone();
+        let new_abs = workdir.join(new_rel);
+        self.fake_git
+            .add_repo(workdir)
+            .with_fs(&self.fake_fs)
+            .renamed(old_rel, new_rel, head);
+        self.fake_fs.insert_file(&new_abs, working.as_bytes());
+    }
+
     /// Seed a repo where each file carries distinct HEAD, INDEX (staged), and
     /// working-tree text, so a diff populated over it distinguishes staged
     /// from unstaged hunks. Tuple order is `(rel, head, index, working)`.

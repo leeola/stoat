@@ -780,17 +780,35 @@ fn resolve_base(
 
 /// The working tree's own base for `path`, as HEAD and the index.
 ///
-/// [`None`] when HEAD does not carry the file, which is what leaves an
-/// untracked buffer without a diff map.
+/// [`None`] when HEAD carries no blob for the file and no move explains the
+/// absence, which is what leaves an untracked buffer without a diff map.
 fn working_tree_base(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
-    let head = Arc::new(repo.head_content(path)?);
+    let Some(head) = repo.head_content(path) else {
+        return moved_base(repo, path);
+    };
     // A tracked file with no index entry is staged for deletion, so its index
     // side is empty text. HEAD's bytes there mark the removal unstaged.
-    let index = match repo.index_content(path) {
-        Some(index) => Arc::new(index),
-        None => Arc::new(String::new()),
-    };
-    Some((head, index))
+    let index = repo.index_content(path).unwrap_or_default();
+    Some((Arc::new(head), Arc::new(index)))
+}
+
+/// The base for a moved `path`, read from the blob it was moved from.
+///
+/// A move leaves no blob under the new path. A base read there alone shows
+/// every line as added, and the old path shows every line as deleted.
+///
+/// [`None`] when `path` is not the new side of a move, which is the ordinary
+/// answer for an untracked file.
+fn moved_base(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
+    let old = repo.rename_source(path)?;
+    let head = repo.head_content(&old)?;
+    // A staged rename carries the new path in the index, while a plain
+    // `fs::rename` leaves the index entry at the old one.
+    let index = repo
+        .index_content(path)
+        .or_else(|| repo.index_content(&old))
+        .unwrap_or_default();
+    Some((Arc::new(head), Arc::new(index)))
 }
 
 /// Whether `buffer_text` stands for a file that is no longer in the working
@@ -1267,6 +1285,57 @@ mod tests {
             DiffStatus::Unchanged,
             "the unchanged first line reads unchanged"
         );
+    }
+
+    /// A moved file carries its content across, so it owes no hunks. Its base
+    /// lives under the path it came from. A read of the new path alone shows
+    /// the whole file as freshly written.
+    #[test]
+    fn a_moved_buffer_diffs_against_the_old_path_and_shows_no_hunks() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_rename_scenario("/repo", "old.txt", "new.txt", "a\nb\n", "a\nb\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/new.txt"));
+        h.settle_diff_jobs();
+
+        assert_eq!(
+            focused_diff_statuses(&h, 2),
+            vec![DiffStatus::Unchanged, DiffStatus::Unchanged],
+            "a move edits no line, so the moved buffer owes no hunks",
+        );
+    }
+
+    #[test]
+    fn a_moved_and_edited_buffer_shows_only_the_edit() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_rename_scenario("/repo", "old.txt", "new.txt", "a\nb\n", "a\nc\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/new.txt"));
+        h.settle_diff_jobs();
+
+        assert_eq!(
+            focused_diff_statuses(&h, 2),
+            vec![DiffStatus::Unchanged, DiffStatus::Modified],
+            "only the edited line is work the move did not carry across",
+        );
+    }
+
+    /// Per-line diff status of the focused editor's buffer, for the first
+    /// `lines` lines. Panics when the buffer carries no diff map, which is the
+    /// failure a test asserting statuses wants named.
+    fn focused_diff_statuses(h: &TestHarness, lines: u32) -> Vec<DiffStatus> {
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer = ws
+            .buffers
+            .get(ws.editors[editor_id].buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("buffer has a diff map");
+        (0..lines).map(|line| dm.status_for_line(line)).collect()
     }
 
     /// Neither blob can change without a write under `.git`, which invalidates
