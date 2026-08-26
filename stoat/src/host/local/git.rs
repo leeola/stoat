@@ -7,8 +7,8 @@ use crate::host::git::{
     RebaseTodo, RewriteResult,
 };
 use git2::{
-    build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Diff, DiffOptions, Repository,
-    RepositoryState, Sort, Status, StatusOptions,
+    build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Diff, DiffFindOptions, DiffOptions,
+    Repository, RepositoryState, Sort, Status, StatusEntry, StatusOptions,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -97,13 +97,9 @@ impl GitRepo for LocalGitRepo {
             None => return Vec::new(),
         };
 
-        let statuses = {
-            let mut opts = StatusOptions::new();
-            opts.include_untracked(true).recurse_untracked_dirs(true);
-            match repo.statuses(Some(&mut opts)) {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
-            }
+        let statuses = match repo.statuses(Some(&mut rename_aware_status())) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
         };
 
         let mut staged: Vec<ChangedFile> = Vec::new();
@@ -111,12 +107,10 @@ impl GitRepo for LocalGitRepo {
         let mut staged_paths = std::collections::HashSet::new();
 
         for entry in statuses.iter() {
-            let rel = match entry.path() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let abs = workdir.join(rel);
             let status = entry.status();
+            let Some((abs, renamed_from)) = entry_paths(&entry, &workdir) else {
+                continue;
+            };
 
             if status.intersects(STAGED) {
                 staged_paths.insert(abs.clone());
@@ -124,12 +118,14 @@ impl GitRepo for LocalGitRepo {
                     path: abs,
                     staged: true,
                     untracked: false,
+                    renamed_from,
                 });
             } else if status.intersects(UNSTAGED) && !staged_paths.contains(&abs) {
                 unstaged.push(ChangedFile {
                     path: abs,
                     staged: false,
                     untracked: status.intersects(Status::WT_NEW),
+                    renamed_from,
                 });
             }
         }
@@ -158,9 +154,11 @@ impl GitRepo for LocalGitRepo {
         // this list is about: whether the file differs from the base.
         let mut opts = DiffOptions::new();
         opts.include_untracked(true).recurse_untracked_dirs(true);
-        let Ok(diff) = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts)) else {
+        let Ok(mut diff) = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
+        else {
             return Vec::new();
         };
+        let _ = diff.find_similar(Some(&mut rename_detection(true)));
 
         let mut files: Vec<ChangedFile> = diff
             .deltas()
@@ -176,6 +174,12 @@ impl GitRepo for LocalGitRepo {
                     // further back. Every entry here is simply changed.
                     staged: false,
                     untracked: delta.status() == git2::Delta::Untracked,
+                    renamed_from: match delta.status() {
+                        git2::Delta::Renamed => {
+                            delta.old_file().path().map(|old| workdir.join(old))
+                        },
+                        _ => None,
+                    },
                 })
             })
             .collect();
@@ -205,17 +209,26 @@ impl GitRepo for LocalGitRepo {
             opts
         };
 
+        // Rename detection runs before every count, so a moved file pairs into
+        // one Renamed delta and a pure move contributes no hunks at all.
         let staged = repo
             .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut hunk_only()))
-            .map_or(0, |diff| count_hunks(&diff, &mut |_, _| {}));
+            .map_or(0, |mut diff| {
+                let _ = diff.find_similar(Some(&mut rename_detection(false)));
+                count_hunks(&diff, &mut |_, _| {})
+            });
         let unstaged = repo
             .diff_index_to_workdir(None, Some(&mut with_untracked()))
-            .map_or(0, |diff| count_hunks(&diff, &mut |_, _| {}));
+            .map_or(0, |mut diff| {
+                let _ = diff.find_similar(Some(&mut rename_detection(true)));
+                count_hunks(&diff, &mut |_, _| {})
+            });
 
         let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
-        if let Ok(diff) =
+        if let Ok(mut diff) =
             repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut with_untracked()))
         {
+            let _ = diff.find_similar(Some(&mut rename_detection(true)));
             count_hunks(&diff, &mut |path, hunks| {
                 *per_file.entry(path).or_default() += hunks;
             });
@@ -281,6 +294,17 @@ impl GitRepo for LocalGitRepo {
         let rel = path.strip_prefix(workdir).ok()?;
         let text = index_blob_text(&repo, rel)?;
         Some(LineEnding::normalize(&text).into_owned())
+    }
+
+    fn rename_source(&self, path: &Path) -> Option<PathBuf> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let workdir = repo.workdir()?.to_path_buf();
+        let statuses = repo.statuses(Some(&mut rename_aware_status())).ok()?;
+
+        statuses.iter().find_map(|entry| {
+            let (abs, renamed_from) = entry_paths(&entry, &workdir)?;
+            (abs == path).then_some(renamed_from).flatten()
+        })
     }
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
@@ -1079,6 +1103,52 @@ fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApp
         });
     }
     Ok(out)
+}
+
+/// Status options that report a moved file as one renamed entry on either side
+/// of the index, rather than as a deletion paired with an addition.
+fn rename_aware_status() -> StatusOptions {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true)
+        .renames_index_to_workdir(true);
+    opts
+}
+
+/// Find options that pair a diff's deletions and additions back into renames.
+///
+/// `untracked` extends the pairing to files git has never seen, which a diff
+/// only carries when it was built with untracked content shown.
+fn rename_detection(untracked: bool) -> DiffFindOptions {
+    let mut opts = DiffFindOptions::new();
+    opts.renames(true).for_untracked(untracked);
+    opts
+}
+
+/// The absolute path `entry` names, and the absolute path it moved from when
+/// the entry is a rename.
+///
+/// [`StatusEntry::path`] reads the *old* side of a staged rename, so the
+/// current path has to come off the entry's delta instead. Returns `None` for
+/// an entry naming no path at all, such as one whose bytes are not UTF-8.
+fn entry_paths(entry: &StatusEntry<'_>, workdir: &Path) -> Option<(PathBuf, Option<PathBuf>)> {
+    let status = entry.status();
+    let renamed = if status.intersects(Status::INDEX_RENAMED) {
+        entry.head_to_index()
+    } else if status.intersects(Status::WT_RENAMED) {
+        entry.index_to_workdir()
+    } else {
+        None
+    };
+
+    match renamed {
+        Some(delta) => Some((
+            workdir.join(delta.new_file().path()?),
+            delta.old_file().path().map(|old| workdir.join(old)),
+        )),
+        None => Some((workdir.join(entry.path().ok()?), None)),
+    }
 }
 
 /// Hunks in `diff`, reporting each delta's path and its own count to `per_file`

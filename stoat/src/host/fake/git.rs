@@ -307,6 +307,7 @@ impl<'a> FakeRepoBuilder<'a> {
                 path: abs.clone(),
                 staged: false,
                 untracked: false,
+                renamed_from: None,
             }));
         });
         if let Some(fs) = self.fs {
@@ -326,6 +327,7 @@ impl<'a> FakeRepoBuilder<'a> {
                 path: abs.clone(),
                 staged: true,
                 untracked: false,
+                renamed_from: None,
             }));
         });
         if let Some(fs) = self.fs {
@@ -369,8 +371,43 @@ impl<'a> FakeRepoBuilder<'a> {
                 path: abs,
                 staged: false,
                 untracked: false,
+                renamed_from: None,
             }));
         });
+        self
+    }
+
+    /// Record `old_rel` as moved to `new_rel` with `content` unchanged, the way
+    /// `git mv` leaves a staged rename.
+    ///
+    /// HEAD holds `content` under the old path only, and the one staged entry
+    /// sits at the new path carrying the old one in `renamed_from`. Its hunk
+    /// count is zero, because a pure move edits no line. To model a move that
+    /// also edits, follow this with [`Self::hunks`] on the new path.
+    pub fn renamed(
+        &mut self,
+        old_rel: impl AsRef<Path>,
+        new_rel: impl AsRef<Path>,
+        content: &str,
+    ) -> &mut Self {
+        let old_abs = self.workdir.join(old_rel.as_ref());
+        let new_abs = self.workdir.join(new_rel.as_ref());
+        self.head_file(old_rel.as_ref(), content);
+        self.mutate_repo(|state| {
+            state.changed.retain(|c| c.file.path != new_abs);
+            state.changed.push(FakeChange {
+                file: ChangedFile {
+                    path: new_abs.clone(),
+                    staged: true,
+                    untracked: false,
+                    renamed_from: Some(old_abs),
+                },
+                hunks: 0,
+            });
+        });
+        if let Some(fs) = self.fs {
+            fs.insert_file(&new_abs, content.as_bytes());
+        }
         self
     }
 
@@ -872,6 +909,7 @@ impl GitRepo for FakeGitRepo {
             path: path.clone(),
             staged: false,
             untracked: true,
+            renamed_from: None,
         }));
         staged.sort_by(|a, b| a.path.cmp(&b.path));
         unstaged.sort_by(|a, b| a.path.cmp(&b.path));
@@ -922,6 +960,7 @@ impl GitRepo for FakeGitRepo {
                 path: self.workdir.join(rel),
                 staged: false,
                 untracked: false,
+                renamed_from: None,
             })
             .collect();
         files.extend(
@@ -938,6 +977,7 @@ impl GitRepo for FakeGitRepo {
             path: path.clone(),
             staged: false,
             untracked: true,
+            renamed_from: None,
         }));
         files.sort_by(|a, b| a.path.cmp(&b.path));
         files.dedup_by(|a, b| a.path == b.path);
@@ -1020,6 +1060,15 @@ impl GitRepo for FakeGitRepo {
             .get(rel)
             .or_else(|| state.head_contents.get(rel))?;
         Some(LineEnding::normalize(text).into_owned())
+    }
+
+    fn rename_source(&self, path: &Path) -> Option<PathBuf> {
+        let state = self.state.lock().unwrap();
+        state
+            .changed
+            .iter()
+            .find(|c| c.file.path == path)
+            .and_then(|c| c.file.renamed_from.clone())
     }
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
@@ -1572,6 +1621,69 @@ mod tests {
         assert!(changed[0].path.ends_with("a.rs"));
         assert!(!changed[1].staged);
         assert!(changed[1].path.ends_with("b.rs"));
+    }
+
+    /// Mirrors the shape `LocalGit` reports for a `git mv`, so a fixture built
+    /// on the fake exercises the same one-entry list the real host produces.
+    #[test]
+    fn a_move_lists_one_staged_entry_carrying_the_old_path() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).renamed("old.rs", "new.rs", "v1");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let changed = repo.changed_files();
+
+        assert_eq!(
+            changed.len(),
+            1,
+            "a move is one entry, not a delete plus an add"
+        );
+        assert!(changed[0].staged);
+        assert_eq!(changed[0].path, workdir().join("new.rs"));
+        assert_eq!(
+            changed[0].renamed_from.as_deref(),
+            Some(workdir().join("old.rs").as_path())
+        );
+    }
+
+    #[test]
+    fn a_pure_move_owes_no_hunks() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).renamed("old.rs", "new.rs", "v1");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.hunk_tallies(),
+            HunkTallies {
+                per_file: vec![(PathBuf::from("new.rs"), 0)],
+                ..Default::default()
+            },
+            "moving a file edits no line",
+        );
+    }
+
+    #[test]
+    fn rename_source_answers_only_for_the_new_side_of_a_move() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .renamed("old.rs", "new.rs", "v1")
+            .modified("kept.rs", "v1", "v2");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.rename_source(&workdir().join("new.rs")),
+            Some(workdir().join("old.rs"))
+        );
+        assert_eq!(
+            repo.rename_source(&workdir().join("kept.rs")),
+            None,
+            "an edit is not a move"
+        );
+        assert_eq!(
+            repo.rename_source(&workdir().join("old.rs")),
+            None,
+            "the old path is gone, not moved"
+        );
     }
 
     #[test]

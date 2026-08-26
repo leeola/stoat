@@ -75,6 +75,16 @@ impl TestRepo {
         self.write_and_stage(name, content).commit("c")
     }
 
+    /// Move `from` to `to` on disk and in the index, the way `git mv` does.
+    fn git_mv(&self, from: &str, to: &str) -> &Self {
+        std::fs::rename(self.join(from), self.join(to)).expect("rename file");
+        let mut index = self.repo.index().expect("index");
+        index.remove_path(Path::new(from)).expect("remove old path");
+        index.add_path(Path::new(to)).expect("add new path");
+        index.write().expect("write index");
+        self
+    }
+
     fn head_sha(&self) -> String {
         self.repo
             .head()
@@ -408,6 +418,114 @@ fn hunk_tallies_are_zero_on_a_clean_repo() {
     tr.commit_file("a.rs", "v1");
     let repo = LocalGit::new().discover(tr.path()).unwrap();
     assert_eq!(repo.hunk_tallies(), Default::default());
+}
+
+/// A move is one file at a new address, not a file destroyed and another
+/// invented. Without the pairing the old path lists as a whole-file deletion
+/// and the new one as a whole-file addition.
+#[test]
+fn changed_files_reports_a_staged_move_as_one_renamed_entry() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "fn main() {}");
+    tr.git_mv("old.rs", "new.rs");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let files = repo.changed_files();
+
+    assert_eq!(
+        files.len(),
+        1,
+        "a move is one entry, not a delete plus an add"
+    );
+    assert!(files[0].staged);
+    assert_eq!(files[0].path, tr.join("new.rs"));
+    assert_eq!(
+        files[0].renamed_from.as_deref(),
+        Some(tr.join("old.rs").as_path())
+    );
+}
+
+#[test]
+fn hunk_tallies_are_zero_for_a_pure_move() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "fn main() {}");
+    tr.git_mv("old.rs", "new.rs");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+
+    assert_eq!(
+        repo.hunk_tallies(),
+        Default::default(),
+        "moving a file edits no line, so it owes no hunks on either side",
+    );
+}
+
+/// Only the edit counts. The move contributes nothing, because the content it
+/// carried across is diffed against the blob it came from.
+#[test]
+fn hunk_tallies_count_only_the_edit_in_a_move_plus_edit() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    tr.git_mv("old.rs", "new.rs");
+    tr.write_and_stage("new.rs", "a\nb\nc\nD\ne\nf\ng\nh\n");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let tallies = repo.hunk_tallies();
+
+    assert_eq!(
+        (tallies.staged, tallies.unstaged),
+        (1, 0),
+        "the one edited line is the only hunk the move carries",
+    );
+    assert_eq!(tallies.per_file, vec![(PathBuf::from("new.rs"), 1)]);
+}
+
+#[test]
+fn changed_files_reports_an_unstaged_move_as_one_entry() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "fn main() {}");
+    std::fs::rename(tr.join("old.rs"), tr.join("new.rs")).expect("rename file");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let files = repo.changed_files();
+
+    assert_eq!(
+        files.len(),
+        1,
+        "an unstaged move is still one file at a new address"
+    );
+    assert!(!files[0].staged);
+    assert_eq!(files[0].path, tr.join("new.rs"));
+    assert_eq!(
+        files[0].renamed_from.as_deref(),
+        Some(tr.join("old.rs").as_path())
+    );
+}
+
+#[test]
+fn rename_source_answers_only_for_the_new_side_of_a_move() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "fn main() {}")
+        .commit_file("kept.rs", "v1");
+    tr.git_mv("old.rs", "new.rs");
+    tr.write("kept.rs", "v2");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+
+    assert_eq!(
+        repo.rename_source(&tr.join("new.rs")),
+        Some(tr.join("old.rs"))
+    );
+    assert_eq!(
+        repo.rename_source(&tr.join("kept.rs")),
+        None,
+        "an edit is not a move"
+    );
+    assert_eq!(
+        repo.rename_source(&tr.join("old.rs")),
+        None,
+        "the old path is gone, not moved"
+    );
 }
 
 #[test]

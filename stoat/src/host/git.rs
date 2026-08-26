@@ -64,6 +64,14 @@ pub struct ChangedFile {
     /// navigation relies on this to skip untracked files, which carry no diff
     /// to show.
     pub untracked: bool,
+    /// Absolute path this file moved from, when the entry is the new side of a
+    /// rename. `None` for every other change.
+    ///
+    /// A moved file has no blob under [`Self::path`] in HEAD, so a consumer
+    /// that diffs against the current path sees the whole file as added and the
+    /// old path as deleted. Resolve the diff base through this instead, and a
+    /// pure move shows no hunks at all.
+    pub renamed_from: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Snafu)]
@@ -229,6 +237,15 @@ pub trait GitRepo: Send + Sync {
     /// Line terminators arrive normalized to bare `\n`, per
     /// [`Self::head_contents`].
     fn index_content(&self, path: &Path) -> Option<String>;
+
+    /// The absolute path `path` moved from, when it is the new side of a staged
+    /// or unstaged rename. `None` for every other path.
+    ///
+    /// A moved file has no HEAD or index blob under its current path, so a
+    /// caller building its diff base asks here first and falls back to `path`
+    /// itself. Answers for one path at a time, because a buffer resolves its
+    /// own base rather than walking the whole change list.
+    fn rename_source(&self, path: &Path) -> Option<PathBuf>;
 
     /// Absolute paths of every file left unmerged in the on-disk index, i.e.
     /// those carrying a stage 1/2/3 (base/ours/theirs) entry.
