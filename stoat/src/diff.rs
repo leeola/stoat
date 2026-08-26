@@ -24,6 +24,9 @@ use stoat_text::LineEnding;
 /// is the discovered repository workdir, which callers use to resolve the
 /// paths the inputs name.
 ///
+/// A moved file diffs against the blob it was moved from, so a pure rename
+/// yields an input whose two texts match and therefore no hunks at all.
+///
 /// Per-file read failures are logged at `warn` level and the file is
 /// skipped, so one unreadable file does not lose the whole scan.
 pub fn scan_working_tree(
@@ -40,7 +43,13 @@ pub fn scan_working_tree(
         return None;
     }
 
-    let head_paths: Vec<&Path> = changed.iter().map(|f| f.path.as_path()).collect();
+    // A moved file's blob sits under the path it came from. Asking for the
+    // current path instead answers nothing, which reads as a whole-file
+    // addition beside the old path's whole-file deletion.
+    let head_paths: Vec<&Path> = changed
+        .iter()
+        .map(|f| f.renamed_from.as_deref().unwrap_or(&f.path))
+        .collect();
     let head_texts = repo.head_contents(&head_paths);
 
     let mut inputs: Vec<ReviewFileInput> = Vec::with_capacity(changed.len());
@@ -114,6 +123,38 @@ mod tests {
             vec![0],
             "disk bytes differing from the blob only in their line terminators \
              carry no change",
+        );
+    }
+
+    /// A move carries its content to a new address. Reading the base at that
+    /// address finds nothing, which reads as a file written from scratch.
+    #[test]
+    fn a_moved_file_diffs_against_the_blob_it_moved_from() {
+        let fs = FakeFs::new();
+        let git = FakeGit::new();
+        git.add_repo("/repo")
+            .with_fs(&fs)
+            .renamed("old.txt", "new.txt", "a\nb\n");
+
+        let langs = LanguageRegistry::standard();
+        let (_workdir, inputs) =
+            scan_working_tree(&git, &fs, &langs, Path::new("/repo")).expect("the repo has changes");
+
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|i| (i.rel_path.as_str(), i.base_text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("new.txt", "a\nb\n")],
+            "the moved file's base is the old path's blob, listed at the new path",
+        );
+        assert_eq!(
+            extract_review_hunks_changeset(&inputs, 3, None)
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            vec![0],
+            "a move edits no line",
         );
     }
 }
