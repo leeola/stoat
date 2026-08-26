@@ -185,9 +185,10 @@ pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// session the registry knows.
 ///
 /// Reached from `SwitchWorkspace` and from a bare launch, which has no files to
-/// show and so asks which project to enter. The finder opens even with nothing
-/// saved, since a lone row costs one Escape and a skip-when-empty rule depends
-/// on the real state dir.
+/// show and so asks which project to enter. This handler always opens the
+/// finder, even at a lone row, because `SwitchWorkspace` is an explicit ask and
+/// deserves an answer. The bare-launch wrapper
+/// [`Stoat::open_workspace_picker`] skips the lone-row case instead.
 ///
 /// The mode drops to normal first, because the picker's own input takes insert
 /// and the editor underneath must not keep a mode it no longer owns.

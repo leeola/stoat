@@ -2749,12 +2749,27 @@ mod tests {
         assert_eq!(picker.entries().len(), 2);
     }
 
+    /// A launch that opens into its only workspace has nothing to pick from, so
+    /// the entry point the binary calls leaves the finder closed.
+    #[test]
+    fn the_bare_launch_entry_point_skips_a_lone_workspace() {
+        let mut h = Stoat::test();
+        assert!(h.stoat.workspace_picker.is_none());
+
+        h.stoat.open_workspace_picker();
+
+        assert!(
+            h.stoat.workspace_picker.is_none(),
+            "a lone row is the workspace the launch already sits in, so there is nothing to pick",
+        );
+    }
+
     /// A bare launch reaches the same finder the key does, through the entry
     /// point the binary calls rather than through a dispatch.
     #[test]
-    fn the_bare_launch_entry_point_opens_the_picker() {
+    fn the_bare_launch_entry_point_opens_the_picker_with_a_second_workspace() {
         let mut h = Stoat::test();
-        assert!(h.stoat.workspace_picker.is_none());
+        h.type_action("NewWorkspace()");
 
         h.stoat.open_workspace_picker();
 
@@ -2765,8 +2780,28 @@ mod tests {
             .map(|picker| picker.entries().len());
         assert_eq!(
             entries,
+            Some(2),
+            "a second workspace gives the finder something to pick"
+        );
+    }
+
+    /// An explicit ask deserves an answer, so the dispatch path opens the finder
+    /// where the bare-launch wrapper skips it.
+    #[test]
+    fn switch_workspace_opens_the_picker_even_when_lone() {
+        let mut h = Stoat::test();
+
+        h.type_action("SwitchWorkspace()");
+
+        let entries = h
+            .stoat
+            .workspace_picker
+            .as_ref()
+            .map(|picker| picker.entries().len());
+        assert_eq!(
+            entries,
             Some(1),
-            "the finder lists the one workspace the launch started with",
+            "SwitchWorkspace answers the ask at one row"
         );
     }
 

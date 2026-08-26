@@ -3112,8 +3112,20 @@ impl Stoat {
     /// landing on the scratch, so the finder comes up with the saved sessions
     /// already listed. Escape dismisses it onto the scratch the launch shows
     /// otherwise.
+    ///
+    /// When the list holds only the workspace the launch already sits in, the
+    /// finder stays closed and the launch lands on the scratch. A lone row
+    /// offers nothing to pick. An explicit `SwitchWorkspace` still opens the
+    /// finder at one row, because an ask deserves an answer.
     pub fn open_workspace_picker(&mut self) {
         action_handlers::workspace::open_workspace_picker(self);
+
+        if let Some(picker) = self
+            .workspace_picker
+            .take_if(|picker| picker.entries().len() == 1)
+        {
+            picker.dispose(self.active_workspace_mut());
+        }
     }
 
     /// Handle that makes [`Self::run`] quit at its next loop turn when
