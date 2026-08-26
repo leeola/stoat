@@ -59,6 +59,19 @@ pub(crate) fn zoom_csi_u(delta: i32) -> &'static [u8] {
     }
 }
 
+/// The CSI-u bytes a digit chord on `ch` reaches a claiming program as, when
+/// the claim asked for delivery down the PTY.
+///
+/// The modifier field is 9, which is super alone in the `1 + bitmask` encoding
+/// CSI-u uses, matching [`zoom_csi_u`].
+///
+/// Super whatever the user actually held. The physical chord modifier is Cmd on
+/// macOS and Ctrl elsewhere, so normalizing here lets the program on the other
+/// end match one combo rather than one per platform.
+pub(crate) fn chord_csi_u(ch: char) -> Vec<u8> {
+    format!("\x1b[{};9u", u32::from(ch)).into_bytes()
+}
+
 /// The digit a platform-modifier chord names, or `None` when the press is not
 /// one.
 ///
@@ -388,6 +401,14 @@ mod tests {
             None,
             "a named key carries no character"
         );
+    }
+
+    /// The claiming program matches one combo whatever the user physically
+    /// held, so the modifier field is the same 9 the zoom bytes carry.
+    #[test]
+    fn chord_csi_u_spells_the_digit_as_super_plus_that_key() {
+        assert_eq!(chord_csi_u('9'), b"\x1b[57;9u");
+        assert_eq!(chord_csi_u('0'), b"\x1b[48;9u");
     }
 
     #[test]

@@ -19,10 +19,10 @@ use crate::{
     },
     config::{self, Config, CursorAnimation},
     input::{
-        alternate_scroll_bytes, cell_at, chord_char, encode_key, font_step, ipc_button,
-        modifier_bits, paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes,
-        sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines, wheel_travel,
-        zoom_csi_u,
+        alternate_scroll_bytes, cell_at, chord_char, chord_csi_u, encode_key, font_step,
+        ipc_button, modifier_bits, paste_bytes, sgr_button_bytes, sgr_modifier_bits,
+        sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines,
+        wheel_travel, zoom_csi_u,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -1536,15 +1536,22 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
 
                 // A digit chord means something to the program rather than to
-                // the terminal, so it goes over the socket where there is one.
-                // Without that route it falls through to encode_key, which
-                // sends the digit's own CSI-u bytes.
-                if primary
-                    && let Some(ch) = chord_char(platform_mod_held, &event.logical_key)
-                    && route() == ZoomRoute::Socket
-                {
-                    send_window_event(state, WindowIpcEvent::Chord { window: 0, ch });
-                    return;
+                // the terminal, so it follows whichever delivery the child
+                // claimed, exactly as the zoom press above does. Without a
+                // claim it falls through to encode_key, which sends the digit's
+                // own CSI-u bytes.
+                if primary && let Some(ch) = chord_char(platform_mod_held, &event.logical_key) {
+                    match route() {
+                        ZoomRoute::Inband => {
+                            let _ = state.pty.write(&chord_csi_u(ch));
+                            return;
+                        },
+                        ZoomRoute::Socket => {
+                            send_window_event(state, WindowIpcEvent::Chord { window: 0, ch });
+                            return;
+                        },
+                        ZoomRoute::FontStep => {},
+                    }
                 }
 
                 #[cfg(feature = "perf")]

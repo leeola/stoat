@@ -2557,12 +2557,7 @@ impl Stoat {
         // The diff chords read the focused view, which the pane-tree borrow
         // below leaves unreachable for the same reason.
         if let WindowIpcEvent::Chord { ch, .. } = event {
-            match ch {
-                '8' => return self.handle_diff_syntax_toggle(),
-                '9' => return self.handle_diff_tint_step(-1),
-                '0' => return self.handle_diff_tint_step(1),
-                _ => {},
-            }
+            return self.handle_chord(ch);
         }
 
         let panes = &mut self.active_workspace_mut().panes;
@@ -2637,6 +2632,25 @@ impl Stoat {
             (pane.view.clone(), pane.area)
         };
         mouse::scroll_view_at(self, view, area, lines)
+    }
+
+    /// Act on a platform-modifier digit chord.
+    ///
+    /// The terminal forwards a chord on the zoom claim rather than on what is
+    /// on screen, so it arrives whatever the user has in front of them, and
+    /// each arm defends its own scope. A digit no arm claims changes nothing,
+    /// which is what leaves it to the keymap on the in-band path.
+    ///
+    /// Shared by both deliveries. The window socket carries a chord as its own
+    /// event, while an in-band claim spells it as super plus the digit down the
+    /// pty, and the two must not drift apart.
+    fn handle_chord(&mut self, ch: char) -> UpdateEffect {
+        match ch {
+            '8' => self.handle_diff_syntax_toggle(),
+            '9' => self.handle_diff_tint_step(-1),
+            '0' => self.handle_diff_tint_step(1),
+            _ => UpdateEffect::None,
+        }
     }
 
     /// Flip the diff view's syntax coloring, or do nothing outside it.
@@ -4194,14 +4208,18 @@ impl Stoat {
             }
         }
 
-        // The zoom combo, arriving as bytes because the host was asked to
-        // deliver it that way. Over the window socket the same press never
-        // reaches here at all, being routed straight to the same step, so this
-        // sits ahead of every reader that would otherwise take it: terminal
-        // passthrough would hand it to a run pane's child, macro capture would
-        // record a press the socket transport does not, and the keymap would
-        // resolve `=` or `-` to whatever the mode binds, which in insert mode is
-        // typing the character.
+        // The zoom combo and the diff digit chords, arriving as bytes because
+        // the host was asked to deliver them that way. Over the window socket
+        // the same press never reaches here at all, being routed straight to
+        // the same step, so this sits ahead of every reader that would
+        // otherwise take it: terminal passthrough would hand it to a run pane's
+        // child, macro capture would record a press the socket transport does
+        // not, and the keymap would resolve `=` or `-` to whatever the mode
+        // binds, which in insert mode is typing the character.
+        //
+        // Only the three digits the chord handler acts on. Any other
+        // super-digit falls to the keymap, which binds none, so both deliveries
+        // ignore it alike.
         //
         // Exactly super, not super among others. That is what the host writes,
         // and a press carrying more is a different chord the keymap should get.
@@ -4209,6 +4227,7 @@ impl Stoat {
             match key.code {
                 KeyCode::Char('=') => return self.handle_zoom_step(1),
                 KeyCode::Char('-') => return self.handle_zoom_step(-1),
+                KeyCode::Char(ch @ ('8' | '9' | '0')) => return self.handle_chord(ch),
                 _ => {},
             }
         }
@@ -8256,6 +8275,46 @@ mod tests {
             (UpdateEffect::None, UpdateEffect::None, 2),
             "off the diff view both chords leave the level alone",
         );
+    }
+
+    /// An in-band claim spells a chord as super plus the digit down the pty
+    /// rather than as a socket event, so the two deliveries have to land the
+    /// same three handlers.
+    #[test]
+    fn the_in_band_super_digits_step_the_tint_dial() {
+        let mut h = diff_syntax_harness();
+        assert_eq!(
+            (h.stoat.diff_tint, h.stoat.diff_syntax),
+            (0, true),
+            "a session opens with the tint off and syntax on",
+        );
+
+        h.stoat.update(inband_chord('0'));
+        assert_eq!(h.stoat.diff_tint, 1, "super-0 steps the dial up");
+        h.stoat.update(inband_chord('9'));
+        assert_eq!(h.stoat.diff_tint, 0, "super-9 steps it back down");
+        h.stoat.update(inband_chord('8'));
+        assert!(!h.stoat.diff_syntax, "super-8 flips the syntax coloring");
+
+        h.stoat.diff_tint = 2;
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+        h.stoat.update(inband_chord('0'));
+        h.stoat.update(inband_chord('9'));
+        h.stoat.update(inband_chord('8'));
+
+        assert_eq!(
+            (h.stoat.diff_tint, h.stoat.diff_syntax),
+            (2, false),
+            "off the diff view the in-band digits leave every dial alone",
+        );
+    }
+
+    /// A digit chord as it arrives over the pty, which is exactly super on the
+    /// digit. The same press over the window socket is [`chord`].
+    fn inband_chord(ch: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SUPER))
     }
 
     /// The terminal forwards the chord on the zoom claim rather than on what is
