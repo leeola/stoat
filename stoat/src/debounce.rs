@@ -41,6 +41,18 @@ pub(crate) const FS_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::f
 /// nothing reads the symbol index between keystrokes.
 pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long a session's work stays unpersisted before the active workspace is
+/// written again.
+///
+/// A crash or a kill loses whatever happened inside the open window, so this is
+/// the bound on that loss rather than a quiet period to wait out. It paces a
+/// throttle, not a debounce. The window opens on the first input after a save
+/// and later input does not push it back, because a reset-on-input debounce
+/// never fires at all under sustained typing, which is when the loss costs
+/// most.
+pub(crate) const WORKSPACE_AUTOSAVE_THROTTLE: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
 /// External-change paths [`drain_pending_index_edits`] hands to the
 /// blocking pool in one pass.
 ///
@@ -300,6 +312,31 @@ fn arm_diff_refresh_debounce(stoat: &mut Stoat) {
     stoat.pending_diff_refresh = Some(task);
 }
 
+/// Open the autosave window if it is closed, so the active workspace is
+/// persisted [`WORKSPACE_AUTOSAVE_THROTTLE`] from now.
+///
+/// Returns without touching an already-armed slot, which is what makes this a
+/// throttle rather than a debounce. Re-arming pushes the write back for as long
+/// as the user keeps typing, and a save that never lands under sustained work is
+/// the case this exists to cover.
+///
+/// The main loop does the save via [`drain_pending_workspace_autosave`], since
+/// async tasks cannot mutate `Stoat`.
+pub(crate) fn arm_workspace_autosave(stoat: &mut Stoat) {
+    if stoat.pending_workspace_autosave.is_some() {
+        return;
+    }
+
+    let executor = stoat.executor.clone();
+    let tx = stoat.workspace_autosave_tx.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_with_redraw(redraw, async move {
+        executor.timer(WORKSPACE_AUTOSAVE_THROTTLE).await;
+        let _ = tx.send(()).await;
+    });
+    stoat.pending_workspace_autosave = Some(task);
+}
+
 /// Schedule a debounced single-file diff warm for the edited `path`.
 ///
 /// Per-path rather than single-slot, unlike [`arm_diff_refresh_debounce`],
@@ -341,6 +378,24 @@ pub(crate) fn drain_pending_diff_refresh(stoat: &mut Stoat) -> bool {
         stoat.pending_diff_refresh = None;
         stoat.active_workspace_mut().invalidate_all_diffs();
         stoat.active_workspace_mut().diff_warmed = false;
+    }
+    false
+}
+
+/// Drain the autosave throttle marker, persisting the active workspace and
+/// closing the window so the next input opens a fresh one.
+///
+/// Only the active workspace, because a background one was already saved when
+/// the user switched away from it, and quit saves them all. Routing through
+/// [`Stoat::save_workspace`] is what keeps the write async and keeps the
+/// fresh-session and persistence-disabled gates in one place.
+///
+/// Returns `false` always: the write lands on the blocking pool and produces
+/// nothing a settle loop waits on.
+pub(crate) fn drain_pending_workspace_autosave(stoat: &mut Stoat) -> bool {
+    while stoat.workspace_autosave_rx.try_recv().is_ok() {
+        stoat.pending_workspace_autosave = None;
+        stoat.save_workspace(stoat.active_workspace);
     }
     false
 }
@@ -464,6 +519,7 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     // TEST IMPORTS
 
     /// A repo with `target/` gitignored and precompute on, so a drained event
@@ -474,6 +530,63 @@ mod tests {
         h.stoat.set_diff_warm_auto(true);
         h.fake_git().add_repo("/repo").ignored("target/debug");
         h
+    }
+
+    /// A session that never switches workspaces persisted nothing until a
+    /// clean quit, so a crash lost the lot. Input is what schedules the write.
+    #[test]
+    fn a_key_press_arms_the_autosave_throttle() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        assert!(
+            h.stoat.pending_workspace_autosave.is_none(),
+            "a session with no input owes no save"
+        );
+
+        h.type_keys("i");
+
+        assert!(
+            h.stoat.pending_workspace_autosave.is_some(),
+            "the first press opens the window"
+        );
+    }
+
+    /// The distinction that matters under sustained typing. A debounce restarts
+    /// its window on every press and so never fires while the user works, which
+    /// is exactly when losing the session costs most.
+    #[test]
+    fn typing_through_the_window_still_saves_on_time() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.type_keys("i");
+
+        h.advance_clock(Duration::from_secs(3));
+        h.type_keys("x");
+        h.advance_clock(Duration::from_secs(3));
+
+        assert!(
+            h.stoat.pending_workspace_autosave.is_none(),
+            "the window opened at the first press closed at 5s and the save ran, \
+             where a debounce restarted at 3s and would still be waiting"
+        );
+    }
+
+    /// The window has to close as well as open, or the second burst of work
+    /// never schedules a write of its own.
+    #[test]
+    fn the_drain_clears_the_armed_slot() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.type_keys("i");
+        h.stoat
+            .workspace_autosave_tx
+            .try_send(())
+            .expect("stand in for the timer firing");
+
+        let progress = drain_pending_workspace_autosave(&mut h.stoat);
+
+        assert_eq!(
+            (progress, h.stoat.pending_workspace_autosave.is_some()),
+            (false, false),
+            "the drain closes the window and reports no work a settle waits on",
+        );
     }
 
     /// A build writing into an ignored directory used to cost a libgit2 query

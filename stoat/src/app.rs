@@ -1334,6 +1334,10 @@ pub struct Stoat {
     /// [`debounce::drain_pending_diff_refresh`].
     pub(crate) diff_refresh_tx: Sender<()>,
     pub(crate) diff_refresh_rx: Receiver<()>,
+    /// Channel the autosave throttle task pushes onto once its window closes,
+    /// drained by [`debounce::drain_pending_workspace_autosave`].
+    pub(crate) workspace_autosave_tx: Sender<()>,
+    pub(crate) workspace_autosave_rx: Receiver<()>,
     /// Per-path debounce tasks for the incremental diff-warm of an edited file.
     /// Re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
     /// its timer so only the latest burst event warms.
@@ -1473,6 +1477,11 @@ pub struct Stoat {
     /// switches leaves one write per workspace rather than a queue of them.
     pub(crate) pending_workspace_saves:
         std::collections::HashMap<WorkspaceId, stoat_scheduler::Task<()>>,
+    /// The open autosave window, armed by user input and cleared when its
+    /// drain saves. `Some` means a save is already scheduled, which is what
+    /// [`debounce::arm_workspace_autosave`] reads to leave the window alone
+    /// rather than pushing it back.
+    pub(crate) pending_workspace_autosave: Option<stoat_scheduler::Task<()>>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -2012,6 +2021,7 @@ impl Stoat {
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (window_ipc_tx, window_ipc_rx) = tokio::sync::mpsc::unbounded_channel();
         let (diff_refresh_tx, diff_refresh_rx) = tokio::sync::mpsc::channel(256);
+        let (workspace_autosave_tx, workspace_autosave_rx) = tokio::sync::mpsc::channel(256);
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
@@ -2184,6 +2194,8 @@ impl Stoat {
             pending_diff_refresh: None,
             diff_refresh_tx,
             diff_refresh_rx,
+            workspace_autosave_tx,
+            workspace_autosave_rx,
             pending_diff_warm_file: std::collections::HashMap::new(),
             diff_warm_file_tx,
             diff_warm_file_rx,
@@ -2210,6 +2222,7 @@ impl Stoat {
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
+            pending_workspace_autosave: None,
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -3910,10 +3923,11 @@ impl Stoat {
 
     /// Persist a workspace's state, serializing it off this thread.
     ///
-    /// Runs on every workspace switch, open and close, so the snapshot is taken
-    /// here and the RON encoding and writes happen on the blocking pool. What
-    /// lands on disk is the workspace as it stood at this call, whatever it does
-    /// afterwards.
+    /// Runs on every workspace switch, open and close, and on the input-armed
+    /// throttle that bounds how much of a live session a crash costs, so the
+    /// snapshot is taken here and the RON encoding and writes happen on the
+    /// blocking pool. What lands on disk is the workspace as it stood at this
+    /// call, whatever it does afterwards.
     ///
     /// A second save of the same workspace replaces the first's task. Snapshots
     /// are ordered by this thread and every write is atomic, so the most a
@@ -4000,13 +4014,23 @@ impl Stoat {
         let code_search = debounce::drain_pending_code_search(self);
         let diff_warm_files = debounce::drain_pending_diff_warm_files(self);
         let index_edits = debounce::drain_pending_index_edits(self);
+        let autosave = debounce::drain_pending_workspace_autosave(self);
 
-        diff_refresh || code_search || diff_warm_files || index_edits
+        diff_refresh || code_search || diff_warm_files || index_edits || autosave
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         debounce::drain_fs_watch_events(self);
         self.drain_external();
+
+        // Only what the user did. A resize arms nothing because their next
+        // input does, and fs-watch or LSP traffic moves disk-backed state the
+        // session file does not own.
+        let user_input = matches!(
+            &event,
+            Event::Key(key) if key.kind == KeyEventKind::Press,
+        ) || matches!(&event, Event::Mouse(_) | Event::Paste(_));
+
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -4069,6 +4093,11 @@ impl Stoat {
         crate::lsp::pull_diagnostics::pull_diagnostics_trigger(self);
         crate::lsp::semantic_tokens::semantic_tokens_trigger(self);
         crate::lsp::folding::folding_ranges_trigger(self);
+
+        if user_input {
+            debounce::arm_workspace_autosave(self);
+        }
+
         effect
     }
 
