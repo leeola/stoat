@@ -750,11 +750,15 @@ impl GitRepo for LocalGitRepo {
 
         let mut opts = DiffOptions::new();
         opts.include_typechange(true);
-        let diff =
+        let mut diff =
             match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), Some(&mut opts)) {
                 Ok(d) => d,
                 Err(_) => return Vec::new(),
             };
+        // Before the stats and the indexed patch reads below, both of which
+        // read the delta list this rewrites in place. Without it a commit that
+        // moves a file lists a deletion beside an addition.
+        let _ = diff.find_similar(Some(&mut rename_detection(false)));
 
         let stats = match diff.stats() {
             Ok(s) => s,

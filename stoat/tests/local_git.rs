@@ -910,6 +910,28 @@ fn commit_file_changes_reports_added_modified_deleted() {
         .any(|c| c.rel_path == Path::new("b.rs") && c.kind == CommitFileChangeKind::Deleted));
 }
 
+/// A move is one file at a new address. Listing it as a deletion beside an
+/// addition doubles the entry count and hides that the content survived.
+#[test]
+fn commit_file_changes_reports_a_move_as_one_renamed_entry() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "alpha\n");
+    tr.git_mv("old.rs", "new.rs");
+    tr.commit("move");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let changes = repo.commit_file_changes(&tr.head_sha());
+
+    assert_eq!(
+        changes
+            .iter()
+            .map(|c| (c.rel_path.as_path(), c.kind, c.additions, c.deletions))
+            .collect::<Vec<_>>(),
+        vec![(Path::new("new.rs"), CommitFileChangeKind::Renamed, 0, 0)],
+        "a move lists once at the destination and edits no line",
+    );
+}
+
 #[test]
 fn amend_head_replaces_tree_and_updates_head() {
     let tr = TestRepo::new();
