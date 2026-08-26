@@ -512,6 +512,60 @@ fn next_change_skips_untracked_files() {
     assert_eq!(h.stoat.pending_message.as_deref(), Some("no more changes"));
 }
 
+/// A moved file lists as changed, but a move edits no line, so there is no
+/// hunk in it to hop to.
+#[test]
+fn next_change_skips_a_changeless_renamed_file() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+    h.fake_git()
+        .add_repo(&workdir)
+        .renamed("old.rs", "moved.rs", "d\ne\nf\n");
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            h.stoat.pending_message.as_deref(),
+        ),
+        (workdir.join("a.rs"), Some("no more changes")),
+        "the moved file owns no hunk, so it is not a nav target",
+    );
+}
+
+/// The filter keys on hunks, not on renamed-ness, so a move that also edits
+/// stays reachable.
+#[test]
+fn next_change_crosses_into_a_renamed_file_that_was_also_edited() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+    h.fake_git()
+        .add_repo(&workdir)
+        .renamed("old.rs", "moved.rs", "d\ne\nf\n")
+        .hunks("moved.rs", 1);
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        focused_buffer_path(&h.stoat),
+        workdir.join("moved.rs"),
+        "an edited move still carries a hunk to land on",
+    );
+}
+
 #[test]
 fn snapshot_count_jump_keeps_cursor_visible() {
     let mut h = TestHarness::with_size(40, 12);

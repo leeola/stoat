@@ -4295,6 +4295,26 @@ fn same_file(fs_host: &Arc<dyn FsHost>, a: &Path, b: &Path) -> bool {
     resolve(a) == resolve(b)
 }
 
+/// Absolute paths of the working tree's changed files that own at least one
+/// hunk, which is what narrows a hop list to files that hold a row to land on.
+///
+/// Tests the count rather than presence in the tally. The two backends spell a
+/// changeless file differently. The local one leaves it out of `per_file`
+/// entirely, while the fake registers it at zero.
+///
+/// Tally paths are repo-relative and hop-list paths are absolute, so they are
+/// joined onto the same workdir `changed_files` used. `git_root` stands in for
+/// a repo with no workdir, which lists no changed files anyway.
+fn files_with_hunks(repo: &dyn GitRepo, git_root: &Path) -> std::collections::HashSet<PathBuf> {
+    let workdir = repo.workdir().unwrap_or_else(|| git_root.to_path_buf());
+    repo.hunk_tallies()
+        .per_file
+        .into_iter()
+        .filter(|(_, hunks)| *hunks > 0)
+        .map(|(rel, _)| workdir.join(rel))
+        .collect()
+}
+
 /// Pick the changed file `dir` leads to from `current_path`, and the row in it
 /// to land on.
 ///
@@ -4321,7 +4341,16 @@ fn scan_changed_file_jump(
     // true answer.
     let listed = match base {
         Some(DiffBase::Rev { sha: Some(sha) }) => repo.changed_files_from(sha.as_str()),
-        _ => repo.changed_files(),
+        _ => {
+            // A moved file lists as changed while owning no hunk, so a hop into
+            // it lands on no row at all. The same holds for a mode-only change
+            // and a binary delta.
+            let hunky = files_with_hunks(&*repo, git_root);
+            repo.changed_files()
+                .into_iter()
+                .filter(|f| hunky.contains(&f.path))
+                .collect()
+        },
     };
     let changed: Vec<PathBuf> = listed
         .into_iter()
