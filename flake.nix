@@ -202,7 +202,7 @@
                 gcc
                 rust-analyzer
                 # using a hardcoded rustfmt version to support nightly rustfmt features.
-                rust-bin.nightly."2026-05-28".rustfmt
+                rust-bin.nightly."2026-08-20".rustfmt
                 rust-toolchain
                 # Drives the feature-powerset compile check in scripts/check-features.sh.
                 cargo-hack
