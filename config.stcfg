@@ -1168,6 +1168,11 @@ on key {
         A -> WalkthroughPrevAnnotation();
         s -> WalkthroughShowNarration();
         d -> [WalkthroughDone(), SetMode(normal)];
+        # The wheel walks the tour's attention points where the diff view walks
+        # its changes. A bare notch still scrolls, so the reader roams the file
+        # and Alt-notches back onto the path.
+        Alt-WheelDown -> WalkthroughForward();
+        Alt-WheelUp -> WalkthroughBackward();
     }
     mode == space_lsp {
         Escape -> SetMode(normal);

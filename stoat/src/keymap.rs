@@ -2102,6 +2102,37 @@ mod tests {
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
+    /// The wheel walks a view's attention points, which for a tour are its
+    /// stops and annotations. A bare notch stays a scroll, so the reader roams
+    /// the file and Alt-notches back onto the path.
+    #[test]
+    fn alt_wheel_walks_the_tour_and_a_bare_notch_does_not() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let walkthrough = TestState::new().set("mode", StateValue::String("walkthrough".into()));
+
+        for (dir, action) in [
+            (WheelDirection::Down, "WalkthroughForward"),
+            (WheelDirection::Up, "WalkthroughBackward"),
+        ] {
+            let bound = keymap
+                .lookup_wheel(&walkthrough, dir, KeyModifiers::ALT)
+                .unwrap_or_else(|| panic!("{dir:?} plus Alt is bound in walkthrough mode"));
+            assert_eq!(
+                (bound.len(), bound[0].name.as_str()),
+                (1, action),
+                "the notch steps once and holds the mode",
+            );
+        }
+
+        assert!(
+            keymap
+                .lookup_wheel(&walkthrough, WheelDirection::Down, KeyModifiers::NONE)
+                .is_none(),
+            "an unmodified notch falls through to the scroll",
+        );
+    }
+
     /// Every list modal answers the same keys with the same verbs.
     ///
     /// The scheme drifted once already, each picker minting its own actions
