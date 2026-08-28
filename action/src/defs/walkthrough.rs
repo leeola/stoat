@@ -102,10 +102,10 @@ define_action!(
     WalkthroughShowNarration,
     "WalkthroughShowNarration",
     ActionKind::WalkthroughShowNarration,
-    "show the current stop's narration again",
-    "Raise the narration popup for the stop the walkthrough is on. The \
-     narration shares the hover popup, which the next key press dismisses, so \
-     this puts it back without moving off the stop.",
+    "show the narration for this point again",
+    "Raise the narration popup for the stop or annotation the walkthrough is \
+     on. The narration shares the hover popup, which the next key press \
+     dismisses, so this puts it back without moving off the point.",
     ActionPriority::Normal,
     command_name = "walkthrough-narration"
 );

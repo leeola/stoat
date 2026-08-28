@@ -579,6 +579,15 @@ const WALKTHROUGH_NARRATION_MAIN: &str = "\
 Everything after this point is one of those three.
 ";
 
+/// Narration for the annotation over the config call. The only sub-step of the
+/// tour that speaks for itself, so the card has both branches to lay out.
+const WALKTHROUGH_NARRATION_LOAD: &str = "\
+The path is relative to the working directory, so a server started from
+elsewhere reads a different file.
+
+A missing one is not an error, which is what the next stop is about.
+";
+
 /// Narration carrying a fenced code block, the widest thing a card has to fit.
 const WALKTHROUGH_NARRATION_CONFIG: &str = "\
 Loading is deliberately forgiving. A missing file, a blank line, or a key
@@ -930,7 +939,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_MAIN,
         span_of(WALKTHROUGH_MAIN, "config::load(&path)"),
         "reads the file, or falls back to defaults",
-        "",
+        WALKTHROUGH_NARRATION_LOAD,
     );
     annotate(
         &mut tour,
@@ -1363,6 +1372,15 @@ mod tests {
         assert_eq!(
             s1.focus.snippet, "fn main() {",
             "the first focus is one line, so the mark is an ellipse",
+        );
+        assert_eq!(
+            (
+                s1.annotations[0].narration.is_empty(),
+                s1.annotations[1].narration.is_empty(),
+            ),
+            (false, true),
+            "one annotation narrates for itself and its sibling leaves the \
+             stop's card up",
         );
 
         let s2 = &tour.stops[1];

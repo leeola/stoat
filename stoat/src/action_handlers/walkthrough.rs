@@ -384,12 +384,6 @@ fn stop_title(run: &WalkthroughRun) -> String {
         .unwrap_or_else(|| run.walkthrough.title.clone())
 }
 
-/// Put the current stop's narration in the hover popup, anchored at `offset`.
-///
-/// A stop with nothing to say takes the popup down rather than leaving the
-/// previous stop's up, so what is on screen always describes where the reader
-/// is. The popup itself is the one a hover raises, which is why the next key
-/// press dismisses it and [`show_narration_again`] exists to bring it back.
 /// Narrowest and widest the card gets, in cells.
 ///
 /// Below the floor a wrapped line is more break than text. The ceiling and the
@@ -406,18 +400,21 @@ fn card_timing() -> SketchTiming {
     SketchTiming::after(0, 320)
 }
 
+/// Put the narration for where the reader is in the hover popup, anchored at
+/// `offset`.
+///
+/// A position with nothing to say takes the popup down rather than leaving the
+/// last one's up, so what is on screen always describes where the reader is.
+/// The popup itself is the one a hover raises, which is why the next key press
+/// dismisses it and [`show_narration_again`] exists to bring it back.
 fn show_narration(stoat: &mut Stoat, offset: usize) {
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return;
     };
-    let narration = run.current_stop().narration.clone();
-    if narration.trim().is_empty() {
+    let Some((heading, narration)) = card_text(run) else {
         stoat.pending_hover = None;
         return;
-    }
-
-    let (at, stops) = run.progress();
-    let heading = format!("{} - {at}/{stops}", stop_title(run));
+    };
 
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
         return;
@@ -459,6 +456,34 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
     });
     popup.frame = card_frame(stoat, card_id);
     stoat.pending_hover = Some(popup);
+}
+
+/// The heading and the markdown the card shows for where the reader is, or
+/// `None` when this position has nothing to say.
+///
+/// An annotation that narrates speaks for itself, since it is the sub-step the
+/// reader stepped onto. One that does not leaves the stop's card standing, so a
+/// tour written before annotations carried narration reads as it always did.
+fn card_text(run: &WalkthroughRun) -> Option<(String, String)> {
+    let narrated = run
+        .current_annotation()
+        .filter(|annotation| !annotation.narration.trim().is_empty());
+
+    if let Some(annotation) = narrated {
+        let (at, count) = run.annotation_progress()?;
+        return Some((
+            format!("{} - {at}/{count}", annotation.label),
+            annotation.narration.clone(),
+        ));
+    }
+
+    let narration = run.current_stop().narration.clone();
+    if narration.trim().is_empty() {
+        return None;
+    }
+
+    let (at, stops) = run.progress();
+    Some((format!("{} - {at}/{stops}", stop_title(run)), narration))
 }
 
 /// The card's width, from the widest line it holds.
@@ -635,6 +660,8 @@ mod tests {
     const SECOND: &str = "fn three() {}\n";
     /// Stop 1's narration. Stop 2 has none, so one tour covers both cases.
     const NARRATION: &str = "The **entry** point.";
+    /// Annotation a1's narration. a2 has none, so one walk covers both cases.
+    const ANNOTATION_NARRATION: &str = "Where the call **lands**.";
 
     fn range_of(line: u32, cols: (u32, u32)) -> Range {
         Range {
@@ -682,6 +709,7 @@ mod tests {
 
         // Stop 1 calls out the callee it reaches in b.rs, then a neighbor in
         // its own file, so one walk covers a cross-file hop and a same-file one.
+        // Only the callee narrates, so the walk covers both card branches too.
         walkthrough
             .add_annotation(
                 "s1",
@@ -689,7 +717,7 @@ mod tests {
                 range_of(1, (1, 13)),
                 "fn three() {}".to_owned(),
                 "the callee".to_owned(),
-                String::new(),
+                ANNOTATION_NARRATION.to_owned(),
             )
             .expect("s1 exists");
         walkthrough
@@ -1107,6 +1135,45 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("1/2: first (trail: 2 stops)"),
             "back past the first annotation reads as the stop, still related",
+        );
+    }
+
+    /// An annotation is a sub-step with documentation of its own, so the card
+    /// follows the reader down into it and back up when it has nothing to add.
+    #[test]
+    fn a_narrated_annotation_takes_the_card_and_an_unnarrated_one_leaves_it() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+
+        next_annotation(&mut stoat);
+        assert_eq!(
+            popup_lines(&stoat),
+            ["the callee - 1/2", "Where the call lands."],
+            "the annotation speaks for itself, under its own heading",
+        );
+
+        next_annotation(&mut stoat);
+        assert_eq!(
+            popup_lines(&stoat),
+            ["first - 1/2", "The entry point."],
+            "an annotation with nothing to add leaves the stop's card up",
+        );
+    }
+
+    #[test]
+    fn asking_again_on_an_annotation_brings_its_own_card_back() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+        next_annotation(&mut stoat);
+
+        show_narration_again(&mut stoat);
+        assert!(stoat.pending_hover.is_none(), "a card that is up goes down");
+
+        show_narration_again(&mut stoat);
+        assert_eq!(
+            popup_lines(&stoat),
+            ["the callee - 1/2", "Where the call lands."],
+            "and asking once more brings the annotation's own card back",
         );
     }
 
