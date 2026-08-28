@@ -124,14 +124,17 @@ impl Random {
 
 /// The knobs rough.js reads while it wobbles a path.
 ///
-/// Every field but [`Self::roughness`] and [`Self::preserve_vertices`] keeps
-/// the reference's default, because those defaults are tuned together and one
-/// changed in isolation stops looking hand-drawn.
+/// Every field but [`Self::roughness`], [`Self::preserve_vertices`], and an
+/// ellipse's [`Self::curve_fitting`] keeps the reference's default, because
+/// those defaults are tuned together and one changed in isolation stops looking
+/// hand-drawn.
 struct Options {
     roughness: f64,
     bowing: f64,
     max_randomness_offset: f64,
     curve_tightness: f64,
+    /// How closely an ellipse's radii hug the ones asked for, the shortfall
+    /// being how far they wander. Only [`ellipse`] reads it.
     curve_fitting: f64,
     curve_step_count: f64,
     /// Pin a segment's endpoints to where they were asked for, so a box's
@@ -230,6 +233,11 @@ where
         SketchShape::Ellipse(bounds) => {
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
+            // An ellipse alone pins its fitting, so its radii do not wander and
+            // the ring hugs the box it was declared with. A focus ring that
+            // wanders 5% cuts into the word it circles. The radii draws still
+            // consume their two stream values, so every later draw stays put.
+            options.curve_fitting = 1.0;
             let ops = ellipse(x + w / 2.0, y + h / 2.0, w, h, &mut options, &mut random);
 
             Geometry {

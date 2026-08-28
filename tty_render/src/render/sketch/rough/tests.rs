@@ -55,22 +55,41 @@ fn one_seed_reproduces_and_two_seeds_differ() {
 
 /// The wobble is bounded, so a mark stays inside the box that declared it
 /// rather than wandering across the screen.
+///
+/// An ellipse pins its curve fitting, so its radii do not wander at all and
+/// only a single point's nudge reaches past the box. A focus ring that wanders
+/// by a fraction of its radius cuts into the word it circles, so this is
+/// checked through [`geometry`] rather than against `ellipse` alone.
 #[test]
 fn an_ellipse_stays_near_its_center() {
-    let mut random = Random::new(3, 0);
-    let mut opts = options();
-    let strokes = flatten(&ellipse(100.0, 100.0, 80.0, 60.0, &mut opts, &mut random));
-
+    // 80 by 60 pixels at the test metrics, which clears the damping thresholds
+    // so the declared roughness reaches the ring.
+    let shape = SketchShape::Ellipse(SketchBounds {
+        x: 0,
+        y: 0,
+        w: 128,
+        h: 48,
+    });
     let (rx, ry) = (40.0_f32, 30.0_f32);
-    let slack = 3.0 * opts.roughness as f32 + opts.max_randomness_offset as f32;
-    for stroke in &strokes {
-        for point in &stroke.points {
-            let dx = (point[0] - 100.0).abs();
-            let dy = (point[1] - 100.0).abs();
-            assert!(
-                dx <= rx + slack && dy <= ry + slack,
-                "point {point:?} escaped the declared box",
-            );
+    let slack = options().max_randomness_offset as f32;
+
+    // A wandering radius is a single draw, so one seed proves little: it lands
+    // small, or inward, as often as it lands out. A fixed spread of them makes
+    // the difference certain while staying reproducible.
+    for seed in 1..=16 {
+        let mut command = command(shape, 64);
+        command.style.seed = seed;
+        let geometry = geometry(&command, metrics(), &nothing_resolves);
+
+        for stroke in &geometry.strokes {
+            for point in &stroke.points {
+                let dx = (point[0] - rx).abs();
+                let dy = (point[1] - ry).abs();
+                assert!(
+                    dx <= rx + slack && dy <= ry + slack,
+                    "at seed {seed} point {point:?} escaped the declared box",
+                );
+            }
         }
     }
 }
