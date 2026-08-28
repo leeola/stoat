@@ -868,7 +868,7 @@ fn rect(
     for (index, (from, to)) in sides.iter().enumerate() {
         ops.extend(double_line(from[0], from[1], to[0], to[1], options, random));
         let (start, control, end) = corners[index];
-        ops.extend(quadratic(start, control, end, radius, options, random));
+        ops.extend(quadratic(start, control, end, options, random));
     }
     ops
 }
@@ -876,18 +876,21 @@ fn rect(
 /// One rounded corner, stroked twice like a side.
 ///
 /// The quadratic is raised to a cubic so it flattens through the same path as
-/// every other curve, and the two passes take the offsets rough.js uses for a
-/// path's `Q` segments.
+/// every other curve, and the two passes take the offsets the reference uses
+/// for a path's `Q` segments.
+///
+/// Those offsets rise with the roughness and not with the rounding, so a
+/// generously rounded box keeps corners as clean as the sides they join.
 fn quadratic(
     start: [f64; 2],
     control: [f64; 2],
     end: [f64; 2],
-    radius: f64,
     options: &Options,
     random: &mut Random,
 ) -> Vec<Op> {
     let mut ops = Vec::new();
-    for amount in [1.0 + 0.2 * radius, 1.5 * (1.0 + 0.22 * radius)] {
+    let rough = options.roughness;
+    for amount in [1.0 * (1.0 + 0.2 * rough), 1.5 * (1.0 + 0.22 * rough)] {
         let jitter = |random: &mut Random| options.offset_opt(amount, random);
         let sx = start[0] + jitter(random);
         let sy = start[1] + jitter(random);

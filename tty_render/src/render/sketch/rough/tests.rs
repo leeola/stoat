@@ -560,6 +560,57 @@ fn a_rounded_box_strokes_its_corners_inside_its_bounds() {
     }
 }
 
+/// A corner's jitter is sized by the roughness, like the sides it joins.
+///
+/// Sizing it by the rounding instead made a generously rounded box grow
+/// corners far sloppier than its own sides, and sloppier the rounder it got.
+#[test]
+fn a_rounded_corners_jitter_does_not_grow_with_its_radius() {
+    // `rect` emits a side's two strokes, then its corner's two, four times
+    // over, so every second pair is a corner.
+    let corner_stroke = |index: usize| index % 4 >= 2;
+
+    let strayed = |radius: u8| {
+        let at = |roughness: u8| {
+            let shape = SketchShape::Rect {
+                bounds: SketchBounds {
+                    x: 0,
+                    y: 0,
+                    w: 128,
+                    h: 128,
+                },
+                radius,
+                fill: None,
+            };
+            geometry(&command(shape, roughness), metrics(), &nothing_resolves)
+        };
+
+        // Roughness zero draws the same stream and the same point count, so
+        // subtracting it leaves the jitter alone.
+        let (exact, wobbled) = (at(0), at(64));
+        exact
+            .strokes
+            .iter()
+            .zip(&wobbled.strokes)
+            .enumerate()
+            .filter(|(index, _)| corner_stroke(*index))
+            .flat_map(|(_, (exact, wobbled))| exact.points.iter().zip(&wobbled.points))
+            .map(|(exact, wobbled)| {
+                (wobbled[0] - exact[0])
+                    .abs()
+                    .max((wobbled[1] - exact[1]).abs())
+            })
+            .fold(0.0_f32, f32::max)
+    };
+
+    let (tight, generous) = (strayed(4), strayed(16));
+    assert!(tight > 0.0, "the corners wobble at all");
+    assert!(
+        (tight - generous).abs() < 1e-4,
+        "a rounder corner strays no further, {tight} against {generous}",
+    );
+}
+
 /// A crisp rectangle behind a wobbling outline reads machine-cut, so the fill's
 /// corners are nudged like the stroke around them.
 ///
