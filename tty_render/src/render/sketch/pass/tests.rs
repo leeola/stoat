@@ -1,7 +1,7 @@
 //! Tests for the hand-drawn mark pass.
 
 use super::*;
-use crate::gpu::headless_device;
+use crate::{gpu::headless_device, render::AnchoredPanel};
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
     SketchStyle, SketchTiming,
@@ -285,7 +285,7 @@ fn a_riding_mark_is_shifted_and_held_back() {
 
     let (_, geometry) = marks(&list);
     let (mut built, mut riding) = (Vec::new(), Vec::new());
-    let anchored = [crate::render::AnchoredPanel {
+    let anchored = [AnchoredPanel {
         host: 3,
         dy_px: -12.0,
         scissor: [0, 0, 40, 40],
@@ -336,11 +336,16 @@ fn a_mark_whose_host_is_still_does_not_ride() {
 
 /// Render `sketches` at `progress` into a square target and read back the red
 /// channel of every texel.
+///
+/// `anchored` names the compositing pools, so a mark riding one is held back
+/// from the base draw and recorded by the riding pass instead. A caller with no
+/// ride passes `&[]`.
 fn render_red(
     device: &Device,
     queue: &Queue,
     sketches: &[Sketch],
     progress: &[f32],
+    anchored: &[AnchoredPanel],
 ) -> Option<Vec<u8>> {
     let mut grid = Grid::new(16, 12);
     grid.set_sketches(sketches.to_vec());
@@ -351,7 +356,7 @@ fn render_red(
         queue,
         &grid,
         progress,
-        &[],
+        anchored,
         &[],
         [TARGET as f32, TARGET as f32],
     );
@@ -398,6 +403,7 @@ fn render_red(
             multiview_mask: None,
         });
         pass.draw(&mut render_pass);
+        pass.draw_riding(&mut render_pass);
     }
     encoder.copy_texture_to_buffer(
         TexelCopyTextureInfo {
@@ -425,6 +431,63 @@ fn render_red(
     Some(rgba.chunks_exact(4).map(|texel| texel[0]).collect())
 }
 
+/// A ridden mark paints where its host carried it, not where it was generated.
+///
+/// The vertex stage moves the quad and the fragment stage measures the distance
+/// fields, so a shift in one and not the other leaves the ink behind while the
+/// box slides off it. Only a rendered image separates the two.
+#[test]
+fn a_ridden_mark_paints_at_its_hosts_shift() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("sketch ride test: no wgpu adapter, skipping");
+        return;
+    };
+    const SHIFT: usize = 8;
+
+    let filled = SketchShape::Rect {
+        bounds: boxed(16, 16, 32, 16),
+        radius: 0,
+        fill: Some(SketchFill {
+            color: [255, 0, 0],
+            alpha: 255,
+            style: SketchFillStyle::Solid,
+        }),
+    };
+    let plain = [sketch(1, filled)];
+    let mut ridden = plain.clone();
+    ridden[0].command.anchor = Some((3, 0.0));
+
+    let rest = render_red(&device, &queue, &plain, &[1.0], &[]).expect("readback");
+    let carried = render_red(
+        &device,
+        &queue,
+        &ridden,
+        &[1.0],
+        &[AnchoredPanel {
+            host: 3,
+            dy_px: SHIFT as f32,
+            scissor: [0, 0, 64, 64],
+        }],
+    )
+    .expect("readback");
+
+    assert!(rest.iter().any(|&byte| byte > 0), "the mark paints at rest");
+
+    let row = TARGET as usize;
+    let mut expected = vec![0u8; rest.len()];
+    expected[SHIFT * row..].copy_from_slice(&rest[..rest.len() - SHIFT * row]);
+
+    let differs = carried
+        .iter()
+        .zip(&expected)
+        .position(|(carried, expected)| carried != expected)
+        .map(|at| (at as u32 % TARGET, at as u32 / TARGET));
+    assert_eq!(
+        differs, None,
+        "the ridden mark is the resting one moved down, first differing (x, y)",
+    );
+}
+
 /// A mark at full progress paints, and the same mark at zero paints nothing.
 /// Without that the reveal is decorative rather than real.
 #[test]
@@ -435,8 +498,8 @@ fn a_reveal_of_zero_paints_nothing_and_one_paints_the_mark() {
     };
     let list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
 
-    let whole = render_red(&device, &queue, &list, &[1.0]).expect("readback");
-    let none = render_red(&device, &queue, &list, &[0.0]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
+    let none = render_red(&device, &queue, &list, &[0.0], &[]).expect("readback");
 
     assert!(whole.iter().any(|&byte| byte > 0), "a full reveal paints");
     assert!(
@@ -455,8 +518,8 @@ fn a_half_reveal_paints_a_prefix_of_the_whole() {
     };
     let list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
 
-    let whole = render_red(&device, &queue, &list, &[1.0]).expect("readback");
-    let half = render_red(&device, &queue, &list, &[0.5]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
+    let half = render_red(&device, &queue, &list, &[0.5], &[]).expect("readback");
 
     let lit = |ink: &[u8]| ink.iter().filter(|&&byte| byte > 0).count();
     assert!(lit(&half) > 0, "half a reveal paints something");
@@ -493,7 +556,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
         return;
     };
     let list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
-    let whole = render_red(&device, &queue, &list, &[1.0]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
 
     assert!(
         whole.iter().any(|&byte| byte > 0 && byte < 255),
@@ -502,7 +565,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
 
     for step in 1..8 {
         let progress = step as f32 / 8.0;
-        let partial = render_red(&device, &queue, &list, &[progress]).expect("readback");
+        let partial = render_red(&device, &queue, &list, &[progress], &[]).expect("readback");
 
         let brighter = partial
             .iter()
@@ -584,7 +647,7 @@ fn the_pen_tip_advances_inside_one_segment() {
     );
 
     let lit = |progress: f32| {
-        render_red(&device, &queue, &list, &[progress])
+        render_red(&device, &queue, &list, &[progress], &[])
             .expect("readback")
             .iter()
             .filter(|&&byte| byte > 0)

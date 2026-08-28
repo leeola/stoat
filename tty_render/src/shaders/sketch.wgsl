@@ -62,6 +62,10 @@ struct VsOut {
     @location(4) @interpolate(flat) reveal_count: u32,
     @location(5) @interpolate(flat) reveal_t: f32,
     @location(6) @interpolate(flat) kind: u32,
+    // Pixels this mark rides down by. The quad moves in vs_main, so the
+    // fragment stage has to measure its distance fields at the same offset or
+    // the ink stays behind while its box slides off it.
+    @location(7) @interpolate(flat) dy: f32,
 }
 
 @vertex
@@ -108,6 +112,7 @@ fn vs_main(
     out.reveal_count = span.z;
     out.reveal_t = width_seq.y;
     out.kind = span.w;
+    out.dy = dy;
     return out;
 }
 
@@ -168,6 +173,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
+    // The points were generated at the mark's rest position, so a ridden mark
+    // is measured against the fragment pulled back by the same shift its quad
+    // was pushed forward by.
+    let at = frag - vec2<f32>(0.0, in.dy);
+
     var sdf: f32;
     if in.kind == KIND_STROKE {
         // Nothing is revealed until the pen has left the first point.
@@ -182,7 +192,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         for (var i = 0u; i + 1u < in.reveal_count; i = i + 1u) {
             sdf = min(
                 sdf,
-                capsule_sdf(frag, points[base + i], points[base + i + 1u], in.half_width)
+                capsule_sdf(at, points[base + i], points[base + i + 1u], in.half_width)
             );
         }
         // The pen tip sits partway along the segment after the revealed run, so
@@ -190,12 +200,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if in.reveal_t > 0.0 {
             let last = base + in.reveal_count - 1u;
             let tip = mix(points[last], points[last + 1u], in.reveal_t);
-            sdf = min(sdf, capsule_sdf(frag, points[last], tip, in.half_width));
+            sdf = min(sdf, capsule_sdf(at, points[last], tip, in.half_width));
         }
     } else {
         let base = in.point_offset;
         sdf = quad_sdf(
-            frag,
+            at,
             points[base],
             points[base + 1u],
             points[base + 2u],
