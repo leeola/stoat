@@ -36,10 +36,10 @@
           libxkbcommon
           libGL
           vulkan-loader
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXrandr
-          xorg.libXi
+          libx11
+          libxcursor
+          libxrandr
+          libxi
         ];
 
         # The CPU the general-purpose packages compile for.
@@ -218,10 +218,10 @@
                 libxkbcommon
                 libGL
                 # X11 fallback libraries
-                xorg.libX11
-                xorg.libXcursor
-                xorg.libXrandr
-                xorg.libXi
+                libx11
+                libxcursor
+                libxrandr
+                libxi
               ];
 
             # Library path for GUI applications
@@ -234,10 +234,10 @@
                 pkgs.libGL
                 pkgs.vulkan-loader
                 # X11 fallback libraries
-                pkgs.xorg.libX11
-                pkgs.xorg.libXcursor
-                pkgs.xorg.libXrandr
-                pkgs.xorg.libXi
+                pkgs.libx11
+                pkgs.libxcursor
+                pkgs.libxrandr
+                pkgs.libxi
               ]
             );
 
