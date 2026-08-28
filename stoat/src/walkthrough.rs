@@ -84,6 +84,13 @@ pub struct Annotation {
     /// Bytes [`Self::range`] covered when the annotation was captured.
     pub snippet: String,
     pub label: String,
+    /// Markdown narration the player's card shows while the reader is on this
+    /// annotation. An empty one leaves the stop's narration standing.
+    ///
+    /// Absent from the stored form while empty, so an annotation written before
+    /// narration existed writes the same bytes it always did.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub narration: String,
 }
 
 /// A range of one file, with the bytes it covered when captured.
@@ -141,6 +148,7 @@ pub struct AnnotationEdit {
     pub range: Option<Range>,
     pub snippet: Option<String>,
     pub label: Option<String>,
+    pub narration: Option<String>,
 }
 
 /// Where [`Walkthrough::move_stop`] puts the stop it moves.
@@ -328,6 +336,7 @@ impl Walkthrough {
         range: Range,
         snippet: String,
         label: String,
+        narration: String,
     ) -> Result<&Annotation, WalkthroughError> {
         let at = self.stop_index(stop)?;
 
@@ -337,6 +346,7 @@ impl Walkthrough {
             range,
             snippet,
             label,
+            narration,
         };
         self.next_annotation_id += 1;
 
@@ -366,6 +376,9 @@ impl Walkthrough {
         }
         if let Some(label) = edit.label {
             annotation.label = label;
+        }
+        if let Some(narration) = edit.narration {
+            annotation.narration = narration;
         }
 
         Ok(annotation)
@@ -569,8 +582,8 @@ fn byte_offset(content: &str, point: Point) -> Result<usize, WalkthroughError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        snippet_for, validate, AnnotationEdit, Finding, FindingKind, Location, MoveTarget, Point,
-        Range, StopEdit, Walkthrough,
+        snippet_for, validate, Annotation, AnnotationEdit, Finding, FindingKind, Location,
+        MoveTarget, Point, Range, StopEdit, Walkthrough,
     };
     use std::path::{Path, PathBuf};
 
@@ -629,6 +642,7 @@ mod tests {
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "here".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -650,6 +664,7 @@ mod tests {
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "here".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -663,6 +678,50 @@ mod tests {
         assert_eq!(parsed.stops[0].annotations[0].path, None);
     }
 
+    /// Every walkthrough stored before annotations carried narration must read
+    /// back the same, and keep writing the same bytes it always did.
+    #[test]
+    fn an_unnarrated_annotation_stores_no_narration() {
+        let mut walkthrough = with_stops(1);
+        walkthrough
+            .add_annotation(
+                "s1",
+                None,
+                range((1, 1), (1, 1)),
+                "x".to_owned(),
+                "here".to_owned(),
+                String::new(),
+            )
+            .expect("s1 exists");
+
+        let json = serde_json::to_string(&walkthrough.stops[0].annotations[0]).expect("serialize");
+        assert!(!json.contains("narration"), "the field is absent: {json}");
+
+        let parsed: Annotation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.narration, "");
+    }
+
+    #[test]
+    fn an_annotation_narration_round_trips_through_json() {
+        let mut walkthrough = with_stops(1);
+        walkthrough
+            .add_annotation(
+                "s1",
+                None,
+                range((1, 1), (1, 1)),
+                "x".to_owned(),
+                "here".to_owned(),
+                "the **why**".to_owned(),
+            )
+            .expect("s1 exists");
+
+        let json = serde_json::to_string(&walkthrough).expect("serialize");
+        let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(parsed, walkthrough);
+        assert_eq!(parsed.stops[0].annotations[0].narration, "the **why**");
+    }
+
     #[test]
     fn an_annotation_path_survives_an_edit_back_to_none() {
         let mut walkthrough = with_stops(1);
@@ -673,6 +732,7 @@ mod tests {
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -725,6 +785,7 @@ mod tests {
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "one".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
         walkthrough
@@ -737,6 +798,7 @@ mod tests {
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "two".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
         assert_eq!(added.id, "a2");
@@ -823,6 +885,7 @@ mod tests {
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "old".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
         walkthrough
@@ -862,7 +925,8 @@ mod tests {
                     None,
                     range((1, 1), (1, 1)),
                     "x".to_owned(),
-                    "l".to_owned()
+                    "l".to_owned(),
+                    String::new(),
                 )
                 .is_err(),
             "unknown stop"
@@ -969,6 +1033,7 @@ mod tests {
                 range((2, 1), (2, 3)),
                 "two".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -994,6 +1059,7 @@ mod tests {
                 range((2, 1), (2, 3)),
                 "two".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -1028,6 +1094,7 @@ mod tests {
                 range((2, 1), (2, 3)),
                 "TWO".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -1075,6 +1142,7 @@ mod tests {
                 range((1, 1), (1, 3)),
                 "far".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -1103,6 +1171,7 @@ mod tests {
                 range((1, 1), (1, 3)),
                 "far".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -1139,6 +1208,7 @@ mod tests {
                 range((2, 1), (2, 3)),
                 "two".to_owned(),
                 "same".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
         walkthrough
@@ -1148,6 +1218,7 @@ mod tests {
                 range((1, 1), (1, 3)),
                 "NOPE".to_owned(),
                 "cross".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 

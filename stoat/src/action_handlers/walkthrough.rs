@@ -689,6 +689,7 @@ mod tests {
                 range_of(1, (1, 13)),
                 "fn three() {}".to_owned(),
                 "the callee".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
         walkthrough
@@ -698,6 +699,7 @@ mod tests {
                 range_of(1, (1, 11)),
                 "fn one() {}".to_owned(),
                 "the neighbor".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
@@ -1223,6 +1225,7 @@ mod tests {
                 range_of(1, (1, 11)),
                 "fn one() {}".to_owned(),
                 "the neighbor".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 

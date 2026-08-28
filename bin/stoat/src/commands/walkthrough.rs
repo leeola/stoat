@@ -158,10 +158,14 @@ pub enum WalkthroughCommand {
         label: String,
 
         #[command(flatten)]
+        narration: NarrationArgs,
+
+        #[command(flatten)]
         workspace: WorkspaceArgs,
     },
 
-    /// Change an annotation's file, range, or label, and print its id.
+    /// Change an annotation's file, range, label, or narration, and print its
+    /// id.
     EditAnnotation {
         slug: String,
         stop: String,
@@ -182,6 +186,9 @@ pub enum WalkthroughCommand {
 
         #[arg(long)]
         label: Option<String>,
+
+        #[command(flatten)]
+        narration: NarrationArgs,
 
         #[command(flatten)]
         workspace: WorkspaceArgs,
@@ -220,7 +227,7 @@ pub struct WorkspaceArgs {
     workspace: Option<PathBuf>,
 }
 
-/// Where a stop's narration text comes from.
+/// Where narration text comes from, for a stop or for an annotation.
 ///
 /// The two sources are exclusive, and both are optional so an edit that touches
 /// neither leaves the narration alone. The file form exists because narration
@@ -349,6 +356,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             file,
             range,
             label,
+            narration,
             workspace,
         } => add_annotation(
             fs,
@@ -358,6 +366,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             file.as_deref(),
             &range,
             label,
+            narration.read(fs)?.unwrap_or_default(),
         ),
 
         WalkthroughCommand::EditAnnotation {
@@ -368,6 +377,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             no_file,
             range,
             label,
+            narration,
             workspace,
         } => edit_annotation(
             fs,
@@ -379,6 +389,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             no_file,
             range.as_deref(),
             label,
+            narration.read(fs)?,
         ),
 
         WalkthroughCommand::RemoveAnnotation {
@@ -683,6 +694,10 @@ fn move_stop(
 ///
 /// A `file` of `None` annotates the stop's own focus file, which is the usual
 /// case and the one that stores no path of its own.
+///
+/// An empty `narration` leaves the stop's own narration standing while the
+/// reader is on this annotation.
+#[allow(clippy::too_many_arguments)]
 fn add_annotation(
     fs: &dyn FsHost,
     root: &Path,
@@ -691,6 +706,7 @@ fn add_annotation(
     file: Option<&Path>,
     range: &str,
     label: String,
+    narration: String,
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
 
@@ -702,7 +718,14 @@ fn add_annotation(
     let path = file.is_some().then_some(captured.path);
 
     let id = walkthrough
-        .add_annotation(stop, path, captured.range, captured.snippet, label)
+        .add_annotation(
+            stop,
+            path,
+            captured.range,
+            captured.snippet,
+            label,
+            narration,
+        )
         .whatever_context(format!("annotate stop '{stop}'"))?
         .id
         .clone();
@@ -714,9 +737,9 @@ fn add_annotation(
 /// Change the annotation `annotation`, returning its id.
 ///
 /// The snippet is re-captured whenever `file`, `no_file`, or `range` is given,
-/// each falling back to what the annotation already holds. A label-only edit
-/// leaves the capture alone, so renaming never re-baselines a range the author
-/// did not mention.
+/// each falling back to what the annotation already holds. An edit that names
+/// only a label or a narration leaves the capture alone, so rewording never
+/// re-baselines a range the author did not mention.
 ///
 /// A re-capture reads the file the annotation itself names, not the stop's
 /// focus, so a bare range edit on a cross-file annotation stays cross-file.
@@ -735,6 +758,7 @@ fn edit_annotation(
     no_file: bool,
     range: Option<&str>,
     label: Option<String>,
+    narration: Option<String>,
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
 
@@ -773,6 +797,7 @@ fn edit_annotation(
                 range: captured.as_ref().map(|location| location.range),
                 snippet: captured.map(|location| location.snippet),
                 label,
+                narration,
             },
         )
         .whatever_context(format!("edit annotation '{annotation}'"))?;
@@ -1272,6 +1297,7 @@ mod tests {
             None,
             "2:4-2:7",
             "the name".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1295,6 +1321,7 @@ mod tests {
             None,
             "2:4-2:7",
             "the name".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1304,6 +1331,58 @@ mod tests {
             (annotation.snippet.as_str(), annotation.label.as_str()),
             ("main", "the name")
         );
+    }
+
+    /// Narration is optional at every step, so an author adds it, renames the
+    /// label without losing it, and takes it away again.
+    #[test]
+    fn an_annotation_narration_is_stored_kept_and_cleared() {
+        let dir = workspace();
+        with_stop(&dir);
+        let narration = |dir: &TempDir| stored(dir).stops[0].annotations[0].narration.clone();
+
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "2:4-2:7",
+            "the name".to_owned(),
+            "why it **matters**".to_owned(),
+        )
+        .expect("add-annotation");
+        assert_eq!(narration(&dir), "why it **matters**");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            None,
+            false,
+            None,
+            Some("renamed".to_owned()),
+            None,
+        )
+        .expect("edit-annotation");
+        assert_eq!(narration(&dir), "why it **matters**", "a label-only edit");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            None,
+            false,
+            None,
+            None,
+            Some(String::new()),
+        )
+        .expect("edit-annotation");
+        assert_eq!(narration(&dir), "", "an empty narration clears it");
     }
 
     #[test]
@@ -1318,6 +1397,7 @@ mod tests {
             None,
             "2:4-2:7",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1331,6 +1411,7 @@ mod tests {
             false,
             Some("1:5-1:7"),
             Some("moved".to_owned()),
+            None,
         )
         .expect("edit-annotation");
 
@@ -1353,6 +1434,7 @@ mod tests {
             None,
             "2:4-2:7",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
         std::fs::write(&file, "CHANGED\nCHANGED\n").expect("rewrite");
@@ -1367,6 +1449,7 @@ mod tests {
             false,
             None,
             Some("renamed".to_owned()),
+            None,
         )
         .expect("edit-annotation");
 
@@ -1391,6 +1474,7 @@ mod tests {
             Some(&other),
             "1:4-1:9",
             "the helper".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1421,6 +1505,7 @@ mod tests {
             Some(&other),
             "1:4-1:9",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1433,6 +1518,7 @@ mod tests {
             None,
             false,
             Some("2:4-2:9"),
+            None,
             None,
         )
         .expect("edit-annotation");
@@ -1456,6 +1542,7 @@ mod tests {
             None,
             "2:4-2:7",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1468,6 +1555,7 @@ mod tests {
             Some(&other),
             false,
             Some("1:4-1:9"),
+            None,
             None,
         )
         .expect("edit-annotation");
@@ -1493,6 +1581,7 @@ mod tests {
             Some(&other),
             "1:1-1:3",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1504,6 +1593,7 @@ mod tests {
             "a1",
             None,
             true,
+            None,
             None,
             None,
         )
@@ -1529,6 +1619,7 @@ mod tests {
             Some(&other),
             "1:4-1:9",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
         add_annotation(
@@ -1539,6 +1630,7 @@ mod tests {
             None,
             "2:4-2:7",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1563,6 +1655,7 @@ mod tests {
             None,
             "1",
             "one".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
         add_annotation(
@@ -1573,6 +1666,7 @@ mod tests {
             None,
             "2",
             "two".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1709,6 +1803,7 @@ mod tests {
             None,
             "1",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
 
@@ -1759,6 +1854,7 @@ mod tests {
             None,
             "1",
             "l".to_owned(),
+            String::new(),
         )
         .expect("add-annotation");
         // Line 2 stays put, so only the annotation over line 1 drifts.

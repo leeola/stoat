@@ -930,6 +930,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_MAIN,
         span_of(WALKTHROUGH_MAIN, "config::load(&path)"),
         "reads the file, or falls back to defaults",
+        "",
     );
     annotate(
         &mut tour,
@@ -938,6 +939,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_MAIN,
         span_of(WALKTHROUGH_MAIN, "Server::new(config)"),
         "binds nothing yet; that waits for run",
+        "",
     );
 
     // A many-line focus, so the mark is a rect. One label wraps.
@@ -962,6 +964,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_CONFIG,
         span_of(WALKTHROUGH_CONFIG, "unwrap_or_default()"),
         "a missing file is not an error",
+        "",
     );
     annotate(
         &mut tour,
@@ -971,6 +974,7 @@ fn walkthrough_tour() -> Walkthrough {
         span_of(WALKTHROUGH_CONFIG, "line.split_once('=')"),
         "a line without an equals sign is skipped entirely, which is how blank \
          lines and comments both fall through without a case of their own",
+        "",
     );
     annotate(
         &mut tour,
@@ -979,6 +983,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_CONFIG,
         span_of(WALKTHROUGH_CONFIG, "apply(&mut config"),
         "one key at a time",
+        "",
     );
 
     // These two sit at opposite ends of one file, so stepping between them
@@ -1004,6 +1009,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_SERVER,
         span_of(WALKTHROUGH_SERVER, "self.dispatch(request)"),
         "every request goes through here",
+        "",
     );
 
     tour.add_stop(
@@ -1046,6 +1052,7 @@ fn walkthrough_tour() -> Walkthrough {
             WALKTHROUGH_HANDLER,
             span_of(WALKTHROUGH_HANDLER, needle),
             label,
+            "",
         );
     }
     annotate(
@@ -1055,6 +1062,7 @@ fn walkthrough_tour() -> Walkthrough {
         WALKTHROUGH_SERVER,
         span_of(WALKTHROUGH_SERVER, "handler::handle(&request)"),
         "this is the call that got here",
+        "",
     );
 
     // No title and nothing to say, so the tour title stands in and the
@@ -1079,6 +1087,9 @@ fn walkthrough_tour() -> Walkthrough {
 /// `path` is [`None`] for the stop's own file and [`Some`] for a cross-file
 /// annotation, which is the distinction the player reads to decide whether to
 /// open another buffer.
+///
+/// An empty `narration` leaves the stop's own narration standing while the
+/// reader is on this annotation.
 fn annotate(
     tour: &mut Walkthrough,
     stop: &str,
@@ -1086,6 +1097,7 @@ fn annotate(
     content: &str,
     range: Range,
     label: &str,
+    narration: &str,
 ) {
     let snippet = walkthrough::snippet_for(content, range)
         .expect("fixture ranges are derived from the content they name");
@@ -1095,6 +1107,7 @@ fn annotate(
         range,
         snippet,
         label.to_string(),
+        narration.to_string(),
     )
     .expect("the stop was just added");
 }

@@ -242,6 +242,7 @@ mod tests {
                     },
                     "x".to_owned(),
                     label.to_owned(),
+                    String::new(),
                 )
                 .expect("s1 exists");
         }
@@ -288,6 +289,7 @@ mod tests {
                 },
                 "x".to_owned(),
                 "l".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
         run.step_annotation(1);

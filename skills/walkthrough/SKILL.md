@@ -24,7 +24,7 @@ the slug.
 |---|---|
 | Walkthrough | A slug, a title, and an ordered list of stops. One JSON file. |
 | Stop | One focus range of one file, plus narration. Id `s1`, `s2`, ... |
-| Annotation | A labeled range, in that stop's focus file or in another. Id `a1`, `a2`, ... |
+| Annotation | A labeled range, in that stop's focus file or in another, plus optional narration. Id `a1`, `a2`, ... |
 | Focus | Path, range, and the bytes the range covered when captured. |
 
 Ids are stable handles. They are assigned once and never reused, so `s2` keeps
@@ -146,7 +146,14 @@ stoat walkthrough add-annotation startup s1 \
   --file src/error.rs --range 8:1-8:24 --label "where it is raised"
 # a2
 
+stoat walkthrough add-annotation startup s1 \
+  --range 5:9-5:20 --label "the retry budget" \
+  --narration "Three attempts, then the caller sees the error."
+# a3
+
 stoat walkthrough edit-annotation startup s1 a1 --label "the error alias"
+stoat walkthrough edit-annotation startup s1 a3 --narration "Three tries, then out."
+stoat walkthrough edit-annotation startup s1 a3 --narration ""       # back to the stop's
 stoat walkthrough edit-annotation startup s1 a1 --range 3:14-3:20   # re-captures
 stoat walkthrough edit-annotation startup s1 a2 --no-file --range 4  # back to the focus
 stoat walkthrough remove-annotation startup s1 a1
@@ -155,6 +162,9 @@ stoat walkthrough remove-annotation startup s1 a1
 The range is within `--file`, or within stop `s1`'s focus file when you omit it.
 As with `edit-stop`, only a `--file`, `--no-file`, or `--range` re-captures the
 snippet.
+
+`--narration` and `--narration-file` take the same text an `add-stop` takes,
+and an annotation with none leaves the stop's narration standing.
 
 A `--range` on its own re-captures from whichever file the annotation already
 reads against, so a cross-file annotation stays where it is. Pair `--file` with
@@ -194,6 +204,9 @@ Gate on the exit status, not on parsing the output.
 - **Annotate sparingly.** Add one only where a short label says something the
   narration does not, such as naming a subexpression or pointing at the arm
   that matters. If the narration already says it, skip the annotation.
+- **A label calls out, a narration explains.** The label is the text on screen
+  beside the code, so keep it to a few words. Give the annotation its own
+  narration when the reader needs a paragraph once they step onto it.
 - **Run `check` last, always.** Repair anything it reports before you hand the
   user the slug. A walkthrough that was stale the moment it was written is
   worse than none.

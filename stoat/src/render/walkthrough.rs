@@ -750,6 +750,7 @@ mod tests {
                     range_of(*line, (1, 11)),
                     "fn one() {}".to_owned(),
                     (*label).to_owned(),
+                    String::new(),
                 )
                 .expect("s1 exists");
         }
@@ -889,6 +890,7 @@ mod tests {
                 range_of(1, (1, 11)),
                 "fn other() {}".to_owned(),
                 "over there".to_owned(),
+                String::new(),
             )
             .expect("s1 exists");
 
