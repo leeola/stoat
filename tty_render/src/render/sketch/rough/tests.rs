@@ -94,6 +94,31 @@ fn an_ellipse_stays_near_its_center() {
     }
 }
 
+/// The ring's step count comes from a perimeter estimate, so an estimate that
+/// reads low tessellates a large ellipse coarsely and its curve reads faceted.
+///
+/// The reference estimates `sqrt(2 * PI * sqrt((rx^2 + ry^2) / 2))`, which for
+/// the 160 by 80 pixel ellipse here is 19.93. That gives 12.69 steps, so the
+/// ring carries 13 points, plus a lead-in and three tail points. Those 17 run
+/// through 14 curves at 8 flattened segments each, after the opening point.
+#[test]
+fn a_large_ellipse_tessellates_to_its_perimeter_estimate() {
+    let shape = SketchShape::Ellipse(SketchBounds {
+        x: 0,
+        y: 0,
+        w: 256,
+        h: 64,
+    });
+    let geometry = geometry(&command(shape, 0), metrics(), &nothing_resolves);
+
+    let counts: Vec<usize> = geometry
+        .strokes
+        .iter()
+        .map(|stroke| stroke.points.len())
+        .collect();
+    assert_eq!(counts, [113, 113], "both passes ride the same ring");
+}
+
 /// With vertices preserved, a box's sides meet at the corners it was asked
 /// for. Without that, low-roughness boxes show gaps where the sides miss.
 #[test]

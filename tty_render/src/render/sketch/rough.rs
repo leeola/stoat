@@ -790,7 +790,7 @@ fn ellipse(
     options: &mut Options,
     random: &mut Random,
 ) -> Vec<Op> {
-    let psq = (2.0 * PI * ((w / 2.0).powi(2) + (h / 2.0).powi(2)).sqrt() / 2.0).sqrt();
+    let psq = (2.0 * PI * (((w / 2.0).powi(2) + (h / 2.0).powi(2)) / 2.0).sqrt()).sqrt();
     let step_count = options
         .curve_step_count
         .max(options.curve_step_count / 200.0_f64.sqrt() * psq);
