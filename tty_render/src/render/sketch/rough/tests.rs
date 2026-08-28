@@ -130,23 +130,51 @@ fn prefix_lengths_rise_to_the_summed_length() {
 
 /// Below the thresholds a wobble sized for a large shape reads as noise, so
 /// it is damped rather than left to swamp the mark.
+///
+/// A connector and a rounded box still read as hand-drawn at a size that
+/// swamps a square-cornered box, so each has an exemption of its own.
 #[test]
 fn roughness_is_damped_only_for_a_small_shape() {
+    let damp = |w, h| damped_roughness(2.0, w, h, RoughKind::Other);
+
+    assert_eq!(damp(100.0, 60.0), 2.0, "a large box keeps it");
+    assert_eq!(damp(30.0, 15.0), 1.0, "a short side halves it");
     assert_eq!(
-        damped_roughness(2.0, 100.0, 60.0),
-        2.0,
-        "a large box keeps it"
-    );
-    assert_eq!(
-        damped_roughness(2.0, 30.0, 15.0),
+        damped_roughness(3.0, 8.0, 8.0, RoughKind::Other),
         1.0,
-        "a short side halves it"
+        "a tiny box thirds it",
     );
-    assert_eq!(damped_roughness(3.0, 8.0, 8.0), 1.0, "a tiny box thirds it");
     assert_eq!(
-        damped_roughness(9.0, 30.0, 15.0),
+        damped_roughness(9.0, 30.0, 15.0, RoughKind::Other),
         2.5,
         "the damped value is capped",
+    );
+
+    assert_eq!(
+        (
+            damped_roughness(2.0, 120.0, 6.0, RoughKind::Linear),
+            damp(120.0, 6.0),
+        ),
+        (2.0, 1.0),
+        "a long connector keeps it where a box of the same deltas does not",
+    );
+    assert_eq!(
+        (
+            damped_roughness(2.0, 40.0, 18.0, RoughKind::Round),
+            damp(40.0, 18.0),
+        ),
+        (2.0, 1.0),
+        "a rounded box keeps it on a shorter side than a square one",
+    );
+    assert_eq!(
+        damped_roughness(2.0, 12.0, 12.0, RoughKind::Round),
+        1.0,
+        "a rounded box under the lower bar still damps",
+    );
+    assert_eq!(
+        damped_roughness(2.0, 30.0, 6.0, RoughKind::Linear),
+        1.0,
+        "a short connector still damps",
     );
 }
 

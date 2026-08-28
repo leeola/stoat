@@ -191,6 +191,20 @@ struct Connector {
     heads: u8,
 }
 
+/// Which roughness exemptions a shape qualifies for.
+///
+/// Only the shape's own type decides this, so [`rough_kind`] reads it once
+/// where the shape is already at hand rather than [`damped_roughness`]
+/// inspecting a shape it otherwise has no use for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RoughKind {
+    /// A connector, which passes its two deltas as its sides.
+    Linear,
+    /// A box with rounded corners.
+    Round,
+    Other,
+}
+
 /// Generate one mark's flattened geometry at the current cell size.
 ///
 /// The shape arrives in cell fractions and leaves in physical pixels. The
@@ -316,7 +330,20 @@ fn pixel_bounds(bounds: SketchBounds, cw: f64, ch: f64) -> (f64, f64, f64, f64) 
 /// The knobs for one shape, with its roughness already damped for its size.
 fn shape_options(command: &SketchCommand, w: f64, h: f64) -> Options {
     let declared = f64::from(command.style.roughness) / ROUGHNESS_UNIT;
-    Options::new(damped_roughness(declared, w, h))
+    Options::new(damped_roughness(declared, w, h, rough_kind(&command.shape)))
+}
+
+/// Which of the roughness exemptions `shape` qualifies for.
+///
+/// An ellipse is not round in the reference's sense. Its `canChangeRoundness`
+/// covers rectangles, lines, diamonds, and images, so an ellipse damps by size
+/// alone.
+fn rough_kind(shape: &SketchShape) -> RoughKind {
+    match shape {
+        SketchShape::Line { .. } => RoughKind::Linear,
+        SketchShape::Rect { radius, .. } if *radius > 0 => RoughKind::Round,
+        _ => RoughKind::Other,
+    }
 }
 
 /// Stroke thickness in physical pixels.
@@ -975,12 +1002,26 @@ fn cubic_at(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], t: f64) -> [
 /// Roughness damped for a shape too small to carry it.
 ///
 /// A wobble sized for a large box swamps a small one, so the same roughness
-/// reads as noise below about twenty pixels. The thresholds are excalidraw's.
-fn damped_roughness(roughness: f64, w: f64, h: f64) -> f64 {
+/// reads as noise below about twenty pixels. The thresholds and the exemptions
+/// are excalidraw's.
+///
+/// A connector and a rounded box each escape the both-sides rule on their own
+/// terms. A connector passes its two deltas as the sides, so a near-axis one is
+/// long on one axis and a pixel or two on the other, which the both-sides rule
+/// reads as a small shape. A rounded box carries a wobble at a smaller size
+/// than a square-cornered one does, because its corners are already curved.
+fn damped_roughness(roughness: f64, w: f64, h: f64, kind: RoughKind) -> f64 {
     let (min_side, max_side) = (w.abs().min(h.abs()), w.abs().max(h.abs()));
-    if min_side >= 20.0 && max_side >= 50.0 {
+
+    let exempt = match kind {
+        RoughKind::Linear => max_side >= 50.0,
+        RoughKind::Round => min_side >= 15.0,
+        RoughKind::Other => min_side >= 20.0 && max_side >= 50.0,
+    };
+    if exempt {
         return roughness;
     }
+
     let divisor = if max_side < 10.0 { 3.0 } else { 2.0 };
     (roughness / divisor).min(2.5)
 }
