@@ -171,6 +171,13 @@ pub struct Settings {
     /// Arguments passed to the terminal pane's subshell. `None` spawns with no
     /// arguments. Set via `terminal.args = ["-l"];` in stcfg.
     pub terminal_args: Option<Vec<String>>,
+    /// Editor binary that `:ssh` runs on the remote host. `None` falls back to
+    /// a bare `stoat`. Set via `ssh.program = "/path/to/stoat";` in stcfg.
+    ///
+    /// sshd runs the command through a non-interactive login shell, whose PATH
+    /// misses most profile-managed directories, so an absolute path is the
+    /// usual value.
+    pub ssh_program: Option<String>,
     /// Whether workspaces load their direnv environment automatically. `None`
     /// falls back to enabled. Set `direnv.load = false;` in stcfg to disable
     /// automatic env loading. The manual reload action ignores this.
@@ -294,6 +301,7 @@ impl Settings {
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
+            ssh_program: other.ssh_program.or(self.ssh_program),
             direnv_load: other.direnv_load.or(self.direnv_load),
             direnv_reload_on_cd: other.direnv_reload_on_cd.or(self.direnv_reload_on_cd),
             direnv_unset_on_exit: other.direnv_unset_on_exit.or(self.direnv_unset_on_exit),
@@ -482,6 +490,11 @@ impl Settings {
                     );
                 }
             },
+            ["ssh", "program"] => {
+                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
+                    self.ssh_program = Some(s.clone());
+                }
+            },
             ["lsp", "server", language] => {
                 if let Value::Array(items) = &setting.value.node {
                     self.lsp_servers
@@ -604,6 +617,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -764,6 +778,20 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_ssh_program() {
+        let program = |src: &str| Settings::from_config(&parse_ok(src)).ssh_program;
+        assert_eq!(
+            program(r#"on init { ssh.program = "/x/stoat"; }"#),
+            Some("/x/stoat".to_string()),
+        );
+        assert_eq!(
+            program("on init { }"),
+            None,
+            "absent falls back at consumer"
+        );
+    }
+
+    #[test]
     fn from_config_extracts_highlight_retention() {
         let config = parse_ok("on init { editor.highlight_retention = 8; }");
         assert_eq!(Settings::from_config(&config).highlight_retention, Some(8));
@@ -909,6 +937,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -952,6 +981,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1004,6 +1034,7 @@ mod tests {
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
+            ssh_program: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1039,6 +1070,7 @@ mod tests {
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
+            ssh_program: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1076,6 +1108,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1116,6 +1149,7 @@ mod tests {
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
+            ssh_program: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1154,6 +1188,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1205,6 +1240,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1248,6 +1284,7 @@ mod tests {
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1288,6 +1325,7 @@ mod tests {
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
+            ssh_program: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1323,6 +1361,7 @@ mod tests {
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
+            ssh_program: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,

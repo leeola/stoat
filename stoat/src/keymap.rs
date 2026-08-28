@@ -2701,6 +2701,7 @@ mod tests {
                 highlight_retention: Some(64),
                 terminal_shell: None,
                 terminal_args: None,
+                ssh_program: None,
                 direnv_load: Some(true),
                 direnv_reload_on_cd: Some(true),
                 direnv_unset_on_exit: Some(false),

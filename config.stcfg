@@ -269,6 +269,11 @@ on init {
     # Arguments passed to the terminal pane's subshell.
     # terminal.args = ["-l"];
 
+    # Editor binary `:ssh` runs on the remote host. Defaults to a bare `stoat`.
+    # sshd runs it through a non-interactive login shell, whose PATH misses most
+    # profile-managed dirs, so an absolute path is the usual value.
+    # ssh.program = "/home/me/.nix-profile/bin/stoat";
+
     # Override the language server for a language. The first list element is
     # the executable and the rest are arguments. An empty list disables it.
     # lsp.server.rust = ["rust-analyzer"];

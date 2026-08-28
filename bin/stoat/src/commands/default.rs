@@ -325,6 +325,7 @@ fn run_tui(
         highlight_retention: None,
         terminal_shell: None,
         terminal_args: None,
+        ssh_program: None,
         direnv_load: None,
         direnv_reload_on_cd: None,
         direnv_unset_on_exit: None,
