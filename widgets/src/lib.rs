@@ -124,6 +124,18 @@ impl ApcScene {
         self.dynamic_current.clear();
     }
 
+    /// Forget what the last flush wrote, so the next [`Self::flush_to`] sends
+    /// the whole scene even when it matches.
+    ///
+    /// The baselines describe what the terminal holds, which stops being true
+    /// once another program drives the same terminal: its reset dropped this
+    /// scene, and a matching lane would write nothing to put it back. Call this
+    /// when the terminal comes back, then build the next frame as usual.
+    pub fn forget_flushed(&mut self) {
+        self.previous.clear();
+        self.dynamic_previous.clear();
+    }
+
     /// The buffer widgets append their decoration frames into via the protocol's
     /// `encode_*_into` encoders.
     ///
@@ -549,6 +561,34 @@ mod tests {
         scene.flush_to(&mut out).expect("vec write");
 
         assert!(out.is_empty(), "an unchanged scene emits nothing");
+    }
+
+    /// The baseline is a claim about what the terminal holds. Another program
+    /// driving the same terminal breaks that claim, and an unchanged scene
+    /// would otherwise put nothing back on the screen.
+    #[test]
+    fn forget_flushed_re_sends_an_unchanged_scene() {
+        fn build(scene: &mut ApcScene) {
+            scene.clear();
+            command::encode_border_into(scene.buffer(), &border());
+            command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+        }
+
+        let mut scene = ApcScene::new();
+        build(&mut scene);
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+        build(&mut scene);
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+
+        scene.forget_flushed();
+        build(&mut scene);
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+
+        let mut expected = encode_reset();
+        expected.extend(encode_border(&border()));
+        expected.extend(encode_scroll_region(&region()));
+        assert_eq!(out, expected, "both lanes go out again");
     }
 
     /// The whole point of the second lane. A reset in front of a `scroll_region`

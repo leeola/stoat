@@ -152,6 +152,25 @@ impl SmoothScrollState {
         }
     }
 
+    /// Retire every tracked pool and forget every thumb placement: emit a
+    /// `Gstoatty;pool_drop` for each pool into `out`, then start over empty.
+    ///
+    /// This is the routine for a program whose terminal was driven by another
+    /// program in between. That program's own reset dropped these pools
+    /// terminal-side, so the tracking here describes buffers that no longer
+    /// exist and every surface must re-declare from scratch.
+    ///
+    /// The thumb placements go too. They are kept so an unmoved viewport
+    /// re-emits nothing, which is exactly wrong once the strip they placed is
+    /// gone: a thumb at an unchanged offset still has to be placed again.
+    pub fn drop_all(&mut self, out: &mut Vec<u8>) {
+        for id in self.pools.keys() {
+            encode_pool_drop_into(out, *id);
+        }
+        self.pools.clear();
+        self.minimap_views.clear();
+    }
+
     /// Append a `minimap_view` frame positioning `strip_id`'s thumb to `out`, but
     /// only when the viewport moved since the last emit for that strip.
     ///
@@ -902,5 +921,32 @@ mod tests {
             Vec::new()
         });
         assert!(commands(&out).contains(&Command::PoolRegion(region(2, 20))));
+    }
+
+    /// A program whose terminal was driven by another program in between comes
+    /// back to a terminal that holds none of these pools, so every one has to
+    /// go and every surface has to re-declare.
+    #[test]
+    fn drop_all_retires_every_pool() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 7, false, |_| {
+            Vec::new()
+        });
+        emit_into(&mut out, &mut state, region(2, 20), 0.0, 7, false, |_| {
+            Vec::new()
+        });
+
+        out.clear();
+        state.drop_all(&mut out);
+        assert_eq!(
+            commands(&out),
+            vec![
+                Command::PoolDrop(PoolDropCommand { pool: 1 }),
+                Command::PoolDrop(PoolDropCommand { pool: 2 }),
+            ]
+        );
+        assert!(!state.already_emitted(1, 7), "pool 1 is forgotten");
+        assert!(!state.already_emitted(2, 7), "pool 2 is forgotten");
     }
 }
