@@ -122,7 +122,7 @@ use crate::{
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
-            ShowCwd, SwitchWorkspace,
+            ShowCwd, Ssh, SwitchWorkspace,
         },
     },
     param::{MissingSnafu, ParseFailureSnafu, WrongKindSnafu},
@@ -1037,6 +1037,24 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: raw.to_owned(),
         }))
     });
+    // The remainder after the host is the remote program's arguments, so the
+    // whole tail arrives as one string and splits here.
+    add(Ssh::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "host" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "host",
+                expected: ParamKind::String,
+            })?;
+        let mut words = raw.split_whitespace().map(str::to_owned);
+        let host = words.next().context(MissingSnafu { name: "host" })?;
+        Ok(Box::new(Ssh {
+            host,
+            args: words.collect(),
+        }))
+    });
     add(ShowCwd::DEF, |_| Ok(Box::new(ShowCwd)));
     add(ReloadEnv::DEF, |_| Ok(Box::new(ReloadEnv)));
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
@@ -1363,6 +1381,7 @@ mod tests {
             ("o", "OpenFile"),
             ("b", "OpenBuffer"),
             ("cd", "SetCwd"),
+            ("ssh", "Ssh"),
         ] {
             assert_eq!(
                 lookup_alias(token).map(|e| e.def.name()),
@@ -1799,7 +1818,8 @@ mod tests {
         // + 4 the long-word extends.
         // + 1 PickerDelete.
         // + 1 PinMode.
-        assert_eq!(all().count(), 418);
+        // + 1 Ssh.
+        assert_eq!(all().count(), 419);
     }
 
     #[test]

@@ -185,6 +185,8 @@ impl TerminalSession for PtyTerminalSession {
 pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
+        // FIXME: The PTY carries no pixel size, so a remote stoat under :ssh reads
+        // no cell metrics and sizes images by cells
         .openpty(portable_pty::PtySize {
             rows: args.rows,
             cols: args.width,

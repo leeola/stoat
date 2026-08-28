@@ -117,6 +117,45 @@ impl Action for SetCwd {
     }
 }
 
+const SSH_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "host",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "Host to open a remote stoat on. Anything after the host is passed to the remote program as its arguments.",
+}];
+
+define_action_def!(
+    SshDef,
+    "Ssh",
+    ActionKind::Ssh,
+    "open a remote stoat over ssh",
+    "Hand the window to a stoat on the named host until it exits. The host is anything ssh accepts, and ports and users come from ~/.ssh/config.",
+    ActionPriority::Common,
+    aliases = &["ssh"],
+    params = SSH_PARAMS
+);
+
+#[derive(Debug)]
+pub struct Ssh {
+    pub host: String,
+    pub args: Vec<String>,
+}
+
+impl Ssh {
+    pub const DEF: &SshDef = &SshDef;
+}
+
+impl Action for Ssh {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 define_action!(
     ShowCwdDef,
     ShowCwd,

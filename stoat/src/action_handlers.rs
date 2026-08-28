@@ -58,7 +58,7 @@ use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
     GotoTab, OpenBuffer, OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab,
-    RenameWorkspace, Run, SetCwd, SetTheme, WalkthroughOpen,
+    RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -1080,6 +1080,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("SetCwd action downcast");
             workspace::set_cwd(stoat, &action.path);
             UpdateEffect::Redraw
+        },
+        ActionKind::Ssh => {
+            let action = action
+                .as_any()
+                .downcast_ref::<Ssh>()
+                .expect("Ssh action downcast");
+            crate::ssh::connect(stoat, &action.host, &action.args)
         },
         ActionKind::ShowCwd => {
             workspace::show_cwd(stoat);

@@ -8,7 +8,8 @@ use crate::{
 };
 pub use pty::{
     agent_socket_path, agent_socket_path_in, spawn_claude, spawn_oneshot, spawn_shell,
-    spawn_term_reader, spawn_terminal, PtyNotification, ShellHandle, TermSpawnEnv,
+    spawn_ssh_reader, spawn_term_reader, spawn_terminal, PtyNotification, ShellHandle,
+    TermSpawnEnv,
 };
 use ratatui::layout::Rect;
 use slotmap::new_key_type;

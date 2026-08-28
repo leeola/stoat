@@ -14,14 +14,19 @@
 //! Neither thread does any of the editor's work, so terminal IO latency is
 //! independent of main-thread workload as well.
 
-use crate::{render::undercurl::UndercurlStamp, vt_input};
+use crate::{
+    render::undercurl::UndercurlStamp,
+    ssh::{PassthroughSlot, SlotState, UiControl},
+    vt_input,
+};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     },
     execute, queue,
-    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen},
 };
+use futures::FutureExt;
 use ratatui::buffer::Buffer;
 /// Only the perf build times frames, so this would be an unused import without
 /// it.
@@ -33,6 +38,7 @@ use std::{
     panic,
     sync::{Arc, Once},
     thread,
+    time::Duration,
 };
 use stoatty_protocol::{
     command::{self, HelloCommand},
@@ -103,22 +109,33 @@ pub fn install_panic_hook() {
     });
 }
 
-/// `stoatty_tx` carries the ident handshake's one-shot answer to the app: the
-/// peer's protocol version when a stoatty replied, `None` when none did. The
-/// app cannot learn it any other way, since the handshake needs raw mode and
-/// sole ownership of fd 0, both of which live on this thread.
+/// Every channel end the UI thread owns, handed over in one piece.
 ///
-/// `cell_pixels_tx` carries the tty's cell size the same way, and unlike the
-/// handshake it carries it again on every resize, since a window that changed
-/// size or font has changed the answer.
-pub fn spawn(
-    event_tx: UnboundedSender<Event>,
-    mut render_rx: watch::Receiver<Option<RenderFrame>>,
-    mut apc_rx: UnboundedReceiver<Vec<u8>>,
-    stoatty_tx: UnboundedSender<Option<u32>>,
-    cell_pixels_tx: UnboundedSender<Option<(u16, u16)>>,
-    mouse_captured: bool,
-) -> thread::JoinHandle<io::Result<()>> {
+/// The thread holds them as a set for its whole life, and spelling each one out
+/// at both entry points buries the two parameters that actually vary.
+pub struct UiChannels {
+    /// Terminal input on its way to the app.
+    pub event_tx: UnboundedSender<Event>,
+    /// The latest painted frame, latest-wins.
+    pub render_rx: watch::Receiver<Option<RenderFrame>>,
+    /// Ordered stoatty APC byte batches, written after each grid frame.
+    pub apc_rx: UnboundedReceiver<Vec<u8>>,
+    /// The ident handshake's one-shot answer to the app: the peer's protocol
+    /// version when a stoatty replied, `None` when none did. The app learns it
+    /// no other way, since the handshake needs raw mode and sole ownership of
+    /// fd 0, both of which live on this thread.
+    pub stoatty_tx: UnboundedSender<Option<u32>>,
+    /// The tty's cell size, for the same reason, and unlike the handshake it
+    /// goes again on every resize, since a window that changed size or font has
+    /// changed the answer.
+    pub cell_pixels_tx: UnboundedSender<Option<(u16, u16)>>,
+    /// What fd 0 feeds, which `:ssh` moves to a remote session and back.
+    pub slot: Arc<PassthroughSlot>,
+    /// What to do with the screen while a remote session owns it.
+    pub ui_rx: UnboundedReceiver<UiControl>,
+}
+
+pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -133,15 +150,7 @@ pub fn spawn(
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             }
-            let result = run(
-                &event_tx,
-                &mut render_rx,
-                &mut apc_rx,
-                &stoatty_tx,
-                &cell_pixels_tx,
-                &mut terminal,
-            )
-            .await;
+            let result = run(&mut channels, &mut terminal, mouse_captured).await;
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
@@ -153,13 +162,19 @@ pub fn spawn(
 }
 
 async fn run(
-    event_tx: &UnboundedSender<Event>,
-    render_rx: &mut watch::Receiver<Option<RenderFrame>>,
-    apc_rx: &mut UnboundedReceiver<Vec<u8>>,
-    stoatty_tx: &UnboundedSender<Option<u32>>,
-    cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
+    channels: &mut UiChannels,
     terminal: &mut ratatui::DefaultTerminal,
+    mouse_captured: bool,
 ) -> io::Result<()> {
+    let UiChannels {
+        event_tx,
+        render_rx,
+        apc_rx,
+        stoatty_tx,
+        cell_pixels_tx,
+        slot,
+        ui_rx,
+    } = channels;
     // Main thread needs terminal dimensions before it can render the first frame
     let size = terminal.size()?;
     if event_tx
@@ -195,7 +210,18 @@ async fn run(
     thread::spawn({
         let event_tx = event_tx.clone();
         let cell_pixels_tx = cell_pixels_tx.clone();
-        move || forward_input(&event_tx, &cell_pixels_tx, crossterm::event::read)
+        let slot = slot.clone();
+        move || {
+            forward_input(
+                &event_tx,
+                &cell_pixels_tx,
+                &slot,
+                crossterm::event::poll,
+                crossterm::event::read,
+                read_stdin_raw,
+                tty_winsize,
+            )
+        }
     });
 
     // What the terminal carries, so a frame whose squiggle is already on screen
@@ -216,6 +242,33 @@ async fn run(
         // content that the grid then paints over, which is the wrong way round.
         tokio::select! {
             biased;
+
+            // Ahead of the render arm on purpose. The app publishes a frame
+            // right after it sends Resume, and a frame drawn before the
+            // alternate screen is back lands on the shell's screen with nothing
+            // to redraw it.
+            Some(ctl) = ui_rx.recv() => {
+                match ctl {
+                    // No synchronized-update wrapper. The remote frames its own,
+                    // and a local wrapper closing mid-frame tears it.
+                    UiControl::Raw(bytes) => {
+                        let mut stdout = io::stdout();
+                        stdout.write_all(&bytes)?;
+                        stdout.flush()?;
+                    },
+                    // The remote's exit left the alternate screen, which took
+                    // this session's screen with it. Raw mode is local termios
+                    // the remote's bytes never touched, so it is not re-applied.
+                    UiControl::Resume => {
+                        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+                        if mouse_captured {
+                            execute!(io::stdout(), EnableMouseCapture)?;
+                        }
+                        terminal.clear()?;
+                        stamp = UndercurlStamp::default();
+                    },
+                }
+            }
 
             changed = render_rx.changed() => {
                 if changed.is_err() {
@@ -388,48 +441,179 @@ fn cell_pixels_from_winsize(ws: &libc::winsize) -> Option<(u16, u16)> {
 /// no pixels leaves it with nothing to divide by. Most do report them, and the
 /// stoatty this usually runs inside always does.
 fn tty_cell_pixels() -> Option<(u16, u16)> {
+    cell_pixels_from_winsize(&tty_winsize()?)
+}
+
+/// The tty text area and the grid it holds, or `None` when the ioctl fails.
+///
+/// Separate from [`tty_cell_pixels`] because the passthrough loop needs the cell
+/// counts rather than the pixel quotient: crossterm reports no resize while a
+/// remote session owns fd 0, so the size is polled instead.
+fn tty_winsize() -> Option<libc::winsize> {
     // SAFETY: TIOCGWINSZ writes a winsize through the pointer and reads nothing
     // else. The struct is fully initialized before the call, so a driver that
     // writes none of it still leaves defined bytes behind.
-    let ws = unsafe {
+    unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
         if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &raw mut ws) != 0 {
             return None;
         }
-        ws
-    };
-    cell_pixels_from_winsize(&ws)
+        Some(ws)
+    }
 }
 
-/// Forward every event `read` produces onto `event_tx` until either end goes
-/// away.
+/// How long each wait for input runs before the loop re-reads the slot.
 ///
-/// `read` is [`crossterm::event::read`] in production, blocking until stdin has
-/// an event. It is a parameter so the loop's two exits can be driven without
-/// a terminal.
+/// The state changes on another thread, so the bound is how long a `:ssh` waits
+/// to be noticed, and it doubles as the tick that polls the window size while a
+/// remote session owns fd 0.
+const INPUT_POLL: Duration = Duration::from_millis(50);
+
+/// Bytes read per pass while a remote session owns fd 0. Large enough that a
+/// pasted screenful crosses in one write.
+const RAW_CHUNK: usize = 4096;
+
+/// Forward what fd 0 produces, to the app or to the remote session `slot`
+/// names.
 ///
-/// A resize also re-reads the tty's cell size onto `cell_pixels_tx`, since a
-/// window that changed size or font has changed that answer too.
+/// Three modes, re-read every pass so a `:ssh` from the app takes effect
+/// without a wake:
 ///
-/// Returns when a send fails, meaning the main loop is gone, or when `read`
+/// - Idle: `poll` then `read` an event and send it, as a normal session does.
+/// - Pending: acknowledge that fd 0 is no longer parsed, then buffer raw bytes. The app spawns ssh
+///   on that ack, so anything typed in between is the user's and is handed to the session once it
+///   exists.
+/// - Active: write every raw byte to the session, and poll the window size, because crossterm
+///   reports no resize while nothing parses fd 0.
+///
+/// Sound because crossterm 0.29 reads fd 0 on the calling thread, so nothing
+/// else reads stdin while this one does.
+///
+/// `poll`, `read`, `read_raw`, and `winsize` are the crossterm and libc calls in
+/// production, and parameters so the loop runs without a terminal.
+///
+/// Returns when a send fails, meaning the main loop is gone, or when a read
 /// errors. Neither is recoverable from here, and the caller's thread has
 /// nothing else to do.
 fn forward_input(
     event_tx: &UnboundedSender<Event>,
     cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
+    slot: &PassthroughSlot,
+    mut poll: impl FnMut(Duration) -> io::Result<bool>,
     mut read: impl FnMut() -> io::Result<Event>,
+    mut read_raw: impl FnMut(&mut [u8], Duration) -> io::Result<usize>,
+    mut winsize: impl FnMut() -> Option<libc::winsize>,
 ) {
-    while let Ok(event) = read() {
-        // A resized window has a new cell count and may have a new cell size,
-        // and the tty answers for both. Read before forwarding, so the app has
-        // the new size by the time it lays out against the new grid.
-        if matches!(event, Event::Resize(..)) {
-            let _ = cell_pixels_tx.send(tty_cell_pixels());
-        }
-        if event_tx.send(event).is_err() {
-            break;
+    let mut raw = [0u8; RAW_CHUNK];
+    let mut buffered: Vec<u8> = Vec::new();
+    let mut acked = false;
+    let mut ran_session = false;
+    let mut last_size: Option<(u16, u16)> = None;
+
+    loop {
+        match slot.state() {
+            SlotState::Idle => {
+                // The app laid out against whatever grid it last heard about,
+                // and the window is free to have changed size while the remote
+                // owned it, so the current size goes out before anything else.
+                if ran_session {
+                    ran_session = false;
+                    buffered.clear();
+                    last_size = None;
+                    if let Some(ws) = winsize()
+                        && event_tx.send(Event::Resize(ws.ws_col, ws.ws_row)).is_err()
+                    {
+                        return;
+                    }
+                    let _ = cell_pixels_tx.send(tty_cell_pixels());
+                }
+                acked = false;
+
+                match poll(INPUT_POLL) {
+                    Ok(true) => {},
+                    Ok(false) => continue,
+                    Err(_) => return,
+                }
+                let Ok(event) = read() else {
+                    return;
+                };
+                // A resized window has a new cell count and may have a new cell
+                // size, and the tty answers for both. Read before forwarding, so
+                // the app has the new size by the time it lays out against the
+                // new grid.
+                if matches!(event, Event::Resize(..)) {
+                    let _ = cell_pixels_tx.send(tty_cell_pixels());
+                }
+                if event_tx.send(event).is_err() {
+                    return;
+                }
+            },
+            SlotState::Pending => {
+                if !acked {
+                    acked = true;
+                    slot.ack();
+                }
+                match read_raw(&mut raw, INPUT_POLL) {
+                    Ok(0) => {},
+                    Ok(n) => buffered.extend_from_slice(&raw[..n]),
+                    Err(_) => return,
+                }
+            },
+            SlotState::Active(session) => {
+                ran_session = true;
+                acked = false;
+                if !buffered.is_empty() {
+                    let held = std::mem::take(&mut buffered);
+                    let _ = session.write(&held).now_or_never();
+                }
+                match read_raw(&mut raw, INPUT_POLL) {
+                    Ok(0) => {
+                        if let Some(ws) = winsize() {
+                            let size = (ws.ws_row, ws.ws_col);
+                            if last_size != Some(size) {
+                                last_size = Some(size);
+                                let _ = session.resize(ws.ws_row, ws.ws_col);
+                            }
+                        }
+                    },
+                    Ok(n) => {
+                        let _ = session.write(&raw[..n]).now_or_never();
+                    },
+                    Err(_) => return,
+                }
+            },
         }
     }
+}
+
+/// Read what is on fd 0 into `buf`, waiting up to `timeout`.
+///
+/// Zero means the wait elapsed with nothing to read, which is also what a
+/// closed stdin reports. Both leave the caller with nothing to forward, and the
+/// loop that calls this ends with the session either way.
+fn read_stdin_raw(buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+    let mut fds = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll reads and writes the one pollfd through the pointer and
+    // touches nothing else. The struct is initialized above.
+    let ready = unsafe { libc::poll(&raw mut fds, 1, timeout.as_millis() as libc::c_int) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ready == 0 {
+        return Ok(0);
+    }
+
+    // SAFETY: read writes at most buf.len() bytes through the pointer, which
+    // borrows a live slice for the call.
+    let got = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+    if got < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(got as usize)
 }
 
 /// Write `first`, then every APC byte batch already queued on `apc_rx`, to
@@ -581,6 +765,25 @@ mod tests {
         );
     }
 
+    /// An idle slot with nothing armed, plus the raw and winsize closures a
+    /// non-passthrough run never reaches.
+    fn idle_input(
+        event_tx: &UnboundedSender<Event>,
+        cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
+        read: impl FnMut() -> io::Result<Event>,
+    ) {
+        let (slot, _ack_rx) = PassthroughSlot::new();
+        forward_input(
+            event_tx,
+            cell_pixels_tx,
+            &slot,
+            |_| Ok(true),
+            read,
+            |_, _| Ok(0),
+            || None,
+        );
+    }
+
     /// Every event read reaches the channel, and a reader that goes away ends
     /// the loop.
     ///
@@ -596,7 +799,7 @@ mod tests {
         // here rather than spinning forever on a reader that never runs out.
         let mut past_end = 0;
         let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
-        forward_input(&tx, &px_tx, || match queued.next() {
+        idle_input(&tx, &px_tx, || match queued.next() {
             Some(event) => Ok(event),
             None => {
                 past_end += 1;
@@ -624,7 +827,7 @@ mod tests {
         // rather than spinning on a read that always succeeds.
         let mut reads = 0;
         let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
-        forward_input(&tx, &px_tx, || {
+        idle_input(&tx, &px_tx, || {
             reads += 1;
             match reads > 4 {
                 true => Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
@@ -634,6 +837,71 @@ mod tests {
         assert_eq!(
             reads, 1,
             "and a closed channel ends it on the first failed send, not later",
+        );
+    }
+
+    /// The whole passthrough handoff from the input thread's side.
+    ///
+    /// The ack is what the app waits for before it spawns ssh, and bytes typed
+    /// between the arm and the spawn belong to the remote, so they have to be
+    /// held rather than dropped. Coming back, the app has laid out against a
+    /// grid it has not heard about since the handoff, so the current size must
+    /// reach it unprompted.
+    #[test]
+    fn passthrough_acks_holds_early_bytes_then_resizes_on_return() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (slot, mut ack_rx) = PassthroughSlot::new();
+        let session = Arc::new(crate::host::FakeTerminalSession::new());
+        slot.arm();
+
+        // Each raw read advances the slot, so the loop walks Pending, Active,
+        // and back to Idle in as many passes.
+        let mut pass = 0;
+        let chunks: [&[u8]; 2] = [b"typed early", b"and later"];
+        forward_input(
+            &tx,
+            &px_tx,
+            &slot,
+            |_| Ok(true),
+            || Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            |buf, _| {
+                let chunk = chunks[pass.min(1)];
+                buf[..chunk.len()].copy_from_slice(chunk);
+                pass += 1;
+                if pass == 1 {
+                    slot.engage(session.clone());
+                }
+                if pass == 2 {
+                    slot.release();
+                }
+                Ok(chunk.len())
+            },
+            || {
+                Some(libc::winsize {
+                    ws_row: 30,
+                    ws_col: 100,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                })
+            },
+        );
+
+        assert!(ack_rx.try_recv().is_ok(), "the arm is acknowledged");
+        assert_eq!(
+            session.sent_strings(),
+            vec!["typed early".to_owned(), "and later".to_owned()],
+            "bytes held while pending go first, then the ones typed at the remote",
+        );
+
+        let mut got = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            got.push(event);
+        }
+        assert_eq!(
+            got,
+            vec![Event::Resize(100, 30)],
+            "and the return reports the size the window reached",
         );
     }
 

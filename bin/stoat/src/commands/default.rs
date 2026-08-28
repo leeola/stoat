@@ -281,6 +281,13 @@ fn run_tui(
     let (cell_pixels_tx, cell_pixels_rx) =
         tokio::sync::mpsc::unbounded_channel::<Option<(u16, u16)>>();
 
+    // What fd 0 feeds while `:ssh` hands the window to a remote stoat, plus the
+    // control lane back to the UI thread. Both ends exist from startup so the
+    // app can refuse `:ssh` on the one condition that matters, a run with no
+    // terminal at all, rather than on whether a channel happens to be wired.
+    let (passthrough_slot, ack_rx) = stoat::ssh::PassthroughSlot::new();
+    let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel::<stoat::ssh::UiControl>();
+
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured = stoat::resolve_mouse_captured(mouse_capture_policy, &LocalEnv);
 
@@ -289,11 +296,15 @@ fn run_tui(
     let driver_tx = inputs.is_some().then(|| event_tx.clone());
 
     let ui_handle = stoat::ui::spawn(
-        event_tx,
-        render_rx,
-        apc_rx,
-        stoatty_tx,
-        cell_pixels_tx,
+        stoat::ui::UiChannels {
+            event_tx,
+            render_rx,
+            apc_rx,
+            stoatty_tx,
+            cell_pixels_tx,
+            slot: passthrough_slot.clone(),
+            ui_rx,
+        },
         mouse_captured,
     );
 
@@ -409,6 +420,11 @@ fn run_tui(
             env_theme,
         );
         stoat.set_apc_tx(apc_tx.clone());
+        stoat.set_passthrough_link(stoat::ssh::PassthroughLink {
+            slot: passthrough_slot,
+            ui_tx,
+            ack_rx,
+        });
         stoat.set_stoatty_rx(stoatty_rx);
         stoat.set_cell_pixels_rx(cell_pixels_rx);
         stoat.set_window_ipc(window_socket_path());

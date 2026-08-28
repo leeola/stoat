@@ -27,6 +27,14 @@ pub enum PtyNotification {
     TermExited {
         term_id: TermId,
     },
+    /// One chunk of a remote `:ssh` session's output, on its way to stdout as
+    /// it is. Untagged because one session runs at a time.
+    SshOutput {
+        data: Vec<u8>,
+    },
+    SshExited {
+        exit_status: Option<i32>,
+    },
 }
 
 pub struct ShellHandle {
@@ -286,6 +294,38 @@ async fn term_reader_task(
     let _ = tx
         .send(PtyNotification::TermExited { term_id: agent_id })
         .await;
+}
+
+/// Spawn the reader that pumps a remote `:ssh` session's PTY output toward
+/// stdout. Detached on the executor like the terminal pane's reader.
+pub fn spawn_ssh_reader(
+    executor: &Executor,
+    session: Arc<dyn TerminalSession>,
+    pty_tx: mpsc::Sender<PtyNotification>,
+) {
+    executor.spawn(ssh_reader_task(session, pty_tx)).detach();
+}
+
+async fn ssh_reader_task(session: Arc<dyn TerminalSession>, tx: mpsc::Sender<PtyNotification>) {
+    loop {
+        let chunk = match session.read_chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
+        };
+        if tx
+            .send(PtyNotification::SshOutput { data: chunk })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    // The read loop ends when ssh closes its PTY end, which is the remote
+    // editor exiting. The code decides whether the status bar reports a
+    // failure, so it is read after the loop rather than guessed from it.
+    let exit_status = session.try_wait().await.ok().flatten();
+    let _ = tx.send(PtyNotification::SshExited { exit_status }).await;
 }
 
 /// Filesystem path of the per-session agent hook socket for `uid`, under

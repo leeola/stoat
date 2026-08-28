@@ -71,6 +71,7 @@ mod review_session;
 pub mod run;
 mod selection;
 mod smooth_scroll;
+pub mod ssh;
 pub(crate) mod symbol_finder;
 pub(crate) mod syntax_parse;
 pub mod term_screen;

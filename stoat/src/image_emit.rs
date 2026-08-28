@@ -54,6 +54,21 @@ pub(crate) struct ImageRuntime {
     next_id: u32,
 }
 
+impl ImageRuntime {
+    /// Forget every transmission and placement this session declared.
+    ///
+    /// The routine for a program whose terminal was driven by another program
+    /// in between. That program's reset dropped the pixels and the placements
+    /// alike, so every image has to be transmitted and placed again.
+    ///
+    /// In-flight reads keep going. Their pixels have not reached the terminal
+    /// yet, so they transmit against the fresh state like any first display.
+    pub(crate) fn forget(&mut self) {
+        self.sent.clear();
+        self.placed.clear();
+    }
+}
+
 /// A file being turned into a transmission on the blocking pool.
 struct PendingTransmit {
     /// The PNG bytes once ready, or `None` while the pool still has it. An

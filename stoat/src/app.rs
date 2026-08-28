@@ -38,6 +38,7 @@ use crate::{
     },
     run::{CommandMark, PtyNotification, RunId},
     selection::merge_overlapping_spans,
+    ssh,
     symbol_finder::SymbolFinder,
     term_session::{TermId, TermReturnFocus},
     theme_pool::{ThemePool, VscodeSource},
@@ -873,7 +874,7 @@ pub struct Stoat {
     /// The claim needs both a stoatty and a window socket reaching this process,
     /// which arrive independently and in either order, so this keeps whichever
     /// lands second from claiming twice and the release from going out unclaimed.
-    zoom_claimed: bool,
+    pub(crate) zoom_claimed: bool,
     /// Aux windows stoatty has been told to open, keyed by window id with the
     /// cell size last sent. [`Self::emit_windows`] diffs it against the detached
     /// panes each frame to emit the WindowOpen and WindowClose commands.
@@ -1734,6 +1735,15 @@ pub struct Stoat {
     /// [`Self::set_apc_tx`] installs it, which startup does after construction
     /// and a test need not do at all.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
+    /// The remote `:ssh` session that owns the screen, or `None` while this
+    /// process draws it. Set while the window belongs to a remote stoat, which
+    /// is what holds back every frame, scene, image, window, pool, and minimap
+    /// batch for the duration.
+    pub(crate) passthrough: Option<ssh::Passthrough>,
+    /// The app's ends of the passthrough plumbing, installed by the bin layer
+    /// after construction. `None` in a headless or embedded run, where `:ssh`
+    /// refuses because there is no terminal to hand over.
+    pub(crate) passthrough_link: Option<ssh::PassthroughLink>,
     /// Whether a stoatty answered the startup ident handshake.
     ///
     /// False until [`Self::handle_stoatty_present`] hears otherwise, and that
@@ -2265,6 +2275,8 @@ impl Stoat {
             version_info: "unknown",
             next_aux_window: 1,
             apc_tx: None,
+            passthrough: None,
+            passthrough_link: None,
             stoatty: false,
             stoatty_protocol: 0,
             walkthrough_runs_opened: 0,
@@ -2424,6 +2436,16 @@ impl Stoat {
         self.apc_tx = Some(apc_tx);
     }
 
+    /// Install the app's ends of the `:ssh` passthrough plumbing.
+    ///
+    /// The bin layer creates the slot and the control channel before spawning
+    /// the UI thread, which needs the other ends, and hands these over once the
+    /// app exists. Left uncalled, `:ssh` refuses for want of a terminal to give
+    /// away.
+    pub fn set_passthrough_link(&mut self, link: ssh::PassthroughLink) {
+        self.passthrough_link = Some(link);
+    }
+
     /// Listen for the UI thread's report of the startup ident handshake.
     ///
     /// The bin layer creates the channel before spawning that thread and hands
@@ -2485,7 +2507,7 @@ impl Stoat {
     /// leaves the alternate screen, which covers a clean exit and a crash
     /// alike, and does so without needing to hear from a process that may no
     /// longer exist.
-    fn sync_zoom_claim(&mut self) {
+    pub(crate) fn sync_zoom_claim(&mut self) {
         let claim = self.stoatty;
         if claim == self.zoom_claimed {
             return;
@@ -3211,6 +3233,12 @@ impl Stoat {
                     self.perf.record_update(started.elapsed());
                     effect
                 }
+                // The spawn waits for the input thread to confirm it stopped
+                // parsing fd 0, so a fast remote's ident never reaches
+                // crossterm and arrives as garbage keys.
+                Some(()) = ssh::ack_recv(&mut self.passthrough_link) => {
+                    ssh::spawn_armed(self)
+                }
                 notif = self.pty_rx.recv() => {
                     let Some(notif) = notif else { continue };
                     self.handle_pty_notification(notif)
@@ -3273,6 +3301,13 @@ impl Stoat {
             match effect {
                 UpdateEffect::Redraw => {
                     self.drive_background();
+                    // A remote session owns the screen, so nothing this process
+                    // draws may reach it. Background work still advanced above,
+                    // which is what keeps saves and language servers alive
+                    // under a long ssh run.
+                    if self.passthrough.is_some() {
+                        continue;
+                    }
                     // A `:wq` deferred behind a format-on-save write sets
                     // `quit_requested` from the pump inside `drive_background`
                     // once the write lands, so quit on the frame it completes.
@@ -4020,6 +4055,16 @@ impl Stoat {
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
+        // A remote session owns the keyboard. These were already parsed out of
+        // the byte stream before the switch, so they are the tail of what the
+        // user typed at this editor and belong to nobody now. A resize still
+        // lands, or this side lays out against a stale grid on return.
+        if self.passthrough.is_some()
+            && matches!(event, Event::Key(_) | Event::Mouse(_) | Event::Paste(_))
+        {
+            return UpdateEffect::None;
+        }
+
         debounce::drain_fs_watch_events(self);
         self.drain_external();
 
@@ -7020,6 +7065,8 @@ impl Stoat {
                 }
                 UpdateEffect::None
             },
+            PtyNotification::SshOutput { data } => ssh::forward_output(self, data),
+            PtyNotification::SshExited { exit_status } => ssh::finish(self, exit_status),
             PtyNotification::TermExited { term_id } => {
                 let pane_ids = ws
                     .panes
@@ -19989,6 +20036,177 @@ mod tests {
             actions,
             [Action::Transmit, Action::Delete, Action::Put],
             "the pixels go out once, then the placement is cleared and set",
+        );
+    }
+
+    /// Install a passthrough link on `stoat` and hand back the two ends a test
+    /// inspects: the slot the input thread reads, and the control lane the UI
+    /// thread drains.
+    fn install_passthrough(
+        stoat: &mut Stoat,
+    ) -> (Arc<ssh::PassthroughSlot>, UnboundedReceiver<ssh::UiControl>) {
+        let (slot, ack_rx) = ssh::PassthroughSlot::new();
+        let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        stoat.set_passthrough_link(ssh::PassthroughLink {
+            slot: slot.clone(),
+            ui_tx,
+            ack_rx,
+        });
+        (slot, ui_rx)
+    }
+
+    fn pool_region(pool: u32) -> PoolRegionCommand {
+        PoolRegionCommand {
+            pool,
+            top: 0,
+            left: 0,
+            width: 40,
+            height: 10,
+            window: 0,
+        }
+    }
+
+    /// A `:ssh` hands the terminal to a remote stoat, so everything this
+    /// session declared has to be retired first and the claim on the zoom combo
+    /// dropped. The remote drives the same terminal, and nothing tells it what
+    /// is already there.
+    #[test]
+    fn connect_retires_the_terminal_state_and_arms_the_slot() {
+        use stoatty_protocol::command::{Command, PoolDropCommand};
+
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = true;
+        h.stoat.zoom_claimed = true;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        let (slot, _ui_rx) = install_passthrough(&mut h.stoat);
+
+        let mut declared = Vec::new();
+        stoat_widgets::pool::emit_into(
+            &mut declared,
+            &mut h.stoat.smooth_scroll,
+            pool_region(7),
+            0.0,
+            0,
+            false,
+            |_| Vec::new(),
+        );
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(
+            ssh::connect(&mut h.stoat, "somewhere", &[]),
+            UpdateEffect::None,
+        );
+
+        let sent = crate::test_fixture::drain_apc(&mut rx);
+        assert!(
+            sent.contains(&Command::PoolDrop(PoolDropCommand { pool: 7 })),
+            "the declared pool is retired: {sent:?}",
+        );
+        assert!(sent.contains(&Command::Reset), "and the scene is reset");
+        assert!(
+            sent.iter()
+                .any(|cmd| matches!(cmd, Command::ZoomCapture { on: false, .. })),
+            "and the zoom claim is released",
+        );
+        assert!(
+            matches!(h.stoat.passthrough, Some(ssh::Passthrough::Pending { .. })),
+            "the session is armed and waiting for the input thread's ack",
+        );
+        assert!(
+            matches!(slot.state(), ssh::SlotState::Pending),
+            "and the input thread is told to stop parsing fd 0",
+        );
+    }
+
+    /// A detached pane lives in an aux window the remote knows nothing about,
+    /// so the handoff refuses rather than stranding it.
+    #[test]
+    fn connect_refuses_while_a_pane_is_detached() {
+        let mut h = Stoat::test();
+        install_passthrough(&mut h.stoat);
+        h.stoat.aux_windows.insert(1, (80, 24));
+
+        assert_eq!(
+            ssh::connect(&mut h.stoat, "somewhere", &[]),
+            UpdateEffect::Redraw,
+        );
+        assert!(h.stoat.passthrough.is_none(), "nothing was handed over");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("reattach detached panes before :ssh"),
+        );
+    }
+
+    /// The whole run, from the ack the spawn waits for to the exit report.
+    #[test]
+    fn a_remote_session_spawns_pipes_its_output_and_reports_its_exit() {
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.stoat.terminal_host = host.clone();
+        h.allow_host_swap();
+        let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
+        h.stoat.settings.ssh_program = Some("/opt/stoat".to_owned());
+
+        ssh::connect(&mut h.stoat, "box", &["~/proj".to_owned()]);
+        assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::None);
+
+        let spawns = host.spawns();
+        assert_eq!(spawns.len(), 1, "one ssh process");
+        assert_eq!(spawns[0].program, "ssh");
+        assert_eq!(
+            spawns[0].args,
+            vec!["-e", "none", "-t", "box", "/opt/stoat ~/proj"],
+            "the configured remote program runs under a PTY with the escape off",
+        );
+        assert_eq!(
+            (spawns[0].width, spawns[0].rows),
+            (h.stoat.size().width, h.stoat.size().height),
+            "and the remote opens at this window's size",
+        );
+        assert!(
+            matches!(slot.state(), ssh::SlotState::Active(_)),
+            "fd 0 now feeds the session",
+        );
+
+        h.stoat.handle_pty_notification(PtyNotification::SshOutput {
+            data: b"ssh: connect refused\r\n".to_vec(),
+        });
+        assert!(
+            matches!(ui_rx.try_recv(), Ok(ssh::UiControl::Raw(bytes)) if bytes == b"ssh: connect refused\r\n"),
+            "remote output reaches stdout untouched",
+        );
+
+        // A key pressed while the remote owns the keyboard was parsed out of
+        // the byte stream before the switch and belongs to nobody now.
+        assert_eq!(
+            h.stoat.update(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            ))),
+            UpdateEffect::None,
+        );
+
+        assert_eq!(
+            h.stoat.handle_pty_notification(PtyNotification::SshExited {
+                exit_status: Some(255)
+            }),
+            UpdateEffect::Redraw,
+        );
+        assert!(h.stoat.passthrough.is_none(), "the session is over");
+        assert!(
+            matches!(slot.state(), ssh::SlotState::Idle),
+            "and fd 0 feeds the editor again",
+        );
+        assert!(
+            matches!(ui_rx.try_recv(), Ok(ssh::UiControl::Resume)),
+            "the UI thread is told to take the screen back",
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("ssh exited (255): ssh: connect refused"),
+            "and the error the remote printed inside the alternate screen survives",
         );
     }
 }
