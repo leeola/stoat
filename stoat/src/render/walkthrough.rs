@@ -58,8 +58,11 @@ const ALPHA_DIMMED: u8 = 110;
 /// rather than as another annotation.
 const LINK_WIDTH: u16 = 48;
 
-/// Corner rounding of a label box, in sixteenths of a cell.
-const LABEL_RADIUS: u8 = 4;
+/// Where a sketched box stops rounding further, in sixteenths of a cell.
+///
+/// The reference caps at 32 pixels, which is about three and a half cells wide
+/// at a typical terminal font size.
+const CORNER_RADIUS_CAP: u16 = 56;
 
 /// How long a retiring slide takes to un-draw itself.
 ///
@@ -438,7 +441,7 @@ impl Painter<'_> {
                         w: box_.width * 16,
                         h: box_.height * 16,
                     },
-                    radius: LABEL_RADIUS,
+                    radius: sketch_corner_radius(box_.width, box_.height),
                     fill: stroke.fill.map(|color| SketchFill {
                         color,
                         alpha: 255,
@@ -478,6 +481,25 @@ impl Painter<'_> {
             );
         }
     }
+}
+
+/// How far a sketched box rounds its corners, in sixteenths of a cell.
+///
+/// A quarter of the box's shorter side, capped at [`CORNER_RADIUS_CAP`], which
+/// is what the reference does in pixels. A fixed rounding reads machine-square
+/// beside a hand-drawn stroke, and the larger the box the more it does.
+///
+/// Stoat states bounds in cells and never sees the pixel size, so the shorter
+/// side is found under the typical two-to-one cell aspect. A cell is twice as
+/// tall as it is wide, so a height in cells counts double against a width.
+///
+/// A focus or annotation mark passes no radius through here. Such a mark hugs
+/// its text with a four-sixteenth pad, so rounding pulls the stroke across the
+/// first and last characters it circles.
+pub(crate) fn sketch_corner_radius(width_cells: u16, height_cells: u16) -> u8 {
+    let shorter = width_cells.min(height_cells.saturating_mul(2));
+    let radius = shorter.saturating_mul(4).min(CORNER_RADIUS_CAP);
+    radius as u8
 }
 
 /// The stroke a mark draws with, at the weight and opacity its emphasis says.
@@ -685,7 +707,7 @@ fn line_ends(
 
 #[cfg(test)]
 mod tests {
-    use super::EXIT_MS;
+    use super::{sketch_corner_radius, EXIT_MS};
     use crate::{
         action_handlers::walkthrough::open,
         app::Stoat,
@@ -700,6 +722,24 @@ mod tests {
     use stoatty_protocol::command::{self, Command, SketchCommand, SketchPhase, SketchShape};
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
+
+    /// A rounding that does not grow with the box reads machine-square beside
+    /// the hand-drawn stroke around it, so it tracks the shorter side.
+    #[test]
+    fn a_sketched_box_rounds_by_its_shorter_side() {
+        assert_eq!(
+            sketch_corner_radius(20, 3),
+            24,
+            "a wide label rounds by its height, which counts double",
+        );
+        assert_eq!(
+            sketch_corner_radius(3, 20),
+            12,
+            "a tall one rounds by its width",
+        );
+        assert_eq!(sketch_corner_radius(40, 10), 56, "a large card caps");
+        assert_eq!(sketch_corner_radius(1, 1), 4, "a single cell barely rounds");
+    }
 
     fn range_of(line: u32, cols: (u32, u32)) -> Range {
         Range {

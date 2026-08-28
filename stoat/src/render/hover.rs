@@ -1,4 +1,4 @@
-use super::TEXT_SCALE_POPUP;
+use super::{walkthrough::sketch_corner_radius, TEXT_SCALE_POPUP};
 use crate::{app::Stoat, editor_state::EditorId, pane::View};
 use ratatui::{
     buffer::Buffer,
@@ -150,9 +150,6 @@ impl HoverPopup {
 /// declared edge sits under the pen rather than inside it.
 const SKETCH_CARD_INSET: u16 = 1;
 
-/// Corner rounding of the card's box, in sixteenths of a cell.
-const SKETCH_CARD_RADIUS: u8 = 4;
-
 /// Emit the card's hand-drawn box and return the interior its body draws in.
 ///
 /// The fill is opaque. A card is read against whatever it floats over, and a
@@ -180,7 +177,7 @@ fn sketch_frame(
             w: area.width * 16,
             h: area.height * 16,
         },
-        radius: SKETCH_CARD_RADIUS,
+        radius: sketch_corner_radius(area.width, area.height),
         fill: Some(SketchFill {
             color: fill,
             alpha: 255,
