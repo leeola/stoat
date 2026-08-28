@@ -115,6 +115,36 @@ fn every_stroke_names_its_own_span_of_the_shared_points() {
     assert_eq!(next as usize, points.len(), "the spans cover every point");
 }
 
+/// A stroke's quad covers its own points, not the whole mark.
+///
+/// A quad the size of the mark has every fragment inside it run the distance
+/// field of every stroke the mark carries, which for a card is sixteen deep
+/// where one or two are near enough to paint.
+#[test]
+fn a_strokes_quad_covers_only_its_own_points() {
+    let list = [sketch(
+        1,
+        SketchShape::Rect {
+            // 32 by 64 pixels at the test metrics, so the two horizontal edges
+            // sit well apart.
+            bounds: boxed(0, 0, 64, 64),
+            radius: 0,
+            fill: None,
+        },
+    )];
+    // The instance carries what the vertex stage sizes the quad from, so the
+    // claim is checked there rather than on the geometry behind it.
+    let built = instances(&list, &[1.0]);
+
+    // `rect` strokes each side twice, in order, so the top edge opens the run
+    // and the bottom edge is the third side.
+    let (top, bottom) = (built[0].bounds, built[4].bounds);
+    assert!(
+        top[3] < bottom[1],
+        "the top edge's quad stops short of the bottom edge's, {top:?} against {bottom:?}",
+    );
+}
+
 /// A fill's four corners share the arena with the strokes, so the shader reads
 /// both through one binding.
 #[test]
@@ -153,6 +183,7 @@ fn the_reveal_lands_on_the_segment_holding_its_distance() {
         // an arc-length search from an index one.
         prefix: vec![0.0, 70.0, 80.0, 90.0, 100.0],
         total: 100.0,
+        bounds: [0.0; 4],
     };
 
     assert_eq!(reveal_at(&stroke, 0.0), (0, 0.0), "nothing at the start");
@@ -319,8 +350,13 @@ fn a_connector_ends_outside_the_component_it_names() {
     );
 
     let target = shape_bounds(&list[0].command.shape, metrics()).expect("an ellipse has bounds");
+    let leftmost = geometry[1]
+        .strokes
+        .iter()
+        .map(|stroke| stroke.bounds[0])
+        .fold(f32::MAX, f32::min);
     assert!(
-        geometry[1].bounds[0] >= target[2],
+        leftmost >= target[2],
         "the connector starts clear of the mark's right edge at {}",
         target[2],
     );

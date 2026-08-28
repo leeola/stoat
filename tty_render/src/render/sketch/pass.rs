@@ -97,6 +97,12 @@ struct StrokeSpan {
     /// recomputed because a reveal binary-searches it every frame.
     prefix: Vec<f32>,
     total: f32,
+    /// This stroke's own pixel box, which the vertex stage sizes its quad from.
+    ///
+    /// Per stroke rather than per mark, so a fragment runs the distance field
+    /// of the one or two strokes whose ink is near it instead of every stroke
+    /// the mark carries.
+    bounds: [f32; 4],
 }
 
 /// One sketch's generated geometry, as the frame reads it.
@@ -105,8 +111,6 @@ struct MarkGeometry {
     /// The four corners of a filled box, already in the point buffer, and the
     /// span they occupy.
     fill: Option<(u32, [f32; 4])>,
-    /// The mark's own pixel bounds, which the vertex stage sizes its quad from.
-    bounds: [f32; 4],
 }
 
 /// The instanced hand-drawn mark pipeline and its per-frame buffers.
@@ -510,7 +514,7 @@ fn build_instances(
                     continue;
                 }
                 push(SketchInstance {
-                    bounds: mark.bounds,
+                    bounds: stroke.bounds,
                     color: rgba(style.color, style.alpha, 1.0),
                     half_width,
                     reveal_t,
@@ -573,20 +577,17 @@ fn generate_marks(
                 count: stroke.points.len() as u32,
                 total: stroke.lengths.last().copied().unwrap_or(0.0),
                 prefix: stroke.lengths.clone(),
+                bounds: points_bounds(&stroke.points),
             });
         }
 
         let fill = generated.fill.map(|corners| {
             let at = points.len() as u32;
             points.extend_from_slice(&corners);
-            (at, bounds_of(&corners))
+            (at, points_bounds(&corners))
         });
 
-        out.push(MarkGeometry {
-            bounds: geometry_bounds(&generated),
-            strokes,
-            fill,
-        });
+        out.push(MarkGeometry { strokes, fill });
     }
 
     points
@@ -684,10 +685,14 @@ fn smoothstep(from: f32, to: f32, at: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The pixel box every point of `geometry` falls inside.
-fn geometry_bounds(geometry: &rough::Geometry) -> [f32; 4] {
+/// The pixel box every point in `points` falls inside.
+///
+/// An empty run yields a zero box rather than the inverted one the fold starts
+/// from. An inverted box sizes a quad the rasterizer drops, which is right, but
+/// it reads as a bug wherever it surfaces.
+fn points_bounds(points: &[[f32; 2]]) -> [f32; 4] {
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for point in geometry.strokes.iter().flat_map(|stroke| &stroke.points) {
+    for point in points {
         bounds[0] = bounds[0].min(point[0]);
         bounds[1] = bounds[1].min(point[1]);
         bounds[2] = bounds[2].max(point[0]);
@@ -697,17 +702,6 @@ fn geometry_bounds(geometry: &rough::Geometry) -> [f32; 4] {
         true => bounds,
         false => [0.0; 4],
     }
-}
-
-fn bounds_of(corners: &[[f32; 2]; 4]) -> [f32; 4] {
-    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for corner in corners {
-        bounds[0] = bounds[0].min(corner[0]);
-        bounds[1] = bounds[1].min(corner[1]);
-        bounds[2] = bounds[2].max(corner[0]);
-        bounds[3] = bounds[3].max(corner[1]);
-    }
-    bounds
 }
 
 fn storage_entry(binding: u32) -> BindGroupLayoutEntry {
