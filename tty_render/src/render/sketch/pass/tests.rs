@@ -173,6 +173,78 @@ fn the_reveal_lands_on_the_segment_holding_its_distance() {
     assert!((t - 0.5).abs() < 1e-5, "and is halfway through the next");
 }
 
+/// How far the pen has come through each stroke at `progress`, in declaration
+/// order.
+///
+/// An entry is `None` before the pen reaches that stroke, `Some(false)` while
+/// it draws, and `Some(true)` once the stroke is whole.
+fn stroke_progress(sketches: &[Sketch], progress: f32) -> Vec<Option<bool>> {
+    let (_, geometry) = marks(sketches);
+    let built = instances(sketches, &[progress]);
+    geometry[0]
+        .strokes
+        .iter()
+        .map(|stroke| {
+            built
+                .iter()
+                .find(|instance| {
+                    instance.kind == KIND_STROKE && instance.point_offset == stroke.point_offset
+                })
+                .map(|instance| instance.reveal_count == stroke.count)
+        })
+        .collect()
+}
+
+/// The pen walks the mark's units in order, so a box draws around its perimeter
+/// rather than growing all four sides at once.
+#[test]
+fn a_boxs_sides_draw_one_after_another() {
+    let list = [sketch(
+        1,
+        SketchShape::Rect {
+            // Two cells wide and two tall, so the four sides are the same
+            // length and a quarter of the reveal covers each.
+            bounds: boxed(0, 0, 64, 32),
+            radius: 0,
+            fill: None,
+        },
+    )];
+    let (_, geometry) = marks(&list);
+    assert_eq!(
+        geometry[0].strokes.len(),
+        8,
+        "four sides, each a base stroke and its overlay",
+    );
+
+    assert_eq!(
+        stroke_progress(&list, 0.3),
+        [
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        ],
+        "the first side is whole, the second is under way, and the rest wait",
+    );
+}
+
+/// A base stroke and its overlay are one unit, so the doubling never draws its
+/// second pass after the first. A single-pair mark keeps the look it had.
+#[test]
+fn an_ellipses_two_strokes_advance_together() {
+    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+
+    assert_eq!(
+        stroke_progress(&list, 0.5),
+        [Some(false), Some(false)],
+        "both passes are partway through at the halfway point",
+    );
+}
+
 /// A stroke the reveal has not reached contributes no instance, rather than an
 /// empty one the GPU still rasterizes.
 #[test]

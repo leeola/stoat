@@ -432,6 +432,11 @@ impl SketchPass {
 /// behind it does not. A stroke the reveal has not reached contributes no
 /// instance at all, rather than an empty one the GPU still rasterizes.
 ///
+/// The reveal walks the mark's units in declaration order rather than advancing
+/// every stroke at once. A mark whose strokes all grow together materializes;
+/// one whose units follow each other reads as being drawn. See [`unit_length`]
+/// for what a unit is.
+///
 /// `riding` collects the slots of marks anchored to a pool compositing this
 /// frame, so [`SketchPass::draw`] skips them and [`SketchPass::draw_riding`]
 /// picks them up after that pool's composite.
@@ -484,25 +489,51 @@ fn build_instances(
 
         let style = &sketch.command.style;
         let half_width = rough::stroke_width(style, metrics) / 2.0;
-        for stroke in &mark.strokes {
-            let (reveal_count, reveal_t) = reveal_at(stroke, revealed);
-            if reveal_count < 2 && reveal_t <= 0.0 {
-                continue;
+        // The pen walks the mark one unit at a time, so a box draws around its
+        // perimeter and an arrowhead follows its shaft.
+        let target = revealed * mark.strokes.chunks(2).map(unit_length).sum::<f32>();
+        let mut unit_start = 0.0;
+
+        for unit in mark.strokes.chunks(2) {
+            let unit_len = unit_length(unit);
+            // A unit with no length is already whole, which is also what draws
+            // a degenerate mark rather than leaving it blank forever.
+            let local = match unit_len > 0.0 {
+                true => ((target - unit_start) / unit_len).clamp(0.0, 1.0),
+                false => 1.0,
+            };
+            unit_start += unit_len;
+
+            for stroke in unit {
+                let (reveal_count, reveal_t) = reveal_at(stroke, local);
+                if reveal_count < 2 && reveal_t <= 0.0 {
+                    continue;
+                }
+                push(SketchInstance {
+                    bounds: mark.bounds,
+                    color: rgba(style.color, style.alpha, 1.0),
+                    half_width,
+                    reveal_t,
+                    dy,
+                    _pad: 0.0,
+                    point_offset: stroke.point_offset,
+                    seq: sketch.seq,
+                    reveal_count,
+                    kind: KIND_STROKE,
+                });
             }
-            push(SketchInstance {
-                bounds: mark.bounds,
-                color: rgba(style.color, style.alpha, 1.0),
-                half_width,
-                reveal_t,
-                dy,
-                _pad: 0.0,
-                point_offset: stroke.point_offset,
-                seq: sketch.seq,
-                reveal_count,
-                kind: KIND_STROKE,
-            });
         }
     }
+}
+
+/// How far the pen travels through one unit of a mark.
+///
+/// A unit is a base stroke and the overlay that doubles it, which
+/// [`rough::Geometry::strokes`] holds adjacent. The two run the same path at
+/// slightly different wobbles, so the longer of them is the distance the unit
+/// takes and both reach their ends together.
+fn unit_length(unit: &[StrokeSpan]) -> f32 {
+    unit.iter().map(|stroke| stroke.total).fold(0.0, f32::max)
 }
 
 /// A protocol color and alpha as the straight float the shader blends with,
