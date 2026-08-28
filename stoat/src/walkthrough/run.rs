@@ -171,6 +171,47 @@ impl WalkthroughRun {
         self.annotation_idx = (next > 0).then(|| (next - 1) as usize);
         next != at
     }
+
+    /// Move `delta` places along the tour read as one sequence, clamped at both
+    /// ends.
+    ///
+    /// That sequence runs a stop's focus, then each of its annotations, then
+    /// the next stop's focus. It is the finest unit the tour has, which is what
+    /// a reader walking it point by point wants under one gesture.
+    ///
+    /// Returns whether it moved.
+    pub(crate) fn step_linear(&mut self, delta: i32) -> bool {
+        let mut moved = false;
+        for _ in 0..delta.unsigned_abs() {
+            moved |= match delta > 0 {
+                true => self.forward_one(),
+                false => self.backward_one(),
+            };
+        }
+        moved
+    }
+
+    /// The annotation after this one, or the next stop's focus past the last.
+    fn forward_one(&mut self) -> bool {
+        self.step_annotation(1) || self.step(1)
+    }
+
+    /// The exact inverse of [`Self::forward_one`].
+    ///
+    /// A step back off a focus lands on the previous stop's *last* annotation,
+    /// since that is the point a forward step came from. A landing on its focus
+    /// instead skips every annotation on the way back.
+    fn backward_one(&mut self) -> bool {
+        if self.annotation_idx.is_some() {
+            return self.step_annotation(-1);
+        }
+        if !self.step(-1) {
+            return false;
+        }
+
+        self.annotation_idx = self.current_stop().annotations.len().checked_sub(1);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +245,27 @@ mod tests {
         WalkthroughRun::new(walkthrough, 0)
     }
 
+    fn annotate(run: &mut WalkthroughRun, stop: &str, label: &str) {
+        run.walkthrough
+            .add_annotation(
+                stop,
+                None,
+                Range {
+                    start: Point { line: 1, col: 1 },
+                    end: Point { line: 1, col: 1 },
+                },
+                "x".to_owned(),
+                label.to_owned(),
+                String::new(),
+            )
+            .expect("the stop exists");
+    }
+
+    /// Where a walk has reached, as the stop and which annotation of how many.
+    fn position(run: &WalkthroughRun) -> (String, Option<(usize, usize)>) {
+        (run.current_stop().id.clone(), run.annotation_progress())
+    }
+
     #[test]
     fn an_empty_walkthrough_has_no_run() {
         assert!(run(0).is_none(), "there is no stop to start on");
@@ -232,19 +294,7 @@ mod tests {
     fn annotation_stepping_starts_and_ends_on_the_focus() {
         let mut run = run(1).expect("one stop");
         for label in ["one", "two"] {
-            run.walkthrough
-                .add_annotation(
-                    "s1",
-                    None,
-                    Range {
-                        start: Point { line: 1, col: 1 },
-                        end: Point { line: 1, col: 1 },
-                    },
-                    "x".to_owned(),
-                    label.to_owned(),
-                    String::new(),
-                )
-                .expect("s1 exists");
+            annotate(&mut run, "s1", label);
         }
 
         assert_eq!(run.annotation_progress(), None, "the focus comes first");
@@ -279,19 +329,7 @@ mod tests {
     #[test]
     fn a_stop_step_returns_to_the_new_stops_focus() {
         let mut run = run(2).expect("two stops");
-        run.walkthrough
-            .add_annotation(
-                "s1",
-                None,
-                Range {
-                    start: Point { line: 1, col: 1 },
-                    end: Point { line: 1, col: 1 },
-                },
-                "x".to_owned(),
-                "l".to_owned(),
-                String::new(),
-            )
-            .expect("s1 exists");
+        annotate(&mut run, "s1", "l");
         run.step_annotation(1);
 
         assert!(run.step(1));
@@ -300,6 +338,68 @@ mod tests {
             None,
             "the annotations belonged to the stop just left",
         );
+    }
+
+    /// The tour reads as one sequence of attention points, so a walk forward
+    /// and straight back retraces exactly the points it visited.
+    #[test]
+    fn a_linear_walk_visits_every_point_and_retraces_it() {
+        let mut run = run(3).expect("three stops");
+        for label in ["one", "two"] {
+            annotate(&mut run, "s2", label);
+        }
+
+        let mut forward = vec![position(&run)];
+        while run.step_linear(1) {
+            forward.push(position(&run));
+        }
+        assert_eq!(
+            forward,
+            [
+                ("s1".to_owned(), None),
+                ("s2".to_owned(), None),
+                ("s2".to_owned(), Some((1, 2))),
+                ("s2".to_owned(), Some((2, 2))),
+                ("s3".to_owned(), None),
+            ],
+            "each stop's focus heads its own annotations",
+        );
+
+        let mut backward = vec![position(&run)];
+        while run.step_linear(-1) {
+            backward.push(position(&run));
+        }
+        forward.reverse();
+        assert_eq!(backward, forward, "backward exactly inverts forward");
+    }
+
+    #[test]
+    fn a_linear_walk_clamps_at_both_ends() {
+        let mut run = run(2).expect("two stops");
+        annotate(&mut run, "s1", "l");
+
+        assert!(
+            run.step_linear(9),
+            "a clamped walk that still moves has moved"
+        );
+        assert_eq!(position(&run), ("s2".to_owned(), None));
+        assert!(!run.step_linear(1), "there is nothing past the last point");
+
+        assert!(run.step_linear(-9));
+        assert_eq!(position(&run), ("s1".to_owned(), None));
+        assert!(!run.step_linear(-1), "there is nothing before the first");
+    }
+
+    /// With nothing between two focuses, the linear walk is the stop walk.
+    #[test]
+    fn a_linear_walk_over_an_unannotated_tour_steps_stops() {
+        let mut run = run(3).expect("three stops");
+
+        assert!(run.step_linear(1));
+        assert_eq!(position(&run), ("s2".to_owned(), None));
+
+        assert!(run.step_linear(-1));
+        assert_eq!(position(&run), ("s1".to_owned(), None));
     }
 
     /// The badge is what says a tour is open at all, so it names which one and

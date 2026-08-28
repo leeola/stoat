@@ -438,6 +438,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | WalkthroughPrev
         | WalkthroughNextAnnotation
         | WalkthroughPrevAnnotation
+        | WalkthroughForward
+        | WalkthroughBackward
         | WalkthroughShowNarration
         | WalkthroughDone => ctx.walkthrough_open,
 

@@ -98,6 +98,34 @@ define_action!(
 );
 
 define_action!(
+    WalkthroughForwardDef,
+    WalkthroughForward,
+    "WalkthroughForward",
+    ActionKind::WalkthroughForward,
+    "go to the next point of the walkthrough",
+    "Move forward one attention point of the walkthrough, read as one \
+     sequence: the stop's focus, then each of its annotations, then the next \
+     stop's focus. The stop and annotation walks keep their own coarser and \
+     in-stop steps.",
+    ActionPriority::Normal,
+    command_name = "walkthrough-forward"
+);
+
+define_action!(
+    WalkthroughBackwardDef,
+    WalkthroughBackward,
+    "WalkthroughBackward",
+    ActionKind::WalkthroughBackward,
+    "go to the previous point of the walkthrough",
+    "Move back one attention point of the walkthrough, exactly inverting the \
+     forward walk. A step back off a stop's focus lands on the previous \
+     stop's last annotation, so walking forward and back again retraces the \
+     same points.",
+    ActionPriority::Normal,
+    command_name = "walkthrough-backward"
+);
+
+define_action!(
     WalkthroughShowNarrationDef,
     WalkthroughShowNarration,
     "WalkthroughShowNarration",

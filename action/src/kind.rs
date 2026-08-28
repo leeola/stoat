@@ -367,6 +367,8 @@ action_kinds! {
     WalkthroughPrev,
     WalkthroughNextAnnotation,
     WalkthroughPrevAnnotation,
+    WalkthroughForward,
+    WalkthroughBackward,
     WalkthroughShowNarration,
     WalkthroughDone,
     Hover,

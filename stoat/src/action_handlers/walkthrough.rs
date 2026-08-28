@@ -82,6 +82,16 @@ pub(crate) fn prev_annotation(stoat: &mut Stoat) -> UpdateEffect {
     step_annotation(stoat, -1)
 }
 
+/// Step forward one attention point of the tour, read as one sequence.
+pub(crate) fn forward(stoat: &mut Stoat) -> UpdateEffect {
+    step_linear(stoat, 1)
+}
+
+/// Step back one attention point of the tour, exactly inverting [`forward`].
+pub(crate) fn backward(stoat: &mut Stoat) -> UpdateEffect {
+    step_linear(stoat, -1)
+}
+
 /// Take the narration card down, or raise it again.
 ///
 /// The card is pinned, so it stays through everything but a deliberate
@@ -235,6 +245,43 @@ fn step_annotation(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     // flicker. A step into another file leaves marks that no longer describe
     // what is on screen.
     if to.path != from.path {
+        retire_slide(stoat);
+    }
+    let note = install_step_trail(stoat, &from, &to);
+
+    match run_of(stoat).current_annotation().is_some() {
+        true => jump_to_annotation(stoat, note),
+        false => jump_to_stop(stoat, note),
+    }
+}
+
+/// Move `delta` attention points along the whole tour, lay the trail between
+/// the two, and jump to where that lands.
+///
+/// The tour reads as one sequence here rather than as a stop walk with an
+/// in-stop walk beside it, which is what lets one gesture carry a reader
+/// through every point of it in order.
+fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() else {
+        stoat.set_status("no walkthrough is playing");
+        return UpdateEffect::Redraw;
+    };
+    let from = current_anchor(run);
+    let from_stop = run.current_stop().id.clone();
+
+    if !run.step_linear(delta) {
+        let end = if delta < 0 { "start" } else { "end" };
+        stoat.set_status(format!("already at the {end} of the tour"));
+        refresh_narration(stoat);
+        return UpdateEffect::Redraw;
+    }
+
+    let to = current_anchor(run_of(stoat));
+    // A point on the same stop and the same file leaves the same marks on the
+    // same code, so nothing retires: un-drawing them to draw them again reads
+    // as a flicker. A new stop, or another file, leaves marks that no longer
+    // describe what is on screen.
+    if run_of(stoat).current_stop().id != from_stop || to.path != from.path {
         retire_slide(stoat);
     }
     let note = install_step_trail(stoat, &from, &to);
@@ -638,8 +685,8 @@ fn drifted(stoat: &mut Stoat, range: walkthrough::Range, captured: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        done, next, next_annotation, open, prev, prev_annotation, show_narration_again,
-        CARD_MAX_WIDTH, CARD_MIN_WIDTH,
+        backward, done, forward, next, next_annotation, open, prev, prev_annotation,
+        show_narration_again, CARD_MAX_WIDTH, CARD_MIN_WIDTH,
     };
     use crate::{
         action_handlers,
@@ -1174,6 +1221,65 @@ mod tests {
             popup_lines(&stoat),
             ["the callee - 1/2", "Where the call lands."],
             "and asking once more brings the annotation's own card back",
+        );
+    }
+
+    /// One gesture reads the tour as a single sequence, so it carries the
+    /// reader off a focus, through the stop's annotations, and on to the next.
+    #[test]
+    fn the_linear_walk_runs_a_focus_its_annotations_then_the_next_stop() {
+        let mut stoat = stoat_with_tour(FIRST);
+        index_the_tour(&mut stoat, true);
+        open(&mut stoat, "tour");
+
+        backward(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("already at the start of the tour"),
+        );
+
+        forward(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("a1 1/2: the callee (trail: 2 stops)"),
+            "the first point past a focus is the stop's first annotation",
+        );
+
+        forward(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("a2 2/2: the neighbor"),
+        );
+
+        forward(&mut stoat);
+        assert_eq!(cursor(&mut stoat), ("/repo/b.rs".to_owned(), 0));
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("2/2: second"),
+            "past the last annotation the walk reaches the next stop's focus",
+        );
+
+        forward(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("already at the end of the tour"),
+        );
+    }
+
+    /// Backward inverts forward exactly, so a reader who overshoots gets the
+    /// point they came from rather than the top of the stop they left.
+    #[test]
+    fn the_linear_walk_back_lands_on_the_previous_stops_last_annotation() {
+        let mut stoat = stoat_with_tour(FIRST);
+        index_the_tour(&mut stoat, true);
+        open(&mut stoat, "tour");
+        next(&mut stoat);
+
+        backward(&mut stoat);
+        assert_eq!(cursor(&mut stoat), ("/repo/a.rs".to_owned(), 0));
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("a2 2/2: the neighbor"),
         );
     }
 

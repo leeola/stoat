@@ -116,8 +116,9 @@ use crate::{
         tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
         walkthrough::{
-            WalkthroughDone, WalkthroughNext, WalkthroughNextAnnotation, WalkthroughOpen,
-            WalkthroughPrev, WalkthroughPrevAnnotation, WalkthroughShowNarration,
+            WalkthroughBackward, WalkthroughDone, WalkthroughForward, WalkthroughNext,
+            WalkthroughNextAnnotation, WalkthroughOpen, WalkthroughPrev, WalkthroughPrevAnnotation,
+            WalkthroughShowNarration,
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -667,6 +668,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(WalkthroughPrevAnnotation::DEF, |_| {
         Ok(Box::new(WalkthroughPrevAnnotation))
     });
+    add(WalkthroughForward::DEF, |_| {
+        Ok(Box::new(WalkthroughForward))
+    });
+    add(WalkthroughBackward::DEF, |_| {
+        Ok(Box::new(WalkthroughBackward))
+    });
     add(WalkthroughShowNarration::DEF, |_| {
         Ok(Box::new(WalkthroughShowNarration))
     });
@@ -1140,6 +1147,8 @@ mod tests {
         "WalkthroughPrev",
         "WalkthroughNextAnnotation",
         "WalkthroughPrevAnnotation",
+        "WalkthroughForward",
+        "WalkthroughBackward",
         "WalkthroughShowNarration",
         "WalkthroughDone",
         "Hover",
@@ -1720,6 +1729,7 @@ mod tests {
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
         // + 7 WalkthroughOpen/Next/Prev/NextAnnotation/PrevAnnotation/ShowNarration/Done.
+        // + 2 WalkthroughForward, WalkthroughBackward.
         // + 2 .
         // + 1 .
         // + 2 .
@@ -1789,7 +1799,7 @@ mod tests {
         // + 4 the long-word extends.
         // + 1 PickerDelete.
         // + 1 PinMode.
-        assert_eq!(all().count(), 416);
+        assert_eq!(all().count(), 418);
     }
 
     #[test]

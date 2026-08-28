@@ -978,6 +978,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::WalkthroughPrev => walkthrough::prev(stoat),
         ActionKind::WalkthroughNextAnnotation => walkthrough::next_annotation(stoat),
         ActionKind::WalkthroughPrevAnnotation => walkthrough::prev_annotation(stoat),
+        ActionKind::WalkthroughForward => walkthrough::forward(stoat),
+        ActionKind::WalkthroughBackward => walkthrough::backward(stoat),
         ActionKind::WalkthroughShowNarration => walkthrough::show_narration_again(stoat),
         ActionKind::WalkthroughDone => walkthrough::done(stoat),
         ActionKind::Hover => crate::lsp::hover::hover(stoat),
