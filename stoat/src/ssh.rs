@@ -1,10 +1,13 @@
-//! Hands the whole window to a plain `stoat` on a remote host over ssh.
+//! Hands the whole window to a plain `stoat` on a remote host, over ssh or
+//! over mosh.
 //!
 //! One session is on screen at a time. While the remote runs, the local stoat
-//! is a byte pipe. The input thread reads fd 0 raw and writes it to the ssh
-//! PTY, and the PTY's output reaches stdout untouched. The remote stoat
-//! therefore handshakes with the local stoatty directly, since its `hello`
-//! reaches stoatty and the ident reply rides fd 0 back through the pipe.
+//! is a byte pipe. The input thread reads fd 0 raw and writes it to the remote
+//! PTY, and the PTY's output reaches stdout untouched. Under ssh the remote
+//! stoat therefore handshakes with the local stoatty directly, since its
+//! `hello` reaches stoatty and the ident reply rides fd 0 back through the
+//! pipe. Under mosh it does not: mosh-server's emulator drops APC, so the
+//! remote runs plain and its handshake resolves on the DSR probe.
 //!
 //! Nothing tells the remote what this terminal already holds, so the local
 //! emitters forget their terminal-side tracking before the handoff and rebuild
@@ -30,6 +33,17 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 /// tears down, so the text is gone by the time anyone reads the status bar.
 /// This much of the tail always covers the last line.
 const TAIL_BYTES: usize = 4096;
+
+/// Which program carries the remote session.
+///
+/// The two differ in how the remote command is spelled and in how the escape
+/// key is disabled, not in how the window is handed over. One passthrough
+/// therefore serves both, and this is the only thing it branches on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Transport {
+    Ssh,
+    Mosh,
+}
 
 /// What the app tells the UI thread to do while a remote session owns the
 /// screen.
@@ -73,6 +87,7 @@ pub(crate) enum Passthrough {
     /// The terminal is torn down and the slot armed, waiting for the input
     /// thread to confirm it stopped parsing fd 0.
     Pending {
+        transport: Transport,
         host: String,
         program: String,
         args: Vec<String>,
@@ -80,7 +95,10 @@ pub(crate) enum Passthrough {
     /// The remote owns the screen. The session itself lives in the slot and in
     /// the reader task, which is what keeps the PTY open, so only the output
     /// tail belongs here.
-    Active { tail: VecDeque<u8> },
+    Active {
+        transport: Transport,
+        tail: VecDeque<u8>,
+    },
 }
 
 impl PassthroughSlot {
@@ -126,7 +144,26 @@ impl PassthroughSlot {
     }
 }
 
+impl Transport {
+    /// The local program, which is also the word every status message uses for
+    /// the session.
+    fn name(self) -> &'static str {
+        match self {
+            Transport::Ssh => "ssh",
+            Transport::Mosh => "mosh",
+        }
+    }
+}
+
 impl Passthrough {
+    fn transport(&self) -> Transport {
+        match self {
+            Passthrough::Pending { transport, .. } | Passthrough::Active { transport, .. } => {
+                *transport
+            },
+        }
+    }
+
     fn push_tail(&mut self, data: &[u8]) {
         let Passthrough::Active { tail, .. } = self else {
             return;
@@ -152,17 +189,25 @@ impl Passthrough {
 /// component is dropped, and both emitters forget what they last sent. The
 /// remote drives the same terminal from here, and nothing tells it what is
 /// already on screen.
-pub(crate) fn connect(stoat: &mut Stoat, host: &str, args: &[String]) -> UpdateEffect {
+pub(crate) fn connect(
+    stoat: &mut Stoat,
+    transport: Transport,
+    host: &str,
+    args: &[String],
+) -> UpdateEffect {
     if stoat.passthrough.is_some() {
-        stoat.set_status("an ssh session is already active");
+        stoat.set_status("a remote session is already active");
         return UpdateEffect::Redraw;
     }
     if stoat.passthrough_link.is_none() {
-        stoat.set_status("ssh needs the terminal UI");
+        stoat.set_status(format!("{} needs the terminal UI", transport.name()));
         return UpdateEffect::Redraw;
     }
     if stoat.active_workspace().panes.has_windowed_panes() || !stoat.aux_windows.is_empty() {
-        stoat.set_status("reattach detached panes before :ssh");
+        stoat.set_status(format!(
+            "reattach detached panes before :{}",
+            transport.name()
+        ));
         return UpdateEffect::Redraw;
     }
 
@@ -200,6 +245,7 @@ pub(crate) fn connect(stoat: &mut Stoat, host: &str, args: &[String]) -> UpdateE
         .unwrap_or("stoat")
         .to_owned();
     stoat.passthrough = Some(Passthrough::Pending {
+        transport,
         host: host.to_owned(),
         program,
         args: args.to_vec(),
@@ -223,23 +269,37 @@ pub(crate) async fn ack_recv(link: &mut Option<PassthroughLink>) -> Option<()> {
 
 /// Spawn the armed session now that fd 0 is no longer parsed as input.
 pub(crate) fn spawn_armed(stoat: &mut Stoat) -> UpdateEffect {
-    let (host, program, args) = match stoat.passthrough.take() {
+    let (transport, host, program, args) = match stoat.passthrough.take() {
         Some(Passthrough::Pending {
+            transport,
             host,
             program,
             args,
-        }) => (host, program, args),
+        }) => (transport, host, program, args),
         other => {
             stoat.passthrough = other;
             return UpdateEffect::None;
         },
     };
 
-    // `env` stays empty so the inherited TERM reaches the remote.
+    // Nothing is unset, so the inherited TERM reaches the remote. An empty
+    // MOSH_ESCAPE_KEY disables mosh's Ctrl-^ the way `-e none` disables ssh's
+    // `~`, and the remote editor must see both bytes.
     let spawn_args = SpawnArgs {
-        program: "ssh".to_owned(),
-        args: ssh_argv(&host, &program, &args),
-        env: Vec::new(),
+        program: transport.name().to_owned(),
+        args: match transport {
+            Transport::Ssh => ssh_argv(&host, &program, &args),
+            Transport::Mosh => mosh_argv(
+                &host,
+                &program,
+                &args,
+                stoat.settings.mosh_server.as_deref(),
+            ),
+        },
+        env: match transport {
+            Transport::Ssh => Vec::new(),
+            Transport::Mosh => vec![("MOSH_ESCAPE_KEY".to_owned(), String::new())],
+        },
         env_remove: Vec::new(),
         cwd: stoat.active_workspace().git_root.clone(),
         width: stoat.size.width,
@@ -252,17 +312,18 @@ pub(crate) fn spawn_armed(stoat: &mut Stoat) -> UpdateEffect {
     let session = match spawned {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
-            stoat.set_status(format!("ssh failed to start: {err}"));
+            stoat.set_status(format!("{} failed to start: {err}", transport.name()));
             return abandon(stoat);
         },
         None => {
-            stoat.set_status("ssh failed to start");
+            stoat.set_status(format!("{} failed to start", transport.name()));
             return abandon(stoat);
         },
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
     stoat.passthrough = Some(Passthrough::Active {
+        transport,
         tail: VecDeque::new(),
     });
     if let Some(link) = &stoat.passthrough_link {
@@ -312,9 +373,10 @@ pub(crate) fn finish(stoat: &mut Stoat, exit_status: Option<i32>) -> UpdateEffec
             Some(code) => code.to_string(),
             None => "no status".to_owned(),
         };
+        let name = ended.as_ref().map_or("remote", |p| p.transport().name());
         let message = match ended.as_ref().and_then(Passthrough::last_line) {
-            Some(line) => format!("ssh exited ({code}): {line}"),
-            None => format!("ssh exited ({code})"),
+            Some(line) => format!("{name} exited ({code}): {line}"),
+            None => format!("{name} exited ({code})"),
         };
         stoat.set_status(message);
     }
@@ -340,6 +402,33 @@ pub(crate) fn ssh_argv(host: &str, program: &str, args: &[String]) -> Vec<String
         host.to_owned(),
         remote,
     ]
+}
+
+/// The argument list for the local `mosh` process.
+///
+/// `--server` names the remote `mosh-server` binary, which mosh starts through
+/// a login shell whose PATH often misses it. `--` comes before the host because
+/// the `mosh` script parses its options with permute on. Without it, a remote
+/// argument that starts with `-` reads as a mosh option.
+///
+/// The program and its arguments stay separate and unquoted. The script
+/// single-quotes every server argument itself and mosh-server execs the program
+/// directly, so a `~` reaches the remote literally and never resolves.
+pub(crate) fn mosh_argv(
+    host: &str,
+    program: &str,
+    args: &[String],
+    server: Option<&str>,
+) -> Vec<String> {
+    let mut argv = Vec::with_capacity(args.len() + 4);
+    if let Some(server) = server {
+        argv.push(format!("--server={server}"));
+    }
+    argv.push("--".to_owned());
+    argv.push(host.to_owned());
+    argv.push(program.to_owned());
+    argv.extend(args.iter().cloned());
+    argv
 }
 
 /// Quote `arg` for the remote login shell, leaving it bare when it needs no
@@ -377,13 +466,38 @@ fn last_line_of(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_line_of, shell_quote, ssh_argv};
+    use super::{last_line_of, mosh_argv, shell_quote, ssh_argv};
 
     #[test]
     fn ssh_argv_joins_the_remote_command_and_quotes_only_what_needs_it() {
         assert_eq!(
             ssh_argv("foo", "stoat", &["~/proj".to_owned(), "a b".to_owned()]),
             vec!["-e", "none", "-t", "foo", "stoat ~/proj 'a b'"],
+        );
+    }
+
+    #[test]
+    fn mosh_argv_keeps_the_remote_command_in_separate_unquoted_entries() {
+        assert_eq!(
+            mosh_argv(
+                "box",
+                "/opt/stoat",
+                &["~/proj".to_owned(), "a b".to_owned()],
+                Some("/opt/mosh-server"),
+            ),
+            vec![
+                "--server=/opt/mosh-server",
+                "--",
+                "box",
+                "/opt/stoat",
+                "~/proj",
+                "a b",
+            ],
+        );
+        assert_eq!(
+            mosh_argv("box", "stoat", &[], None),
+            vec!["--", "box", "stoat"],
+            "an unset server leaves mosh its own lookup",
         );
     }
 

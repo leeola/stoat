@@ -156,6 +156,45 @@ impl Action for Ssh {
     }
 }
 
+const MOSH_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "host",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "Host to open a remote stoat on over mosh. Anything after the host is passed to the remote program as its arguments.",
+}];
+
+define_action_def!(
+    MoshDef,
+    "Mosh",
+    ActionKind::Mosh,
+    "open a remote stoat over mosh",
+    "Hand the window to a stoat on the named host over mosh until it exits. The remote runs as a plain terminal, since mosh drops the stoatty protocol. The host is anything mosh accepts, and ports and users come from ~/.ssh/config.",
+    ActionPriority::Common,
+    aliases = &["mosh"],
+    params = MOSH_PARAMS
+);
+
+#[derive(Debug)]
+pub struct Mosh {
+    pub host: String,
+    pub args: Vec<String>,
+}
+
+impl Mosh {
+    pub const DEF: &MoshDef = &MoshDef;
+}
+
+impl Action for Mosh {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 define_action!(
     ShowCwdDef,
     ShowCwd,

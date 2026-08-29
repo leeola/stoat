@@ -426,6 +426,7 @@ action_kinds! {
     RenameWorkspace,
     SetCwd,
     Ssh,
+    Mosh,
     ShowCwd,
     ReloadEnv,
     SubmitPromptInput,

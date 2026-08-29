@@ -171,8 +171,9 @@ pub struct Settings {
     /// Arguments passed to the terminal pane's subshell. `None` spawns with no
     /// arguments. Set via `terminal.args = ["-l"];` in stcfg.
     pub terminal_args: Option<Vec<String>>,
-    /// Editor binary that `:ssh` runs on the remote host. `None` falls back to
-    /// a bare `stoat`. Set via `ssh.program = "/path/to/stoat";` in stcfg.
+    /// Editor binary that `:ssh` and `:mosh` run on the remote host. `None`
+    /// falls back to a bare `stoat`. Set via
+    /// `ssh.program = "/path/to/stoat";` in stcfg.
     ///
     /// sshd runs the command through a non-interactive login shell, whose PATH
     /// misses most profile-managed directories, so an absolute path is the

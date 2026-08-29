@@ -1735,14 +1735,14 @@ pub struct Stoat {
     /// [`Self::set_apc_tx`] installs it, which startup does after construction
     /// and a test need not do at all.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
-    /// The remote `:ssh` session that owns the screen, or `None` while this
-    /// process draws it. Set while the window belongs to a remote stoat, which
-    /// is what holds back every frame, scene, image, window, pool, and minimap
-    /// batch for the duration.
+    /// The remote `:ssh` or `:mosh` session that owns the screen, or `None`
+    /// while this process draws it. Set while the window belongs to a remote
+    /// stoat, which is what holds back every frame, scene, image, window, pool,
+    /// and minimap batch for the duration.
     pub(crate) passthrough: Option<ssh::Passthrough>,
     /// The app's ends of the passthrough plumbing, installed by the bin layer
     /// after construction. `None` in a headless or embedded run, where `:ssh`
-    /// refuses because there is no terminal to hand over.
+    /// and `:mosh` refuse because there is no terminal to hand over.
     pub(crate) passthrough_link: Option<ssh::PassthroughLink>,
     /// Whether a stoatty answered the startup ident handshake.
     ///
@@ -2436,12 +2436,12 @@ impl Stoat {
         self.apc_tx = Some(apc_tx);
     }
 
-    /// Install the app's ends of the `:ssh` passthrough plumbing.
+    /// Install the app's ends of the `:ssh` and `:mosh` passthrough plumbing.
     ///
     /// The bin layer creates the slot and the control channel before spawning
     /// the UI thread, which needs the other ends, and hands these over once the
-    /// app exists. Left uncalled, `:ssh` refuses for want of a terminal to give
-    /// away.
+    /// app exists. Left uncalled, both commands refuse for want of a terminal
+    /// to give away.
     pub fn set_passthrough_link(&mut self, link: ssh::PassthroughLink) {
         self.passthrough_link = Some(link);
     }
@@ -20094,7 +20094,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
 
         assert_eq!(
-            ssh::connect(&mut h.stoat, "somewhere", &[]),
+            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, "somewhere", &[]),
             UpdateEffect::None,
         );
 
@@ -20128,7 +20128,7 @@ mod tests {
         h.stoat.aux_windows.insert(1, (80, 24));
 
         assert_eq!(
-            ssh::connect(&mut h.stoat, "somewhere", &[]),
+            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, "somewhere", &[]),
             UpdateEffect::Redraw,
         );
         assert!(h.stoat.passthrough.is_none(), "nothing was handed over");
@@ -20149,7 +20149,12 @@ mod tests {
         let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
         h.stoat.settings.ssh_program = Some("/opt/stoat".to_owned());
 
-        ssh::connect(&mut h.stoat, "box", &["~/proj".to_owned()]);
+        ssh::connect(
+            &mut h.stoat,
+            ssh::Transport::Ssh,
+            "box",
+            &["~/proj".to_owned()],
+        );
         assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::None);
 
         let spawns = host.spawns();
@@ -20207,6 +20212,61 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("ssh exited (255): ssh: connect refused"),
             "and the error the remote printed inside the alternate screen survives",
+        );
+    }
+
+    /// mosh takes the remote command as separate argv entries and disables its
+    /// escape key through the environment, so the same handoff spawns a
+    /// differently shaped process.
+    #[test]
+    fn a_mosh_session_spawns_with_the_server_flag_and_the_escape_key_off() {
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.stoat.terminal_host = host.clone();
+        h.allow_host_swap();
+        install_passthrough(&mut h.stoat);
+        h.stoat.settings.ssh_program = Some("/opt/stoat".to_owned());
+        h.stoat.settings.mosh_server = Some("/opt/mosh-server".to_owned());
+
+        ssh::connect(
+            &mut h.stoat,
+            ssh::Transport::Mosh,
+            "box",
+            &["~/proj".to_owned()],
+        );
+        assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::None);
+
+        let spawns = host.spawns();
+        assert_eq!(spawns.len(), 1, "one mosh process");
+        assert_eq!(spawns[0].program, "mosh");
+        assert_eq!(
+            spawns[0].args,
+            vec![
+                "--server=/opt/mosh-server",
+                "--",
+                "box",
+                "/opt/stoat",
+                "~/proj"
+            ],
+            "the remote command stays in separate unquoted entries",
+        );
+        assert_eq!(
+            spawns[0].env,
+            vec![("MOSH_ESCAPE_KEY".to_owned(), String::new())],
+            "and Ctrl-^ reaches the remote instead of ending the session",
+        );
+
+        h.stoat.handle_pty_notification(PtyNotification::SshOutput {
+            data: b"Did not find mosh server startup message.\r\n".to_vec(),
+        });
+        h.stoat.handle_pty_notification(PtyNotification::SshExited {
+            exit_status: Some(1),
+        });
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("mosh exited (1): Did not find mosh server startup message."),
+            "and the exit report names mosh",
         );
     }
 }

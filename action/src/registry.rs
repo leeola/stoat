@@ -121,7 +121,7 @@ use crate::{
             WalkthroughShowNarration,
         },
         workspace::{
-            CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
+            CloseWorkspace, CopyWorkspace, Mosh, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
             ShowCwd, Ssh, SwitchWorkspace,
         },
     },
@@ -1037,23 +1037,13 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: raw.to_owned(),
         }))
     });
-    // The remainder after the host is the remote program's arguments, so the
-    // whole tail arrives as one string and splits here.
     add(Ssh::DEF, |params| {
-        let raw = params
-            .first()
-            .context(MissingSnafu { name: "host" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "host",
-                expected: ParamKind::String,
-            })?;
-        let mut words = raw.split_whitespace().map(str::to_owned);
-        let host = words.next().context(MissingSnafu { name: "host" })?;
-        Ok(Box::new(Ssh {
-            host,
-            args: words.collect(),
-        }))
+        let (host, args) = remote_target(params)?;
+        Ok(Box::new(Ssh { host, args }))
+    });
+    add(Mosh::DEF, |params| {
+        let (host, args) = remote_target(params)?;
+        Ok(Box::new(Mosh { host, args }))
     });
     add(ShowCwd::DEF, |_| Ok(Box::new(ShowCwd)));
     add(ReloadEnv::DEF, |_| Ok(Box::new(ReloadEnv)));
@@ -1069,6 +1059,25 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
 
     map
+}
+
+/// Split a remote-session command's one parameter into a host and the remote
+/// program's arguments.
+///
+/// The remainder after the host is the remote program's arguments, so the whole
+/// tail arrives as one string and splits here.
+fn remote_target(params: &[ParamValue]) -> Result<(String, Vec<String>), ParamError> {
+    let raw = params
+        .first()
+        .context(MissingSnafu { name: "host" })?
+        .as_string()
+        .context(WrongKindSnafu {
+            name: "host",
+            expected: ParamKind::String,
+        })?;
+    let mut words = raw.split_whitespace().map(str::to_owned);
+    let host = words.next().context(MissingSnafu { name: "host" })?;
+    Ok((host, words.collect()))
 }
 
 pub fn lookup(name: &str) -> Option<&'static RegistryEntry> {
@@ -1382,6 +1391,7 @@ mod tests {
             ("b", "OpenBuffer"),
             ("cd", "SetCwd"),
             ("ssh", "Ssh"),
+            ("mosh", "Mosh"),
         ] {
             assert_eq!(
                 lookup_alias(token).map(|e| e.def.name()),
@@ -1819,7 +1829,8 @@ mod tests {
         // + 1 PickerDelete.
         // + 1 PinMode.
         // + 1 Ssh.
-        assert_eq!(all().count(), 419);
+        // + 1 Mosh.
+        assert_eq!(all().count(), 420);
     }
 
     #[test]

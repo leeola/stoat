@@ -269,7 +269,8 @@ on init {
     # Arguments passed to the terminal pane's subshell.
     # terminal.args = ["-l"];
 
-    # Editor binary `:ssh` runs on the remote host. Defaults to a bare `stoat`.
+    # Editor binary `:ssh` and `:mosh` run on the remote host. Defaults to a
+    # bare `stoat`.
     # sshd runs it through a non-interactive login shell, whose PATH misses most
     # profile-managed dirs, so an absolute path is the usual value.
     # ssh.program = "/home/me/.nix-profile/bin/stoat";
