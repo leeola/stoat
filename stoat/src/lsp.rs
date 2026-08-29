@@ -56,7 +56,7 @@ impl LspSymbolKind {
 /// clone its request builder does.
 pub(crate) fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
     let editor = action_handlers::focused_editor_mut(stoat)?;
-    Some(editor.display_map.snapshot().buffer_snapshot().version())
+    Some(editor.display_map.buffer_snapshot().version())
 }
 
 /// The label for the highest-priority explicit LSP request in flight, or

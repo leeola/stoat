@@ -41,8 +41,7 @@ pub(crate) type DocumentHighlightResponse = (BufferId, Vec<(std::ops::Range<usiz
 /// the rope, so the trigger can bail before host resolution.
 fn document_highlight_key(stoat: &mut Stoat) -> Option<(BufferId, u64, usize)> {
     let editor = action_handlers::focused_editor_mut(stoat)?;
-    let snapshot = editor.display_map.snapshot();
-    let buf_snap = snapshot.buffer_snapshot();
+    let buf_snap = editor.display_map.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
     let tail_off = buf_snap.resolve_anchor(&sel.tail());
     let head_off = buf_snap.resolve_anchor(&sel.head());
@@ -120,8 +119,7 @@ fn build_document_highlight_request(
 ) -> Option<(BufferId, u64, usize, Rope, DocumentHighlightParams)> {
     let (buffer_id, version, offset, rope) = {
         let editor = action_handlers::focused_editor_mut(stoat)?;
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
+        let buf_snap = editor.display_map.buffer_snapshot();
         let sel = editor.selections.newest_anchor();
         let tail_off = buf_snap.resolve_anchor(&sel.tail());
         let head_off = buf_snap.resolve_anchor(&sel.head());
@@ -200,8 +198,7 @@ fn apply_document_highlights(
     }
 
     let (read, write) = {
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
+        let buf_snap = editor.display_map.buffer_snapshot();
         let mut read: Vec<std::ops::Range<Anchor>> = Vec::new();
         let mut write: Vec<std::ops::Range<Anchor>> = Vec::new();
         for (range, is_write) in items {
