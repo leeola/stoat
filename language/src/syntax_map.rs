@@ -95,19 +95,26 @@ pub struct LayerKey {
 /// carries no length of its own. Without it, asking how many layers a snapshot
 /// holds means walking every one of them, which is what
 /// [`SyntaxSnapshot::layer_count`] used to do on a path that runs per edit.
+///
+/// `max_end` is how far past a byte offset a subtree reaches. Layers order by
+/// `(depth, start_offset)`, so start offsets restart at every depth and a seek
+/// bounds no range query. The furthest end bounds one from below: a subtree
+/// whose layers all end before a range starts holds nothing in that range.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LayerSummary {
     pub key: LayerKey,
     pub count: usize,
+    pub max_end: u32,
 }
 
 impl ContextLessSummary for LayerSummary {
     fn add_summary(&mut self, other: &Self) {
         // The cumulative position of an ordered key is just the latest item's,
-        // which is what a seek compares against. The count is the one thing
-        // here that genuinely accumulates.
+        // which is what a seek compares against. The count and the furthest end
+        // are the two here that genuinely accumulate.
         self.key = other.key.clone();
         self.count += other.count;
+        self.max_end = self.max_end.max(other.max_end);
     }
 }
 
@@ -120,6 +127,7 @@ impl Item for SyntaxLayer {
                 start_offset: self.start_offset,
             },
             count: 1,
+            max_end: self.end_offset,
         }
     }
 }
@@ -187,8 +195,18 @@ impl SyntaxSnapshot {
         let mut cursor = QueryCursorHandle::new();
         cursor.set_byte_range(byte_range.clone());
 
-        for layer in self.layers.iter() {
-            // Skip layers that don't intersect the requested range.
+        // A file of rust doc comments carries a markdown layer per block and an
+        // inline layer per inline node, so the tree runs to thousands. The
+        // filter descends past a subtree whose layers all end before the range
+        // starts, which is most of them for the narrow covers a recapture asks.
+        let reaching = self
+            .layers
+            .filter::<_, ()>((), |s| s.max_end as usize > byte_range.start);
+
+        for layer in reaching {
+            // The summary bounds a subtree from below only. The range's own end
+            // is still the layer's to answer, since start offsets restart at
+            // every depth and so no summary orders them.
             if (layer.end_offset as usize) <= byte_range.start
                 || (layer.start_offset as usize) >= byte_range.end
             {
@@ -3154,6 +3172,42 @@ mod tests {
             (host.start_offset as usize) < second_block
                 && (host.end_offset as usize) > second_block,
             "one layer must span both blocks, which is what makes it combined, got {host:?}"
+        );
+    }
+
+    /// The range filter reaches a layer that a later sibling's extent hides.
+    ///
+    /// The root layer spans the file and sorts ahead of every injection, so
+    /// the subtree holding it also holds shorter layers that end long before
+    /// it does. Only the largest end in a subtree bounds what that subtree
+    /// reaches. Taking the last layer's end instead skips the root for a range
+    /// past the doc comments, and the fixture needs more layers than one
+    /// sum-tree leaf holds to put the two in one subtree at all.
+    #[test]
+    fn a_range_filter_reaches_a_layer_a_later_sibling_ends_before() {
+        let lang = rust_lang();
+        let mut source = String::new();
+        for i in 0..16 {
+            source.push_str(&format!(
+                "/// doc **bold{i}**\nfn f{i}() {{ let _ = {i}; }}\n\n"
+            ));
+        }
+        let rope = Rope::from(source.as_str());
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
+        let snapshot = map.snapshot();
+        assert!(
+            snapshot.layer_count() > 12,
+            "the fixture must outgrow one sum-tree leaf, got {} layers",
+            snapshot.layer_count(),
+        );
+
+        let tail = source.rfind("fn f15").expect("fixture")..source.len();
+        let captures = snapshot.captures(tail, &rope, |l| Some(&l.highlight_query));
+        assert!(
+            captures.iter().any(|c| c.depth == 0),
+            "the root layer must answer a range that starts past every \
+             injected layer's end",
         );
     }
 }
