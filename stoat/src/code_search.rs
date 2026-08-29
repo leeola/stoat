@@ -99,10 +99,22 @@ pub struct CodeSearchFinder {
     /// again leaves it empty rather than publishing the part of the tree it
     /// reached, which would silently shrink every later query.
     ///
+    /// Seeded from [`crate::app::Stoat::finder_path_cache`] when that holds
+    /// this root's tree, and published back into it once a walk completes, so
+    /// the file finder and this modal walk the tree once between them.
+    ///
     /// A file created or deleted while the modal is open stays invisible to
-    /// every query after the first. The cache dies with the finder, so
-    /// reopening the modal sees the tree again.
-    pub(crate) walked: Arc<OnceLock<Vec<PathBuf>>>,
+    /// every query after the first, since this is written once. Reopening the
+    /// modal reads the cache again, which the watch events keep current.
+    pub(crate) walked: Arc<OnceLock<Arc<Vec<PathBuf>>>>,
+    /// The [`crate::app::Stoat::finder_path_epoch`] this modal opened under,
+    /// which stamps the cache a completed walk publishes.
+    ///
+    /// Read at open rather than when a walk starts, because a walk starts at or
+    /// after that moment. An event arriving during one leaves the stamp behind
+    /// the epoch, and the next finder open walks rather than trusting a list
+    /// the event already moved past.
+    pub(crate) walk_epoch: u64,
 }
 
 impl CodeSearchFinder {
@@ -110,6 +122,8 @@ impl CodeSearchFinder {
         ws: &mut Workspace,
         executor: Executor,
         target_lang: Option<Arc<Language>>,
+        walked: Option<Arc<Vec<PathBuf>>>,
+        walk_epoch: u64,
     ) -> Self {
         let input = InputView::create(
             ws,
@@ -134,7 +148,11 @@ impl CodeSearchFinder {
             parse_cache: Arc::new(std::array::from_fn(|_| {
                 Mutex::new(ast::AstParseCache::new(ast::PARSE_CACHE_SHARD_CAP))
             })),
-            walked: Arc::new(OnceLock::new()),
+            walked: Arc::new(match walked {
+                Some(paths) => OnceLock::from(paths),
+                None => OnceLock::new(),
+            }),
+            walk_epoch,
         }
     }
 

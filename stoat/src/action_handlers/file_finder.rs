@@ -3,7 +3,7 @@ use crate::{
     file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent},
     picker::{PathPicker, Scan},
 };
-use std::{collections::HashSet, mem, ops::ControlFlow, path::PathBuf};
+use std::{collections::HashSet, mem, ops::ControlFlow, path::PathBuf, sync::Arc};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -181,7 +181,9 @@ pub(super) fn open_file_finder(
         None => stoat
             .finder_path_cache
             .take_if(|cache| cache.root == git_root && cache.epoch == stoat.finder_path_epoch)
-            .map(|cache| cache.paths)
+            // A code-search modal reading the same list leaves a second
+            // reference behind, and the picker owns what it filters.
+            .map(|cache| Arc::try_unwrap(cache.paths).unwrap_or_else(|held| (*held).clone()))
             .unwrap_or_default(),
     };
     let walk_epoch = stoat.finder_path_epoch;
@@ -570,7 +572,7 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
     if finder.core.picklist.display_roots.is_none() {
         stoat.finder_path_cache = Some(FinderPathCache {
             root: mem::take(&mut finder.core.git_root),
-            paths: mem::take(&mut finder.core.all_paths),
+            paths: Arc::new(mem::take(&mut finder.core.all_paths)),
             epoch: finder.walk_epoch,
         });
     }

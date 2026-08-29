@@ -6,6 +6,7 @@ use crate::{
         SearchMode, MATCH_CAP,
     },
     debounce,
+    file_finder::FinderPathCache,
     input_history::InputHistory,
     pane::View,
     picker::PreviewSource,
@@ -39,8 +40,20 @@ pub(crate) fn open_code_search(stoat: &mut Stoat) -> UpdateEffect {
     }
     let target_lang = focused_buffer_language(stoat);
     let executor = stoat.executor.clone();
+
+    // The file finder walks the same tree for the same reason, and the walk is
+    // the fixed cost on a repository of many small files. Reading its list
+    // costs a refcount and skips the walk entirely.
+    let walk_epoch = stoat.finder_path_epoch;
+    let git_root = stoat.active_workspace().git_root.clone();
+    let walked = stoat
+        .finder_path_cache
+        .as_ref()
+        .filter(|cache| cache.root == git_root && cache.epoch == walk_epoch)
+        .map(|cache| Arc::clone(&cache.paths));
+
     let ws = stoat.active_workspace_mut();
-    let finder = CodeSearchFinder::new(ws, executor, target_lang);
+    let finder = CodeSearchFinder::new(ws, executor, target_lang, walked, walk_epoch);
     stoat.code_search = Some(finder);
     UpdateEffect::Redraw
 }
@@ -314,9 +327,9 @@ impl WalkRecorder {
     ///
     /// Losing the race to another scan is not an error. Both walked the same
     /// tree, so either answer serves.
-    fn publish(self, cache: &OnceLock<Vec<PathBuf>>) {
+    fn publish(self, cache: &OnceLock<Arc<Vec<PathBuf>>>) {
         if let Some(paths) = self.paths {
-            let _ = cache.set(paths);
+            let _ = cache.set(Arc::new(paths));
         }
     }
 }
@@ -553,6 +566,8 @@ pub(crate) fn spawn_code_search(
 /// Reaching the cap drops the pending scan, which cancels the walk. Returns
 /// whether a batch was drained.
 pub(crate) fn pump_code_search(stoat: &mut Stoat) -> bool {
+    publish_walk_to_finder_cache(stoat);
+
     let Some(mut pending) = stoat.pending_code_search.take() else {
         return false;
     };
@@ -583,6 +598,35 @@ pub(crate) fn pump_code_search(stoat: &mut Stoat) -> bool {
     }
 }
 
+/// Hand a completed code-search walk to the file finder's path cache.
+///
+/// The modal walks the same tree the finder does, so a finder opening after one
+/// answers from this list rather than walking again. It stamps the list with
+/// the epoch the modal opened under, which retires it if the tree moved while
+/// the walk ran.
+///
+/// Fills an empty cache only. A cache already holding this root's paths is at
+/// least as current as the walk, because the watch events maintain it and the
+/// walk is a snapshot. A finder open takes the cache, so an open finder holds
+/// the paths and gets to be the one that hands them back on close.
+fn publish_walk_to_finder_cache(stoat: &mut Stoat) {
+    if stoat.finder_path_cache.is_some() || stoat.file_finder.is_some() {
+        return;
+    }
+    let Some(finder) = stoat.code_search.as_ref() else {
+        return;
+    };
+    let Some(paths) = finder.walked.get() else {
+        return;
+    };
+
+    stoat.finder_path_cache = Some(FinderPathCache {
+        root: stoat.active_workspace().git_root.clone(),
+        paths: Arc::clone(paths),
+        epoch: finder.walk_epoch,
+    });
+}
+
 /// A walk that breaks is unreachable through the modal, since a scan under the
 /// test scheduler runs inline while its receiver is still alive. Neither the
 /// match cap nor a re-typed query can cut one short there, so the rule that
@@ -590,7 +634,11 @@ pub(crate) fn pump_code_search(stoat: &mut Stoat) -> bool {
 #[cfg(test)]
 mod tests {
     use super::WalkRecorder;
-    use std::{ops::ControlFlow, path::PathBuf, sync::OnceLock};
+    use std::{
+        ops::ControlFlow,
+        path::PathBuf,
+        sync::{Arc, OnceLock},
+    };
 
     fn batch(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()
@@ -604,7 +652,10 @@ mod tests {
 
         let cache = OnceLock::new();
         recorder.publish(&cache);
-        assert_eq!(cache.get(), Some(&batch(&["/repo/a.rs", "/repo/b.rs"])));
+        assert_eq!(
+            cache.get().map(|held| &**held),
+            Some(&batch(&["/repo/a.rs", "/repo/b.rs"])),
+        );
     }
 
     #[test]
@@ -634,14 +685,14 @@ mod tests {
     #[test]
     fn publishing_into_a_filled_cache_leaves_it_alone() {
         let cache = OnceLock::new();
-        let _ = cache.set(batch(&["/repo/a.rs"]));
+        let _ = cache.set(Arc::new(batch(&["/repo/a.rs"])));
 
         let mut recorder = WalkRecorder::new();
         recorder.record(batch(&["/repo/b.rs"]), ControlFlow::Continue(()));
         recorder.publish(&cache);
 
         assert_eq!(
-            cache.get(),
+            cache.get().map(|held| &**held),
             Some(&batch(&["/repo/a.rs"])),
             "the first walk to finish is the one the session keeps"
         );

@@ -10,6 +10,7 @@ use std::{
     collections::{hash_map::DefaultHasher, BTreeMap},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -120,16 +121,20 @@ pub(crate) struct Browse {
     pub(crate) picker: PathPicker,
 }
 
-/// A closed finder's collected workspace file list, held for the next open.
+/// The workspace file list a walk collected, held for whatever asks next.
 ///
 /// Lives on `Stoat` rather than in the finder, since its whole point is to
-/// outlive one. See [`crate::app::Stoat::finder_path_cache`] for why it is
-/// moved rather than shared.
+/// outlive one. See [`crate::app::Stoat::finder_path_cache`].
+///
+/// The list is behind an `Arc` because the code-search modal walks the same
+/// tree and reads the same answer, so the two hand it over for a refcount
+/// rather than a copy. A finder open still takes it by value, unwrapping the
+/// `Arc` where it holds the only reference.
 pub(crate) struct FinderPathCache {
     /// The single root the paths were walked under. A finder opening on a
     /// different workspace walks its own tree rather than reading these.
     pub(crate) root: PathBuf,
-    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) paths: Arc<Vec<PathBuf>>,
     /// The [`crate::app::Stoat::finder_path_epoch`] the walk that produced
     /// `paths` began under, which is what the next open compares against.
     pub(crate) epoch: u64,
@@ -2386,5 +2391,64 @@ mod tests {
             (true, selected_before),
             "the preview scrolls down and the list selection holds"
         );
+    }
+
+    /// The code-search modal walks the same tree for the same reason, so a
+    /// finder's list answers its first scan.
+    #[test]
+    fn a_code_search_after_a_finder_close_walks_nothing() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}"), ("b.rs", "fn b() {}")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        let walked = walked_dirs(&h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.type_text("fn");
+        h.settle();
+        h.advance_clock(debounce::CODE_SEARCH_DEBOUNCE);
+        h.settle();
+
+        assert_eq!(
+            walked_dirs(&h),
+            walked,
+            "the scan read the finder's list rather than walking",
+        );
+        assert_eq!(
+            h.stoat
+                .code_search
+                .as_ref()
+                .expect("the modal is open")
+                .matches
+                .len(),
+            2,
+            "and matched in both files",
+        );
+    }
+
+    /// And the other way, so whichever opens first pays for the walk.
+    #[test]
+    fn a_finder_after_a_code_search_walk_walks_nothing() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}"), ("b.rs", "fn b() {}")]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.type_text("fn");
+        h.settle();
+        h.advance_clock(debounce::CODE_SEARCH_DEBOUNCE);
+        h.settle();
+        h.type_keys("escape");
+        h.settle();
+        let walked = walked_dirs(&h);
+
+        h.type_keys("space p");
+
+        assert_eq!(
+            walked_dirs(&h),
+            walked,
+            "the finder read the modal's walk rather than walking",
+        );
+        assert_eq!(base_paths(&h), ["a.rs", "b.rs"], "and lists every file");
     }
 }

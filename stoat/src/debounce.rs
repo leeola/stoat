@@ -262,15 +262,19 @@ fn absorb_into_finder_cache(
         .as_mut()
         .expect("checked above and not taken since");
 
+    // A code-search modal reading the same list gets its own copy here rather
+    // than the tree moving under the scan it started.
+    let paths = Arc::make_mut(&mut cache.paths);
+
     match arrived {
         // A burst names one create twice often enough, and a path listed
         // twice is a row the finder shows twice.
         Some(_) => {
-            if !cache.paths.iter().any(|held| held == path) {
-                cache.paths.push(path.to_path_buf());
+            if !paths.iter().any(|held| held == path) {
+                paths.push(path.to_path_buf());
             }
         },
-        None => cache.paths.retain(|held| held != path),
+        None => paths.retain(|held| held != path),
     }
 
     true
