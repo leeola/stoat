@@ -4253,6 +4253,12 @@ fn goto_change_across_files(
     let git_host = stoat.git_host.clone();
     let fs_host = stoat.fs_host.clone();
     let base = stoat.active_workspace().diff_base().cloned();
+    // The hop reads the tally the workspace already holds rather than walking
+    // the repository again, which is what every `n` across a file used to cost.
+    let tally = stoat
+        .active_workspace()
+        .repo_hunk_totals()
+        .map(<[_]>::to_vec);
     let redraw = stoat.redraw_notify.clone();
     let (tx, rx) = mpsc::channel();
 
@@ -4264,6 +4270,7 @@ fn goto_change_across_files(
             current_path,
             dir,
             base.as_ref(),
+            tally,
         );
         let _ = tx.send(found);
         redraw.notify_one();
@@ -4305,10 +4312,22 @@ fn same_file(fs_host: &Arc<dyn FsHost>, a: &Path, b: &Path) -> bool {
 /// Tally paths are repo-relative and hop-list paths are absolute, so they are
 /// joined onto the same workdir `changed_files` used. `git_root` stands in for
 /// a repo with no workdir, which lists no changed files anyway.
-fn files_with_hunks(repo: &dyn GitRepo, git_root: &Path) -> std::collections::HashSet<PathBuf> {
+///
+/// `stored` is the workspace's last tally, which is what this reads when it has
+/// one. A fresh tally is a walk of every diff in the repository, and a hop
+/// tolerates a beat of staleness exactly as the status bar does. `None` means
+/// no tally has landed yet, and only then is one worth running here.
+fn files_with_hunks(
+    repo: &dyn GitRepo,
+    git_root: &Path,
+    stored: Option<Vec<(PathBuf, usize)>>,
+) -> std::collections::HashSet<PathBuf> {
     let workdir = repo.workdir().unwrap_or_else(|| git_root.to_path_buf());
-    repo.hunk_tallies()
-        .per_file
+    let per_file = match stored {
+        Some(per_file) => per_file,
+        None => repo.hunk_tallies().per_file,
+    };
+    per_file
         .into_iter()
         .filter(|(_, hunks)| *hunks > 0)
         .map(|(rel, _)| workdir.join(rel))
@@ -4329,6 +4348,7 @@ fn scan_changed_file_jump(
     current_path: Option<PathBuf>,
     dir: ChangeDir,
     base: Option<&DiffBase>,
+    tally: Option<Vec<(PathBuf, usize)>>,
 ) -> ChangedFileJump {
     let Some(repo) = git_host.discover(git_root) else {
         return ChangedFileJump::NoMoreChanges;
@@ -4345,7 +4365,7 @@ fn scan_changed_file_jump(
             // A moved file lists as changed while owning no hunk, so a hop into
             // it lands on no row at all. The same holds for a mode-only change
             // and a binary delta.
-            let hunky = files_with_hunks(&*repo, git_root);
+            let hunky = files_with_hunks(&*repo, git_root, tally);
             repo.changed_files()
                 .into_iter()
                 .filter(|f| hunky.contains(&f.path))

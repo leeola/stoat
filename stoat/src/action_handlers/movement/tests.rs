@@ -566,6 +566,38 @@ fn next_change_crosses_into_a_renamed_file_that_was_also_edited() {
     );
 }
 
+/// A hop off the UI thread used to walk every diff in the repository to learn
+/// which files own a hunk. The workspace already holds that, and a hop
+/// tolerates a beat of staleness exactly as the status bar does.
+#[test]
+fn a_hop_reads_the_stored_tally_instead_of_walking_the_repo() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_review_scenario(
+        &workdir,
+        &[("a.rs", "a\nb\nc\n", "a\nX\nc\n"), ("b.rs", "d\n", "Y\n")],
+    );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    let before = h.fake_git().tally_calls(&workdir);
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        focused_buffer_path(&h.stoat),
+        workdir.join("b.rs"),
+        "the hop still lands on the next changed file",
+    );
+    assert_eq!(
+        h.fake_git().tally_calls(&workdir),
+        before,
+        "and it read the stored tally rather than buying a repo walk",
+    );
+}
+
 #[test]
 fn snapshot_count_jump_keeps_cursor_visible() {
     let mut h = TestHarness::with_size(40, 12);
