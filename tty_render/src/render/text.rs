@@ -2251,10 +2251,9 @@ impl TextPass {
         rects.clear();
 
         if !anchored.is_empty() {
-            let runs = grid.text_runs().to_vec();
             for ride in anchored {
                 let (glyph_start, rect_start) = (glyphs.len() as u32, rects.len() as u32);
-                for run in &runs {
+                for run in grid.text_runs() {
                     if run.anchor.map(|(host, _)| host) != Some(ride.host) {
                         continue;
                     }
@@ -2438,8 +2437,7 @@ impl TextPass {
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
-        let runs = grid.text_runs().to_vec();
-        for run in &runs {
+        for run in grid.text_runs() {
             if rides_a_pool(run, &self.riding_hosts) {
                 continue;
             }
