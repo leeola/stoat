@@ -18,7 +18,7 @@ use crate::{
     app::Stoat,
     diff,
     diff_cache::DiffCache,
-    host::{FsHost, GitHost},
+    host::{FsHost, GitHost, GitRepo},
     review::{extract_review_hunks_single, ReviewFileInput},
     review_session::DiffDocument,
 };
@@ -92,16 +92,19 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
     stoat.pending_diff_warm = Some(PendingDiffWarm { _task: task, done });
 }
 
-/// Spawn a single-file diff warm for `path`, recomputing its HEAD-vs-worktree
+/// Spawn one diff warm covering `paths`, recomputing their HEAD-vs-worktree
 /// hunks into the cache move-unaware.
 ///
 /// The move-unaware entry gives an instant open, and the whole-changeset
 /// Complete pass on the next review open upgrades it (see the `move_aware` flag
 /// on [`crate::diff_cache::DiffCache`]). The status bar shows a diff spinner
 /// segment until [`install_finished`] clears every warm. Called from
-/// [`crate::debounce::drain_pending_diff_warm_files`] after the per-path
-/// debounce fires.
-pub(crate) fn spawn_file_warm(stoat: &mut Stoat, path: PathBuf) {
+/// [`crate::debounce::drain_pending_diff_warm_files`] once the shared debounce
+/// window closes.
+///
+/// One job for the batch rather than one per path, so a burst opens the
+/// repository once instead of once per file.
+pub(crate) fn spawn_file_warm(stoat: &mut Stoat, paths: Vec<PathBuf>) {
     let git_root = stoat.active_workspace().git_root.clone();
     let git_host = stoat.git_host.clone();
     let fs_host = stoat.fs_host.clone();
@@ -114,12 +117,12 @@ pub(crate) fn spawn_file_warm(stoat: &mut Stoat, path: PathBuf) {
     let task = {
         let done = done.clone();
         stoat.executor.spawn_blocking(move || {
-            warm_file(
+            warm_files(
                 &*git_host,
                 &*fs_host,
                 &langs,
                 &git_root,
-                &path,
+                &paths,
                 &cache,
                 &tree_cache,
             );
@@ -196,18 +199,17 @@ fn warm(
     review::populate_diff_cache_from(cache, &doc, cancel);
 }
 
-/// Recompute one edited file's HEAD-vs-worktree hunks and write them to the
+/// Recompute the edited files' HEAD-vs-worktree hunks and write them to the
 /// cache move-unaware.
 ///
-/// Skips a file untracked in HEAD, which has nothing to diff against, and a file
-/// clean vs HEAD, which yields no hunks. Builds the same base/buffer/language
-/// the review scan reads so the cache key matches and a later open hits it.
-fn warm_file(
+/// Opens the repository once for the whole batch, which is what a burst of
+/// external edits costs on the blocking pool.
+fn warm_files(
     git: &dyn GitHost,
     fs: &dyn FsHost,
     langs: &LanguageRegistry,
     git_root: &Path,
-    path: &Path,
+    paths: &[PathBuf],
     cache: &Mutex<DiffCache>,
     tree_cache: &TreeCache,
 ) {
@@ -217,6 +219,30 @@ fn warm_file(
     let Some(workdir) = repo.workdir() else {
         return;
     };
+
+    for path in paths {
+        warm_file_in(&*repo, fs, langs, &workdir, path, cache, tree_cache);
+    }
+}
+
+/// Warm one path against an already-open repository.
+///
+/// Takes the repository and its workdir rather than a git root, so a batch pays
+/// the libgit2 open once instead of once per file.
+///
+/// Skips a file untracked in HEAD, which has nothing to diff against, and a
+/// file clean vs HEAD, which yields no hunks. Builds the same
+/// base/buffer/language the review scan reads so the cache key matches and a
+/// later open hits it.
+fn warm_file_in(
+    repo: &dyn GitRepo,
+    fs: &dyn FsHost,
+    langs: &LanguageRegistry,
+    workdir: &Path,
+    path: &Path,
+    cache: &Mutex<DiffCache>,
+    tree_cache: &TreeCache,
+) {
     let Some(base_text) = repo.head_content(path) else {
         return;
     };
@@ -228,7 +254,7 @@ fn warm_file(
 
     let language = langs.for_path(path);
     let rel_path = path
-        .strip_prefix(&workdir)
+        .strip_prefix(workdir)
         .unwrap_or(path)
         .display()
         .to_string();
@@ -321,6 +347,7 @@ mod tests {
     #[test]
     fn fs_watch_modified_warms_the_file() {
         let mut h = warm_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
         drive_fs_event(
             &mut h,
             Path::new("/repo/a.txt"),
@@ -341,6 +368,7 @@ mod tests {
     #[test]
     fn fs_watch_gitignored_path_caches_nothing() {
         let mut h = warm_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
         h.fake_git().add_repo("/repo").ignored("a.txt");
         drive_fs_event(
             &mut h,
@@ -357,6 +385,100 @@ mod tests {
                 .lookup(&key)
                 .is_none(),
             "a gitignored path is never warmed",
+        );
+    }
+
+    /// A checkout's worth of paths is not warmed a file at a time.
+    ///
+    /// Each per-file warm opens the repository and reads two versions of the
+    /// file. A large batch therefore costs more than the whole-changeset pass it
+    /// duplicates. Clearing `diff_warmed` hands the batch to that pass.
+    #[test]
+    fn a_large_batch_defers_to_the_whole_warm() {
+        let mut h = warm_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        for i in 0..200 {
+            let path = PathBuf::from(format!("/repo/f{i}.txt"));
+            h.fake_fs().insert_file(&path, "x\n");
+            h.fake_fs_watcher()
+                .inject(&path, crate::host::FsEventKind::Modified);
+        }
+        debounce::drain_fs_watch_events(&mut h.stoat);
+        h.advance_clock(debounce::FS_WATCH_DEBOUNCE);
+
+        assert!(
+            h.stoat.diff_warm_files.is_empty(),
+            "no per-file warm spawns for a batch this size",
+        );
+        assert!(
+            !h.stoat.active_workspace().diff_warmed,
+            "and the whole warm is owed instead",
+        );
+    }
+
+    /// The window runs from the first path of a burst, not the latest.
+    ///
+    /// A reset-on-each-event timer never fires while a checkout or a build
+    /// emits paths faster than the window, which is the case the warm most
+    /// needs to survive.
+    #[test]
+    fn the_window_runs_from_the_first_path_of_a_burst() {
+        let mut h = warm_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        // Two steps that clear one fixed window but never a window the second
+        // path restarts.
+        let step = debounce::FS_WATCH_DEBOUNCE.mul_f32(0.75);
+
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/a.txt"), crate::host::FsEventKind::Modified);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+        h.advance_clock(step);
+
+        let second = PathBuf::from("/repo/b.txt");
+        h.fake_fs().insert_file(&second, "x\n");
+        h.fake_fs_watcher()
+            .inject(&second, crate::host::FsEventKind::Modified);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+        h.advance_clock(step);
+
+        assert!(
+            !h.stoat.diff_warm_files.is_empty(),
+            "the window opened by the first path closes on time",
+        );
+    }
+
+    /// A burst that writes `.git` alongside working-tree files warms once.
+    ///
+    /// The `.git` write stales every base on its own. A per-file warm first
+    /// diffs those files, and the whole warm then diffs them again.
+    #[test]
+    fn a_git_write_in_the_window_cancels_the_per_file_warm() {
+        let mut h = warm_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/a.txt"), crate::host::FsEventKind::Modified);
+        h.fake_fs_watcher().inject(
+            Path::new("/repo/.git/index"),
+            crate::host::FsEventKind::Modified,
+        );
+        debounce::drain_fs_watch_events(&mut h.stoat);
+        h.advance_clock(debounce::FS_WATCH_DEBOUNCE);
+
+        assert!(
+            h.stoat.diff_warm_files.is_empty(),
+            "the shared window sees the .git write and spawns no per-file warm",
+        );
+        assert!(
+            h.stoat
+                .diff_cache()
+                .lock()
+                .expect("diff_cache")
+                .lookup(&diff_cache_key("a\n", "b\n", None))
+                .is_none(),
+            "so nothing is diffed twice",
         );
     }
 

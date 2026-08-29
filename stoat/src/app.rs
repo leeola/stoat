@@ -1361,15 +1361,23 @@ pub struct Stoat {
     /// drained by [`debounce::drain_pending_workspace_autosave`].
     pub(crate) workspace_autosave_tx: Sender<()>,
     pub(crate) workspace_autosave_rx: Receiver<()>,
-    /// Per-path debounce tasks for the incremental diff-warm of an edited file.
-    /// Re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
-    /// its timer so only the latest burst event warms.
-    pub(crate) pending_diff_warm_file:
-        std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
-    /// Channel the diff-warm debounce tasks push a path onto once their timer
-    /// fires, drained by [`debounce::drain_pending_diff_warm_files`].
-    pub(crate) diff_warm_file_tx: Sender<PathBuf>,
-    pub(crate) diff_warm_file_rx: Receiver<PathBuf>,
+    /// Edited working-tree files waiting on the shared debounce window to have
+    /// their diffs warmed.
+    ///
+    /// A set covered by one timer rather than a task per path. A checkout names
+    /// thousands of files at once and each warm is a libgit2 open plus two
+    /// reads, so what a per-path timer costs is a task and a job per file for
+    /// files nobody has open.
+    pub(crate) diff_warm_pending_paths: std::collections::HashSet<PathBuf>,
+    /// The one debounce timer covering whatever
+    /// [`Self::diff_warm_pending_paths`] holds. Armed when the set goes from
+    /// empty to occupied, so the window closes a fixed
+    /// [`debounce::FS_WATCH_DEBOUNCE`] after the burst starts.
+    pub(crate) diff_warm_file_timer: Option<stoat_scheduler::Task<()>>,
+    /// Channel the diff-warm debounce timer pushes onto once it fires, drained
+    /// by [`debounce::drain_pending_diff_warm_files`].
+    pub(crate) diff_warm_file_tx: Sender<()>,
+    pub(crate) diff_warm_file_rx: Receiver<()>,
     /// In-flight single-file diff warms. Held so their tasks are not dropped
     /// (which would cancel them) and so the status bar's diff segment stays up
     /// until every one finishes. [`crate::diff_warm::install_finished`] drops the
@@ -1383,9 +1391,9 @@ pub struct Stoat {
     /// Files changed outside the editor, waiting on the shared debounce window
     /// to be reindexed into the code graph.
     ///
-    /// A set covered by one timer rather than a task per path, unlike
-    /// [`Self::pending_diff_warm_file`]. A checkout or a formatter run names
-    /// thousands of files at once, and the burst is what this has to survive.
+    /// A set covered by one timer rather than a task per path. A checkout or a
+    /// formatter run names thousands of files at once, and the burst is what
+    /// this has to survive.
     pub(crate) index_pending_external_edits: std::collections::HashSet<PathBuf>,
     /// The one debounce timer covering whatever
     /// [`Self::index_pending_external_edits`] holds.
@@ -2234,7 +2242,8 @@ impl Stoat {
             diff_refresh_rx,
             workspace_autosave_tx,
             workspace_autosave_rx,
-            pending_diff_warm_file: std::collections::HashMap::new(),
+            diff_warm_pending_paths: std::collections::HashSet::new(),
+            diff_warm_file_timer: None,
             diff_warm_file_tx,
             diff_warm_file_rx,
             diff_warm_files: Vec::new(),
@@ -4105,7 +4114,7 @@ impl Stoat {
     /// entry point and not another silently never runs there.
     ///
     /// [`debounce::drain_fs_watch_events`] is deliberately absent. It arms the
-    /// per-path debounces rather than dispatching them, so it has nothing to
+    /// debounce windows rather than dispatching them, so it has nothing to
     /// report and belongs at the event edge.
     fn drain_external(&mut self) -> bool {
         crate::lsp::drain::drain_lsp_notifications(self);
