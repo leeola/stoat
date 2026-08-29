@@ -20213,8 +20213,17 @@ mod tests {
         assert_eq!(spawns[0].program, "ssh");
         assert_eq!(
             spawns[0].args,
-            vec!["-e", "none", "-t", "box", "/opt/stoat ~/proj"],
-            "the configured remote program runs under a PTY with the escape off",
+            vec![
+                "-e",
+                "none",
+                "-t",
+                "box",
+                &format!(
+                    "/opt/stoat --attachable {} ~/proj",
+                    h.stoat.active_workspace().uid
+                ),
+            ],
+            "the remote runs attachable under a PTY with the escape off",
         );
         assert_eq!(
             (spawns[0].width, spawns[0].rows),
@@ -20328,7 +20337,9 @@ mod tests {
                 "--",
                 "box",
                 "/opt/stoat",
-                "~/proj"
+                "--attachable",
+                &h.stoat.active_workspace().uid.to_string(),
+                "~/proj",
             ],
             "the remote command stays in separate unquoted entries",
         );

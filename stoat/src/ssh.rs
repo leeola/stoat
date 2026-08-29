@@ -12,6 +12,11 @@
 //! Nothing tells the remote what this terminal already holds, so the local
 //! emitters forget their terminal-side tracking before the handoff and rebuild
 //! it from scratch on return.
+//!
+//! The remote runs as an attachable session named after the local workspace's
+//! uid, so it outlives the link and a later handoff lands back in the same
+//! running editor. The uid is stable across local restarts, which is what makes
+//! that hold with no state kept on either side.
 
 use crate::{
     apc_emit,
@@ -402,17 +407,26 @@ pub(crate) fn spawn_armed(stoat: &mut Stoat) -> UpdateEffect {
         },
     };
 
+    // The uid names the session because it is stable across local restarts, so
+    // a reopen attaches to the remote that survived and starts a fresh one when
+    // it is gone, with nothing else to keep in step.
+    let mut remote_args = vec![
+        "--attachable".to_owned(),
+        stoat.active_workspace().uid.to_string(),
+    ];
+    remote_args.extend(args);
+
     // Nothing is unset, so the inherited TERM reaches the remote. An empty
     // MOSH_ESCAPE_KEY disables mosh's Ctrl-^ the way `-e none` disables ssh's
     // `~`, and the remote editor must see both bytes.
     let spawn_args = SpawnArgs {
         program: transport.name().to_owned(),
         args: match transport {
-            Transport::Ssh => ssh_argv(&host, &program, &args),
+            Transport::Ssh => ssh_argv(&host, &program, &remote_args),
             Transport::Mosh => mosh_argv(
                 &host,
                 &program,
-                &args,
+                &remote_args,
                 stoat.settings.mosh_server.as_deref(),
             ),
         },
