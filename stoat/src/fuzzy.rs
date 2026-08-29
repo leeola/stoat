@@ -14,7 +14,8 @@ use nucleo::{
 };
 use std::{
     cell::RefCell,
-    sync::atomic::{AtomicBool, Ordering},
+    cmp::Ordering,
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
 
 /// How many candidates one [`score_candidates`] pass scores between reads of
@@ -179,34 +180,42 @@ pub(crate) fn score_only<'a, T>(
     }))
 }
 
-/// Matches ordered best-first, indexed only as deep as `indexed`.
+/// The `indexed` best matches ordered best-first, then every other match.
 ///
 /// See [`rank_indexing_best`], which produces this.
 pub(crate) struct Ranked<'a, T> {
     pub(crate) matches: Vec<RankedMatch<'a, T>>,
-    /// How many leading matches carry `matched_indices`. Past this the field is
-    /// empty because it was never computed, which a caller deep enough to paint
-    /// those rows answers with [`indices_of_parsed`].
+    /// How many leading matches are ordered and carry `matched_indices`.
+    ///
+    /// Past this the field is empty because it was never computed, which a
+    /// caller deep enough to paint those rows answers with
+    /// [`indices_of_parsed`]. Those rows are in no particular order either:
+    /// they are the matches the block left over, and a caller wanting them
+    /// ranked sorts them itself.
     pub(crate) indexed: usize,
 }
 
-/// Scores every candidate but only indexes the `indexed` best, returning them
-/// already ordered best-first.
+/// Scores every candidate, then orders and indexes the `indexed` best of them.
 ///
 /// Deriving matched indices is the score-matrix traceback plus a vector per
 /// atom, and a list far longer than its viewport spends nearly all of that on
 /// rows nobody sees. Scoring alone decides what matches, so the traceback is
-/// held back for the rows that can lead the list.
+/// held back for the rows that lead the list.
 ///
-/// The ordering is exact down to `indexed` and approximate below it. Two of the
-/// bonuses need the indices, so rows past the block are ranked on their raw
-/// score, and one whose bonuses would have lifted it just inside the block
-/// stays just outside. The bonuses are bounded, so this only ever reshuffles
-/// rows across that boundary.
+/// Only the block is ordered. Past it the matches are in no order at all, since
+/// finding the block is a partition rather than a sort, and a list that runs to
+/// tens of thousands of matches spends the whole difference ranking rows
+/// nothing paints. A caller reading past the block sorts for itself.
 ///
-/// Ordering is otherwise [`sort_ranked`]'s. This sorts rather than leaving that
-/// to the caller because `indexed` counts positions, and a caller's own
-/// tie-break could move an unindexed row above it.
+/// The block's own ordering is exact under [`sort_ranked`], down to the bonuses
+/// two of the rankings need the indices for. The block is chosen on raw score,
+/// so a row the bonuses lift just far enough to belong in it stays outside
+/// instead. The bonuses are bounded, so this only ever reshuffles rows across
+/// that one boundary.
+///
+/// The block is ordered here rather than by the caller because `indexed` counts
+/// positions, and a caller's own tie-break moves an unindexed row above one
+/// that carries its offsets.
 ///
 /// See also:
 /// - [`match_and_rank`] for the unbounded form, which indexes every match.
@@ -242,7 +251,8 @@ pub(crate) fn score_candidates<'a, T>(
 
         let mut scored: Vec<RankedMatch<'a, T>> = Vec::new();
         for (seen, (item, haystack)) in items.into_iter().enumerate() {
-            if seen % CANCEL_STRIDE == 0 && cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+            if seen % CANCEL_STRIDE == 0
+                && cancel.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed))
             {
                 return None;
             }
@@ -275,12 +285,15 @@ pub(crate) fn rank_scored<'a, T>(
     let indexed = with_matcher(|matcher| {
         let mut hay_buf: Vec<char> = Vec::new();
 
-        // Ordering the whole set by raw score first is what makes the block a
-        // deterministic set of rows rather than whichever equal-scoring ones a
-        // partition happened to leave in front.
-        sort_ranked(&mut scored);
-
+        // The block is a set before it is an order, and a partition names that
+        // set for a linear pass. Sorting the whole list to find it costs a
+        // two-character query over a large repository some forty thousand
+        // comparisons per keystroke to order rows nothing paints.
         let indexed = indexed.min(scored.len());
+        if indexed < scored.len() {
+            scored.select_nth_unstable_by(indexed, ranked_order);
+        }
+
         let mut buffers = Scratch::default();
         for ranked in &mut scored[..indexed] {
             let hay = Utf32Str::new(ranked.haystack, &mut hay_buf);
@@ -360,11 +373,18 @@ pub(crate) fn indices_of_parsed(
 /// A list that ranks by something of its own -- the palette's command priority,
 /// the workspace picker's insertion index -- sorts for itself instead.
 pub(crate) fn sort_ranked<T>(matches: &mut [RankedMatch<'_, T>]) {
-    matches.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.haystack.cmp(b.haystack))
-    });
+    matches.sort_by(ranked_order);
+}
+
+/// Where `a` ranks against `b` under [`sort_ranked`]'s order.
+///
+/// Named so a partition and a sort share one definition of which rows lead.
+/// Falling through to the haystack makes the order total over a picker's rows,
+/// so a partition names the same set a full sort puts in front.
+fn ranked_order<T>(a: &RankedMatch<'_, T>, b: &RankedMatch<'_, T>) -> Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| a.haystack.cmp(b.haystack))
 }
 
 struct Scored {
@@ -828,5 +848,43 @@ mod tests {
             derived, stored,
             "deriving late gives what indexing early would"
         );
+    }
+
+    /// The block holds the best rows in order, and the tail holds the rest.
+    ///
+    /// A partition names the block without ordering anything else, so the
+    /// property worth pinning is two-sided. The block must be the same rows a
+    /// full sort puts in front, in the same order, and no match may go missing
+    /// into the tail the partition leaves behind it.
+    #[test]
+    fn the_block_is_the_best_rows_and_the_tail_is_the_rest() {
+        let haystacks: Vec<String> = (0..2_000).map(|i| format!("src/mod_{i}.rs")).collect();
+
+        for (query, block) in [("mod", 1), ("m r", 32), ("^src", 511), ("rs", 100)] {
+            let mut sorted = match_and_rank(query, as_rows(&haystacks)).expect("atoms");
+            sort_ranked(&mut sorted);
+            assert!(
+                sorted.len() > block,
+                "the query must match more rows than the block holds, got {}",
+                sorted.len(),
+            );
+
+            let ranked = rank_indexing_best(query, as_rows(&haystacks), block).expect("atoms");
+            assert_eq!(ranked.indexed, block, "the block is full for {query:?}");
+            assert_eq!(
+                shape(&ranked.matches[..block]),
+                shape(&sorted[..block]),
+                "the block leads with the same rows a full sort does for {query:?}",
+            );
+
+            let mut kept: Vec<usize> = ranked.matches.iter().map(|m| m.item).collect();
+            let mut all: Vec<usize> = sorted.iter().map(|m| m.item).collect();
+            kept.sort_unstable();
+            all.sort_unstable();
+            assert_eq!(
+                kept, all,
+                "and the tail keeps every other match for {query:?}",
+            );
+        }
     }
 }

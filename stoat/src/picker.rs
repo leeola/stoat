@@ -194,12 +194,17 @@ pub(crate) struct PickList {
     /// Read it through [`Self::row_indices`], which covers the rows past the
     /// end of this.
     pub(crate) match_indices: Vec<Vec<u32>>,
-    /// How many leading rows of `filtered` have their offsets in
+    /// How many leading rows of `filtered` are ranked and have their offsets in
     /// [`Self::match_indices`].
     ///
     /// Deriving offsets costs more than deciding what matched, so a list far
-    /// longer than any viewport derives them only as deep as something can
-    /// plausibly paint. Rows below derive theirs on demand.
+    /// longer than any viewport derives them only as deep as something
+    /// plausibly paints. Rows below derive theirs on demand.
+    ///
+    /// Those rows are also in no particular order. Finding this many best rows
+    /// is a partition, which leaves the rest where it happens to leave them,
+    /// and ordering tens of thousands of matches nothing paints is what that
+    /// spares. A row past here is a match, not a rank.
     pub(crate) indexed: usize,
     pub(crate) selected: usize,
     /// Rendered list height in rows, refreshed each frame by the owner's render
