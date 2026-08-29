@@ -213,6 +213,15 @@ pub struct CreaseMap {
     /// through a caller's closure and `remove` drops items, and neither names a
     /// version the carry could start from.
     last_synced_version: Option<u64>,
+    /// The greatest resolved end among the items, or `None` when there are
+    /// none.
+    ///
+    /// What [`Self::sync`] compares an edit against to decide that nothing
+    /// moved. Held rather than scanned for, because that decision runs on every
+    /// buffer version while the items change only when a server speaks, and a
+    /// path that exists to cost nothing must not walk a large file's creases to
+    /// prove it.
+    max_resolved_end: Option<usize>,
     /// How many times the tree was rebuilt from the items.
     ///
     /// A rebuild that changes nothing is indistinguishable from the tree it
@@ -237,6 +246,7 @@ impl Default for CreaseMap {
             next_id: 0,
             id_to_range: HashMap::new(),
             last_synced_version: None,
+            max_resolved_end: None,
             #[cfg(test)]
             tree_rebuilds: 0,
             #[cfg(test)]
@@ -330,6 +340,15 @@ impl CreaseMap {
         removed
     }
 
+    /// How many times the tree was rebuilt from the items.
+    ///
+    /// For a caller outside this module whose subject is what it made this map
+    /// do, rather than what the map holds afterward.
+    #[cfg(test)]
+    pub(crate) fn tree_rebuilds(&self) -> u64 {
+        self.tree_rebuilds
+    }
+
     /// Take `items` as the crease set and rebuild the tree over it.
     ///
     /// `items` must be in resolved-start order, which is what the tree is keyed
@@ -341,6 +360,7 @@ impl CreaseMap {
         }
 
         self.creases = SumTree::from_iter(items.iter().cloned(), ());
+        self.max_resolved_end = items.iter().map(|item| item.resolved_end).max();
         self.items = items;
     }
 
@@ -390,8 +410,7 @@ impl CreaseMap {
         // Nothing about where the creases sit has moved. Every edit lands at or
         // past the last crease's end, so no offset shifts and the tree already
         // holds what a rebuild would produce.
-        let last_end = self.items.iter().map(|item| item.resolved_end).max();
-        let untouched = match (edits.edits().first(), last_end) {
+        let untouched = match (edits.edits().first(), self.max_resolved_end) {
             (None, _) => true,
             (Some(first), Some(end)) => first.old.start >= end,
             (Some(_), None) => false,

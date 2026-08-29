@@ -135,6 +135,13 @@ pub struct WrapSync {
     pub since_version: u64,
 }
 
+/// One foldable region per entry, as a server named them, with the text a
+/// collapsed region shows in place of its body.
+///
+/// In anchors so the regions follow the text through the edits that arrive
+/// before the next answer does.
+pub type FoldingRanges = Vec<(Range<Anchor>, Option<String>)>;
+
 pub struct DisplayMap {
     multi_buffer: MultiBuffer,
     inlay_map: InlayMap,
@@ -148,6 +155,13 @@ pub struct DisplayMap {
     lsp_token_highlights: SemanticTokensHighlights,
     inlay_highlights: Arc<InlayHighlights>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
+    /// The ranges each buffer's installed folding creases were built from.
+    ///
+    /// Compared against a fresh response so an answer that names the same
+    /// regions installs nothing. In anchors rather than offsets, matching what
+    /// the creases hold, so an edit that moves a region without changing it
+    /// still compares equal.
+    lsp_folding_signature: HashMap<BufferId, FoldingRanges>,
     masked: bool,
     /// When false, tree-sitter syntax coloring is suppressed for this
     /// editor. [`Self::highlighted_chunks`] then withholds the semantic-
@@ -256,6 +270,7 @@ impl DisplayMap {
             lsp_token_highlights: Arc::new(HashMap::new()),
             inlay_highlights: Arc::new(BTreeMap::new()),
             lsp_folding_crease_ids: HashMap::new(),
+            lsp_folding_signature: HashMap::new(),
             masked: false,
             syntax_highlighting: true,
             clip_at_line_ends: false,
@@ -646,11 +661,16 @@ impl DisplayMap {
         self.cached_snapshot = None;
     }
 
-    pub fn set_lsp_folding_ranges(
-        &mut self,
-        buffer_id: BufferId,
-        ranges: Vec<(Range<Anchor>, Option<String>)>,
-    ) {
+    pub fn set_lsp_folding_ranges(&mut self, buffer_id: BufferId, ranges: FoldingRanges) {
+        // A server re-answers on every settled edit, and its answer for a file
+        // nobody restructured is the one already installed. Reinstalling it
+        // rebuilds the crease tree twice, hands every crease a fresh id, and
+        // bumps settings_generation, which throws away every highlight
+        // endpoint cache with it.
+        if self.lsp_folding_signature.get(&buffer_id) == Some(&ranges) {
+            return;
+        }
+
         let old_ids = self.lsp_folding_crease_ids.remove(&buffer_id);
         let had_none = old_ids.as_ref().is_none_or(Vec::is_empty) && ranges.is_empty();
         if let Some(old_ids) = old_ids {
@@ -659,6 +679,7 @@ impl DisplayMap {
         if !had_none {
             self.settings_generation += 1;
         }
+        let signature = ranges.clone();
         let creases = ranges.into_iter().map(|(range, collapsed_text)| {
             Crease::inline(
                 range,
@@ -671,6 +692,7 @@ impl DisplayMap {
         });
         let ids = self.insert_creases(creases);
         self.lsp_folding_crease_ids.insert(buffer_id, ids);
+        self.lsp_folding_signature.insert(buffer_id, signature);
     }
 
     /// Bring the installed deleted-line blocks in line with `signature`,
@@ -1796,6 +1818,57 @@ mod tests {
         let v1 = dm.snapshot().version();
         let v2 = dm.snapshot().version();
         assert_eq!(v1, v2);
+    }
+
+    /// A server re-answers the folding request on every settled edit, and for
+    /// a file whose structure nobody changed it answers the same ranges.
+    /// Installing that answer costs two crease-tree rebuilds and a
+    /// `settings_generation` bump, which invalidates every highlight endpoint
+    /// cache, so the answer has to be recognized before any of it runs.
+    #[test]
+    fn an_unchanged_folding_answer_installs_nothing() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(shared);
+        let mut dm = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+
+        let ranges = {
+            let snap = dm.multi_buffer.snapshot();
+            vec![(
+                snap.anchor_at(0, stoat_text::Bias::Right)
+                    ..snap.anchor_at(5, stoat_text::Bias::Left),
+                None,
+            )]
+        };
+        dm.set_lsp_folding_ranges(BufferId::new(0), ranges.clone());
+        dm.snapshot();
+
+        let installed = (dm.crease_map.tree_rebuilds(), dm.settings_generation);
+        dm.set_lsp_folding_ranges(BufferId::new(0), ranges);
+
+        assert_eq!(
+            (dm.crease_map.tree_rebuilds(), dm.settings_generation),
+            installed,
+            "the same ranges are already installed",
+        );
+
+        // A different answer still installs, which is what says the compare
+        // measures something.
+        let moved = {
+            let snap = dm.multi_buffer.snapshot();
+            vec![(
+                snap.anchor_at(6, stoat_text::Bias::Right)
+                    ..snap.anchor_at(11, stoat_text::Bias::Left),
+                None,
+            )]
+        };
+        dm.set_lsp_folding_ranges(BufferId::new(0), moved);
+
+        assert_ne!(
+            (dm.crease_map.tree_rebuilds(), dm.settings_generation),
+            installed,
+            "and a real change reaches the tree",
+        );
     }
 
     #[test]
