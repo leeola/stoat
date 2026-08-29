@@ -41,6 +41,11 @@ pub(crate) struct AcceptedImports {
 /// to consume on subsequent Tab presses. Plain items insert the text
 /// verbatim and collapse the cursor at the inserted end.
 pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
+    // A narrow off the loop has not landed yet on the keystroke that armed it,
+    // and the rows it installs next are the ones the reader sees when Tab
+    // arrives. Landing it here is what makes them the rows accepted.
+    crate::completion::request::settle_pending_narrow(stoat);
+
     let Some(popup) = stoat.pending_completion.take() else {
         return UpdateEffect::None;
     };

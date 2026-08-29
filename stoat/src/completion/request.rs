@@ -59,6 +59,15 @@ use stoat_text::{Point, Rope};
 /// task and restarts the timer.
 pub(crate) const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// Rows a narrow scores where it stands rather than on the blocking pool.
+///
+/// A narrow off the loop lands a pump later, so the keystroke that asked for it
+/// paints the rows it replaces once first. That is worth paying only where
+/// the scoring is what costs, and a handful of rows costs less to score than
+/// the hop costs to arrange. A server answering a short prefix runs to
+/// thousands of rows and is the case this is sized for.
+const NARROW_INLINE_MAX: usize = 256;
+
 /// Owned snapshot of [`CompletionContext`] for a spawned task. The
 /// public context borrows from the rope and prefix; this struct
 /// holds owned strings so it can outlive the trigger frame.
@@ -244,6 +253,9 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
                 ask_again(stoat, &snapshot, owned, servers);
                 return;
             },
+            // The narrow is armed and the popup keeps painting what it holds
+            // until it lands, which is what the pool costs.
+            Refine::Narrowing => return,
         }
     }
 
@@ -319,6 +331,9 @@ enum Refine {
     /// These servers stopped early last time and are asked again. Everything
     /// else stays on the open popup and is merged back when the answer lands.
     Ask { servers: Vec<String> },
+    /// The narrow was too large to score here and runs on the blocking pool.
+    /// The popup stays as it is until [`pump`] installs the result.
+    Narrowing,
 }
 
 /// What a landed completion request means for the open popup.
@@ -339,6 +354,31 @@ pub(crate) enum RequestOutcome {
         fresh: CompletionPopup,
         asked: Vec<String>,
     },
+    /// The open popup's own rows, narrowed to a longer prefix.
+    ///
+    /// Carries no items, because the popup it was computed for still holds
+    /// them. `generation` names that popup, so a narrow landing after
+    /// something else installed is dropped rather than pinning rows to a list
+    /// they were never scored against.
+    Narrow {
+        matches: Vec<(u32, u32)>,
+        prefix: String,
+        prefix_range: Range<usize>,
+        generation: u64,
+    },
+}
+
+/// A narrow armed onto the blocking pool, as the question that armed it.
+///
+/// Held beside the task because a caller that must not wait for the pool
+/// answers the question itself rather than blocking on the thread that has it.
+/// The task's own answer is then redundant.
+pub(crate) struct NarrowRequest {
+    prefix: String,
+    prefix_range: Range<usize>,
+    /// The popup the narrow reads, so an answer arriving after something else
+    /// installed is recognized as describing a list that is no longer there.
+    generation: u64,
 }
 
 /// Decide what the open popup can do for `owned`'s prefix.
@@ -377,6 +417,14 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
         };
     }
 
+    // A large narrow scores every row through nucleo, so it goes to the pool.
+    // The items are shared and the index is a pair of `u32`s per row, so what
+    // crosses is a refcount bump and a small vector.
+    if popup.matches.len() > NARROW_INLINE_MAX {
+        arm_narrow(stoat, owned);
+        return Refine::Narrowing;
+    }
+
     // Nothing is re-asked, so this call replaces the popup outright. The items
     // carry over untouched. Only which of them match, and in what order, has
     // moved.
@@ -385,18 +433,61 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
         .take()
         .expect("borrowed one just above");
 
-    let mut matches = surviving(&popup.items, &popup.matches, &[], &owned.prefix);
-    rank_scored(&popup.items, &mut matches);
-
     Refine::Done(CompletionPopup {
+        matches: narrowed(&popup.items, &popup.matches, &owned.prefix),
         items: popup.items,
-        matches,
         selected_idx: 0,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range.clone(),
         prefix: owned.prefix.clone(),
         incomplete: Vec::new(),
     })
+}
+
+/// The rows of `matches` that `prefix` still matches, ranked.
+///
+/// Pure and self-contained, which is what lets a caller run it on the blocking
+/// pool. Nothing here reads the app or awaits.
+fn narrowed(items: &[CompletionItem], matches: &[(u32, u32)], prefix: &str) -> Vec<(u32, u32)> {
+    let mut narrowed = surviving(items, matches, &[], prefix);
+    rank_scored(items, &mut narrowed);
+    narrowed
+}
+
+/// Spawn the open popup's narrow onto the blocking pool.
+///
+/// Stamped with the generation of the popup it reads, which is how [`pump`]
+/// tells whether the rows it comes back with still describe what is open.
+///
+/// Stored in the request slot like any other in-flight answer, so the next
+/// keystroke replaces it and the one it supersedes is dropped rather than
+/// installed.
+fn arm_narrow(stoat: &mut Stoat, owned: &ContextOwned) {
+    let Some(popup) = &stoat.pending_completion else {
+        return;
+    };
+    let items = popup.items.clone();
+    let matches = popup.matches.clone();
+    let generation = stoat.completion_generation;
+    let prefix = owned.prefix.clone();
+    let prefix_range = owned.prefix_range.clone();
+
+    let task = stoat.executor.spawn_blocking({
+        let prefix = prefix.clone();
+        let prefix_range = prefix_range.clone();
+        move || RequestOutcome::Narrow {
+            matches: narrowed(&items, &matches, &prefix),
+            prefix,
+            prefix_range,
+            generation,
+        }
+    });
+    stoat.pending_completion_request = Some(task);
+    stoat.pending_narrow = Some(NarrowRequest {
+        prefix,
+        prefix_range,
+        generation,
+    });
 }
 
 /// The rows of `matches` that `prefix` still matches, in the order they were
@@ -624,6 +715,103 @@ fn install_refill(stoat: &mut Stoat, fresh: CompletionPopup, asked: Vec<String>)
     );
 }
 
+/// Show the rows a narrow came back with, provided they still describe the
+/// open popup. Returns `true` when the popup changed.
+///
+/// `generation` names the popup the rows were scored against. Anything
+/// installed since gave the popup a different item list, and rows indexing the
+/// old one name whatever now sits at those positions. The keystroke that
+/// asked for this narrow has already asked for another against the popup that
+/// replaced it.
+fn install_narrow(
+    stoat: &mut Stoat,
+    matches: Vec<(u32, u32)>,
+    prefix: String,
+    prefix_range: Range<usize>,
+    generation: u64,
+) -> bool {
+    if stoat.completion_generation != generation {
+        return false;
+    }
+    // Answered, so nothing is left for a keystroke to answer itself.
+    stoat.pending_narrow = None;
+    let Some(popup) = stoat.pending_completion.take() else {
+        return false;
+    };
+
+    install_popup(
+        stoat,
+        CompletionPopup {
+            items: popup.items,
+            matches,
+            selected_idx: 0,
+            anchor_offset: prefix_range.start,
+            prefix_range,
+            prefix,
+            incomplete: Vec::new(),
+        },
+    );
+    true
+}
+
+/// Land an in-flight narrow before something reads the popup's rows.
+///
+/// A narrow on the pool lands a pump later, so a keystroke that arrives inside
+/// that window reads the rows it replaces. This does the narrow here instead,
+/// which is cheaper than the wait and is why the request is kept beside the
+/// task.
+///
+/// Nothing happens when no narrow is armed. A fetch is a server round trip, and
+/// no keystroke waits on one.
+pub(crate) fn settle_pending_narrow(stoat: &mut Stoat) {
+    let Some(request) = stoat.pending_narrow.take() else {
+        return;
+    };
+    if stoat.completion_generation != request.generation {
+        return;
+    }
+    let Some(popup) = stoat.pending_completion.take() else {
+        return;
+    };
+
+    // The armed task answers the same question, so its answer is redundant now
+    // and its generation stamp no longer matches whatever installs below.
+    stoat.pending_completion_request = None;
+
+    install_popup(
+        stoat,
+        CompletionPopup {
+            matches: narrowed(&popup.items, &popup.matches, &request.prefix),
+            items: popup.items,
+            selected_idx: 0,
+            anchor_offset: request.prefix_range.start,
+            prefix_range: request.prefix_range,
+            prefix: request.prefix,
+            incomplete: Vec::new(),
+        },
+    );
+}
+
+/// Apply a landed outcome to the open popup.
+fn resolve_outcome(stoat: &mut Stoat, outcome: RequestOutcome) -> bool {
+    match outcome {
+        RequestOutcome::Replace(popup) => {
+            install_popup(stoat, popup);
+            true
+        },
+        RequestOutcome::Refill { fresh, asked } => {
+            install_refill(stoat, fresh, asked);
+            true
+        },
+        RequestOutcome::Narrow {
+            matches,
+            prefix,
+            prefix_range,
+            generation,
+        } => install_narrow(stoat, matches, prefix, prefix_range, generation),
+    }
+}
+
 /// Poll the in-flight completion task. On `Ready` resolves its
 /// [`RequestOutcome`] against [`Stoat::pending_completion`], installing a full
 /// answer outright and merging a re-ask into what is open. Returns `true` when
@@ -636,14 +824,7 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(RequestOutcome::Replace(popup)) => {
-            install_popup(stoat, popup);
-            true
-        },
-        Poll::Ready(RequestOutcome::Refill { fresh, asked }) => {
-            install_refill(stoat, fresh, asked);
-            true
-        },
+        Poll::Ready(outcome) => resolve_outcome(stoat, outcome),
         Poll::Pending => {
             stoat.pending_completion_request = Some(task);
             false
@@ -2038,6 +2219,123 @@ mod harness_tests {
         assert!(
             popup.matches.len() < before.len(),
             "and the narrowing happened in the index",
+        );
+    }
+
+    /// Type `text` without the harness's render.
+    ///
+    /// The render drives the pumps, which lands a narrow inside the keystroke
+    /// that armed it. These tests are about the window before it lands, so they
+    /// drive the key alone.
+    fn type_unrendered(h: &mut TestHarness, text: &str) {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        for ch in text.chars() {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            let _ = h.stoat.update(Event::Key(key));
+        }
+    }
+
+    /// A popup large enough that its narrow goes to the blocking pool.
+    ///
+    /// One row per label, `NARROW_INLINE_MAX` of them plus the two the tests
+    /// look for, so the narrow is over the threshold whichever way it lands.
+    fn large_popup(h: &mut TestHarness) {
+        enable_completion(h);
+        open_scratch(h, "");
+
+        let mut labels: Vec<String> = (0..NARROW_INLINE_MAX)
+            .map(|i| format!("foo_filler_{i:04}"))
+            .collect();
+        labels.push("foobar".into());
+        labels.push("foobaz".into());
+        let borrowed: Vec<&str> = labels.iter().map(String::as_str).collect();
+        h.fake_lsp().set_completions("/ws/buf.rs", 0, 3, &borrowed);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        assert!(
+            h.stoat.pending_completion.as_ref().expect("popup").len() > NARROW_INLINE_MAX,
+            "the fixture has to reach the off-thread branch",
+        );
+    }
+
+    /// A narrow scored against a popup that has since been replaced names rows
+    /// of an item list that is no longer there. Installing it pins the popup to
+    /// whatever now sits at those positions.
+    #[test]
+    fn a_narrow_from_a_replaced_popup_is_dropped() {
+        let mut h = TestHarness::default();
+        large_popup(&mut h);
+
+        type_unrendered(&mut h, "b");
+        assert!(
+            h.stoat.pending_completion_request.is_some(),
+            "the narrow is in flight",
+        );
+
+        // Run the pool job and the task around it, so what is left is a landed
+        // answer nobody has installed yet.
+        for _ in 0..8 {
+            h.tick();
+        }
+
+        // Stands in for something else installing, which is the only thing that
+        // moves this counter.
+        h.stoat.completion_generation = h.stoat.completion_generation.wrapping_add(1);
+        let generation = h.stoat.completion_generation;
+        let rows_before = h.stoat.pending_completion.as_ref().expect("popup").len();
+
+        let changed = pump(&mut h.stoat);
+
+        assert!(!changed, "the stale narrow installs nothing");
+        assert_eq!(
+            (
+                h.stoat.completion_generation,
+                h.stoat.pending_completion.as_ref().expect("popup").len()
+            ),
+            (generation, rows_before),
+            "and leaves the popup it landed on alone",
+        );
+    }
+
+    /// Tab inside the window a pooled narrow runs in accepts from the rows the
+    /// narrow is about to show, not the ones it replaces.
+    #[test]
+    fn accepting_during_a_narrow_takes_the_narrowed_row() {
+        let mut h = TestHarness::default();
+        large_popup(&mut h);
+
+        type_unrendered(&mut h, "bar");
+        assert!(
+            h.stoat.pending_completion_request.is_some(),
+            "the narrow is in flight when Tab arrives",
+        );
+
+        let accepted = crate::completion::accept::execute(&mut h.stoat);
+        assert!(
+            matches!(accepted, crate::app::UpdateEffect::Redraw),
+            "the accept landed",
+        );
+
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(
+                    h.stoat
+                        .active_workspace()
+                        .buffers
+                        .id_for_path(&PathBuf::from("/ws/buf.rs"))
+                        .expect("the buffer is open")
+                )
+                .expect("buffer")
+                .read()
+                .expect("buffer lock")
+                .rope()
+                .to_string(),
+            "foobar",
+            "the narrowed first row is what Tab took",
         );
     }
 

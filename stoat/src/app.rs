@@ -1704,6 +1704,12 @@ pub struct Stoat {
     pub(crate) pending_completion_request:
         Option<stoat_scheduler::Task<crate::completion::request::RequestOutcome>>,
 
+    /// The question an in-flight narrow was armed with.
+    ///
+    /// Held so a keystroke that must not wait for the pool answers it here
+    /// instead. `None` whenever no narrow is armed.
+    pub(crate) pending_narrow: Option<crate::completion::request::NarrowRequest>,
+
     /// In-flight debounced `completionItem/resolve` for the popup's
     /// selected row. Replacing the entry drops the prior task, so
     /// navigating past a row cancels its resolve. Polled by
@@ -2304,6 +2310,7 @@ impl Stoat {
             pending_completion: None,
             completion_generation: 0,
             pending_completion_request: None,
+            pending_narrow: None,
             pending_completion_resolve: None,
             pending_completion_accept: StampedPending::default(),
             last_completion_signature: None,
