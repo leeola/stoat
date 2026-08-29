@@ -44,7 +44,7 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     let Some(popup) = stoat.pending_completion.take() else {
         return UpdateEffect::None;
     };
-    let Some(item) = popup.items.into_iter().nth(popup.selected_idx) else {
+    let Some(item) = popup.selected().cloned() else {
         return UpdateEffect::None;
     };
 
@@ -290,12 +290,9 @@ mod tests {
 
     fn install_popup(h: &mut TestHarness, items: Vec<CompletionItem>, prefix_range: Range<usize>) {
         h.stoat.pending_completion = Some(CompletionPopup {
-            items,
-            selected_idx: 0,
             anchor_offset: prefix_range.start,
             prefix_range,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(items)
         });
     }
 
@@ -361,7 +358,9 @@ mod tests {
         h.type_text("fo");
         let replace_range = anchors(&h, 0..2);
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![
+            selected_idx: 1,
+            prefix_range: 0..2,
+            ..CompletionPopup::showing(vec![
                 CompletionItem {
                     label: "foo".into(),
                     source: CompletionSource::Word,
@@ -386,12 +385,7 @@ mod tests {
                     lsp_item: None,
                     server: None,
                 },
-            ],
-            selected_idx: 1,
-            anchor_offset: 0,
-            prefix_range: 0..2,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ])
         });
 
         dispatch(&mut h.stoat, &AcceptCompletion);
@@ -742,7 +736,9 @@ mod tests {
         h.type_keys("i");
         h.type_text("pri");
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
+            prefix_range: 0..3,
+            prefix: "pri".into(),
+            ..CompletionPopup::showing(vec![CompletionItem {
                 label: "println!".into(),
                 source: CompletionSource::Lsp,
                 kind: None,
@@ -753,12 +749,7 @@ mod tests {
                 documentation: None,
                 lsp_item: None,
                 server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..3,
-            prefix: "pri".into(),
-            incomplete: Vec::new(),
+            }])
         });
 
         h.type_text("n");

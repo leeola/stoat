@@ -5424,7 +5424,7 @@ impl Stoat {
             },
             KeyCode::Down if self.pending_completion.is_some() => {
                 if let Some(popup) = self.pending_completion.as_mut() {
-                    let last = popup.items.len().saturating_sub(1);
+                    let last = popup.len().saturating_sub(1);
                     popup.selected_idx = (popup.selected_idx + 1).min(last);
                 }
                 action_handlers::completion::arm_completion_resolve(self);
@@ -18029,25 +18029,18 @@ mod tests {
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         assert_eq!(h.stoat.focused_mode(), "insert");
-        h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
-                label: "foo".into(),
-                source: CompletionSource::Lsp,
-                kind: None,
-                detail: None,
-                replace_range: crate::completion::unused_replace_range(),
-                insert_text: "foo".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
-        });
+        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![CompletionItem {
+            label: "foo".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: crate::completion::unused_replace_range(),
+            insert_text: "foo".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }]));
         h.type_keys("escape");
         assert_eq!(h.stoat.pending_completion, None);
         assert_eq!(
@@ -18088,7 +18081,8 @@ mod tests {
         h.type_keys("f o o");
         let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
+            prefix_range: 0..3,
+            ..CompletionPopup::showing(vec![CompletionItem {
                 label: "foobar".into(),
                 source: CompletionSource::Word,
                 kind: None,
@@ -18099,12 +18093,7 @@ mod tests {
                 documentation: None,
                 lsp_item: None,
                 server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..3,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            }])
         });
 
         h.type_keys("tab");
@@ -18124,7 +18113,8 @@ mod tests {
         assert_eq!(cursor_before.0, 1);
 
         let popup = || CompletionPopup {
-            items: vec![
+            prefix_range: 0..1,
+            ..CompletionPopup::showing(vec![
                 CompletionItem {
                     label: "foo".into(),
                     source: CompletionSource::Word,
@@ -18161,12 +18151,7 @@ mod tests {
                     lsp_item: None,
                     server: None,
                 },
-            ],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..1,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ])
         };
         h.stoat.pending_completion = Some(popup());
 
@@ -18211,7 +18196,8 @@ mod tests {
         h.type_keys("p r i");
         let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
+            prefix_range: 0..3,
+            ..CompletionPopup::showing(vec![CompletionItem {
                 label: "fn".into(),
                 source: CompletionSource::Lsp,
                 kind: None,
@@ -18222,12 +18208,7 @@ mod tests {
                 documentation: None,
                 lsp_item: None,
                 server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..3,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            }])
         });
         h.type_keys("tab");
         assert_eq!(buffer_text(&h, &path), "name(arg)");
@@ -18263,7 +18244,8 @@ mod tests {
         h.type_keys("p r i");
         let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
+            prefix_range: 0..3,
+            ..CompletionPopup::showing(vec![CompletionItem {
                 label: "fn".into(),
                 source: CompletionSource::Lsp,
                 kind: None,
@@ -18274,12 +18256,7 @@ mod tests {
                 documentation: None,
                 lsp_item: None,
                 server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..3,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            }])
         });
         h.type_keys("tab");
         assert_eq!(buffer_text(&h, &path), "name(arg)");
@@ -18310,7 +18287,8 @@ mod tests {
         h.type_keys("f");
         let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..1);
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
+            prefix_range: 0..1,
+            ..CompletionPopup::showing(vec![CompletionItem {
                 label: "snippet".into(),
                 source: CompletionSource::Lsp,
                 kind: None,
@@ -18321,12 +18299,7 @@ mod tests {
                 documentation: None,
                 lsp_item: None,
                 server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..1,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            }])
         });
         h.type_keys("tab");
         assert!(h.stoat.active_snippet.is_some());

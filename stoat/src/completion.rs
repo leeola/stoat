@@ -120,10 +120,26 @@ pub struct CompletionItem {
 /// consumes the entry on `Tab`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionPopup {
-    /// Rows the popup paints, in display order (already filtered
-    /// and ranked by the trigger pipeline).
-    pub items: Vec<CompletionItem>,
-    /// Index of the highlighted row in [`Self::items`]. Tab accepts
+    /// Every item the sources answered with, in the order they answered.
+    ///
+    /// Held once and never reordered. A keystroke narrows the popup by
+    /// rewriting [`Self::matches`], which moves four bytes per row rather than
+    /// a struct of four `String`s, and a large answer runs to thousands of
+    /// rows. Shared so a request that merges into this list moves the survivors
+    /// rather than copying them.
+    ///
+    /// Read through [`Self::rows`] or [`Self::row`]. Indexing this directly
+    /// reads an item the popup is not showing, in an order it is not showing
+    /// them in.
+    pub items: Arc<[CompletionItem]>,
+    /// The rows the popup paints, as `(index into items, score)`, in display
+    /// order.
+    ///
+    /// The score is kept beside the index because ranking reads it and
+    /// scoring is the same pass that decides the match, so a caller that
+    /// narrows has it already.
+    pub matches: Vec<(u32, u32)>,
+    /// Index of the highlighted row in [`Self::matches`]. Tab accepts
     /// this row; Up / Down adjust it within bounds.
     pub selected_idx: usize,
     /// Byte offset in the buffer the popup is anchored to. The
@@ -151,6 +167,55 @@ pub struct CompletionPopup {
     /// to say about a longer prefix, so it is asked again while the rest are
     /// carried across.
     pub incomplete: Vec<String>,
+}
+
+impl CompletionPopup {
+    /// A popup showing every one of `items`, in the order given.
+    ///
+    /// The match index is built to show all of them, unscored, which is what a
+    /// caller that already has the rows it wants needs. The request pipeline
+    /// scores and reorders through that index rather than through the items.
+    ///
+    /// Every other field takes its zero value, so a caller names only what it
+    /// cares about through functional update syntax.
+    pub fn showing(items: Vec<CompletionItem>) -> Self {
+        Self {
+            matches: (0..items.len() as u32).map(|index| (index, 0)).collect(),
+            items: items.into(),
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
+        }
+    }
+
+    /// How many rows the popup shows, which is what a selection is bounded by.
+    pub fn len(&self) -> usize {
+        self.matches.len()
+    }
+
+    /// Whether the popup shows nothing, which is what closes it.
+    pub fn is_empty(&self) -> bool {
+        self.matches.is_empty()
+    }
+
+    /// The item at display row `row`, or `None` past the last one.
+    pub fn row(&self, row: usize) -> Option<&CompletionItem> {
+        self.items.get(self.matches.get(row)?.0 as usize)
+    }
+
+    /// The items the popup shows, in display order.
+    pub fn rows(&self) -> impl Iterator<Item = &CompletionItem> {
+        self.matches
+            .iter()
+            .filter_map(|&(index, _)| self.items.get(index as usize))
+    }
+
+    /// The highlighted item, or `None` when the popup shows nothing.
+    pub fn selected(&self) -> Option<&CompletionItem> {
+        self.row(self.selected_idx)
+    }
 }
 
 /// State the dispatch entry hands to each source so it can decide
@@ -444,15 +509,12 @@ mod tests {
             server: None,
         };
         let popup = CompletionPopup {
-            items: vec![item.clone()],
-            selected_idx: 0,
             anchor_offset: 4,
             prefix_range: 4..7,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(vec![item.clone()])
         };
         assert_eq!(popup.clone(), popup);
-        assert_eq!(popup.items, [item]);
+        assert_eq!(popup.rows().cloned().collect::<Vec<_>>(), [item]);
         assert_eq!(popup.selected_idx, 0);
         assert_eq!(popup.anchor_offset, 4);
         assert_eq!(popup.prefix_range, 4..7);

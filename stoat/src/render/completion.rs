@@ -1,6 +1,6 @@
 use crate::{
     app::Stoat,
-    completion::CompletionItem,
+    completion::{CompletionItem, CompletionPopup},
     fuzzy,
     pane::{FocusTarget, View},
     render::{cursor_popup, text::clip_to_width},
@@ -102,7 +102,7 @@ fn layout_key(stoat: &Stoat) -> LayoutKey {
                 p.anchor_offset,
                 p.selected_idx,
                 p.prefix_range.clone(),
-                p.items.len(),
+                p.len(),
             )
         }),
     }
@@ -141,7 +141,7 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
     }
 
     let popup = stoat.pending_completion.as_ref()?;
-    let total = popup.items.len();
+    let total = popup.len();
     let viewport_top = viewport_top_for(selected_idx, total, MAX_VISIBLE_ROWS);
     let visible_count = total.saturating_sub(viewport_top).min(MAX_VISIBLE_ROWS);
 
@@ -150,14 +150,13 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
     let clipped_width = |text: &str| text.chars().take(interior_width as usize).count();
 
     let max_line_width = popup
-        .items
-        .iter()
+        .rows()
         .skip(viewport_top)
         .take(visible_count)
         .map(|item| clipped_width(&item.label))
         .max()
         .unwrap_or(0) as u16;
-    let detail = popup.items.get(selected_idx).and_then(detail_footer);
+    let detail = popup.row(selected_idx).and_then(detail_footer);
     let detail_width = detail.as_deref().map(clipped_width).unwrap_or(0) as u16;
     let footer_rows: u16 = if detail.is_some() { 1 } else { 0 };
 
@@ -248,7 +247,7 @@ pub(crate) fn render_completion(
     );
 
     paint_completion_rows(
-        &popup.items,
+        popup,
         popup.selected_idx,
         prefix,
         layout.viewport_top,
@@ -281,7 +280,7 @@ pub(crate) fn render_completion(
 /// the smooth-scroll pool, which paints absolute pages, so both render
 /// identical rows.
 pub(crate) fn paint_completion_rows(
-    items: &[CompletionItem],
+    popup: &CompletionPopup,
     selected_idx: usize,
     prefix: &str,
     start_row: usize,
@@ -303,7 +302,7 @@ pub(crate) fn paint_completion_rows(
         let width = area.width as usize;
         for row_idx in 0..area.height {
             let item_idx = start_row + row_idx as usize;
-            let Some(item) = items.get(item_idx) else {
+            let Some(item) = popup.row(item_idx) else {
                 break;
             };
             let row = area.y + row_idx;
@@ -422,14 +421,10 @@ mod tests {
         let mut h = TestHarness::with_size(40, 24);
         let _path = open_scratch(&mut h, "");
         h.type_keys("i");
-        h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![make_item("alpha"), make_item("beta")],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
-        });
+        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![
+            make_item("alpha"),
+            make_item("beta"),
+        ]));
 
         // The pool emit is the second consumer, and it ships nothing without a
         // stoatty listening, so without these it never asks for a layout at all.
@@ -470,12 +465,9 @@ mod tests {
         // has room on either side and only the preference decides.
         let anchor_offset = "line\n".len() * 10;
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![make_item("alpha"), make_item("beta")],
-            selected_idx: 0,
             anchor_offset,
             prefix_range: anchor_offset..anchor_offset,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(vec![make_item("alpha"), make_item("beta")])
         });
 
         let (_, cursor) =
@@ -497,12 +489,14 @@ mod tests {
         let _path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![make_item("println"), make_item("print"), make_item("panic")],
             selected_idx: 1,
             anchor_offset: 0,
             prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(vec![
+                make_item("println"),
+                make_item("print"),
+                make_item("panic"),
+            ])
         });
         h.assert_snapshot("snapshot_completion_popup_basic");
     }
@@ -515,14 +509,7 @@ mod tests {
         let mut foo = make_item("foo");
         foo.detail = Some("fn foo() -> u32".into());
         foo.documentation = Some("Returns the foo.\nMore details.".into());
-        h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![foo, make_item("bar")],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
-        });
+        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![foo, make_item("bar")]));
         h.assert_snapshot("snapshot_completion_popup_detail_footer");
     }
 
@@ -535,12 +522,8 @@ mod tests {
             .map(|i| make_item(&format!("item_{i:02}")))
             .collect();
         h.stoat.pending_completion = Some(CompletionPopup {
-            items,
             selected_idx: 12,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(items)
         });
         h.assert_snapshot("snapshot_completion_popup_scrolling");
     }
@@ -551,12 +534,14 @@ mod tests {
         let _path = open_scratch(&mut h, "pri");
         h.type_keys("A");
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![make_item("println"), make_item("print"), make_item("panic")],
             selected_idx: 0,
             anchor_offset: 3,
             prefix_range: 0..3,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(vec![
+                make_item("println"),
+                make_item("print"),
+                make_item("panic"),
+            ])
         });
         h.assert_snapshot("snapshot_completion_popup_with_match");
     }

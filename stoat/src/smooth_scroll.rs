@@ -18,7 +18,7 @@ use crate::{
     code_search::CodeSearchFinder,
     command_palette::ArgPicker,
     commit_list::CommitListState,
-    completion::CompletionItem,
+    completion::CompletionPopup,
     conflict_session::ConflictViewState,
     display_map::{highlights::HighlightEndpoint, DisplaySnapshot},
     file_finder::FileFinder,
@@ -604,7 +604,7 @@ pub(crate) fn render_arg_page(
 /// Mirrors [`render_finder_page`] but paints completion rows; the page index
 /// alone selects the rows, and the list is read-only here.
 pub(crate) fn render_completion_page(
-    items: &[CompletionItem],
+    popup: &CompletionPopup,
     selected_idx: usize,
     prefix: &str,
     page: u64,
@@ -618,7 +618,7 @@ pub(crate) fn render_completion_page(
         page,
         theme,
         |buf, area, start_row| {
-            paint_completion_rows(items, selected_idx, prefix, start_row, area, theme, buf)
+            paint_completion_rows(popup, selected_idx, prefix, start_row, area, theme, buf)
         },
     )
 }

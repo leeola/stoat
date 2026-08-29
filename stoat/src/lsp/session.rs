@@ -626,12 +626,16 @@ mod tests {
             .pending_completion
             .clone()
             .expect("completion popup armed");
+        // The display row rather than the position in the arrival order, since
+        // the selection names a row the popup shows.
         let smile = popup
-            .items
-            .iter()
+            .rows()
             .position(|item| item.label == ":smile:")
             .expect("the shortcode server offers :smile:");
-        assert_eq!(popup.items[smile].source, CompletionSource::Lsp);
+        assert_eq!(
+            popup.row(smile).expect("the row just found").source,
+            CompletionSource::Lsp
+        );
 
         h.stoat
             .pending_completion

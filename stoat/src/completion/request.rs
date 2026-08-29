@@ -377,18 +377,20 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
         };
     }
 
-    // Nothing is re-asked, so this call replaces the popup outright and its
-    // items move into the refined one rather than being copied out of it.
+    // Nothing is re-asked, so this call replaces the popup outright. The items
+    // carry over untouched. Only which of them match, and in what order, has
+    // moved.
     let popup = stoat
         .pending_completion
         .take()
         .expect("borrowed one just above");
 
-    let (mut items, scores) = surviving(popup.items.into_iter(), &[], &owned.prefix);
-    rank_scored(&mut items, scores);
+    let mut matches = surviving(&popup.items, &popup.matches, &[], &owned.prefix);
+    rank_scored(&popup.items, &mut matches);
 
     Refine::Done(CompletionPopup {
-        items,
+        items: popup.items,
+        matches,
         selected_idx: 0,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range.clone(),
@@ -397,40 +399,61 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
     })
 }
 
-/// The items `prefix` still matches, in the order they were given, with what
-/// each scored.
+/// The rows of `matches` that `prefix` still matches, in the order they were
+/// given, rescored against it.
 ///
-/// Items from a server named in `stale` are dropped whatever they score. That
-/// server is being asked again, and its own answer supersedes what it said
-/// before.
+/// Rows naming a server in `stale` are dropped whatever they score. That server
+/// is being asked again, and its own answer supersedes what it said before.
 ///
 /// Scoring and filtering are the same pass because the score is what decides
 /// the match. A caller that ranks what comes back therefore has its scores
 /// already and does not go over the haystacks twice.
+///
+/// Narrows the index rather than the items, so a keystroke over a large popup
+/// moves a pair of `u32`s per row rather than a struct of four `String`s.
 fn surviving(
-    items: impl Iterator<Item = CompletionItem>,
+    items: &[CompletionItem],
+    matches: &[(u32, u32)],
     stale: &[String],
     prefix: &str,
-) -> (Vec<CompletionItem>, Vec<u32>) {
-    let fresh: Vec<CompletionItem> = items
-        .filter(|item| {
-            item.server
+) -> Vec<(u32, u32)> {
+    let fresh: Vec<(u32, u32)> = matches
+        .iter()
+        .copied()
+        .filter(|&(index, _)| {
+            items[index as usize]
+                .server
                 .as_deref()
                 .is_none_or(|name| !stale.iter().any(|s| s == name))
         })
         .collect();
 
-    let scored = scores_against(&fresh, prefix);
-    let mut kept = Vec::with_capacity(fresh.len());
-    let mut scores = Vec::with_capacity(fresh.len());
-    for (item, score) in fresh.into_iter().zip(scored) {
-        if let Some(score) = score {
-            kept.push(item);
-            scores.push(score);
-        }
-    }
+    let haystacks: Vec<&str> = fresh
+        .iter()
+        .map(|&(index, _)| match_against(&items[index as usize]))
+        .collect();
 
-    (kept, scores)
+    scores_for(&haystacks, prefix)
+        .into_iter()
+        .zip(&fresh)
+        .filter_map(|(score, &(index, _))| Some((index, score?)))
+        .collect()
+}
+
+/// Every item as a match row, scored against `prefix`, keeping the ones it does
+/// not match at zero.
+///
+/// A fresh popup shows everything its sources answered. A server filters for
+/// itself and offers items whose labels the prefix does not match, so dropping
+/// them here would hide answers it meant the reader to see. Narrowing a popup
+/// already open is [`surviving`], which does drop them.
+fn all_matches(items: &[CompletionItem], prefix: &str) -> Vec<(u32, u32)> {
+    let haystacks: Vec<&str> = items.iter().map(match_against).collect();
+    scores_for(&haystacks, prefix)
+        .into_iter()
+        .enumerate()
+        .map(|(index, score)| (index as u32, score.unwrap_or(0)))
+        .collect()
 }
 
 /// Ask `servers` again for a prefix they answered incompletely, leaving the
@@ -468,17 +491,20 @@ fn ask_again(
     else {
         // The server is no longer there to ask, so the popup's own items are all
         // of it. Narrowing them to the grown prefix is what the landing request
-        // would otherwise have done, and taking the popup does it without a copy.
-        let mut items = match stoat.pending_completion.take() {
-            Some(popup) => surviving(popup.items.into_iter(), &servers, &owned.prefix).0,
-            None => Vec::new(),
-        };
-        rank_by_prefix(&mut items, &owned.prefix);
+        // would otherwise have done, and the items carry over as they are.
+        let narrowed = stoat.pending_completion.take().map(|popup| {
+            let mut matches = surviving(&popup.items, &popup.matches, &servers, &owned.prefix);
+            rank_scored(&popup.items, &mut matches);
+            (popup.items, matches)
+        });
+        let (items, matches) = narrowed.unwrap_or_else(|| (Arc::from([]), Vec::new()));
+
         stoat.pending_completion_request = None;
         install_popup(
             stoat,
             CompletionPopup {
                 items,
+                matches,
                 selected_idx: 0,
                 anchor_offset: owned.prefix_range.start,
                 prefix_range: owned.prefix_range,
@@ -534,12 +560,11 @@ fn ask_again(
         // and ranking a partial list only to re-rank the whole one is wasted.
         RequestOutcome::Refill {
             fresh: CompletionPopup {
-                items,
-                selected_idx: 0,
                 anchor_offset: owned.prefix_range.start,
                 prefix_range: owned.prefix_range,
                 prefix: owned.prefix,
                 incomplete,
+                ..CompletionPopup::showing(items)
             },
             asked: servers,
         }
@@ -569,17 +594,23 @@ fn install_popup(stoat: &mut Stoat, popup: CompletionPopup) {
 /// A popup gone by now was accepted or dismissed mid-flight, and reviving what
 /// it held would undo that, so only the fresh items install.
 fn install_refill(stoat: &mut Stoat, fresh: CompletionPopup, asked: Vec<String>) {
-    let mut items = match stoat.pending_completion.take() {
-        Some(popup) => surviving(popup.items.into_iter(), &asked, &fresh.prefix).0,
+    // The one place a popup's item list is rebuilt, because this is the one
+    // place its membership grows. Everywhere else narrows the index instead.
+    let mut items: Vec<CompletionItem> = match stoat.pending_completion.take() {
+        Some(popup) => surviving(&popup.items, &popup.matches, &asked, &fresh.prefix)
+            .into_iter()
+            .map(|(index, _)| popup.items[index as usize].clone())
+            .collect(),
         None => Vec::new(),
     };
-    items.extend(fresh.items);
-    rank_by_prefix(&mut items, &fresh.prefix);
+    items.extend(fresh.items.iter().cloned());
+    let matches = rank_by_prefix(&items, &fresh.prefix);
 
     install_popup(
         stoat,
         CompletionPopup {
-            items,
+            items: items.into(),
+            matches,
             selected_idx: 0,
             anchor_offset: fresh.anchor_offset,
             prefix_range: fresh.prefix_range,
@@ -932,18 +963,19 @@ async fn run_request(
     // Scores every item against the prefix and sorts, so it follows the size of
     // the whole answer rather than what the popup shows. The last stretch of
     // work here, and the last one that belonged on the run loop.
-    let items = executor
+    let (items, matches) = executor
         .spawn_blocking({
             let prefix = owned.prefix.clone();
             move || {
-                rank_by_prefix(&mut items, &prefix);
-                items
+                let matches = rank_by_prefix(&items, &prefix);
+                (items, matches)
             }
         })
         .await;
 
     RequestOutcome::Replace(CompletionPopup {
-        items,
+        items: items.into(),
+        matches,
         selected_idx: 0,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range,
@@ -967,39 +999,25 @@ async fn run_request(
 /// order behind the ones that do rather than disappearing.
 ///
 /// An empty prefix leaves the order alone, having nothing to rank by.
-fn rank_by_prefix(items: &mut Vec<CompletionItem>, prefix: &str) {
-    if prefix.is_empty() {
-        return;
+fn rank_by_prefix(items: &[CompletionItem], prefix: &str) -> Vec<(u32, u32)> {
+    let mut matches = all_matches(items, prefix);
+    if !prefix.is_empty() {
+        rank_scored(items, &mut matches);
     }
-
-    let scores = scores_against(items, prefix)
-        .into_iter()
-        .map(|score| score.unwrap_or(0))
-        .collect();
-    rank_scored(items, scores);
+    matches
 }
 
-/// Order `items` by their servers' sort text, then by `scores` descending.
+/// Order `matches` by their servers' sort text, then by score descending.
 ///
-/// `scores` is parallel to `items` and is permuted alongside them, so scoring
-/// can happen before the ordering rather than between its two passes. A caller
-/// that already knows what its candidates scored does not have to score them
-/// again to rank them.
-fn rank_scored(items: &mut Vec<CompletionItem>, mut scores: Vec<u32>) {
-    debug_assert_eq!(items.len(), scores.len(), "one score per item");
+/// The score rides in the match rows, so scoring happens before the ordering
+/// rather than between its two passes. A caller that already knows what its
+/// candidates scored does not have to score them again to rank them.
+fn rank_scored(items: &[CompletionItem], matches: &mut [(u32, u32)]) {
+    sort_by_sort_text(items, matches);
 
-    let sorted = sort_text_order(items);
-    if let Some(order) = sorted {
-        scores = order.iter().map(|&from| scores[from]).collect();
-        apply_order(items, &order);
-    }
-
-    // Stable, so items the score cannot separate keep what the sort-text pass
+    // Stable, so rows the score cannot separate keep what the sort-text pass
     // left them in, and everything else keeps the order its source produced.
-    let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by(|&a, &b| scores[b].cmp(&scores[a]));
-
-    apply_order(items, &order);
+    matches.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
 }
 
 /// What each item scores against `prefix`, `None` where it does not match.
@@ -1007,17 +1025,16 @@ fn rank_scored(items: &mut Vec<CompletionItem>, mut scores: Vec<u32>) {
 /// A match scoring zero and no match at all are different answers, and the
 /// refine path drops on the second, so they stay apart here rather than
 /// collapsing onto zero.
-fn scores_against(items: &[CompletionItem], prefix: &str) -> Vec<Option<u32>> {
-    let haystacks: Vec<&str> = items.iter().map(match_against).collect();
+fn scores_for(haystacks: &[&str], prefix: &str) -> Vec<Option<u32>> {
     let Some(scored) = fuzzy::score_only(
         prefix,
         haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
     ) else {
         // No usable atoms, so nothing is being asked and nothing is rejected.
-        return vec![Some(0); items.len()];
+        return vec![Some(0); haystacks.len()];
     };
 
-    let mut out = vec![None; items.len()];
+    let mut out = vec![None; haystacks.len()];
     for (idx, score) in scored {
         out[idx] = Some(score);
     }
@@ -1033,53 +1050,37 @@ fn match_against(item: &CompletionItem) -> &str {
         .unwrap_or(&item.label)
 }
 
-/// The permutation putting the items carrying a `sortText` in that order among
-/// themselves and leaving every other item where it is, or `None` when fewer
-/// than two carry one and there is nothing to reorder.
+/// Put the rows carrying a `sortText` in that order among themselves, leaving
+/// every other row where it is.
 ///
 /// Only LSP items have one, so ordering the whole list by it would have to
 /// decide how an item with a sort text ranks against an item without, and any
 /// answer to that shuffles items across sources for no reason. Confining the
-/// reorder to the items that have one asks no such question.
-fn sort_text_order(items: &[CompletionItem]) -> Option<Vec<usize>> {
-    let slots: Vec<usize> = (0..items.len())
-        .filter(|&idx| sort_text(&items[idx]).is_some())
+/// reorder to the rows that have one asks no such question.
+fn sort_by_sort_text(items: &[CompletionItem], matches: &mut [(u32, u32)]) {
+    let slots: Vec<usize> = (0..matches.len())
+        .filter(|&slot| sort_text(&items[matches[slot].0 as usize]).is_some())
         .collect();
     if slots.len() < 2 {
-        return None;
+        return;
     }
 
-    let mut sorted = slots.clone();
-    sorted.sort_by(|&a, &b| {
-        sort_text(&items[a])
-            .cmp(&sort_text(&items[b]))
-            .then(a.cmp(&b))
+    let mut sorted: Vec<(u32, u32)> = slots.iter().map(|&slot| matches[slot]).collect();
+    sorted.sort_by(|a, b| {
+        sort_text(&items[a.0 as usize])
+            .cmp(&sort_text(&items[b.0 as usize]))
+            .then(a.0.cmp(&b.0))
     });
 
-    // Every position keeps what it holds except the slots, which take the
-    // sorted sequence between them.
-    let mut order: Vec<usize> = (0..items.len()).collect();
-    for (slot, from) in slots.into_iter().zip(sorted) {
-        order[slot] = from;
+    for (slot, row) in slots.into_iter().zip(sorted) {
+        matches[slot] = row;
     }
-
-    Some(order)
 }
 
 fn sort_text(item: &CompletionItem) -> Option<&str> {
     item.lsp_item
         .as_ref()
         .and_then(|lsp| lsp.sort_text.as_deref())
-}
-
-/// Permute `items` so that position `n` holds what `order`'s `n`th index names.
-fn apply_order(items: &mut Vec<CompletionItem>, order: &[usize]) {
-    let mut taken: Vec<Option<CompletionItem>> = items.drain(..).map(Some).collect();
-    items.extend(
-        order
-            .iter()
-            .map(|&from| taken[from].take().expect("each index is named once")),
-    );
 }
 
 #[cfg(test)]
@@ -1255,8 +1256,17 @@ mod harness_tests {
         path
     }
 
-    fn labels(items: &[CompletionItem]) -> Vec<String> {
-        items.iter().map(|i| i.label.clone()).collect()
+    /// The labels `matches` names, in the order it names them.
+    fn ranked(items: &[CompletionItem], matches: &[(u32, u32)]) -> Vec<String> {
+        matches
+            .iter()
+            .map(|&(index, _)| items[index as usize].label.clone())
+            .collect()
+    }
+
+    /// The labels the popup shows, in the order it shows them.
+    fn shown(popup: &CompletionPopup) -> Vec<String> {
+        popup.rows().map(|i| i.label.clone()).collect()
     }
 
     #[test]
@@ -1511,7 +1521,7 @@ mod harness_tests {
         h.advance_clock(COMPLETION_DEBOUNCE);
 
         let popup = h.stoat.pending_completion.clone().expect("popup armed");
-        let got = labels(&popup.items);
+        let got = shown(&popup);
         assert!(
             got.iter().any(|l| l == "foobar"),
             "expected foobar in {got:?}",
@@ -1623,13 +1633,13 @@ mod harness_tests {
             .pending_completion
             .clone()
             .expect("path popup armed");
-        let mut got: Vec<String> = labels(&popup.items)
+        let mut got: Vec<String> = shown(&popup)
             .into_iter()
             .filter(|l| l == "lib.rs" || l == "main.rs" || l == "buf.rs")
             .collect();
         got.sort();
         assert_eq!(got, vec!["buf.rs", "lib.rs", "main.rs"]);
-        for item in &popup.items {
+        for item in popup.rows() {
             if matches!(item.label.as_str(), "lib.rs" | "main.rs" | "buf.rs") {
                 assert_eq!(item.source, CompletionSource::Path);
             }
@@ -1787,7 +1797,7 @@ mod harness_tests {
         h.advance_clock(COMPLETION_DEBOUNCE);
 
         let popup = h.stoat.pending_completion.as_ref().expect("popup armed");
-        let mut got = labels(&popup.items);
+        let mut got = shown(popup);
         got.sort();
         assert_eq!(got, ["foobar", "foxtrot"]);
     }
@@ -1795,12 +1805,9 @@ mod harness_tests {
     /// A popup over `prefix`, anchored at the start of the line.
     fn popup_over(items: Vec<CompletionItem>, prefix: &str) -> CompletionPopup {
         CompletionPopup {
-            items,
-            selected_idx: 0,
-            anchor_offset: 0,
             prefix_range: 0..prefix.len(),
             prefix: prefix.to_string(),
-            incomplete: Vec::new(),
+            ..CompletionPopup::showing(items)
         }
     }
 
@@ -1831,7 +1838,7 @@ mod harness_tests {
             .pending_completion
             .as_ref()
             .expect("popup installed");
-        let mut got = labels(&popup.items);
+        let mut got = shown(popup);
         got.sort();
         assert_eq!(
             got,
@@ -1859,7 +1866,7 @@ mod harness_tests {
             .pending_completion
             .as_ref()
             .expect("popup installed");
-        assert_eq!(labels(&popup.items), ["append"]);
+        assert_eq!(shown(popup), ["append"]);
     }
 
     #[test]
@@ -1868,16 +1875,16 @@ mod harness_tests {
         // the reader typed scattered through the first and contiguous in the
         // second. The scorer separates those. It does not separate a match from
         // a longer haystack around the same match.
-        let mut items = vec![
+        let items = vec![
             word("a_pretty_pear"),
             served("apply_theme", None, None),
             word("zebra_handler"),
         ];
 
-        rank_by_prefix(&mut items, "app");
+        let matches = rank_by_prefix(&items, "app");
 
         assert_eq!(
-            labels(&items),
+            ranked(&items, &matches),
             ["apply_theme", "a_pretty_pear", "zebra_handler"],
             "the popup leads with the best answer whichever source produced it"
         );
@@ -1885,12 +1892,12 @@ mod harness_tests {
 
     #[test]
     fn an_item_the_prefix_cannot_match_stays_in_the_list() {
-        let mut items = vec![served("unrelated", None, None), word("apply")];
+        let items = vec![served("unrelated", None, None), word("apply")];
 
-        rank_by_prefix(&mut items, "app");
+        let matches = rank_by_prefix(&items, "app");
 
         assert_eq!(
-            labels(&items),
+            ranked(&items, &matches),
             ["apply", "unrelated"],
             "a server filters for itself, so what it offered is kept rather than dropped"
         );
@@ -1898,16 +1905,16 @@ mod harness_tests {
 
     #[test]
     fn an_empty_prefix_leaves_the_sources_order_alone() {
-        let mut items = vec![
+        let items = vec![
             word("zebra"),
             served("beta", None, Some("0001")),
             served("alpha", None, Some("0000")),
         ];
 
-        rank_by_prefix(&mut items, "");
+        let matches = rank_by_prefix(&items, "");
 
         assert_eq!(
-            labels(&items),
+            ranked(&items, &matches),
             ["zebra", "beta", "alpha"],
             "nothing to rank by, so the order the sources gave stands"
         );
@@ -1917,15 +1924,18 @@ mod harness_tests {
     fn equal_scores_fall_back_to_the_servers_sort_text() {
         // Identical labels score identically, so only the sort text separates
         // them, and the word item has none to be judged by.
-        let mut items = vec![
+        let items = vec![
             served("item", Some("app"), Some("0002")),
             word("app"),
             served("item", Some("app"), Some("0001")),
         ];
 
-        rank_by_prefix(&mut items, "app");
+        let matches = rank_by_prefix(&items, "app");
 
-        let ordering: Vec<Option<&str>> = items.iter().map(sort_text).collect();
+        let ordering: Vec<Option<&str>> = matches
+            .iter()
+            .map(|&(index, _)| sort_text(&items[index as usize]))
+            .collect();
         assert_eq!(
             ordering,
             [Some("0001"), None, Some("0002")],
@@ -1938,15 +1948,15 @@ mod harness_tests {
     fn matching_uses_the_filter_text_a_server_supplies() {
         // The label alone would put the word item first, its characters being
         // findable in order where the server's label's are not.
-        let mut items = vec![
+        let items = vec![
             word("a_p_p_lication"),
             served("unhelpful label", Some("app"), None),
         ];
 
-        rank_by_prefix(&mut items, "app");
+        let matches = rank_by_prefix(&items, "app");
 
         assert_eq!(
-            labels(&items),
+            ranked(&items, &matches),
             ["unhelpful label", "a_p_p_lication"],
             "a server asking to be matched on something else is matched on it"
         );
@@ -1983,7 +1993,7 @@ mod harness_tests {
             .clone()
             .expect("the popup survives the keystroke");
         assert_eq!(
-            labels(&popup.items),
+            shown(&popup),
             ["foobar", "foobaz"],
             "the rows the longer prefix cannot match are gone"
         );
@@ -1991,6 +2001,39 @@ mod harness_tests {
             h.fake_lsp().observed_completions().len(),
             asked,
             "and the server was not asked again"
+        );
+    }
+
+    /// A keystroke over an open popup rewrites which rows it shows. The items
+    /// themselves are what a large answer makes expensive to move, and nothing
+    /// about them changed, so the narrowed popup holds the same list.
+    #[test]
+    fn narrowing_leaves_the_item_list_where_it_is() {
+        let mut h = TestHarness::default();
+        popup_over_foo(&mut h);
+
+        let before = h
+            .stoat
+            .pending_completion
+            .as_ref()
+            .expect("the popup is open")
+            .items
+            .clone();
+
+        h.type_text("b");
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .as_ref()
+            .expect("the popup survives the keystroke");
+        assert!(
+            Arc::ptr_eq(&before, &popup.items),
+            "the same items answer the longer prefix",
+        );
+        assert!(
+            popup.matches.len() < before.len(),
+            "and the narrowing happened in the index",
         );
     }
 
@@ -2003,7 +2046,7 @@ mod harness_tests {
         let popup = h.stoat.pending_completion.clone().expect("popup");
 
         assert_eq!(
-            labels(&popup.items),
+            shown(&popup),
             ["foobar"],
             "narrowed before any debounce could have elapsed"
         );
@@ -2075,9 +2118,9 @@ mod harness_tests {
         );
         let popup = h.stoat.pending_completion.clone().expect("popup");
         assert!(
-            labels(&popup.items).contains(&"foobarred".to_string()),
+            shown(&popup).contains(&"foobarred".to_string()),
             "and what it then offered is shown: {:?}",
-            labels(&popup.items)
+            shown(&popup)
         );
     }
 
@@ -2156,7 +2199,7 @@ mod harness_tests {
         h.advance_clock(COMPLETION_DEBOUNCE);
 
         let popup = h.stoat.pending_completion.clone().expect("popup armed");
-        let got = labels(&popup.items);
+        let got = shown(&popup);
         let contiguous = got
             .iter()
             .position(|l| l == "foobar")

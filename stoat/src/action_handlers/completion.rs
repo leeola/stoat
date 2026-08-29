@@ -113,7 +113,7 @@ fn resolve_plan(
     std::sync::Arc<dyn crate::host::LspHost>,
 )> {
     let popup = stoat.pending_completion.as_ref()?;
-    let item = popup.items.get(popup.selected_idx)?;
+    let item = popup.selected()?;
     let lsp_item = item.lsp_item.as_ref()?;
     if item.detail.is_some() && item.documentation.is_some() {
         return None;
@@ -161,7 +161,14 @@ fn apply_resolved(stoat: &mut Stoat, resolved: ResolvedCompletion) -> bool {
     let Some(popup) = stoat.pending_completion.as_mut() else {
         return false;
     };
-    let Some(item) = popup.items.get_mut(popup.selected_idx) else {
+    let Some(&(index, _)) = popup.matches.get(popup.selected_idx) else {
+        return false;
+    };
+
+    // A resolve fills in what the server withheld from its first answer, so the
+    // item is edited where it sits. The list is cloned only when something else
+    // still holds it, which is a request that has not landed yet.
+    let Some(item) = std::sync::Arc::make_mut(&mut popup.items).get_mut(index as usize) else {
         return false;
     };
     if item.label != resolved.label {
@@ -303,7 +310,8 @@ mod tests {
         h.type_keys("l l i");
         let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..2);
         h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
+            prefix_range: 0..2,
+            ..CompletionPopup::showing(vec![CompletionItem {
                 label: "foo".into(),
                 source: CompletionSource::Word,
                 kind: None,
@@ -314,12 +322,7 @@ mod tests {
                 documentation: None,
                 lsp_item: None,
                 server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..2,
-            prefix: String::new(),
-            incomplete: Vec::new(),
+            }])
         });
         dispatch(&mut h.stoat, &SmartTab);
         assert!(h.stoat.pending_completion.is_none());
@@ -381,14 +384,7 @@ mod tests {
     }
 
     fn popup(items: Vec<CompletionItem>) -> CompletionPopup {
-        CompletionPopup {
-            items,
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
-        }
+        CompletionPopup::showing(items)
     }
 
     #[test]
@@ -403,7 +399,14 @@ mod tests {
         h.advance_clock(std::time::Duration::from_millis(150));
 
         let popup = h.stoat.pending_completion.as_ref().expect("popup");
-        assert_eq!(popup.items[0].documentation.as_deref(), Some("foo docs"));
+        assert_eq!(
+            popup
+                .row(0)
+                .expect("the row it resolved")
+                .documentation
+                .as_deref(),
+            Some("foo docs")
+        );
     }
 
     #[test]
@@ -424,7 +427,14 @@ mod tests {
         h.advance_clock(std::time::Duration::from_millis(150));
 
         let popup = h.stoat.pending_completion.as_ref().expect("popup");
-        assert_eq!(popup.items[0].documentation, None, "foo's resolve dropped");
-        assert_eq!(popup.items[1].documentation.as_deref(), Some("bar docs"));
+        let doc = |row: usize| {
+            popup
+                .row(row)
+                .expect("both rows show")
+                .documentation
+                .clone()
+        };
+        assert_eq!(doc(0), None, "foo's resolve dropped");
+        assert_eq!(doc(1).as_deref(), Some("bar docs"));
     }
 }

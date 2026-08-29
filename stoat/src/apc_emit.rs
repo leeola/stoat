@@ -1524,7 +1524,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             true,
             |page| {
                 crate::smooth_scroll::render_completion_page(
-                    &popup.items,
+                    popup,
                     popup.selected_idx,
                     &prefix,
                     page,
@@ -3163,25 +3163,18 @@ mod tests {
         h.settle();
         h.type_keys("i");
 
-        h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![CompletionItem {
-                label: "println".into(),
-                source: CompletionSource::Lsp,
-                kind: None,
-                detail: None,
-                replace_range: crate::completion::unused_replace_range(),
-                insert_text: "println".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
-        });
+        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![CompletionItem {
+            label: "println".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: crate::completion::unused_replace_range(),
+            insert_text: "println".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }]));
 
         let mut buf = Buffer::empty(h.stoat.size());
         app::paint_frame(&mut h.stoat, &mut buf);
@@ -4202,14 +4195,11 @@ mod tests {
             lsp_item: None,
             server: None,
         };
-        h.stoat.pending_completion = Some(CompletionPopup {
-            items: vec![item("alpha"), item("beta"), item("gamma")],
-            selected_idx: 0,
-            anchor_offset: 0,
-            prefix_range: 0..0,
-            prefix: String::new(),
-            incomplete: Vec::new(),
-        });
+        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![
+            item("alpha"),
+            item("beta"),
+            item("gamma"),
+        ]));
 
         emit_smooth_scroll(&mut h.stoat);
         let (_, layout) = crate::render::completion::completion_popup_layout(&mut h.stoat)
