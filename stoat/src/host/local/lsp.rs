@@ -245,7 +245,7 @@ impl LocalLsp {
     async fn request<P, R>(&self, method: &str, params: P) -> io::Result<R>
     where
         P: Serialize,
-        R: DeserializeOwned,
+        R: DeserializeOwned + Send + 'static,
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -272,8 +272,7 @@ impl LocalLsp {
         }
 
         match rx.await {
-            Ok(Ok(raw)) => serde_json::from_str(raw.get())
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
+            Ok(Ok(raw)) => parse_result(raw).await,
             Ok(Err(err)) => Err(io::Error::other(format!(
                 "lsp error {}: {}",
                 err.code, err.message
@@ -940,6 +939,39 @@ struct IncomingError {
     data: Option<Value>,
 }
 
+/// Response bodies at or below this size are parsed where they are awaited.
+///
+/// A thread hop costs more than a small parse, and most responses are small. It
+/// is the outliers that matter here, and they are far larger than this.
+const PARSE_OFF_THREAD_BYTES: usize = 64 * 1024;
+
+/// Deserialize a response body into `R`, off the awaiting thread when it is
+/// large.
+///
+/// A `semanticTokens/full` result runs to hundreds of thousands of numbers, and
+/// a completion list to thousands of items. Parsing either where the request is
+/// awaited puts it on the run loop, between two frames, since that is where the
+/// scheduler pumps a spawned future. Past [`PARSE_OFF_THREAD_BYTES`] the parse
+/// goes to the blocking pool instead.
+///
+/// Requires a Tokio runtime for a body over that size, which is what the app
+/// runs under.
+async fn parse_result<R>(raw: Box<RawValue>) -> io::Result<R>
+where
+    R: DeserializeOwned + Send + 'static,
+{
+    let invalid = |err| io::Error::new(io::ErrorKind::InvalidData, err);
+
+    if raw.get().len() <= PARSE_OFF_THREAD_BYTES {
+        return serde_json::from_str(raw.get()).map_err(invalid);
+    }
+
+    tokio::task::spawn_blocking(move || serde_json::from_str::<R>(raw.get()))
+        .await
+        .map_err(io::Error::other)?
+        .map_err(invalid)
+}
+
 /// Classify one JSON-RPC message by its shape. An `id` without a `method` is a
 /// response to us. A `method` with an `id` is a server request. A `method`
 /// without an `id` is a notification.
@@ -1285,6 +1317,53 @@ mod tests {
         let exited = reap_child(&child, Duration::from_secs(5), Duration::from_millis(10)).await;
 
         assert!(exited, "the child went on its own inside the bound");
+    }
+
+    /// A semantic-token response runs to hundreds of thousands of numbers, and
+    /// the value it parses to has to be the same one whichever side of the
+    /// size bound it lands on.
+    #[tokio::test]
+    async fn a_large_result_parses_to_what_a_small_one_would() {
+        let numbers: Vec<u32> = (0..40_000).collect();
+        let body = serde_json::value::to_raw_value(&numbers).expect("serializes");
+        assert!(
+            body.get().len() > super::PARSE_OFF_THREAD_BYTES,
+            "the fixture has to reach the off-thread branch",
+        );
+
+        let parsed: Vec<u32> = super::parse_result(body).await.expect("parses");
+        assert_eq!(parsed, numbers, "the off-thread parse returns the value");
+
+        let small = serde_json::value::to_raw_value(&[1u32, 2, 3]).expect("serializes");
+        let parsed: Vec<u32> = super::parse_result(small).await.expect("parses");
+        assert_eq!(parsed, [1, 2, 3], "and so does the one parsed in place");
+    }
+
+    /// A body that does not fit `R` is a protocol error either side of the
+    /// bound, and the join that carries the large one back must not turn it
+    /// into something else.
+    #[tokio::test]
+    async fn a_result_that_does_not_fit_is_invalid_data_at_either_size() {
+        let big = serde_json::value::to_raw_value(&vec!["text"; 20_000]).expect("serializes");
+        assert!(big.get().len() > super::PARSE_OFF_THREAD_BYTES);
+
+        let kinds = [
+            super::parse_result::<Vec<u32>>(big)
+                .await
+                .expect_err("strings do not fit u32")
+                .kind(),
+            super::parse_result::<Vec<u32>>(
+                serde_json::value::to_raw_value(&["text"]).expect("serializes"),
+            )
+            .await
+            .expect_err("strings do not fit u32")
+            .kind(),
+        ];
+        assert_eq!(
+            kinds,
+            [std::io::ErrorKind::InvalidData; 2],
+            "both sizes report the parse failure as invalid data",
+        );
     }
 
     #[test]
