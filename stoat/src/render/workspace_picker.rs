@@ -63,7 +63,10 @@ pub(crate) fn render_workspace_picker(
     const EDIT_W: u16 = 6;
 
     let path_display = picker.path_display();
-    let show_path = !matches!(path_display, PathDisplay::Omit);
+    // A remote row keeps the column alive even when every root is the same,
+    // because the host is the one thing that separates those rows.
+    let show_path = !matches!(path_display, PathDisplay::Omit)
+        || picker.entries().iter().any(|e| e.remote_host.is_some());
 
     let edit_col_x = inner.x + inner.width.saturating_sub(1 + EDIT_W);
     let run_col_x = edit_col_x.saturating_sub(RUN_W);
@@ -155,12 +158,21 @@ pub(crate) fn render_workspace_picker(
         }
 
         if show_path {
-            let context: &Path = match &path_display {
-                PathDisplay::Omit => unreachable!("show_path guards against Omit"),
-                PathDisplay::Relative(ancestor) => ancestor.as_path(),
-                PathDisplay::TildeAbsolute => Path::new(""),
+            // Omit means every row shares a root, so the path itself separates
+            // nothing and only the host is worth the column.
+            let path = match &path_display {
+                PathDisplay::Omit => String::new(),
+                PathDisplay::Relative(ancestor) => {
+                    crate::paths::display_relative(&entry.git_root, ancestor)
+                },
+                PathDisplay::TildeAbsolute => {
+                    crate::paths::display_relative(&entry.git_root, Path::new(""))
+                },
             };
-            let path = crate::paths::display_relative(&entry.git_root, context);
+            let path = match &entry.remote_host {
+                Some(host) => format!("{host}:{path}"),
+                None => path,
+            };
             let path_trimmed: String = path.chars().take(path_w as usize).collect();
             write_str(buf, path_x, row, &path_trimmed, base_style);
         }
@@ -217,21 +229,36 @@ mod tests {
         SlotMap<WorkspaceId, Workspace>,
         WorkspaceId,
     ) {
+        let (workspaces, active) =
+            workspaces_over(count, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        let picker = picker_for(&workspaces, active);
+        (picker, workspaces, active)
+    }
+
+    /// `count` workspaces named `ws00`..., the first of them active, each rooted
+    /// at `root(i)` so a caller decides whether the roots differ.
+    fn workspaces_over(
+        count: usize,
+        root: impl Fn(usize) -> PathBuf,
+    ) -> (SlotMap<WorkspaceId, Workspace>, WorkspaceId) {
         let executor: Executor = Arc::new(TestScheduler::new()).executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let mut active = WorkspaceId::default();
         for i in 0..count {
-            let id = workspaces.insert(Workspace::new(
-                PathBuf::from(format!("/tmp/ws{i:02}")),
-                &executor,
-                crate::test_notify(),
-            ));
+            let id = workspaces.insert(Workspace::new(root(i), &executor, crate::test_notify()));
             workspaces[id].id = id;
             workspaces[id].name = format!("ws{i:02}");
             if i == 0 {
                 active = id;
             }
         }
+        (workspaces, active)
+    }
+
+    fn picker_for(
+        workspaces: &SlotMap<WorkspaceId, Workspace>,
+        active: WorkspaceId,
+    ) -> WorkspacePicker {
         // The picker renders through the active workspace's editors, and a null
         // editor key resolves to nothing, so the input row paints blank.
         let input = InputView {
@@ -240,8 +267,7 @@ mod tests {
             target: SubmitTarget::WorkspacePicker,
             max_height: 1,
         };
-        let picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
-        (picker, workspaces, active)
+        WorkspacePicker::new(workspaces, active, Vec::new(), input)
     }
 
     fn render(
@@ -341,6 +367,60 @@ mod tests {
         assert!(
             text.contains(&last),
             "and it is the selected entry ({last}) that paints there: {text:?}"
+        );
+    }
+
+    /// Picking a remote row leaves this machine, so the path column says which
+    /// host it goes to. Roots that differ still render below their ancestor.
+    #[test]
+    fn a_remote_row_carries_its_host_into_the_path_column() {
+        let (mut workspaces, active) =
+            workspaces_over(2, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        let remote = workspaces.keys().find(|id| *id != active).unwrap();
+        workspaces[remote].remote = Some(crate::ssh::RemoteTarget {
+            transport: crate::ssh::Transport::Ssh,
+            host: "box".to_owned(),
+            args: Vec::new(),
+        });
+        let mut picker = picker_for(&workspaces, active);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+
+        let painted: Vec<String> = (0..area.height).map(|r| row_text(&buf, r)).collect();
+        assert!(
+            painted.iter().any(|line| line.contains("box:ws01")),
+            "the remote row reads host:path: {painted:?}",
+        );
+    }
+
+    /// One shared root drops the path column, but a remote row still has to say
+    /// where it goes, so the column survives carrying only the host.
+    #[test]
+    fn a_remote_row_keeps_the_path_column_when_every_root_matches() {
+        let (mut workspaces, active) = workspaces_over(2, |_| PathBuf::from("/tmp/same"));
+        let remote = workspaces.keys().find(|id| *id != active).unwrap();
+        workspaces[remote].remote = Some(crate::ssh::RemoteTarget {
+            transport: crate::ssh::Transport::Mosh,
+            host: "box".to_owned(),
+            args: Vec::new(),
+        });
+        let mut picker = picker_for(&workspaces, active);
+        assert_eq!(
+            picker.path_display(),
+            crate::workspace_picker::PathDisplay::Omit,
+            "the shared root is what would drop the column",
+        );
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+
+        let painted: Vec<String> = (0..area.height).map(|r| row_text(&buf, r)).collect();
+        assert!(
+            painted.iter().any(|line| line.contains("box:")),
+            "the host paints with no path beside it: {painted:?}",
         );
     }
 }

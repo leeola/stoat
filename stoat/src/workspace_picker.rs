@@ -81,6 +81,10 @@ pub struct PickerEntry {
     /// State file mtime, ordering inactive rows newest first. Epoch for open
     /// rows, which sort by name instead.
     pub mtime: SystemTime,
+    /// Host this workspace's window was last handed to, or `None` when it is
+    /// local. Picking such a row hands the window straight back to that host,
+    /// which the path column says by reading `host:path`.
+    pub remote_host: Option<String>,
 }
 
 /// Rendering strategy for the picker's per-row path column. Selected once
@@ -134,6 +138,7 @@ impl WorkspacePicker {
                 editor_count: ws.editors.len(),
                 state_path: None,
                 mtime: UNIX_EPOCH,
+                remote_host: ws.remote.as_ref().map(|target| target.host.clone()),
             })
             .collect();
 
@@ -153,6 +158,7 @@ impl WorkspacePicker {
                 editor_count: 0,
                 state_path: Some(reg.state_path),
                 mtime: reg.mtime,
+                remote_host: reg.meta.remote_host,
             });
         }
 
@@ -173,7 +179,10 @@ impl WorkspacePicker {
 
         let haystacks = entries
             .iter()
-            .map(|e| format!("{} {}", e.basename, e.git_root.display()))
+            .map(|e| {
+                let host = e.remote_host.as_deref().unwrap_or_default();
+                format!("{} {} {}", e.basename, host, e.git_root.display())
+            })
             .collect();
 
         let mut picker = Self {
@@ -587,6 +596,7 @@ mod tests {
                 name: name.into(),
                 git_root: PathBuf::from(root),
                 buffer_count: 3,
+                remote_host: None,
             },
             state_path: PathBuf::from(root).join("s.ron"),
             mtime: UNIX_EPOCH + Duration::from_secs(secs),
@@ -765,5 +775,37 @@ mod tests {
             "the stored haystack carries the root path, not just the name"
         );
         assert_eq!(picker.filtered.len(), 1, "the other root does not match");
+    }
+
+    #[test]
+    fn a_query_narrows_on_a_remote_host() {
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut ids = Vec::new();
+        for root in ["/tmp/alpha", "/tmp/beta"] {
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(root),
+                &exec,
+                crate::test_notify(),
+            ));
+            workspaces[id].id = id;
+            workspaces[id].name = String::new();
+            ids.push(id);
+        }
+        workspaces[ids[1]].remote = Some(crate::ssh::RemoteTarget {
+            transport: crate::ssh::Transport::Ssh,
+            host: "faraway".to_owned(),
+            args: Vec::new(),
+        });
+
+        let mut picker = WorkspacePicker::new(&workspaces, ids[0], Vec::new(), dummy_input());
+        picker.refilter("faraway");
+
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("beta"),
+            "the haystack carries the host, so a host names its workspace"
+        );
+        assert_eq!(picker.filtered.len(), 1, "the local row does not match");
     }
 }

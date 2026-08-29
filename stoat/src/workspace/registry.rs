@@ -27,6 +27,11 @@ pub(crate) struct WorkspaceMeta {
     pub name: String,
     pub git_root: PathBuf,
     pub buffer_count: usize,
+    /// Host this workspace's window was last handed to, or `None` when it is
+    /// local. Carried here so the picker flags a row that leaves this machine
+    /// without opening the workspace's whole state file.
+    #[serde(default)]
+    pub remote_host: Option<String>,
 }
 
 /// A persisted workspace discovered by [`list_all`], pairing its metadata with
@@ -140,6 +145,7 @@ fn meta_from_state(state_path: &Path, fs: &dyn FsHost) -> Option<WorkspaceMeta> 
         name: state.name,
         git_root: state.git_root,
         buffer_count: state.buffers.entries.len(),
+        remote_host: state.remote.map(|target| target.host),
     })
 }
 

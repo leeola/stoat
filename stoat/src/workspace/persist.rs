@@ -292,6 +292,7 @@ impl Workspace {
             name: self.name.clone(),
             git_root: self.git_root.clone(),
             buffer_count: self.buffers.len(),
+            remote_host: self.remote.as_ref().map(|target| target.host.clone()),
         }
     }
 
