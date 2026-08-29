@@ -242,19 +242,24 @@ pub(crate) fn parse_buffer_step(
         )),
     };
 
-    // The search index is an argmax over resolved token ends, and each anchor
-    // below resolves to the offset it was just built from, so the byte ends
-    // answer it without resolving anything.
-    let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
     let token_channel = match (&recaptured, prior_token_anchors) {
         (Some(recaptured), Some(prior)) => {
             recaptured.anchor_against(prior, styles.interner.clone(), &snapshot)
         },
-        _ => BufferSemanticTokens::with_resolved_ends(
-            anchor_spans(&styled, &ends, &snapshot),
-            styles.interner.clone(),
-            &ends,
-        ),
+        _ => {
+            // The search index is an argmax over resolved token ends, and each
+            // anchor below resolves to the offset it was just built from, so
+            // the byte ends answer it without resolving anything. A carried
+            // parse anchors against its prior and never reads them, so the walk
+            // over every token in the file belongs to this arm alone.
+            let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
+
+            BufferSemanticTokens::with_resolved_ends(
+                anchor_spans(&styled, &ends, &snapshot),
+                styles.interner.clone(),
+                &ends,
+            )
+        },
     };
 
     // Which rows this parse restained, for consumers that colour per row. It
