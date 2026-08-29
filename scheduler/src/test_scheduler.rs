@@ -3,7 +3,10 @@ use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -21,6 +24,7 @@ struct SchedulerState {
 pub struct TestScheduler {
     clock: TestClock,
     state: Mutex<SchedulerState>,
+    blocking_calls: AtomicUsize,
 }
 
 impl TestScheduler {
@@ -31,7 +35,17 @@ impl TestScheduler {
                 runnables: VecDeque::new(),
                 timers: Vec::new(),
             }),
+            blocking_calls: AtomicUsize::new(0),
         }
+    }
+
+    /// Returns the number of jobs handed to the blocking pool so far.
+    ///
+    /// Blocking work runs inline here, so its effects are identical to those
+    /// of a spawned future. This counter is the only witness a test has that a
+    /// caller kept a long walk off the run-loop thread.
+    pub fn blocking_calls(&self) -> usize {
+        self.blocking_calls.load(Ordering::Relaxed)
     }
 
     pub fn test_clock(&self) -> &TestClock {
@@ -196,6 +210,7 @@ impl Scheduler for TestScheduler {
     }
 
     fn schedule_blocking(&self, work: Box<dyn FnOnce() + Send + 'static>) {
+        self.blocking_calls.fetch_add(1, Ordering::Relaxed);
         work();
     }
 }

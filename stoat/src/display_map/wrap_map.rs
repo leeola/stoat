@@ -14,24 +14,6 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-
-/// Yields control back to the executor once, allowing other tasks to run.
-fn yield_now() -> impl Future<Output = ()> {
-    struct YieldNow(bool);
-    impl Future for YieldNow {
-        type Output = ();
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            if self.0 {
-                Poll::Ready(())
-            } else {
-                self.0 = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }
-    }
-    YieldNow(false)
-}
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{
     patch::{Edit, Patch},
@@ -414,9 +396,10 @@ impl WrapMap {
     /// Whether the wanted width differs from the snapshot's by enough work to
     /// be worth deferring.
     ///
-    /// Rewrapping a large file is the same O(file) walk a large edit batch
-    /// already hands to the background, and a pane drag emits a width change
-    /// per resize event, so running it inline stalls the UI thread repeatedly.
+    /// Rewrapping a large file is an O(file) walk, and a pane drag emits a
+    /// width change per resize event, so running it inline stalls the UI thread
+    /// repeatedly. Deferring ships the current frame first and sends the walk
+    /// to the blocking pool, where it costs the run loop nothing.
     ///
     /// Turning wrapping off never qualifies. [`Self::flush_edits`] does nothing
     /// without a width, so a queued entry would never run and the snapshot
@@ -517,23 +500,23 @@ impl WrapMap {
                 let mut snapshot = self.snapshot.clone();
                 let pending = self.pending_edits.clone();
                 self.background_edits_taken = pending.len();
-                let task = self
-                    .executor
-                    .spawn_with_redraw(self.redraw.clone(), async move {
-                        let mut edits = Patch::empty();
-                        for (tab_snapshot, tab_edits) in pending {
-                            let (new_snap, wrap_edits) = sync_incremental(
-                                &snapshot,
-                                tab_snapshot,
-                                &tab_edits,
-                                Some(wrap_width),
-                            );
-                            snapshot = new_snap;
-                            edits = edits.compose(wrap_edits.edits().iter().cloned());
-                            yield_now().await;
-                        }
-                        (snapshot, edits)
-                    });
+                // The walk goes to the blocking pool, not to a spawned future.
+                // Every spawned future is pumped on the run-loop thread, and
+                // one width change queues a single whole-file entry, so a
+                // yield between entries never breaks up the walk that matters.
+                let walk = self.executor.spawn_blocking(move || {
+                    let mut edits = Patch::empty();
+                    for (tab_snapshot, tab_edits) in pending {
+                        let (new_snap, wrap_edits) =
+                            sync_incremental(&snapshot, tab_snapshot, &tab_edits, Some(wrap_width));
+                        snapshot = new_snap;
+                        edits = edits.compose(wrap_edits.edits().iter().cloned());
+                    }
+                    (snapshot, edits)
+                });
+                // A thin outer task so the redraw wake still fires when the
+                // walk lands, and so `poll_background_task` polls one thing.
+                let task = self.executor.spawn_with_redraw(self.redraw.clone(), walk);
                 self.background_task = Some(task);
             }
 
@@ -2559,6 +2542,61 @@ mod tests {
                 "display_line mismatch at row {row}"
             );
         }
+    }
+
+    /// The rewrap walk leaves the run loop entirely.
+    ///
+    /// It goes to the blocking pool rather than to a spawned future, because
+    /// every spawned future is pumped on the run-loop thread and one width
+    /// change queues a single whole-file entry. The outer task carries the
+    /// result back, so the work is still owed after the spawn and settled once
+    /// the scheduler drains.
+    #[test]
+    fn a_deferred_rewrap_settles_off_the_run_loop() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        // Over the deferral threshold, and long enough that each row wraps.
+        let content: String = (0..150)
+            .map(|i| format!("line{i} aaaaaaaaaaaa\n"))
+            .collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (mut wrap_map, _) =
+            WrapMap::new(tab_snapshot, Some(20), executor, crate::test_notify());
+
+        let blocking_before = scheduler.blocking_calls();
+
+        wrap_map.set_wrap_width(Some(10));
+        resync(&multi_buffer, &mut wrap_map);
+        assert!(
+            wrap_map.background_pending(),
+            "the walk is owed rather than done inline",
+        );
+        assert_eq!(
+            scheduler.blocking_calls(),
+            blocking_before + 1,
+            "and it is owed to the blocking pool, not to a spawned future",
+        );
+
+        scheduler.run_until_parked();
+        let snapshot = resync(&multi_buffer, &mut wrap_map);
+
+        assert!(
+            !wrap_map.background_pending(),
+            "and the drained scheduler settles it",
+        );
+        assert_eq!(
+            snapshot.wrap_width,
+            Some(10),
+            "the width the walk was started with is the one installed",
+        );
     }
 
     /// Turning wrapping off while a rewrap is running does not surface the
