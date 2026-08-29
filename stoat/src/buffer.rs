@@ -1,6 +1,6 @@
 use crate::diff_map::DiffMap;
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
+use std::{borrow::Cow, cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -179,7 +179,7 @@ struct UndoGroup {
 /// fragment tree, so anchors taken against the live buffer do not survive it.
 /// [`Self::compacted`] is how a holder of such anchors learns it has to
 /// re-express them.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct BufferHistory {
     pub ops: Vec<BufferOp>,
     /// Persisted [`TextBuffer::saved_marker`], the last-clean edit frontier.
@@ -201,6 +201,54 @@ pub struct BufferHistory {
     /// disk is just a log to replay, and reads `false`.
     #[serde(skip)]
     pub compacted: bool,
+    /// The bytes `ops[0]` loaded the buffer with, held as a rope rather than
+    /// spelled out in that op.
+    ///
+    /// `Some` means `ops[0]` is the seed edit with its text left empty and
+    /// these bytes standing in for it. A snapshot then clones a rope handle
+    /// instead of copying the whole file, which is what keeps an autosave off
+    /// the UI thread's byte budget. Serialization folds it back into `ops[0]`,
+    /// so the on-disk form is the log it always was.
+    ///
+    /// Not part of that form, so a history read back from disk carries `None`
+    /// and is simply a log to replay.
+    #[serde(skip)]
+    pub seed: Option<Rope>,
+}
+
+/// [`BufferHistory`] as it goes on the wire, with the seed folded back into
+/// `ops[0]`.
+///
+/// The field names and their order match what [`BufferHistory`]'s derived
+/// `Deserialize` reads, so the two describe one format. The ops are borrowed
+/// when there is no seed to fold, which is every history read back from disk.
+#[derive(Serialize)]
+struct BufferHistoryRecord<'a> {
+    ops: Cow<'a, [BufferOp]>,
+    saved_marker: Option<u64>,
+    undo_floor: usize,
+}
+
+impl Serialize for BufferHistory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let ops = match &self.seed {
+            Some(seed) => {
+                let mut ops = self.ops.clone();
+                let Some(BufferOp::Edit { text, .. }) = ops.first_mut() else {
+                    unreachable!("a seeded log opens with the edit that loaded it")
+                };
+                *text = seed.to_string();
+                Cow::Owned(ops)
+            },
+            None => Cow::Borrowed(self.ops.as_slice()),
+        };
+        BufferHistoryRecord {
+            ops,
+            saved_marker: self.saved_marker,
+            undo_floor: self.undo_floor,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// Stable identifier for a [`Checkpoint`] within a single [`TextBuffer`].
@@ -1468,21 +1516,15 @@ impl TextBuffer {
             return self.compacted_history();
         }
 
-        let mut ops = self.ops.clone();
-        if let Some(seed) = &self.seed_text {
-            // Materialized only here, so what persists is the same log as ever
-            // and a restored buffer replays the load the way it was written.
-            let Some(BufferOp::Edit { text, .. }) = ops.first_mut() else {
-                unreachable!("a seeded log opens with the edit that loaded it")
-            };
-            *text = seed.to_string();
-        }
-
         BufferHistory {
-            ops,
+            // The seed rides as a rope handle rather than as bytes in `ops[0]`.
+            // Serialization is what puts it back, so what persists is the same
+            // log as ever and a restored buffer replays the load as written.
+            ops: self.ops.clone(),
             saved_marker: self.saved_marker,
             undo_floor: self.undo_floor,
             compacted: false,
+            seed: self.seed_text.clone(),
         }
     }
 
@@ -1497,11 +1539,12 @@ impl TextBuffer {
         BufferHistory {
             ops: vec![BufferOp::Edit {
                 old: 0..0,
-                text: self.snapshot.visible_text.to_string(),
+                text: String::new(),
             }],
             saved_marker: (!self.dirty).then_some(SEED_TIMESTAMP),
             undo_floor: 1,
             compacted: true,
+            seed: Some(self.snapshot.visible_text.clone()),
         }
     }
 
@@ -1510,9 +1553,16 @@ impl TextBuffer {
     /// resolve to identical byte offsets in the reconstructed one.
     pub fn from_history(buffer_id: BufferId, history: &BufferHistory) -> Self {
         let mut buf = Self::new(buffer_id);
-        for op in &history.ops {
+        // A history built in memory carries its seed as a rope beside an
+        // emptied `ops[0]`, so replaying that op means materializing it here.
+        // One read back from disk has it spelled out and carries no seed.
+        let seed = history.seed.as_ref().map(Rope::to_string);
+        for (index, op) in history.ops.iter().enumerate() {
             match op {
-                BufferOp::Edit { old, text } => buf.edit(old.clone(), text),
+                BufferOp::Edit { old, text } => match seed.as_deref().filter(|_| index == 0) {
+                    Some(seed) => buf.edit(old.clone(), seed),
+                    None => buf.edit(old.clone(), text),
+                },
                 BufferOp::UndoGroup { edits } => buf.replay_undo_group(edits),
                 BufferOp::Undo => {
                     buf.undo();
@@ -3557,7 +3607,29 @@ mod tests {
         let BufferOp::Edit { old, text } = &history.ops[0] else {
             panic!("the persisted log opens with the load")
         };
+        assert_eq!(
+            (old.clone(), text.as_str()),
+            (0..0, ""),
+            "the snapshot carries a rope handle rather than the file's bytes",
+        );
+        assert_eq!(
+            history.seed.as_ref().map(ToString::to_string).as_deref(),
+            Some(content),
+            "and the rope is what stands in for the load",
+        );
+
+        // The fold happens on the way out, so the log that persists is the one
+        // it always was and an older stoat reads it unchanged.
+        let wire = ron::ser::to_string(&history).expect("a history serializes");
+        let read: BufferHistory = ron::from_str(&wire).expect("and reads back");
+        let BufferOp::Edit { old, text } = &read.ops[0] else {
+            panic!("the persisted log opens with the load")
+        };
         assert_eq!((old.clone(), text.as_str()), (0..0, content));
+        assert!(
+            read.seed.is_none(),
+            "a history off the wire is a log to replay, with nothing standing in",
+        );
 
         let restored = TextBuffer::from_history(BufferId::new(0), &history);
         assert_eq!(

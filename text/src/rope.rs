@@ -1852,6 +1852,17 @@ impl std::fmt::Display for Rope {
     }
 }
 
+/// Prints the content as a quoted string, so a rope reads in a derived `Debug`
+/// exactly as the `String` it stands in for did.
+///
+/// The whole content is materialized to do it, which is what any `Debug` of a
+/// rope costs. Nothing on a hot path formats one.
+impl std::fmt::Debug for Rope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.to_string(), f)
+    }
+}
+
 struct ChunksIter<'a> {
     cursor: sum_tree::Cursor<'a, 'a, Chunk, usize>,
     started: bool,

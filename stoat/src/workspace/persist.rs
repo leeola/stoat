@@ -1209,6 +1209,37 @@ mod tests {
         assert_eq!(offsets_after, offsets_before);
     }
 
+    /// The snapshot runs on the UI thread, so it must not copy an open file's
+    /// bytes. Every entry carrying a rope seed is what says it did not.
+    #[test]
+    fn a_snapshot_carries_each_open_file_as_a_rope_seed() {
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (a, _) = ws.buffers.open(&ws_dir.join("a.txt"), "alpha\n");
+        let (b, _) = ws.buffers.open(&ws_dir.join("b.txt"), "beta\n");
+
+        let state = ws.to_state();
+        // A buffer loaded empty pushed no op and so stands in for nothing. The
+        // workspace's own scratch is one, which is why this keys on the files.
+        let seed = |id| {
+            state
+                .buffers
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.history.seed.as_ref())
+                .map(ToString::to_string)
+        };
+
+        assert_eq!(
+            (seed(a), seed(b)),
+            (Some("alpha\n".to_owned()), Some("beta\n".to_owned())),
+            "each open file rides as a rope handle rather than a copy",
+        );
+    }
+
     #[test]
     fn clean_buffer_has_single_insert_op() {
         use crate::buffer::BufferOp;
