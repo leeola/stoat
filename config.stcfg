@@ -274,6 +274,11 @@ on init {
     # profile-managed dirs, so an absolute path is the usual value.
     # ssh.program = "/home/me/.nix-profile/bin/stoat";
 
+    # mosh-server binary on the remote host. Defaults to mosh's own lookup.
+    # mosh starts it through a non-interactive login shell, whose PATH misses
+    # most profile-managed dirs, so an absolute path is the usual value.
+    # mosh.server = "/home/me/.nix-profile/bin/mosh-server";
+
     # Override the language server for a language. The first list element is
     # the executable and the rest are arguments. An empty list disables it.
     # lsp.server.rust = ["rust-analyzer"];

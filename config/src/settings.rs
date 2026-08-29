@@ -178,6 +178,15 @@ pub struct Settings {
     /// misses most profile-managed directories, so an absolute path is the
     /// usual value.
     pub ssh_program: Option<String>,
+    /// `mosh-server` binary on the remote host, passed to mosh as
+    /// `--server=<value>`. `None` passes no flag, so mosh's own
+    /// `mosh-server` lookup applies. Set via
+    /// `mosh.server = "/path/to/mosh-server";` in stcfg.
+    ///
+    /// mosh starts the server through ssh's non-interactive login shell, whose
+    /// PATH misses most profile-managed directories, so an absolute path is the
+    /// usual value.
+    pub mosh_server: Option<String>,
     /// Whether workspaces load their direnv environment automatically. `None`
     /// falls back to enabled. Set `direnv.load = false;` in stcfg to disable
     /// automatic env loading. The manual reload action ignores this.
@@ -302,6 +311,7 @@ impl Settings {
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
             ssh_program: other.ssh_program.or(self.ssh_program),
+            mosh_server: other.mosh_server.or(self.mosh_server),
             direnv_load: other.direnv_load.or(self.direnv_load),
             direnv_reload_on_cd: other.direnv_reload_on_cd.or(self.direnv_reload_on_cd),
             direnv_unset_on_exit: other.direnv_unset_on_exit.or(self.direnv_unset_on_exit),
@@ -495,6 +505,11 @@ impl Settings {
                     self.ssh_program = Some(s.clone());
                 }
             },
+            ["mosh", "server"] => {
+                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
+                    self.mosh_server = Some(s.clone());
+                }
+            },
             ["lsp", "server", language] => {
                 if let Value::Array(items) = &setting.value.node {
                     self.lsp_servers
@@ -618,6 +633,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -792,6 +808,20 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_mosh_server() {
+        let server = |src: &str| Settings::from_config(&parse_ok(src)).mosh_server;
+        assert_eq!(
+            server(r#"on init { mosh.server = "/x/mosh-server"; }"#),
+            Some("/x/mosh-server".to_string()),
+        );
+        assert_eq!(
+            server("on init { }"),
+            None,
+            "absent falls back to mosh's own lookup"
+        );
+    }
+
+    #[test]
     fn from_config_extracts_highlight_retention() {
         let config = parse_ok("on init { editor.highlight_retention = 8; }");
         assert_eq!(Settings::from_config(&config).highlight_retention, Some(8));
@@ -938,6 +968,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -982,6 +1013,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1035,6 +1067,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
+            mosh_server: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1071,6 +1104,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
+            mosh_server: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1109,6 +1143,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1150,6 +1185,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
+            mosh_server: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1189,6 +1225,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1241,6 +1278,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1285,6 +1323,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
+                mosh_server: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
                 direnv_unset_on_exit: None,
@@ -1326,6 +1365,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
+            mosh_server: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
@@ -1362,6 +1402,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
+            mosh_server: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
             direnv_unset_on_exit: None,
