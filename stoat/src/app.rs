@@ -850,6 +850,16 @@ pub struct Stoat {
     /// channel, which parks the arm once it closes instead of waking the loop on
     /// every poll. Born closed, since a process with no UI thread never reports.
     stoatty_rx: UnboundedReceiver<Option<u32>>,
+    /// Whether the UI thread has answered the startup ident handshake, either
+    /// way. Distinct from [`Self::stoatty`], which says a stoatty answered:
+    /// a plain terminal reports too, and a reconnect waits on the report
+    /// rather than on the protocol.
+    pub(crate) terminal_reported: bool,
+    /// Whether an active workspace carries a remote target that has not been
+    /// reconnected to yet. Set when a restore or a switch makes such a
+    /// workspace active, cleared by [`crate::ssh::reconnect_when_ready`] once
+    /// the terminal report lets the handoff run.
+    pub(crate) remote_pending: bool,
     /// Pixels per cell as the tty reports them, or `None` while it has not.
     ///
     /// An image is transmitted in pixels and placed in cells, so fitting one to
@@ -2100,6 +2110,8 @@ impl Stoat {
             window_ipc_tx,
             window_ipc_rx,
             stoatty_rx,
+            terminal_reported: false,
+            remote_pending: false,
             cell_pixels: None,
             images: crate::image_emit::ImageRuntime::default(),
             cell_pixels_rx,
@@ -2482,6 +2494,10 @@ impl Stoat {
     /// the app already starts in, and a repeat cannot arrive since the handshake
     /// runs once.
     fn handle_stoatty_present(&mut self, protocol: Option<u32>) -> UpdateEffect {
+        // Set before the filter below, because a plain terminal reports `None`
+        // and that answer still ends the wait a reconnect is gated on.
+        self.terminal_reported = true;
+
         let Some(protocol) = protocol.filter(|_| !self.stoatty) else {
             return UpdateEffect::None;
         };
@@ -3260,6 +3276,7 @@ impl Stoat {
                 // neighbours use would wake the loop on every poll.
                 Some(present) = self.stoatty_rx.recv() => {
                     self.handle_stoatty_present(present)
+                        .merge(ssh::reconnect_when_ready(self))
                 }
                 // A poll tick is a reason to re-stat the followed files, not a
                 // reason to paint. Only the pump finding one of them advanced
@@ -3579,6 +3596,9 @@ impl Stoat {
             effect = effect.merge(self.handle_stoatty_present(present));
             coalesced += 1;
         }
+        // A report drained here rather than through the select arm still has to
+        // release a workspace waiting on it.
+        effect = effect.merge(ssh::reconnect_when_ready(self));
         // The last report wins: an intermediate size from a drag that is already
         // over describes a window that no longer exists.
         while let Ok(cell_pixels) = self.cell_pixels_rx.try_recv() {
@@ -3953,6 +3973,10 @@ impl Stoat {
         }
         if self.active_workspace == workspace {
             action_handlers::respawn_terminal_panes(self);
+            if self.active_workspace().remote.is_some() {
+                self.remote_pending = true;
+                ssh::reconnect_when_ready(self);
+            }
         }
     }
 
@@ -20306,6 +20330,69 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("mosh exited (1): Did not find mosh server startup message."),
             "and the exit report names mosh",
+        );
+    }
+
+    /// The handoff waits on the terminal's report. An earlier run races that
+    /// report's own zoom claim and theme colors onto the remote's screen
+    /// instead of this one.
+    #[test]
+    fn a_stored_target_reconnects_only_after_the_terminal_reports() {
+        let mut h = Stoat::test();
+        install_passthrough(&mut h.stoat);
+        h.stoat.active_workspace_mut().remote = Some(ssh::RemoteTarget {
+            transport: ssh::Transport::Ssh,
+            host: "box".to_owned(),
+            args: Vec::new(),
+        });
+        h.stoat.remote_pending = true;
+
+        assert_eq!(ssh::reconnect_when_ready(&mut h.stoat), UpdateEffect::None);
+        assert!(
+            h.stoat.passthrough.is_none(),
+            "nothing is handed over before the terminal answers",
+        );
+        assert!(h.stoat.remote_pending, "and the workspace stays armed");
+
+        h.stoat.terminal_reported = true;
+        ssh::reconnect_when_ready(&mut h.stoat);
+        assert!(
+            matches!(
+                h.stoat.passthrough,
+                Some(ssh::Passthrough::Pending { ref host, .. }) if host == "box"
+            ),
+            "the report releases the handoff",
+        );
+        assert!(!h.stoat.remote_pending, "and the arming is spent");
+    }
+
+    /// Becoming active is the other half of the pair, so a switch onto a
+    /// workspace that carries a target sends the window back to that host.
+    #[test]
+    fn switching_to_a_workspace_with_a_target_reconnects_to_it() {
+        let mut h = Stoat::test();
+        install_passthrough(&mut h.stoat);
+        h.stoat.terminal_reported = true;
+        h.stoat.active_workspace_mut().remote = Some(ssh::RemoteTarget {
+            transport: ssh::Transport::Mosh,
+            host: "box".to_owned(),
+            args: Vec::new(),
+        });
+
+        // The copy carries the source's target and is switched to, which is
+        // the switch path a picker selection also takes.
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
+
+        assert!(
+            matches!(
+                h.stoat.passthrough,
+                Some(ssh::Passthrough::Pending {
+                    transport: ssh::Transport::Mosh,
+                    ref host,
+                    ..
+                }) if host == "box"
+            ),
+            "the workspace switched to hands its window back",
         );
     }
 }

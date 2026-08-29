@@ -280,6 +280,28 @@ pub(crate) fn connect(
     UpdateEffect::None
 }
 
+/// Hand the window back to the active workspace's stored target, once both the
+/// workspace and the terminal are ready.
+///
+/// Three points complete that pair, and each one calls here: the restore and
+/// the switch that arm a workspace, and the terminal's report of the startup
+/// handshake. Whichever lands last is the one that connects, and the rest
+/// return without doing anything.
+///
+/// The terminal report is the gate because a handoff before it races the
+/// report's own zoom claim and theme colors onto the remote's screen.
+pub(crate) fn reconnect_when_ready(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat.terminal_reported || !stoat.remote_pending {
+        return UpdateEffect::None;
+    }
+    stoat.remote_pending = false;
+
+    let Some(target) = stoat.active_workspace().remote.clone() else {
+        return UpdateEffect::None;
+    };
+    connect(stoat, target.transport, &target.host, &target.args)
+}
+
 /// Await the input thread's ack, or park forever when no link is installed.
 ///
 /// A `None` link has no receiver to wait on, and an arm that returns

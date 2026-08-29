@@ -80,6 +80,11 @@ fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     stoat.active_workspace = next;
     let size = stoat.size();
     stoat.active_workspace_mut().layout(size);
+
+    if stoat.active_workspace().remote.is_some() {
+        stoat.remote_pending = true;
+        crate::ssh::reconnect_when_ready(stoat);
+    }
 }
 
 /// Page the workspace picker's selection by half its visible rows in `dir`.
