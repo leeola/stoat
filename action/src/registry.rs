@@ -1066,18 +1066,27 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
 ///
 /// The remainder after the host is the remote program's arguments, so the whole
 /// tail arrives as one string and splits here.
-fn remote_target(params: &[ParamValue]) -> Result<(String, Vec<String>), ParamError> {
+///
+/// No host means reconnect to the workspace's stored target. The palette
+/// autospaces a submitted command, so a bare `ssh` arrives with an empty
+/// argument rather than none, and both spellings resolve to the same request.
+fn remote_target(params: &[ParamValue]) -> Result<(Option<String>, Vec<String>), ParamError> {
     let raw = params
         .first()
-        .context(MissingSnafu { name: "host" })?
-        .as_string()
-        .context(WrongKindSnafu {
-            name: "host",
-            expected: ParamKind::String,
-        })?;
+        .map(|param| {
+            param.as_string().context(WrongKindSnafu {
+                name: "host",
+                expected: ParamKind::String,
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+
     let mut words = raw.split_whitespace().map(str::to_owned);
-    let host = words.next().context(MissingSnafu { name: "host" })?;
-    Ok((host, words.collect()))
+    let Some(host) = words.next() else {
+        return Ok((None, Vec::new()));
+    };
+    Ok((Some(host), words.collect()))
 }
 
 pub fn lookup(name: &str) -> Option<&'static RegistryEntry> {

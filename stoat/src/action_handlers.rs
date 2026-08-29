@@ -1089,7 +1089,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             crate::ssh::connect(
                 stoat,
                 crate::ssh::Transport::Ssh,
-                &action.host,
+                action.host.as_deref(),
                 &action.args,
             )
         },
@@ -1101,7 +1101,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             crate::ssh::connect(
                 stoat,
                 crate::ssh::Transport::Mosh,
-                &action.host,
+                action.host.as_deref(),
                 &action.args,
             )
         },

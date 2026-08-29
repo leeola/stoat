@@ -121,8 +121,8 @@ const SSH_PARAMS: &[ParamDef] = &[ParamDef {
     name: "host",
     kind: ParamKind::String,
     value_source: ValueSource::None,
-    required: true,
-    description: "Host to open a remote stoat on. Anything after the host is passed to the remote program as its arguments.",
+    required: false,
+    description: "Host to open a remote stoat on. Anything after the host is passed to the remote program as its arguments. Omitted, it reconnects to the workspace's last remote.",
 }];
 
 define_action_def!(
@@ -130,7 +130,7 @@ define_action_def!(
     "Ssh",
     ActionKind::Ssh,
     "open a remote stoat over ssh",
-    "Hand the window to a stoat on the named host until it exits. The host is anything ssh accepts, and ports and users come from ~/.ssh/config.",
+    "Hand the window to a stoat on the named host until it exits. The host is anything ssh accepts, and ports and users come from ~/.ssh/config. With no host, it reconnects to the last remote this workspace was handed to.",
     ActionPriority::Common,
     aliases = &["ssh"],
     params = SSH_PARAMS
@@ -138,7 +138,7 @@ define_action_def!(
 
 #[derive(Debug)]
 pub struct Ssh {
-    pub host: String,
+    pub host: Option<String>,
     pub args: Vec<String>,
 }
 
@@ -160,8 +160,8 @@ const MOSH_PARAMS: &[ParamDef] = &[ParamDef {
     name: "host",
     kind: ParamKind::String,
     value_source: ValueSource::None,
-    required: true,
-    description: "Host to open a remote stoat on over mosh. Anything after the host is passed to the remote program as its arguments.",
+    required: false,
+    description: "Host to open a remote stoat on over mosh. Anything after the host is passed to the remote program as its arguments. Omitted, it reconnects to the workspace's last remote.",
 }];
 
 define_action_def!(
@@ -169,7 +169,7 @@ define_action_def!(
     "Mosh",
     ActionKind::Mosh,
     "open a remote stoat over mosh",
-    "Hand the window to a stoat on the named host over mosh until it exits. The remote runs as a plain terminal, since mosh drops the stoatty protocol. The host is anything mosh accepts, and ports and users come from ~/.ssh/config.",
+    "Hand the window to a stoat on the named host over mosh until it exits. The remote runs as a plain terminal, since mosh drops the stoatty protocol. The host is anything mosh accepts, and ports and users come from ~/.ssh/config. With no host, it reconnects to the last remote this workspace was handed to.",
     ActionPriority::Common,
     aliases = &["mosh"],
     params = MOSH_PARAMS
@@ -177,7 +177,7 @@ define_action_def!(
 
 #[derive(Debug)]
 pub struct Mosh {
-    pub host: String,
+    pub host: Option<String>,
     pub args: Vec<String>,
 }
 

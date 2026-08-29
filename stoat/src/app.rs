@@ -20118,7 +20118,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
 
         assert_eq!(
-            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, "somewhere", &[]),
+            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, Some("somewhere"), &[]),
             UpdateEffect::None,
         );
 
@@ -20152,7 +20152,7 @@ mod tests {
         h.stoat.aux_windows.insert(1, (80, 24));
 
         assert_eq!(
-            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, "somewhere", &[]),
+            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, Some("somewhere"), &[]),
             UpdateEffect::Redraw,
         );
         assert!(h.stoat.passthrough.is_none(), "nothing was handed over");
@@ -20176,7 +20176,7 @@ mod tests {
         ssh::connect(
             &mut h.stoat,
             ssh::Transport::Ssh,
-            "box",
+            Some("box"),
             &["~/proj".to_owned()],
         );
         assert_eq!(
@@ -20268,7 +20268,7 @@ mod tests {
         h.allow_host_swap();
         install_passthrough(&mut h.stoat);
 
-        ssh::connect(&mut h.stoat, ssh::Transport::Ssh, "box", &[]);
+        ssh::connect(&mut h.stoat, ssh::Transport::Ssh, Some("box"), &[]);
         ssh::spawn_armed(&mut h.stoat);
         assert!(h.stoat.active_workspace().remote.is_some());
 
@@ -20295,7 +20295,7 @@ mod tests {
         ssh::connect(
             &mut h.stoat,
             ssh::Transport::Mosh,
-            "box",
+            Some("box"),
             &["~/proj".to_owned()],
         );
         assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::None);
@@ -20330,6 +20330,60 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("mosh exited (1): Did not find mosh server startup message."),
             "and the exit report names mosh",
+        );
+    }
+
+    /// A bare `:ssh` reuses the host and args the workspace last went to. The
+    /// typed command still picks the link, so a bare `:mosh` after an `:ssh`
+    /// reaches the same remote over the other one.
+    #[test]
+    fn a_bare_command_reconnects_to_the_stored_target() {
+        let mut h = Stoat::test();
+        install_passthrough(&mut h.stoat);
+        h.stoat.active_workspace_mut().remote = Some(ssh::RemoteTarget {
+            transport: ssh::Transport::Ssh,
+            host: "box".to_owned(),
+            args: vec!["~/proj".to_owned()],
+        });
+
+        ssh::connect(&mut h.stoat, ssh::Transport::Mosh, None, &[]);
+
+        assert!(
+            matches!(
+                h.stoat.passthrough,
+                Some(ssh::Passthrough::Pending {
+                    transport: ssh::Transport::Mosh,
+                    ref host,
+                    ref args,
+                    ..
+                }) if host == "box" && args == &["~/proj".to_owned()]
+            ),
+            "the stored host and args ride the typed link",
+        );
+        assert_eq!(
+            h.stoat.active_workspace().remote,
+            Some(ssh::RemoteTarget {
+                transport: ssh::Transport::Mosh,
+                host: "box".to_owned(),
+                args: vec!["~/proj".to_owned()],
+            }),
+            "and the record follows the link it went over",
+        );
+    }
+
+    #[test]
+    fn a_bare_command_with_nothing_stored_says_so() {
+        let mut h = Stoat::test();
+        install_passthrough(&mut h.stoat);
+
+        assert_eq!(
+            ssh::connect(&mut h.stoat, ssh::Transport::Ssh, None, &[]),
+            UpdateEffect::Redraw,
+        );
+        assert!(h.stoat.passthrough.is_none(), "nothing was handed over");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no remote to reconnect to"),
         );
     }
 

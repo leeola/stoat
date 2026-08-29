@@ -199,6 +199,10 @@ impl Passthrough {
 
 /// Hand the window to a stoat on `host`, or refuse and say why.
 ///
+/// A `None` host reconnects to the workspace's stored target, and refuses when
+/// it has none. `transport` is the caller's regardless, so a reconnect reaches
+/// the same remote over whichever link was asked for.
+///
 /// The terminal state goes first. Every image, pool, minimap strip, and APC
 /// component is dropped, and both emitters forget what they last sent. The
 /// remote drives the same terminal from here, and nothing tells it what is
@@ -206,9 +210,23 @@ impl Passthrough {
 pub(crate) fn connect(
     stoat: &mut Stoat,
     transport: Transport,
-    host: &str,
+    host: Option<&str>,
     args: &[String],
 ) -> UpdateEffect {
+    // No host reconnects to where this workspace last went. The typed command
+    // still picks the link, so a `:mosh` after an `:ssh` reaches the same
+    // remote over the other one.
+    let (host, args) = match host {
+        Some(host) => (host.to_owned(), args.to_vec()),
+        None => match stoat.active_workspace().remote.clone() {
+            Some(target) => (target.host, target.args),
+            None => {
+                stoat.set_status("no remote to reconnect to");
+                return UpdateEffect::Redraw;
+            },
+        },
+    };
+
     if stoat.passthrough.is_some() {
         stoat.set_status("a remote session is already active");
         return UpdateEffect::Redraw;
@@ -258,20 +276,21 @@ pub(crate) fn connect(
         .as_deref()
         .unwrap_or("stoat")
         .to_owned();
+    let target = RemoteTarget {
+        transport,
+        host,
+        args,
+    };
     stoat.passthrough = Some(Passthrough::Pending {
         transport,
-        host: host.to_owned(),
+        host: target.host.clone(),
         program,
-        args: args.to_vec(),
+        args: target.args.clone(),
     });
 
     // Recorded and saved before the remote starts, so a crash while it owns the
     // screen still leaves the workspace something to reconnect to.
-    stoat.active_workspace_mut().remote = Some(RemoteTarget {
-        transport,
-        host: host.to_owned(),
-        args: args.to_vec(),
-    });
+    stoat.active_workspace_mut().remote = Some(target);
     stoat.save_workspace(stoat.active_workspace);
 
     if let Some(link) = &stoat.passthrough_link {
@@ -299,7 +318,7 @@ pub(crate) fn reconnect_when_ready(stoat: &mut Stoat) -> UpdateEffect {
     let Some(target) = stoat.active_workspace().remote.clone() else {
         return UpdateEffect::None;
     };
-    connect(stoat, target.transport, &target.host, &target.args)
+    connect(stoat, target.transport, Some(&target.host), &target.args)
 }
 
 /// Await the input thread's ack, or park forever when no link is installed.
