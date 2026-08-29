@@ -7,8 +7,8 @@ use crate::host::git::{
     RebaseTodo, RewriteResult,
 };
 use git2::{
-    build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Diff, DiffFindOptions, DiffOptions,
-    Repository, RepositoryState, Sort, Status, StatusEntry, StatusOptions,
+    build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Delta, Diff, DiffFindOptions,
+    DiffOptions, Repository, RepositoryState, Sort, Status, StatusEntry, StatusOptions,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -173,11 +173,9 @@ impl GitRepo for LocalGitRepo {
                     // which says nothing about a file's distance from a commit
                     // further back. Every entry here is simply changed.
                     staged: false,
-                    untracked: delta.status() == git2::Delta::Untracked,
+                    untracked: delta.status() == Delta::Untracked,
                     renamed_from: match delta.status() {
-                        git2::Delta::Renamed => {
-                            delta.old_file().path().map(|old| workdir.join(old))
-                        },
+                        Delta::Renamed => delta.old_file().path().map(|old| workdir.join(old)),
                         _ => None,
                     },
                 })
@@ -201,11 +199,12 @@ impl GitRepo for LocalGitRepo {
             opts.context_lines(0).interhunk_lines(0);
             opts
         };
+        // No `show_untracked_content`. That flag reads and xdiffs every
+        // untracked file's whole content just to learn it holds one hunk.
+        // [`count_hunks`] counts such a delta from its size instead.
         let with_untracked = || {
             let mut opts = hunk_only();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .show_untracked_content(true);
+            opts.include_untracked(true).recurse_untracked_dirs(true);
             opts
         };
 
@@ -772,11 +771,11 @@ impl GitRepo for LocalGitRepo {
                 None => continue,
             };
             let kind = match delta.status() {
-                git2::Delta::Added => CommitFileChangeKind::Added,
-                git2::Delta::Deleted => CommitFileChangeKind::Deleted,
-                git2::Delta::Modified => CommitFileChangeKind::Modified,
-                git2::Delta::Renamed => CommitFileChangeKind::Renamed,
-                git2::Delta::Typechange => CommitFileChangeKind::TypeChange,
+                Delta::Added => CommitFileChangeKind::Added,
+                Delta::Deleted => CommitFileChangeKind::Deleted,
+                Delta::Modified => CommitFileChangeKind::Modified,
+                Delta::Renamed => CommitFileChangeKind::Renamed,
+                Delta::Typechange => CommitFileChangeKind::TypeChange,
                 _ => CommitFileChangeKind::Modified,
             };
             let patch = git2::Patch::from_diff(&diff, i).ok().flatten();
@@ -1190,6 +1189,22 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
     );
     if let Some((done, count)) = current {
         per_file(done, count);
+    }
+
+    // An untracked file carries no hunk through the walk above, because the
+    // diff was built without `show_untracked_content` and libgit2 reads no
+    // content it was not asked for. Its whole content is the work, so it owes
+    // one hunk when it holds bytes and none when it is empty. The sizes come
+    // off the deltas, which is metadata the diff already holds.
+    for delta in diff.deltas() {
+        if delta.status() != Delta::Untracked || delta.new_file().size() == 0 {
+            continue;
+        }
+        let Some(path) = delta.new_file().path().map(Path::to_path_buf) else {
+            continue;
+        };
+        total += 1;
+        per_file(path, 1);
     }
     total
 }

@@ -412,6 +412,23 @@ fn hunk_tallies_count_an_untracked_file_as_unstaged() {
     assert_eq!(tallies.per_file, vec![(PathBuf::from("new.rs"), 1)]);
 }
 
+/// An untracked file's whole content is its one hunk, so a file holding no
+/// content holds no hunk either.
+#[test]
+fn hunk_tallies_count_an_empty_untracked_file_as_nothing() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\n");
+    tr.write("empty.rs", "");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+
+    assert_eq!(
+        repo.hunk_tallies(),
+        Default::default(),
+        "an empty file adds no line, so it owes no hunk",
+    );
+}
+
 #[test]
 fn hunk_tallies_are_zero_on_a_clean_repo() {
     let tr = TestRepo::new();
