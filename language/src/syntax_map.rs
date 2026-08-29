@@ -41,7 +41,9 @@ use std::{
     time::Instant,
 };
 use stoat_scheduler::Executor;
-use stoat_text::{patch::Edit as PatchEdit, ContextLessSummary, Item, Rope, SumTree};
+use stoat_text::{
+    patch::Edit as PatchEdit, Bias, ContextLessSummary, Dimension, Item, Rope, SumTree,
+};
 use tree_sitter::{Node, Query, StreamingIterator, Tree};
 
 /// How many captures [`SyntaxSnapshot::captures`] reserves room for.
@@ -115,6 +117,18 @@ impl ContextLessSummary for LayerSummary {
         self.key = other.key.clone();
         self.count += other.count;
         self.max_end = self.max_end.max(other.max_end);
+    }
+}
+
+/// The key doubles as a cursor position, so a seek names a layer by
+/// `(depth, start_offset)` and slices the run ahead of it.
+impl<'a> Dimension<'a, LayerSummary> for LayerKey {
+    fn zero(_: ()) -> Self {
+        LayerKey::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a LayerSummary, _: ()) {
+        self.clone_from(&summary.key);
     }
 }
 
@@ -330,12 +344,10 @@ impl SyntaxMap {
         };
         let ts_edits = input_edits(edits, old_rope, new_rope);
 
-        let mut new_layers: Vec<SyntaxLayer> = Vec::with_capacity(self.snapshot.layer_count());
-        for layer in self.snapshot.layers.iter() {
+        let replayed = |layer: &SyntaxLayer| {
             let mut next = layer.clone();
             if (layer.end_offset as usize) <= first_edit {
-                new_layers.push(next);
-                continue;
+                return next;
             }
 
             apply_input_edits(&mut next.tree, &ts_edits);
@@ -344,13 +356,49 @@ impl SyntaxMap {
             next.end_offset =
                 (translate_offset(edits, layer.end_offset as usize) as u32).max(next.start_offset);
 
-            new_layers.push(next);
-        }
+            next
+        };
+
         // Built rather than installed, because installing sorts. Depth does not
         // move here, and `translate_offset` is the identity below the first edit
-        // and monotone above it, so no layer's key can cross another's and the
-        // list is already in the order the tree wants.
-        self.snapshot.layers = SumTree::from_iter(new_layers, ());
+        // and monotone above it, so no layer's key crosses another's and the
+        // appended order is the order the tree wants.
+        let carried = {
+            // The summary says how far a subtree reaches, so this walk descends
+            // past whole runs of layers the edit leaves alone and stops only at
+            // the ones that need replaying.
+            let reached = self
+                .snapshot
+                .layers
+                .filter::<_, ()>((), |s| s.max_end as usize > first_edit);
+            let mut cursor = self.snapshot.layers.cursor::<LayerKey>(());
+            let mut built = SumTree::new(());
+
+            for layer in reached {
+                let key = LayerKey {
+                    depth: layer.depth,
+                    start_offset: layer.start_offset,
+                };
+                built.append(cursor.slice(&key, Bias::Left), ());
+
+                // Two layers of one depth sharing a start offset stop the slice
+                // at the first of them rather than at the one the filter named,
+                // so every layer at this key answers for itself. A later filter
+                // item at the same key then finds the cursor already past it.
+                while let Some(at_key) = cursor
+                    .item()
+                    .filter(|l| l.depth == key.depth && l.start_offset == key.start_offset)
+                {
+                    built.push(replayed(at_key), ());
+                    cursor.next();
+                }
+            }
+
+            built.append(cursor.suffix(), ());
+            built
+        };
+
+        self.snapshot.layers = carried;
     }
 
     /// Reparse `rope` against `language`, replacing every layer.
@@ -3208,6 +3256,57 @@ mod tests {
             captures.iter().any(|c| c.depth == 0),
             "the root layer must answer a range that starts past every \
              injected layer's end",
+        );
+    }
+
+    /// A layer the edit never reaches carries over by subtree rather than by
+    /// copy.
+    ///
+    /// A whole-file rebuild answers every question about the layer set the
+    /// same way, so what separates it is where the layers live. Slicing shares
+    /// the aligned subtrees by pointer and copies only the partial leaves at
+    /// the two ends of a run, which leaves most untouched layers at the
+    /// address they already had. A rebuild leaves none of them there.
+    #[test]
+    fn interpolate_carries_an_untouched_layer_by_subtree() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let mut original = String::new();
+        for i in 0..16 {
+            original.push_str(&format!(
+                "/// doc **bold{i}**\nfn f{i}() {{ let _ = {i}; }}\n\n"
+            ));
+        }
+        let old_rope = Rope::from(original.as_str());
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang, 1, None, None).unwrap();
+        assert!(
+            map.snapshot().layer_count() > 12,
+            "the fixture must outgrow one sum-tree leaf, got {} layers",
+            map.snapshot().layer_count(),
+        );
+
+        let insert_pos = original.len();
+        let inserted = "fn tail() {}\n";
+        let new_rope = Rope::from(format!("{original}{inserted}").as_str());
+        let edits = vec![PatchEdit {
+            old: insert_pos..insert_pos,
+            new: insert_pos..(insert_pos + inserted.len()),
+        }];
+
+        let before = map.snapshot().clone();
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let carried = before
+            .iter_layers()
+            .zip(map.snapshot().iter_layers())
+            .filter(|(old, new)| std::ptr::eq(*old, *new))
+            .count();
+        assert!(
+            carried > 0,
+            "an edit past every injected layer must leave some of them in \
+             place, got {carried} of {} still at their address",
+            before.layer_count(),
         );
     }
 }
