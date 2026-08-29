@@ -59,6 +59,20 @@ pub struct Args {
     #[arg(long = "log-stderr")]
     pub log_stderr: bool,
 
+    /// Run as a detachable session named NAME. It starts when none exists, and
+    /// attaches to the one that does otherwise. The session survives its
+    /// terminal going away, and the same command reattaches.
+    #[arg(
+        long = "attachable",
+        value_name = "NAME",
+        value_parser = crate::commands::attach::parse_name
+    )]
+    attachable: Option<String>,
+
+    /// The server half of `--attachable`, which that flag starts for itself.
+    #[arg(long = "attach-serve", hide = true, value_name = "NAME")]
+    attach_serve: Option<String>,
+
     #[arg(
         short = 'v',
         long = "version",
@@ -129,8 +143,16 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         common,
         working_dir,
         text_proto_log,
+        attachable,
+        attach_serve,
         ..
     } = args;
+
+    // Before anything else, because the client half never starts an editor at
+    // all. It pipes this terminal to the session that does.
+    if let Some(name) = attachable {
+        return crate::commands::attach::attach_or_start(&name);
+    }
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
@@ -144,9 +166,27 @@ pub fn run(args: Args) -> Result<(), Whatever> {
             clap_complete::generate(shell, &mut Args::command(), "stoat", &mut std::io::stdout());
             Ok(())
         },
-        Some(Command::Review) => run_tui(text_proto_log, common, working_dir, TuiStart::Review),
-        Some(Command::Conflict) => run_tui(text_proto_log, common, working_dir, TuiStart::Conflict),
-        None => run_tui(text_proto_log, common, working_dir, TuiStart::Files),
+        Some(Command::Review) => run_tui(
+            text_proto_log,
+            common,
+            working_dir,
+            TuiStart::Review,
+            attach_serve,
+        ),
+        Some(Command::Conflict) => run_tui(
+            text_proto_log,
+            common,
+            working_dir,
+            TuiStart::Conflict,
+            attach_serve,
+        ),
+        None => run_tui(
+            text_proto_log,
+            common,
+            working_dir,
+            TuiStart::Files,
+            attach_serve,
+        ),
     }
 }
 
@@ -170,7 +210,7 @@ fn run_fixture(
                 whatever!("`--fixture` conflicts with the fixture subcommand");
             }
             common.fixture = Some(name);
-            run_tui(text_proto_log, common, None, TuiStart::Files)
+            run_tui(text_proto_log, common, None, TuiStart::Files, None)
         },
         (None, None) => whatever!("specify a fixture name or `ls`"),
     }
@@ -222,6 +262,7 @@ fn run_tui(
     common: CommonArgs,
     working_dir: Option<PathBuf>,
     start: TuiStart,
+    attach_serve: Option<String>,
 ) -> Result<(), Whatever> {
     // Run before anything takes over the terminal, so a forwarded open leaves
     // the shell exactly as it found it. Outside a stoat terminal pane this
@@ -254,6 +295,16 @@ fn run_tui(
         .map(input_parse::parse_input_sequence)
         .transpose()
         .with_whatever_context(|e| format!("parse --inputs sequence: {e}"))?;
+
+    // Before the panic hook, because this moves fd 0 and fd 1 onto a pty of
+    // this process's own and the hook restores whatever they end up being.
+    let mut attach_server = attach_serve
+        .as_deref()
+        .map(crate::commands::attach::serve)
+        .transpose()?;
+    let attached_rx = attach_server
+        .as_mut()
+        .and_then(crate::commands::attach::AttachServer::attached_rx);
 
     stoat::ui::install_panic_hook();
 
@@ -427,6 +478,9 @@ fn run_tui(
             ack_rx,
         });
         stoat.set_stoatty_rx(stoatty_rx);
+        if let Some(attached_rx) = attached_rx {
+            stoat.set_attached_rx(attached_rx);
+        }
         stoat.set_cell_pixels_rx(cell_pixels_rx);
         stoat.set_window_ipc(window_socket_path());
         stoat.set_version_info(VERSION_INFO);
@@ -546,6 +600,12 @@ fn run_tui(
         .join()
         .expect("ui thread panicked")
         .whatever_context("ui thread")?;
+
+    // After the join, because the terminal-restore bytes it writes are the last
+    // thing the attached client needs.
+    if let Some(server) = attach_server {
+        server.finish();
+    }
 
     Ok(())
 }

@@ -1,4 +1,5 @@
 pub mod agent_api;
+pub mod attach;
 pub mod default;
 pub mod diff;
 pub mod dump;
