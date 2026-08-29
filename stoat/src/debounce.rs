@@ -53,6 +53,14 @@ pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration:
 pub(crate) const WORKSPACE_AUTOSAVE_THROTTLE: std::time::Duration =
     std::time::Duration::from_secs(5);
 
+/// Watch events [`drain_fs_watch_events`] takes in one turn.
+///
+/// Each costs a set of debounce arms, and the drain runs on the loop that
+/// paints, so a checkout naming thousands of paths is spread over turns
+/// rather than stalling one. The drain wakes the loop again whenever it
+/// stops here, so the pacing costs latency and never progress.
+const FS_WATCH_DRAIN_CAP: usize = 256;
+
 /// External-change paths [`drain_pending_index_edits`] hands to the
 /// blocking pool in one pass.
 ///
@@ -94,12 +102,13 @@ pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
 /// None of them does the work here: each arms a timer whose drain lands on the
 /// main loop later.
 ///
-/// Cap matches [`Stoat::drain_lsp_notifications`] so a pathological burst
-/// cannot starve the event loop.
+/// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
+/// again when it stops there, so a checkout's worth of paths drains over
+/// several turns instead of stalling one.
 pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let host = stoat.fs_watch_host.clone();
     let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
-    for _ in 0..256 {
+    for _ in 0..FS_WATCH_DRAIN_CAP {
         let Some(event) = host.try_recv() else {
             break;
         };
@@ -110,6 +119,13 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             "fs watch event observed",
         );
         events.push((event.path, event.kind));
+    }
+
+    // The cap is the only thing that stops the loop early, so hitting it
+    // means more paths are queued. Waking the loop again is what carries a
+    // burst past one turn without a keystroke to drive it.
+    if events.len() == FS_WATCH_DRAIN_CAP {
+        stoat.drain_notify.notify_one();
     }
 
     if events.is_empty() {
@@ -637,6 +653,89 @@ mod tests {
             (progress, h.stoat.pending_workspace_autosave.is_some()),
             (false, false),
             "the drain closes the window and reports no work a settle waits on",
+        );
+    }
+
+    /// A file written three times arms one debounce, not three.
+    ///
+    /// A save reports several events for one write and a formatter reports
+    /// several more, so the watcher folds them by path before the drain
+    /// ever sees them.
+    #[test]
+    fn repeated_events_on_one_path_arm_one_debounce() {
+        let mut h = ignored_dir_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        let path = Path::new("/repo/src/a.rs");
+        for _ in 0..3 {
+            h.fake_fs_watcher().inject(path, FsEventKind::Modified);
+        }
+
+        // Counted by draining the host, because the arms below are sets and
+        // hold one path either way. The saving is the work three events cost
+        // on the way there.
+        let mut queued = 0;
+        while h.stoat.fs_watch_host.try_recv().is_some() {
+            queued += 1;
+        }
+        assert_eq!(queued, 1, "the three writes reach the drain as one event");
+
+        h.fake_fs_watcher().inject(path, FsEventKind::Modified);
+        drain_fs_watch_events(&mut h.stoat);
+
+        assert_eq!(
+            h.stoat.diff_warm_pending_paths.len(),
+            1,
+            "and that one event arms one debounce",
+        );
+    }
+
+    /// An event arriving into an idle session wakes the loop by itself.
+    ///
+    /// Without it the drain runs only from `update`, that is on a terminal
+    /// event, so an agent's edits sit queued until the user presses a key.
+    #[test]
+    fn an_event_wakes_the_loop_with_no_input() {
+        let h = ignored_dir_harness();
+        let _ = h.stoat.drain_notify.notified().now_or_never();
+
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/src/a.rs"), FsEventKind::Modified);
+
+        assert!(
+            h.stoat.drain_notify.notified().now_or_never().is_some(),
+            "the watcher asks for the turn that drains it",
+        );
+    }
+
+    /// A burst past the drain cap wakes the loop again rather than waiting
+    /// for a keystroke.
+    ///
+    /// An agent or a checkout emits events into an editor nobody is at, so
+    /// the drain has to carry itself across turns.
+    #[test]
+    fn a_capped_drain_wakes_the_loop_for_the_rest() {
+        let mut h = ignored_dir_harness();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        for i in 0..FS_WATCH_DRAIN_CAP + 1 {
+            h.fake_fs_watcher().inject(
+                PathBuf::from(format!("/repo/src/f{i}.rs")),
+                FsEventKind::Modified,
+            );
+        }
+        // Drop any wake the harness setup left armed, so the assertion
+        // reads this drain's own.
+        let _ = h.stoat.drain_notify.notified().now_or_never();
+        drain_fs_watch_events(&mut h.stoat);
+
+        assert!(
+            h.stoat.drain_notify.notified().now_or_never().is_some(),
+            "the capped drain asks for the turn that takes the rest",
+        );
+        assert!(
+            h.stoat.fs_watch_host.try_recv().is_some(),
+            "and there is a rest to take",
         );
     }
 

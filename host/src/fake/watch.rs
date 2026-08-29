@@ -1,6 +1,6 @@
 use crate::{
     fake::fs::FakeFs,
-    watch::{FsEventKind, FsWatchEvent, FsWatchHost, WatchToken},
+    watch::{merge_event_kind, FsEventKind, FsWatchEvent, FsWatchHost, WakeFn, WatchToken},
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -15,6 +15,7 @@ use std::{
 /// (`crate::fs::FsHost::write`) lands on a watched path.
 pub struct FakeFsWatcher {
     state: Mutex<FakeWatchState>,
+    wake: Mutex<Option<WakeFn>>,
 }
 
 struct FakeWatchState {
@@ -39,19 +40,44 @@ impl FakeFsWatcher {
                 paths: BTreeMap::new(),
                 queue: VecDeque::new(),
             }),
+            wake: Mutex::new(None),
         }
     }
 
-    /// Push an event onto the queue for `path` regardless of whether
-    /// the path is currently watched. Tests that want the watcher to
-    /// behave like a paired [`FakeFs`] write should prefer
-    /// [`Self::install_on`].
+    /// Queue an event for `path` regardless of whether the path is
+    /// currently watched. For a watcher that behaves like a paired
+    /// [`FakeFs`] write, use [`Self::install_on`] instead.
+    ///
+    /// An event for a path already queued merges into that entry through
+    /// [`merge_event_kind`], matching what the production watcher does, so
+    /// a test that emits three writes to one file drains one event. The
+    /// entry keeps its original position, so paths drain in the order they
+    /// were first named.
+    ///
+    /// Also matching production, an event that fills an empty queue runs the
+    /// wake from [`FsWatchHost::set_wake`], so a test drives the same
+    /// idle-drain path a real burst does.
     pub fn inject(&self, path: impl AsRef<Path>, kind: FsEventKind) {
-        let mut state = self.state.lock().expect("FakeFsWatcher poisoned");
-        state.queue.push_back(FsWatchEvent {
-            path: path.as_ref().to_path_buf(),
-            kind,
-        });
+        let path = path.as_ref().to_path_buf();
+
+        let opened = {
+            let mut state = self.state.lock().expect("FakeFsWatcher poisoned");
+            match state.queue.iter_mut().find(|e| e.path == path) {
+                Some(queued) => {
+                    queued.kind = merge_event_kind(Some(queued.kind), kind);
+                    false
+                },
+                None => {
+                    let was_empty = state.queue.is_empty();
+                    state.queue.push_back(FsWatchEvent { path, kind });
+                    was_empty
+                },
+            }
+        };
+
+        if opened && let Some(wake) = self.wake.lock().expect("FakeFsWatcher poisoned").as_ref() {
+            wake();
+        }
     }
 
     /// Snapshot of currently-watched paths. Each path appears once
@@ -126,6 +152,10 @@ impl FsWatchHost for FakeFsWatcher {
             .expect("FakeFsWatcher poisoned")
             .queue
             .pop_front()
+    }
+
+    fn set_wake(&self, wake: WakeFn) {
+        *self.wake.lock().expect("FakeFsWatcher poisoned") = Some(wake);
     }
 }
 

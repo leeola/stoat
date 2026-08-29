@@ -2957,7 +2957,17 @@ impl Stoat {
     /// [`NoopFsWatcher`] (no events ever fire); the bin layer
     /// installs [`crate::host::LocalFsWatcher`] and tests install
     /// [`crate::host::FakeFsWatcher`].
+    ///
+    /// Arms the host's wake against [`Self::drain_notify`], so a burst that
+    /// arrives while the user sits idle still reaches
+    /// [`debounce::drain_fs_watch_events`]. Wiring it here rather than in
+    /// [`Self::new`] is what makes it reach every host, since the one `new`
+    /// installs produces no events at all.
     pub fn set_fs_watch_host(&mut self, host: Arc<dyn FsWatchHost>) {
+        host.set_wake(Box::new({
+            let drain = self.drain_notify.clone();
+            move || drain.notify_one()
+        }));
         self.fs_watch_host = host;
     }
 
@@ -3330,6 +3340,10 @@ impl Stoat {
                 // unless the drain says otherwise, so the frame is earned
                 // rather than assumed.
                 _ = self.drain_notify.notified() => {
+                    // Ahead of drain_external, so the debounces a burst arms
+                    // are visible to the drains in the same turn rather than
+                    // waiting on another wake.
+                    debounce::drain_fs_watch_events(self);
                     if self.drain_external() {
                         UpdateEffect::Redraw
                     } else {
