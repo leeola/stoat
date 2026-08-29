@@ -35,6 +35,7 @@ use std::time::Instant;
 use std::{
     backtrace::Backtrace,
     io::{self, Write},
+    os::fd::RawFd,
     panic,
     sync::{Arc, Once},
     thread,
@@ -212,6 +213,7 @@ async fn run(
         let cell_pixels_tx = cell_pixels_tx.clone();
         let stoatty_tx = stoatty_tx.clone();
         let slot = slot.clone();
+        let wake_fd = slot.wake_fd();
         move || {
             forward_input(
                 InputChannels {
@@ -225,6 +227,7 @@ async fn run(
                 read_stdin_raw,
                 tty_winsize,
                 stoatty_handshake,
+                move || wait_idle(wake_fd),
             )
         }
     });
@@ -467,12 +470,21 @@ fn tty_winsize() -> Option<libc::winsize> {
     }
 }
 
-/// How long each wait for input runs before the loop re-reads the slot.
+/// How long a raw read waits before the loop takes another turn.
 ///
-/// The state changes on another thread, so the bound is how long a `:ssh` waits
-/// to be noticed, and it doubles as the tick that polls the window size while a
-/// remote session owns fd 0.
+/// The tick that polls the window size while a remote session owns fd 0, since
+/// crossterm reports no resize while nothing parses it. The idle wait needs no
+/// interval of its own, since it parks on the slot's wake pipe beside fd 0.
 const INPUT_POLL: Duration = Duration::from_millis(50);
+
+/// What ended an idle wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleWake {
+    /// Something arrived on fd 0, or a signal interrupted the wait.
+    Input,
+    /// The app moved the slot out of idle.
+    Slot,
+}
 
 /// Bytes read per pass while a remote session owns fd 0. Large enough that a
 /// pasted screenful crosses in one write.
@@ -499,10 +511,11 @@ struct InputChannels<'a> {
 /// Forward what fd 0 produces, to the app or to the remote session the slot
 /// names.
 ///
-/// Four modes, re-read every pass so a `:ssh` or an attach takes effect without
-/// a wake:
+/// Four modes, re-read every pass, so a `:ssh` or an attach takes effect on the
+/// turn after the slot moves:
 ///
-/// - Idle: `poll` then `read` an event and send it, as a normal session does.
+/// - Idle: `poll` then `read` an event and send it, as a normal session does. An idle wait blocks
+///   on `wait_idle` rather than spinning, so a session with nobody typing costs nothing.
 /// - Pending: acknowledge that fd 0 is no longer parsed, then buffer raw bytes. The app spawns ssh
 ///   on that ack, so anything typed in between is the user's and is handed to the session once it
 ///   exists.
@@ -527,6 +540,7 @@ fn forward_input(
     mut read_raw: impl FnMut(&mut [u8], Duration) -> io::Result<usize>,
     mut winsize: impl FnMut() -> Option<libc::winsize>,
     mut handshake: impl FnMut() -> (Option<u32>, Vec<u8>),
+    mut wait_idle: impl FnMut() -> io::Result<IdleWake>,
 ) {
     let InputChannels {
         event_tx,
@@ -560,9 +574,18 @@ fn forward_input(
                 }
                 acked = false;
 
-                match poll(INPUT_POLL) {
+                // Asked first with no wait, so an event crossterm already
+                // buffered is read rather than parked behind the poll below,
+                // which sees only what the kernel still holds on fd 0.
+                match poll(Duration::ZERO) {
                     Ok(true) => {},
-                    Ok(false) => continue,
+                    Ok(false) => match wait_idle() {
+                        // The slot moved, so the next turn takes the arm it
+                        // moved to rather than reading fd 0 here.
+                        Ok(IdleWake::Slot) => continue,
+                        Ok(IdleWake::Input) => {},
+                        Err(_) => return,
+                    },
                     Err(_) => return,
                 }
                 let Ok(event) = read() else {
@@ -632,6 +655,54 @@ fn forward_input(
             },
         }
     }
+}
+
+/// Park until fd 0 has something or the slot leaves idle, however long that
+/// takes.
+///
+/// No timeout, so an idle session costs no wakes at all, and an arm is seen the
+/// moment the app writes its byte rather than up to a poll interval later.
+///
+/// A signal reads as input. SIGWINCH interrupts `poll` on Linux whatever
+/// `SA_RESTART` says, and crossterm reports that resize through a signal fd of
+/// its own, so falling through to the read is what collects it.
+fn wait_idle(wake_fd: RawFd) -> io::Result<IdleWake> {
+    let mut fds = [
+        libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+
+    // SAFETY: poll reads and writes the two pollfds through the pointer and
+    // touches nothing else. The array is initialized above.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+    if ready < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(IdleWake::Input);
+        }
+        return Err(err);
+    }
+
+    if fds[1].revents & libc::POLLIN == 0 {
+        return Ok(IdleWake::Input);
+    }
+    // Drained so a burst of arms leaves the pipe empty rather than waking the
+    // next idle wait immediately. The count does not matter, only the state.
+    let mut sink = [0u8; 64];
+    // SAFETY: read writes at most sink.len() bytes through the pointer, which
+    // borrows a live array for the call.
+    unsafe {
+        libc::read(wake_fd, sink.as_mut_ptr().cast(), sink.len());
+    }
+    Ok(IdleWake::Slot)
 }
 
 /// Read what is on fd 0 into `buf`, waiting up to `timeout`.
@@ -834,6 +905,7 @@ mod tests {
             |_, _| Ok(0),
             || None,
             || (None, Vec::new()),
+            || Ok(IdleWake::Input),
         );
     }
 
@@ -943,6 +1015,7 @@ mod tests {
                 })
             },
             || (None, Vec::new()),
+            || Ok(IdleWake::Input),
         );
 
         assert!(ack_rx.try_recv().is_ok(), "the arm is acknowledged");
@@ -961,6 +1034,44 @@ mod tests {
             vec![Event::Resize(100, 30)],
             "and the return reports the size the window reached",
         );
+    }
+
+    /// An idle wait parks until fd 0 has something or the slot moves, and a
+    /// `:ssh` arm is what moves it. Waiting on the pipe rather than on a poll
+    /// interval is what keeps an idle session free and the ack immediate.
+    #[test]
+    fn an_idle_wait_ends_on_the_slot_leaving_idle() {
+        let armed = PassthroughSlot::new().0;
+        armed.arm();
+        assert_wakes(&armed, "an ssh arm");
+
+        let attached = PassthroughSlot::new().0;
+        attached.rehandshake();
+        assert_wakes(&attached, "an attach");
+    }
+
+    /// Assert `slot` woke an idle wait, without risking one that never ends.
+    fn assert_wakes(slot: &PassthroughSlot, what: &str) {
+        let wake_fd = slot.wake_fd();
+        // Checked before the blocking wait, so a transition that forgot to wake
+        // fails here rather than parking the suite forever.
+        assert!(readable(wake_fd), "{what} wrote its wake byte");
+        assert_eq!(
+            wait_idle(wake_fd).expect("the wait resolves"),
+            IdleWake::Slot,
+            "and that byte is what ended the wait after {what}",
+        );
+    }
+
+    /// Whether `fd` has something to read right now.
+    fn readable(fd: RawFd) -> bool {
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: as in `wait_idle`, with a zero timeout so it never blocks.
+        unsafe { libc::poll(&raw mut poll_fd, 1, 0) > 0 }
     }
 
     /// The probe reads raw fd 0, so it belongs on this thread. What was typed
@@ -995,6 +1106,7 @@ mod tests {
                 })
             },
             || (Some(3), b"x".to_vec()),
+            || Ok(IdleWake::Input),
         );
 
         assert_eq!(

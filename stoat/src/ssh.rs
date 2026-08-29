@@ -28,6 +28,8 @@ use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
+    io::{PipeReader, PipeWriter, Write},
+    os::fd::{AsRawFd, RawFd},
     sync::{Arc, Mutex},
 };
 use stoatty_protocol::command::{encode_minimap_drop_into, encode_reset_into, MinimapDropCommand};
@@ -81,6 +83,16 @@ pub enum UiControl {
 pub struct PassthroughSlot {
     state: Mutex<SlotState>,
     ack_tx: UnboundedSender<()>,
+    /// Read end of the wake pipe, which the input thread parks on beside fd 0
+    /// while the slot is idle.
+    ///
+    /// A pipe rather than a poll interval, so an idle session costs no wakes at
+    /// all and a state change is seen the moment it happens rather than up to
+    /// one interval later.
+    wake_rx: PipeReader,
+    /// Write end, poked by whichever state change the idle thread has to
+    /// notice.
+    wake_tx: Mutex<PipeWriter>,
 }
 
 #[derive(Clone)]
@@ -129,9 +141,12 @@ impl PassthroughSlot {
     /// input thread's ack.
     pub fn new() -> (Arc<PassthroughSlot>, UnboundedReceiver<()>) {
         let (ack_tx, ack_rx) = unbounded_channel();
+        let (wake_rx, wake_tx) = std::io::pipe().expect("passthrough wake pipe");
         let slot = PassthroughSlot {
             state: Mutex::new(SlotState::Idle),
             ack_tx,
+            wake_rx,
+            wake_tx: Mutex::new(wake_tx),
         };
         (Arc::new(slot), ack_rx)
     }
@@ -147,15 +162,16 @@ impl PassthroughSlot {
 
     /// Report that fd 0 is no longer parsed as terminal input.
     ///
-    /// The spawn waits for this rather than starting ssh straight away. A warm
-    /// ControlMaster plus a fast remote delivers the ident inside the input
-    /// thread's poll interval, and an ident parsed by crossterm is garbage keys.
+    /// The spawn waits for this rather than starting ssh straight away, because
+    /// an ident parsed by crossterm is garbage keys. The arm wakes the input
+    /// thread at once, so this follows it by the time one pass takes.
     pub fn ack(&self) {
         let _ = self.ack_tx.send(());
     }
 
     pub(crate) fn arm(&self) {
         *self.state.lock().expect("passthrough slot lock") = SlotState::Pending;
+        self.wake();
     }
 
     pub(crate) fn engage(&self, session: Arc<dyn TerminalSession>) {
@@ -169,6 +185,24 @@ impl PassthroughSlot {
     /// Ask the input thread to identify the terminal on fd 0 again.
     pub(crate) fn rehandshake(&self) {
         *self.state.lock().expect("passthrough slot lock") = SlotState::Handshake;
+        self.wake();
+    }
+
+    /// The wake pipe's read end, for the input thread to park on.
+    pub(crate) fn wake_fd(&self) -> RawFd {
+        self.wake_rx.as_raw_fd()
+    }
+
+    /// Tell an idle input thread the state moved under it.
+    ///
+    /// Only the two transitions out of idle need this. `engage` and `release`
+    /// fire while that thread is already inside a polling arm.
+    ///
+    /// A full pipe means unread wakes are already queued, which says what this
+    /// one would, so a failed write is nothing to handle.
+    fn wake(&self) {
+        let mut tx = self.wake_tx.lock().expect("passthrough wake lock");
+        let _ = tx.write(&[1]);
     }
 }
 
