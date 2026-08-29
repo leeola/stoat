@@ -413,6 +413,27 @@ pub(crate) fn drain_pending_diff_refresh(stoat: &mut Stoat) -> bool {
     false
 }
 
+/// Drain the signature-help debounce marker, asking the server about the
+/// argument list the cursor sits in.
+///
+/// The request also flushes the buffer's pending didChange, since a server
+/// places a position only in text it has been sent. Both happen once per window
+/// rather than once per trigger character.
+///
+/// Returns `true` when a window closed, so the harness settle loop re-iterates
+/// and reaches the pump that collects the request this armed.
+pub(crate) fn drain_pending_signature_help(stoat: &mut Stoat) -> bool {
+    let mut fired = false;
+    while stoat.signature_help_rx.try_recv().is_ok() {
+        fired = true;
+    }
+    if fired {
+        stoat.pending_signature_help_timer = None;
+        crate::lsp::signature_help::request_signature_help(stoat);
+    }
+    fired
+}
+
 /// Drain the autosave throttle marker, persisting the active workspace and
 /// closing the window so the next input opens a fresh one.
 ///

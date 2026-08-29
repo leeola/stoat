@@ -22,8 +22,20 @@ use std::{
     path::Path,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 use stoat_text::Rope;
+
+/// Quiet window from the most recent trigger character before the request goes
+/// out.
+///
+/// Typing an argument list emits one per argument, and each one both flushes
+/// the didChange window and asks the server, so `foo(a, b, c)` is four of each
+/// without a window to collect them.
+///
+/// Short enough that the popup still appears while the reader looks for it,
+/// which is what separates this from the 500 ms a folding refresh waits.
+pub(crate) const SIGNATURE_HELP_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Signature-help popup state ready to paint.
 ///
@@ -96,8 +108,26 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
             .is_some_and(|chars| chars.contains(&ch));
 
     if is_trigger || is_retrigger {
-        request_signature_help(stoat);
+        arm_signature_help_debounce(stoat);
     }
+}
+
+/// Open the quiet window that [`request_signature_help`] runs at the end of.
+///
+/// Re-arming replaces the task, which cancels its future at the
+/// [`stoat_scheduler::Executor::timer`] await, so a burst of trigger characters
+/// asks once. The main loop drains it through
+/// [`crate::debounce::drain_pending_signature_help`], since an async task has
+/// no way to reach `Stoat`.
+fn arm_signature_help_debounce(stoat: &mut Stoat) {
+    let executor = stoat.executor.clone();
+    let tx = stoat.signature_help_tx.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_with_redraw(redraw, async move {
+        executor.timer(SIGNATURE_HELP_DEBOUNCE).await;
+        let _ = tx.send(()).await;
+    });
+    stoat.pending_signature_help_timer = Some(task);
 }
 
 /// The focused editor's `(buffer_id, version, rope, cursor_offset)`, or `None`
@@ -123,7 +153,7 @@ fn focused_edit_snapshot(stoat: &mut Stoat) -> Option<(BufferId, u64, Rope, usiz
 /// [`Stoat::pending_signature_help_request`] and applied by
 /// [`pump_lsp_signature_help`]. No-op when the pane is not an editor, the buffer
 /// has no path, or the server does not advertise the capability.
-fn request_signature_help(stoat: &mut Stoat) {
+pub(crate) fn request_signature_help(stoat: &mut Stoat) {
     let (anchor_offset, buffer_id, focused_rope) = {
         let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
             return;
@@ -322,11 +352,41 @@ mod tests {
             .set_signature_help(path.to_str().unwrap(), 0, 1, sig_help(1));
         h.type_keys("i");
         h.type_text("(");
-        h.settle();
+        h.advance_clock(SIGNATURE_HELP_DEBOUNCE);
 
         let popup = h.stoat.pending_signature_help.as_ref().expect("popup");
         assert_eq!(popup.label, "fn add(x: i32, y: i32) -> i32");
         assert_eq!(popup.active_param, Some(15..21));
+    }
+
+    /// Typing an argument list emits a trigger character per argument, and each
+    /// one both flushes the didChange window and asks the server. One window
+    /// covers the burst.
+    #[test]
+    fn a_burst_of_trigger_characters_asks_once() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_signature_help(&h);
+        let root = seed(&mut h, &[("main.rs", "")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.type_keys("i");
+
+        // Three trigger characters inside one window, since nothing advances
+        // the clock between them.
+        h.type_text("(a,b,");
+        assert_eq!(
+            h.fake_lsp().observed_signature_helps().len(),
+            0,
+            "the window is still open",
+        );
+
+        h.advance_clock(SIGNATURE_HELP_DEBOUNCE);
+
+        assert_eq!(
+            h.fake_lsp().observed_signature_helps().len(),
+            1,
+            "and the burst cost one request",
+        );
     }
 
     #[test]
@@ -342,7 +402,7 @@ mod tests {
 
         h.type_keys("i");
         h.type_text("(");
-        h.settle();
+        h.advance_clock(SIGNATURE_HELP_DEBOUNCE);
         assert_eq!(
             h.stoat
                 .pending_signature_help
@@ -353,7 +413,7 @@ mod tests {
         );
 
         h.type_text("x,");
-        h.settle();
+        h.advance_clock(SIGNATURE_HELP_DEBOUNCE);
         assert_eq!(
             h.stoat
                 .pending_signature_help
@@ -376,7 +436,7 @@ mod tests {
 
         h.type_keys("i");
         h.type_text("(");
-        h.settle();
+        h.advance_clock(SIGNATURE_HELP_DEBOUNCE);
         assert!(h.stoat.pending_signature_help.is_some());
 
         h.type_keys("escape");

@@ -596,6 +596,7 @@ struct FakeLspState {
     observed_saves: Vec<DidSaveTextDocumentParams>,
     observed_closes: Vec<DidCloseTextDocumentParams>,
     observed_completions: Vec<CompletionParams>,
+    observed_signature_helps: Vec<SignatureHelpParams>,
     observed_formatting: Vec<DocumentFormattingParams>,
     observed_range_formatting: Vec<DocumentRangeFormattingParams>,
     /// Keys whose programmed list the server reports as incomplete.
@@ -683,6 +684,7 @@ impl FakeLsp {
                 observed_saves: Vec::new(),
                 observed_closes: Vec::new(),
                 observed_completions: Vec::new(),
+                observed_signature_helps: Vec::new(),
                 observed_formatting: Vec::new(),
                 observed_range_formatting: Vec::new(),
                 incomplete_completions: std::collections::BTreeSet::new(),
@@ -1102,6 +1104,13 @@ impl FakeLsp {
     /// context and that a request fired at the expected time.
     pub fn observed_completions(&self) -> Vec<CompletionParams> {
         self.state.lock().unwrap().observed_completions.clone()
+    }
+
+    /// Snapshot of every [`SignatureHelpParams`] received via
+    /// [`LspHost::signature_help`] in call order. Tests assert that a burst of
+    /// trigger characters asked once rather than once each.
+    pub fn observed_signature_helps(&self) -> Vec<SignatureHelpParams> {
+        self.state.lock().unwrap().observed_signature_helps.clone()
     }
 
     /// Snapshot of every [`DocumentFormattingParams`] received via
@@ -2477,7 +2486,8 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::SignatureHelpRequest, params);
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.observed_signature_helps.push(params.clone());
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,

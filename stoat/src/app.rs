@@ -1589,6 +1589,18 @@ pub struct Stoat {
     pub(crate) pending_signature_help_request:
         Option<stoat_scheduler::Task<Option<crate::lsp::signature_help::SignatureHelpPopup>>>,
 
+    /// Single-slot debounce window for the signature-help request.
+    ///
+    /// Typing an argument list emits a trigger character per argument, and each
+    /// one both flushes the didChange window and asks the server. Re-arming
+    /// replaces the task, cancelling the prior timer, so a burst costs one of
+    /// each.
+    pub(crate) pending_signature_help_timer: Option<stoat_scheduler::Task<()>>,
+    /// Channel the debounce task pushes onto once its timer fires, drained by
+    /// [`debounce::drain_pending_signature_help`].
+    pub(crate) signature_help_tx: Sender<()>,
+    pub(crate) signature_help_rx: Receiver<()>,
+
     /// Signature-help popup content waiting to be painted. Cleared when the
     /// editor leaves insert mode or the completion popup opens.
     pub(crate) pending_signature_help: Option<crate::lsp::signature_help::SignatureHelpPopup>,
@@ -2068,6 +2080,7 @@ impl Stoat {
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (window_ipc_tx, window_ipc_rx) = tokio::sync::mpsc::unbounded_channel();
         let (diff_refresh_tx, diff_refresh_rx) = tokio::sync::mpsc::channel(256);
+        let (signature_help_tx, signature_help_rx) = tokio::sync::mpsc::channel(256);
         let (workspace_autosave_tx, workspace_autosave_rx) = tokio::sync::mpsc::channel(256);
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
@@ -2291,6 +2304,9 @@ impl Stoat {
             pending_hover_request: None,
             pending_hover: None,
             pending_signature_help_request: None,
+            pending_signature_help_timer: None,
+            signature_help_tx,
+            signature_help_rx,
             pending_signature_help: None,
             last_signature_help_key: None,
             pending_code_action_request: None,
@@ -4147,8 +4163,9 @@ impl Stoat {
         let diff_warm_files = debounce::drain_pending_diff_warm_files(self);
         let index_edits = debounce::drain_pending_index_edits(self);
         let autosave = debounce::drain_pending_workspace_autosave(self);
+        let signature_help = debounce::drain_pending_signature_help(self);
 
-        diff_refresh || code_search || diff_warm_files || index_edits || autosave
+        diff_refresh || code_search || diff_warm_files || index_edits || autosave || signature_help
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
