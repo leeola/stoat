@@ -196,10 +196,7 @@ impl Passthrough {
         let Passthrough::Active { tail, .. } = self else {
             return;
         };
-        tail.extend(data.iter().copied());
-        while tail.len() > TAIL_BYTES {
-            tail.pop_front();
-        }
+        keep_tail(tail, data);
     }
 
     fn last_line(&self) -> Option<String> {
@@ -590,6 +587,27 @@ fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
+/// Append `data` to `tail`, keeping only the last [`TAIL_BYTES`] of the two.
+///
+/// One drain rather than one pop per excess byte. A chunk runs to 64 KiB, and a
+/// remote `cat` or a streaming build log sends them back to back, so pop-per-
+/// byte costs tens of thousands of calls per chunk on the app thread, to keep
+/// bytes nothing reads until the session ends.
+///
+/// A chunk at least as long as the window makes everything buffered irrelevant,
+/// so that case drops the lot and refills from the chunk's own tail.
+fn keep_tail(tail: &mut VecDeque<u8>, data: &[u8]) {
+    if data.len() >= TAIL_BYTES {
+        tail.clear();
+        tail.extend(&data[data.len() - TAIL_BYTES..]);
+        return;
+    }
+
+    let excess = (tail.len() + data.len()).saturating_sub(TAIL_BYTES);
+    tail.drain(..excess);
+    tail.extend(data);
+}
+
 /// The last non-empty line in `bytes`, for the exit report.
 ///
 /// Lossy UTF-8 because the tail is cut at a fixed byte count and lands mid
@@ -605,7 +623,8 @@ fn last_line_of(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_line_of, mosh_argv, shell_quote, ssh_argv};
+    use super::{keep_tail, last_line_of, mosh_argv, shell_quote, ssh_argv, TAIL_BYTES};
+    use std::collections::VecDeque;
 
     #[test]
     fn ssh_argv_joins_the_remote_command_and_quotes_only_what_needs_it() {
@@ -645,6 +664,31 @@ mod tests {
         assert_eq!(shell_quote("~/proj"), "~/proj");
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// The window holds the end of the stream, whatever the chunk sizes were,
+    /// which is what lets the exit report quote a line printed inside the
+    /// alternate screen the remote's own exit tore down.
+    #[test]
+    fn the_tail_keeps_the_last_window_across_chunk_sizes() {
+        let mut tail = VecDeque::new();
+
+        keep_tail(&mut tail, &vec![b'x'; 100 * 1024]);
+        assert_eq!(
+            tail.len(),
+            TAIL_BYTES,
+            "a chunk past the window leaves exactly the window",
+        );
+
+        keep_tail(&mut tail, b"\r\nssh: connect refused\r\n");
+        assert_eq!(tail.len(), TAIL_BYTES, "and a short one does not grow it");
+
+        let bytes: Vec<u8> = tail.iter().copied().collect();
+        assert_eq!(
+            last_line_of(&bytes),
+            Some("ssh: connect refused".to_owned()),
+            "the end of the stream is what survived",
+        );
     }
 
     #[test]
