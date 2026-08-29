@@ -35,7 +35,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Anchor, Bias, Rope};
+use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
 use stoat_widgets::{
     bar::Bar,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
@@ -212,23 +212,35 @@ pub(crate) fn render_editor_with_overlay(
     let row_severity: &RowSeverity = match diagnostic_info {
         Some((path, set)) => {
             let version = set.version_for(path);
-            let buffer_version = snapshot.buffer_snapshot().version();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            let buffer_version = buffer_snapshot.version();
+            let rows = editor.scroll_row..end_row;
             let stale = match &editor.gutter_severity_cache {
-                Some(cache) => cache.version != version || cache.buffer_version != buffer_version,
+                Some(cache) => {
+                    cache.version != version
+                        || cache.buffer_version != buffer_version
+                        || cache.rows != rows
+                },
                 None => true,
             };
             if stale {
                 // The marks and the underline read the same resolution, so they
                 // cannot disagree about where a diagnostic sits.
-                build_diagnostic_span_cache(editor, set, path, snapshot.buffer_snapshot());
+                build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
                 let map = editor
                     .diagnostic_span_cache
                     .as_ref()
-                    .map(|cache| row_severity_from_spans(&cache.spans))
+                    .map(|cache| {
+                        let visible = row_byte_range(buffer_snapshot, &rows);
+                        row_severity_from_spans(
+                            &cache.resolve_overlapping(&visible, buffer_snapshot),
+                        )
+                    })
                     .unwrap_or_default();
                 editor.gutter_severity_cache = Some(GutterSeverityCache {
                     version,
                     buffer_version,
+                    rows,
                     map: Arc::new(map),
                 });
             }
@@ -639,46 +651,45 @@ pub(crate) fn render_editor_with_overlay(
 
     if let Some((path, set)) = diagnostic_info {
         build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
-        let spans: &[ResolvedDiag] = editor
-            .diagnostic_span_cache
-            .as_ref()
-            .map_or(&[], |c| c.spans.as_slice());
         let sel = editor.selections.newest_anchor();
         let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
         let head_off = buffer_snapshot.resolve_anchor(&sel.head());
         let cursor = cursor_offset(rope, tail_off, head_off);
-        let cursor_diag = diagnostic_at_offset(spans, cursor);
-        let hover_diag = hover_cell.and_then(|(hx, hy)| {
-            let col = hx.checked_sub(content_area.x)?;
-            let row = hy.checked_sub(content_area.y)?;
-            if col >= content_area.width || row >= content_area.height {
-                return None;
-            }
-            let offset = display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
-            diagnostic_at_offset(spans, offset)
-        });
+        let (cursor_diag, hover_diag) = match editor.diagnostic_span_cache.as_ref() {
+            Some(cache) => {
+                let hover = hover_cell.and_then(|(hx, hy)| {
+                    let col = hx.checked_sub(content_area.x)?;
+                    let row = hy.checked_sub(content_area.y)?;
+                    if col >= content_area.width || row >= content_area.height {
+                        return None;
+                    }
+                    let offset =
+                        display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
+                    diagnostic_at_offset(cache, offset, buffer_snapshot)
+                });
+                (diagnostic_at_offset(cache, cursor, buffer_snapshot), hover)
+            },
+            None => (None, None),
+        };
 
         // The mouse hover wins over the cursor when both land in a span. The
         // popover needs a scene plus the severity and background colors resolved
         // to RGB, and its presence suppresses the same diagnostic's redundant
         // EOL message.
         let mut suppress = None;
-        if let Some(index) = hover_diag.or(cursor_diag) {
+        if let Some(found) = hover_diag.or(cursor_diag) {
             let bg = style_rgb(fallback_style.bg.or_else(|| {
                 theme
                     .try_get(crate::theme::scope::UI_BACKGROUND)
                     .and_then(|style| style.bg)
             }));
             if let (Some(scene), Some(colors), Some(bg)) = (scene, severity.as_ref(), bg) {
-                let diag = &set.get(path)[index];
+                let diag = &set.get(path)[found.index];
                 let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
-                // Reuse the span resolved with this diagnostic's server encoding
-                // rather than re-deriving the offset from its raw character column.
-                let start = spans
-                    .iter()
-                    .find(|s| s.index == index)
-                    .map_or(0, |s| s.start);
-                let display = snapshot.buffer_to_display(rope.offset_to_point(start));
+                // The span the query resolved, rather than the offset re-derived
+                // from this diagnostic's raw character column under its server's
+                // encoding.
+                let display = snapshot.buffer_to_display(rope.offset_to_point(found.start));
                 let rel_col = display.column.min(u32::from(content_area.width)) as u16;
                 let rel_row = display
                     .row
@@ -700,7 +711,7 @@ pub(crate) fn render_editor_with_overlay(
                     content_area,
                     primary_cell,
                 ) {
-                    suppress = Some(index);
+                    suppress = Some(found.index);
                 }
             }
         }
@@ -854,14 +865,19 @@ pub(crate) fn paint_chunk_rows(
 
 /// Cached gutter severity map for one diagnostic set against one buffer.
 ///
-/// `map` is the per-buffer-row worst severity. Rebuilt when either version
-/// moves, so the gutter is not rebuilt from the full diagnostic list every
-/// frame. The buffer version belongs in the key because the rows come from
-/// spans shifted through the edits since each diagnostic was published, so
-/// typing moves them without the server saying anything.
+/// `map` is the worst severity per buffer row, over the visible rows only.
+/// Rebuilt when the version, the buffer, or the window moves, so the gutter is
+/// not rebuilt every frame.
+///
+/// The buffer version belongs in the key because the rows come from spans
+/// shifted through the edits since each diagnostic was published, so typing
+/// moves them without the server saying anything. The row window belongs there
+/// because the map describes only the rows it was built for, and a scroll asks
+/// about rows it never covered.
 pub(crate) struct GutterSeverityCache {
     pub(crate) version: u64,
     buffer_version: u64,
+    rows: Range<u32>,
     pub(crate) map: Arc<RowSeverity>,
 }
 
@@ -953,6 +969,24 @@ impl RowSeverity {
             .flat_map(|(run, _)| run.start.max(rows.start)..run.end.min(rows.end))
             .collect()
     }
+}
+
+/// The bytes `rows` covers, for a query that names rows but searches offsets.
+///
+/// The end runs to the start of the row past the window, so a diagnostic
+/// reaching the window's last row is kept whatever column it ends on.
+fn row_byte_range(
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    rows: &Range<u32>,
+) -> Range<usize> {
+    let rope = snapshot.rope();
+    let start = rope.point_to_offset(Point::new(rows.start, 0));
+    let end = if rows.end >= snapshot.line_count() {
+        rope.len()
+    } else {
+        rope.point_to_offset(Point::new(rows.end, 0))
+    };
+    start..end.max(start)
 }
 
 /// Build the row severities from resolved diagnostic spans, the worst severity
@@ -1898,8 +1932,9 @@ fn paint_diagnostic_spans(
     // hint's grey win.
     ordered.clear();
     ordered.extend(
-        cache.spans[cache.overlapping(visible.clone())]
-            .iter()
+        cache
+            .resolve_overlapping(&visible, snapshot.buffer_snapshot())
+            .into_iter()
             .filter(|s| s.start < s.end && s.end > visible.start),
     );
     ordered.sort_by_key(|s| Reverse(severity_rank(s.severity)));
@@ -2021,7 +2056,8 @@ fn paint_cursor_line_diagnostic(
 
     // Containment is by line rather than by offset, so a diagnostic reaching the
     // cursor's line from anywhere on it wins the readout.
-    let Some(resolved) = cache.cursor_line_diagnostic(cursor_point.row) else {
+    let Some(resolved) = cache.cursor_line_diagnostic(cursor_point.row, snapshot.buffer_snapshot())
+    else {
         return;
     };
     let index = resolved.index;

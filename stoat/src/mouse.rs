@@ -1342,11 +1342,8 @@ fn resolve_hover_diagnostic(stoat: &mut Stoat, column: u16, row: u16) -> Option<
     let snapshot = editor.display_map.snapshot();
     let buffer = snapshot.buffer_snapshot();
     crate::diagnostic_spans::build_diagnostic_span_cache(editor, diagnostics, &path, buffer);
-    let spans = editor
-        .diagnostic_span_cache
-        .as_ref()
-        .map_or(&[][..], |cache| cache.spans.as_slice());
-    crate::diagnostic_spans::diagnostic_at_offset(spans, offset)
+    let cache = editor.diagnostic_span_cache.as_ref()?;
+    crate::diagnostic_spans::diagnostic_at_offset(cache, offset, buffer).map(|found| found.index)
 }
 
 /// Track the hovered cell and redraw only when the diagnostic under it
@@ -2122,6 +2119,45 @@ mod tests {
             2,
             "the hover refreshed the shared cache rather than resolving its own list",
         );
+    }
+
+    /// Typing in a file full of diagnostics rebuilds nothing.
+    ///
+    /// The cache holds publish anchors, which already describe where an edit
+    /// carried each diagnostic, so only the server moving them is a reason to
+    /// build it again. A cache keyed on the buffer version instead resolved
+    /// every diagnostic in the file on each keystroke.
+    #[test]
+    fn an_edit_leaves_the_span_cache_standing() {
+        let (mut h, editor_id) = hover_diagnostics_harness(3);
+        let before = cached_spans_ptr(&h, editor_id);
+
+        h.type_keys("i");
+        h.type_keys("x");
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            cached_spans_ptr(&h, editor_id),
+            before,
+            "the same spans answer for the edited buffer",
+        );
+    }
+
+    /// The address of the cached span list, which moves only on a rebuild.
+    fn cached_spans_ptr(
+        h: &crate::test_harness::TestHarness,
+        editor_id: EditorId,
+    ) -> *const crate::diagnostic_spans::AnchoredDiag {
+        h.stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .expect("editor exists")
+            .diagnostic_span_cache
+            .as_ref()
+            .expect("a painted editor has a span cache")
+            .spans
+            .as_ptr()
     }
 
     /// A pointer resting inside one cell reports motion repeatedly. The

@@ -13,7 +13,7 @@
 use crate::editor_state::EditorState;
 use lsp_types::{DiagnosticSeverity, DiagnosticTag};
 use std::{ops::Range, path::Path};
-use stoat_text::Anchor;
+use stoat_text::{Anchor, Bias};
 
 /// A diagnostic resolved to byte offsets once per (set, buffer) version, so the
 /// per-frame render paths binary-search a cached slice instead of re-resolving
@@ -34,47 +34,108 @@ pub(crate) struct ResolvedDiag {
     pub(crate) index: usize,
 }
 
-/// Per-editor cache of [`ResolvedDiag`]s, rebuilt when the diagnostic set or the
-/// buffer version changes. Transient render state, not persisted.
+/// A diagnostic still in the anchors [`crate::diagnostics`] published it with.
+///
+/// Held instead of byte offsets so an edit does not stale the cache. Anchors
+/// follow their text, so the same pair answers for every buffer version, and a
+/// query resolves the few it actually returns.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AnchoredDiag {
+    pub(crate) start: Anchor,
+    pub(crate) end: Anchor,
+    pub(crate) severity: DiagnosticSeverity,
+    pub(crate) unnecessary: bool,
+    /// The position in `set.get(path)`, so a caller recovers the diagnostic's
+    /// message and tags after locating it.
+    pub(crate) index: usize,
+}
+
+/// Per-editor cache of the diagnostics for one path, in publish anchors.
+///
+/// Keyed on the path's own diagnostic version alone. A buffer edit leaves it
+/// standing, because anchors already describe where the text went, so typing in
+/// a file full of diagnostics costs nothing here. Transient render state, not
+/// persisted.
 pub(crate) struct DiagnosticSpanCache {
     set_version: u64,
-    buffer_version: u64,
-    pub(crate) spans: Vec<ResolvedDiag>,
-    /// Running maximum of [`Self::spans`]' ends, one entry per span.
+    /// Sorted by start offset as resolved when the cache was built.
+    ///
+    /// One consistent resolve settles the order, and anchors move monotonically
+    /// from there, so no later edit reorders them. That is what lets every
+    /// query binary-search without resolving the whole list again.
+    pub(crate) spans: Vec<AnchoredDiag>,
+    /// Running argmax of [`Self::spans`]' ends, one entry per span.
     ///
     /// The spans are sorted by start, so their ends are not, and a viewport's
-    /// lower bound cannot be searched for directly. This is non-decreasing by
-    /// construction, and entry `i` at or below an offset proves every span up to
-    /// `i` ends at or before it, which is what makes the bound searchable.
-    prefix_max_end: Vec<usize>,
-    /// Running maximum of [`Self::spans`]' end rows, one entry per span.
-    ///
-    /// The row counterpart of [`Self::prefix_max_end`], and searchable for the
-    /// same reason. The cursor-line query is line-keyed rather than
-    /// offset-keyed, and the two do not agree at a line's first byte: a
-    /// diagnostic whose range ends at column 0 of a line counts as reaching that
-    /// line, while its end offset is the byte before the line's own span. A
-    /// bound in rows reaches exactly what a filter in rows accepts.
-    prefix_max_end_line: Vec<u32>,
+    /// lower bound is not searchable directly. Entry `i` names the span
+    /// with the greatest end among `0..=i`, which is enough to prove every span
+    /// up to `i` ends at or before an offset. An index rather than an offset,
+    /// since the end it stands for has to be resolved against the snapshot the
+    /// query asks about rather than the one that built this.
+    prefix_max_end: Vec<u32>,
     /// The cursor line the readout last answered for, and the diagnostic it
     /// found there.
     ///
     /// The readout runs on every frame the cursor sits inside a diagnostic, and
-    /// the answer only moves when the cursor changes line. The two versions
-    /// above are not part of the key, since a change to either replaces this
-    /// whole cache and the memo along with it.
-    cursor_line_diag: Option<(u32, Option<ResolvedDiag>)>,
+    /// the answer only moves when the cursor changes line. Keyed on the buffer
+    /// version too, unlike the spans, because a line number means something
+    /// different after an edit above it.
+    cursor_line_diag: Option<(u32, u64, Option<ResolvedDiag>)>,
 }
 
 impl DiagnosticSpanCache {
-    /// The index range of [`Self::spans`] that can overlap `visible`.
+    /// The index range of [`Self::spans`] that bounds every overlap with
+    /// `byte_range`.
     ///
-    /// Spans outside it are settled, so a caller still filters the ones inside
-    /// for a real overlap.
-    pub(crate) fn overlapping(&self, visible: Range<usize>) -> Range<usize> {
-        let lo = self.prefix_max_end.partition_point(|&e| e <= visible.start);
-        let hi = self.spans.partition_point(|s| s.start < visible.end);
-        lo..hi.max(lo)
+    /// Resolves O(log n) probe anchors rather than every span.
+    ///
+    /// Spans in the range still need a per-span end check. Some end at or
+    /// before `byte_range.start` and ride along under the max end of a span
+    /// that encloses the range from earlier.
+    pub(crate) fn overlapping(
+        &self,
+        byte_range: &Range<usize>,
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Range<usize> {
+        let resolve = |anchor: &Anchor| snapshot.resolve_anchor(anchor);
+
+        let hi = {
+            let (mut left, mut right) = (0, self.spans.len());
+            while left < right {
+                let mid = left + (right - left) / 2;
+                if resolve(&self.spans[mid].start) < byte_range.end {
+                    left = mid + 1;
+                } else {
+                    right = mid;
+                }
+            }
+            left
+        };
+
+        let (mut left, mut right) = (0, hi);
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let max_end = &self.spans[self.prefix_max_end[mid] as usize].end;
+            if resolve(max_end) > byte_range.start {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+        left..hi
+    }
+
+    /// The spans the bounds keep for `byte_range`, resolved to offsets.
+    ///
+    /// One batch resolve over the spans the bounds kept, so the cost follows
+    /// what the viewport covers rather than what the file holds.
+    pub(crate) fn resolve_overlapping(
+        &self,
+        byte_range: &Range<usize>,
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Vec<ResolvedDiag> {
+        let bounds = self.overlapping(byte_range, snapshot);
+        resolve_span_range(&self.spans[bounds], snapshot)
     }
 
     /// The worst-severity diagnostic whose rows straddle `line`.
@@ -82,97 +143,112 @@ impl DiagnosticSpanCache {
     /// The answer for one line is kept, so a frame whose cursor has not changed
     /// line reads it back rather than searching again.
     ///
-    /// Ties go to the earliest span, matching a scan of the whole slice: the
-    /// bound below preserves the order the spans are sorted in.
-    pub(crate) fn cursor_line_diagnostic(&mut self, line: u32) -> Option<ResolvedDiag> {
-        if let Some((cached, found)) = self.cursor_line_diag
-            && cached == line
+    /// Ties go to the earliest span, matching a scan of the whole slice, since
+    /// the bounds below preserve the order the spans are sorted in.
+    pub(crate) fn cursor_line_diagnostic(
+        &mut self,
+        line: u32,
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Option<ResolvedDiag> {
+        let buffer_version = snapshot.version();
+        if let Some((cached_line, cached_version, found)) = self.cursor_line_diag
+            && cached_line == line
+            && cached_version == buffer_version
         {
             return found;
         }
 
-        let found = self.spans[self.straddling_line(line)]
-            .iter()
+        // A diagnostic ending at column 0 of a line still counts as reaching
+        // that line, so the probe covers the line's own bytes and the byte
+        // before it.
+        let rope = snapshot.rope();
+        let line_start = rope.point_to_offset(stoat_text::Point::new(line, 0));
+        let probe = line_start.saturating_sub(1)..line_start + rope.line_len(line) as usize + 1;
+
+        let found = self
+            .resolve_overlapping(&probe, snapshot)
+            .into_iter()
             .filter(|s| s.start_line <= line && line <= s.end_line)
-            .min_by_key(|s| severity_rank(s.severity))
-            .copied();
+            .min_by_key(|s| severity_rank(s.severity));
 
-        self.cursor_line_diag = Some((line, found));
+        self.cursor_line_diag = Some((line, buffer_version, found));
         found
-    }
-
-    /// The index range of [`Self::spans`] with rows that straddle `line`.
-    ///
-    /// Spans outside it end above the line or start below it, so a caller still
-    /// filters the ones inside for real containment.
-    fn straddling_line(&self, line: u32) -> Range<usize> {
-        let lo = self.prefix_max_end_line.partition_point(|&e| e < line);
-        let hi = self.spans.partition_point(|s| s.start_line <= line);
-        lo..hi.max(lo)
     }
 }
 
-/// Resolve every diagnostic for `path` to byte offsets, sorted by start.
+/// Every diagnostic for `path` in its publish anchors, sorted by start.
 ///
-/// The offsets come from the anchors [`crate::diagnostics`] recorded at the
-/// publish. They follow the text through later edits, rather than the
-/// coordinates the server named. A diagnostic whose anchors are missing, or
-/// belong to another buffer, resolves to an empty span at the buffer start.
+/// One consistent resolve settles the order, which the anchors then carry
+/// through every later edit unchanged, so this runs once per publish rather
+/// than once per keystroke.
 ///
-/// The index into `set.get(path)` is retained so callers can recover the source
-/// diagnostic.
-pub(crate) fn resolve_diagnostic_spans(
+/// A diagnostic whose anchors are missing, or belong to another buffer, takes
+/// an anchor at the buffer start, matching where
+/// [`resolve_diagnostic_spans`] puts it. It has no position of its own, and one
+/// at the start is what every downstream filter already expects.
+fn anchored_diagnostics(
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
     snapshot: &crate::multi_buffer::MultiBufferSnapshot,
-) -> Vec<ResolvedDiag> {
+) -> Vec<AnchoredDiag> {
     let diagnostics = set.get(path);
     let published = set.spans(path);
+    let unanchored = snapshot.anchor_at(0, Bias::Right);
 
-    // Every endpoint in one walk of the fragment tree rather than a root descent
-    // apiece, then their lines in one walk of the rope. A diagnostic with no
-    // anchor pair contributes none, so the running slot below is what pairs the
-    // results back up with the diagnostics that asked for them.
-    let anchored: Vec<bool> = (0..diagnostics.len())
-        .map(|index| anchors_in(published.get(index), snapshot).is_some())
-        .collect();
-    let endpoints: Vec<Anchor> = (0..diagnostics.len())
-        .filter_map(|index| anchors_in(published.get(index), snapshot))
-        .flat_map(|(start, end)| [start, end])
-        .collect();
-    let offsets = snapshot.resolve_anchors_batch(&endpoints);
-    let points = snapshot.rope().offsets_to_points_batch(&offsets);
-
-    let mut slot = 0usize;
-    let mut spans: Vec<ResolvedDiag> = diagnostics
+    let spans: Vec<AnchoredDiag> = diagnostics
         .iter()
         .enumerate()
         .map(|(index, diag)| {
-            let (start, end, start_line, end_line) = if anchored[index] {
-                let resolved = (
-                    offsets[slot],
-                    offsets[slot + 1],
-                    points[slot].row,
-                    points[slot + 1].row,
-                );
-                slot += 2;
-                resolved
-            } else {
-                (0, 0, 0, 0)
-            };
-            ResolvedDiag {
+            let (start, end) =
+                anchors_in(published.get(index), snapshot).unwrap_or((unanchored, unanchored));
+            AnchoredDiag {
                 start,
                 end,
                 severity: diag.severity.unwrap_or(DiagnosticSeverity::ERROR),
                 unnecessary: is_unnecessary(diag),
-                start_line,
-                end_line,
                 index,
             }
         })
         .collect();
-    spans.sort_by_key(|s| s.start);
+
+    let starts = snapshot
+        .resolve_anchors_batch(&spans.iter().map(|span| span.start).collect::<Vec<Anchor>>());
+    // Sorted by the start each span resolved to, which the parallel Vec above
+    // holds by index, so a sort key never re-resolves.
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by_key(|&i| (starts[i], i));
+
+    order.into_iter().map(|i| spans[i]).collect()
+}
+
+/// The endpoints of `spans` resolved against `snapshot`.
+///
+/// Every endpoint in one walk of the fragment tree rather than a root descent
+/// apiece, then their lines in one walk of the rope.
+fn resolve_span_range(
+    spans: &[AnchoredDiag],
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+) -> Vec<ResolvedDiag> {
+    let endpoints: Vec<Anchor> = spans
+        .iter()
+        .flat_map(|span| [span.start, span.end])
+        .collect();
+    let offsets = snapshot.resolve_anchors_batch(&endpoints);
+    let points = snapshot.rope().offsets_to_points_batch(&offsets);
+
     spans
+        .iter()
+        .enumerate()
+        .map(|(slot, span)| ResolvedDiag {
+            start: offsets[slot * 2],
+            end: offsets[slot * 2 + 1],
+            severity: span.severity,
+            unnecessary: span.unnecessary,
+            start_line: points[slot * 2].row,
+            end_line: points[slot * 2 + 1].row,
+            index: span.index,
+        })
+        .collect()
 }
 
 /// `span`'s endpoints when they anchor into the buffer `snapshot` is for.
@@ -200,48 +276,52 @@ pub(crate) fn build_diagnostic_span_cache(
     path: &Path,
     snapshot: &crate::multi_buffer::MultiBufferSnapshot,
 ) {
-    let buffer_version = snapshot.version();
     let set_version = set.version_for(path);
     let stale = match &editor.diagnostic_span_cache {
-        Some(cache) => cache.set_version != set_version || cache.buffer_version != buffer_version,
+        Some(cache) => cache.set_version != set_version,
         None => true,
     };
     if stale {
-        let spans = resolve_diagnostic_spans(set, path, snapshot);
+        let spans = anchored_diagnostics(set, path, snapshot);
         editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
             set_version,
-            buffer_version,
-            prefix_max_end: prefix_max_ends(&spans),
-            prefix_max_end_line: prefix_max_end_lines(&spans),
+            prefix_max_end: prefix_max_end_indices(&spans, snapshot),
             cursor_line_diag: None,
             spans,
         });
     }
 }
 
-/// The running maximum of `spans`' ends, for [`DiagnosticSpanCache::prefix_max_end`].
-fn prefix_max_ends(spans: &[ResolvedDiag]) -> Vec<usize> {
-    let mut max_end = 0;
-    spans
-        .iter()
-        .map(|span| {
-            max_end = max_end.max(span.end);
-            max_end
-        })
-        .collect()
-}
+/// The running argmax of `spans`' ends, for
+/// [`DiagnosticSpanCache::prefix_max_end`].
+///
+/// Entry `i` is the index of the greatest end among `0..=i`. Ties keep the
+/// earlier index, which is not observable: both name a span with the same end,
+/// so a search reads the same bound either way.
+///
+/// Resolved once here against the snapshot that builds the cache. Anchors move
+/// monotonically, so the span holding the greatest end holds it for every later
+/// version too, and only its offset moves.
+fn prefix_max_end_indices(
+    spans: &[AnchoredDiag],
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+) -> Vec<u32> {
+    let ends =
+        snapshot.resolve_anchors_batch(&spans.iter().map(|span| span.end).collect::<Vec<Anchor>>());
 
-/// The running maximum of `spans`' end rows, for
-/// [`DiagnosticSpanCache::prefix_max_end_line`].
-fn prefix_max_end_lines(spans: &[ResolvedDiag]) -> Vec<u32> {
+    let mut indices = Vec::with_capacity(ends.len());
     let mut max_end = 0;
-    spans
-        .iter()
-        .map(|span| {
-            max_end = max_end.max(span.end_line);
-            max_end
-        })
-        .collect()
+    let mut max_idx = 0;
+
+    for (i, &end) in ends.iter().enumerate() {
+        if i == 0 || end > max_end {
+            max_end = end;
+            max_idx = i as u32;
+        }
+        indices.push(max_idx);
+    }
+
+    indices
 }
 
 pub(crate) fn severity_rank(sev: DiagnosticSeverity) -> u8 {
@@ -263,19 +343,25 @@ fn is_unnecessary(diag: &lsp_types::Diagnostic) -> bool {
         .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY))
 }
 
-/// Index into `set.get(path)` of the highest-severity diagnostic whose byte
-/// range contains `offset`, or `None` when none do.
+/// The highest-severity diagnostic whose byte range contains `offset`, or
+/// `None` when none do.
 ///
-/// `spans` is [`resolve_diagnostic_spans`] output, sorted by start. A
-/// `partition_point` bounds the scan to spans starting at or before `offset`.
-/// The worst severity wins a tie, matching the gutter and the EOL message.
-pub(crate) fn diagnostic_at_offset(spans: &[ResolvedDiag], offset: usize) -> Option<usize> {
-    let hi = spans.partition_point(|s| s.start <= offset);
-    spans[..hi]
-        .iter()
-        .filter(|s| s.start < s.end && offset < s.end)
+/// Resolves only the spans the cache's bounds keep for the byte `offset` sits
+/// on, rather than every span before it. The worst severity wins a tie,
+/// matching the gutter and the EOL message.
+///
+/// The resolved span comes back with the answer, so a caller that needs the
+/// diagnostic's position reads it here rather than searching for it again.
+pub(crate) fn diagnostic_at_offset(
+    cache: &DiagnosticSpanCache,
+    offset: usize,
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+) -> Option<ResolvedDiag> {
+    cache
+        .resolve_overlapping(&(offset..offset + 1), snapshot)
+        .into_iter()
+        .filter(|s| s.start < s.end && s.start <= offset && offset < s.end)
         .min_by_key(|s| severity_rank(s.severity))
-        .map(|s| s.index)
 }
 
 #[cfg(test)]
@@ -290,7 +376,8 @@ mod tests {
         path: &std::path::Path,
         snapshot: &crate::multi_buffer::MultiBufferSnapshot,
     ) -> Vec<(usize, usize, usize, u32)> {
-        super::resolve_diagnostic_spans(set, path, snapshot)
+        let spans = super::anchored_diagnostics(set, path, snapshot);
+        super::resolve_span_range(&spans, snapshot)
             .iter()
             .map(|s| (s.index, s.start, s.end, s.start_line))
             .collect()
@@ -412,37 +499,60 @@ mod tests {
             ],
         );
 
-        let spans = super::resolve_diagnostic_spans(&set, &path, &snapshot);
+        let cache = cache_over(
+            &snapshot,
+            super::anchored_diagnostics(&set, &path, &snapshot),
+        );
+        let at = |offset| super::diagnostic_at_offset(&cache, offset, &snapshot).map(|d| d.index);
+
         // Offset 4 is in both, so the worse severity (the error) wins.
-        assert_eq!(super::diagnostic_at_offset(&spans, 4), Some(1));
+        assert_eq!(at(4), Some(1));
         // Offset 7 is inside only the error span.
-        assert_eq!(super::diagnostic_at_offset(&spans, 7), Some(1));
+        assert_eq!(at(7), Some(1));
         // Offset 0 is outside both.
-        assert_eq!(super::diagnostic_at_offset(&spans, 0), None);
+        assert_eq!(at(0), None);
     }
 
-    /// A cache over spans at the given byte ranges, ordered as
-    /// [`super::resolve_diagnostic_spans`] leaves them.
-    fn span_cache(ranges: &[(usize, usize)]) -> super::DiagnosticSpanCache {
-        let spans: Vec<super::ResolvedDiag> = ranges
+    /// A cache over spans at the given byte ranges, with a buffer long enough
+    /// for each to name a real position.
+    fn span_cache(
+        ranges: &[(usize, usize)],
+    ) -> (
+        super::DiagnosticSpanCache,
+        crate::multi_buffer::MultiBufferSnapshot,
+    ) {
+        let len = ranges.iter().map(|&(_, end)| end).max().unwrap_or(0);
+        let snapshot = snapshot_over(&"a".repeat(len + 1));
+        let spans = anchored(&snapshot, ranges, DiagnosticSeverity::WARNING);
+        (cache_over(&snapshot, spans), snapshot)
+    }
+
+    /// Anchor each byte range against `snapshot`, in the order given.
+    fn anchored(
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+        ranges: &[(usize, usize)],
+        severity: DiagnosticSeverity,
+    ) -> Vec<super::AnchoredDiag> {
+        ranges
             .iter()
             .enumerate()
-            .map(|(index, &(start, end))| super::ResolvedDiag {
-                start,
-                end,
-                severity: DiagnosticSeverity::WARNING,
+            .map(|(index, &(start, end))| super::AnchoredDiag {
+                start: snapshot.anchor_at(start, Bias::Right),
+                end: snapshot.anchor_at(end, Bias::Left),
+                severity,
                 unnecessary: false,
-                start_line: 0,
-                end_line: 0,
                 index,
             })
-            .collect();
+            .collect()
+    }
 
+    fn cache_over(
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+        spans: Vec<super::AnchoredDiag>,
+    ) -> super::DiagnosticSpanCache {
         super::DiagnosticSpanCache {
             set_version: 0,
-            buffer_version: 0,
-            prefix_max_end: super::prefix_max_ends(&spans),
-            prefix_max_end_line: super::prefix_max_end_lines(&spans),
+            prefix_max_end: super::prefix_max_end_indices(&spans, snapshot),
             cursor_line_diag: None,
             spans,
         }
@@ -454,7 +564,7 @@ mod tests {
     /// skipping its neighbours.
     #[test]
     fn the_overlap_bound_keeps_a_span_reaching_in_from_above() {
-        let cache = span_cache(&[
+        let (cache, snapshot) = span_cache(&[
             (0, 5),
             (10, 400),
             (20, 25),
@@ -464,12 +574,12 @@ mod tests {
         ]);
 
         assert_eq!(
-            cache.overlapping(100..300),
+            cache.overlapping(&(100..300), &snapshot),
             1..5,
             "the walk opens at the long span and closes before the one below",
         );
         assert_eq!(
-            cache.overlapping(600..700),
+            cache.overlapping(&(600..700), &snapshot),
             6..6,
             "a viewport past every span walks nothing",
         );
@@ -480,38 +590,41 @@ mod tests {
     /// order anyway, since the caller indexes the spans with it.
     #[test]
     fn the_overlap_bound_survives_a_zero_width_span_at_the_viewport_start() {
-        let cache = span_cache(&[(5, 5)]);
+        let (cache, snapshot) = span_cache(&[(5, 5)]);
 
-        assert!(cache.spans[cache.overlapping(5..5)].is_empty());
+        assert!(cache.spans[cache.overlapping(&(5..5), &snapshot)].is_empty());
     }
 
-    /// A cache over spans at the given `(start_line, end_line, severity)`, laid
-    /// out one line apart so the byte order matches the row order.
-    fn line_span_cache(rows: &[(u32, u32, DiagnosticSeverity)]) -> super::DiagnosticSpanCache {
-        let spans: Vec<super::ResolvedDiag> = rows
+    /// A cache over spans at the given `(start_line, end_line, severity)`, over
+    /// a buffer of ten-byte lines so a row's start offset is `row * 10`.
+    ///
+    /// Each span ends at column 0 of its end row, which is the case a bound in
+    /// offsets alone gets wrong.
+    fn line_span_cache(
+        rows: &[(u32, u32, DiagnosticSeverity)],
+    ) -> (
+        super::DiagnosticSpanCache,
+        crate::multi_buffer::MultiBufferSnapshot,
+    ) {
+        let last = rows.iter().map(|&(_, end, _)| end).max().unwrap_or(0);
+        let text: String = (0..=last + 1).map(|_| "aaaaaaaaa\n").collect();
+        let snapshot = snapshot_over(&text);
+
+        let spans: Vec<super::AnchoredDiag> = rows
             .iter()
             .enumerate()
             .map(
-                |(index, &(start_line, end_line, severity))| super::ResolvedDiag {
-                    start: start_line as usize * 10,
-                    end: end_line as usize * 10,
+                |(index, &(start_line, end_line, severity))| super::AnchoredDiag {
+                    start: snapshot.anchor_at(start_line as usize * 10, Bias::Right),
+                    end: snapshot.anchor_at(end_line as usize * 10, Bias::Left),
                     severity,
                     unnecessary: false,
-                    start_line,
-                    end_line,
                     index,
                 },
             )
             .collect();
 
-        super::DiagnosticSpanCache {
-            set_version: 0,
-            buffer_version: 0,
-            prefix_max_end: super::prefix_max_ends(&spans),
-            prefix_max_end_line: super::prefix_max_end_lines(&spans),
-            cursor_line_diag: None,
-            spans,
-        }
+        (cache_over(&snapshot, spans), snapshot)
     }
 
     /// A diagnostic reaching the cursor's line from above still wins the
@@ -520,18 +633,18 @@ mod tests {
     /// reads it as settled and drops the span the row filter accepts.
     #[test]
     fn the_line_bound_keeps_a_span_ending_at_the_line_start() {
-        let mut cache = line_span_cache(&[
+        let (mut cache, snapshot) = line_span_cache(&[
             (0, 3, DiagnosticSeverity::WARNING),
             (5, 5, DiagnosticSeverity::ERROR),
         ]);
 
         assert_eq!(
-            cache.cursor_line_diagnostic(3).map(|d| d.index),
+            cache.cursor_line_diagnostic(3, &snapshot).map(|d| d.index),
             Some(0),
             "the span reaching line 3 from line 0 wins it",
         );
         assert_eq!(
-            cache.cursor_line_diagnostic(4).map(|d| d.index),
+            cache.cursor_line_diagnostic(4, &snapshot).map(|d| d.index),
             None,
             "and the line below it is inside nothing",
         );
@@ -542,14 +655,14 @@ mod tests {
     /// spans are sorted in, so narrowing it leaves both answers alone.
     #[test]
     fn the_worst_severity_wins_the_cursor_line() {
-        let mut cache = line_span_cache(&[
+        let (mut cache, snapshot) = line_span_cache(&[
             (2, 2, DiagnosticSeverity::WARNING),
             (2, 2, DiagnosticSeverity::ERROR),
             (2, 2, DiagnosticSeverity::ERROR),
         ]);
 
         assert_eq!(
-            cache.cursor_line_diagnostic(2).map(|d| d.index),
+            cache.cursor_line_diagnostic(2, &snapshot).map(|d| d.index),
             Some(1),
             "the first of the two errors wins over the warning",
         );
@@ -561,23 +674,25 @@ mod tests {
     /// emptied slice finds nothing.
     #[test]
     fn a_cursor_that_stays_on_its_line_answers_from_the_memo() {
-        let mut cache = line_span_cache(&[(1, 1, DiagnosticSeverity::ERROR)]);
-
-        assert_eq!(cache.cursor_line_diagnostic(1).map(|d| d.index), Some(0));
-
-        // Emptied together, since the bound indexes the spans through the prefix
-        // maximums and a real cache never holds one without the others.
-        cache.spans.clear();
-        cache.prefix_max_end.clear();
-        cache.prefix_max_end_line.clear();
+        let (mut cache, snapshot) = line_span_cache(&[(1, 1, DiagnosticSeverity::ERROR)]);
 
         assert_eq!(
-            cache.cursor_line_diagnostic(1).map(|d| d.index),
+            cache.cursor_line_diagnostic(1, &snapshot).map(|d| d.index),
+            Some(0)
+        );
+
+        // Emptied together, since the bound indexes the spans through the prefix
+        // maximums and a real cache never holds one without the other.
+        cache.spans.clear();
+        cache.prefix_max_end.clear();
+
+        assert_eq!(
+            cache.cursor_line_diagnostic(1, &snapshot).map(|d| d.index),
             Some(0),
             "the same line answers from the memo rather than searching again",
         );
         assert_eq!(
-            cache.cursor_line_diagnostic(2).map(|d| d.index),
+            cache.cursor_line_diagnostic(2, &snapshot).map(|d| d.index),
             None,
             "and a moved cursor searches, over the spans that are there now",
         );
