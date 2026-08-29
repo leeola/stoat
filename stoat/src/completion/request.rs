@@ -496,34 +496,38 @@ fn ask_again(
 
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut incomplete = Vec::new();
-        {
-            let ctx = owned.as_borrowed();
-            for (name, host) in &hosts {
-                let encoding = host.offset_encoding();
-                let Some(params) = build_lsp_params(
-                    request.source_path.as_deref(),
-                    &buffer.visible_text,
-                    request.cursor_offset,
-                    encoding,
-                    Some(host_context(host.as_ref(), request.trigger)),
-                ) else {
-                    continue;
-                };
-                let answer = crate::completion::lsp::fetch(
-                    &ctx,
-                    name,
-                    host.as_ref(),
-                    params,
-                    &buffer,
-                    encoding,
-                )
-                .await;
+        for (name, host) in &hosts {
+            let encoding = host.offset_encoding();
+            let Some(params) = build_lsp_params(
+                request.source_path.as_deref(),
+                &buffer.visible_text,
+                request.cursor_offset,
+                encoding,
+                Some(host_context(host.as_ref(), request.trigger)),
+            ) else {
+                continue;
+            };
+            let (raw, complete) = crate::completion::lsp::fetch(host.as_ref(), params).await;
 
-                if !answer.complete {
-                    incomplete.push(name.clone());
-                }
-                items.extend(answer.items);
+            if !complete {
+                incomplete.push(name.clone());
             }
+
+            let server: Arc<str> = Arc::from(name.as_str());
+            items.extend(
+                executor
+                    .spawn_blocking({
+                        let owned = owned.clone();
+                        let buffer = buffer.clone();
+                        move || {
+                            let ctx = owned.as_borrowed();
+                            crate::completion::lsp::translate_all(
+                                raw, &ctx, &buffer, &server, encoding,
+                            )
+                        }
+                    })
+                    .await,
+            );
         }
 
         // These go back unranked. The popup's survivors join them at install,
@@ -886,20 +890,33 @@ async fn run_request(
                         ) else {
                             continue;
                         };
-                        let answer = crate::completion::lsp::fetch(
-                            &ctx,
-                            name,
-                            host.as_ref(),
-                            params,
-                            &buffer,
-                            encoding,
-                        )
-                        .await;
+                        let (raw, complete) =
+                            crate::completion::lsp::fetch(host.as_ref(), params).await;
 
-                        if !answer.complete {
+                        if !complete {
                             incomplete.push(name.clone());
                         }
-                        items.extend(answer.items);
+
+                        // Translating a large answer costs several string
+                        // clones, two anchors, and two rope descents per item.
+                        // The scheduler pumps this future on the run-loop
+                        // thread, so the walk goes to the pool as the word
+                        // source above already does.
+                        let server: Arc<str> = Arc::from(name.as_str());
+                        items.extend(
+                            executor
+                                .spawn_blocking({
+                                    let owned = owned.clone();
+                                    let buffer = buffer.clone();
+                                    move || {
+                                        let ctx = owned.as_borrowed();
+                                        crate::completion::lsp::translate_all(
+                                            raw, &ctx, &buffer, &server, encoding,
+                                        )
+                                    }
+                                })
+                                .await,
+                        );
                     }
                 }
             },
@@ -912,7 +929,18 @@ async fn run_request(
         items.extend(words.await);
     }
 
-    rank_by_prefix(&mut items, &owned.prefix);
+    // Scores every item against the prefix and sorts, so it follows the size of
+    // the whole answer rather than what the popup shows. The last stretch of
+    // work here, and the last one that belonged on the run loop.
+    let items = executor
+        .spawn_blocking({
+            let prefix = owned.prefix.clone();
+            move || {
+                rank_by_prefix(&mut items, &prefix);
+                items
+            }
+        })
+        .await;
 
     RequestOutcome::Replace(CompletionPopup {
         items,
@@ -1736,7 +1764,7 @@ mod harness_tests {
                 sort_text: sort_text.map(str::to_string),
                 ..Default::default()
             })),
-            server: Some("test".to_string()),
+            server: Some(Arc::from("test")),
             ..word(label)
         }
     }

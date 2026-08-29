@@ -18,7 +18,7 @@ pub(crate) mod snippet;
 pub mod word;
 
 use crate::buffer::TextBufferSnapshot;
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 use stoat_text::{Anchor, Bias};
 
 /// Identifies which subsystem produced a completion item; consumed
@@ -106,7 +106,10 @@ pub struct CompletionItem {
     /// `completionItem/resolve` and additional-text-edit resolution route back
     /// to it when several servers contribute completions. `None` for non-LSP
     /// sources.
-    pub server: Option<String>,
+    ///
+    /// Shared rather than owned per item, since a server's whole answer names
+    /// the same one and a large answer runs to thousands of items.
+    pub server: Option<Arc<str>>,
 }
 
 /// In-flight completion popup. Held on

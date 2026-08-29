@@ -17,6 +17,7 @@ use lsp_types::{
     CompletionItem as LspCompletionItem, CompletionItemKind as LspCompletionItemKind,
     CompletionParams, CompletionResponse, CompletionTextEdit, Documentation,
 };
+use std::sync::Arc;
 
 /// What one server offered, and whether that is all of it.
 #[derive(Default)]
@@ -30,34 +31,37 @@ pub struct Answer {
 
 /// Fetch LSP completions for the cursor described by `params`.
 ///
-/// `buffer` and `encoding` are needed to convert any `text_edit`
-/// range the server returns into a `replace_range` anchored against
-/// the text the request was measured on. Items without a `text_edit`
-/// fall back to `ctx.prefix_range` so acceptance rewrites the current
-/// prefix.
+/// Returns the server raw items and whether it called the list complete.
+/// Translating them is [`translate_all`], kept apart so it runs somewhere
+/// other than where this awaits.
 ///
 /// A server that errors or answers `None` yields no items, and is reported
 /// incomplete so nothing is narrowed from an answer that never came.
-pub async fn fetch(
-    ctx: &CompletionContext<'_>,
-    server: &str,
-    lsp: &dyn LspHost,
-    params: CompletionParams,
-    buffer: &TextBufferSnapshot,
-    encoding: OffsetEncoding,
-) -> Answer {
-    let (items, complete) = match lsp.completion(params).await {
+pub async fn fetch(lsp: &dyn LspHost, params: CompletionParams) -> (Vec<LspCompletionItem>, bool) {
+    match lsp.completion(params).await {
         Ok(Some(response)) => extract_items(response),
-        _ => return Answer::default(),
-    };
-
-    Answer {
-        items: items
-            .into_iter()
-            .map(|item| translate(item, server, ctx, buffer, encoding))
-            .collect(),
-        complete,
+        _ => (Vec::new(), false),
     }
+}
+
+/// Turn a server's raw items into the popup's own, in the coordinates of the
+/// text the request was built against.
+///
+/// Every item costs several string clones, two anchors, and two rope descents,
+/// so a large answer is a stretch of work worth keeping off the thread that
+/// paints. Nothing here awaits or touches the app, which is what lets a caller
+/// run it wherever it wants.
+pub fn translate_all(
+    items: Vec<LspCompletionItem>,
+    ctx: &CompletionContext<'_>,
+    buffer: &TextBufferSnapshot,
+    server: &Arc<str>,
+    encoding: OffsetEncoding,
+) -> Vec<CompletionItem> {
+    items
+        .into_iter()
+        .map(|item| translate(item, server, ctx, buffer, encoding))
+        .collect()
 }
 
 /// Split a response into its items and whether the server called the list
@@ -73,7 +77,7 @@ fn extract_items(response: CompletionResponse) -> (Vec<LspCompletionItem>, bool)
 
 fn translate(
     lsp_item: LspCompletionItem,
-    server: &str,
+    server: &Arc<str>,
     ctx: &CompletionContext<'_>,
     buffer: &TextBufferSnapshot,
     encoding: OffsetEncoding,
@@ -109,7 +113,7 @@ fn translate(
         insert_text,
         is_snippet,
         lsp_item: Some(Box::new(lsp_item)),
-        server: Some(server.to_string()),
+        server: Some(Arc::clone(server)),
     }
 }
 
@@ -177,20 +181,38 @@ mod tests {
         TestScheduler::new().block_on(future)
     }
 
+    /// Fetch and translate in one call, which is what the app does across a
+    /// blocking job. These tests are about what a server answer becomes, not
+    /// where the translation runs.
+    fn fetch_items(
+        ctx: &CompletionContext<'_>,
+        server: &str,
+        lsp: &dyn LspHost,
+        params: CompletionParams,
+        buffer: &TextBufferSnapshot,
+        encoding: OffsetEncoding,
+    ) -> Answer {
+        let (raw, complete) = run(fetch(lsp, params));
+        Answer {
+            items: translate_all(raw, ctx, buffer, &Arc::from(server), encoding),
+            complete,
+        }
+    }
+
     #[test]
     fn empty_response_returns_no_items() {
         let lsp = FakeLsp::new();
         let buffer = snapshot("fn main() {}\n");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items, Vec::new());
     }
@@ -202,14 +224,14 @@ mod tests {
         let buffer = snapshot("hello world\n");
         let params = completion_params("/src/lib.rs", 0, 5);
         let ctx = ctx_at(2, 7);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items.len(), 3);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -221,6 +243,35 @@ mod tests {
             assert_eq!(item.detail, None);
             assert_eq!(item.insert_text, item.label);
         }
+    }
+
+    /// A server's whole answer names the same server, so the name is shared
+    /// rather than copied per item. A large answer runs to thousands of them.
+    #[test]
+    fn every_item_from_one_server_shares_its_name() {
+        let lsp = FakeLsp::new();
+        lsp.set_completions("/src/lib.rs", 0, 5, &["foo", "bar", "baz"]);
+        let buffer = snapshot("hello world\n");
+        let items = fetch_items(
+            &ctx_at(2, 7),
+            "test-server",
+            &lsp,
+            completion_params("/src/lib.rs", 0, 5),
+            &buffer,
+            OffsetEncoding::Utf16,
+        )
+        .items;
+
+        let names: Vec<*const u8> = items
+            .iter()
+            .map(|item| item.server.as_ref().expect("an lsp item names its server"))
+            .map(|name| name.as_ptr())
+            .collect();
+        assert_eq!(names.len(), 3, "the fixture has items to share between");
+        assert!(
+            names.windows(2).all(|pair| pair[0] == pair[1]),
+            "one allocation carries the name for the whole answer",
+        );
     }
 
     #[test]
@@ -242,14 +293,14 @@ mod tests {
         let buffer = snapshot("print\n");
         let params = completion_params("/src/lib.rs", 0, 5);
         let ctx = ctx_at(0, 5);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items.len(), 1);
         assert_eq!(replace_offsets(&buffer, &items[0]), 0..5);
@@ -272,14 +323,14 @@ mod tests {
         let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(
             items[0].detail.as_deref(),
@@ -303,14 +354,14 @@ mod tests {
         let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items[0].kind, Some(CompletionItemKind::Method));
     }
@@ -331,14 +382,14 @@ mod tests {
         let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items[0].kind, Some(CompletionItemKind::Other));
     }
@@ -350,14 +401,14 @@ mod tests {
         let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items[0].insert_text, "bare_label");
     }
@@ -378,14 +429,14 @@ mod tests {
         let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(
+        let items = fetch_items(
             &ctx,
             "test-server",
             &lsp,
             params,
             &buffer,
             OffsetEncoding::Utf16,
-        ))
+        )
         .items;
         assert_eq!(items[0].insert_text, "method");
         assert_eq!(items[0].label, "method (display)");
