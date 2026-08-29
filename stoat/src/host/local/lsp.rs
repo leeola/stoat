@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    ClientCapabilities, CodeAction, CodeActionCapabilityResolveSupport,
+    CancelParams, ClientCapabilities, CodeAction, CodeActionCapabilityResolveSupport,
     CodeActionClientCapabilities, CodeActionKindLiteralSupport, CodeActionLiteralSupport,
     CodeActionOrCommand, CodeActionParams, ColorInformation, ColorPresentation,
     ColorPresentationParams, CompletionClientCapabilities, CompletionItem,
@@ -271,7 +271,17 @@ impl LocalLsp {
             return Err(err);
         }
 
-        match rx.await {
+        // Armed only once the request is on the queue, so a send that failed
+        // never cancels a request the server never saw.
+        let mut guard = CancelOnDrop {
+            lsp: self,
+            id,
+            armed: true,
+        };
+        let received = rx.await;
+        guard.armed = false;
+
+        match received {
             Ok(Ok(raw)) => parse_result(raw).await,
             Ok(Err(err)) => Err(io::Error::other(format!(
                 "lsp error {}: {}",
@@ -307,6 +317,47 @@ impl LocalLsp {
         self.writer_tx
             .send(body)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "language server closed"))
+    }
+}
+
+/// Tells the server to stop work on a request nobody awaits any more.
+///
+/// Every cancellation in the editor is a dropped future. A keystroke supersedes
+/// the completion, the semantic tokens, or the highlight it asked for a moment
+/// ago. The drop stops the editor waiting, but a server hears nothing and
+/// computes the superseded answer through to completion, which is the work a
+/// server slower than the debounce spends all its time on.
+///
+/// The notification goes to the writer thread and does not block. A transport
+/// already gone takes the write with it, which is the same nothing that dropping
+/// alone did.
+struct CancelOnDrop<'a> {
+    lsp: &'a LocalLsp,
+    id: i64,
+    /// Cleared once the response lands, so a request that finished cancels
+    /// nothing on its way out of scope.
+    armed: bool,
+}
+
+impl Drop for CancelOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.lsp
+            .pending
+            .lock()
+            .expect("lsp pending map poisoned")
+            .remove(&self.id);
+
+        // Ids come from a counter this session started at one, so the narrowing
+        // is exact for any id a session reaches.
+        let _ = self.lsp.notify(
+            "$/cancelRequest",
+            CancelParams {
+                id: NumberOrString::Number(self.id as i32),
+            },
+        );
     }
 }
 
@@ -1255,8 +1306,10 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        client_capabilities, reap_child, transcript_slug, transcript_stem, wakes_for, write_framed,
-        Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant, Mutex, Routed,
+        client_capabilities, mpsc, reap_child, transcript_slug, transcript_stem, unbounded_channel,
+        wakes_for, write_framed, Arc, AtomicI64, Command, DiagnosticTag, Duration, Envelope,
+        FrameDecoder, HashSet, Instant, LocalLsp, Mutex, Receiver, Routed, ServerCapabilities,
+        TokioMutex, WRITE_QUEUE_DEPTH,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::{json, Value};
@@ -1317,6 +1370,113 @@ mod tests {
         let exited = reap_child(&child, Duration::from_secs(5), Duration::from_millis(10)).await;
 
         assert!(exited, "the child went on its own inside the bound");
+    }
+
+    /// A transport whose outgoing frames the test reads.
+    ///
+    /// The frame a cancel writes goes to the writer thread, so a test that
+    /// wants to see it has to hold the other end of that channel. No reader
+    /// thread runs, so nothing ever answers a request, which is the state these
+    /// tests are about. The child is a sleep the way [`reap_child`]'s own tests
+    /// spawn one, since the struct needs one and nothing here speaks to it.
+    fn unanswered_transport() -> (LocalLsp, Receiver<Vec<u8>>) {
+        let (writer_tx, writer_rx) = mpsc::sync_channel(WRITE_QUEUE_DEPTH);
+        let (_notif_tx, notif_rx) = unbounded_channel();
+        let (_incoming_tx, incoming_rx) = unbounded_channel();
+
+        let lsp = LocalLsp {
+            writer_tx,
+            child: Mutex::new(
+                Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("a child the transport never speaks to"),
+            ),
+            next_id: AtomicI64::new(1),
+            pending: Default::default(),
+            notif_rx: TokioMutex::new(notif_rx),
+            incoming_rx: TokioMutex::new(incoming_rx),
+            capabilities: Mutex::new(Arc::new(ServerCapabilities::default())),
+            tx_transcript: None,
+        };
+        (lsp, writer_rx)
+    }
+
+    /// The method names the transport wrote, in order.
+    fn written_methods(rx: &Receiver<Vec<u8>>) -> Vec<String> {
+        rx.try_iter()
+            .filter_map(|body: Vec<u8>| serde_json::from_slice::<Value>(&body).ok())
+            .filter_map(|msg| msg.get("method")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// A request nobody awaits any more is one the server must stop working on.
+    /// The drop alone leaves it computing an answer that is already superseded,
+    /// which is where a slow server spends its time.
+    #[tokio::test]
+    async fn a_dropped_request_cancels_itself_with_the_server() {
+        let (lsp, writer_rx) = unanswered_transport();
+
+        {
+            let pending = std::pin::pin!(lsp.request::<_, Value>("textDocument/hover", json!({})));
+            // One poll to send the request and reach the await, then dropped
+            // the way a superseded task is.
+            let waker = futures::task::noop_waker();
+            let mut cx = std::task::Context::from_waker(&waker);
+            assert!(
+                pending.poll(&mut cx).is_pending(),
+                "nothing answers, so it waits",
+            );
+        }
+
+        assert_eq!(
+            written_methods(&writer_rx),
+            ["textDocument/hover", "$/cancelRequest"],
+            "the drop told the server to stop",
+        );
+        assert!(
+            lsp.pending.lock().expect("pending map").is_empty(),
+            "and left nothing waiting for a response",
+        );
+        let _ = lsp.child.lock().expect("child").kill();
+    }
+
+    /// A request that got its answer has nothing to cancel, and a cancel for an
+    /// id the server already answered is a message it has to reason about.
+    #[tokio::test]
+    async fn an_answered_request_cancels_nothing() {
+        let (lsp, writer_rx) = unanswered_transport();
+
+        let mut pending = std::pin::pin!(lsp.request::<_, Value>("textDocument/hover", json!({})));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            pending.as_mut().poll(&mut cx).is_pending(),
+            "the request is waiting on a response",
+        );
+
+        // Stands in for the reader thread routing a response back.
+        let (_, answered) = lsp
+            .pending
+            .lock()
+            .expect("pending map")
+            .drain()
+            .next()
+            .expect("the request registered itself");
+        let raw = serde_json::value::to_raw_value(&json!({})).expect("serializes");
+        answered.send(Ok(raw)).expect("the request still awaits");
+
+        assert!(
+            pending.as_mut().poll(&mut cx).is_ready(),
+            "and finishes on it",
+        );
+
+        assert_eq!(
+            written_methods(&writer_rx),
+            ["textDocument/hover"],
+            "the request went out and nothing cancelled it",
+        );
+        let _ = lsp.child.lock().expect("child").kill();
     }
 
     /// A semantic-token response runs to hundreds of thousands of numbers, and
