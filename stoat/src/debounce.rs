@@ -329,8 +329,10 @@ pub(crate) fn arm_workspace_autosave(stoat: &mut Stoat) {
 
     let executor = stoat.executor.clone();
     let tx = stoat.workspace_autosave_tx.clone();
-    let redraw = stoat.redraw_notify.clone();
-    let task = stoat.executor.spawn_with_redraw(redraw, async move {
+    // The drain wake rather than the redraw one, since the expiry has a file to
+    // write and a grid that did not move.
+    let drain = stoat.drain_notify.clone();
+    let task = stoat.executor.spawn_with_redraw(drain, async move {
         executor.timer(WORKSPACE_AUTOSAVE_THROTTLE).await;
         let _ = tx.send(()).await;
     });
@@ -519,6 +521,7 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
     use std::time::Duration;
     // TEST IMPORTS
 
@@ -566,6 +569,29 @@ mod tests {
             h.stoat.pending_workspace_autosave.is_none(),
             "the window opened at the first press closed at 5s and the save ran, \
              where a debounce restarted at 3s and would still be waiting"
+        );
+    }
+
+    /// The expiry has a file to write and a grid that did not move. Waking the
+    /// loop to paint re-emits every decoration stream for nothing.
+    ///
+    /// Armed directly rather than by typing, because a keystroke also arms the
+    /// index and diff debounces, and those do ask for a frame.
+    #[test]
+    fn the_autosave_expiry_wakes_the_loop_to_drain_and_not_to_paint() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        arm_workspace_autosave(&mut h.stoat);
+        assert!(h.stoat.pending_workspace_autosave.is_some());
+
+        h.advance_clock(WORKSPACE_AUTOSAVE_THROTTLE + Duration::from_secs(1));
+
+        assert!(
+            h.stoat.drain_notify.notified().now_or_never().is_some(),
+            "the expiry woke the loop to drain",
+        );
+        assert!(
+            h.stoat.redraw_notify.notified().now_or_never().is_none(),
+            "and asked for no frame of its own",
         );
     }
 

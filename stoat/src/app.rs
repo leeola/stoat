@@ -908,6 +908,14 @@ pub struct Stoat {
     /// blocking pool). Multiple notifications collapse into one
     /// pending wake-up.
     pub(crate) redraw_notify: Arc<tokio::sync::Notify>,
+    /// The same wake-up for a task whose result is not on screen.
+    ///
+    /// [`Self::run`] drains the debounce channels on it and paints only when
+    /// that drain reports something visible moved. A workspace autosave is the
+    /// case in point. Its throttle expiring has a file to write and a grid that
+    /// did not change, so waking through [`Self::redraw_notify`] repaints every
+    /// pane and re-emits every decoration stream for nothing.
+    pub(crate) drain_notify: Arc<tokio::sync::Notify>,
     /// Notified once to make [`Self::run`] quit at the next loop turn,
     /// regardless of editor state. The `--timeout` self-driver uses it to
     /// auto-close a scripted session after a fixed delay. A notification
@@ -2033,6 +2041,7 @@ impl Stoat {
         // Built before the first workspace, since an editor needs it at
         // construction to wake the run loop when its background rewrap settles.
         let redraw_notify = Arc::new(tokio::sync::Notify::new());
+        let drain_notify = Arc::new(tokio::sync::Notify::new());
 
         let mut workspaces = SlotMap::with_key();
         let workspace = Workspace::new(initial_git_root.clone(), &executor, redraw_notify.clone());
@@ -2127,6 +2136,7 @@ impl Stoat {
             aux_cursor: None,
             _index_build_task: None,
             redraw_notify,
+            drain_notify,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
@@ -3307,6 +3317,16 @@ impl Stoat {
                     }
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
+                // A drain wake has work to land and nothing to show for it
+                // unless the drain says otherwise, so the frame is earned
+                // rather than assumed.
+                _ = self.drain_notify.notified() => {
+                    if self.drain_external() {
+                        UpdateEffect::Redraw
+                    } else {
+                        UpdateEffect::None
+                    }
+                }
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
                 _ = frame_timer.tick(), if animating || building || dirty || spinning => {
                     let now = std::time::Instant::now();
