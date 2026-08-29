@@ -20155,6 +20155,15 @@ mod tests {
             "box",
             &["~/proj".to_owned()],
         );
+        assert_eq!(
+            h.stoat.active_workspace().remote,
+            Some(ssh::RemoteTarget {
+                transport: ssh::Transport::Ssh,
+                host: "box".to_owned(),
+                args: vec!["~/proj".to_owned()],
+            }),
+            "the workspace records where its window went",
+        );
         assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::None);
 
         let spawns = host.spawns();
@@ -20213,6 +20222,36 @@ mod tests {
             Some("ssh exited (255): ssh: connect refused"),
             "and the error the remote printed inside the alternate screen survives",
         );
+        assert_eq!(
+            h.stoat.active_workspace().remote,
+            Some(ssh::RemoteTarget {
+                transport: ssh::Transport::Ssh,
+                host: "box".to_owned(),
+                args: vec!["~/proj".to_owned()],
+            }),
+            "and a dropped link keeps the target for the next reopen",
+        );
+    }
+
+    /// The user closing the remote editor is the one ending that means the
+    /// window belongs here again, so nothing is left to reconnect to.
+    #[test]
+    fn a_clean_remote_exit_clears_the_workspace_target() {
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.stoat.terminal_host = host;
+        h.allow_host_swap();
+        install_passthrough(&mut h.stoat);
+
+        ssh::connect(&mut h.stoat, ssh::Transport::Ssh, "box", &[]);
+        ssh::spawn_armed(&mut h.stoat);
+        assert!(h.stoat.active_workspace().remote.is_some());
+
+        h.stoat.handle_pty_notification(PtyNotification::SshExited {
+            exit_status: Some(0),
+        });
+        assert_eq!(h.stoat.active_workspace().remote, None);
     }
 
     /// mosh takes the remote command as separate argv entries and disables its

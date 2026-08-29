@@ -25,6 +25,7 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, FocusTarget, PaneId, PaneTree, View},
     rebase::RebaseState,
+    ssh::RemoteTarget,
     workspace::{Tab, Workspace, WorkspaceUid},
 };
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,11 @@ pub(crate) struct WorkspaceStateV1 {
     /// missing entries restore as unnamed tabs.
     #[serde(default)]
     pub tab_names: Vec<Option<String>>,
+    /// The remote host this workspace's window was handed to and did not close
+    /// cleanly. `None` on files written by a local session, and on files that
+    /// predate the field.
+    #[serde(default)]
+    pub remote: Option<RemoteTarget>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -269,6 +275,7 @@ impl Workspace {
                 .collect(),
             active_tab: self.active_tab,
             tab_names: self.tabs.iter().map(|tab| tab.name.clone()).collect(),
+            remote: self.remote.clone(),
         }
     }
 
@@ -394,6 +401,7 @@ impl Workspace {
             state.name
         };
         self.last_finder_scope = state.last_finder_scope;
+        self.remote = state.remote;
         self.palette_history = InputHistory::from_entries(state.palette_history);
         self.search_history = InputHistory::from_entries(state.search_history);
         self.code_search_history = InputHistory::from_entries(state.code_search_history);
@@ -1529,6 +1537,51 @@ mod tests {
         );
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.last_finder_scope, Some("modified".to_string()));
+    }
+
+    #[test]
+    fn remote_target_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let target = RemoteTarget {
+            transport: crate::ssh::Transport::Ssh,
+            host: "box".to_string(),
+            args: vec!["~/p".to_string()],
+        };
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.remote = Some(target.clone());
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        assert_eq!(fresh.remote, None, "fresh workspace is local");
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.remote, Some(target));
+    }
+
+    #[test]
+    fn a_state_file_without_the_remote_field_restores_a_local_workspace() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.remote = Some(RemoteTarget {
+            transport: crate::ssh::Transport::Mosh,
+            host: "box".to_string(),
+            args: Vec::new(),
+        });
+        let state_path = ws_dir.join("state.ron");
+
+        let body = ron::ser::to_string(&LegacyState::from(ws.to_state())).unwrap();
+        assert!(!body.contains("remote"), "no remote field on the wire");
+        fake.write(&state_path, body.as_bytes()).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.remote, None, "a file predating the field is local");
     }
 
     #[test]

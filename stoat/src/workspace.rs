@@ -25,6 +25,7 @@ use crate::{
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, walkthrough::SlideParts},
     run::{RunId, RunState},
+    ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermReturnFocus, TermSession},
     workspace::diff::{
@@ -159,6 +160,14 @@ pub struct Workspace {
     /// to a scope at open time and validated against the current config, so a
     /// name whose scope has since been removed falls back to the default.
     pub(crate) last_finder_scope: Option<String>,
+    /// The remote host this workspace's window was handed to and did not close
+    /// cleanly, or `None` when the window is local. Persisted, so reopening the
+    /// workspace reconnects to where it left off.
+    ///
+    /// A clean remote exit clears it, because the user closed that session on
+    /// purpose. Every other ending keeps it, since a dropped link is exactly
+    /// what a reconnect is for.
+    pub(crate) remote: Option<RemoteTarget>,
     /// Fish-style recall history of executed command-palette lines, walked by
     /// bare Up/Down in the palette. Persisted per workspace.
     pub(crate) palette_history: InputHistory,
@@ -366,6 +375,7 @@ impl Workspace {
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
             last_finder_scope: None,
+            remote: None,
             palette_history: InputHistory::default(),
             search_history: InputHistory::default(),
             code_search_history: InputHistory::default(),

@@ -20,6 +20,7 @@ use crate::{
     run,
 };
 use futures::FutureExt;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -39,10 +40,23 @@ const TAIL_BYTES: usize = 4096;
 /// The two differ in how the remote command is spelled and in how the escape
 /// key is disabled, not in how the window is handed over. One passthrough
 /// therefore serves both, and this is the only thing it branches on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Transport {
     Ssh,
     Mosh,
+}
+
+/// The remote host a workspace's window was last handed to and did not close
+/// cleanly.
+///
+/// A reopen of that workspace reconnects to this, so it holds everything
+/// [`connect`] needs to run again: which program carries the session, where it
+/// goes, and what the remote editor was told to open.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RemoteTarget {
+    pub transport: Transport,
+    pub host: String,
+    pub args: Vec<String>,
 }
 
 /// What the app tells the UI thread to do while a remote session owns the
@@ -250,6 +264,16 @@ pub(crate) fn connect(
         program,
         args: args.to_vec(),
     });
+
+    // Recorded and saved before the remote starts, so a crash while it owns the
+    // screen still leaves the workspace something to reconnect to.
+    stoat.active_workspace_mut().remote = Some(RemoteTarget {
+        transport,
+        host: host.to_owned(),
+        args: args.to_vec(),
+    });
+    stoat.save_workspace(stoat.active_workspace);
+
     if let Some(link) = &stoat.passthrough_link {
         link.slot.arm();
     }
@@ -368,7 +392,12 @@ pub(crate) fn finish(stoat: &mut Stoat, exit_status: Option<i32>) -> UpdateEffec
     stoat.sync_zoom_claim();
     apc_emit::emit_theme_default_colors(stoat);
 
-    if exit_status != Some(0) {
+    // A clean exit is the user closing the remote on purpose. Every other
+    // ending is a dropped link, and the target stays for the next reopen.
+    if exit_status == Some(0) {
+        stoat.active_workspace_mut().remote = None;
+        stoat.save_workspace(stoat.active_workspace);
+    } else {
         let code = match exit_status {
             Some(code) => code.to_string(),
             None => "no status".to_owned(),
