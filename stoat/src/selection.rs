@@ -148,6 +148,18 @@ impl SelectionsCollection {
             .expect("SelectionsCollection invariant: at least one selection")
     }
 
+    /// Every selection endpoint, start then end, in the order
+    /// [`Self::reanchor`] visits them.
+    ///
+    /// Paired with that order so a caller resolves the endpoints now and feeds
+    /// the results back positionally later, which is what lets the two halves
+    /// of a reanchor run on different threads.
+    pub(crate) fn anchors(&self) -> impl Iterator<Item = &Anchor> {
+        self.disjoint
+            .iter()
+            .flat_map(|selection| [&selection.start, &selection.end])
+    }
+
     /// Rewrite every selection endpoint through `remap`.
     ///
     /// Moves a selection set onto a buffer state whose fragment tree was

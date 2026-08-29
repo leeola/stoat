@@ -17,7 +17,7 @@
 //! by design.
 
 use crate::{
-    buffer::TextBuffer,
+    buffer::{BufferId, TextBuffer},
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
@@ -37,6 +37,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
+use stoat_text::Bias;
 
 /// On-disk shape of [`FocusTarget`], preserving the pre-unit-variant wire format
 /// so older and newer state.ron files stay mutually readable.
@@ -110,6 +111,14 @@ pub(crate) struct WorkspaceStateV1 {
     /// predate the field.
     #[serde(default)]
     pub remote: Option<RemoteTarget>,
+    /// Selection endpoints owed a re-take against a compacted buffer's seed,
+    /// resolved but not yet re-anchored.
+    ///
+    /// Never on the wire, because a state read back from disk already holds the
+    /// anchors its own seed produced. Every path that reads a state resolves
+    /// these first, so nothing outside this module sees the list non-empty.
+    #[serde(skip)]
+    pub(crate) pending_reanchors: Vec<PendingReanchor>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -232,18 +241,70 @@ fn list_ron_files_by_mtime_desc(dir: &Path, fs: &dyn FsHost) -> io::Result<Vec<P
     Ok(entries.into_iter().map(|(p, _)| p).collect())
 }
 
+impl WorkspaceStateV1 {
+    /// Re-take every pending selection endpoint against the seed its buffer
+    /// restores from, and clear the list.
+    ///
+    /// The expensive half of a compacted reanchor. One buffer is built per
+    /// pending buffer, so a save pays it on the blocking pool rather than on
+    /// the run loop where the snapshot is taken.
+    ///
+    /// The seed is built rather than synthesized so the anchors come from the
+    /// same code any other anchor does, including at the buffer ends where the
+    /// sentinels take over.
+    ///
+    /// Idempotent, since a resolved list is empty and every entry point calls
+    /// this before reading the state.
+    pub(crate) fn resolve_reanchors(&mut self) {
+        // One seed at a time, because the pending list groups every editor of
+        // a buffer together. An ungrouped list rebuilds on each switch, which
+        // costs more and stays correct.
+        let mut held: Option<(BufferId, TextBuffer)> = None;
+        for pending in std::mem::take(&mut self.pending_reanchors) {
+            if held.as_ref().is_none_or(|(id, _)| *id != pending.buffer) {
+                let Some(entry) = self
+                    .buffers
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == pending.buffer)
+                else {
+                    continue;
+                };
+                let seed = TextBuffer::from_history(pending.buffer, &entry.history);
+                held = Some((pending.buffer, seed));
+            }
+            let Some((_, seed)) = &held else {
+                continue;
+            };
+
+            let Some((_, editor)) = self
+                .editors
+                .iter_mut()
+                .find(|(id, _)| *id == pending.editor)
+            else {
+                continue;
+            };
+            let mut endpoints = pending.endpoints.into_iter();
+            editor.selections.reanchor(|_| match endpoints.next() {
+                Some((offset, bias)) => seed.anchor_at(offset, bias),
+                None => unreachable!("an endpoint was resolved for every anchor"),
+            });
+        }
+    }
+}
+
 impl Workspace {
     /// Build a serializable snapshot of everything the workspace currently
     /// knows how to round-trip.
     pub(crate) fn to_state(&self) -> WorkspaceStateV1 {
-        let mut editors: Vec<(EditorId, EditorStateSnapshot)> = self
+        let editors: Vec<(EditorId, EditorStateSnapshot)> = self
             .editors
             .iter()
             .map(|(id, state)| (id, state.snapshot()))
             .collect();
 
         let buffers = self.buffers.snapshot();
-        reanchor_compacted_selections(&self.buffers, &buffers, &mut editors);
+        let pending_reanchors = pending_reanchors(&self.buffers, &buffers, &editors);
 
         let rebase_active = self
             .rebase_active
@@ -276,13 +337,16 @@ impl Workspace {
             active_tab: self.active_tab,
             tab_names: self.tabs.iter().map(|tab| tab.name.clone()).collect(),
             remote: self.remote.clone(),
+            pending_reanchors,
         }
     }
 
     /// Serialize the current workspace state to RON and write it atomically
     /// to `path`. Parent directory is created if missing.
     pub(crate) fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
-        write_state(&self.to_state(), &self.meta(), path, fs)
+        let mut state = self.to_state();
+        state.resolve_reanchors();
+        write_state(&state, &self.meta(), path, fs)
     }
 
     /// The registry entry describing this workspace, as it stands.
@@ -321,6 +385,7 @@ impl Workspace {
     }
 
     pub(crate) fn apply_state(&mut self, mut state: WorkspaceStateV1, executor: &Executor) {
+        state.resolve_reanchors();
         self.buffers
             .restore_from(std::mem::take(&mut state.buffers));
         self.install_restored_parts(state, executor);
@@ -470,7 +535,21 @@ pub(crate) fn write_state(
     super::registry::write_meta(meta, path, fs)
 }
 
-/// Re-express selections into buffers whose history is persisting compacted.
+/// One editor's selection endpoints, resolved against the live buffer and
+/// waiting to be re-taken against the seed that will replace it.
+///
+/// The offsets are in the order [`SelectionsCollection::anchors`] yields them,
+/// which is the order [`SelectionsCollection::reanchor`] consumes them, so the
+/// two halves pair up positionally.
+#[derive(Debug)]
+pub(crate) struct PendingReanchor {
+    editor: EditorId,
+    buffer: BufferId,
+    endpoints: Vec<(usize, Bias)>,
+}
+
+/// Resolve the selections of every editor showing a buffer whose history is
+/// persisting compacted.
 ///
 /// A selection endpoint is an anchor naming an insertion in the fragment tree
 /// the op log builds, and a compacted history replays a seed instead of that
@@ -480,35 +559,36 @@ pub(crate) fn write_state(
 /// it against the seed keeps the position, which is the whole point of
 /// persisting selections.
 ///
-/// The seed is built rather than synthesized so the anchors come from the same
-/// code any other anchor does, including at the buffer ends where the sentinels
-/// take over. It costs one buffer build per compacted buffer some editor is
-/// showing, on the save path only.
-fn reanchor_compacted_selections(
+/// Only the resolve happens here, because only it needs the live buffer, and it
+/// is O(log n) per endpoint. Re-taking means building the seed, which is the
+/// expensive half and needs nothing but the history, so
+/// [`WorkspaceStateV1::resolve_reanchors`] does it wherever the state is next
+/// used. On the autosave path that is the blocking pool.
+fn pending_reanchors(
     registry: &BufferRegistry,
     snap: &BufferRegistrySnapshot,
-    editors: &mut [(EditorId, EditorStateSnapshot)],
-) {
+    editors: &[(EditorId, EditorStateSnapshot)],
+) -> Vec<PendingReanchor> {
+    let mut pending = Vec::new();
     for entry in snap.entries.iter().filter(|e| e.history.compacted) {
-        if !editors.iter().any(|(_, ed)| ed.buffer_id == entry.id) {
-            continue;
-        }
         let Some(live) = registry.get(entry.id) else {
             continue;
         };
-
         let live = live.read().expect("buffer poisoned");
-        let seed = TextBuffer::from_history(entry.id, &entry.history);
 
-        for (_, editor) in editors
-            .iter_mut()
-            .filter(|(_, ed)| ed.buffer_id == entry.id)
-        {
-            editor
-                .selections
-                .reanchor(|anchor| seed.anchor_at(live.resolve_anchor(anchor), anchor.bias));
+        for (id, editor) in editors.iter().filter(|(_, ed)| ed.buffer_id == entry.id) {
+            pending.push(PendingReanchor {
+                editor: *id,
+                buffer: entry.id,
+                endpoints: editor
+                    .selections
+                    .anchors()
+                    .map(|anchor| (live.resolve_anchor(anchor), anchor.bias))
+                    .collect(),
+            });
         }
     }
+    pending
 }
 
 /// Bring a restored pane tree back into a usable state against the freshly
@@ -1067,13 +1147,13 @@ mod tests {
         assert_eq!(fresh.panes.split_pane_ids().len(), count_before);
     }
 
-    fn buffer_text(ws: &Workspace, id: crate::buffer::BufferId) -> String {
+    fn buffer_text(ws: &Workspace, id: BufferId) -> String {
         let buffer = ws.buffers.get(id).expect("buffer missing");
         let guard = buffer.read().expect("buffer poisoned");
         guard.rope().to_string()
     }
 
-    fn buffer_is_dirty(ws: &Workspace, id: crate::buffer::BufferId) -> bool {
+    fn buffer_is_dirty(ws: &Workspace, id: BufferId) -> bool {
         let buffer = ws.buffers.get(id).expect("buffer missing");
         let guard = buffer.read().expect("buffer poisoned");
         guard.dirty
@@ -1273,6 +1353,97 @@ mod tests {
             },
             other => panic!("expected single Edit op, got {other:?}"),
         }
+    }
+
+    /// The snapshot is taken on the run loop, so the half of a compacted
+    /// reanchor that rebuilds a buffer must not happen there. What it leaves
+    /// behind is the resolved endpoints, and resolving them lands the same
+    /// anchors the eager pass produced.
+    #[test]
+    fn a_snapshot_defers_the_reanchor_and_resolving_it_lands_the_same_anchors() {
+        use crate::{
+            buffer::OPS_COMPACT_THRESHOLD, multi_buffer::MultiBuffer,
+            selection::SelectionsCollection,
+        };
+        use stoat_text::{Bias, SelectionGoal};
+
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id, buffer) = ws.buffers.open(&ws_dir.join("long.txt"), "abcdefghij\n");
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            for _ in 0..OPS_COMPACT_THRESHOLD {
+                let end = guard.rope().len();
+                guard.edit(end..end, "x");
+            }
+        }
+
+        let editor_id = ws.editors.insert(EditorState::new(
+            id,
+            buffer.clone(),
+            exec.clone(),
+            crate::test_notify(),
+        ));
+        let multi = MultiBuffer::singleton(buffer.clone());
+        let multi_snap = multi.snapshot();
+        let mut selections = SelectionsCollection::new();
+        for offset in [3, OPS_COMPACT_THRESHOLD] {
+            selections.insert_cursor(
+                multi_snap.anchor_at(offset, Bias::Right),
+                SelectionGoal::None,
+                &multi_snap,
+            );
+        }
+        ws.editors[editor_id].selections = selections;
+
+        let mut state = ws.to_state();
+        assert_eq!(
+            state.pending_reanchors.len(),
+            1,
+            "the shown compacted buffer leaves its editor's endpoints owed",
+        );
+
+        // The seed the restore replays is what the resolved anchors have to
+        // read against, so the offsets come off a buffer built from it.
+        let entry = state
+            .buffers
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .expect("the buffer is in the snapshot");
+        let seed = TextBuffer::from_history(id, &entry.history);
+        let live = buffer.read().expect("buffer poisoned");
+        let expected: Vec<usize> = ws.editors[editor_id]
+            .selections
+            .anchors()
+            .map(|anchor| {
+                seed.resolve_anchor(&seed.anchor_at(live.resolve_anchor(anchor), anchor.bias))
+            })
+            .collect();
+        drop(live);
+
+        state.resolve_reanchors();
+        assert!(
+            state.pending_reanchors.is_empty(),
+            "and resolving spends them",
+        );
+
+        let (_, editor) = state
+            .editors
+            .iter()
+            .find(|(eid, _)| *eid == editor_id)
+            .expect("the editor is in the snapshot");
+        let landed: Vec<usize> = editor
+            .selections
+            .anchors()
+            .map(|anchor| seed.resolve_anchor(anchor))
+            .collect();
+        assert_eq!(
+            landed, expected,
+            "the deferred half lands what the eager pass did",
+        );
     }
 
     /// The op log is what carries selections across a restart, so bounding it

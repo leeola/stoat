@@ -4026,6 +4026,11 @@ impl Stoat {
 
         let fs = self.fs_host.clone();
         let task = self.executor.spawn_blocking(move || {
+            // The snapshot resolved its selection endpoints on the run loop.
+            // Re-taking them rebuilds a buffer per compacted one an editor
+            // shows, which is why that half happens here.
+            let mut state = state;
+            state.resolve_reanchors();
             if let Err(err) = crate::workspace::write_state(&state, &meta, &path, fs.as_ref()) {
                 tracing::warn!(?path, ?err, "failed to save workspace state");
             }
