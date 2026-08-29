@@ -12,7 +12,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -31,6 +31,13 @@ pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 /// already far past what a viewport shows or a reader pages through. Rows below
 /// it derive theirs when something actually paints them.
 pub(crate) const INDEXED_ROWS: usize = 512;
+
+/// How many candidates a scan needs before it splits across cores.
+///
+/// A split costs a thread spawn and a join per core, and below a list this size
+/// the scoring it saves is smaller than that. A repository large enough for a
+/// keystroke to be felt is far past it.
+const PARALLEL_SCAN_MIN: usize = 4_096;
 
 /// Source of process-unique content-version stamps, shared by every pool that
 /// versions its content by a monotonic generation instead of a content hash.
@@ -268,6 +275,12 @@ pub(crate) struct Scan {
     candidates: Candidates,
     /// How much of the base the rows covered when this was prepared.
     covered: usize,
+    /// Set by the picker once a later query supersedes this one, which
+    /// [`Self::run`] reads as it scores and answers by giving up.
+    ///
+    /// `None` for a scan the caller runs to completion on its own thread, which
+    /// has nothing to be superseded by.
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Which rows a [`Scan`] offers to the matcher.
@@ -295,41 +308,21 @@ pub(crate) struct ScanOutcome {
 
 impl Scan {
     /// Match and rank, which is the expensive half and touches nothing but this.
-    pub(crate) fn run(self) -> ScanOutcome {
+    ///
+    /// `None` means a later query superseded this one while it scored. The
+    /// caller drops it rather than reporting it, since the rows it answers for
+    /// are a query the user has already typed past.
+    pub(crate) fn run(self) -> Option<ScanOutcome> {
         let anchor = self.anchor.as_deref();
         let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
 
-        let (ranked, scored) = match &self.candidates {
-            Candidates::Every => {
-                let items = self
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, display)| keeps(display))
-                    .map(|(idx, display)| (idx, &**display));
-
-                (
-                    fuzzy::rank_indexing_best(&self.pattern, items, INDEXED_ROWS),
-                    self.rows.len(),
-                )
-            },
-            Candidates::Narrowed { previous, arrived } => {
-                let items = previous
-                    .iter()
-                    .copied()
-                    .chain(arrived.clone())
-                    .filter(|&idx| keeps(&self.rows[idx]))
-                    .map(|idx| (idx, &*self.rows[idx]));
-
-                (
-                    fuzzy::rank_indexing_best(&self.pattern, items, INDEXED_ROWS),
-                    previous.len() + arrived.len(),
-                )
-            },
+        let scored = match &self.candidates {
+            Candidates::Every => self.rows.len(),
+            Candidates::Narrowed { previous, arrived } => previous.len() + arrived.len(),
         };
 
         let mut outcome = ScanOutcome {
-            query: self.query,
+            query: self.query.clone(),
             covered: self.covered,
             filtered: Vec::new(),
             match_indices: Vec::new(),
@@ -337,11 +330,37 @@ impl Scan {
             scored,
         };
 
-        // `begin_refilter` only builds a scan for a query with atoms, so the
-        // matcher always has something to rank.
-        let Some(ranked) = ranked else {
-            return outcome;
+        // `begin_refilter` only builds a scan for a query with atoms, so this
+        // holds for every scan that reaches a worker.
+        let Some(pattern) = fuzzy::parse_query(&self.pattern) else {
+            return Some(outcome);
         };
+
+        // Materialized rather than streamed, because a split hands each thread a
+        // contiguous share and an iterator has no shares to hand out.
+        let candidates: Vec<usize> = match &self.candidates {
+            Candidates::Every => (0..self.rows.len())
+                .filter(|&idx| keeps(&self.rows[idx]))
+                .collect(),
+            Candidates::Narrowed { previous, arrived } => previous
+                .iter()
+                .copied()
+                .chain(arrived.clone())
+                .filter(|&idx| keeps(&self.rows[idx]))
+                .collect(),
+        };
+
+        let cancel = self.cancel.as_deref();
+        let matched = match candidates.len() >= PARALLEL_SCAN_MIN {
+            true => self.score_across_cores(&pattern, &candidates, cancel)?,
+            false => fuzzy::score_candidates(
+                &pattern,
+                candidates.iter().map(|&idx| (idx, &*self.rows[idx])),
+                cancel,
+            )?,
+        };
+
+        let ranked = fuzzy::rank_scored(&pattern, matched, INDEXED_ROWS);
 
         outcome.indexed = ranked.indexed;
         for (row, m) in ranked.matches.into_iter().enumerate() {
@@ -353,7 +372,50 @@ impl Scan {
             }
         }
 
-        outcome
+        Some(outcome)
+    }
+
+    /// Score `candidates` on one thread per core, concatenated in chunk order.
+    ///
+    /// Chunks are contiguous and rejoin in the order they were cut, so the list
+    /// this hands back is the one a single pass builds, and the rank derived
+    /// from it is byte-identical. A thread that finds the cancel flag
+    /// set abandons its chunk, and its `None` is the whole scan's answer.
+    fn score_across_cores<'a>(
+        &'a self,
+        pattern: &fuzzy::Pattern,
+        candidates: &[usize],
+        cancel: Option<&AtomicBool>,
+    ) -> Option<Vec<fuzzy::RankedMatch<'a, usize>>> {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let chunk = candidates.len().div_ceil(threads);
+
+        let chunks: Vec<Option<Vec<fuzzy::RankedMatch<'a, usize>>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = candidates
+                .chunks(chunk)
+                .map(|share| {
+                    scope.spawn(move || {
+                        fuzzy::score_candidates(
+                            pattern,
+                            share.iter().map(|&idx| (idx, &*self.rows[idx])),
+                            cancel,
+                        )
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a scoring thread panicked"))
+                .collect()
+        });
+
+        let mut matched = Vec::new();
+        for share in chunks {
+            matched.extend(share?);
+        }
+
+        Some(matched)
     }
 }
 
@@ -459,8 +521,9 @@ impl PickList {
     /// sorted, deduplicated set of matched character offsets in that row's
     /// display string, or empty when no pattern or anchor is active.
     pub(crate) fn refilter(&mut self, query: &str, git_root: &Path) {
-        if let Some(scan) = self.begin_refilter(query, git_root) {
-            let outcome = scan.run();
+        if let Some(scan) = self.begin_refilter(query, git_root)
+            && let Some(outcome) = scan.run()
+        {
             self.apply_scan(outcome);
         }
     }
@@ -532,6 +595,7 @@ impl PickList {
             rows: Arc::clone(&cache.rows),
             candidates,
             covered: self.base.len(),
+            cancel: None,
         })
     }
 
@@ -893,6 +957,13 @@ pub(crate) struct PathPicker {
     scan_generation: u64,
     /// Whether a scan is out and has not reported back yet.
     scan_pending: bool,
+    /// The flag the scan started at [`Self::scan_generation`] reads.
+    ///
+    /// The generation alone drops a superseded result on arrival, which spares
+    /// the paint but not the scoring. A burst of K keystrokes over a large
+    /// repository is K full scans of it, all but one for a query nobody is
+    /// waiting on. Setting this stops those where they stand.
+    scan_cancel: Arc<AtomicBool>,
     /// Held so dropping the picker cancels a scan still running for it.
     _scan_task: Option<Task<()>>,
     /// How much of [`Self::all_paths`] the pick list's base already holds, so a
@@ -936,6 +1007,7 @@ impl PathPicker {
             last_filter_text: String::new(),
             filter_valid: false,
             scan_rx,
+            scan_cancel: Arc::new(AtomicBool::new(false)),
             scan_tx,
             scan_generation: 0,
             scan_pending: false,
@@ -1070,9 +1142,22 @@ impl PathPicker {
         self.filter_valid = true;
 
         let scan = self.picklist.begin_refilter(query, &self.git_root)?;
+        Some(self.supersede(scan))
+    }
+
+    /// Stamp `scan` with a fresh generation and tell the one before it to stop.
+    ///
+    /// The flag the running scan holds is set rather than replaced in place,
+    /// because it is what that scan reads. A fresh one takes its place for the
+    /// scan starting now.
+    fn supersede(&mut self, mut scan: Scan) -> (u64, Scan) {
+        self.scan_cancel.store(true, Ordering::Relaxed);
+        self.scan_cancel = Arc::new(AtomicBool::new(false));
+        scan.cancel = Some(Arc::clone(&self.scan_cancel));
+
         self.scan_generation = next_generation();
         self.scan_pending = true;
-        Some((self.scan_generation, scan))
+        (self.scan_generation, scan)
     }
 
     /// The sender a scan's runner reports back through, and the task slot that
@@ -1097,7 +1182,12 @@ impl PathPicker {
     ) {
         let sink = self.scan_sink();
         let task = executor.spawn_blocking(move || {
-            let outcome = scan.run();
+            // A cancelled scan reports nothing. Its rows answer a query the
+            // picker has typed past, and the scan that superseded it is the one
+            // whose arrival wakes the paint.
+            let Some(outcome) = scan.run() else {
+                return;
+            };
             if sink.send((generation, outcome)).is_ok() {
                 redraw.notify_one();
             }
@@ -1130,9 +1220,7 @@ impl PathPicker {
         self.filter_valid = true;
 
         let scan = self.picklist.begin_refilter(query, &self.git_root)?;
-        self.scan_generation = next_generation();
-        self.scan_pending = true;
-        Some((self.scan_generation, scan))
+        Some(self.supersede(scan))
     }
 
     /// Bring the rows up to date with `query` here and now.
@@ -1177,7 +1265,11 @@ impl PathPicker {
         self.scan_generation = next_generation();
     }
 
-    /// Hold the task running a scan, so dropping the picker cancels it.
+    /// Hold the task awaiting a scan, so dropping the picker drops the wake.
+    ///
+    /// Dropping the task does not stop the scan. [`Executor::spawn_blocking`]
+    /// has already handed the closure to the pool, and only
+    /// [`Self::scan_cancel`] reaches it there.
     pub(crate) fn hold_scan(&mut self, task: Task<()>) {
         self._scan_task = Some(task);
     }
@@ -2665,8 +2757,12 @@ mod tests {
 
         let sink = picker.scan_sink();
         for (generation, scan) in scans {
-            sink.send((generation, scan.run()))
-                .expect("the picker is listening");
+            // The queries the burst outran gave up rather than finishing, so
+            // only the last of them has anything to report.
+            if let Some(outcome) = scan.run() {
+                sink.send((generation, outcome))
+                    .expect("the picker is listening");
+            }
         }
 
         assert!(picker.pump_scan(), "a result landed");
@@ -2682,17 +2778,23 @@ mod tests {
         let mut h = crate::Stoat::test();
         let mut picker = walked_picker(&mut h);
 
+        // Finished before the next query supersedes it, which is the race the
+        // generation guard is for. A scan still scoring when that happens gives
+        // up instead and never reports at all.
         let (slow, first) = picker.begin_scan("m").expect("a scan");
+        let late = first.run().expect("the query it answers is still current");
+
         let (quick, second) = picker.begin_scan("ma").expect("a scan");
 
         let sink = picker.scan_sink();
-        sink.send((quick, second.run())).expect("listening");
+        sink.send((quick, second.run().expect("a current scan reports")))
+            .expect("listening");
         assert!(picker.pump_scan());
         assert_eq!(answered_query(&picker), Some("ma"));
 
         // The earlier scan reports back late, having taken longer over a query
         // the user has since typed past.
-        sink.send((slow, first.run())).expect("listening");
+        sink.send((slow, late)).expect("listening");
         assert!(
             !picker.pump_scan(),
             "the late result changes nothing rather than reverting the list"
@@ -2723,7 +2825,8 @@ mod tests {
             .begin_scan_with_base("main", &base, id)
             .expect("a scan");
         let sink = picker.scan_sink();
-        sink.send((generation, scan.run())).expect("listening");
+        sink.send((generation, scan.run().expect("a current scan reports")))
+            .expect("listening");
         assert!(picker.pump_scan(), "the result landed");
 
         assert_eq!(picker.picklist.filtered, inline);
@@ -2781,7 +2884,8 @@ mod tests {
         );
 
         let sink = picker.scan_sink();
-        sink.send((orphaned, scan.run())).expect("listening");
+        sink.send((orphaned, scan.run().expect("settling does not cancel")))
+            .expect("listening");
         assert!(
             !picker.pump_scan(),
             "and the scan it overtook can no longer land"
@@ -2911,5 +3015,79 @@ mod tests {
                 "an empty result has no entry under the cursor to act on"
             );
         }
+    }
+
+    /// A scan large enough to split ranks exactly as one thread ranks it.
+    ///
+    /// The shares are contiguous and rejoin in the order they were cut, so a
+    /// share that loses a candidate, repeats one, or maps one to the wrong row
+    /// shows up here as a ranking the serial pass does not produce.
+    ///
+    /// The join order itself is below this test. `sort_ranked` orders on score
+    /// and then on the row's text, and two rows of a picker never carry the
+    /// same text, so the order it settles on is total.
+    #[test]
+    fn a_split_scan_ranks_as_one_thread_does() {
+        let base: Vec<PathBuf> = (0..12_000)
+            .map(|i| p(&format!("/repo/crate{}/src/module_{i}.rs", i % 37)))
+            .collect();
+        assert!(
+            base.len() > PARALLEL_SCAN_MIN,
+            "the fixture must be large enough to split",
+        );
+
+        let mut list = list_over(&base);
+        let scan = list
+            .begin_refilter("mod", &p("/repo"))
+            .expect("the query has atoms");
+        let outcome = scan.run().expect("nothing supersedes it");
+
+        let rows = &list.display.as_ref().expect("the scan built one").rows;
+        let serial = fuzzy::rank_indexing_best(
+            "mod",
+            rows.iter().enumerate().map(|(idx, row)| (idx, &**row)),
+            INDEXED_ROWS,
+        )
+        .expect("the query has atoms");
+
+        assert_eq!(
+            outcome.filtered,
+            serial.matches.iter().map(|m| m.item).collect::<Vec<_>>(),
+            "the split ranks the rows in the serial order",
+        );
+        assert_eq!(
+            outcome.match_indices,
+            serial.matches[..serial.indexed]
+                .iter()
+                .map(|m| m.matched_indices.clone())
+                .collect::<Vec<_>>(),
+            "and highlights the same offsets on them",
+        );
+    }
+
+    /// A scan the next keystroke supersedes gives up where it stands.
+    ///
+    /// The generation guard already drops such a result on arrival, which
+    /// spares the paint but not the scoring. Over a large repository a burst is
+    /// one full scan per keystroke, all but the last for nobody.
+    #[test]
+    fn a_superseded_scan_gives_up_rather_than_finishing() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+
+        let (_, outrun) = picker.begin_scan("m").expect("a scan");
+        let rows = picker.picklist.filtered.clone();
+
+        // Starting the next query is what tells the one before it to stop.
+        picker.begin_scan("ma").expect("a scan");
+
+        assert!(
+            outrun.run().is_none(),
+            "the outrun scan reports nothing rather than a ranking",
+        );
+        assert_eq!(
+            picker.picklist.filtered, rows,
+            "and the rows on display stay as they were",
+        );
     }
 }

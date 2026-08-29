@@ -12,7 +12,18 @@ use nucleo::{
     pattern::{CaseMatching, Normalization},
     Matcher, Utf32Str,
 };
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+/// How many candidates one [`score_candidates`] pass scores between reads of
+/// its cancel flag.
+///
+/// An atomic load per candidate costs more than the score it guards on a short
+/// haystack. A stride this wide still answers a keystroke within a fraction of
+/// a frame on any list a picker holds.
+const CANCEL_STRIDE: usize = 1_024;
 
 thread_local! {
     static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::default());
@@ -206,11 +217,36 @@ pub(crate) fn rank_indexing_best<'a, T>(
     indexed: usize,
 ) -> Option<Ranked<'a, T>> {
     let pattern = parse_query(query)?;
-    let (scored, indexed) = with_matcher(|matcher| {
+    let scored = score_candidates(&pattern, items, None)?;
+    Some(rank_scored(&pattern, scored, indexed))
+}
+
+/// The candidates `pattern` matches, in the order they arrived.
+///
+/// Scoring is the half of a rank that carries no shared state, so a caller with
+/// more candidates than one thread scores splits them across cores. Feed each
+/// thread's answer to [`rank_scored`] as one list, in the order the candidates
+/// were offered, and the ranking equals the one a serial pass gives.
+///
+/// Returns `None` once `cancel` is set, rather than a list that stops partway.
+/// A picker sets the flag when the next keystroke supersedes the query. A
+/// partial answer to a question nobody asks is worse than no answer, because it
+/// still costs a sort and a send and reads as a whole one.
+pub(crate) fn score_candidates<'a, T>(
+    pattern: &Pattern,
+    items: impl IntoIterator<Item = (T, &'a str)>,
+    cancel: Option<&AtomicBool>,
+) -> Option<Vec<RankedMatch<'a, T>>> {
+    with_matcher(|matcher| {
         let mut hay_buf: Vec<char> = Vec::new();
 
         let mut scored: Vec<RankedMatch<'a, T>> = Vec::new();
-        for (item, haystack) in items {
+        for (seen, (item, haystack)) in items.into_iter().enumerate() {
+            if seen % CANCEL_STRIDE == 0 && cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                return None;
+            }
+
             let hay = Utf32Str::new(haystack, &mut hay_buf);
             if let Some(score) = pattern.score(hay, matcher) {
                 scored.push(RankedMatch {
@@ -222,6 +258,23 @@ pub(crate) fn rank_indexing_best<'a, T>(
             }
         }
 
+        Some(scored)
+    })
+}
+
+/// Order `scored` best-first and index the `indexed` best of them.
+///
+/// The bonuses two of the rankings need are derived here rather than during
+/// scoring, because they cost a traceback per row and only the block that leads
+/// the list is painted with them.
+pub(crate) fn rank_scored<'a, T>(
+    pattern: &Pattern,
+    mut scored: Vec<RankedMatch<'a, T>>,
+    indexed: usize,
+) -> Ranked<'a, T> {
+    let indexed = with_matcher(|matcher| {
+        let mut hay_buf: Vec<char> = Vec::new();
+
         // Ordering the whole set by raw score first is what makes the block a
         // deterministic set of rows rather than whichever equal-scoring ones a
         // partition happened to leave in front.
@@ -232,7 +285,7 @@ pub(crate) fn rank_indexing_best<'a, T>(
         for ranked in &mut scored[..indexed] {
             let hay = Utf32Str::new(ranked.haystack, &mut hay_buf);
             let Some(with_bonuses) =
-                score_with_bonuses(&pattern, ranked.haystack, hay, matcher, &mut buffers)
+                score_with_bonuses(pattern, ranked.haystack, hay, matcher, &mut buffers)
             else {
                 continue;
             };
@@ -241,13 +294,13 @@ pub(crate) fn rank_indexing_best<'a, T>(
         }
         sort_ranked(&mut scored[..indexed]);
 
-        (scored, indexed)
+        indexed
     });
 
-    Some(Ranked {
+    Ranked {
         matches: scored,
         indexed,
-    })
+    }
 }
 
 /// Matched offsets for one haystack under `query`, into `out`.
