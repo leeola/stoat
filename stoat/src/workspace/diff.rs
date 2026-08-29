@@ -138,10 +138,25 @@ pub(crate) struct DiffState {
     /// Hunks staged and unstaged across the whole repo, plus the count each
     /// changed file carries, as the status bar's repo-wide tally reads them.
     ///
-    /// `None` until a diff lands, and for a workspace root outside any repo.
-    /// Refreshed wherever a diff map does, since the same events move both: an
-    /// edit, a save, a staging action, and a write under `.git`.
+    /// `None` until the first tally lands, and for a workspace root outside any
+    /// repo. Four events owe it a fresh read, each by clearing
+    /// [`Self::tally_current`]. They are a landed save, a staging action, a
+    /// write under `.git`, and a first open.
+    ///
+    /// An edit is not one of them. The tally reads what is on disk, which an
+    /// unsaved edit has not touched, so re-walking the repository per keystroke
+    /// costs a full three-diff repo scan for an answer that never changed.
     pub(super) repo_hunk_tallies: Option<HunkTallies>,
+    /// The in-flight repo-wide tally, held so it is not cancelled before its
+    /// answer lands.
+    pub(super) tally_job: Option<Task<Option<HunkTallies>>>,
+    /// Whether the stored tally is known to match what is on disk.
+    ///
+    /// Starts `false`, because a fresh workspace has read no tally and the first
+    /// drive owes one. A landed tally sets it, and a save, a staging action, a
+    /// git write, or a first open clears it. An unsaved edit does not, since the
+    /// tally reads the disk and an unsaved edit has not touched it.
+    pub(super) tally_current: bool,
     /// The version each buffer is currently settling on, and when that version
     /// was first seen. Read by [`Self::settled`].
     settle: HashMap<BufferId, (u64, Instant)>,
@@ -160,6 +175,7 @@ impl DiffState {
     pub(super) fn invalidate(&mut self, id: BufferId) {
         self.jobs.remove(&id);
         self.versions.remove(&id);
+        self.tally_current = false;
     }
 
     /// Stale every buffer's diff map by dropping all recorded versions and
@@ -175,9 +191,19 @@ impl DiffState {
     pub(super) fn invalidate_all(&mut self) {
         self.jobs.clear();
         self.versions.clear();
+        self.tally_current = false;
         // The cached blobs were read from the git state this call is reacting
         // to having changed, so they are exactly what must not be reused.
         self.base_text.clear();
+    }
+
+    /// Mark the repo-wide tally as owed, so the next drive spawns one.
+    ///
+    /// This serves the events that move the tally without staling any buffer
+    /// diff. A landed save is the case in point: the file's own hunks are
+    /// unchanged by the write, but the repo's counts are not.
+    pub(super) fn stale_tally(&mut self) {
+        self.tally_current = false;
     }
 
     /// Whether `id`'s installed map was computed for buffer version `version`.
@@ -312,9 +338,9 @@ impl DiffState {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
         }
 
-        if let Some(repo) = git_host.discover(git_root) {
-            self.repo_hunk_tallies = Some(repo.hunk_tallies());
-        }
+        // Owed rather than read here, because a repo-wide tally is a walk of
+        // every diff in the repository and this runs on the UI thread.
+        self.tally_current = false;
 
         // A file with no language has no colors to wait for, so its map is
         // already whole and nothing has to recompute it.
@@ -382,9 +408,6 @@ impl DiffState {
             }
         });
         for out in completed {
-            if let Some(tallies) = out.repo_hunk_tallies {
-                self.repo_hunk_tallies = Some(tallies);
-            }
             if let Some(base) = out.base {
                 self.base_text.insert(out.path, base);
             }
@@ -408,6 +431,31 @@ impl DiffState {
             // Recorded either way, so an unchanged result still counts as
             // diffed and the buffer is not tried again next frame.
             self.versions.insert(out.buffer_id, out.target_version);
+        }
+
+        if let Some(job) = &mut self.tally_job {
+            let mut cx = Context::from_waker(&waker);
+            if let Poll::Ready(tallies) = Pin::new(job).poll(&mut cx) {
+                // A `None` answer means the root is outside a repo now, which
+                // says nothing about the last tally that was read inside one.
+                if tallies.is_some() {
+                    self.repo_hunk_tallies = tallies;
+                }
+                self.tally_job = None;
+            }
+        }
+        if !self.tally_current && self.tally_job.is_none() {
+            self.tally_current = true;
+            self.tally_job = Some(executor.spawn_blocking({
+                let git_host = git_host.clone();
+                let git_root = git_root.to_path_buf();
+                let redraw = redraw_notify.clone();
+                move || {
+                    let tallies = git_host.discover(&git_root).map(|repo| repo.hunk_tallies());
+                    redraw.notify_one();
+                    tallies
+                }
+            }));
         }
 
         // The staleness checks come first so a settled buffer costs one lock
@@ -471,8 +519,6 @@ impl DiffState {
                         diff_map.anchor_hunks(&buffer_snapshot);
                         (diff_map, base)
                     });
-                    let repo_hunk_tallies =
-                        git_host.discover(&git_root).map(|repo| repo.hunk_tallies());
                     redraw.notify_one();
                     let (diff_map, base) = match computed {
                         Some((diff_map, base)) => (Some(diff_map), Some(base)),
@@ -484,7 +530,6 @@ impl DiffState {
                         target_version: cur_version,
                         diff_map,
                         base,
-                        repo_hunk_tallies,
                     }
                 }
             });
@@ -514,10 +559,6 @@ pub(super) struct DiffJobOutput {
     /// The blobs the diff ran against, `None` when the repo or the file's HEAD
     /// content could not be read and there was nothing to diff.
     pub(super) base: Option<DiffBaseText>,
-    /// The repo-wide tally read while the job held the repo, `None` outside a
-    /// repo. Read here rather than on the run loop, since it costs a walk of
-    /// every diff in the repository.
-    pub(super) repo_hunk_tallies: Option<HunkTallies>,
 }
 
 /// Where the cursor sits among every hunk in the repository, as
@@ -1051,6 +1092,38 @@ mod tests {
             ws.repo_hunk_totals(),
             Some([(PathBuf::from("a.rs"), 3), (PathBuf::from("b.rs"), 1)].as_slice()),
             "and the per-file counts come off the same tally",
+        );
+    }
+
+    /// A repo-wide tally is a walk of every diff in the repository, and an
+    /// unsaved edit has not touched the disk it reads, so a settle must not buy
+    /// one. A landed save has touched it, so that one must.
+    #[test]
+    fn only_a_disk_write_buys_another_repo_tally() {
+        let mut h = TestHarness::with_size(40, 12);
+        let workdir = PathBuf::from("/tally");
+        h.stage_review_scenario(&workdir, &[("a.rs", "one\n", "ONE\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+
+        let after_open = h.fake_git().tally_calls(&workdir);
+        assert!(after_open > 0, "the first open reads one");
+
+        h.type_keys("i x <esc>");
+        h.settle_diff_jobs();
+        assert_eq!(
+            h.fake_git().tally_calls(&workdir),
+            after_open,
+            "an unsaved edit cannot move the tally, so it buys no walk",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveBuffer);
+        h.settle_diff_jobs();
+        assert_eq!(
+            h.fake_git().tally_calls(&workdir),
+            after_open + 1,
+            "and a landed save buys exactly one",
         );
     }
 

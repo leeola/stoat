@@ -504,7 +504,9 @@ impl TestHarness {
         // drive that spawns the job.
         self.stoat.drive_background();
         self.advance_clock(crate::workspace::diff::DIFF_SETTLE + Duration::from_millis(1));
-        for _ in 0..2 {
+        // Three, because the repo-wide tally is a job of its own: one pass
+        // spawns it, and it lands a pass behind the per-buffer maps.
+        for _ in 0..3 {
             self.stoat.drive_background();
             self.settle();
         }

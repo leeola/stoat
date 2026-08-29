@@ -11,7 +11,10 @@ use crate::host::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 use stoat_text::LineEnding;
 
@@ -62,6 +65,7 @@ impl FakeGit {
                 Arc::new(FakeGitRepo {
                     workdir: workdir.clone(),
                     state: Mutex::new(FakeRepoState::default()),
+                    tally_calls: AtomicUsize::new(0),
                 })
             });
             if !state
@@ -181,6 +185,18 @@ impl FakeGit {
                 (abs, patch)
             })
             .collect()
+    }
+
+    /// How many repo-wide tallies have run against the repo at `workdir`.
+    ///
+    /// A tally is the most expensive read the trait offers, so a test that
+    /// cares how often it runs counts it rather than timing it.
+    pub fn tally_calls(&self, workdir: &Path) -> usize {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map_or(0, |repo| repo.tally_calls.load(Ordering::Relaxed))
     }
 }
 
@@ -656,6 +672,11 @@ impl<'a> FakeRepoBuilder<'a> {
 pub struct FakeGitRepo {
     workdir: PathBuf,
     state: Mutex<FakeRepoState>,
+    /// How many times [`GitRepo::hunk_tallies`] has run against this repo.
+    ///
+    /// A repo-wide tally is the most expensive read the trait offers, so a test
+    /// that cares how often it runs counts it here rather than timing it.
+    tally_calls: AtomicUsize,
 }
 
 /// A changed-file registration and the hunks it stands for.
@@ -990,6 +1011,7 @@ impl GitRepo for FakeGitRepo {
     /// fake file counts in both and every fixture reads as one edit until it
     /// says otherwise.
     fn hunk_tallies(&self) -> HunkTallies {
+        self.tally_calls.fetch_add(1, Ordering::Relaxed);
         let state = self.state.lock().unwrap();
         let side = |staged: bool| {
             state

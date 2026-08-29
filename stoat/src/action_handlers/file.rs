@@ -380,6 +380,8 @@ fn write_buffer_to_disk(
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.mark_clean();
     }
+    // The bytes reached the disk, which is what the repo-wide tally reads.
+    stoat.active_workspace_mut().stale_hunk_tally();
     if let Some(mtime) = stoat
         .fs_host
         .metadata(path)
@@ -607,6 +609,8 @@ fn finish_pending_save(stoat: &mut Stoat, pending: &PendingSave) {
     if held && let Some(buffer) = stoat.active_workspace().buffers.get(pending.buffer_id) {
         buffer.write().expect("buffer poisoned").mark_clean();
     }
+    // The bytes reached the disk, which is what the repo-wide tally reads.
+    stoat.active_workspace_mut().stale_hunk_tally();
     if let Some(mtime) = stoat
         .fs_host
         .metadata(&pending.path)

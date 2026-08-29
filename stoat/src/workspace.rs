@@ -670,6 +670,11 @@ impl Workspace {
         self.diff.invalidate(id);
     }
 
+    /// Mark the repo-wide hunk tally as owed. See [`DiffState::stale_tally`].
+    pub(crate) fn stale_hunk_tally(&mut self) {
+        self.diff.stale_tally();
+    }
+
     /// Stale every buffer's diff map. See [`DiffState::invalidate_all`].
     pub(crate) fn invalidate_all_diffs(&mut self) {
         self.diff.invalidate_all();
