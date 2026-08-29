@@ -210,16 +210,21 @@ async fn run(
     thread::spawn({
         let event_tx = event_tx.clone();
         let cell_pixels_tx = cell_pixels_tx.clone();
+        let stoatty_tx = stoatty_tx.clone();
         let slot = slot.clone();
         move || {
             forward_input(
-                &event_tx,
-                &cell_pixels_tx,
-                &slot,
+                InputChannels {
+                    event_tx: &event_tx,
+                    cell_pixels_tx: &cell_pixels_tx,
+                    stoatty_tx: &stoatty_tx,
+                    slot: &slot,
+                },
                 crossterm::event::poll,
                 crossterm::event::read,
                 read_stdin_raw,
                 tty_winsize,
+                stoatty_handshake,
             )
         }
     });
@@ -473,11 +478,29 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 /// pasted screenful crosses in one write.
 const RAW_CHUNK: usize = 4096;
 
-/// Forward what fd 0 produces, to the app or to the remote session `slot`
+/// Every channel end and shared handle the input thread reads or writes.
+///
+/// Grouped for the same reason as [`UiChannels`]. The thread holds them for its
+/// whole life, and spelling four of them out at every call buries the closures
+/// that actually differ between a real run and a test.
+struct InputChannels<'a> {
+    /// Terminal input on its way to the app.
+    event_tx: &'a UnboundedSender<Event>,
+    /// The tty's cell size, re-read on every resize and after an attach.
+    cell_pixels_tx: &'a UnboundedSender<Option<(u16, u16)>>,
+    /// The ident handshake's answer. Sent once at startup by the UI thread, and
+    /// again from here for each terminal that attaches later.
+    stoatty_tx: &'a UnboundedSender<Option<u32>>,
+    /// What fd 0 feeds, which the app moves between the editor, a remote
+    /// session, and a handshake.
+    slot: &'a PassthroughSlot,
+}
+
+/// Forward what fd 0 produces, to the app or to the remote session the slot
 /// names.
 ///
-/// Three modes, re-read every pass so a `:ssh` from the app takes effect
-/// without a wake:
+/// Four modes, re-read every pass so a `:ssh` or an attach takes effect without
+/// a wake:
 ///
 /// - Idle: `poll` then `read` an event and send it, as a normal session does.
 /// - Pending: acknowledge that fd 0 is no longer parsed, then buffer raw bytes. The app spawns ssh
@@ -485,6 +508,8 @@ const RAW_CHUNK: usize = 4096;
 ///   exists.
 /// - Active: write every raw byte to the session, and poll the window size, because crossterm
 ///   reports no resize while nothing parses fd 0.
+/// - Handshake: identify the terminal that just attached and report it, then go idle. The probe
+///   reads raw fd 0, so it belongs on this thread and nowhere else.
 ///
 /// Sound because crossterm 0.29 reads fd 0 on the calling thread, so nothing
 /// else reads stdin while this one does.
@@ -496,14 +521,20 @@ const RAW_CHUNK: usize = 4096;
 /// errors. Neither is recoverable from here, and the caller's thread has
 /// nothing else to do.
 fn forward_input(
-    event_tx: &UnboundedSender<Event>,
-    cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
-    slot: &PassthroughSlot,
+    channels: InputChannels<'_>,
     mut poll: impl FnMut(Duration) -> io::Result<bool>,
     mut read: impl FnMut() -> io::Result<Event>,
     mut read_raw: impl FnMut(&mut [u8], Duration) -> io::Result<usize>,
     mut winsize: impl FnMut() -> Option<libc::winsize>,
+    mut handshake: impl FnMut() -> (Option<u32>, Vec<u8>),
 ) {
+    let InputChannels {
+        event_tx,
+        cell_pixels_tx,
+        stoatty_tx,
+        slot,
+    } = channels;
+
     let mut raw = [0u8; RAW_CHUNK];
     let mut buffered: Vec<u8> = Vec::new();
     let mut acked = false;
@@ -581,6 +612,23 @@ fn forward_input(
                     },
                     Err(_) => return,
                 }
+            },
+            SlotState::Handshake => {
+                let (stoatty, typed) = handshake();
+                if stoatty_tx.send(stoatty).is_err() {
+                    return;
+                }
+                // Typed while the probe owned fd 0, so it belongs to the user
+                // and goes ahead of anything typed after, exactly as at launch.
+                for event in vt_input::decode(&typed) {
+                    if event_tx.send(event).is_err() {
+                        return;
+                    }
+                }
+                // The app laid out against the terminal that left, so the Idle
+                // re-entry owes it this one's size and cell metrics.
+                ran_session = true;
+                slot.release();
             },
         }
     }
@@ -773,14 +821,19 @@ mod tests {
         read: impl FnMut() -> io::Result<Event>,
     ) {
         let (slot, _ack_rx) = PassthroughSlot::new();
+        let (stoatty_tx, _stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
         forward_input(
-            event_tx,
-            cell_pixels_tx,
-            &slot,
+            InputChannels {
+                event_tx,
+                cell_pixels_tx,
+                stoatty_tx: &stoatty_tx,
+                slot: &slot,
+            },
             |_| Ok(true),
             read,
             |_, _| Ok(0),
             || None,
+            || (None, Vec::new()),
         );
     }
 
@@ -859,10 +912,14 @@ mod tests {
         // and back to Idle in as many passes.
         let mut pass = 0;
         let chunks: [&[u8]; 2] = [b"typed early", b"and later"];
+        let (stoatty_tx, _stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
         forward_input(
-            &tx,
-            &px_tx,
-            &slot,
+            InputChannels {
+                event_tx: &tx,
+                cell_pixels_tx: &px_tx,
+                stoatty_tx: &stoatty_tx,
+                slot: &slot,
+            },
             |_| Ok(true),
             || Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
             |buf, _| {
@@ -885,6 +942,7 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
+            || (None, Vec::new()),
         );
 
         assert!(ack_rx.try_recv().is_ok(), "the arm is acknowledged");
@@ -902,6 +960,67 @@ mod tests {
             got,
             vec![Event::Resize(100, 30)],
             "and the return reports the size the window reached",
+        );
+    }
+
+    /// The probe reads raw fd 0, so it belongs on this thread. What was typed
+    /// while it owned the terminal is the user's, and the app laid out against
+    /// the terminal that left, so the new one's size follows.
+    #[test]
+    fn a_rehandshake_identifies_the_new_terminal_and_replays_what_was_typed() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stoatty_tx, mut stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (slot, _ack_rx) = PassthroughSlot::new();
+        slot.rehandshake();
+
+        // The Idle pass after the handshake ends the loop, so the one probe is
+        // all this runs.
+        forward_input(
+            InputChannels {
+                event_tx: &tx,
+                cell_pixels_tx: &px_tx,
+                stoatty_tx: &stoatty_tx,
+                slot: &slot,
+            },
+            |_| Ok(true),
+            || Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            |_, _| Ok(0),
+            || {
+                Some(libc::winsize {
+                    ws_row: 40,
+                    ws_col: 120,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                })
+            },
+            || (Some(3), b"x".to_vec()),
+        );
+
+        assert_eq!(
+            stoatty_rx.try_recv(),
+            Ok(Some(3)),
+            "the new terminal's protocol reaches the app",
+        );
+        assert!(
+            matches!(slot.state(), SlotState::Idle),
+            "and fd 0 goes back to feeding the editor",
+        );
+
+        let mut got = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            got.push(event);
+        }
+        assert_eq!(
+            got,
+            vec![
+                Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                Event::Resize(120, 40),
+            ],
+            "what was typed at the probe goes first, then the new size",
         );
     }
 

@@ -83,6 +83,10 @@ pub enum SlotState {
     Idle,
     Pending,
     Active(Arc<dyn TerminalSession>),
+    /// A newly attached terminal needs identifying, and only the thread that
+    /// owns fd 0 runs the probe. It reverts to [`Self::Idle`] once the answer
+    /// is on its way to the app.
+    Handshake,
 }
 
 /// The app's ends of the passthrough plumbing, installed by the bin layer.
@@ -156,6 +160,11 @@ impl PassthroughSlot {
     pub(crate) fn release(&self) {
         *self.state.lock().expect("passthrough slot lock") = SlotState::Idle;
     }
+
+    /// Ask the input thread to identify the terminal on fd 0 again.
+    pub(crate) fn rehandshake(&self) {
+        *self.state.lock().expect("passthrough slot lock") = SlotState::Handshake;
+    }
 }
 
 impl Transport {
@@ -195,6 +204,44 @@ impl Passthrough {
         let bytes: Vec<u8> = tail.iter().copied().collect();
         last_line_of(&bytes)
     }
+}
+
+/// Drop everything this session declared to the terminal and forget it was
+/// declared.
+///
+/// Every image, pool, minimap strip, and APC component goes, both emitters
+/// forget what they last sent, and the zoom claim is released. The next frame
+/// therefore re-declares from scratch.
+///
+/// Two things need that. A handoff gives the terminal to a remote that knows
+/// nothing of what is on it, and an attach brings a terminal that holds nothing
+/// this session sent. Every drop is a no-op against a terminal that was never
+/// declared to, so an attach calls this without checking.
+pub(crate) fn retire_terminal_state(stoat: &mut Stoat) {
+    crate::image_emit::emit_drop_all_images(stoat);
+    stoat.images.forget();
+
+    let mut out = Vec::new();
+    stoat.smooth_scroll.drop_all(&mut out);
+    for (_, content) in std::mem::take(&mut stoat.minimap_content) {
+        encode_minimap_drop_into(
+            &mut out,
+            &MinimapDropCommand {
+                content_id: content.content_id(),
+            },
+        );
+    }
+    encode_reset_into(&mut out);
+    if let Some(apc_tx) = stoat.apc_tx.clone() {
+        let _ = apc_tx.send(out);
+    }
+
+    stoat.apc_scene.clear();
+    stoat.apc_scene.forget_flushed();
+
+    stoat.zoom_claimed = false;
+    apc_emit::emit_zoom_capture(stoat, false);
+    apc_emit::emit_reset_default_colors(stoat);
 }
 
 /// Hand the window to a stoat on `host`, or refuse and say why.
@@ -244,30 +291,7 @@ pub(crate) fn connect(
     }
 
     if stoat.stoatty {
-        crate::image_emit::emit_drop_all_images(stoat);
-        stoat.images.forget();
-
-        let mut out = Vec::new();
-        stoat.smooth_scroll.drop_all(&mut out);
-        for (_, content) in std::mem::take(&mut stoat.minimap_content) {
-            encode_minimap_drop_into(
-                &mut out,
-                &MinimapDropCommand {
-                    content_id: content.content_id(),
-                },
-            );
-        }
-        encode_reset_into(&mut out);
-        if let Some(apc_tx) = stoat.apc_tx.clone() {
-            let _ = apc_tx.send(out);
-        }
-
-        stoat.apc_scene.clear();
-        stoat.apc_scene.forget_flushed();
-
-        stoat.zoom_claimed = false;
-        apc_emit::emit_zoom_capture(stoat, false);
-        apc_emit::emit_reset_default_colors(stoat);
+        retire_terminal_state(stoat);
     }
 
     let program = stoat
@@ -295,6 +319,37 @@ pub(crate) fn connect(
 
     if let Some(link) = &stoat.passthrough_link {
         link.slot.arm();
+    }
+    UpdateEffect::None
+}
+
+/// Start over against a terminal that just attached.
+///
+/// A client that attaches brings a terminal holding nothing this session sent,
+/// and it is a different stoatty, or none at all. So everything declared is
+/// retired, the identity resets to what a fresh session starts with, the UI
+/// thread re-enters the alternate screen, and the input thread identifies the
+/// new terminal.
+///
+/// No effect while a remote owns the screen. That session's own client is what
+/// was replaced, and this process is a byte pipe with nothing declared.
+///
+/// Returns [`UpdateEffect::None`] because the frame that repaints comes from the
+/// input thread's size report after the handshake, against the new terminal's
+/// grid rather than the old one's.
+pub(crate) fn terminal_replaced(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.passthrough.is_some() {
+        return UpdateEffect::None;
+    }
+
+    retire_terminal_state(stoat);
+    stoat.stoatty = false;
+    stoat.stoatty_protocol = 0;
+    stoat.terminal_reported = false;
+
+    if let Some(link) = &stoat.passthrough_link {
+        let _ = link.ui_tx.send(UiControl::Resume);
+        link.slot.rehandshake();
     }
     UpdateEffect::None
 }

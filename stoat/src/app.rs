@@ -850,6 +850,10 @@ pub struct Stoat {
     /// channel, which parks the arm once it closes instead of waking the loop on
     /// every poll. Born closed, since a process with no UI thread never reports.
     stoatty_rx: UnboundedReceiver<Option<u32>>,
+    /// A client attached to this session, so the terminal on fd 0 is a new one
+    /// that holds nothing this process sent. Born closed like [`Self::stoatty_rx`],
+    /// since a run with no attach server never reports.
+    attached_rx: UnboundedReceiver<()>,
     /// Whether the UI thread has answered the startup ident handshake, either
     /// way. Distinct from [`Self::stoatty`], which says a stoatty answered:
     /// a plain terminal reports too, and a reconnect waits on the report
@@ -2050,6 +2054,7 @@ impl Stoat {
         // installs the UI thread's end. Closed is the truthful state for a
         // process that has no UI thread to hear from.
         let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+        let (_, attached_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let (_, cell_pixels_rx) = tokio::sync::mpsc::unbounded_channel::<Option<(u16, u16)>>();
 
         let env_host: Arc<dyn EnvHost> = Arc::new(LocalEnv);
@@ -2110,6 +2115,7 @@ impl Stoat {
             window_ipc_tx,
             window_ipc_rx,
             stoatty_rx,
+            attached_rx,
             terminal_reported: false,
             remote_pending: false,
             cell_pixels: None,
@@ -2466,6 +2472,15 @@ impl Stoat {
     /// wants.
     pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<Option<u32>>) {
         self.stoatty_rx = stoatty_rx;
+    }
+
+    /// Listen for a client attaching to this session.
+    ///
+    /// Installed by an attach server, which is the only thing that reports one.
+    /// Left uncalled, the channel stays closed and nothing ever re-declares the
+    /// terminal, which is right for a session no client attaches to.
+    pub fn set_attached_rx(&mut self, attached_rx: UnboundedReceiver<()>) {
+        self.attached_rx = attached_rx;
     }
 
     /// Listen for the UI thread's reports of the tty's cell pixel size.
@@ -3278,6 +3293,9 @@ impl Stoat {
                     self.handle_stoatty_present(present)
                         .merge(ssh::reconnect_when_ready(self))
                 }
+                // Parks the same way once the server drops its sender, and for
+                // the same reason as the arm above.
+                Some(()) = self.attached_rx.recv() => ssh::terminal_replaced(self),
                 // A poll tick is a reason to re-stat the followed files, not a
                 // reason to paint. Only the pump finding one of them advanced
                 // asks for a frame.
@@ -20330,6 +20348,80 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("mosh exited (1): Did not find mosh server startup message."),
             "and the exit report names mosh",
+        );
+    }
+
+    /// An attached terminal holds nothing this session sent and answers for
+    /// itself, so everything declared is retired and the identity starts over.
+    #[test]
+    fn an_attach_retires_the_terminal_and_asks_who_it_is() {
+        use stoatty_protocol::command::{Command, PoolDropCommand};
+
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 7;
+        h.stoat.zoom_claimed = true;
+        h.stoat.terminal_reported = true;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
+
+        let mut declared = Vec::new();
+        stoat_widgets::pool::emit_into(
+            &mut declared,
+            &mut h.stoat.smooth_scroll,
+            pool_region(4),
+            0.0,
+            0,
+            false,
+            |_| Vec::new(),
+        );
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(ssh::terminal_replaced(&mut h.stoat), UpdateEffect::None);
+
+        let sent = crate::test_fixture::drain_apc(&mut rx);
+        assert!(
+            sent.contains(&Command::PoolDrop(PoolDropCommand { pool: 4 })),
+            "the declared pool is retired: {sent:?}",
+        );
+        assert!(sent.contains(&Command::Reset), "and the scene is reset");
+
+        assert!(!h.stoat.stoatty, "the terminal is unidentified again");
+        assert_eq!(h.stoat.stoatty_protocol, 0);
+        assert!(!h.stoat.terminal_reported);
+        assert!(
+            matches!(slot.state(), ssh::SlotState::Handshake),
+            "and the input thread is asked to identify the new terminal",
+        );
+        assert!(
+            matches!(ui_rx.try_recv(), Ok(ssh::UiControl::Resume)),
+            "the UI thread re-enters the alternate screen",
+        );
+
+        h.stoat.handle_stoatty_present(Some(1));
+        assert!(h.stoat.stoatty, "and the new terminal's answer upgrades it");
+        assert_eq!(h.stoat.stoatty_protocol, 1);
+    }
+
+    /// A remote owns the screen, so the client that got replaced is that
+    /// session's, not this one's. This process declared nothing to retire.
+    #[test]
+    fn an_attach_while_a_remote_runs_leaves_the_passthrough_alone() {
+        let mut h = Stoat::test();
+        let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
+        ssh::connect(&mut h.stoat, ssh::Transport::Ssh, Some("box"), &[]);
+
+        assert_eq!(ssh::terminal_replaced(&mut h.stoat), UpdateEffect::None);
+
+        assert!(
+            matches!(h.stoat.passthrough, Some(ssh::Passthrough::Pending { .. })),
+            "the armed session is untouched",
+        );
+        assert!(matches!(slot.state(), ssh::SlotState::Pending));
+        assert!(
+            ui_rx.try_recv().is_err(),
+            "and the screen is not taken back"
         );
     }
 
