@@ -34,7 +34,7 @@ use crate::{
 };
 use std::{
     cmp::Reverse,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     slice,
     sync::Arc,
@@ -42,7 +42,8 @@ use std::{
 };
 use stoat_scheduler::Executor;
 use stoat_text::{
-    patch::Edit as PatchEdit, Bias, ContextLessSummary, Dimension, Item, Rope, SumTree,
+    patch::Edit as PatchEdit, Bias, ContextLessSummary, Dimension, Edit as TreeEdit, Item,
+    KeyedItem, Rope, SumTree,
 };
 use tree_sitter::{Node, Query, StreamingIterator, Tree};
 
@@ -85,7 +86,7 @@ impl std::fmt::Debug for SyntaxLayer {
 /// so layer iteration walks the tree shallowest-to-deepest, in document
 /// order within each depth. Matches the iteration shape Zed's
 /// `SyntaxMapCaptures` consumes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LayerKey {
     pub depth: u32,
     pub start_offset: u32,
@@ -142,6 +143,16 @@ impl Item for SyntaxLayer {
             },
             count: 1,
             max_end: self.end_offset,
+        }
+    }
+}
+
+impl KeyedItem for SyntaxLayer {
+    type Key = LayerKey;
+    fn key(&self) -> LayerKey {
+        LayerKey {
+            depth: self.depth,
+            start_offset: self.start_offset,
         }
     }
 }
@@ -495,22 +506,46 @@ impl SyntaxMap {
         root: Option<&Tree>,
         deadline: Option<(Instant, &Executor)>,
     ) -> Option<Vec<Range<usize>>> {
+        let injection_filter_ranges = injection_filter_ranges.filter(|ranges| !ranges.is_empty());
+
+        // Only the priors a filtered walk reaches are worth indexing. Each
+        // entry below copies a tree handle and reads its included ranges, and
+        // the two indexes and `carry_unvisited_injections` walk the list again,
+        // all of it before the deadline is first consulted. A file of doc
+        // comments carries about 1,400 layers and a keystroke reaches a few.
+        //
+        // The hull of the filter ranges is the whole window even though a
+        // combined injection widens its query below that hull to span a prior
+        // it overlaps. The widening reaches back only as far as that prior's
+        // own start, and two layers of one depth and language never overlap, so
+        // the only prior the widened query finds is the one that widened it.
+        let prior_window = injection_filter_ranges.map(|ranges| {
+            ranges.iter().map(|r| r.start).min().unwrap_or(0)
+                ..ranges.iter().map(|r| r.end).max().unwrap_or(0)
+        });
+
         // Snapshot prior injection layers keyed by (host_range, language name)
-        // so we can reuse them when the same host node still exists.
-        let prior_injections: Vec<PriorInjection> = self
-            .snapshot
-            .layers
-            .iter()
-            .filter(|l| l.depth >= 1)
-            .map(|l| PriorInjection {
-                depth: l.depth,
-                start_offset: l.start_offset,
-                end_offset: l.end_offset,
-                language: l.language.clone(),
-                host_ranges: l.tree.included_ranges(),
-                tree: l.tree.clone(),
-            })
-            .collect();
+        // so the walk reuses them when the same host node still exists.
+        let prior_of = |l: &SyntaxLayer| PriorInjection {
+            depth: l.depth,
+            start_offset: l.start_offset,
+            end_offset: l.end_offset,
+            language: l.language.clone(),
+            host_ranges: l.tree.included_ranges(),
+            tree: l.tree.clone(),
+        };
+        let prior_injections: Vec<PriorInjection> = match &prior_window {
+            Some(window) => reachable_priors(&self.snapshot.layers, window)
+                .map(prior_of)
+                .collect(),
+            None => self
+                .snapshot
+                .layers
+                .iter()
+                .filter(|l| l.depth >= 1)
+                .map(prior_of)
+                .collect(),
+        };
 
         // The walk asks after a prior once per host range it rediscovers, so
         // scanning the list would cost priors times discoveries. Two of the
@@ -548,8 +583,6 @@ impl SyntaxMap {
         // map that looks complete while missing the layers the abort cut off,
         // so the clock decides which of the two happened.
         let out_of_time = || deadline.is_some_and(|(dl, executor)| executor.now() >= dl);
-
-        let injection_filter_ranges = injection_filter_ranges.filter(|ranges| !ranges.is_empty());
 
         // Where this walk moved the layer set, for a caller narrowing its own
         // work to the ranges a restyle could have reached.
@@ -950,7 +983,46 @@ impl SyntaxMap {
         layer_changes.sort_unstable_by_key(|r| r.start);
         merge_ranges(&mut layer_changes);
 
-        self.install_layers(new_layers, version);
+        match &prior_window {
+            // A layer outside the window never entered the index, so nothing
+            // above carries it forward. Editing the tree by key is what keeps
+            // it. The runs between the edited keys are appended whole, so a
+            // layer no edit names is never rebuilt.
+            Some(window) => {
+                let walked: HashSet<LayerKey> = new_layers.iter().map(|l| l.key()).collect();
+
+                // The root layer's key moves when an edit lands at offset zero,
+                // because [`Self::interpolate`] translates its start like any
+                // other. The fresh root always keys at zero, so an insert alone
+                // leaves the moved one behind. Depth sorts first, so this walks
+                // a short prefix.
+                let roots = self
+                    .snapshot
+                    .layers
+                    .iter()
+                    .take_while(|l| l.depth == 0)
+                    .map(|l| l.key());
+
+                let dropped = roots
+                    .chain(reachable_priors(&self.snapshot.layers, window).map(|l| l.key()))
+                    .filter(|k| !walked.contains(k))
+                    .map(TreeEdit::Remove)
+                    .collect::<Vec<_>>();
+
+                let edits: Vec<TreeEdit<SyntaxLayer>> = new_layers
+                    .into_iter()
+                    .map(TreeEdit::Insert)
+                    .chain(dropped)
+                    .collect();
+
+                self.snapshot.layers.edit(edits, ());
+                self.snapshot.parsed_version = version;
+            },
+            // An unfiltered walk rediscovers every layer, so the fresh list is
+            // the whole answer.
+            None => self.install_layers(new_layers, version),
+        }
+
         Some(layer_changes)
     }
 }
@@ -1304,6 +1376,21 @@ fn carry_unvisited_injections(
 
     drop(fresh_index);
     layers.append(&mut carried);
+}
+
+/// The injection layers whose extent overlaps `window`.
+///
+/// The summary says how far a subtree reaches, so the walk descends past the
+/// runs that end before the window and stops at the first layer inside it. The
+/// caller pays a tree-handle copy and an `included_ranges` read per layer this
+/// yields, which is why the ones a filtered walk never asks about stay out.
+fn reachable_priors<'a>(
+    layers: &'a SumTree<SyntaxLayer>,
+    window: &'a Range<usize>,
+) -> impl Iterator<Item = &'a SyntaxLayer> {
+    layers
+        .filter::<_, ()>((), |s| s.max_end as usize > window.start)
+        .filter(|l| l.depth >= 1 && (l.start_offset as usize) < window.end)
 }
 
 /// Map a byte offset from pre-edit into post-edit coordinates.
@@ -2066,7 +2153,7 @@ mod tests {
 
         // From every layer, not just the host: the rust root, the combined
         // markdown over the doc comments, and the inline markdown inside it.
-        let depths: std::collections::HashSet<u32> = captures.iter().map(|c| c.depth).collect();
+        let depths: HashSet<u32> = captures.iter().map(|c| c.depth).collect();
         assert!(depths.contains(&0), "expected at least one depth-0 capture");
         assert!(depths.contains(&1), "expected at least one depth-1 capture");
         assert!(depths.contains(&2), "expected at least one depth-2 capture");
@@ -3307,6 +3394,37 @@ mod tests {
             "an edit past every injected layer must leave some of them in \
              place, got {carried} of {} still at their address",
             before.layer_count(),
+        );
+    }
+
+    /// A filtered reparse indexes only the priors its window reaches.
+    ///
+    /// Every prior the window admits costs a tree-handle copy, a read of its
+    /// included ranges, a place in two indexes, and a pass through
+    /// `carry_unvisited_injections`, all of it before the deadline is first
+    /// consulted. A file of doc comments carries hundreds of layers and a
+    /// keystroke reaches a few, so the count is what separates the two.
+    #[test]
+    fn a_keystroke_window_reaches_a_handful_of_priors() {
+        let lang = rust_lang();
+        let mut source = String::new();
+        for i in 0..16 {
+            source.push_str(&format!(
+                "/// doc **bold{i}**\nfn f{i}() {{ let _ = {i}; }}\n\n"
+            ));
+        }
+        let rope = Rope::from(source.as_str());
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
+
+        let all = map.snapshot().layer_count();
+        assert!(all > 30, "the fixture must carry many layers, got {all}");
+
+        let typed = source.rfind("fn f8").expect("fixture");
+        let reached = reachable_priors(&map.snapshot().layers, &(typed..typed + 1)).count();
+        assert!(
+            reached < all / 4,
+            "one line's window must reach a fraction of the {all} layers, got {reached}",
         );
     }
 }
