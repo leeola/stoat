@@ -1406,10 +1406,13 @@ mod tests {
         );
     }
 
-    /// A removal changes which files a walk would find, so the list captured
-    /// before it is no longer an answer.
+    /// A removal drops one path, which the cached list answers itself.
+    ///
+    /// Walking the tree again to learn that one file left it is the whole
+    /// cost this cache exists to avoid, and a single save is enough to force
+    /// it if the list retires on every change.
     #[test]
-    fn a_removed_file_makes_the_next_open_walk_again() {
+    fn a_removed_file_leaves_the_cached_list_without_a_walk() {
         let mut h = crate::Stoat::test();
         let root = seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
 
@@ -1422,9 +1425,71 @@ mod tests {
         debounce::drain_fs_watch_events(&mut h.stoat);
         h.type_keys("space p");
 
+        assert_eq!(walked_dirs(&h), walked, "the removal listed no directories",);
+        assert_eq!(base_paths(&h), ["a.rs"], "and the removed file is gone");
+    }
+
+    /// A created file is one path the cached list takes on its own.
+    #[test]
+    fn a_created_file_joins_the_cached_list_without_a_walk() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        let walked = walked_dirs(&h);
+        let epoch = h.stoat.finder_path_epoch;
+
+        h.fake_fs()
+            .insert_files([(root.join("b.rs"), "".as_bytes())]);
+        h.fake_fs_watcher()
+            .inject(root.join("b.rs"), crate::host::FsEventKind::Created);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+
+        assert_eq!(
+            h.stoat.finder_path_epoch, epoch,
+            "the cached list stands rather than being retired",
+        );
+        h.type_keys("space p");
+        assert_eq!(walked_dirs(&h), walked, "the create listed no directories");
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs", "b.rs"],
+            "and the new file is there"
+        );
+    }
+
+    /// What a walk finds inside a new directory is the question the cache
+    /// exists to avoid asking, so the directory retires it.
+    #[test]
+    fn a_created_directory_retires_the_cached_list() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        let walked = walked_dirs(&h);
+        let epoch = h.stoat.finder_path_epoch;
+
+        h.fake_fs()
+            .insert_files([(root.join("nested/c.rs"), "".as_bytes())]);
+        h.fake_fs_watcher()
+            .inject(root.join("nested"), crate::host::FsEventKind::Created);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+
+        assert!(
+            h.stoat.finder_path_epoch > epoch,
+            "an unlistable change retires the cached list",
+        );
+        h.type_keys("space p");
         assert!(
             walked_dirs(&h) > walked,
-            "the removal forced a fresh walk instead of reusing the stale list",
+            "so the next open walks the tree again",
+        );
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs", "nested/c.rs"],
+            "and finds what the directory holds",
         );
     }
 

@@ -14,7 +14,7 @@
 use crate::{
     action_handlers,
     app::Stoat,
-    host::{FsEventKind, GitRepo},
+    host::{FsEventKind, FsMetadata, GitRepo},
 };
 use std::{
     ffi::OsStr,
@@ -164,8 +164,8 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
 
         // Past the ignored-directory filter, so what is left is a real
         // source-tree change rather than build churn. Anything that adds or
-        // removes a path makes a cached walk list wrong, and a plain content
-        // edit does not.
+        // removes a path moves the set a walk lists, and a plain content edit
+        // does not.
         if !in_git_dir
             && path.starts_with(&git_root)
             && matches!(
@@ -173,22 +173,24 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
                 FsEventKind::Created | FsEventKind::Removed | FsEventKind::Renamed
             )
         {
-            stoat.finder_path_epoch += 1;
+            // Read before anything decides what to do with the path, since a
+            // directory and a file lead in different directions below. The
+            // stat is affordable here because the ignored-directory filter
+            // above already dropped build churn, leaving source-tree changes,
+            // which are rare. A removal has nothing left to stat.
+            let arrived = match kind {
+                FsEventKind::Removed => None,
+                _ => stoat.fs_host.metadata(&path).ok().flatten(),
+            };
 
             // Watches are per directory, so one created after startup is
-            // invisible until it gets its own. The stat is affordable here
-            // because the ignored-directory filter above already dropped
-            // build churn, leaving creates in the source tree, which are
-            // rare.
-            if kind == FsEventKind::Created
-                && stoat
-                    .fs_host
-                    .metadata(&path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|meta| meta.is_dir)
-            {
+            // invisible until it gets its own.
+            if kind == FsEventKind::Created && arrived.as_ref().is_some_and(|meta| meta.is_dir) {
                 let _ = stoat.fs_watch_host.watch(&path);
+            }
+
+            if !absorb_into_finder_cache(stoat, &path, &git_root, arrived, &mut repo) {
+                stoat.finder_path_epoch += 1;
             }
         }
 
@@ -210,6 +212,68 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             arm_index_external_edit_debounce(stoat, path);
         }
     }
+}
+
+/// Apply a source-tree change to the cached finder paths, reporting whether it
+/// landed.
+///
+/// The cache is one root's own walk output, so a change to that root's tree
+/// edits it in place instead of retiring it. A caller that gets `false` bumps
+/// [`Stoat::finder_path_epoch`], which retires the list on the next open and
+/// costs a full ignore-aware walk of the tree.
+///
+/// `arrived` is the stat of `path`, or `None` when nothing is there. A rename
+/// carries one path and no direction, so the stat is what says whether it is
+/// the name the file took or the one it left.
+///
+/// A created directory reports `false`. What a walk finds inside it is exactly
+/// the question this cache exists to avoid asking.
+fn absorb_into_finder_cache(
+    stoat: &mut Stoat,
+    path: &Path,
+    git_root: &Path,
+    arrived: Option<FsMetadata>,
+    repo: &mut Option<Option<Arc<dyn GitRepo>>>,
+) -> bool {
+    if arrived.as_ref().is_some_and(|meta| meta.is_dir) {
+        return false;
+    }
+    if stoat
+        .finder_path_cache
+        .as_ref()
+        .is_none_or(|cache| cache.root != git_root)
+    {
+        return false;
+    }
+
+    // The ignored-directory filter above cleared the parent, which leaves the
+    // file's own verdict. A walk applies both, so a list standing in for one
+    // has to as well.
+    if arrived.is_some() {
+        let git_host = stoat.git_host.clone();
+        let repo = repo.get_or_insert_with(|| git_host.discover(git_root));
+        if repo.as_ref().is_some_and(|r| r.is_path_ignored(path)) {
+            return true;
+        }
+    }
+
+    let cache = stoat
+        .finder_path_cache
+        .as_mut()
+        .expect("checked above and not taken since");
+
+    match arrived {
+        // A burst names one create twice often enough, and a path listed
+        // twice is a row the finder shows twice.
+        Some(_) => {
+            if !cache.paths.iter().any(|held| held == path) {
+                cache.paths.push(path.to_path_buf());
+            }
+        },
+        None => cache.paths.retain(|held| held != path),
+    }
+
+    true
 }
 
 /// Whether `path` sits in a gitignored directory, answering from
