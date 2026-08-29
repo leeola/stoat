@@ -574,8 +574,12 @@ fn ask_again(
 
 /// Install `popup` as the current one, or clear the popup when it came out
 /// empty, the way a landed request does.
+///
+/// Empty means it shows no rows, not that it holds no items. A narrowed popup
+/// keeps every item it was fetched with and shows only the ones the prefix
+/// still matches, so a prefix that matches none of them is what closes it.
 fn install_popup(stoat: &mut Stoat, popup: CompletionPopup) {
-    if popup.items.is_empty() {
+    if popup.is_empty() {
         stoat.pending_completion = None;
     } else {
         stoat.completion_generation = stoat.completion_generation.wrapping_add(1);
@@ -2034,6 +2038,22 @@ mod harness_tests {
         assert!(
             popup.matches.len() < before.len(),
             "and the narrowing happened in the index",
+        );
+    }
+
+    /// Typing past what any item answers closes the popup rather than leaving
+    /// an empty one open. The items are all still there, so the rows it shows
+    /// are what says whether it has anything to say.
+    #[test]
+    fn narrowing_to_nothing_closes_the_popup() {
+        let mut h = TestHarness::default();
+        popup_over_foo(&mut h);
+
+        h.type_text("zzz");
+
+        assert!(
+            h.stoat.pending_completion.is_none(),
+            "no item answers the longer prefix",
         );
     }
 
