@@ -17,7 +17,7 @@
 use crate::{
     action_handlers,
     app::Stoat,
-    buffer::BufferId,
+    buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::LspSymbolKindIndex,
     display_map::{syntax_theme, HighlightStyleId, SemanticTokenHighlight},
     host::{LspHost, OffsetEncoding},
@@ -54,24 +54,23 @@ struct DecodedToken {
 /// A completed semantic-tokens request's payload.
 ///
 /// It carries the buffer, the buffer version the request was built against, the
-/// server's own token stream with the result id naming it, and the resolved
-/// `(byte range, scope stem, symbol kind)` spans in request-time coordinates.
-/// The scope drives the highlight channel and the kind the symbol-kind index.
-/// Each is optional.
+/// server's own token stream with the result id naming it, and the anchored
+/// spans for the highlight channel and the symbol-kind index.
 ///
-/// The stream is carried alongside the resolved spans because the next pull
-/// patches it rather than re-asking for it, and the result id is what names it
-/// to the server.
+/// The spans arrive anchored rather than as offsets, because decoding and
+/// anchoring are one stretch of work that runs off the run loop together. The
+/// version says which text those anchors were minted against, which is what the
+/// pump checks before installing them.
+///
+/// The stream is carried alongside them because the next pull patches it rather
+/// than re-asking for it, and the result id is what names it to the server.
 pub(crate) type SemanticTokensOutcome = (
     BufferId,
     u64,
     Option<String>,
     Vec<SemanticToken>,
-    Vec<(
-        std::ops::Range<usize>,
-        Option<&'static str>,
-        Option<LspSymbolKind>,
-    )>,
+    Arc<[SemanticTokenHighlight]>,
+    LspSymbolKindIndex,
 );
 
 /// Request semantic tokens for the focused editor when the server advertises a
@@ -101,7 +100,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     let legend = legend.to_vec();
     let encoding = host.offset_encoding();
 
-    let Some((buffer_id, version, rope, params)) = build_semantic_tokens_request(stoat) else {
+    let Some((buffer_id, version, snapshot, params)) = build_semantic_tokens_request(stoat) else {
         return;
     };
 
@@ -135,17 +134,40 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         .flatten()
         .and_then(|(result_id, data)| result_id.map(|result_id| (result_id, data)));
 
+    let styles = stoat.syntax_styles.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.spawn_woken(async move {
-        executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
-        let (result_id, data) = match previous {
-            Some((previous_result_id, previous_data)) => {
-                pull_token_delta(host.as_ref(), &params, previous_result_id, &previous_data).await?
-            },
-            None => pull_tokens_full(host.as_ref(), params).await?,
-        };
-        let items = convert_semantic_tokens(&data, &legend, &rope, encoding);
-        Some((buffer_id, version, result_id, data, items))
+    let task = stoat.spawn_woken({
+        let executor = executor.clone();
+        async move {
+            executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
+            let (result_id, data) = match previous {
+                Some((previous_result_id, previous_data)) => {
+                    pull_token_delta(host.as_ref(), &params, previous_result_id, &previous_data)
+                        .await?
+                },
+                None => pull_tokens_full(host.as_ref(), params).await?,
+            };
+
+            // A whole file's tokens, decoded and then anchored, is one
+            // non-yielding stretch of CPU, and the scheduler pumps a spawned
+            // future on the run-loop thread. It goes to the blocking pool
+            // instead, as the parse job next door does.
+            //
+            // Anchoring here rather than in the pump is safe because an anchor
+            // minted against version V keeps naming its text whatever the
+            // buffer reads as later. The pump still drops a reply whose version
+            // has moved, which is what decides that the offsets meant anything.
+            let (data, tokens, kinds) = executor
+                .spawn_blocking(move || {
+                    let items =
+                        convert_semantic_tokens(&data, &legend, &snapshot.visible_text, encoding);
+                    let (tokens, kinds) = anchor_tokens(&items, &snapshot, &styles);
+                    (data, tokens, kinds)
+                })
+                .await;
+
+            Some((buffer_id, version, result_id, data, tokens, kinds))
+        }
     });
     stoat.pending_semantic_tokens.arm(task);
 }
@@ -219,17 +241,22 @@ async fn pull_token_delta(
 
 fn build_semantic_tokens_request(
     stoat: &mut Stoat,
-) -> Option<(BufferId, u64, Rope, SemanticTokensParams)> {
-    let (buffer_id, version, rope) = {
-        let editor = action_handlers::focused_editor_mut(stoat)?;
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        (
-            editor.buffer_id,
-            buf_snap.version(),
-            buf_snap.rope().clone(),
-        )
-    };
+) -> Option<(BufferId, u64, TextBufferSnapshot, SemanticTokensParams)> {
+    let buffer_id = action_handlers::focused_editor_mut(stoat)?.buffer_id;
+
+    // The registry's own snapshot rather than the focused editor's, because it
+    // is the tree the reply is anchored against, and its rope is the text the
+    // server measured. Taking both from one snapshot is what keeps the offsets
+    // and the anchors describing the same buffer.
+    let snapshot = stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)?
+        .read()
+        .expect("buffer poisoned")
+        .snapshot
+        .clone();
+    let version = snapshot.version;
 
     let path = stoat
         .active_workspace()
@@ -242,7 +269,7 @@ fn build_semantic_tokens_request(
         partial_result_params: Default::default(),
         text_document: TextDocumentIdentifier { uri },
     };
-    Some((buffer_id, version, rope, params))
+    Some((buffer_id, version, snapshot, params))
 }
 
 /// The token-type legend from the server's semantic-tokens capability, or `None`
@@ -424,60 +451,43 @@ pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
     let Some(outcome) = stoat.pending_semantic_tokens.poll() else {
         return false;
     };
-    if let Some((buffer_id, version, result_id, data, items)) = outcome {
-        // Retained before the anchoring below, which drops the reply when the
+    if let Some((buffer_id, version, result_id, data, tokens, kinds)) = outcome {
+        // Retained before the install below, which drops the reply when the
         // buffer has moved on. The stream is still what the server holds
         // whatever this buffer now reads as, so the next delta can name it.
         stoat
             .active_workspace_mut()
             .buffers
             .store_lsp_token_source(buffer_id, result_id, data);
-        apply_semantic_tokens(stoat, buffer_id, version, items);
+        apply_semantic_tokens(stoat, buffer_id, version, tokens, kinds);
     }
     true
 }
 
-/// Anchor a semantic-token reply onto `buffer_id` and paint it, provided the
-/// buffer still reads as it did when the request went out.
+/// Split `items` into the highlight channel's spans and the symbol-kind
+/// index's, both anchored against `snapshot`.
 ///
-/// `version` is the buffer version the server measured `items` against. The
-/// offsets in them name that text, so anchoring them to a buffer that has moved
-/// since would pin each token to whatever now sits at its offset. A reply that
-/// misses is dropped rather than adjusted. The trigger is keyed on the buffer
-/// version, so the edit that invalidated this reply has already asked for
-/// another.
-fn apply_semantic_tokens(
-    stoat: &mut Stoat,
-    buffer_id: BufferId,
-    version: u64,
-    items: Vec<(
+/// The two are independent. A token carries a scope, a kind, both, or (dropped
+/// in decode) neither.
+///
+/// Style ids come from the shared theme table rather than a per-response
+/// interner, so a stored token means the same scope after a theme switch and is
+/// recolored by swapping the table instead of re-requesting it.
+///
+/// Built in the shapes `anchors_at_batch` and the zips want, in one walk.
+/// Holding the spans first costs a cloned range per token only to copy its
+/// endpoints back out, and both payloads here are `Copy`. Each vector is
+/// reserved against the token count, which bounds it above and is the only
+/// allocation it takes.
+fn anchor_tokens(
+    items: &[(
         std::ops::Range<usize>,
         Option<&'static str>,
         Option<LspSymbolKind>,
-    )>,
-) {
-    let live = stoat
-        .active_workspace()
-        .buffers
-        .get(buffer_id)
-        .map(|shared| shared.read().expect("buffer poisoned").snapshot.version);
-    if live != Some(version) {
-        return;
-    }
-
-    // The highlight channel takes the scope-bearing spans, the symbol-kind index
-    // the kind-bearing ones. A token may feed one, both, or (dropped in decode)
-    // neither.
-    //
-    // Ids come from the shared theme table rather than a per-response interner,
-    // so a stored token means the same scope after a theme switch and can be
-    // recolored by swapping the table instead of re-requesting it.
-    //
-    // Split into the shapes `anchors_at_batch` and the zip below want in one
-    // walk. Holding the spans first would clone a range per token only to copy
-    // its endpoints back out, and both payloads here are `Copy`. Each vector is
-    // reserved against the token count, which bounds it above and is the only
-    // allocation it takes.
+    )],
+    snapshot: &TextBufferSnapshot,
+    styles: &syntax_theme::SyntaxStyles,
+) -> (Arc<[SemanticTokenHighlight]>, LspSymbolKindIndex) {
     let mut token_starts: Vec<usize> = Vec::with_capacity(items.len());
     let mut token_ends: Vec<usize> = Vec::with_capacity(items.len());
     let mut token_styles: Vec<HighlightStyleId> = Vec::with_capacity(items.len());
@@ -485,10 +495,10 @@ fn apply_semantic_tokens(
     let mut kind_ends: Vec<usize> = Vec::with_capacity(items.len());
     let mut kinds_seen: Vec<LspSymbolKind> = Vec::with_capacity(items.len());
 
-    for (range, scope, kind) in &items {
+    for (range, scope, kind) in items {
         if let Some(style) = (*scope)
             .and_then(syntax_theme::highlight_id_for_key)
-            .and_then(|id| stoat.syntax_styles.id_for_highlight(id))
+            .and_then(|id| styles.id_for_highlight(id))
         {
             token_starts.push(range.start);
             token_ends.push(range.end);
@@ -502,39 +512,54 @@ fn apply_semantic_tokens(
         }
     }
 
+    let tokens: Arc<[SemanticTokenHighlight]> = token_styles
+        .into_iter()
+        .zip(snapshot.anchors_at_batch(&token_starts, Bias::Right))
+        .zip(snapshot.anchors_at_batch(&token_ends, Bias::Left))
+        .map(|((style, start), end)| SemanticTokenHighlight {
+            range: start..end,
+            style,
+        })
+        .collect();
+
+    let kinds: LspSymbolKindIndex = kinds_seen
+        .into_iter()
+        .zip(snapshot.anchors_at_batch(&kind_starts, Bias::Right))
+        .zip(snapshot.anchors_at_batch(&kind_ends, Bias::Left))
+        .map(|((kind, start), end)| (start..end, kind))
+        .collect();
+
+    (tokens, kinds)
+}
+
+/// Install an anchored semantic-token reply on `buffer_id`, provided the buffer
+/// still reads as it did when the request went out.
+///
+/// `version` is the buffer version the server measured the tokens against, and
+/// the anchors were minted against that same text. They keep naming it however
+/// the buffer moves, but the offsets they came from named the old text, so a
+/// reply whose version has moved describes spans the user has since edited. It
+/// is dropped rather than adjusted. The trigger is keyed on the buffer version,
+/// so the edit that invalidated this reply has already asked for another.
+fn apply_semantic_tokens(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    version: u64,
+    tokens: Arc<[SemanticTokenHighlight]>,
+    kinds: LspSymbolKindIndex,
+) {
+    let live = stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)
+        .map(|shared| shared.read().expect("buffer poisoned").snapshot.version);
+    if live != Some(version) {
+        return;
+    }
+
     let interner = stoat.syntax_styles.interner.clone();
 
     let ws = stoat.active_workspace_mut();
-    let Some(shared) = ws.buffers.get(buffer_id) else {
-        return;
-    };
-
-    // Anchor against the buffer's own snapshot from the registry, not the
-    // focused editor's, so the response lands and is retained even when focus
-    // has since moved to another buffer.
-    let (tokens, kinds): (Arc<[SemanticTokenHighlight]>, LspSymbolKindIndex) = {
-        let buf_snap = shared.read().expect("buffer poisoned").snapshot.clone();
-
-        let tokens: Arc<[SemanticTokenHighlight]> = token_styles
-            .into_iter()
-            .zip(buf_snap.anchors_at_batch(&token_starts, Bias::Right))
-            .zip(buf_snap.anchors_at_batch(&token_ends, Bias::Left))
-            .map(|((style, start), end)| SemanticTokenHighlight {
-                range: start..end,
-                style,
-            })
-            .collect();
-
-        let kinds: LspSymbolKindIndex = kinds_seen
-            .into_iter()
-            .zip(buf_snap.anchors_at_batch(&kind_starts, Bias::Right))
-            .zip(buf_snap.anchors_at_batch(&kind_ends, Bias::Left))
-            .map(|((kind, start), end)| (start..end, kind))
-            .collect();
-
-        (tokens, kinds)
-    };
-
     ws.buffers
         .store_lsp_tokens(buffer_id, version, tokens.clone(), interner.clone());
     ws.buffers.store_lsp_symbol_kinds(buffer_id, kinds);
@@ -866,22 +891,9 @@ mod tests {
             .snapshot
             .version;
 
-        // The first token styles without a kind and the second kinds without a
-        // style, so the two sequences diverge before the third, which is in
-        // both.
-        apply_semantic_tokens(
-            &mut h.stoat,
-            buffer_id,
-            version,
-            vec![
-                (0..5, Some("function"), None),
-                (6..10, None, Some(LspSymbolKind::Type)),
-                (11..16, Some("function"), Some(LspSymbolKind::Function)),
-            ],
-        );
-
-        let ws = h.stoat.active_workspace();
-        let snapshot = ws
+        let snapshot = h
+            .stoat
+            .active_workspace()
             .buffers
             .get(buffer_id)
             .expect("buffer")
@@ -889,6 +901,22 @@ mod tests {
             .expect("buffer poisoned")
             .snapshot
             .clone();
+
+        // The first token styles without a kind and the second kinds without a
+        // style, so the two sequences diverge before the third, which is in
+        // both.
+        let (tokens, kinds) = anchor_tokens(
+            &[
+                (0..5, Some("function"), None),
+                (6..10, None, Some(LspSymbolKind::Type)),
+                (11..16, Some("function"), Some(LspSymbolKind::Function)),
+            ],
+            &snapshot,
+            &h.stoat.syntax_styles,
+        );
+        apply_semantic_tokens(&mut h.stoat, buffer_id, version, tokens, kinds);
+
+        let ws = h.stoat.active_workspace();
         let (_, tokens, _) = ws.buffers.lsp_tokens_for(buffer_id).expect("tokens stored");
 
         let spans: Vec<(usize, usize)> = tokens
@@ -915,6 +943,44 @@ mod tests {
             ws.buffers.lsp_symbol_kind_at(buffer_id, 12),
             Some(Some(LspSymbolKind::Function)),
             "and the token carrying both lands its kind where its style went"
+        );
+    }
+
+    /// A whole file's tokens are decoded and anchored off the run loop.
+    ///
+    /// The decode builds a token per span and descends the rope once per
+    /// position, and the anchoring runs four batch passes over the result. On
+    /// the run loop that lands between two frames.
+    #[test]
+    fn a_reply_is_decoded_and_anchored_off_the_run_loop() {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = y\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 1,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                }],
+            }),
+        );
+
+        h.type_keys("escape");
+        let before = h.blocking_calls();
+        h.advance_clock(Duration::from_millis(550));
+
+        assert_eq!(lsp_token_count(&mut h), 1, "the reply landed");
+        assert!(
+            h.blocking_calls() > before,
+            "and reached the pool rather than the run loop",
         );
     }
 

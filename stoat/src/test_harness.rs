@@ -469,6 +469,15 @@ impl TestHarness {
         self.scheduler.pending_runnables()
     }
 
+    /// How many jobs the app has handed to the blocking pool.
+    ///
+    /// The scheduler runs them inline here, so a job's effects are the same as a
+    /// spawned future's. This is the only way a test tells apart work that was
+    /// kept off the run loop from work that was not.
+    pub(crate) fn blocking_calls(&self) -> usize {
+        self.scheduler.blocking_calls()
+    }
+
     /// Advance the fake clock by `duration`, firing every timer that
     /// expires inside the window, then settle the harness so any pending
     /// commit produced by those wake-ups is routed through the main dispatch
