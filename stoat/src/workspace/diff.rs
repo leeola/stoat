@@ -122,7 +122,13 @@ pub(crate) struct DiffState {
     /// is otherwise paid per keystroke. Cleared by [`Self::invalidate_all`],
     /// which the `.git` watcher drives, so an entry cannot outlive the git
     /// state it was read from.
-    pub(super) base_text: HashMap<PathBuf, DiffBaseText>,
+    ///
+    /// A `None` entry records a miss. The file has no HEAD blob and no move
+    /// explains the absence, which is the ordinary answer for an untracked one.
+    /// Reaching that answer costs a working-tree stat walk and two rename
+    /// passes, and only a git write turns a path into a rename target, so the
+    /// miss is as cacheable as a hit and clears with the rest.
+    pub(super) base_text: HashMap<PathBuf, Option<DiffBaseText>>,
     /// What buffers diff against, `None` for the ordinary working-tree diff.
     ///
     /// Set through [`super::Workspace::set_diff_base`], which invalidates
@@ -314,25 +320,30 @@ impl DiffState {
             )
         };
 
+        // Resolved here rather than inside, so a miss is filed as one and the
+        // next landing on an untracked file costs a map lookup.
+        let base = match self.base_text.get(&path) {
+            Some(base) => base.clone(),
+            None => {
+                let base = resolve_base(&**git_host, git_root, &path, self.base_override.as_ref());
+                self.base_text.insert(path.clone(), base.clone());
+                base
+            },
+        };
+
         // The language is what gates the base-text parse inside, so withholding
         // it is how the colors are skipped.
-        let computed = compute_diff_map(
-            &**git_host,
-            git_root,
-            &path,
-            &text,
-            None,
-            syntax_styles,
-            base_cache,
-            self.base_text.get(&path).cloned(),
-            self.base_override.as_ref(),
-            // The sync open stays line-only so it lands in one frame. The
-            // structural refinement arrives at the background settle.
-            None,
-        );
-        let diff_map = computed.map(|(diff_map, base)| {
-            self.base_text.insert(path.clone(), base);
-            diff_map
+        let diff_map = base.as_ref().and_then(|base| {
+            compute_diff_map(
+                &text,
+                None,
+                syntax_styles,
+                base_cache,
+                base,
+                // The sync open stays line-only so it lands in one frame. The
+                // structural refinement arrives at the background settle.
+                None,
+            )
         });
         if let Some(shared) = buffers.get(id) {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
@@ -408,9 +419,9 @@ impl DiffState {
             }
         });
         for out in completed {
-            if let Some(base) = out.base {
-                self.base_text.insert(out.path, base);
-            }
+            // Filed whether or not it resolved, since a miss is what an
+            // untracked buffer keeps re-deriving otherwise.
+            self.base_text.insert(out.path, out.base);
             if let Some(shared) = buffers.get(out.buffer_id) {
                 let mut guard = shared.write().expect("buffer poisoned");
                 // A recompute landing on the same hunks is not news. Every
@@ -490,6 +501,7 @@ impl DiffState {
 
             let language = language_registry.for_path(&path);
             let cached_base = self.base_text.get(&path).cloned();
+
             let task = executor.spawn_blocking({
                 let git_host = git_host.clone();
                 let git_root = git_root.to_path_buf();
@@ -503,27 +515,27 @@ impl DiffState {
                     // Materialize the rope only now that the diff is confirmed
                     // stale and a job is committed, off the event-loop thread.
                     let buffer_text = buffer_snapshot.visible_text.to_string();
-                    let computed = compute_diff_map(
-                        &*git_host,
-                        &git_root,
-                        &path,
-                        &buffer_text,
-                        language.as_ref(),
-                        &syntax_styles,
-                        &base_cache,
-                        cached_base,
-                        base_override.as_ref(),
-                        Some(&tree_cache),
-                    )
-                    .map(|(mut diff_map, base)| {
-                        diff_map.anchor_hunks(&buffer_snapshot);
-                        (diff_map, base)
+                    // A miss is an answer, so it is filed back like a hit and
+                    // the next settle in an untracked buffer walks nothing.
+                    let base = match cached_base {
+                        Some(base) => base,
+                        None => resolve_base(&*git_host, &git_root, &path, base_override.as_ref()),
+                    };
+                    let diff_map = base.as_ref().and_then(|base| {
+                        compute_diff_map(
+                            &buffer_text,
+                            language.as_ref(),
+                            &syntax_styles,
+                            &base_cache,
+                            base,
+                            Some(&tree_cache),
+                        )
+                        .map(|mut diff_map| {
+                            diff_map.anchor_hunks(&buffer_snapshot);
+                            diff_map
+                        })
                     });
                     redraw.notify_one();
-                    let (diff_map, base) = match computed {
-                        Some((diff_map, base)) => (Some(diff_map), Some(base)),
-                        None => (None, None),
-                    };
                     DiffJobOutput {
                         buffer_id,
                         path,
@@ -558,6 +570,10 @@ pub(super) struct DiffJobOutput {
     pub(super) diff_map: Option<DiffMap>,
     /// The blobs the diff ran against, `None` when the repo or the file's HEAD
     /// content could not be read and there was nothing to diff.
+    ///
+    /// Filed into [`DiffState::base_text`] either way, because `None` is the
+    /// answer for an untracked file and re-deriving it costs a working-tree
+    /// walk.
     pub(super) base: Option<DiffBaseText>,
 }
 
@@ -671,26 +687,14 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// block washes what it actually changed rather than every line's prefix.
 /// Without either, or when the tree pass falls back to lines, the line pass's
 /// char-refined spans stand.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn compute_diff_map(
-    git: &dyn GitHost,
-    git_root: &Path,
-    path: &Path,
     buffer_text: &str,
     language: Option<&Arc<Language>>,
     syntax_styles: &SyntaxStyles,
     base_cache: &BaseHighlightCache,
-    cached_base: Option<DiffBaseText>,
-    base_override: Option<&DiffBase>,
+    base: &DiffBaseText,
     tree_memo: Option<&TreeCache>,
-) -> Option<(DiffMap, DiffBaseText)> {
-    // Reading the blobs is what costs. It takes the repo mutex and then
-    // decompresses bytes that a keystroke cannot have changed. The pair is
-    // handed back either way so the caller can file it for the next one.
-    let base = match cached_base {
-        Some(base) => base,
-        None => resolve_base(git, git_root, path, base_override)?,
-    };
+) -> Option<DiffMap> {
     let base_text = &*base.head;
     let index_text = &*base.index;
 
@@ -767,7 +771,7 @@ pub(super) fn compute_diff_map(
             base_cache,
         ));
     }
-    Some((diff_map, base.clone()))
+    Some(diff_map)
 }
 
 /// Read the two blobs a diff measures `path` against, per the workspace's base.
@@ -1092,6 +1096,36 @@ mod tests {
             ws.repo_hunk_totals(),
             Some([(PathBuf::from("a.rs"), 3), (PathBuf::from("b.rs"), 1)].as_slice()),
             "and the per-file counts come off the same tally",
+        );
+    }
+
+    /// An untracked file has no HEAD blob, so its base resolves through a
+    /// rename lookup, which the local backend answers with a working-tree stat
+    /// walk and two rename passes. Only a git write turns a path into a rename
+    /// target, so that answer holds until one does.
+    #[test]
+    fn an_untracked_buffer_asks_for_its_missing_base_once() {
+        let mut h = TestHarness::with_size(40, 12);
+        let workdir = PathBuf::from("/untracked");
+        h.stage_review_scenario(&workdir, &[("tracked.rs", "one\n", "ONE\n")]);
+        // Written straight into the fake fs, so it exists on disk with no
+        // registration in the repo, which is what untracked means.
+        let fresh = workdir.join("fresh.rs");
+        h.fake_fs().insert_file(&fresh, b"new\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&fresh);
+        h.settle_diff_jobs();
+
+        let after_open = h.fake_git().rename_source_calls(&workdir);
+        assert!(after_open > 0, "the first settle asks once");
+
+        h.type_keys("i x <esc>");
+        h.settle_diff_jobs();
+
+        assert_eq!(
+            h.fake_git().rename_source_calls(&workdir),
+            after_open,
+            "and the recorded miss answers every settle after it",
         );
     }
 

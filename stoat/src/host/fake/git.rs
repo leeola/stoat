@@ -66,6 +66,7 @@ impl FakeGit {
                     workdir: workdir.clone(),
                     state: Mutex::new(FakeRepoState::default()),
                     tally_calls: AtomicUsize::new(0),
+                    rename_source_calls: AtomicUsize::new(0),
                 })
             });
             if !state
@@ -197,6 +198,15 @@ impl FakeGit {
             .repos
             .get(workdir)
             .map_or(0, |repo| repo.tally_calls.load(Ordering::Relaxed))
+    }
+
+    /// How many rename lookups have run against the repo at `workdir`.
+    pub fn rename_source_calls(&self, workdir: &Path) -> usize {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map_or(0, |repo| repo.rename_source_calls.load(Ordering::Relaxed))
     }
 }
 
@@ -677,6 +687,11 @@ pub struct FakeGitRepo {
     /// A repo-wide tally is the most expensive read the trait offers, so a test
     /// that cares how often it runs counts it here rather than timing it.
     tally_calls: AtomicUsize,
+    /// How many times [`GitRepo::rename_source`] has run against this repo.
+    ///
+    /// Counted for the same reason as [`Self::tally_calls`]. The local backend
+    /// answers it with a working-tree stat walk and two rename passes.
+    rename_source_calls: AtomicUsize,
 }
 
 /// A changed-file registration and the hunks it stands for.
@@ -1085,6 +1100,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn rename_source(&self, path: &Path) -> Option<PathBuf> {
+        self.rename_source_calls.fetch_add(1, Ordering::Relaxed);
         let state = self.state.lock().unwrap();
         state
             .changed
