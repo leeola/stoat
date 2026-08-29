@@ -201,7 +201,7 @@ pub(crate) fn build_diagnostic_span_cache(
     snapshot: &crate::multi_buffer::MultiBufferSnapshot,
 ) {
     let buffer_version = snapshot.version();
-    let set_version = set.version();
+    let set_version = set.version_for(path);
     let stale = match &editor.diagnostic_span_cache {
         Some(cache) => cache.set_version != set_version || cache.buffer_version != buffer_version,
         None => true,

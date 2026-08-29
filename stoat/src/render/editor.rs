@@ -211,7 +211,7 @@ pub(crate) fn render_editor_with_overlay(
     let empty_severity = RowSeverity::default();
     let row_severity: &RowSeverity = match diagnostic_info {
         Some((path, set)) => {
-            let version = set.version();
+            let version = set.version_for(path);
             let buffer_version = snapshot.buffer_snapshot().version();
             let stale = match &editor.gutter_severity_cache {
                 Some(cache) => cache.version != version || cache.buffer_version != buffer_version,
@@ -261,7 +261,7 @@ pub(crate) fn render_editor_with_overlay(
             rope.offset_to_point(cursor).row + 1
         });
 
-    let severity_version = diagnostic_info.map_or(0, |(_, set)| set.version());
+    let severity_version = diagnostic_info.map_or(0, |(path, set)| set.version_for(path));
 
     let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(

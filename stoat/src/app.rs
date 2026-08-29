@@ -12418,10 +12418,11 @@ mod tests {
             ("line numbers", |h| {
                 h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
             }),
+            // The path the unfocused pane holds, since a key watches only its
+            // own path's diagnostics.
             ("diagnostics", |h| {
-                let path = h.stoat.active_workspace().git_root.join("a.txt");
                 h.stoat.diagnostics.replace_from_server(
-                    path,
+                    PathBuf::from("/test/a.txt"),
                     "test".into(),
                     Vec::new(),
                     Vec::new(),
@@ -12476,6 +12477,43 @@ mod tests {
                 "{what} has to reach the unfocused pane's key"
             );
         }
+    }
+
+    /// A publish for a file a pane does not show leaves that pane's key alone.
+    ///
+    /// A check run publishes every file in the workspace one at a time. Under a
+    /// key that watched the whole set, each of those publishes threw away every
+    /// pane's cached paint, so one run repainted the screen once per file.
+    #[test]
+    fn a_publish_for_another_file_leaves_a_panes_key_alone() {
+        let mut h = Stoat::test();
+        split_pair(&mut h);
+
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            let focused = ws.panes.focus();
+            ws.panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|id| *id != focused)
+                .expect("the split has an unfocused pane")
+        };
+        let before = h.stoat.pane_cache.get(&pane).expect("cached paint").key;
+
+        h.stoat.diagnostics.replace_from_server(
+            PathBuf::from("/test/elsewhere.rs"),
+            "test".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        h.settle();
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            before,
+            h.stoat.pane_cache.get(&pane).expect("cached again").key,
+            "a file this pane does not show cannot invalidate its paint",
+        );
     }
 
     #[test]

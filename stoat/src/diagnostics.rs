@@ -96,6 +96,17 @@ pub struct DiagnosticSet {
     /// Bumped on every mutation so render-side caches keyed off the set can
     /// detect a change without comparing the diagnostics themselves.
     version: u64,
+    /// Per-path counter bumped only when that path's diagnostics move.
+    ///
+    /// A check run publishes every file in the workspace, and the editor caches
+    /// that watch [`Self::version`] rebuild on each of those publishes even
+    /// though all but one describe files nobody has open. A cache keyed on its
+    /// own path rebuilds when its own path changes.
+    ///
+    /// Survives a path being dropped from [`Self::by_path`], so a file whose
+    /// diagnostics clear and later return never reuses a version a cache
+    /// already saw.
+    versions: HashMap<PathBuf, u64>,
 }
 
 /// Severity-bucketed counts for a single document plus the worst
@@ -151,6 +162,7 @@ impl DiagnosticSet {
     ) {
         debug_assert_eq!(diagnostics.len(), spans.len(), "one span per diagnostic");
         self.version += 1;
+        *self.versions.entry(path.clone()).or_default() += 1;
         let entry = self.by_path.entry(path.clone()).or_default();
         if diagnostics.is_empty() {
             entry.by_server.remove(&server);
@@ -251,6 +263,16 @@ impl DiagnosticSet {
     /// diagnostics are unchanged.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Monotonic counter bumped only when `path`'s own diagnostics change.
+    ///
+    /// What a per-editor cache keys on, so a check run publishing the rest of
+    /// the workspace leaves it alone. Zero for a path no server has published
+    /// for, which no cache confuses with a real version, since the first
+    /// publish moves it to one.
+    pub fn version_for(&self, path: &Path) -> u64 {
+        self.versions.get(path).copied().unwrap_or(0)
     }
 
     /// Iterate every `(path, diagnostics)` pair currently in the set.
@@ -479,5 +501,50 @@ mod tests {
         // Clearing the last server drops the path entirely.
         set.replace_from_server(path.clone(), "clippy".into(), vec![], no_spans(0));
         assert!(set.get(&path).is_empty());
+    }
+
+    /// A check run publishes the whole workspace, and an editor showing one
+    /// file rebuilds nothing for the other files in it.
+    #[test]
+    fn a_publish_leaves_every_other_paths_version_alone() {
+        let mut set = DiagnosticSet::new();
+        let (a, b) = (PathBuf::from("/ws/a.rs"), PathBuf::from("/ws/b.rs"));
+
+        set.replace_for_path(a.clone(), vec![diag(DiagnosticSeverity::ERROR, "boom")]);
+        let a_after_own_publish = set.version_for(&a);
+
+        set.replace_for_path(b.clone(), vec![diag(DiagnosticSeverity::WARNING, "hm")]);
+
+        assert_eq!(
+            (set.version_for(&a), set.version_for(&b)),
+            (a_after_own_publish, 1),
+            "each path counts only its own publishes",
+        );
+        assert_eq!(
+            set.version_for(&PathBuf::from("/ws/never.rs")),
+            0,
+            "and a path nobody published for has no version",
+        );
+    }
+
+    /// Diagnostics that clear and later return must not hand a cache a version
+    /// it already treated as settled.
+    #[test]
+    fn a_cleared_path_keeps_counting_from_where_it_left_off() {
+        let mut set = DiagnosticSet::new();
+        let path = PathBuf::from("/ws/a.rs");
+
+        set.replace_for_path(path.clone(), vec![diag(DiagnosticSeverity::ERROR, "boom")]);
+        let published = set.version_for(&path);
+
+        set.replace_for_path(path.clone(), vec![]);
+        let cleared = set.version_for(&path);
+        set.replace_for_path(path.clone(), vec![diag(DiagnosticSeverity::ERROR, "again")]);
+
+        assert_eq!(
+            (published, cleared, set.version_for(&path)),
+            (1, 2, 3),
+            "the counter survives the path leaving the set",
+        );
     }
 }

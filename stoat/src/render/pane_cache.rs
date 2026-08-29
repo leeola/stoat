@@ -244,7 +244,9 @@ pub(crate) fn pane_cache_key(
         paint_generation,
         inactive_dim_bits: frame.inactive_dim.to_bits(),
         line_numbers: frame.line_numbers,
-        diagnostics_version: frame.diagnostics.version(),
+        diagnostics_version: buffers
+            .path_for(buffer)
+            .map_or(0, |path| frame.diagnostics.version_for(path)),
         diff_version,
         minimap_content_id,
         minimap_enabled: frame.minimap_enabled,
