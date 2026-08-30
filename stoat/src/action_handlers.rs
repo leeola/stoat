@@ -60,7 +60,7 @@ use stoat_action::{
     GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab,
     RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
-use stoat_text::{Anchor, BufferId, Selection};
+use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
 
 /// A motion `RepeatLastMotion` (Alt-.) plays back.
@@ -1467,6 +1467,16 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
 /// answering both questions is what keeps a large file off the disk twice.
 pub(crate) enum OpenContent {
     Text(String),
+    /// Text already normalized and built into a rope, with the terminator the
+    /// file arrived with.
+    ///
+    /// Only the background open produces this. Detecting the ending, replacing
+    /// its terminators, and building the rope are the expensive half of opening
+    /// a large file, and the read that reached it was already off the run loop.
+    Rope {
+        rope: Rope,
+        ending: LineEnding,
+    },
     /// An image, as its pixel dimensions. The bytes are dropped: nothing yet
     /// draws them, and holding a decoded image per open pane would cost far
     /// more than the label that is shown instead.
@@ -3138,6 +3148,9 @@ mod tests {
             Ok(OpenContent::Text(text)) => {
                 assert_eq!(text, "hello", "{path} read as text");
                 Ok(None)
+            },
+            Ok(OpenContent::Rope { .. }) => {
+                unreachable!("the read hands back bytes; only the open path builds a rope")
             },
             Err(e) => Err(e.kind()),
         };

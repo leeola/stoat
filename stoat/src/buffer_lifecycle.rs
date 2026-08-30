@@ -28,7 +28,7 @@ use std::{
     time::SystemTime,
 };
 use stoat_scheduler::{Executor, Task};
-use stoat_text::LineEnding;
+use stoat_text::{LineEnding, Rope};
 
 /// Largest file opened synchronously on the main thread.
 ///
@@ -84,15 +84,54 @@ pub(crate) fn open_file_in_pane(
         },
     };
     let workspace = stoat.active_workspace;
+    install_content(stoat, workspace, target, &absolute, content, disk_mtime)
+}
+
+/// Show what a read found, as the buffer or the image it turned out to be.
+///
+/// Shared by the synchronous open and the background one, which differ only in
+/// where the read happened and how far the content was carried before it
+/// arrived here.
+fn install_content(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    target: PaneId,
+    absolute: &Path,
+    content: OpenContent,
+    disk_mtime: Option<SystemTime>,
+) -> Option<BufferId> {
     match content {
-        OpenContent::Text(text) => {
-            finish_open(stoat, workspace, target, &absolute, &text, disk_mtime)
-        },
+        OpenContent::Text(text) => finish_open(
+            stoat,
+            workspace,
+            target,
+            absolute,
+            OpenBody::Text(&text),
+            disk_mtime,
+        ),
+        OpenContent::Rope { rope, ending } => finish_open(
+            stoat,
+            workspace,
+            target,
+            absolute,
+            OpenBody::Rope { rope, ending },
+            disk_mtime,
+        ),
         OpenContent::Image { px } => {
-            show_image(stoat, workspace, target, &absolute, px);
+            show_image(stoat, workspace, target, absolute, px);
             None
         },
     }
+}
+
+/// The text a finished open registers, in whichever form reached it.
+///
+/// A synchronous open carries the bytes it read and normalizes them here. A
+/// background one did that work on the pool and carries the rope, since
+/// building it is the expensive half of opening a large file.
+enum OpenBody<'a> {
+    Text(&'a str),
+    Rope { rope: Rope, ending: LineEnding },
 }
 
 /// Point `target` at an image file, replacing whatever it showed.
@@ -149,7 +188,16 @@ fn spawn_pending_open(
         let redraw = stoat.redraw_notify.clone();
         let path = absolute.clone();
         stoat.executor.spawn_blocking(move || {
-            let content = read_open_content(&*fs_host, &path);
+            // Normalized and roped here rather than at install. Both walk the
+            // whole file, and this path exists because that file is large
+            // enough for the walk to be felt on the thread that paints.
+            let content = read_open_content(&*fs_host, &path).map(|content| match content {
+                OpenContent::Text(text) => OpenContent::Rope {
+                    ending: LineEnding::detect(&text),
+                    rope: Rope::from(LineEnding::normalize(&text).as_ref()),
+                },
+                other => other,
+            });
             *result.lock().expect("pending open mutex") = Some(content);
             redraw.notify_one();
         })
@@ -218,21 +266,14 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
         if !ws.panes.contains(pending.target) {
             continue;
         }
-        match content {
-            OpenContent::Text(text) => {
-                finish_open(
-                    stoat,
-                    pending.workspace,
-                    pending.target,
-                    &pending.path,
-                    &text,
-                    pending.disk_mtime,
-                );
-            },
-            OpenContent::Image { px } => {
-                show_image(stoat, pending.workspace, pending.target, &pending.path, px);
-            },
-        }
+        install_content(
+            stoat,
+            pending.workspace,
+            pending.target,
+            &pending.path,
+            content,
+            pending.disk_mtime,
+        );
     }
 
     // The badge belongs to whichever workspace raised it, which is not
@@ -261,14 +302,11 @@ fn finish_open(
     workspace: WorkspaceId,
     target: PaneId,
     absolute: &Path,
-    content: &str,
+    content: OpenBody<'_>,
     disk_mtime: Option<SystemTime>,
 ) -> Option<BufferId> {
     let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
-
-    let ending = LineEnding::detect(content);
-    let content = LineEnding::normalize(content);
 
     let (buffer_id, buffer) = {
         let ws = &mut stoat.workspaces[workspace];
@@ -279,7 +317,13 @@ fn finish_open(
         // baseline onto a write the buffer never saw, leaving the guard
         // comparing that write against itself.
         let existed = ws.buffers.id_for_path(absolute).is_some();
-        let (buffer_id, buffer) = ws.buffers.open(absolute, &content);
+        let (ending, (buffer_id, buffer)) = match content {
+            OpenBody::Text(text) => (
+                LineEnding::detect(text),
+                ws.buffers.open(absolute, &LineEnding::normalize(text)),
+            ),
+            OpenBody::Rope { rope, ending } => (ending, ws.buffers.open_rope(absolute, rope)),
+        };
         if !existed {
             ws.buffers.set_line_ending(buffer_id, ending);
             if let Some(mtime) = disk_mtime {
@@ -1181,6 +1225,75 @@ mod tests {
                 .unwrap_or_default()
                 .contains("cannot open"),
             "and nothing reports it as unopenable",
+        );
+    }
+
+    /// A background open normalizes and ropes off the run loop, so what
+    /// installs is a rope and the ending it was read with.
+    ///
+    /// Neither survives the pool by accident. The rope is what the read
+    /// produced, and the ending is a fact about the file the rope no longer
+    /// holds, since normalizing is what took the terminators out of it.
+    #[test]
+    fn a_large_crlf_file_installs_its_rope_and_its_ending() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/big");
+        let path = root.join("crlf.txt");
+
+        let line = b"a line of text\r\n";
+        let mut big = Vec::new();
+        while big.len() <= OPEN_SYNC_MAX_BYTES as usize {
+            big.extend_from_slice(line);
+        }
+        let lines = big.len() / line.len();
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        // Read before the install takes it, which is where the pool's work
+        // shows. A read that only fetches bytes leaves text here and the run
+        // loop the same walk over the file to do.
+        {
+            let pending = h.stoat.pending_file_opens.first().expect("one read is out");
+            let held = pending.result.lock().expect("pending open mutex");
+            let Some(Ok(OpenContent::Rope { rope, ending })) = held.as_ref() else {
+                panic!("the pool hands back a rope, not the bytes it read")
+            };
+            assert_eq!(*ending, LineEnding::Crlf, "with the ending it detected");
+            assert_eq!(
+                rope.len(),
+                lines * (line.len() - 1),
+                "and normalized before building",
+            );
+        }
+
+        install_pending_opens(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        let buffer_id = ws
+            .buffers
+            .id_for_path(&path)
+            .expect("the buffer installs once the read finishes");
+        assert_eq!(
+            ws.buffers.line_ending(buffer_id),
+            LineEnding::Crlf,
+            "the ending the pool detected is what the buffer writes back with",
+        );
+
+        let rope = ws
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .clone();
+        assert_eq!(
+            rope.len(),
+            lines * (line.len() - 1),
+            "and the rope holds the file with one terminator byte per line gone",
         );
     }
 }

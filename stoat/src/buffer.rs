@@ -340,12 +340,26 @@ impl TextBuffer {
     }
 
     pub fn with_text(buffer_id: BufferId, text: &str) -> Self {
+        Self::seeded(buffer_id, Replacement::Text(text))
+    }
+
+    /// [`Self::with_text`] over a rope the caller already built.
+    ///
+    /// For a load that read and normalized a file off the run loop. Building
+    /// the rope is the expensive half of opening a large one, and it belongs
+    /// wherever the read happened rather than on the thread that paints.
+    pub fn with_rope(buffer_id: BufferId, rope: Rope) -> Self {
+        Self::seeded(buffer_id, Replacement::Whole(rope))
+    }
+
+    /// A buffer holding `content` as the file it was loaded from.
+    fn seeded(buffer_id: BufferId, content: Replacement<'_>) -> Self {
         let mut buf = Self::new(buffer_id);
-        if !text.is_empty() {
+        if content.len() > 0 {
             // Spliced rather than edited, so the fragment tree, timestamps and
             // dirty state are built exactly as any other edit builds them
             // without the log first taking its own copy of the whole file.
-            buf.splice(0..0, text);
+            buf.splice(0..0, content);
 
             // A seeded log still opens with the edit that loaded it, which is
             // where `BufferHistory`'s serializer puts the file back. The rope
@@ -475,7 +489,7 @@ impl TextBuffer {
             splice_one_range(
                 SpliceRange {
                     range: range.clone(),
-                    text,
+                    text_len: text.len(),
                     timestamp: base + *k as u64,
                 },
                 &mut SpliceState {
@@ -526,19 +540,19 @@ impl TextBuffer {
             old: range.clone(),
             text: text.to_owned(),
         });
-        self.splice(range, text);
+        self.splice(range, Replacement::Text(text));
     }
 
-    /// Replace `range` with `text`, recording nothing in the op log.
+    /// Replace `range` with `content`, recording nothing in the op log.
     ///
     /// The entry is the caller's to write, because a seed's entry holds no text
     /// of its own. [`Self::with_text`] loads a whole file and hands its bytes to
     /// the rope, so building the log's copy of them first is one whole-file
     /// allocation for something already in hand.
-    fn splice(&mut self, range: Range<usize>, text: &str) {
+    fn splice(&mut self, range: Range<usize>, content: Replacement<'_>) {
         // Where this edit finishes once the splice lands, which the stamp below
         // needs after `range` is spent.
-        let edit_end = range.start + text.len();
+        let edit_end = range.start + content.len();
         let timestamp = self.next_timestamp;
         self.next_timestamp += 1;
 
@@ -556,7 +570,7 @@ impl TextBuffer {
         splice_one_range(
             SpliceRange {
                 range: range.clone(),
-                text,
+                text_len: content.len(),
                 timestamp,
             },
             &mut SpliceState {
@@ -579,7 +593,10 @@ impl TextBuffer {
         let deleted_text = deleted_rope.into_text();
 
         // Update the rope
-        self.snapshot.visible_text.replace(range, text);
+        match content {
+            Replacement::Text(text) => self.snapshot.visible_text.replace(range, text),
+            Replacement::Whole(rope) => self.snapshot.visible_text = rope,
+        }
 
         // Store new state
         self.snapshot.deleted_text = deleted_text;
@@ -592,10 +609,36 @@ impl TextBuffer {
     }
 }
 
+/// What a splice puts in place of the range it replaces.
+///
+/// [`Replacement::Whole`] is for a load that built its rope elsewhere, which is
+/// the whole point of building it there. It replaces the buffer's rope outright
+/// rather than splicing into it, so it is sound only over the empty buffer, and
+/// [`TextBuffer::seeded`] is the only caller that has one.
+enum Replacement<'a> {
+    Text(&'a str),
+    Whole(Rope),
+}
+
+impl Replacement<'_> {
+    /// How many bytes the replacement adds, which is all the fragment tree
+    /// records about it.
+    fn len(&self) -> usize {
+        match self {
+            Replacement::Text(text) => text.len(),
+            Replacement::Whole(rope) => rope.len(),
+        }
+    }
+}
+
 /// One range's replacement, as [`splice_one_range`] consumes it.
-struct SpliceRange<'a> {
+///
+/// The fragment tree records how long the replacement is and where it came
+/// from, never what it says, so a caller holding a rope rather than a string
+/// answers with the same length.
+struct SpliceRange {
     range: Range<usize>,
-    text: &'a str,
+    text_len: usize,
     timestamp: u64,
 }
 
@@ -619,10 +662,10 @@ struct SpliceState<'a, 'b, 'c, 'd> {
 ///
 /// The old visible and deleted ropes are reached through the rebuild in
 /// `state`, which reads both forward across the whole pass.
-fn splice_one_range(edit: SpliceRange<'_>, state: &mut SpliceState<'_, '_, '_, '_>) {
+fn splice_one_range(edit: SpliceRange, state: &mut SpliceState<'_, '_, '_, '_>) {
     let SpliceRange {
         range,
-        text,
+        text_len,
         timestamp,
     } = edit;
     let cx = &None;
@@ -660,14 +703,14 @@ fn splice_one_range(edit: SpliceRange<'_>, state: &mut SpliceState<'_, '_, '_, '
     // before it. Fragments already deleted at this position fall behind it
     // for the same reason. They stand for text that is gone, and the new
     // text takes its place.
-    if !text.is_empty() {
+    if text_len > 0 {
         let next_id = cursor.item().map(|f| &f.id).unwrap_or(Locator::max_ref());
         let new_frag_id = Locator::between(last_id(new_fragments, cx), next_id);
         let new_frag = Fragment {
             id: new_frag_id.clone(),
             timestamp,
             insertion_offset: 0,
-            len: text.len() as u32,
+            len: text_len as u32,
             visible: true,
             deletions: Default::default(),
             max_undos: 0,

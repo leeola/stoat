@@ -17,7 +17,7 @@ use std::{
 use stoat_language::{
     drop_syntax_in_background, structural_diff::DiffResult, Language, SyntaxMap, SyntaxState,
 };
-use stoat_text::{Anchor, LineEnding};
+use stoat_text::{Anchor, LineEnding, Rope};
 
 /// Anchored, start-sorted LSP symbol kinds for one buffer, keyed by span. Built
 /// from a semantic-tokens response and queried by offset via
@@ -234,13 +234,30 @@ impl BufferRegistry {
     /// Returns the existing buffer for `path`, or creates one with `text`.
     /// If the buffer already exists, `text` is ignored.
     pub(crate) fn open(&mut self, path: &Path, text: &str) -> (BufferId, SharedBuffer) {
+        self.register(path, |id| TextBuffer::with_text(id, text))
+    }
+
+    /// [`Self::open`] over a rope the caller already built.
+    ///
+    /// For a load that read and normalized a large file off the run loop. An
+    /// existing buffer discards `rope` the way it discards `text`.
+    pub(crate) fn open_rope(&mut self, path: &Path, rope: Rope) -> (BufferId, SharedBuffer) {
+        self.register(path, |id| TextBuffer::with_rope(id, rope))
+    }
+
+    /// The existing buffer for `path`, or one `build` makes and this records.
+    fn register(
+        &mut self,
+        path: &Path,
+        build: impl FnOnce(BufferId) -> TextBuffer,
+    ) -> (BufferId, SharedBuffer) {
         if let Some(&id) = self.path_to_id.get(path) {
             let entry = &self.buffers[&id];
             return (id, entry.buffer.clone());
         }
 
         let id = self.allocate_id();
-        let buffer = Arc::new(RwLock::new(TextBuffer::with_text(id, text)));
+        let buffer = Arc::new(RwLock::new(build(id)));
         let path_buf = path.to_path_buf();
         self.path_to_id.insert(path_buf.clone(), id);
         self.buffers.insert(
