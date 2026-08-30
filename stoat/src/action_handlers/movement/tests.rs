@@ -4407,18 +4407,23 @@ fn select_mode_g_k_extends_to_file_start() {
     assert_eq!(h.stoat.focused_mode(), "select");
 }
 
+/// The window top sits a scrolloff below the first visible row, so the file has
+/// to be long enough for that row to lie above the cursor.
+///
+/// Six steps down leave the view scrolled to row 1, putting the window top at
+/// row 4, which is offset 8 on these one-character lines.
 #[test]
 fn select_mode_g_t_extends_to_window_top() {
     let mut h = TestHarness::with_size(30, 10);
-    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
     h.open_file(&path);
-    h.type_keys("j j v");
+    h.type_keys("j j j j j j v");
     h.type_keys("g t");
     let (start, end, reversed) = h.selection_spans()[0];
     assert_eq!(
         (start, end, reversed),
-        (0, 5, true),
-        "head extended to row 0, and crossing the tail keeps the c on row 2 covered"
+        (8, 13, true),
+        "head extended to the window top, and crossing the tail keeps the g covered"
     );
     assert_eq!(h.stoat.focused_mode(), "select");
 }

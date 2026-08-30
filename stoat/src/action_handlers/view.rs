@@ -578,6 +578,7 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
 pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -> UpdateEffect {
     // Rows in from the named edge, so a bare motion lands on the edge itself.
     let count = stoat.take_pending_count().unwrap_or(1).saturating_sub(1);
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -589,13 +590,31 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
     let rope = buffer_snapshot.rope();
     let max_display_row = display_snapshot.max_point().row;
 
+    // The band a scroll keeps a cursor inside is the band this motion aims
+    // into. Landing on the visible edge itself puts the cursor where the next
+    // scroll drags it away from, so the row the user asked for is not the row
+    // they end up reading.
+    let scrolloff = scrolloff.min(viewport.saturating_sub(1) / 2);
+    // The viewport's last row, or the file's own last row once the file ends
+    // above it. The middle of a half-filled screen is the middle of the text,
+    // not of the empty space below it.
+    let last_visible = viewport
+        .saturating_sub(1)
+        .min(max_display_row.saturating_sub(scroll_row));
+
     // A count reaches in from whichever edge the motion names. The middle has
     // no edge to count from, so it ignores one.
     let offset = match align {
-        WindowAlign::Top => count,
-        WindowAlign::Center => viewport / 2,
-        WindowAlign::Bottom => viewport.saturating_sub(1).saturating_sub(count),
+        WindowAlign::Top => scrolloff + count,
+        WindowAlign::Center => last_visible / 2,
+        WindowAlign::Bottom => last_visible.saturating_sub(scrolloff + count),
     };
+    // The two bounds cross on a view holding fewer rows than two scrolloffs,
+    // where no row is far enough from both edges. Applying the upper one last
+    // keeps the answer inside the text rather than past its end.
+    let offset = offset
+        .max(scrolloff)
+        .min(last_visible.saturating_sub(scrolloff));
     let target_row = scroll_row.saturating_add(offset).min(max_display_row);
 
     let target_point = display_snapshot.clip_point(DisplayPoint::new(target_row, 0), Bias::Left);
@@ -1141,34 +1160,42 @@ mod tests {
         );
     }
 
+    /// The row a window goto names is a display row, so a block above it puts
+    /// the cursor on an earlier buffer line than the row's own number.
+    ///
+    /// Scrolled to display row 11 with a scrolloff of 2, the top landing is
+    /// display row 13, which the deleted-line block renders an earlier buffer
+    /// line at. Treating the display row as a buffer row lands three lines low.
     #[test]
-    fn goto_window_top_lands_on_display_top_line_past_a_block() {
+    fn goto_window_top_lands_on_the_display_line_past_a_block() {
         let mut h = TestHarness::with_size(40, 12);
         open_with_deleted_block(&mut h);
+        h.stoat.settings.scrolloff = Some(2);
         {
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.scroll_row = 11;
         }
 
+        let band_top = 13;
         let expected_row = {
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
             let snapshot = editor.display_map.snapshot();
             snapshot
-                .display_to_buffer(DisplayPoint::new(11, 0))
-                .expect("a buffer line renders at the viewport top")
+                .display_to_buffer(DisplayPoint::new(band_top, 0))
+                .expect("a buffer line renders at the band's top")
                 .row
         };
 
         goto_window(&mut h.stoat, WindowAlign::Top, false);
 
         assert!(
-            expected_row < 11,
-            "display row 11 maps to an earlier buffer row past the block",
+            expected_row < band_top,
+            "the band's top row maps to an earlier buffer row past the block",
         );
         assert_eq!(
             focused_cursor_point(&mut h.stoat).row,
             expected_row,
-            "goto Top lands on the buffer line rendered at the viewport top",
+            "goto Top lands on the buffer line rendered at the band's top",
         );
     }
 
@@ -1956,17 +1983,20 @@ mod tests {
         h.assert_snapshot("snapshot_page_up_at_top_is_noop");
     }
 
+    /// The top landing is measured from the scrolled view, a scrolloff below
+    /// its first visible row, and moves the cursor without moving the view.
     #[test]
-    fn goto_window_top_after_scroll_lands_at_scroll_row() {
+    fn goto_window_top_after_scroll_lands_below_the_scroll_row() {
         let mut h = TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
+        h.stoat.settings.scrolloff = Some(2);
         h.type_keys("ctrl-f");
         let scroll_before = h.editor_scroll_rows();
         let scroll_row = scroll_before[0];
         dispatch(&mut h.stoat, &stoat_action::GotoWindowTop);
         let positions = h.cursor_display_positions();
-        assert_eq!(positions, vec![(scroll_row, 0)]);
+        assert_eq!(positions, vec![(scroll_row + 2, 0)]);
         assert_eq!(h.editor_scroll_rows(), scroll_before);
     }
 
@@ -1978,11 +2008,12 @@ mod tests {
     /// lands every count on the row a bare `gt` reaches.
     #[test]
     fn goto_window_with_a_count_counts_rows_in_from_its_edge() {
-        // A fresh view per gesture. Landing in the scrolloff band scrolls the
-        // view, so a second gesture in the same harness counts from a moved
-        // edge.
+        // A fresh view per gesture, since a landing near an edge scrolls the
+        // view and leaves the next gesture counting from a moved one. The tall
+        // window is what puts rows between the two scrolloff bands for a count
+        // to cross.
         let landed = |keys: &str| {
-            let mut h = TestHarness::with_size(30, 10);
+            let mut h = TestHarness::with_size(30, 20);
             let path = h.write_file("s.txt", &page_scratch_content());
             h.open_file(&path);
             h.type_keys("ctrl-f");
@@ -2003,6 +2034,88 @@ mod tests {
             landed("3 g c"),
             landed("g c"),
             "the middle has no edge to count in from",
+        );
+    }
+
+    /// Every window goto lands inside the scrolloff band rather than on the
+    /// visible edge, and the middle is measured across the same band's rows.
+    ///
+    /// The edge row is where the next scroll drags the view away from, so a
+    /// cursor left there does not stay at the row the user aimed for.
+    #[test]
+    fn goto_window_lands_inside_the_scrolloff_band() {
+        let mut h = TestHarness::with_size(30, 20);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.stoat.settings.scrolloff = Some(2);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_row = 5;
+        }
+
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowTop);
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(7, 0)],
+            "two rows below the first visible row",
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(12, 0)],
+            "two rows above the last visible row",
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowCenter);
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(9, 0)],
+            "the middle of the ten visible rows",
+        );
+
+        // A count long enough to cross the window stops at the far band rather
+        // than running off the rows the window holds.
+        h.stoat.pending_count = Some(9);
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowTop);
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(12, 0)],
+            "counting down from the top stops at the bottom band",
+        );
+
+        h.stoat.pending_count = Some(9);
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(7, 0)],
+            "counting up from the bottom stops at the top band",
+        );
+    }
+
+    /// A file ending partway down the window centers on the middle of its own
+    /// text, not on the middle of the window.
+    ///
+    /// The rows below the last line hold nothing to put a cursor on, so
+    /// counting them into the middle aims past the end of the file and lands
+    /// on the last line instead of the middle one.
+    #[test]
+    fn goto_window_center_measures_the_text_not_the_window() {
+        let mut h = TestHarness::with_size(30, 20);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.stoat.settings.scrolloff = Some(0);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(20);
+        }
+
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowCenter);
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(2, 0)],
+            "five lines center on the third",
         );
     }
 
@@ -2039,17 +2152,21 @@ mod tests {
         assert_eq!(h.editor_scroll_rows(), scroll_before);
     }
 
+    /// A file with fewer rows than two scrolloffs has no row far enough from
+    /// both edges, so the band's two bounds cross.
+    ///
+    /// The upper bound settles it, which keeps the landing inside the text.
+    /// Taking the lower one instead aims past the end of a three-line file.
     #[test]
     fn goto_window_clamps_to_buffer_end() {
         let mut h = TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", "a\nb\nc\n");
         h.open_file(&path);
         dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
-        let positions = h.cursor_display_positions();
-        assert!(
-            positions[0].0 <= 3,
-            "cursor must clamp to last buffer row, got {}",
-            positions[0].0
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(0, 0)],
+            "a file shorter than two scrolloffs collapses onto its first row",
         );
     }
 
