@@ -469,7 +469,7 @@ pub(crate) fn closest_surround_pair(
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
         if open == close && at_cursor == Some(open) {
             settled[i] = true;
-            string_pair[i] = enclosing_string_pair(rope, scan.tree, cursor, open);
+            string_pair[i] = enclosing_delimited_pair(rope, scan.tree, cursor, open);
         }
     }
 
@@ -691,7 +691,7 @@ pub(crate) fn find_surround_pair(
             if skip > 0 {
                 return None;
             }
-            return enclosing_string_pair(rope, scan.tree, cursor, open);
+            return enclosing_delimited_pair(rope, scan.tree, cursor, open);
         }
         let open_pos = walk_left_for_symmetric(rope, cursor, open, scan, skip)?;
         let close_pos = walk_right_for_symmetric(rope, cursor, open, scan, skip)?;
@@ -703,44 +703,62 @@ pub(crate) fn find_surround_pair(
     }
 }
 
-/// Walk the tree-sitter ancestor chain at `offset` looking for the
-/// deepest node whose `kind()` mentions `"string"`. Returns the
-/// node's byte range (half-open: `start..end_byte`). Used to
-/// disambiguate cursor-on-quote surround lookups; the calling site
-/// translates `range.end - 1` into the closing quote's byte offset.
-fn find_enclosing_string_node(tree: &stoat_language::Tree, offset: usize) -> Option<Range<usize>> {
-    let mut node = tree.root_node().descendant_for_byte_range(offset, offset)?;
-    loop {
-        if node.kind().contains("string") {
-            return Some(node.byte_range());
-        }
-        match node.parent() {
-            Some(p) => node = p,
-            None => return None,
-        }
-    }
-}
-
-/// Translate `find_enclosing_string_node` into a surround pair when
-/// the located string node opens with `open`. Returns `None` when
-/// the buffer has no tree, no string ancestor exists at the cursor,
-/// or the located node does not start with `open` (e.g. a rust raw
-/// string `r"..."` whose first byte is `r`).
-fn enclosing_string_pair(
+/// Offsets of the two `open` delimiters around `cursor`, or `None` where the
+/// buffer has no tree and where no node around the cursor carries that pair.
+///
+/// A character that both opens and closes leaves a cursor on it with no side
+/// to search from, so the tree answers instead. Any node the character closes
+/// is a node it delimits, whatever the grammar calls it: a string, a char
+/// literal, a prefixed literal whose own first byte is the prefix, or a markup
+/// attribute's quoted value.
+///
+/// Answers the deepest such node, so a literal nested in another resolves to
+/// its own delimiters.
+fn enclosing_delimited_pair(
     rope: &Rope,
     tree: Option<&stoat_language::Tree>,
     cursor: usize,
     open: char,
 ) -> Option<(usize, usize)> {
-    let tree = tree?;
-    let range = find_enclosing_string_node(tree, cursor)?;
-    if range.start >= range.end {
+    let mut node = tree?
+        .root_node()
+        .descendant_for_byte_range(cursor, cursor)?;
+    loop {
+        if let Some(pair) = delimiter_pair(rope, node.byte_range(), open) {
+            return Some(pair);
+        }
+        node = node.parent()?;
+    }
+}
+
+/// Offsets of the `open` closing `range` and of the first one inside it, where
+/// `range` carries both.
+///
+/// A node ending in the delimiter is a node the delimiter closes, and the pair
+/// opens at the first one inside it. That admits a prefix, so `r"..."` and
+/// `b"..."` resolve to their quotes rather than to the letter they start with.
+///
+/// The end test is what keeps the climb honest. A node merely containing two of
+/// the character, which most of the file does, closes with something else.
+fn delimiter_pair(rope: &Rope, range: Range<usize>, open: char) -> Option<(usize, usize)> {
+    if rope.reversed_chars_at(range.end).next() != Some(open) {
         return None;
     }
-    if rope.chars_at(range.start).next() != Some(open) {
-        return None;
+    let last = range.end.checked_sub(open.len_utf8())?;
+
+    // The caller reaches here only with the cursor on one of the pair, so the
+    // scan meets an `open` at or before it and needs no bound of its own.
+    let mut pos = range.start;
+    for ch in rope.chars_at(range.start) {
+        if pos >= last {
+            return None;
+        }
+        if ch == open {
+            return Some((pos, last));
+        }
+        pos += ch.len_utf8();
     }
-    Some((range.start, range.end - open.len_utf8()))
+    None
 }
 
 fn walk_right_for_close(
@@ -1744,6 +1762,53 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m r \" '");
         assert_eq!(buffer_text(&h, &path), "let s = 'abc';\n");
+    }
+
+    /// A char literal is quoted the same way a string is, so a cursor on its
+    /// quote resolves the same way.
+    ///
+    /// The grammar calls it a `char_literal`, which no test for the word
+    /// "string" matches. What makes it a quoted node is that the quote closes
+    /// it.
+    #[test]
+    fn surround_delete_quote_on_a_char_literal() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let c = 'x';\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find('\'').expect("opening quote present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m d '");
+        assert_eq!(buffer_text(&h, &path), "let c = x;\n");
+    }
+
+    /// A quote with no literal around it resolves to nothing, rather than to
+    /// whichever node happens to contain it.
+    ///
+    /// The apostrophe here sits in a comment, so no node closes on one. Without
+    /// that test the climb settles on the comment and pairs the apostrophe with
+    /// the comment's own last character.
+    #[test]
+    fn surround_delete_quote_in_a_comment_finds_no_pair() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "// it's fine\nlet x = 1;\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find('\'').expect("apostrophe present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m d '");
+        assert_eq!(buffer_text(&h, &path), src, "nothing is deleted");
+    }
+
+    /// A prefixed literal opens with its prefix, not its quote, so a rule
+    /// reading the node's first byte refuses it.
+    #[test]
+    fn surround_delete_quote_on_a_raw_string() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let s = r\"abc\";\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find('"').expect("opening quote present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m d \"");
+        assert_eq!(buffer_text(&h, &path), "let s = rabc;\n");
     }
 
     #[test]
