@@ -246,6 +246,11 @@ pub(crate) fn apply_text_edits_to_buffer(
     let mut guard = buffer.write().expect("buffer poisoned");
     // Any group open here is an insert session, and folding a server edit into
     // it would make undoing the typing undo the server's work too.
+    //
+    // The session is reopened below rather than left sealed. A format-on-save
+    // or a completion's extra edits land mid-session, and without the reopen
+    // every later keystroke of it becomes an undo step of its own.
+    let was_open = guard.group_open();
     guard.begin_group(selections.clone());
 
     let mut converted: Vec<(usize, std::ops::Range<usize>, String)> = edits
@@ -261,7 +266,10 @@ pub(crate) fn apply_text_edits_to_buffer(
     for (_, range, new_text) in converted {
         guard.edit(range, &new_text);
     }
-    guard.seal_group(selections);
+    guard.seal_group(selections.clone());
+    if was_open {
+        guard.begin_group(selections);
+    }
     Ok(buffer_id)
 }
 

@@ -1148,6 +1148,15 @@ impl TextBuffer {
         // Sealed with no selections, as `undo`, `redo` and `begin_group` all do
         // at this level. The selections a group restores come from the caller,
         // and a save has none to offer.
+        //
+        // A session sealed here is reopened below, carrying its own pre-edit
+        // selections across. A save lands mid-session often enough, and leaving
+        // it sealed makes every later keystroke of that session an undo step of
+        // its own. Reopening only what was open keeps a save outside a session
+        // from leaving a group nothing closes.
+        let was_open = self.open_group;
+        let before = self.open_group_before.clone();
+
         self.seal_group(Arc::from([]));
         self.saved_marker = self.frontier();
         self.saved_text = Some(self.snapshot.visible_text.clone());
@@ -1157,6 +1166,10 @@ impl TextBuffer {
         // captured here.
         self.saved_version = Some(self.snapshot.version);
         self.dirty = false;
+
+        if was_open {
+            self.begin_group(before);
+        }
     }
 
     /// Modified when the edit frontier has moved off [`Self::saved_marker`] and
@@ -2282,6 +2295,32 @@ mod tests {
         assert!(
             !restored.dirty,
             "the restored buffer agrees, with no saved bytes to fall back on",
+        );
+    }
+
+    /// A save mid-session leaves the typing after it one step.
+    ///
+    /// The save must seal, so its marker names a frontier undo lands on.
+    /// Leaving it sealed drops the session on the floor, and every keystroke
+    /// after becomes a revision of its own, so undo takes back one character at
+    /// a time for the rest of the session.
+    #[test]
+    fn a_save_inside_an_insert_session_leaves_the_typing_after_it_one_step() {
+        let mut b = buf("start\n");
+        b.begin_group(Arc::from([]));
+        b.edit(6..6, "one\n");
+        b.mark_clean();
+        let saved = b.snapshot.visible_text.to_string();
+
+        b.edit(10..10, "two\n");
+        b.edit(14..14, "three\n");
+        b.seal_group(Arc::from([]));
+
+        b.undo();
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            saved,
+            "one undo takes back every edit made after the save",
         );
     }
 

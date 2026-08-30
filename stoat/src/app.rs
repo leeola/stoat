@@ -17171,6 +17171,54 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "Xbar\n", "one redo puts both back");
     }
 
+    /// A server edit inside an insert session is its own step, and the typing
+    /// after it stays one.
+    ///
+    /// A format-on-save or a completion's extra edits land mid-session. Sealing
+    /// the session for them and leaving it sealed drops the session on the
+    /// floor, so every later keystroke becomes a revision of its own and undo
+    /// deletes one character at a time for the rest of the session.
+    #[test]
+    fn a_server_edit_mid_session_leaves_the_typing_after_it_one_step() {
+        use crate::host::OffsetEncoding;
+        use lsp_types::{Position, Range as LspRange, TextEdit};
+
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo\n");
+
+        h.type_keys("i");
+        h.type_text("A");
+
+        crate::lsp::edit_apply::apply_text_edits_to_buffer(
+            &mut h.stoat,
+            &path,
+            vec![TextEdit {
+                range: LspRange::new(Position::new(0, 0), Position::new(0, 0)),
+                new_text: "S".to_string(),
+            }],
+            OffsetEncoding::Utf16,
+        )
+        .expect("the server edit applies");
+
+        h.type_text("BC");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "SABCfoo\n");
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "SAfoo\n",
+            "one undo takes back every key typed after the server edit",
+        );
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "Afoo\n",
+            "and the next takes back the server's edit on its own",
+        );
+    }
+
     /// Opening a line and typing into it are likewise one revision.
     #[test]
     fn open_below_and_typing_undo_as_one_step() {
