@@ -68,6 +68,66 @@ pub struct Run {
     pub class: u8,
 }
 
+/// One line's runs, held inline rather than in a heap allocation of their own.
+///
+/// A [`Run`] is three bytes and [`MAX_RUNS`] caps a line at twelve of them, so
+/// the whole summary is thirty-six bytes and fits where a `Vec`'s pointer, its
+/// length, and its capacity went. One allocation per buffer line is what a
+/// hundred-thousand-line file paid to build its strip, and every splice paid
+/// again to carry a copy to the wire.
+///
+/// Copies rather than clones for the same reason, so a splice that hands the
+/// emitter its payload is a memcpy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LineRuns {
+    runs: [Run; MAX_RUNS],
+    len: u8,
+}
+
+impl Default for LineRuns {
+    fn default() -> Self {
+        Self {
+            runs: [Run {
+                start_col: 0,
+                len: 0,
+                class: 0,
+            }; MAX_RUNS],
+            len: 0,
+        }
+    }
+}
+
+impl LineRuns {
+    pub fn as_slice(&self) -> &[Run] {
+        &self.runs[..self.len as usize]
+    }
+
+    /// Append `run`, or drop it once the line holds [`MAX_RUNS`].
+    ///
+    /// Dropping is what the summary wants rather than a failure to report.
+    /// [`summarize_line`] widens its last run to swallow the rest of the line
+    /// past the cap, so a caller reaching this has already decided the run has
+    /// nowhere to go.
+    fn push(&mut self, run: Run) {
+        if (self.len as usize) < MAX_RUNS {
+            self.runs[self.len as usize] = run;
+            self.len += 1;
+        }
+    }
+
+    fn last(&self) -> Option<&Run> {
+        self.as_slice().last()
+    }
+
+    fn last_mut(&mut self) -> Option<&mut Run> {
+        self.runs[..self.len as usize].last_mut()
+    }
+
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+}
+
 /// A line's diff or diagnostic state, drawn as a colored run in the reserved
 /// left-edge lane.
 ///
@@ -101,7 +161,7 @@ pub struct LineToken {
 pub struct Splice {
     pub start: u32,
     pub removed: u32,
-    pub lines: Vec<Vec<Run>>,
+    pub lines: Vec<LineRuns>,
 }
 
 /// The decoration and syntax versions a [`MinimapContent::sync`] re-checks its
@@ -238,7 +298,7 @@ impl EdgeSource for ResolvedEdges {
 /// at a time.
 pub struct MinimapContent {
     content_id: u32,
-    lines: Vec<Vec<Run>>,
+    lines: Vec<LineRuns>,
     /// The built rows carrying a mark and the edge-lane class each carries,
     /// ascending by row. A row absent from it is unmarked.
     ///
@@ -693,18 +753,16 @@ impl MinimapContent {
 
     /// Store `summary` as `row`'s and queue the one-line splice carrying it.
     ///
-    /// The summary `row` held supplies the splice's payload allocation, since it
-    /// is dead the moment the new one replaces it. The store and the payload
-    /// remain two owned copies of the runs. The wire replay consumes the
-    /// payload, while the store stays to answer the next sync's comparison.
-    fn replace_line(&mut self, row: u32, summary: Vec<Run>) {
-        let mut payload = std::mem::replace(&mut self.lines[row as usize], summary);
-        payload.clone_from(&self.lines[row as usize]);
+    /// The store and the payload are two copies of the runs. The wire replay
+    /// consumes the payload, while the store stays to answer the next sync's
+    /// comparison, and a [`LineRuns`] copies rather than allocating.
+    fn replace_line(&mut self, row: u32, summary: LineRuns) {
+        self.lines[row as usize] = summary;
 
         self.queue_splice(Splice {
             start: row,
             removed: 1,
-            lines: vec![payload],
+            lines: vec![summary],
         });
     }
 
@@ -842,7 +900,7 @@ fn summarize_rows(
     rows: Range<u32>,
     tokens: &HashMap<u32, Vec<LineToken>>,
     marks: &impl EdgeSource,
-) -> Vec<Vec<Run>> {
+) -> Vec<LineRuns> {
     let mut text = String::new();
     let mut walk = rope.line_walk(rows.clone());
     rows.map(|row| {
@@ -879,8 +937,8 @@ fn line_count(rope: &Rope) -> u32 {
 /// current run, so a gap breaks the blocks. A char uncovered by any token is
 /// class 0. Once [`MAX_RUNS`] runs exist, the last run swallows the rest of the
 /// line.
-pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> Vec<Run> {
-    let mut runs: Vec<Run> = Vec::new();
+pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> LineRuns {
+    let mut runs = LineRuns::default();
     if let Some(class) = edge {
         runs.push(Run {
             start_col: 0,
@@ -1079,8 +1137,8 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        summarize_line, EdgeSource, LineToken, MinimapContent, Run, Splice, SyncVersions,
-        BUILD_CHUNK, MAX_LINES, RESYNC_CHUNK,
+        summarize_line, EdgeSource, LineRuns, LineToken, MinimapContent, Run, Splice, SyncVersions,
+        BUILD_CHUNK, MAX_LINES, MAX_RUNS, RESYNC_CHUNK,
     };
     use std::{cell::RefCell, collections::HashMap, ops::Range};
     use stoat_text::{
@@ -1166,6 +1224,29 @@ mod tests {
         }
     }
 
+    /// A line holds `MAX_RUNS` runs and drops what comes after.
+    ///
+    /// The store is a fixed array, so a push past the end has nowhere to go.
+    /// Dropping it is what the summary already does. `summarize_line` widens
+    /// its last run to swallow the rest of the line rather than pushing again,
+    /// and a push that reached here has passed that decision.
+    #[test]
+    fn a_line_holds_max_runs_and_drops_the_rest() {
+        let mut runs = LineRuns::default();
+        for i in 0..MAX_RUNS {
+            runs.push(run(i as u8, 1, i as u8));
+        }
+        assert_eq!(runs.len(), MAX_RUNS, "the line fills to the cap");
+
+        runs.push(run(99, 1, 99));
+        assert_eq!(runs.len(), MAX_RUNS, "and the next push adds nothing");
+        assert_eq!(
+            runs.as_slice().last(),
+            Some(&run(MAX_RUNS as u8 - 1, 1, MAX_RUNS as u8 - 1)),
+            "the run it dropped never displaced one that fit",
+        );
+    }
+
     fn tok(range: Range<usize>, class: u8) -> LineToken {
         LineToken { range, class }
     }
@@ -1175,20 +1256,20 @@ mod tests {
         // "ab cd" with one token over "ab" and one over "cd": a run per word,
         // broken by the space, each carrying its token's class.
         let runs = summarize_line("ab cd", &[tok(0..2, 1), tok(3..5, 2)], None);
-        assert_eq!(runs, vec![run(2, 2, 1), run(5, 2, 2)]);
+        assert_eq!(runs.as_slice(), [run(2, 2, 1), run(5, 2, 2)]);
     }
 
     #[test]
     fn summarize_line_coalesces_adjacent_same_class() {
         // Two tokens of the same class over contiguous chars merge into one run.
         let runs = summarize_line("abcd", &[tok(0..2, 1), tok(2..4, 1)], None);
-        assert_eq!(runs, vec![run(2, 4, 1)]);
+        assert_eq!(runs.as_slice(), [run(2, 4, 1)]);
     }
 
     #[test]
     fn summarize_line_uncovered_is_class_zero() {
         let runs = summarize_line("ab", &[], None);
-        assert_eq!(runs, vec![run(2, 2, 0)]);
+        assert_eq!(runs.as_slice(), [run(2, 2, 0)]);
     }
 
     #[test]
@@ -1196,7 +1277,7 @@ mod tests {
         // A leading tab from the col-2 lane edge still advances to the next tab
         // stop at column 4, so the word starts at column 4.
         let runs = summarize_line("\tab", &[tok(1..3, 1)], None);
-        assert_eq!(runs, vec![run(4, 2, 1)]);
+        assert_eq!(runs.as_slice(), [run(4, 2, 1)]);
     }
 
     #[test]
@@ -1204,8 +1285,8 @@ mod tests {
         let line = "x".repeat(200);
         let runs = summarize_line(&line, &[], None);
         assert_eq!(
-            runs,
-            vec![run(2, 118, 0)],
+            runs.as_slice(),
+            [run(2, 118, 0)],
             "content fills the lane edge to the 120-column cap"
         );
     }
@@ -1220,7 +1301,7 @@ mod tests {
             .collect();
         let runs = summarize_line(&line, &tokens, None);
         assert_eq!(runs.len(), 12, "runs cap at twelve");
-        let last = runs[11];
+        let last = runs.as_slice()[11];
         // The last char sits at display column 40 (x at even columns, shifted
         // past the 2-column lane); run 12 stretches to cover it.
         assert_eq!(last.start_col as u32 + last.len as u32, 41);
@@ -1288,7 +1369,7 @@ mod tests {
         let inserted = summarize_line("new", &[], None);
         assert_eq!(
             &content.lines[BUILD_CHUNK as usize - 1..BUILD_CHUNK as usize + 2],
-            &[inserted.clone(), inserted.clone(), inserted][..],
+            &[inserted, inserted, inserted][..],
             "including the rows that landed past where the build had reached",
         );
         assert!(!content.build_pending(), "and nothing is left to build");
@@ -1981,7 +2062,7 @@ mod tests {
     fn summarize_line_prepends_the_edge_lane() {
         // An edge fills the reserved cols 0-1 and content starts at col 2.
         let runs = summarize_line("ab", &[tok(0..2, 1)], Some(40));
-        assert_eq!(runs, vec![run(0, 2, 40), run(2, 2, 1)]);
+        assert_eq!(runs.as_slice(), [run(0, 2, 40), run(2, 2, 1)]);
     }
 
     #[test]
@@ -2019,12 +2100,12 @@ mod tests {
 
         let built = &content.take_queued()[0].lines;
         assert_eq!(
-            built[0][0],
+            built[0].as_slice()[0],
             run(2, 5, 0),
             "an unmarked line starts past the lane"
         );
         assert_eq!(
-            built[1][0],
+            built[1].as_slice()[0],
             run(0, 2, 40),
             "a marked line leads with its edge"
         );
@@ -2744,7 +2825,7 @@ mod tests {
         assert_eq!(splices[0].start, 1);
         assert_eq!(splices[0].removed, 1);
         assert_eq!(
-            splices[0].lines[0][0],
+            splices[0].lines[0].as_slice()[0],
             run(0, 2, 40),
             "the mark leads the line"
         );
@@ -2781,8 +2862,8 @@ mod tests {
         assert_eq!(splices.len(), 1, "only the recolored line splices");
         assert_eq!(splices[0].start, 0);
         assert_eq!(
-            splices[0].lines[0],
-            vec![run(2, 5, 0)],
+            splices[0].lines[0].as_slice(),
+            [run(2, 5, 0)],
             "line 0 goes monochrome"
         );
     }
