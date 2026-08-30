@@ -1104,17 +1104,29 @@ impl WrapSnapshot {
     /// side `bias` names.
     ///
     /// Descends into the tab layer, so the result also clears tab expansions,
-    /// fold placeholders, and inlays. The row it clamped `point` to is kept.
-    /// Tab-space clipping snaps onto a character boundary, and a wrap boundary
-    /// is one already, so the column cannot cross either end of the row.
+    /// fold placeholders, and inlays. The result lands on the row of the
+    /// position it chose, which a fold placeholder straddling a wrap break
+    /// makes a different row than the one asked about.
+    ///
+    /// A position on a soft-wrap break column has a candidate on each side of
+    /// the break. `Bias::Left` answers the last cell of the row asked about,
+    /// and `Bias::Right` the first cell of the continuation below it.
     pub fn clip_point(&self, point: WrapPoint, bias: Bias) -> WrapPoint {
         let max_row = self.total_rows.saturating_sub(1);
         let row = point.row().min(max_row);
-        let max_col = self.line_len(row);
+        let (max_col, wraps_after) = self.row_extent(row);
         // A continuation row's synthetic indent margin holds no text, so a
         // column inside it clamps up to the first real cell.
         let min_col = self.soft_wrap_indent(row).min(max_col);
-        let col = point.column().clamp(min_col, max_col);
+        let mut col = point.column().clamp(min_col, max_col);
+
+        // A break column belongs to the row after the break, so a position
+        // there resolves onto the continuation. That is the answer a rightward
+        // clip wants. A leftward one wants the cell before the break, which is
+        // the last one this row owns, so it steps back before descending.
+        if bias == Bias::Left && wraps_after && col == max_col && col > min_col {
+            col -= 1;
+        }
 
         // A fold placeholder can straddle a wrap break, and a clip lands on the
         // whole placeholder, so the snap can leave the row it started on.
@@ -1128,8 +1140,17 @@ impl WrapSnapshot {
     }
 
     pub fn line_len(&self, wrap_row: u32) -> u32 {
+        self.row_extent(wrap_row).0
+    }
+
+    /// Display width of `wrap_row`, and whether a soft-wrap break ends it.
+    ///
+    /// The second answer separates a break from a real line end, which the two
+    /// clip biases resolve to different rows. Both come out of one transform
+    /// lookup, so the clip path pays for a single walk of the tree.
+    fn row_extent(&self, wrap_row: u32) -> (u32, bool) {
         if self.wrap_width.is_none() {
-            return self.tab_snapshot.line_len(wrap_row);
+            return (self.tab_snapshot.line_len(wrap_row), false);
         }
 
         let target = OutputRow(wrap_row + 1);
@@ -1142,14 +1163,20 @@ impl WrapSnapshot {
         let output_offset = wrap_row - output_start.0;
 
         let Some(transform) = cursor.item() else {
-            return 0;
+            return (0, false);
         };
         let (input_offset, sub_row) = transform.split(output_offset);
         // A run carries no measurement, its rows being whole tab rows.
         if transform.is_run() {
-            return self.tab_snapshot.line_len(input_start.0 + input_offset);
+            return (
+                self.tab_snapshot.line_len(input_start.0 + input_offset),
+                false,
+            );
         }
-        transform_sub_row_len(transform, sub_row)
+        (
+            transform_sub_row_len(transform, sub_row),
+            transform.next_wrap_column(sub_row).is_some(),
+        )
     }
 
     pub fn soft_wrap_indent(&self, wrap_row: u32) -> u32 {
@@ -2079,6 +2106,31 @@ mod tests {
             snap.clip_point(WrapPoint::new(1, 0), Bias::Left),
             WrapPoint::new(1, indent),
             "a column in the synthetic margin clamps to the first real cell",
+        );
+    }
+
+    /// The break column of a wrapped row is the one column two rows both have
+    /// a claim on, and the bias decides which of them answers.
+    ///
+    /// It is the row's own width, so a clamp leaves it untouched, and it is the
+    /// continuation's first column, so the descent into tab space resolves it
+    /// there. The leftward answer must stay above the break. The forward one
+    /// moves a cursor the wrong way, and a `k` off the end of a wrapped line
+    /// then lands a row below where it aimed.
+    #[test]
+    fn a_leftward_clip_of_a_break_column_stays_above_the_break() {
+        let snap = make_snapshot(&"a".repeat(20), Some(10));
+        assert_eq!(snap.line_count(), 2, "the line wraps into two rows");
+
+        assert_eq!(
+            snap.clip_point(WrapPoint::new(0, 10), Bias::Left),
+            WrapPoint::new(0, 9),
+            "clipping left takes the last cell the row owns",
+        );
+        assert_eq!(
+            snap.clip_point(WrapPoint::new(0, 10), Bias::Right),
+            WrapPoint::new(1, 0),
+            "clipping right takes the continuation's first cell",
         );
     }
 

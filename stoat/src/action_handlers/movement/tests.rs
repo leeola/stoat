@@ -908,6 +908,24 @@ fn vertical_motion_under_wrap_round_trips() {
     );
 }
 
+/// From the end of a wrapped line, `k` steps onto the row above rather than
+/// back to the start of the row it is on.
+///
+/// The end of the 30-character line is display column 10 of its last row, and
+/// that column is where the row above breaks. The break belongs to the row
+/// after it, so the leftward clip must step back over it. The forward answer
+/// lands on column 20, one cell into the row `k` started from.
+#[test]
+fn move_up_from_a_wrapped_line_end_crosses_the_break() {
+    let mut h = wrapped_pane_cursor_on_short_line();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        place_cursor(editor, 0, 30);
+    }
+    move_vertical(&mut h.stoat, -1, false);
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 19));
+}
+
 /// A count crosses that many screen rows, so three presses cover the whole
 /// wrapped line where one covers a third of it.
 #[test]
