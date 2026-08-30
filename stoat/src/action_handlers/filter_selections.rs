@@ -83,6 +83,10 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         return true;
     }
     editor.selections.replace_with(kept, buffer_snapshot);
+    // The survivors keep the ids they arrived with, which leaves the primary on
+    // whichever one the user made last. A filter answers in document order, and
+    // the front of that answer is where reading resumes.
+    editor.selections.make_first_primary();
     true
 }
 
@@ -109,10 +113,14 @@ mod tests {
     use stoat_action as action;
 
     fn select_two_ranges(h: &mut TestHarness, a: (usize, usize), b: (usize, usize)) {
+        select_ranges(h, &[a, b]);
+    }
+
+    fn select_ranges(h: &mut TestHarness, ranges: &[(usize, usize)]) {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let pieces = vec![a, b];
+        let pieces = ranges.to_vec();
         editor
             .selections
             .split_each(buf_snap, stoat_text::Bias::Right, |_| pieces.clone());
@@ -128,6 +136,29 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(4, 7, false)]);
+    }
+
+    /// A filter answers in document order, so the primary goes to the first
+    /// survivor rather than to whichever one the user made last.
+    ///
+    /// The survivors keep the ids they arrived with, and the highest of those
+    /// is the primary, so a filter that drops nothing leaves it on the last
+    /// range. The front of the answer is where the user reads from next.
+    #[test]
+    fn keep_hands_the_primary_to_the_first_survivor() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("aaa bbb ccc");
+        select_ranges(&mut h, &[(0, 3), (4, 7), (8, 11)]);
+        dispatch(&mut h.stoat, &action::KeepSelections);
+        h.type_text("\\w+");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        dispatch(&mut h.stoat, &action::KeepPrimarySelection);
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false)],
+            "the first survivor is the primary",
+        );
     }
 
     #[test]
