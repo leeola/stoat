@@ -7,7 +7,7 @@ use crate::{
     pane::View,
 };
 use regex_cursor::{engines::meta, regex_automata::util::syntax};
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, ops::Range, sync::Arc};
 use stoat_text::{char_is_word, Anchor, Rope, Selection};
 
 /// The search pattern compiled for the engine that matches over a rope.
@@ -687,39 +687,38 @@ fn find_forward(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
     })
 }
 
-/// The last match starting before `from`, or the last in the file when there is
-/// none, so a reverse search wraps around.
+/// The last match ending at or before `from`, or the last in the rest of the
+/// file when there is none, so a reverse search wraps around.
 ///
-/// One forward pass, stopping at the first match the cursor has already passed.
-/// `find_iter` is lazy, so an ordinary reverse search reads `from` bytes rather
-/// than the file. Only a search with nothing behind the cursor, which is the
-/// one that has to wrap, reads to the end.
+/// `from` is the primary selection's start, and a match reaching past it covers
+/// ground the cursor already stands on, so a repeat lands on the match it just
+/// left. Bounding the scan rather than filtering its results is what excludes
+/// one, since a match has to fit inside the bound to count at all.
+///
+/// The bound moves the match span alone, so an assertion in the pattern still
+/// reads the text on either side of it and the offsets stay buffer offsets.
+///
+/// The wrap arm scans from `from` afresh rather than reading on from the first
+/// scan, so a run of overlapping candidates aligns from the cursor.
 fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
-    let mut matches = regex.find_iter(rope.regex_input(0..rope.len()));
-    let mut before = None;
-
-    let at_or_after = loop {
-        match matches.next() {
-            Some(m) if m.start() < from => {
-                before = Some(Hit {
-                    start: m.start(),
-                    end: m.end(),
-                    wrapped: false,
-                })
-            },
-            other => break other,
-        }
+    let from = from.min(rope.len());
+    let last = |range: Range<usize>| {
+        regex
+            .find_iter(rope.regex_input(range))
+            .last()
+            .map(|m| Hit {
+                start: m.start(),
+                end: m.end(),
+                wrapped: false,
+            })
     };
 
-    if before.is_some() {
-        return before;
+    if let Some(hit) = last(0..from) {
+        return Some(hit);
     }
-    let first = at_or_after?;
-    let last = matches.last();
-    Some(Hit {
-        start: last.map_or(first.start(), |m| m.start()),
-        end: last.map_or(first.end(), |m| m.end()),
+    last(from..rope.len()).map(|hit| Hit {
         wrapped: true,
+        ..hit
     })
 }
 
@@ -952,6 +951,11 @@ mod tests {
         );
     }
 
+    /// Ten steps right put the cursor on the last cell of the second `abc`, so
+    /// that match reaches past the cursor and the first one answers.
+    ///
+    /// The match the cursor stands inside is the text the search started from,
+    /// so taking it leaves a repeat with nowhere to move.
     #[test]
     fn reverse_search_selects_the_first_match_before_the_cursor() {
         let mut h = TestHarness::with_size(40, 10);
@@ -960,7 +964,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::OpenReverseSearchInput);
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
     }
 
     #[test]
@@ -1412,9 +1416,12 @@ mod tests {
         );
     }
 
-    /// The reverse walk keeps only two candidates, so pin both the ordinary
-    /// pick and the wrap-around against a buffer with matches either side of
-    /// the cursor.
+    /// A match counts only where it ends at or before the cursor, so pin the
+    /// ordinary pick, the two ways a match reaches past the bound, and the
+    /// wrap-around, against a buffer with matches either side of the cursor.
+    ///
+    /// A match the cursor stands inside covers ground already read, so taking
+    /// it lands a repeat back where it started.
     #[test]
     fn find_reverse_picks_the_last_match_before_the_cursor() {
         let regex = super::compile_cursor_regex("ab", false).expect("valid regex");
@@ -1425,8 +1432,16 @@ mod tests {
             hit(4, 6),
             "the nearest match before the cursor wins, not the first or last",
         );
-        assert_eq!(super::find_reverse(&regex, &text, 9), hit(8, 10));
-        assert_eq!(super::find_reverse(&regex, &text, 5), hit(4, 6));
+        assert_eq!(
+            super::find_reverse(&regex, &text, 9),
+            hit(4, 6),
+            "the match at 8 straddles the cursor, so the one before it answers",
+        );
+        assert_eq!(
+            super::find_reverse(&regex, &text, 5),
+            hit(0, 2),
+            "and a match ending one byte past the cursor is out on the same rule",
+        );
         assert_eq!(
             super::find_reverse(&regex, &text, 0),
             wrapped_hit(8, 10),
@@ -1435,6 +1450,25 @@ mod tests {
         assert_eq!(
             super::find_reverse(&regex, &stoat_text::Rope::from("nope"), 2),
             None
+        );
+    }
+
+    /// The wrap scan starts at the cursor, so a run of overlapping candidates
+    /// lines up from there.
+    ///
+    /// A scan answers non-overlapping matches, and where it starts decides
+    /// which ones those are. Over four `a`s the pattern matches at 0 and 2 from
+    /// the buffer's start, but at 1 alone from the cursor, and the last of those
+    /// two runs is a different span.
+    #[test]
+    fn a_wrapping_reverse_search_aligns_its_matches_from_the_cursor() {
+        let regex = super::compile_cursor_regex("aa", false).expect("valid regex");
+        let text = stoat_text::Rope::from("aaaa");
+
+        assert_eq!(
+            super::find_reverse(&regex, &text, 1),
+            wrapped_hit(1, 3),
+            "the run starts at the cursor, so it reaches 1..3 and stops",
         );
     }
 
