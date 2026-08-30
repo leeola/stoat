@@ -4230,15 +4230,15 @@ fn select_mode_parent_node_start_clears_the_vertical_goal_column() {
     dispatch(&mut h.stoat, &stoat_action::ExtendMoveParentNodeStart);
     assert_eq!(
         h.selection_spans()[0],
-        (7, 18, true),
-        "the parent extend moves the head back to the block's brace on row 0",
+        (13, 18, true),
+        "the parent extend moves the head back to the let declaration's start",
     );
 
     h.type_keys("j");
     assert_eq!(
         h.selection_spans()[0],
-        (16, 18, true),
-        "the next row is entered at column 7, the brace's column, not the held column 8",
+        (17, 28, false),
+        "the next row is entered at column 4, the landing's column, not the held column 8",
     );
 }
 
@@ -6753,6 +6753,70 @@ fn move_parent_node_start_collapses_to_parent_start() {
         spans[0].1,
         spans[0].0 + 1,
         "parent jump collapses to a 1-wide cursor"
+    );
+}
+
+/// Every cursor walks to the bound of the node it is in, so a set of them
+/// stays a set.
+///
+/// Resolving one node and landing every cursor on it makes every span
+/// identical, and identical spans merge, so the whole set collapses onto one
+/// cursor. Here the two cursors sit inside different call expressions and end
+/// up one cell past each.
+#[test]
+fn move_parent_node_end_moves_every_cursor_to_its_own_node() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "let a = foo(1);\nlet b = bar(2);\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(8, 9), (24, 25)]);
+
+    dispatch(&mut h.stoat, &stoat_action::MoveParentNodeEnd);
+
+    assert_eq!(
+        h.selection_spans(),
+        vec![(11, 12, false), (27, 28, false)],
+        "each cursor lands one past its own identifier",
+    );
+}
+
+/// A cursor already standing on a node's start climbs to the nearest ancestor
+/// that starts earlier.
+///
+/// The node offers nowhere further back to go, so answering with its own start
+/// leaves the cursor where it is. An ancestor sharing that start byte is no
+/// move either, which is why the climb passes those by.
+#[test]
+fn move_parent_node_start_climbs_off_a_node_start() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "let a = foo(1);\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(8, 9)]);
+
+    dispatch(&mut h.stoat, &stoat_action::MoveParentNodeStart);
+
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 1, false)],
+        "the call shares the identifier's start, so the climb reaches the statement",
+    );
+}
+
+/// A count repeats the step rather than widening one, so each repeat starts
+/// from where the last one landed.
+#[test]
+fn a_counted_parent_node_end_steps_out_one_node_at_a_time() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "let a = foo(1);\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(8, 9)]);
+
+    h.stoat.pending_count = Some(2);
+    dispatch(&mut h.stoat, &stoat_action::MoveParentNodeEnd);
+
+    assert_eq!(
+        h.selection_spans(),
+        vec![(14, 15, false)],
+        "one step passes the identifier, the second the argument list",
     );
 }
 

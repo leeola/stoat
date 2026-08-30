@@ -3572,7 +3572,7 @@ pub(super) fn move_to_parent_bound(
     bound: NodeBound,
     extend: bool,
 ) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
+    let count = stoat.take_pending_count().unwrap_or(1).max(1);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3580,63 +3580,109 @@ pub(super) fn move_to_parent_bound(
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, sel_start, sel_end) = {
-        let editor = ws.editors.get_mut(editor_id).expect("editor");
-        let buffer_id = editor.buffer_id;
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let start = buffer_snapshot.resolve_anchor(&sel.start);
-        let end = buffer_snapshot.resolve_anchor(&sel.end);
-        (buffer_id, start, end)
-    };
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
-    let target_offset = {
+    // The snapshot outlives the editor borrow, so the rope stays readable while
+    // the syntax map answers for each selection in turn.
+    let (display_snapshot, reads) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let display_snapshot = editor.display_map.snapshot();
+        let reads = editor
+            .selections
+            .resolved_reads(display_snapshot.buffer_snapshot());
+        (display_snapshot, reads)
+    };
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    // Every cursor walks to the bound of the node it sits in. Resolving one
+    // node and landing every cursor on it makes every span identical, and
+    // identical spans merge, so the set collapses to one cursor.
+    let mut targets: Vec<(usize, usize)> = {
         let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
             return UpdateEffect::None;
         };
         let snapshot = syntax_map.snapshot();
-        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
-            return UpdateEffect::None;
-        };
-        let root = layer.tree.root_node();
-        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
-            return UpdateEffect::None;
-        };
-        let mut current = node;
-        let mut moved = false;
-        for _ in 0..count {
-            match current.parent() {
-                Some(p) => {
-                    current = p;
-                    moved = true;
-                },
-                None => break,
-            }
-        }
-        if !moved {
-            return UpdateEffect::None;
-        }
-        match bound {
-            NodeBound::Start => current.start_byte(),
-            NodeBound::End => current.end_byte(),
-        }
+        reads
+            .iter()
+            .filter_map(|read| {
+                let cursor = cursor_offset(rope, read.tail, read.head);
+                let start = read.head.min(read.tail);
+                let end = read.head.max(read.tail);
+                let landing = walk_to_node_bound(snapshot, start, end, cursor, bound, count)?;
+                Some((read.id, landing))
+            })
+            .collect()
     };
+    targets.sort_unstable_by_key(|(id, _)| *id);
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    if extend {
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        // Landing on a node's bound moves horizontally, so it drops any column a
-        // prior vertical move was holding, for the same reason as the sibling
-        // motion above.
-        move_cursors(&mut editor.selections, new_buf, true, |_| {
-            Some((target_offset, SelectionGoal::None))
-        });
-    } else {
-        apply_primary_range(editor, target_offset..target_offset);
-    }
+    // Landing on a node's bound moves horizontally, so it drops any column a
+    // prior vertical move was holding, for the same reason as the sibling
+    // motion above.
+    move_cursors(&mut editor.selections, buffer_snapshot, extend, |read| {
+        let found = targets.binary_search_by_key(&read.id, |(id, _)| *id).ok()?;
+        Some((targets[found].1, SelectionGoal::None))
+    });
     UpdateEffect::Redraw
+}
+
+/// The offset `count` node-bound steps from the selection covering
+/// `start..end`, whose block cursor covers the cell at `cursor`.
+///
+/// One step takes the innermost named node covering the selection and answers
+/// with the bound `bound` names. Going forward that is the cell just past the
+/// node, so a run of steps walks out through the enclosing constructs one at a
+/// time. Going backward it is the node's own first cell, except where the
+/// cursor already stands there and the step climbs instead, since a node offers
+/// nowhere further back to go.
+///
+/// Each step feeds its landing back as the next collapsed cursor, so a count
+/// repeats the motion rather than widening any single step's reach.
+fn walk_to_node_bound(
+    snapshot: &stoat_language::SyntaxSnapshot,
+    start: usize,
+    end: usize,
+    cursor: usize,
+    bound: NodeBound,
+    count: u32,
+) -> Option<usize> {
+    let (mut start, mut end, mut cursor) = (start, end, cursor);
+    let mut landing = None;
+
+    for _ in 0..count {
+        let layer = deepest_containing_layer(snapshot, start, end)?;
+        let node = layer
+            .tree
+            .root_node()
+            .named_descendant_for_byte_range(start, end)?;
+        let next = match bound {
+            NodeBound::End => node.end_byte(),
+            NodeBound::Start if node.start_byte() == cursor => {
+                find_parent_start(node).unwrap_or(node).start_byte()
+            },
+            NodeBound::Start => node.start_byte(),
+        };
+
+        landing = Some(next);
+        (start, end, cursor) = (next, next, next);
+    }
+
+    landing
+}
+
+/// The nearest named ancestor of `node` that starts before `node` does.
+///
+/// An ancestor sharing the same start byte answers the same offset, which is no
+/// move at all, so the walk passes those by along with the unnamed nodes a
+/// grammar fills in between them.
+fn find_parent_start(node: stoat_language::Node<'_>) -> Option<stoat_language::Node<'_>> {
+    let start = node.start_byte();
+    let mut node = node;
+    while node.start_byte() >= start || !node.is_named() {
+        node = node.parent()?;
+    }
+    Some(node)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -3958,29 +4004,6 @@ fn find_target(rope: &Rope, cursor: usize, kind: FindKind, ch: char, count: u32)
             }
         },
     }
-}
-
-fn apply_primary_range(editor: &mut EditorState, target: Range<usize>) {
-    let new_display = editor.display_map.snapshot();
-    let new_buf = new_display.buffer_snapshot();
-    let widened = Selection {
-        id: 0,
-        start: target.start,
-        end: target.end,
-        reversed: false,
-        goal: SelectionGoal::None,
-    }
-    .min_width_1(new_buf.rope());
-    let new_start = new_buf.anchor_at(widened.start, Bias::Right);
-    let new_end = new_buf.anchor_at(widened.end, Bias::Left);
-    editor.selections.transform(new_buf, |sel| {
-        let mut new = sel.clone();
-        new.start = new_start;
-        new.end = new_end;
-        new.reversed = false;
-        new.goal = SelectionGoal::None;
-        new
-    });
 }
 
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
