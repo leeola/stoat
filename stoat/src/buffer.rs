@@ -1296,9 +1296,15 @@ impl TextBuffer {
     ///
     /// Where undo walks the tree, this walks creation order, so a revision
     /// undone away from and left on a branch is still reachable. Returns the
-    /// selections that go with the revision landed on, or `None` at the root.
+    /// selections that go with the revision landed on, or `None` at the seed.
+    ///
+    /// The seed is the bottom, not the root. A loaded file arrives as an edit
+    /// over the empty buffer, so the root is the state before the file, and
+    /// landing on it toggles the file's own bytes off. [`Self::undo`] refuses
+    /// below [`Self::undo_floor`] for the same reason, and this walk answers to
+    /// it too.
     pub fn earlier(&mut self) -> Option<Arc<[Selection<Anchor>]>> {
-        if self.current == 0 {
+        if self.current == 0 || self.depth_of(self.current - 1) < self.undo_floor {
             return None;
         }
         self.jump_to(self.current - 1)
@@ -1322,6 +1328,10 @@ impl TextBuffer {
     /// sides branch apart there, so no edit appears on both and one toggle pass
     /// covers the move.
     fn jump_to(&mut self, to: usize) -> Option<Arc<[Selection<Anchor>]>> {
+        debug_assert!(
+            self.depth_of(to) >= self.undo_floor,
+            "a revision below the seed holds a state the file never had",
+        );
         self.seal_group(Arc::from([]));
 
         let meet = self.common_ancestor(self.current, to);

@@ -5162,6 +5162,54 @@ fn earlier_reaches_a_state_on_the_abandoned_branch() {
     );
 }
 
+/// Walking back stops at the file, not before it.
+///
+/// A loaded file arrives as an edit over the empty buffer, so the revision
+/// below it is a state the file never had. Landing there toggles its own bytes
+/// off and leaves a buffer that is empty and reads modified, with the file it
+/// came from nowhere in the history.
+#[test]
+fn earlier_stops_at_the_file_it_loaded() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "x\n");
+    h.open_file(&path);
+
+    h.type_keys("i");
+    h.type_text("A");
+    h.type_keys("escape");
+    dispatch(&mut h.stoat, &stoat_action::Undo);
+    h.type_keys("i");
+    h.type_text("B");
+    h.type_keys("escape");
+
+    for _ in 0..3 {
+        dispatch(&mut h.stoat, &stoat_action::Earlier);
+    }
+
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "x\n",
+        "the walk bottoms out on the file rather than on the empty buffer",
+    );
+    assert!(
+        !focused_buffer_dirty(&mut h),
+        "and the file's own bytes are not a modification of it",
+    );
+}
+
+fn focused_buffer_dirty(h: &mut TestHarness) -> bool {
+    let ws = h.stoat.active_workspace();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        crate::pane::View::Editor(id) => id,
+        _ => panic!("focused pane is not an editor"),
+    };
+    let buffer_id = ws.editors[editor_id].buffer_id;
+    let buffer = ws.buffers.get(buffer_id).expect("buffer");
+    let guard = buffer.read().expect("poisoned");
+    guard.dirty
+}
+
 /// A count walks that many states at once rather than one press apiece.
 #[test]
 fn count_prefix_earlier_walks_back_n_steps() {
