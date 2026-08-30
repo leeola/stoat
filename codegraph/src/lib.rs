@@ -221,15 +221,21 @@ impl CodeGraph {
             Target::Unresolved { name, kind } => (name, *kind),
         };
 
-        let mut candidates = self.candidates_for(name, kind);
-        match candidates.len() {
-            1 => (Confidence::Resolved, Some(candidates.remove(0))),
-            0 => (Confidence::NameMatch, None),
+        match self.resolution(name, kind) {
+            (1, key) => (Confidence::Resolved, key),
+            (0, _) => (Confidence::NameMatch, None),
             _ => (Confidence::Ambiguous, None),
         }
     }
 
-    fn candidates_for(&self, name: &str, kind: RefKind) -> Vec<SymbolKey> {
+    /// How many symbols named `name` a `kind` reference accepts, and the first
+    /// of them.
+    ///
+    /// A count rather than the candidates themselves, because the only thing
+    /// asked of the set is whether it holds exactly one. Collecting it cost a
+    /// `Vec` per edge, and a shard merges every one of its edges on the run
+    /// loop.
+    fn resolution(&self, name: &str, kind: RefKind) -> (usize, Option<SymbolKey>) {
         let symbol_kinds: &[SymbolKind] = match kind {
             RefKind::Call => &[SymbolKind::Function, SymbolKind::Method],
             RefKind::Type => &[
@@ -242,13 +248,14 @@ impl CodeGraph {
         };
 
         let Some(entries) = self.by_name.get(name) else {
-            return Vec::new();
+            return (0, None);
         };
         entries
             .iter()
             .filter(|e| symbol_kinds.contains(&e.0))
-            .map(|e| e.1)
-            .collect()
+            .fold((0, None), |(count, first), e| {
+                (count + 1, first.or(Some(e.1)))
+            })
     }
 
     /// Merge one file's [`FileShard`] into the graph.
@@ -264,11 +271,23 @@ impl CodeGraph {
         for sym in shard.symbols {
             files.insert(sym.file);
             let key = sym.key;
-            self.dirty_names.insert(sym.name.clone());
-            self.by_name
-                .entry(sym.name.clone())
-                .or_default()
-                .push((sym.kind, key));
+
+            // Cloned only where a map takes ownership of a name it does not
+            // already hold. A file's symbols repeat names across shards, and a
+            // clone per symbol per drained shard is what this loop paid.
+            if !self.dirty_names.contains(&sym.name) {
+                self.dirty_names.insert(sym.name.clone());
+            }
+            match self.by_name.get_mut(&sym.name) {
+                Some(entries) => entries.push((sym.kind, key)),
+                None => {
+                    self.by_name
+                        .entry(sym.name.clone())
+                        .or_default()
+                        .push((sym.kind, key));
+                },
+            }
+
             self.by_file.entry(sym.file).or_default().push(key);
             self.symbols.insert(key, sym);
         }
@@ -1297,6 +1316,45 @@ mod tests {
             graph.path_relating(k[0], k[0], EdgeKind::Calls).unwrap(),
             vec![k[0]],
             "a symbol relates to itself as the one-step path",
+        );
+    }
+
+    /// One candidate resolves, several are ambiguous, and none is a name match.
+    ///
+    /// The resolution counts matches rather than collecting them, so the count
+    /// alone decides all three answers and nothing tells them apart if it is
+    /// wrong.
+    #[test]
+    fn a_call_resolves_on_one_candidate_and_is_ambiguous_past_that() {
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard_of(FileId(0), "a.rs", "fn only() {}\n"));
+
+        let call = |name: &str| Target::Unresolved {
+            name: name.to_string(),
+            kind: RefKind::Call,
+        };
+
+        assert_eq!(
+            graph.resolve_target(&call("only")),
+            (
+                Confidence::Resolved,
+                Some(key_for(&graph, "only", SymbolKind::Function))
+            ),
+            "one candidate names the symbol the edge links to",
+        );
+        assert_eq!(
+            graph.resolve_target(&call("absent")),
+            (Confidence::NameMatch, None),
+            "and a name the graph never saw stays unresolved",
+        );
+
+        for (file, name) in [(1, "b.rs"), (2, "c.rs"), (3, "d.rs")] {
+            graph.insert_shard(shard_of(FileId(file), name, "fn shared() {}\n"));
+        }
+        assert_eq!(
+            graph.resolve_target(&call("shared")),
+            (Confidence::Ambiguous, None),
+            "three candidates leave the edge pointing at none of them",
         );
     }
 }

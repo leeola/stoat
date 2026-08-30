@@ -3950,7 +3950,11 @@ impl Stoat {
         for workspace in resolve_pending {
             if let Some(ws) = self.workspaces.get_mut(workspace) {
                 ws.code_graph.reresolve_unresolved();
-                if completed.contains(&workspace) {
+                // Counting the edges walks every live one of them twice, which
+                // is the whole graph for a line no subscriber takes.
+                if completed.contains(&workspace)
+                    && tracing::enabled!(target: "stoat::app", tracing::Level::INFO)
+                {
                     let stats = ws.code_graph.stats();
                     tracing::info!(
                         target: "stoat::app",
