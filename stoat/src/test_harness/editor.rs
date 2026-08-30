@@ -7,7 +7,7 @@ use crate::{
     View,
 };
 use std::{path::PathBuf, sync::Arc};
-use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
+use stoat_text::{cursor_offset, Point};
 
 /// Append `text` at offset 0 in the focused editor's buffer, then re-seed the
 /// cursor as a fresh 1-wide block over the first character. Panics if the
@@ -242,20 +242,21 @@ pub(crate) fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// Replace `editor`'s selections with one collapsed cursor at the buffer point
-/// `(row, col)`.
+/// Replace `editor`'s selections with one block cursor over the character at
+/// the buffer point `(row, col)`.
 ///
 /// Drives view tests that need the cursor at a known buffer position without
 /// typing motions to get it there.
+///
+/// The whole set is replaced. Adding to it instead leaves the collection's
+/// seeded cursor on the first character, and a motion then moves two cursors
+/// where the test asked for one.
 pub(crate) fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let offset = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
-    let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
     editor.selections = SelectionsCollection::new();
-    editor
-        .selections
-        .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
+    editor.selections.set_block_cursor(offset, buffer_snapshot);
 }
 
 /// Path of the file backing the focused editor's buffer.

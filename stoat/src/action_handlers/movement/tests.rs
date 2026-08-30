@@ -5127,6 +5127,25 @@ fn count_prefix_unindent_clamps_at_available_indent() {
     assert_eq!(focused_buffer_text(&mut h), "abc\n");
 }
 
+/// The harness cursor helper leaves exactly one selection, so a test reads the
+/// landing its own motion produced.
+///
+/// A collection starts with a seeded cursor on the first character. Adding to
+/// it rather than replacing it leaves two, a motion moves both, and two
+/// landings meeting on one cell merge into a selection carrying neither one's
+/// goal.
+#[test]
+fn place_cursor_leaves_one_selection() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abcdef\n");
+    h.open_file(&path);
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        place_cursor(editor, 0, 4);
+    }
+    assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
+}
+
 #[test]
 fn indent_selection_dedupes_lines_across_multi_cursors() {
     let mut h = TestHarness::with_size(20, 5);
