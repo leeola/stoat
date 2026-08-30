@@ -15,6 +15,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
 };
+use std::cmp::Reverse;
 use stoat_text::{Bias, Selection, SelectionGoal};
 
 /// Object kinds the unimpaired menu steps between.
@@ -173,10 +174,25 @@ fn object_range(
     for _ in 0..count {
         let ranges =
             collect_capture_ranges_for_buffer(ws, buffer_id, at, kind.capture_name(), direction);
+        // Each step travels toward one bound, so that bound picks the winner:
+        // the nearest start ahead, or the nearest end behind. A tie on it goes
+        // to the longer object, which is the outer one of a nested pair.
+        //
+        // The list arrives sorted by start, which is the wrong key going back.
+        // An outer object starts before the one nested in it and ends after,
+        // so reading the greatest start reaches the inner object and steps
+        // over the very one containing it.
         let next = match direction {
-            NavDirection::Next => ranges.into_iter().find(|r| r.start > at),
-            NavDirection::Prev => ranges.into_iter().rev().find(|r| r.end < at),
-        }?;
+            NavDirection::Next => ranges
+                .iter()
+                .filter(|r| r.start > at)
+                .min_by_key(|r| (r.start, Reverse(r.end))),
+            NavDirection::Prev => ranges
+                .iter()
+                .filter(|r| r.end < at)
+                .max_by_key(|r| (r.end, Reverse(r.start))),
+        }
+        .cloned()?;
         at = match direction {
             NavDirection::Next => next.start,
             NavDirection::Prev => next.end.saturating_sub(1),
@@ -458,6 +474,42 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevFunction);
         assert_eq!(selected(&mut h, src), "fn alpha() {}");
+    }
+
+    /// A backward step lands on the object whose end is nearest, which for a
+    /// nested pair is the one written around the other.
+    ///
+    /// Both functions above the cursor end before it, so both are candidates.
+    /// The outer one starts first and ends last, so picking by start reaches
+    /// the inner function and steps over the very object containing it.
+    #[test]
+    fn prev_function_takes_the_outer_of_a_nested_pair() {
+        let src = "fn outer() { fn inner() {} }\nfn after() { 1 }\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, src.find('1').expect("body"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevFunction);
+        assert_eq!(selected(&mut h, src), "fn outer() { fn inner() {} }");
+    }
+
+    /// A forward step lands on the nearest start ahead, so a nested pair is
+    /// entered at the outer function rather than the one written inside it.
+    ///
+    /// The backward step reads the far bound and the forward one the near
+    /// bound, and only the backward rule changes which of a nested pair wins.
+    /// This holds the forward answer steady across that.
+    #[test]
+    fn next_function_takes_the_nearest_start() {
+        let src = "fn before() { 1 }\nfn outer() { fn inner() {} }\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, src.find('1').expect("body"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(selected(&mut h, src), "fn outer() { fn inner() {} }");
     }
 
     /// Alt-. after a function jump repeats the jump, since the motion records
