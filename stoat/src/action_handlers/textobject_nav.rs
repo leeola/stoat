@@ -169,6 +169,11 @@ fn object_range(
     direction: NavDirection,
     count: u32,
 ) -> Option<std::ops::Range<usize>> {
+    let len = ws
+        .buffers
+        .get(buffer_id)
+        .and_then(|buffer| buffer.read().ok().map(|guard| guard.rope().len()))?;
+
     let mut at = cursor;
     let mut found = None;
     for _ in 0..count {
@@ -197,6 +202,14 @@ fn object_range(
         // up on the step that runs out throws away the ground already covered,
         // where the press asked to go as far as the objects allow.
         let Some(next) = next else { break };
+        // An object reaching the end of the buffer is refused, and the next
+        // candidate does not stand in for it, so a file with no trailing
+        // newline offers no object for whatever closes it. The refusal comes
+        // after the winner is chosen for that reason, which is where the
+        // selection side of textobjects puts it too.
+        if next.start >= len || next.end >= len {
+            break;
+        }
         // Both directions resume from the last byte of the object just taken.
         // Resuming a forward step at the object's start leaves everything
         // nested inside it still ahead, so the next step descends rather than
@@ -567,6 +580,52 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
         assert_eq!(selected(&mut h, src), "fn gamma() {}");
+    }
+
+    /// An object running to the end of the buffer offers nothing to step to,
+    /// the way `mi f` already refuses to select one.
+    ///
+    /// A file with no trailing newline ends inside its last function, so that
+    /// function has no closing boundary to land on.
+    #[test]
+    fn next_function_refuses_an_object_at_the_buffer_end() {
+        let src = "fn a() {}\nfn b() {}";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 0);
+
+        let before = cursor_offset(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(
+            cursor_offset(&mut h),
+            before,
+            "the last function is refused"
+        );
+    }
+
+    /// A refused object is not replaced by the next candidate, so a nested one
+    /// ending before the buffer does not stand in for the outer one.
+    ///
+    /// The refusal comes after the winner is chosen. Dropping the reaching
+    /// objects from the candidates first leaves the inner function as the
+    /// nearest start ahead, and the step then lands inside the very object the
+    /// rule refuses.
+    #[test]
+    fn a_refused_object_does_not_fall_back_to_a_nested_one() {
+        let src = "fn a() {}\nfn outer() { fn inner() {} }";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 0);
+
+        let before = cursor_offset(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(
+            cursor_offset(&mut h),
+            before,
+            "the inner function does not replace the refused outer one",
+        );
     }
 
     #[test]
