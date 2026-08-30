@@ -128,19 +128,24 @@ fn run_shell(
     Ok(text)
 }
 
-/// Text the primary selection covers, or empty where no editor is focused.
+/// Text the first selection covers, or empty where no editor is focused.
 ///
 /// Insert and append pipe nothing, so this is the selection their trailing
-/// newline is measured against.
-fn primary_text(stoat: &mut Stoat) -> String {
+/// newline is measured against. One run feeds every selection, so one of them
+/// has to set the trim, and the first in the document is the one the user
+/// reads the result from. The primary is wherever a multi-cursor gesture
+/// happened to leave it, which the output has nothing to do with.
+fn first_selection_text(stoat: &mut Stoat) -> String {
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return String::new();
     };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let primary = editor.selections.newest_anchor();
-    let start = buffer_snapshot.resolve_anchor(&primary.start);
-    let end = buffer_snapshot.resolve_anchor(&primary.end);
+    let Some(first) = editor.selections.all_anchors().first() else {
+        return String::new();
+    };
+    let start = buffer_snapshot.resolve_anchor(&first.start);
+    let end = buffer_snapshot.resolve_anchor(&first.end);
     buffer_snapshot.rope().chunks_in_range(start..end).collect()
 }
 
@@ -340,7 +345,7 @@ fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd
 
 fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
-    let output = match run_shell(shell_host, cmd, "", &primary_text(stoat), &diff) {
+    let output = match run_shell(shell_host, cmd, "", &first_selection_text(stoat), &diff) {
         Ok(output) => output,
         Err(message) => {
             stoat.set_status(message);
@@ -357,7 +362,7 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
-    let output = match run_shell(shell_host, cmd, "", &primary_text(stoat), &diff) {
+    let output = match run_shell(shell_host, cmd, "", &first_selection_text(stoat), &diff) {
         Ok(output) => output,
         Err(message) => {
             stoat.set_status(message);
@@ -594,6 +599,35 @@ mod tests {
         h.type_text("date");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         assert_eq!(buffer_text(&mut h), "xMon Jan 1y");
+    }
+
+    /// One run feeds every selection, and the first selection in the document
+    /// decides whether the output keeps its trailing newline.
+    ///
+    /// Here the first selection ends without one and the primary ends with one,
+    /// so the two answer differently. Measuring against the primary keeps a
+    /// newline the command added of its own accord, and every insert gets it.
+    #[test]
+    fn insert_output_trims_against_the_first_selection() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "echo hi",
+            ShellOutput {
+                stdout: b"hi\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("foo\nbar\n");
+        select_range(&mut h, 0, 3);
+        add_range(&mut h, 4, 8);
+
+        dispatch(&mut h.stoat, &action::ShellInsertOutput);
+        h.type_text("echo hi");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(buffer_text(&mut h), "hifoo\nhibar\n");
     }
 
     /// Insert writes at each selection's start, so a forward selection gets the
