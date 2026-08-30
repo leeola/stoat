@@ -576,6 +576,8 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
 }
 
 pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -> UpdateEffect {
+    // Rows in from the named edge, so a bare motion lands on the edge itself.
+    let count = stoat.take_pending_count().unwrap_or(1).saturating_sub(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -587,10 +589,12 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
     let rope = buffer_snapshot.rope();
     let max_display_row = display_snapshot.max_point().row;
 
+    // A count reaches in from whichever edge the motion names. The middle has
+    // no edge to count from, so it ignores one.
     let offset = match align {
-        WindowAlign::Top => 0,
+        WindowAlign::Top => count,
         WindowAlign::Center => viewport / 2,
-        WindowAlign::Bottom => viewport.saturating_sub(1),
+        WindowAlign::Bottom => viewport.saturating_sub(1).saturating_sub(count),
     };
     let target_row = scroll_row.saturating_add(offset).min(max_display_row);
 
@@ -1964,6 +1968,42 @@ mod tests {
         let positions = h.cursor_display_positions();
         assert_eq!(positions, vec![(scroll_row, 0)]);
         assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    /// A count picks which visible row the goto lands on, counting in from the
+    /// edge it names.
+    ///
+    /// The digit rides the chord. `g` binds to a mode switch alone, which
+    /// leaves the pending count for `t` to read. A handler that never reads it
+    /// lands every count on the row a bare `gt` reaches.
+    #[test]
+    fn goto_window_with_a_count_counts_rows_in_from_its_edge() {
+        // A fresh view per gesture. Landing in the scrolloff band scrolls the
+        // view, so a second gesture in the same harness counts from a moved
+        // edge.
+        let landed = |keys: &str| {
+            let mut h = TestHarness::with_size(30, 10);
+            let path = h.write_file("s.txt", &page_scratch_content());
+            h.open_file(&path);
+            h.type_keys("ctrl-f");
+            h.type_keys(keys);
+            h.cursor_display_positions()[0].0
+        };
+
+        let (top, bottom) = (landed("g t"), landed("g b"));
+        assert!(bottom > top + 2, "the viewport holds rows to count across");
+
+        assert_eq!(landed("3 g t"), top + 2, "the third row down from the top");
+        assert_eq!(
+            landed("3 g b"),
+            bottom - 2,
+            "the third row up from the bottom",
+        );
+        assert_eq!(
+            landed("3 g c"),
+            landed("g c"),
+            "the middle has no edge to count in from",
+        );
     }
 
     #[test]
