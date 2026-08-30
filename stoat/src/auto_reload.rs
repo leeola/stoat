@@ -143,7 +143,11 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
             .active_workspace_mut()
             .buffers
             .set_line_ending(id, LineEnding::detect(&new));
-        let new = LineEnding::normalize(&new).into_owned();
+
+        // Borrowed rather than owned. A file already holding LF normalizes to
+        // itself, and taking the copy that ends the borrow costs the whole file
+        // to reach text the reload only reads.
+        let normalized = LineEnding::normalize(&new);
 
         let (old_len, old_last_row, common) = {
             let guard = buffer.read().expect("buffer poisoned");
@@ -151,13 +155,13 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
             (
                 text.len(),
                 text.max_point().row,
-                common_prefix_len(text.chunks(), &new),
+                common_prefix_len(text.chunks(), &normalized),
             )
         };
-        // The buffer is a prefix of `new` only when every one of its bytes
+        // The buffer is a prefix of the file only when every one of its bytes
         // matched, which is the appended-log fast path.
         let appended = common == old_len;
-        if appended && new.len() == old_len {
+        if appended && normalized.len() == old_len {
             stoat
                 .active_workspace_mut()
                 .buffers
@@ -193,10 +197,10 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
         {
             let mut guard = buffer.write().expect("buffer poisoned");
             if appended {
-                guard.edit(old_len..old_len, &new[old_len..]);
+                guard.edit(old_len..old_len, &normalized[old_len..]);
             } else {
-                let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &new);
-                guard.edit(old_span, &new[new_span]);
+                let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &normalized);
+                guard.edit(old_span, &normalized[new_span]);
             }
             guard.mark_clean();
         }
@@ -378,7 +382,10 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
         .active_workspace_mut()
         .buffers
         .set_line_ending(id, LineEnding::detect(&new));
-    let new = LineEnding::normalize(&new).into_owned();
+
+    // Borrowed rather than owned, as the pump's own reload is.
+    let normalized = LineEnding::normalize(&new);
+
     let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
         return ReloadOutcome::Missing;
     };
@@ -386,9 +393,9 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
     let (old_len, common) = {
         let guard = buffer.read().expect("buffer poisoned");
         let text = &guard.snapshot.visible_text;
-        (text.len(), common_prefix_len(text.chunks(), &new))
+        (text.len(), common_prefix_len(text.chunks(), &normalized))
     };
-    let unchanged = common == old_len && new.len() == old_len;
+    let unchanged = common == old_len && normalized.len() == old_len;
 
     if unchanged {
         if buffer.read().expect("buffer poisoned").dirty {
@@ -396,8 +403,8 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
         }
     } else {
         let mut guard = buffer.write().expect("buffer poisoned");
-        let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &new);
-        guard.edit(old_span, &new[new_span]);
+        let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &normalized);
+        guard.edit(old_span, &normalized[new_span]);
         guard.mark_clean();
     }
     stoat
