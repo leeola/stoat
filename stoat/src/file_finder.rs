@@ -1399,6 +1399,8 @@ mod tests {
 
         h.type_keys("space p");
         h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
         let walked = walked_dirs(&h);
 
         h.type_keys("space p");
@@ -1423,6 +1425,8 @@ mod tests {
 
         h.type_keys("space p");
         h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
         let walked = walked_dirs(&h);
 
         h.fake_fs_watcher()
@@ -1442,6 +1446,8 @@ mod tests {
 
         h.type_keys("space p");
         h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
         let walked = walked_dirs(&h);
         let epoch = h.stoat.finder_path_epoch;
 
@@ -1473,6 +1479,8 @@ mod tests {
 
         h.type_keys("space p");
         h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
         let walked = walked_dirs(&h);
         let epoch = h.stoat.finder_path_epoch;
 
@@ -2402,6 +2410,8 @@ mod tests {
 
         h.type_keys("space p");
         h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
         let walked = walked_dirs(&h);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
@@ -2440,6 +2450,8 @@ mod tests {
         h.settle();
         h.type_keys("escape");
         h.settle();
+        h.stoat.drain_index_updates();
+
         let walked = walked_dirs(&h);
 
         h.type_keys("space p");
@@ -2450,5 +2462,38 @@ mod tests {
             "the finder read the modal's walk rather than walking",
         );
         assert_eq!(base_paths(&h), ["a.rs", "b.rs"], "and lists every file");
+    }
+
+    /// The startup index build walks the whole tree, so the first finder open
+    /// has nothing left to find out.
+    ///
+    /// That open is the one a user reaches for seconds after launch, and on a
+    /// large repository the walk it repeats is the wait they notice.
+    #[test]
+    fn the_index_build_leaves_the_first_finder_open_nothing_to_walk() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}"), ("src/b.rs", "")]);
+        h.fake_git.add_repo(root.clone());
+
+        h.stoat.start_index_build();
+        h.settle();
+
+        h.stoat.drain_index_updates();
+
+        let walked = walked_dirs(&h);
+        assert!(walked > 0, "the build walked the tree");
+
+        h.type_keys("space p");
+
+        assert_eq!(
+            walked_dirs(&h),
+            walked,
+            "the open read the build's list rather than walking",
+        );
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs", "src/b.rs"],
+            "and lists every file the build found",
+        );
     }
 }

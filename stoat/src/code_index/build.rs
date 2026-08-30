@@ -48,6 +48,16 @@ pub(crate) enum IndexUpdate {
     Complete {
         workspace: WorkspaceId,
         manifest: Manifest,
+        /// Every file the build's walk yielded, which is the same tree the
+        /// file finder walks on its first open.
+        ///
+        /// Wider than the manifest, which holds only the files a language
+        /// extracted. The finder lists what the workspace contains.
+        walked: Vec<PathBuf>,
+        /// The `finder_path_epoch` this build spawned under, which stamps the
+        /// cache `walked` becomes. A tree that moved while the build ran leaves
+        /// the stamp behind the epoch, and the next finder open walks instead.
+        walk_epoch: u64,
     },
     /// One file's freshly re-extracted shard. The drain evicts the file's
     /// prior symbols, inserts these, and re-resolves so callers of the
@@ -101,6 +111,7 @@ pub(crate) fn build_index(
     git_root: PathBuf,
     workspace: WorkspaceId,
     index_dir: Option<PathBuf>,
+    walk_epoch: u64,
 ) -> Task<()> {
     let IndexBuild {
         fs,
@@ -134,9 +145,14 @@ pub(crate) fn build_index(
         // across cores is what keeps a cold build of a large repo from being
         // one core's worth of work.
         let entries: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
+
+        // Every path the walk yielded, not only the ones a language extracted.
+        // This walk is the same one the file finder makes on its first open, so
+        // recording it here spares that one entirely.
+        let walked: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
         let cancelled = AtomicBool::new(false);
         fs.walk_workspace_files_parallel(&git_root, &|batch| {
-            for path in batch {
+            for path in &batch {
                 // The receiver drops on quit. Stop the walk instead of scanning
                 // the rest of the tree while the runtime blocks on shutdown.
                 if tx.is_closed() {
@@ -149,7 +165,7 @@ pub(crate) fn build_index(
                     &git_root,
                     index_dir.as_deref(),
                     &known,
-                    &path,
+                    path,
                 ) else {
                     continue;
                 };
@@ -186,6 +202,11 @@ pub(crate) fn build_index(
                 }
                 redraw.notify_one();
             }
+
+            // Past the early returns, so a walk the shutdown cut short records
+            // nothing. Its list covers part of the tree, and a finder seeded
+            // from that silently loses whatever the walk never reached.
+            walked.lock().expect("walked paths poisoned").extend(batch);
             ControlFlow::Continue(())
         });
 
@@ -218,6 +239,8 @@ pub(crate) fn build_index(
         let _ = tx.send(IndexUpdate::Complete {
             workspace,
             manifest,
+            walked: walked.into_inner().expect("walked paths poisoned"),
+            walk_epoch,
         });
         redraw.notify_one();
         tracing::info!(
@@ -557,6 +580,7 @@ mod tests {
             PathBuf::from("/repo"),
             WorkspaceId::default(),
             index_dir,
+            0,
         );
         scheduler.run_until_parked();
         drop(task);

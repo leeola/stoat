@@ -261,6 +261,27 @@ pub fn manual_walk_streaming(
     }
 }
 
+/// The walk every workspace traversal is built from.
+///
+/// Four of them run over the same tree: the finder's list, the code-search
+/// scan, the index build, and the directory sweep the watcher registers. Their
+/// answers stand in for each other, and only settings stated in one place keep
+/// that true. What separates them is which entries they yield and whether they
+/// walk on one thread or many.
+fn workspace_walk_builder(root: &Path) -> WalkBuilder {
+    let defaults = build_default_ignore(root);
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .require_git(false)
+        .add_custom_ignore_filename(".stoatignore")
+        .filter_entry(move |entry| {
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            !defaults.matched(entry.path(), is_dir).is_ignore()
+        });
+    builder
+}
+
 /// Build the baked-in ignore matcher from [`DEFAULT_STOATIGNORE`],
 /// rooted at `root` so glob expansion treats the workspace as the
 /// pattern base.
@@ -538,16 +559,7 @@ impl FsHost for LocalFs {
     }
 
     fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf> {
-        let defaults = build_default_ignore(root);
-        let walker = WalkBuilder::new(root)
-            .hidden(false)
-            .require_git(false)
-            .add_custom_ignore_filename(".stoatignore")
-            .filter_entry(move |entry| {
-                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-                !defaults.matched(entry.path(), is_dir).is_ignore()
-            })
-            .build();
+        let walker = workspace_walk_builder(root).build();
 
         let mut out = Vec::new();
         for entry in walker.flatten() {
@@ -560,16 +572,7 @@ impl FsHost for LocalFs {
     }
 
     fn walk_workspace_dirs(&self, root: &Path) -> Vec<PathBuf> {
-        let defaults = build_default_ignore(root);
-        let walker = WalkBuilder::new(root)
-            .hidden(false)
-            .require_git(false)
-            .add_custom_ignore_filename(".stoatignore")
-            .filter_entry(move |entry| {
-                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-                !defaults.matched(entry.path(), is_dir).is_ignore()
-            })
-            .build();
+        let walker = workspace_walk_builder(root).build();
 
         let mut out = Vec::new();
         for entry in walker.flatten() {
@@ -586,16 +589,7 @@ impl FsHost for LocalFs {
         root: &Path,
         on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
     ) {
-        let defaults = build_default_ignore(root);
-        let walker = WalkBuilder::new(root)
-            .hidden(false)
-            .require_git(false)
-            .add_custom_ignore_filename(".stoatignore")
-            .filter_entry(move |entry| {
-                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-                !defaults.matched(entry.path(), is_dir).is_ignore()
-            })
-            .build();
+        let walker = workspace_walk_builder(root).build();
 
         let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
         for entry in walker.flatten() {
@@ -619,16 +613,7 @@ impl FsHost for LocalFs {
         root: &Path,
         on_batch: &(dyn Fn(Vec<PathBuf>) -> ControlFlow<()> + Sync),
     ) {
-        let defaults = build_default_ignore(root);
-        let walker = WalkBuilder::new(root)
-            .hidden(false)
-            .require_git(false)
-            .add_custom_ignore_filename(".stoatignore")
-            .filter_entry(move |entry| {
-                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-                !defaults.matched(entry.path(), is_dir).is_ignore()
-            })
-            .build_parallel();
+        let walker = workspace_walk_builder(root).build_parallel();
 
         walker.run(|| {
             // Each visitor owns its buffer, so batches never cross threads and

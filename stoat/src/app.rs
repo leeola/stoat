@@ -3739,7 +3739,35 @@ impl Stoat {
             git_root,
             workspace,
             index_dir,
+            self.finder_path_epoch,
         ));
+    }
+
+    /// File a completed index build's walk as the finder's cached path list.
+    ///
+    /// The build walks the whole workspace tree, and the finder walks the same
+    /// one on its first open. Filing it here is what makes that first open
+    /// instant on a repository large enough for the walk to be felt.
+    ///
+    /// Takes only what nothing else holds. A cache already filed stands, a
+    /// finder open has the paths in hand, and an epoch the tree moved past
+    /// since the build spawned names a list the events already overtook.
+    fn seed_finder_paths(&mut self, workspace: WorkspaceId, walked: Vec<PathBuf>, epoch: u64) {
+        if self.finder_path_cache.is_some()
+            || self.file_finder.is_some()
+            || epoch != self.finder_path_epoch
+        {
+            return;
+        }
+        let Some(ws) = self.workspaces.get(workspace) else {
+            return;
+        };
+
+        self.finder_path_cache = Some(FinderPathCache {
+            root: ws.git_root.clone(),
+            paths: Arc::new(walked),
+            epoch,
+        });
     }
 
     /// Where the index for `git_root` persists, or `None` when it does not.
@@ -3790,7 +3818,7 @@ impl Stoat {
     /// At most [`INDEX_DRAIN_CAP`] updates are processed per call. On hitting
     /// the cap the drain schedules a redraw and returns, leaving the remainder
     /// queued for the next turn.
-    fn drain_index_updates(&mut self) {
+    pub(crate) fn drain_index_updates(&mut self) {
         let started = std::time::Instant::now();
         let mut resolve_pending: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
@@ -3822,9 +3850,12 @@ impl Stoat {
                 IndexUpdate::Complete {
                     workspace,
                     manifest,
+                    walked,
+                    walk_epoch,
                 } => {
                     resolve_pending.insert(workspace);
                     completed.insert(workspace);
+                    self.seed_finder_paths(workspace, walked, walk_epoch);
                     if let Some(dir) = self.index_dir_for_workspace(workspace, &mut dirs) {
                         writes.entry(dir).or_default().completed = Some(manifest);
                     }
