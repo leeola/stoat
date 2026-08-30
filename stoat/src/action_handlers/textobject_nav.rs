@@ -192,11 +192,16 @@ fn object_range(
                 .filter(|r| r.end < at)
                 .max_by_key(|r| (r.end, Reverse(r.start))),
         }
-        .cloned()?;
-        at = match direction {
-            NavDirection::Next => next.start,
-            NavDirection::Prev => next.end.saturating_sub(1),
-        };
+        .cloned();
+        // A count reaching past the last object walks as far as it goes. Giving
+        // up on the step that runs out throws away the ground already covered,
+        // where the press asked to go as far as the objects allow.
+        let Some(next) = next else { break };
+        // Both directions resume from the last byte of the object just taken.
+        // Resuming a forward step at the object's start leaves everything
+        // nested inside it still ahead, so the next step descends rather than
+        // moving on.
+        at = next.end.saturating_sub(1);
         found = Some(next);
     }
     found
@@ -474,6 +479,43 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevFunction);
         assert_eq!(selected(&mut h, src), "fn alpha() {}");
+    }
+
+    /// A counted step resumes past the object it reached, so the second step
+    /// leaves the first object rather than descending into it.
+    ///
+    /// Everything nested inside the first function starts after the first
+    /// function's own start, so resuming there leaves the inner one still
+    /// ahead and the second step lands on it.
+    #[test]
+    fn count_prefix_next_function_steps_over_a_nested_one() {
+        let src = "fn head() { 1 }\nfn outer() { fn inner() {} }\nfn tail() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, src.find('1').expect("body"));
+
+        h.stoat.pending_count = Some(2);
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(selected(&mut h, src), "fn tail() {}");
+    }
+
+    /// A count reaching past the last object walks as far as it goes and stops
+    /// there, rather than abandoning the whole motion.
+    ///
+    /// A user pressing a large count means "as far as this goes", and giving
+    /// up on the step that runs out throws away the ground already covered.
+    #[test]
+    fn count_prefix_past_the_last_function_keeps_the_last_reached() {
+        let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 0);
+
+        h.stoat.pending_count = Some(5);
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(selected(&mut h, src), "fn gamma() {}");
     }
 
     /// A backward step lands on the object whose end is nearest, which for a
