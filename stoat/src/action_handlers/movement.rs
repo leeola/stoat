@@ -310,10 +310,7 @@ fn move_vertical_by(
 ) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     let delta = (delta as i64).saturating_mul(count as i64);
-    // Clip toward the direction of travel so a block row (e.g. a review
-    // chunk header) snaps to the buffer row past it rather than back to the
-    // one just left, which would strand the cursor at the block boundary.
-    let clip_bias = if delta > 0 { Bias::Right } else { Bias::Left };
+    let travel = if delta > 0 { Bias::Right } else { Bias::Left };
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -365,11 +362,7 @@ fn move_vertical_by(
         // rather than past the buffer. A step that reaches the row it started
         // on still lands, collapsing a wide selection the way `h` at the buffer
         // start does.
-        //
-        // Snapping through the clip is what carries the cursor off a row that
-        // holds no text, a fold placeholder or a diff block row, onto the next
-        // one in the travel direction.
-        let clipped = display_snapshot.clip_point(DisplayPoint::new(new_row, goal_col), clip_bias);
+        let clipped = clip_to_goal(&display_snapshot, new_row, goal_col, travel);
         let buffer_pt = display_snapshot.display_to_buffer(clipped)?;
         if extend && Some(buffer_pt.row) == empty_final_row {
             return None;
@@ -384,6 +377,32 @@ fn move_vertical_by(
         landing_for(read.head, read.tail, read.goal)
     });
     UpdateEffect::Redraw
+}
+
+/// Where a motion carrying the cell column `goal` lands on display `row`.
+///
+/// A tab or a wide glyph covers several cells, so a goal inside one names no
+/// position of its own. Both directions answer with the glyph the goal sits in,
+/// which is the cell under the column the user aimed at. Resolving forward
+/// instead hands back the character after it, so the same column reads as two
+/// different cells depending on which way the cursor arrived.
+///
+/// `travel` decides only which row to leave for. A row holding no text at all,
+/// a fold placeholder or a diff block row, has no position on it to answer
+/// with, and clipping left there walks back the way the motion came. The second
+/// clip covers that case and only that case.
+pub(super) fn clip_to_goal(
+    display: &DisplaySnapshot,
+    row: u32,
+    goal: u32,
+    travel: Bias,
+) -> DisplayPoint {
+    let point = DisplayPoint::new(row, goal);
+    let clipped = display.clip_point(point, Bias::Left);
+    if clipped.row == row {
+        return clipped;
+    }
+    display.clip_point(point, travel)
 }
 
 pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> UpdateEffect {

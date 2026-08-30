@@ -100,16 +100,15 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     // Move the cursor in display rows so it tracks the scroll leg below one for
     // one across block rows. A downward jump past the last display row lands on
     // the final cell, since the empty buffer row beyond it has no display row of
-    // its own. Otherwise clip toward the direction of travel so a block row
-    // snaps to the buffer row past it rather than back to the one just left.
+    // its own.
     let target_point = match target_row >= max_point.row {
         true => max_point,
         false => {
-            let bias = match dir {
+            let travel = match dir {
                 PageDir::Up => Bias::Left,
                 PageDir::Down => Bias::Right,
             };
-            display_snapshot.clip_point(DisplayPoint::new(target_row, current.column), bias)
+            movement::clip_to_goal(&display_snapshot, target_row, current.column, travel)
         },
     };
     // A full page scrolls even where the cursor keeps its row, so the view
@@ -537,7 +536,7 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
         .saturating_sub(bottom)
         .min(max_row);
 
-    let (target_row, clip_bias) = if cursor_row < band_top {
+    let (target_row, travel) = if cursor_row < band_top {
         (band_top.min(max_row), Bias::Right)
     } else if cursor_row > band_bottom {
         (band_bottom, Bias::Left)
@@ -566,7 +565,7 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
         if new_row == cursor_display.row {
             return None;
         }
-        let clipped = snapshot.clip_point(DisplayPoint::new(new_row, goal_col), clip_bias);
+        let clipped = movement::clip_to_goal(&snapshot, new_row, goal_col, travel);
         let buffer_pt = snapshot.display_to_buffer(clipped)?;
         Some((
             rope.point_to_offset(buffer_pt),
@@ -1062,6 +1061,31 @@ mod tests {
             cursor_row - scroll,
             2,
             "the cursor's display row keeps the intended 2-row top margin",
+        );
+    }
+
+    /// A downward step onto a block row carries on downward, landing on the
+    /// buffer row below the block rather than the one above it.
+    ///
+    /// A block row holds no text, so a position on it resolves to the nearest
+    /// row that does. Searching left from a row a `j` just reached walks back to
+    /// the row the motion started from, which leaves the cursor where it was.
+    /// The direction of travel is what picks the far side of the block.
+    #[test]
+    fn a_downward_step_onto_a_block_row_lands_below_it() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_with_deleted_block(&mut h);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 0);
+        }
+
+        movement::move_vertical(&mut h.stoat, 1, false);
+
+        assert_eq!(
+            focused_cursor_point(&mut h.stoat),
+            Point::new(1, 0),
+            "j crosses the block to the buffer row under it",
         );
     }
 

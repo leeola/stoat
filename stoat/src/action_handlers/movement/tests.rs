@@ -671,6 +671,87 @@ fn vertical_motion_lands_on_the_visual_column_of_a_wide_line() {
     assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(1, 6));
 }
 
+/// Replace the focused editor's selections with one block cursor over the
+/// character at the buffer point `(row, col)`.
+///
+/// [`place_cursor`] adds to the set, leaving the collection's seeded cursor at
+/// offset 0 behind it. A motion then moves both, and two landings that meet on
+/// the same cell merge into one whose goal is neither's. This leaves exactly
+/// one selection, so a landing reads back as the motion left it.
+fn only_cursor_at(h: &mut TestHarness, row: u32, col: u32) {
+    let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+    let snapshot = editor.display_map.snapshot();
+    let buf = snapshot.buffer_snapshot();
+    let offset = buf.rope().point_to_offset(Point::new(row, col));
+    editor.selections.set_block_cursor(offset, buf);
+}
+
+/// A goal column that falls inside a tab resolves to the tab, in whichever
+/// direction the motion arrived from.
+///
+/// The tab covers cells 0 through 3, and a goal of 2 names none of them on its
+/// own. The cell the user sees under that column is the tab, so both `j` and
+/// `k` answer with it. Resolving forward instead hands back the character
+/// after the tab, which is four cells from where the motion aimed.
+#[test]
+fn a_goal_inside_a_tab_lands_on_the_tab_from_either_side() {
+    let landing = |content: &str, from_row: u32, delta: i32| {
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("tabbed.rs", content);
+        h.open_file(&path);
+        only_cursor_at(&mut h, from_row, 2);
+        move_vertical(&mut h.stoat, delta, false);
+        focused_cursor_point(&mut h.stoat)
+    };
+
+    assert_eq!(
+        landing("xyzwuvst\n\tabc\n", 0, 1),
+        Point::new(1, 0),
+        "j onto the tabbed line rests on the tab",
+    );
+    assert_eq!(
+        landing("\tabc\nxyzwuvst\n", 1, -1),
+        Point::new(0, 0),
+        "k onto the tabbed line rests on the tab too",
+    );
+}
+
+/// A goal column that falls inside a wide glyph resolves to that glyph.
+///
+/// Each ideograph covers two cells, so a goal of 5 sits in the second half of
+/// the third one, which starts at byte 6. Resolving forward hands back the
+/// fourth ideograph at byte 9 instead, two cells past where the motion aimed.
+#[test]
+fn a_goal_inside_a_wide_glyph_lands_on_that_glyph() {
+    let mut h = TestHarness::with_size(40, 12);
+    let path = h.write_file("cjk.rs", "abcdefgh\n\u{4e00}\u{4e01}\u{4e02}\u{4e03}\n");
+    h.open_file(&path);
+    only_cursor_at(&mut h, 0, 5);
+
+    move_vertical(&mut h.stoat, 1, false);
+
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(1, 6));
+}
+
+/// The goal column a motion carries survives a landing that resolves it to a
+/// glyph start, so a step onto a tab and back returns to where it started.
+///
+/// The landing sits at display column 0, four cells left of the goal. The
+/// motion must carry the goal onward, not the landed column, which strands the
+/// return trip at the start of the line it came from.
+#[test]
+fn a_landing_on_a_tab_keeps_the_goal_column() {
+    let mut h = TestHarness::with_size(40, 12);
+    let path = h.write_file("tabbed.rs", "xyzwuvst\n\tabc\n");
+    h.open_file(&path);
+    only_cursor_at(&mut h, 0, 2);
+
+    move_vertical(&mut h.stoat, 1, false);
+    move_vertical(&mut h.stoat, -1, false);
+
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 2));
+}
+
 #[test]
 fn vertical_motion_lands_past_a_tab_on_the_target_line() {
     // Visual column 4 on the line below is the character after the tab, at
