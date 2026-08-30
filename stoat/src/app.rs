@@ -16958,7 +16958,7 @@ mod tests {
     #[test]
     fn a_word_delete_backward_keeps_a_combining_mark_with_its_base() {
         let mut h = Stoat::test();
-        let path = open_scratch_file(&mut h, "cafe\u{301}x");
+        let path = open_scratch_file(&mut h, "cafe\u{301}");
         h.type_keys("A");
         h.type_keys("alt-backspace");
         assert_eq!(

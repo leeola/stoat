@@ -260,6 +260,11 @@ fn prev_word_start_with<F: Fn(char, char) -> bool>(
 /// past a trailing newline run (so the head runs back through a blank line), and
 /// retreats onto the head when the cell at `from` is itself a line ending (so
 /// `b` on a newline excludes it) or at the first target boundary at `head_start`.
+///
+/// A `None` `prev_ch` (the zero-width cursor past the last character of a file
+/// with no trailing newline) counts as an unconditional target, mirroring
+/// Helix. Nothing sits under that cursor, so the boundary straddling it is
+/// still ahead of the scan and the last span answers.
 fn backward_word_range<C, T>(
     rope: &Rope,
     anchor_in: usize,
@@ -276,13 +281,8 @@ where
     }
 
     let mut iter = rope.reversed_chars_at(from).peekable();
-    let (mut head, mut prev_ch) = match rope.chars_at(from).next() {
-        Some(seed) => (from, seed),
-        None => match iter.next() {
-            Some(seed) => (from - seed.len_utf8(), seed),
-            None => return (anchor_in, from),
-        },
-    };
+    let mut head = from;
+    let mut prev_ch = rope.chars_at(from).next();
     let mut anchor = anchor_in;
 
     while let Some(&ch) = iter.peek() {
@@ -291,9 +291,9 @@ where
         }
         iter.next();
         head -= ch.len_utf8();
-        prev_ch = ch;
+        prev_ch = Some(ch);
     }
-    if char_is_line_ending(prev_ch) {
+    if prev_ch.is_some_and(char_is_line_ending) {
         anchor = head;
     }
 
@@ -302,15 +302,18 @@ where
         let Some(ch) = iter.next() else {
             return (anchor, head);
         };
-        let boundary = is_boundary(prev_ch, ch);
-        if is_target(prev_ch, ch, boundary) {
+        let reached = match prev_ch {
+            None => true,
+            Some(prev) => is_target(prev, ch, is_boundary(prev, ch)),
+        };
+        if reached {
             if head == head_start {
                 anchor = head;
             } else {
                 return (anchor, head);
             }
         }
-        prev_ch = ch;
+        prev_ch = Some(ch);
         head -= ch.len_utf8();
     }
 }
@@ -853,6 +856,18 @@ mod tests {
     fn prev_word_start_from_end() {
         let r = rope("hello world");
         assert_eq!(prev_word_start(&r, 11), 6);
+    }
+
+    /// The zero-width cursor past the last character of a file with no trailing
+    /// newline has no character under it, so the boundary straddling it is
+    /// still ahead of the scan and the last span is the answer.
+    ///
+    /// Seeding the scan off the character behind the cursor instead puts that
+    /// boundary behind it, and the motion runs on to the span before the last.
+    #[test]
+    fn prev_word_start_from_the_phantom_end_takes_the_last_span() {
+        let r = rope("foo bar.");
+        assert_eq!(prev_word_start_range(&r, 8, 8), (8, 7));
     }
 
     #[test]
