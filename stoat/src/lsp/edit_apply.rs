@@ -843,4 +843,32 @@ mod tests {
             .expect_err("expected error");
         assert!(matches!(err, WorkspaceEditError::UriNotFile { .. }));
     }
+
+    /// A server's own terminators never reach the rope.
+    ///
+    /// A formatter echoes the document's endings, so one run over a CRLF file
+    /// hands back `\r\n` pairs. The buffer holds LF and the save restores the
+    /// file's terminator from it, so a pair landing in the rope grows another
+    /// `\r` on every save after.
+    #[test]
+    fn a_server_edit_carrying_crlf_lands_as_lf() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abc\n");
+
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(file_uri(&path), vec![text_edit(0, 3, 3, "\r\nd\r\ne")]);
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abc\nd\ne\n",
+            "the server's terminators arrive as the buffer's own",
+        );
+    }
 }

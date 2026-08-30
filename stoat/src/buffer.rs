@@ -5,8 +5,8 @@ pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
     Anchor, Bias, Cursor, Dimensions, Edit as TreeEdit, Fragment, IndentStyle, InsertionFragment,
-    InsertionFragmentKey, KeyedItem, Locator, Point, Rope, RopeCursor, Selection, SumTree, UndoMap,
-    UndoOperation,
+    InsertionFragmentKey, KeyedItem, LineEnding, Locator, Point, Rope, RopeCursor, Selection,
+    SumTree, UndoMap, UndoOperation,
 };
 
 /// Op-log length past which [`TextBuffer::history`] persists a compacted seed
@@ -423,13 +423,22 @@ impl TextBuffer {
             return;
         }
 
+        // The buffer holds LF whatever a caller hands it, for the reason
+        // [`Self::edit`] gives. Normalized once up front so every reader below
+        // takes the same bytes, and indexed by the caller's own position so
+        // the descending walk reaches each edit's text through its own `k`.
+        let texts: Vec<Cow<'_, str>> = edits
+            .iter()
+            .map(|(_, text)| LineEnding::normalize(text))
+            .collect();
+
         // Ops and timestamps follow the caller's descending order, so the
         // recorded history is byte-identical to the sequential calls.
         let base = self.next_timestamp;
-        for (k, (range, text)) in edits.iter().enumerate() {
+        for (k, (range, _)) in edits.iter().enumerate() {
             self.ops.push(BufferOp::Edit {
                 old: range.clone(),
-                text: (*text).to_owned(),
+                text: texts[k].to_string(),
             });
             self.record_edit(base + k as u64);
         }
@@ -484,12 +493,12 @@ impl TextBuffer {
             ascending[0].1 .0.start,
         );
 
-        for (k, (range, text)) in &ascending {
+        for (k, (range, _)) in &ascending {
             deleted_rope.skip_to(range.start);
             splice_one_range(
                 SpliceRange {
                     range: range.clone(),
-                    text_len: text.len(),
+                    text_len: texts[*k].len(),
                     timestamp: base + *k as u64,
                 },
                 &mut SpliceState {
@@ -511,9 +520,9 @@ impl TextBuffer {
         let visible_text = {
             let mut out = Rope::new();
             let mut reader = RopeCursor::new(&self.snapshot.visible_text, 0);
-            for (_, (range, text)) in &ascending {
+            for (k, (range, _)) in &ascending {
                 out.append(reader.slice(range.start));
-                out.push(text);
+                out.push(&texts[*k]);
                 reader.seek_forward(range.end);
             }
             out.append(reader.suffix());
@@ -529,18 +538,31 @@ impl TextBuffer {
         self.snapshot.version = self.next_timestamp - 1;
         // The edits arrive descending, so the last recorded is the earliest in
         // the document and no splice above it moved its end.
-        if let Some((range, text)) = edits.last() {
-            self.stamp_last_edit(range.start + text.len());
+        if let Some((range, _)) = edits.last() {
+            self.stamp_last_edit(range.start + texts[edits.len() - 1].len());
         }
         self.recompute_dirty();
     }
 
+    /// Replace `range` with `text`, recording the edit in the op log.
+    ///
+    /// The buffer holds LF whatever a caller hands it. A file's terminators
+    /// are remembered at load and restored at save, so a `\r\n` that reaches
+    /// the rope leaves the save path writing a `\r` before a `\n` that already
+    /// has one, and every server-touched line gains another per save. A
+    /// language server or a review apply hands over whatever the far side
+    /// wrote, which is why the invariant is enforced here rather than at each
+    /// of them.
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        // Everything below reads this one value, so the fragment length, the
+        // recorded op, the rope bytes, and the edit stamp stay in agreement.
+        let text = LineEnding::normalize(text);
+
         self.ops.push(BufferOp::Edit {
             old: range.clone(),
-            text: text.to_owned(),
+            text: text.to_string(),
         });
-        self.splice(range, Replacement::Text(text));
+        self.splice(range, Replacement::Text(&text));
     }
 
     /// Replace `range` with `content`, recording nothing in the op log.
@@ -4573,5 +4595,47 @@ mod tests {
                 patch.edits()
             );
         }
+    }
+
+    /// Text entering the buffer holds LF, whichever terminator it arrived
+    /// with.
+    ///
+    /// The file's own terminator is remembered at load and restored at save,
+    /// so a `\r\n` reaching the rope leaves the save writing a `\r` before a
+    /// `\n` that already has one. A language server or a review apply hands
+    /// over whatever the far side wrote.
+    #[test]
+    fn an_edit_normalizes_the_terminators_it_carries() {
+        let mut b = buf("one\ntwo");
+        b.edit(b.rope().len()..b.rope().len(), "\r\nthree");
+        b.edit(0..0, "zero\r\n");
+
+        assert_eq!(
+            b.rope().to_string(),
+            "zero\none\ntwo\nthree",
+            "the rope holds LF whichever terminator the edit carried",
+        );
+    }
+
+    /// And a batch normalizes every one of its edits.
+    ///
+    /// The batch splices against one walk of the old tree, so a length taken
+    /// from the caller's text and bytes taken from the normalized one would
+    /// put the fragments and the rope at different offsets.
+    #[test]
+    fn a_batch_normalizes_every_edit_it_applies() {
+        let mut b = buf("one\ntwo\n");
+        b.edit_batch(&[(8..8, "three\r\nfour"), (0..0, "zero\r\n")]);
+
+        assert_eq!(
+            b.rope().to_string(),
+            "zero\none\ntwo\nthree\nfour",
+            "every edit's text reaches the rope as LF",
+        );
+        assert_eq!(
+            b.rope().len(),
+            b.snapshot.fragments.summary().text.visible,
+            "and the fragments cover exactly the bytes the rope holds",
+        );
     }
 }

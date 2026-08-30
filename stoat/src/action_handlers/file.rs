@@ -533,6 +533,10 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
     let task = {
         let target = target.clone();
         stoat.executor.spawn_blocking(move || {
+            // The rope holds LF, which [`TextBuffer::edit`] enforces wherever
+            // text enters the buffer, so every `\n` here is a terminator to
+            // restore and none of them already carries a `\r`.
+            //
             // A chunk never splits a line ending, so restoring per chunk is the
             // same bytes the whole-text restore produced.
             let mut restored = rope.chunks().map(|chunk| ending.restore(chunk));
