@@ -7282,6 +7282,25 @@ fn repeat_last_motion_replays_find_next_char() {
     assert_eq!(h.primary_head_offset(), 8);
 }
 
+/// A find on Enter is a motion like any other find, so a replay steps it.
+///
+/// The `x` find matches nothing, which leaves the cursor put and records a
+/// motion of its own. The Enter find must record over it. A replay that
+/// reaches the older record stands still, since there is still no `x`.
+#[test]
+fn repeat_last_motion_replays_a_find_on_enter() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+    h.open_file(&path);
+    h.type_keys("f x");
+    assert_eq!(h.primary_head_offset(), 0, "no x to find");
+
+    h.type_keys("f enter");
+    assert_eq!(h.primary_head_offset(), 3, "the first row's ending");
+    h.type_keys("alt-.");
+    assert_eq!(h.primary_head_offset(), 7, "the second row's ending");
+}
+
 /// A replay carries the count the find was made with, rather than advancing
 /// one match at a time.
 #[test]

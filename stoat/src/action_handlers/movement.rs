@@ -3679,9 +3679,6 @@ pub(crate) fn execute_find(
 /// Backs `f`/`t`/`F`/`T` followed by Enter. A line ending is not a character
 /// the caller names in advance, since one line ends in LF where the next ends
 /// in CRLF, so the target comes from the cursor's row instead of a scan.
-///
-/// Records no repeatable motion, so `Alt-.` replays whatever find came before
-/// it rather than this one.
 pub(crate) fn execute_find_line_ending(
     stoat: &mut Stoat,
     kind: FindKind,
@@ -3689,6 +3686,11 @@ pub(crate) fn execute_find_line_ending(
     count: u32,
 ) -> UpdateEffect {
     let count = count.max(1);
+    stoat.last_motion = Some(LastMotion::FindLineEnding {
+        kind,
+        count,
+        extend,
+    });
     move_to_motion_range(stoat, extend, |rope, cursor| {
         let target = line_ending_target(rope, cursor, kind, count)?;
         Some(landing_range(rope, cursor, target))

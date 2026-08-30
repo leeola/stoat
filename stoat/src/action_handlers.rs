@@ -82,6 +82,14 @@ pub(crate) enum LastMotion {
         count: u32,
         extend: bool,
     },
+    /// The same find aimed at a line ending rather than a character. Nothing
+    /// names the target in advance, since one line ends in LF where the next
+    /// ends in CRLF, so there is no char to carry.
+    FindLineEnding {
+        kind: movement::FindKind,
+        count: u32,
+        extend: bool,
+    },
     Paragraph {
         dir: movement::ParaDir,
         count: u32,
@@ -150,6 +158,11 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
                 count,
                 extend,
             } => movement::execute_find(stoat, kind, ch, extend, count),
+            LastMotion::FindLineEnding {
+                kind,
+                count,
+                extend,
+            } => movement::execute_find_line_ending(stoat, kind, extend, count),
             LastMotion::Paragraph { dir, count, extend } => {
                 movement::goto_paragraph_impl(stoat, dir, extend, count)
             },
