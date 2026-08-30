@@ -588,34 +588,21 @@ impl SelectionsCollection {
         self.replace_with(new_disjoint, snapshot);
     }
 
-    /// Replace selections with `new_disjoint`, giving each one a fresh id.
-    ///
-    /// For a producer building a set of selections that carry no identity yet,
-    /// which is every producer that would otherwise leave them all at the
-    /// default id. The collection tells selections apart by id and by nothing
-    /// else. The primary is the highest-id one, removing it retains everything
-    /// whose id differs, and switch-case, increment and paste all build maps
-    /// keyed on it. Selections sharing an id are therefore one selection to all
-    /// of them, and removing the primary of a set that shares one removes the
-    /// whole set.
-    ///
-    /// [`Self::replace_with`] is for callers whose ids already mean something,
-    /// such as a motion carrying each selection's identity forward.
-    pub(crate) fn replace_with_fresh_ids(
-        &mut self,
-        new_disjoint: Vec<Selection<Anchor>>,
-        snapshot: &MultiBufferSnapshot,
-    ) {
-        let last = new_disjoint.len().saturating_sub(1);
-        self.replace_with_fresh_ids_primary(new_disjoint, last, snapshot);
-    }
-
     /// Replace selections with `new_disjoint`, giving each a fresh id and the
     /// one at `primary_index` the primary.
     ///
-    /// For a producer that knows which of its pieces the user works from,
-    /// where [`Self::replace_with_fresh_ids`] offers only the last. The
-    /// choice has to be made here rather than afterward, since
+    /// For a producer building a set of selections that carry no identity yet,
+    /// which is every producer that otherwise leaves them all at the default
+    /// id. The collection tells selections apart by id and by nothing else. The
+    /// primary is the highest-id one, removing it retains everything whose id
+    /// differs, and switch-case, increment and paste all build maps keyed on
+    /// it. Selections sharing an id are therefore one selection to all of them,
+    /// and removing the primary of a set that shares one removes the whole set.
+    ///
+    /// [`Self::replace_with`] is for callers whose ids already mean something,
+    /// such as a motion carrying each selection's identity forward.
+    ///
+    /// The primary is named here rather than afterward, since
     /// [`Self::replace_with`] sorts by offset and merges overlaps, so an index
     /// no longer names the same piece once it returns.
     ///
@@ -714,8 +701,8 @@ impl SelectionsCollection {
         self.replace_with(new_disjoint, snapshot);
     }
 
-    /// [`Self::replace_with_fresh_ids`] from `(start, end)` offsets, minting
-    /// every endpoint under `bias` in one batched walk.
+    /// Replace selections from `(start, end)` offsets, giving each a fresh id
+    /// and minting every endpoint under `bias` in one batched walk.
     ///
     /// For a producer that found its spans by scanning text rather than by
     /// moving selections around, and so holds offsets. Anchoring them itself
@@ -2286,10 +2273,13 @@ mod tests {
         );
     }
 
-    /// Numbering in list order is the same call naming the last piece, which is
-    /// what the plain form promises its callers.
+    /// An index past the end names the last piece, which is what numbering in
+    /// list order already gives.
+    ///
+    /// A caller with no piece in mind has that fallback rather than a panic or
+    /// a primary the list order does not explain.
     #[test]
-    fn replace_with_fresh_ids_makes_the_last_piece_primary() {
+    fn an_out_of_range_primary_index_names_the_last_piece() {
         let multi = singleton("abcdefghij");
         let snapshot = multi.snapshot();
         let mut collection = SelectionsCollection::new();
@@ -2301,7 +2291,11 @@ mod tests {
             reversed: false,
             goal: SelectionGoal::None,
         };
-        collection.replace_with_fresh_ids(vec![span(0, 2), span(4, 6), span(8, 10)], &snapshot);
+        collection.replace_with_fresh_ids_primary(
+            vec![span(0, 2), span(4, 6), span(8, 10)],
+            99,
+            &snapshot,
+        );
 
         assert_eq!(
             snapshot.resolve_anchor(&collection.newest_anchor().start),

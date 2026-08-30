@@ -1558,6 +1558,33 @@ fn join_selections_across_three_lines_joins_each_in_turn() {
     assert_eq!(buffer_string(&mut h), "ab cd ef\n");
 }
 
+/// The join leaves the primary on the first space it inserted, so the next
+/// gesture works from the front of what it produced.
+///
+/// A producer minting ids in list order leaves the primary on its last piece.
+/// For a three-line join that is the space between the second and third lines,
+/// furthest from where the user started reading.
+#[test]
+fn join_selections_leaves_the_primary_on_the_first_space() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "ab\ncd\nef\n");
+    h.open_file(&path);
+    set_range(&mut h, 0, 8);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(2, 3, false), (5, 6, false)],
+        "one selection on each inserted space",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(2, 3, false)],
+        "the first space is the primary",
+    );
+}
+
 /// The plain join reaches a key, not just the palette.
 ///
 /// A shifted key extends in this scheme, which takes J away from the join.

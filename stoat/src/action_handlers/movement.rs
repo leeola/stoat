@@ -1403,7 +1403,12 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
     if spaces.is_empty() {
         editor.selections.transform(new_buf, |sel| sel.clone());
     } else {
-        editor.selections.replace_with_fresh_ids(spaces, new_buf);
+        // The spaces come out in document order, and the front of that is where
+        // the user reads on from, so the first one takes the primary rather than
+        // the last one the loop happened to mint.
+        editor
+            .selections
+            .replace_with_fresh_ids_primary(spaces, 0, new_buf);
     }
     UpdateEffect::Redraw
 }
