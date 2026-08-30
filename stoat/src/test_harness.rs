@@ -487,6 +487,15 @@ impl TestHarness {
         self.settle();
     }
 
+    /// Poll every spawned task to suspension without driving the pumps.
+    ///
+    /// For a test that wants a background job finished and then drives the
+    /// pump that takes its result itself, so the pump's own answer is the
+    /// test's to read rather than one [`Self::settle`] already consumed.
+    pub fn run_until_parked(&mut self) {
+        self.scheduler.run_until_parked();
+    }
+
     /// Drive the scheduler and async pump pipeline to a fixed point. After
     /// returning, every spawned task has been polled to suspension and every
     /// queued pump result has been routed through the main dispatch path.

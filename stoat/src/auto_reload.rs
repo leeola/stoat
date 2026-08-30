@@ -32,12 +32,65 @@ use crate::{
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::SystemTime,
 };
+use stoat_scheduler::Task;
 use stoat_text::{Bias, LineEnding, Rope, SelectionGoal};
 
 /// Environment variable stoatty exports to its children, carrying the log id
 /// its own log file is named after.
 const STOATTY_LOG_ID: &str = "STOATTY_LOG_ID";
+
+/// A followed file read on the blocking pool, awaiting the edit it describes.
+///
+/// The stat that started it runs on the run loop, since it decides whether
+/// anything happened. Everything after it walks the whole file, which a
+/// followed build log makes the run loop do twice a second.
+///
+/// Held in [`Stoat::pending_auto_reloads`] so the task is not dropped, which
+/// cancels the read, before [`pump_auto_reload_install`] takes it.
+pub(crate) struct PendingAutoReload {
+    /// Which buffer the read answers for, so a poll landing while it is still
+    /// out does not start a second read of the same file.
+    id: BufferId,
+    _task: Task<()>,
+    result: Arc<Mutex<Option<AutoReloadResult>>>,
+}
+
+/// What a pool read found, as the run loop needs it.
+struct AutoReloadResult {
+    id: BufferId,
+    mode: AutoReloadMode,
+    /// The file's mtime as the stat read it, recorded whatever the outcome, so
+    /// a file the reload rejects is not re-read twice a second until it
+    /// changes again.
+    mtime: SystemTime,
+    /// The buffer version the comparison was made against.
+    ///
+    /// An edit landing while the read ran leaves the spans below describing
+    /// text that has since moved, so the install drops them and the next tick
+    /// reads again.
+    version: u64,
+    outcome: Result<ReloadDiff, String>,
+}
+
+/// The edit a read implies, or none when the file matches the buffer.
+struct ReloadDiff {
+    ending: LineEnding,
+    /// Where the buffer's text is replaced and by what, or `None` when the two
+    /// already agree and only the mtime moves.
+    ///
+    /// The replacement is the slice that changed rather than the whole file.
+    /// Carrying the file across costs a copy of it, which is the cost running
+    /// the comparison here rather than on the run loop removes.
+    splice: Option<(Range<usize>, String)>,
+    /// The buffer's last row when the comparison was made, which is the row a
+    /// tail follower must rest on to follow the new end.
+    old_last_row: u32,
+    /// Where a follow-mode cursor lands, at the first byte that changed.
+    follow_offset: usize,
+}
 
 /// Arm the auto-reload poll if it is not already running.
 ///
@@ -68,19 +121,16 @@ pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
     stoat.auto_reload_poll = Some(task);
 }
 
-/// Re-read every auto-reload-flagged buffer whose file advanced past its
-/// recorded mtime, and disarm the poll when none remain.
+/// Stat every auto-reload-flagged buffer's file and read the ones that moved,
+/// disarming the poll when none remain.
 ///
-/// A dirty buffer is skipped so in-memory edits are never clobbered. When the
-/// new content extends the old it is appended in place, preserving anchors for
-/// the log-tail case. Otherwise the buffer is fully replaced. A cursor sitting
-/// on the old last line follows to the new end, while any other cursor stays
-/// put.
+/// The stat is all this does on the run loop. A file whose mtime advanced is
+/// read and compared on the blocking pool, and
+/// [`pump_auto_reload_install`] applies whatever that found. A dirty buffer is
+/// skipped so in-memory edits are never clobbered.
 ///
-/// Returns whether anything the reader can see moved, either a buffer reloaded
-/// or a status reporting a file that could not be read. A poll finding every
-/// followed file unchanged returns `false`, which is what lets the run loop
-/// skip the frame rather than repaint at the poll cadence.
+/// Returns whether a read was started, so the run loop knows work is out. What
+/// the reader sees moving is the install's answer, not this one.
 pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
     if stoat.auto_reload_poll.is_none() {
         return false;
@@ -91,18 +141,20 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
         return false;
     }
 
-    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-    // Separate from `changed` because a failed read repaints the status without
-    // editing the buffer, and the LSP notify below must not hear about a buffer
-    // that never changed.
-    let mut status_set = false;
-    let mut changed = false;
-
+    let mut spawned = false;
     for (id, path, mode) in paths {
         let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
             continue;
         };
-        if buffer.read().expect("buffer poisoned").dirty {
+        let (dirty, version, rope) = {
+            let guard = buffer.read().expect("buffer poisoned");
+            (
+                guard.dirty,
+                guard.snapshot.version,
+                guard.snapshot.visible_text.clone(),
+            )
+        };
+        if dirty {
             continue;
         }
         let Some(mtime) = stoat
@@ -117,57 +169,180 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
         if stoat.active_workspace().buffers.disk_mtime(id) == Some(mtime) {
             continue;
         }
-        let new = match read_string_via_host(&*stoat.fs_host, &path) {
-            Ok(new) => new,
-            Err(e) => {
-                // Recorded even though nothing was loaded, so this says the
-                // version was seen and could not be used rather than that
-                // nothing has been seen. Otherwise the poll re-reads and
-                // re-reports it twice a second until the file changes again. A
-                // later write moves the mtime and gets its own read, so a file
-                // caught mid-write still recovers.
+        // One read per file at a time. A poll landing while the last one is
+        // still out reads the same bytes a second time, and the install keeps
+        // only the one the buffer has not moved past.
+        if stoat.pending_auto_reloads.iter().any(|p| p.id == id) {
+            continue;
+        }
+
+        let result: Arc<Mutex<Option<AutoReloadResult>>> = Arc::new(Mutex::new(None));
+        let task = {
+            let result = result.clone();
+            let fs_host = stoat.fs_host.clone();
+            let redraw = stoat.redraw_notify.clone();
+            let path = path.clone();
+            stoat.executor.spawn_blocking(move || {
+                let outcome = read_and_compare(&*fs_host, &path, &rope);
+                *result.lock().expect("pending reload mutex") = Some(AutoReloadResult {
+                    id,
+                    mode,
+                    mtime,
+                    version,
+                    outcome,
+                });
+                redraw.notify_one();
+            })
+        };
+        stoat.pending_auto_reloads.push(PendingAutoReload {
+            id,
+            _task: task,
+            result,
+        });
+        spawned = true;
+    }
+
+    spawned
+}
+
+/// Read `path` and work out the edit that brings `old` up to it.
+///
+/// Runs on the blocking pool. The read, the ending, the normalize, and both
+/// walks all cover the whole file, which is what this exists to keep off the
+/// thread that paints.
+fn read_and_compare(
+    fs: &dyn crate::host::FsHost,
+    path: &Path,
+    old: &Rope,
+) -> Result<ReloadDiff, String> {
+    let new = read_string_via_host(fs, path)
+        .map_err(|e| format!("cannot reload {}: {e}", display_name(path)))?;
+
+    // Before the prefix diff, which would otherwise compare the file's
+    // carriage returns against a buffer that has none and call every line
+    // changed. The file may also have changed style since it was opened, so
+    // its current one is the honest answer.
+    let ending = LineEnding::detect(&new);
+    let normalized = LineEnding::normalize(&new);
+
+    let old_len = old.len();
+    let old_last_row = old.max_point().row;
+    let common = common_prefix_len(old.chunks(), &normalized);
+
+    // The buffer is a prefix of the file only when every one of its bytes
+    // matched, which is the appended-log fast path.
+    let appended = common == old_len;
+    if appended && normalized.len() == old_len {
+        return Ok(ReloadDiff {
+            ending,
+            splice: None,
+            old_last_row,
+            follow_offset: old_len,
+        });
+    }
+
+    let (splice, follow_offset) = match appended {
+        true => (
+            (old_len..old_len, normalized[old_len..].to_string()),
+            old_len,
+        ),
+        false => {
+            let (old_span, new_span) = changed_span(old, &normalized);
+            let mut offset = common;
+            while !normalized.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            ((old_span, normalized[new_span].to_string()), offset)
+        },
+    };
+
+    Ok(ReloadDiff {
+        ending,
+        splice: Some(splice),
+        old_last_row,
+        follow_offset,
+    })
+}
+
+/// Apply every finished auto-reload read, and report whether the reader sees
+/// anything move.
+///
+/// A read whose buffer was edited or reloaded while it ran describes text that
+/// has since moved, so it is dropped and the next poll reads again. The mtime
+/// is recorded whatever the outcome, including a failed read, so a file the
+/// reload rejects is not re-read at the poll cadence until it changes.
+///
+/// When the new content extends the old it is appended in place, preserving
+/// anchors for the log-tail case. Otherwise the changed span is replaced. A
+/// cursor resting on what was the last line follows to the new end, while any
+/// other cursor stays put.
+pub(crate) fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
+    let mut ready = Vec::new();
+    stoat.pending_auto_reloads.retain(|pending| {
+        match pending.result.lock().expect("pending reload mutex").take() {
+            Some(result) => {
+                ready.push(result);
+                false
+            },
+            None => true,
+        }
+    });
+    if ready.is_empty() {
+        return false;
+    }
+
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    // Separate from `changed` because a failed read repaints the status without
+    // editing the buffer, and the LSP notify below must not hear about a buffer
+    // that never changed.
+    let mut status_set = false;
+    let mut changed = false;
+
+    for result in ready {
+        let AutoReloadResult {
+            id,
+            mode,
+            mtime,
+            version,
+            outcome,
+        } = result;
+
+        let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
+            continue;
+        };
+        let (dirty, current) = {
+            let guard = buffer.read().expect("buffer poisoned");
+            (guard.dirty, guard.snapshot.version)
+        };
+        if dirty || current != version {
+            continue;
+        }
+
+        let diff = match outcome {
+            Ok(diff) => diff,
+            Err(message) => {
                 stoat
                     .active_workspace_mut()
                     .buffers
                     .set_disk_mtime(id, mtime);
-                stoat.set_status(format!("cannot reload {}: {e}", display_name(&path)));
+                stoat.set_status(message);
                 status_set = true;
                 continue;
             },
         };
-        // Before the prefix diff, which would otherwise compare the file's
-        // carriage returns against a buffer that has none and call every line
-        // changed. The file may also have changed style since it was opened, so
-        // its current one is the honest answer.
+
         stoat
             .active_workspace_mut()
             .buffers
-            .set_line_ending(id, LineEnding::detect(&new));
+            .set_line_ending(id, diff.ending);
 
-        // Borrowed rather than owned. A file already holding LF normalizes to
-        // itself, and taking the copy that ends the borrow costs the whole file
-        // to reach text the reload only reads.
-        let normalized = LineEnding::normalize(&new);
-
-        let (old_len, old_last_row, common) = {
-            let guard = buffer.read().expect("buffer poisoned");
-            let text = &guard.snapshot.visible_text;
-            (
-                text.len(),
-                text.max_point().row,
-                common_prefix_len(text.chunks(), &normalized),
-            )
-        };
-        // The buffer is a prefix of the file only when every one of its bytes
-        // matched, which is the appended-log fast path.
-        let appended = common == old_len;
-        if appended && normalized.len() == old_len {
+        let Some((old_span, text)) = diff.splice else {
             stoat
                 .active_workspace_mut()
                 .buffers
                 .set_disk_mtime(id, mtime);
             continue;
-        }
+        };
 
         let tail_followers: Vec<EditorId> = if mode == AutoReloadMode::Tail {
             stoat
@@ -175,33 +350,17 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
                 .editors
                 .iter_mut()
                 .filter_map(|(eid, editor)| {
-                    (editor.buffer_id == id && editor_cursor_row(editor) == old_last_row)
+                    (editor.buffer_id == id && editor_cursor_row(editor) == diff.old_last_row)
                         .then_some(eid)
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let follow_offset = (mode == AutoReloadMode::Follow).then(|| {
-            if appended {
-                old_len
-            } else {
-                let mut offset = common;
-                while !new.is_char_boundary(offset) {
-                    offset -= 1;
-                }
-                offset
-            }
-        });
 
         {
             let mut guard = buffer.write().expect("buffer poisoned");
-            if appended {
-                guard.edit(old_len..old_len, &normalized[old_len..]);
-            } else {
-                let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &normalized);
-                guard.edit(old_span, &normalized[new_span]);
-            }
+            guard.edit(old_span, &text);
             guard.mark_clean();
         }
         stoat
@@ -216,7 +375,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
                 collapse_to_buffer_end(editor, scrolloff);
             }
         }
-        if let Some(offset) = follow_offset {
+        if mode == AutoReloadMode::Follow {
             let follow_editors: Vec<EditorId> = ws
                 .editors
                 .iter()
@@ -224,7 +383,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
                 .collect();
             for eid in follow_editors {
                 if let Some(editor) = ws.editors.get_mut(eid) {
-                    collapse_to_offset(editor, offset, scrolloff);
+                    collapse_to_offset(editor, diff.follow_offset, scrolloff);
                 }
             }
         }
@@ -734,8 +893,8 @@ fn editor_cursor_row(editor: &mut EditorState) -> u32 {
 mod tests {
     use super::{
         collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, open_log_buffer, open_logs,
-        pump_auto_reload, reload_all, reload_focused, session_log_path, set_auto_reload_config,
-        set_buffer_auto_reload, target_log_stem,
+        pump_auto_reload, pump_auto_reload_install, reload_all, reload_focused, session_log_path,
+        set_auto_reload_config, set_buffer_auto_reload, target_log_stem,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -840,9 +999,18 @@ mod tests {
     }
 
     /// Drive one poll pass, standing in for the tick the timer sends in
-    /// production, and report whether the pump asked for a repaint.
+    /// production, and report whether the reader sees anything move.
+    ///
+    /// The tick only stats and spawns. What the run loop paints for is the
+    /// install, which reaches the reads once the pool has run them, so the
+    /// settle between the two is the same wait production makes.
     fn pump_poll(h: &mut TestHarness) -> bool {
-        pump_auto_reload(&mut h.stoat)
+        pump_auto_reload(&mut h.stoat);
+        // Not a settle, which drives the install itself and leaves nothing for
+        // the call below to report. The reads finish on the pool and the
+        // install is what the run loop paints for.
+        h.run_until_parked();
+        pump_auto_reload_install(&mut h.stoat)
     }
 
     /// The run loop paints a poll tick only when the pump reports one, so a
@@ -1741,6 +1909,62 @@ mod tests {
             session_log_path(dir, None),
             None,
             "a session that named no log file resolves no path",
+        );
+    }
+
+    /// A read whose buffer moved while it ran is dropped, not applied.
+    ///
+    /// The comparison happens on the pool against the text the buffer held
+    /// when the stat fired. An edit landing before the result does means the
+    /// spans it carries name text that has since moved, and applying them
+    /// would splice the file into the wrong place.
+    #[test]
+    fn a_reload_whose_buffer_moved_under_it_is_dropped() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-raced");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        pump_auto_reload(&mut h.stoat);
+        h.run_until_parked();
+
+        // The user types while the read is out, which is what moves the
+        // version the comparison was made against.
+        {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(id)
+                .expect("the buffer is open");
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(0..0, "typed\n");
+        }
+
+        assert!(
+            !pump_auto_reload_install(&mut h.stoat),
+            "the result answers a buffer that has since moved",
+        );
+        assert_eq!(
+            buffer_text(&h, id),
+            "typed\nline1\n",
+            "so the edit stands and the file's line never landed",
+        );
+
+        // The next poll reads again, against what the buffer holds now.
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .get(id)
+            .expect("the buffer is open")
+            .write()
+            .expect("buffer poisoned")
+            .mark_clean();
+        assert!(pump_poll(&mut h), "the poll after it reloads for real");
+        assert_eq!(
+            buffer_text(&h, id),
+            "line1\nline2\n",
+            "and the file replaces what the buffer held",
         );
     }
 }

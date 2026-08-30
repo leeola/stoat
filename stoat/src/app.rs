@@ -1388,6 +1388,14 @@ pub struct Stoat {
     /// [`Self::drive_background`]. Holding the task here keeps the read alive;
     /// dropping it (on quit) cancels it.
     pub(crate) pending_file_opens: Vec<crate::buffer_lifecycle::PendingFileOpen>,
+    /// Followed files reading on the blocking pool, awaiting the edit they
+    /// describe from [`crate::auto_reload::pump_auto_reload_install`].
+    ///
+    /// A followed build log is re-read at the poll cadence, and the read plus
+    /// the comparison walk the whole file, so both sit here rather than on the
+    /// thread that paints. Holding the task keeps the read alive. Dropping it
+    /// on quit cancels it.
+    pub(crate) pending_auto_reloads: Vec<crate::auto_reload::PendingAutoReload>,
     /// Files changed outside the editor, waiting on the shared debounce window
     /// to be reindexed into the code graph.
     ///
@@ -2267,6 +2275,7 @@ impl Stoat {
             diff_warm_file_rx,
             diff_warm_files: Vec::new(),
             pending_file_opens: Vec::new(),
+            pending_auto_reloads: Vec::new(),
             index_pending_external_edits: std::collections::HashSet::new(),
             index_external_edit_timer: None,
             ignored_dir_cache: std::collections::HashMap::new(),
@@ -7508,6 +7517,8 @@ impl Stoat {
         action_handlers::picker::sync_diagnostics_picker(self);
         action_handlers::picker::sync_jumplist_picker(self);
 
+        let auto_reload = crate::auto_reload::pump_auto_reload_install(self);
+
         let format_on_save = action_handlers::file::pump_format_on_save(self);
         let pending_save = action_handlers::file::pump_pending_save(self);
         let completion = crate::completion::request::pump(self);
@@ -7521,6 +7532,7 @@ impl Stoat {
             || changed_file_jump
             || diff_nav_jump
             || lsp
+            || auto_reload
             || format_on_save
             || pending_save
             || completion
