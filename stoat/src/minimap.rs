@@ -334,18 +334,20 @@ impl MinimapContent {
         self.synced_version
     }
 
-    /// Whether chunked work is still outstanding, from either the initial build
-    /// or a recolor sweep.
+    /// Whether chunked work is still outstanding, from the initial build or
+    /// either sweep.
     ///
-    /// The caller ticks [`Self::sync`] on idle frames while this holds, so both
-    /// cursors run to completion instead of stalling until the next user event.
-    /// The sweep needs this as much as the build does. It advances one
+    /// The caller ticks [`Self::sync`] on idle frames while this holds, so
+    /// every cursor runs to completion instead of stalling until the next user
+    /// event. A sweep needs this as much as the build does. It advances one
     /// [`RESYNC_CHUNK`] per sync on a file that is already fully built, so
-    /// without it every row past the first chunk keeps stale colors until some
-    /// unrelated event happens to tick another sync.
+    /// without it every row past the first chunk keeps stale colors or stale
+    /// marks until some unrelated event happens to tick another sync.
     pub fn build_pending(&self) -> bool {
         !self.disabled
-            && (self.built_upto < line_count(&self.synced_rope) || self.resync_upto.is_some())
+            && (self.built_upto < line_count(&self.synced_rope)
+                || self.resync_upto.is_some()
+                || self.edge_resync_upto.is_some())
     }
 
     /// Drain the pending splices for the emission layer.
@@ -2300,6 +2302,43 @@ mod tests {
         );
         assert!(content.take_queued().is_empty());
         assert_eq!(total, RESYNC_CHUNK + RESYNC_CHUNK / 2, "two chunks of rows");
+    }
+
+    /// An edge sweep with rows left keeps the frame loop ticking, the way the
+    /// recolor sweep does.
+    ///
+    /// The caller syncs on an idle frame only while the content says work is
+    /// pending. A sweep that stops saying so covers one chunk per unrelated
+    /// user event, which on a large file leaves most rows carrying the marks
+    /// of the branch that was checked out before.
+    #[test]
+    fn an_in_flight_edge_sweep_keeps_reporting_pending() {
+        let (rope, mut content) = built_recolor_fixture();
+        assert!(
+            !content.build_pending(),
+            "the fixture is fully built, so nothing is pending before the bump"
+        );
+
+        let marked = [1u32, RESYNC_CHUNK + 1];
+        let asked = RefCell::new(Vec::new());
+        let marks = RecordingEdges {
+            marked: &marked,
+            asked: &asked,
+        };
+
+        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        let _ = content.take_queued();
+        assert!(
+            content.build_pending(),
+            "the sweep has rows left, so idle ticks must keep coming"
+        );
+
+        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        let _ = content.take_queued();
+        assert!(
+            !content.build_pending(),
+            "the finished sweep lets the frame loop go idle again"
+        );
     }
 
     /// Past a handful of moved marks the window's slice of the edge list is
