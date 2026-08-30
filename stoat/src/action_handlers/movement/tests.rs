@@ -8291,6 +8291,38 @@ fn match_brackets_pairs_each_cursor_separately() {
     );
 }
 
+/// A bracket in a fenced code block pairs the way the same source does in a
+/// file of that language.
+///
+/// Rust reads the paren as text inside a string, so the pair around the cursor
+/// is the string's own quotes. Reading the markdown tree instead finds no
+/// bracket node at all and falls through to a plain text walk, which pairs the
+/// two parens and knows nothing of the string holding them.
+#[test]
+fn match_brackets_reads_the_injected_layers_grammar() {
+    let landed = |name: &str, src: &str, cursor: usize| {
+        let mut h = TestHarness::with_size(30, 8);
+        let path = h.write_file(name, src);
+        h.open_file(&path);
+        h.settle();
+        jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m m");
+        h.primary_head_offset()
+    };
+
+    let plain = landed("s.rs", "let s = \"(a)\";\n", 9);
+    assert_eq!(plain, 12, "rust pairs the quotes around the paren");
+
+    // The fence puts the rust source 8 bytes in, so its offsets sit 8 further
+    // on than the same source alone.
+    let fenced = landed("s.md", "```rust\nlet s = \"(a)\";\n```\n", 17);
+    assert_eq!(
+        fenced - 8,
+        plain,
+        "the fenced block answers what the same rust source answers",
+    );
+}
+
 /// A cursor on no bracket holds its place while the others jump.
 #[test]
 fn match_brackets_keeps_cursors_with_no_pair() {

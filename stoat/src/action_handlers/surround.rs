@@ -393,6 +393,20 @@ pub(crate) fn deepest_tree_at(
     snapshot: Option<&stoat_language::SyntaxSnapshot>,
     offset: usize,
 ) -> Option<&stoat_language::Tree> {
+    deepest_layer_at(snapshot, offset).map(|layer| &layer.tree)
+}
+
+/// The deepest syntax layer whose byte span covers `offset`.
+///
+/// A layer injected into another parses a region with its own grammar, so a
+/// caller reading anything the grammar decides has to read it from the layer
+/// the offset falls in rather than from the file's own. The tree is one such
+/// thing and the language's queries are another, which is why this answers the
+/// whole layer where [`deepest_tree_at`] answers only the tree.
+pub(crate) fn deepest_layer_at(
+    snapshot: Option<&stoat_language::SyntaxSnapshot>,
+    offset: usize,
+) -> Option<&stoat_language::SyntaxLayer> {
     snapshot?
         .iter_layers()
         .fold(None::<&stoat_language::SyntaxLayer>, |acc, layer| {
@@ -407,7 +421,6 @@ pub(crate) fn deepest_tree_at(
                 acc
             }
         })
-        .map(|layer| &layer.tree)
 }
 
 /// Every pair type the closest-pair textobject considers.

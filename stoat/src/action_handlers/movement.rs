@@ -1,4 +1,4 @@
-use super::{split_selection, view, LastMotion};
+use super::{split_selection, surround, view, LastMotion};
 use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
@@ -4745,27 +4745,46 @@ pub(super) fn match_brackets(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
-    let tree_opt: Option<stoat_language::Tree> = ws
-        .buffers
-        .syntax_map(buffer_id)
-        .and_then(|sm| sm.snapshot().iter_layers().next().map(|l| l.tree.clone()));
-
-    let language = ws.buffers.language_for(buffer_id);
-    let bracket_query = language.as_ref().and_then(|lang| lang.bracket_query());
-
-    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    let display_snapshot = editor.display_map.snapshot();
+    // The snapshot outlives the editor borrow, so the rope stays readable while
+    // the syntax map answers for each cursor in turn.
+    let (display_snapshot, reads) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let display_snapshot = editor.display_map.snapshot();
+        let reads = editor
+            .selections
+            .resolved_reads(display_snapshot.buffer_snapshot());
+        (display_snapshot, reads)
+    };
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
+    // Every cursor pairs its own bracket. Resolving one partner and landing it
+    // on all of them makes every span identical, and identical spans merge, so
+    // the set collapses to one cursor.
+    //
+    // A cursor reads the layer it falls in, not the file's own. A fenced block
+    // in a markup file parses under its own grammar, so its brackets pair
+    // through that grammar's tree and that language's query.
+    let mut targets: Vec<(usize, usize)> = {
+        let snapshot = ws.buffers.syntax_map(buffer_id).map(|sm| sm.snapshot());
+        reads
+            .iter()
+            .filter_map(|read| {
+                let cursor = cursor_offset(rope, read.tail, read.head);
+                let layer = surround::deepest_layer_at(snapshot, cursor);
+                let query = layer.and_then(|layer| layer.language.bracket_query());
+                let target = bracket_partner(rope, cursor, query, layer.map(|l| &l.tree))?;
+                Some((read.id, target))
+            })
+            .collect()
+    };
+    targets.sort_unstable_by_key(|(id, _)| *id);
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    // A cursor sitting in no pair holds its place.
     move_cursors(&mut editor.selections, buffer_snapshot, extend, |read| {
-        // Every cursor pairs its own bracket. Resolving one partner and landing
-        // it on all of them makes every span identical, and identical spans
-        // merge, so the set collapses to one cursor. A cursor sitting in no pair
-        // holds its place.
-        let cursor = cursor_offset(rope, read.tail, read.head);
-        let target = bracket_partner(rope, cursor, bracket_query, tree_opt.as_ref())?;
-        Some((target, SelectionGoal::None))
+        let found = targets.binary_search_by_key(&read.id, |(id, _)| *id).ok()?;
+        Some((targets[found].1, SelectionGoal::None))
     });
     UpdateEffect::Redraw
 }
