@@ -342,17 +342,19 @@ impl TextBuffer {
     pub fn with_text(buffer_id: BufferId, text: &str) -> Self {
         let mut buf = Self::new(buffer_id);
         if !text.is_empty() {
-            buf.edit(0..0, text);
+            // Spliced rather than edited, so the fragment tree, timestamps and
+            // dirty state are built exactly as any other edit builds them
+            // without the log first taking its own copy of the whole file.
+            buf.splice(0..0, text);
 
-            // Seeded through `edit` so the fragment tree, timestamps and dirty
-            // state are built exactly as any other edit builds them, then the
-            // recorded copy of the file is handed to the rope that already
-            // holds those bytes.
+            // A seeded log still opens with the edit that loaded it, which is
+            // where `BufferHistory`'s serializer puts the file back. The rope
+            // below is what holds those bytes until then.
+            buf.ops.push(BufferOp::Edit {
+                old: 0..0,
+                text: String::new(),
+            });
             buf.seed_text = Some(buf.snapshot.visible_text.clone());
-            let Some(BufferOp::Edit { text, .. }) = buf.ops.first_mut() else {
-                unreachable!("the edit above is the log's first op")
-            };
-            *text = String::new();
         }
         // Empty content is a baseline too. Skipping this leaves `saved_text`
         // unset, and the content comparison that clears a round-trip edit
@@ -520,13 +522,23 @@ impl TextBuffer {
     }
 
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
-        // Where this edit finishes once the splice lands, which the stamp below
-        // needs after `range` is spent.
-        let edit_end = range.start + text.len();
         self.ops.push(BufferOp::Edit {
             old: range.clone(),
             text: text.to_owned(),
         });
+        self.splice(range, text);
+    }
+
+    /// Replace `range` with `text`, recording nothing in the op log.
+    ///
+    /// The entry is the caller's to write, because a seed's entry holds no text
+    /// of its own. [`Self::with_text`] loads a whole file and hands its bytes to
+    /// the rope, so building the log's copy of them first is one whole-file
+    /// allocation for something already in hand.
+    fn splice(&mut self, range: Range<usize>, text: &str) {
+        // Where this edit finishes once the splice lands, which the stamp below
+        // needs after `range` is spent.
+        let edit_end = range.start + text.len();
         let timestamp = self.next_timestamp;
         self.next_timestamp += 1;
 
