@@ -3709,25 +3709,11 @@ fn landing_range(rope: &Rope, cursor: usize, target: usize) -> (usize, usize) {
     }
 }
 
-/// The cell a block cursor covers when its range reaches `head` from `anchor`.
-///
-/// The inverse of [`landing_range`], for the extend path, which holds the
-/// anchor it already has and asks only which cell to cover. The anchor is what
-/// decides the answer, not the cursor: a head past the anchor sits one beyond
-/// the last covered cell, where a head before it sits on the first.
-fn landing_cell(rope: &Rope, anchor: usize, head: usize) -> usize {
-    if head > anchor {
-        rope.prev_grapheme_boundary(head)
-    } else {
-        head
-    }
-}
-
 /// The `(start, end, reversed)` span an extend produces when its motion lands
 /// on `target`.
 ///
 /// For the motions that land on a whole span rather than a single cell, where
-/// [`landing_cell`] answers for the rest. The anchor stays put and the head
+/// [`cursor_offset`] answers for the rest. The anchor stays put and the head
 /// reaches whichever end of the target lies further from it, so a step back
 /// grows the selection rather than turning it inside out.
 ///
@@ -3778,8 +3764,12 @@ fn move_to_motion_range(
             // stamping the result on all of them makes every span identical, and
             // identical spans merge, so the set collapses to one cursor.
             let cursor = cursor_offset(rope, read.tail, read.head);
-            let (_, head) = range_of(rope, cursor)?;
-            Some((landing_cell(rope, read.tail, head), SelectionGoal::None))
+            // The cell comes back out against the anchor the motion paired its
+            // head with, never the live selection's. The two sit on opposite
+            // sides of the head once the selection has grown past the target,
+            // and reading from the wrong side gives up the target's own cell.
+            let (anchor, head) = range_of(rope, cursor)?;
+            Some((cursor_offset(rope, anchor, head), SelectionGoal::None))
         });
         return UpdateEffect::Redraw;
     }

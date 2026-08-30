@@ -3959,6 +3959,58 @@ fn select_mode_extend_to_line_start_at_column_zero_keeps_a_cell() {
     );
 }
 
+/// An extend find whose target lies inside the live selection lands the cursor
+/// on the character it found.
+///
+/// A find names a character and the motion answers with the pair that covers
+/// it, which reaches one grapheme past whichever end of the cursor the target
+/// is not on. Recovering the covered cell has to read that head against the
+/// anchor the motion paired it with. Reading it against the selection's own
+/// anchor answers from the other side of the head and gives up a cell, which
+/// only shows once the selection has grown past the target.
+#[test]
+fn an_extend_find_back_into_the_selection_covers_its_target() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abcdef\n");
+    h.open_file(&path);
+    h.type_keys("v l l l l l");
+    assert_eq!(
+        h.selection_spans()[0],
+        (0, 6, false),
+        "the selection covers the whole word with the cursor on f",
+    );
+
+    h.type_keys("F b");
+    assert_eq!(
+        h.selection_spans()[0],
+        (0, 2, false),
+        "the find pulls the head back onto the b it found",
+    );
+}
+
+/// The reversed twin, where the selection grew leftward and the find runs
+/// forward into it.
+#[test]
+fn an_extend_find_forward_into_a_reversed_selection_covers_its_target() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abcdefgh\n");
+    h.open_file(&path);
+    only_cursor_at(&mut h, 0, 7);
+    h.type_keys("v h h h h");
+    assert_eq!(
+        h.selection_spans()[0],
+        (3, 8, true),
+        "the selection runs back from h with the cursor on d",
+    );
+
+    h.type_keys("f e");
+    assert_eq!(
+        h.selection_spans()[0],
+        (4, 8, true),
+        "the find pushes the head onto the e it found",
+    );
+}
+
 /// A find is a horizontal move, so it clears the column a prior vertical
 /// move was holding.
 ///
