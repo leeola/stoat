@@ -5159,6 +5159,57 @@ fn align_selections_aligns_a_second_column_after_the_first() {
     );
 }
 
+/// A head past the pane's width still measures its column along its buffer
+/// line, so a soft wrap does not change where the align lands.
+///
+/// The first line runs 20 cells before its `=`, which is the whole pane, so the
+/// sign draws on a continuation row. A column read off that row restarts near
+/// zero and reports the shorter line as the one to pad up to.
+#[test]
+fn align_selections_measures_past_a_soft_wrap() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "aaaaaaaaaaaaaaaaaaaa=1\nbb=2\n");
+    h.open_file(&path);
+    h.type_keys("%");
+    dispatch(&mut h.stoat, &stoat_action::SelectRegex);
+    h.type_text("=");
+    h.type_keys("enter");
+    assert_eq!(h.selection_spans().len(), 2, "one cursor on each row");
+
+    dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "aaaaaaaaaaaaaaaaaaaa=1\nbb                  =2\n",
+        "the short line pads out to the long line's column",
+    );
+}
+
+/// Two heads on one line stay two ranks even when a soft wrap draws them on
+/// separate rows.
+///
+/// Rank is what pairs a head with the head it lines up against, and it comes
+/// from a run of heads sharing a row. Counting display rows splits the wrapped
+/// line in two, which leaves every head first on its own row and nothing to
+/// align the second column against.
+#[test]
+fn align_selections_ranks_two_heads_split_by_a_wrap() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "a=aaaaaaaaaaaaaaaa=b\nccc=ccc=d\n");
+    h.open_file(&path);
+    h.type_keys("%");
+    dispatch(&mut h.stoat, &stoat_action::SelectRegex);
+    h.type_text("=");
+    h.type_keys("enter");
+    assert_eq!(h.selection_spans().len(), 4, "two cursors on each row");
+
+    dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "a  =aaaaaaaaaaaaaaaa=b\nccc=ccc             =d\n",
+        "the second column lines up across the wrap",
+    );
+}
+
 #[test]
 fn align_selections_already_aligned_is_noop() {
     let mut h = TestHarness::with_size(20, 5);

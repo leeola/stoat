@@ -1466,11 +1466,15 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
                 break;
             }
             let head_pt = if sel.reversed { start_pt } else { end_pt };
-            let head_display = display_snapshot.buffer_to_display(head_pt);
+            // Cells along the buffer line, not along a display row. A head past
+            // the wrap width draws on a continuation row, whose column restarts
+            // from zero and whose row is not its line's first. A display measure
+            // therefore reads a column the text does not have, and splits two
+            // heads on one line onto rows that never rank against each other.
             out.push(AlignEntry {
                 insert_offset: start_offset,
-                head_col: head_display.column,
-                head_row: head_display.row,
+                head_col: display_snapshot.visual_column(head_pt),
+                head_row: head_pt.row,
             });
         }
         out
@@ -1569,6 +1573,9 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
 struct AlignEntry {
     insert_offset: usize,
     head_col: u32,
+    /// Buffer row, which the rank loop only ever compares for equality. A
+    /// display row splits one soft-wrapped line into several, and two heads on
+    /// one line then rank as one apiece.
     head_row: u32,
 }
 
