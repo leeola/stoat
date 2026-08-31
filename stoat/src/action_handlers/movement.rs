@@ -4135,11 +4135,6 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
 /// Display rows the newest selection's landed stop covers, exclusive end.
 ///
-/// A deletion stop holds no buffer rows of its own, so it brackets its seam.
-/// The span runs from the row it landed on through the row after the seam. The
-/// diff view's spliced block sits between those two buffer rows, so the mapped
-/// span covers the removed lines without this reading the block structure.
-///
 /// `None` where the newest selection took no landing, which leaves the caller
 /// on the plain cursor centering.
 fn landed_display_span(
@@ -4152,12 +4147,21 @@ fn landed_display_span(
         .find(|(id, ..)| *id == newest_id)
         .map(|(_, _, rows)| rows.clone())?;
 
-    let snapshot = editor.display_map.snapshot();
+    Some(stop_display_span(&editor.display_map.snapshot(), &rows))
+}
+
+/// Display rows a stop's buffer `rows` cover, exclusive end.
+///
+/// A deletion stop holds no buffer rows of its own, so it brackets its seam.
+/// The span runs from the row it landed on through the row after the seam. The
+/// diff view's spliced block sits between those two buffer rows, so the mapped
+/// span covers the removed lines without this reading the block structure.
+fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32> {
     let display_row = |row: u32| snapshot.buffer_to_display(Point::new(row, 0)).row;
-    Some(match rows.is_empty() {
+    match rows.is_empty() {
         true => display_row(rows.start.saturating_sub(1))..display_row(rows.start) + 1,
         false => display_row(rows.start)..display_row(rows.end),
-    })
+    }
 }
 
 /// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when the
@@ -4317,9 +4321,14 @@ pub(crate) struct PendingChangedFileJump {
 enum ChangedFileJump {
     /// Open `path` and land on `line`, which is `None` when the file turned out
     /// to hold no hunk after all.
+    ///
+    /// `rows` is the buffer rows that hunk occupies, which the far side centers
+    /// on. It rides the message because the target is not open when the scan
+    /// picks it, so nothing after the open knows which chunk was chosen.
     To {
         path: PathBuf,
         line: Option<u32>,
+        rows: Option<Range<u32>>,
         wrapped: bool,
     },
     /// Nowhere else to go.
@@ -4502,25 +4511,31 @@ fn scan_changed_file_jump(
     {
         return ChangedFileJump::NoMoreChanges;
     }
-    let line = first_hunk_row(&*repo, fs_host, &path, dir);
+    let stop = first_hunk_stop(&*repo, fs_host, &path, dir);
 
     ChangedFileJump::To {
         path,
-        line,
+        line: stop.as_ref().map(|(row, _)| *row),
+        rows: stop.map(|(_, rows)| rows),
         wrapped,
     }
 }
 
-/// The row of `path`'s first (Next) or last (Prev) hunk against HEAD.
+/// The landing row of `path`'s first (Next) or last (Prev) hunk against HEAD,
+/// paired with the rows that hunk occupies.
+///
+/// The rows travel with the row because the hop's target is not open yet,
+/// which leaves nothing on the far side to look the chunk up from. An empty
+/// range is a deletion, which the display mapping brackets rather than spans.
 ///
 /// `None` when the file has no HEAD blob, cannot be read, or diffs clean, in
 /// which case the hop opens it and leaves the cursor where the open put it.
-fn first_hunk_row(
+fn first_hunk_stop(
     repo: &dyn GitRepo,
     fs_host: &Arc<dyn FsHost>,
     path: &Path,
     dir: ChangeDir,
-) -> Option<u32> {
+) -> Option<(u32, Range<u32>)> {
     let base = repo.head_content(path)?;
     let mut bytes = Vec::new();
     fs_host.read(path, &mut bytes).ok()?;
@@ -4548,10 +4563,11 @@ fn first_hunk_row(
                 .map_or(hunk.buffer_start_line, |run| run.start),
         }
     };
-    match dir {
-        ChangeDir::Next => hunks.first().map(|hunk| stop_row(hunk, false)),
-        ChangeDir::Prev => hunks.last().map(|hunk| stop_row(hunk, true)),
-    }
+    let (hunk, last) = match dir {
+        ChangeDir::Next => (hunks.first()?, false),
+        ChangeDir::Prev => (hunks.last()?, true),
+    };
+    Some((stop_row(hunk, last), hunk.buffer_line_range.clone()))
 }
 
 /// Apply a landed changed-file hop, opening the target and landing on its hunk.
@@ -4568,12 +4584,13 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         Err(mpsc::TryRecvError::Disconnected) => return false,
     };
 
-    let (path, line, wrapped) = match found {
+    let (path, line, rows, wrapped) = match found {
         ChangedFileJump::To {
             path,
             line,
+            rows,
             wrapped,
-        } => (path, line, wrapped),
+        } => (path, line, rows, wrapped),
         ChangedFileJump::NoMoreChanges => {
             stoat.set_status("no more changes");
             return true;
@@ -4612,8 +4629,16 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         // Pull the view onto the landed hunk here, so a startup or mouse
         // dispatch that skips the Key-event epilogue still lands scrolled. The
         // hop centers its landing the way the in-file walk does, biased toward
-        // the file the reader crossed from.
-        view::center_jump_on_cursor(editor, matches!(pending.dir, ChangeDir::Next), center_off);
+        // the file the reader crossed from, and on the whole chunk where the
+        // scan told it which rows the chunk covers.
+        let down = matches!(pending.dir, ChangeDir::Next);
+        match rows {
+            Some(rows) => {
+                let span = stop_display_span(&editor.display_map.snapshot(), &rows);
+                view::center_jump_on_span(editor, span, down, center_off)
+            },
+            None => view::center_jump_on_cursor(editor, down, center_off),
+        };
     }
 
     if let Some(entry) = pending.origin {

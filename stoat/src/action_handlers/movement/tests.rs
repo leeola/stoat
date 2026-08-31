@@ -122,6 +122,48 @@ fn next_change_crosses_to_next_file_first_hunk() {
     );
 }
 
+/// A hop crosses into a file whose diff map has not been computed yet, so the
+/// chunk it landed on rides the hop message. That is what puts a hop and an
+/// in-file step onto the same chunk in the same place, so crossing a file
+/// boundary is not its own kind of landing.
+#[test]
+fn next_change_across_files_centers_the_landed_chunk() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    let base: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+    let working: String = (0..100)
+        .map(|i| match (50..56).contains(&i) {
+            true => format!("changed {i:02}\n"),
+            false => format!("line {i:02}\n"),
+        })
+        .collect();
+    h.stage_review_scenario(
+        &workdir,
+        &[
+            ("a.rs", "a\nb\nc\n", "a\nX\nc\n"),
+            ("b.rs", &base, &working),
+        ],
+    );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    // The open has not been laid out when the hop centers, so the fallback
+    // viewport is what both centering paths read here. The chunk covers rows
+    // 50 through 55, so its midpoint is 53 and the centered top row is 43.
+    // Centering the landing row alone leaves the top at 40 instead.
+    let scroll = focused_editor_mut(&mut h.stoat).expect("editor").scroll_row;
+    assert_eq!(
+        (focused_buffer_path(&h.stoat), scroll),
+        (workdir.join("b.rs"), 53 - view::DEFAULT_VIEWPORT_ROWS / 2),
+        "the hop centers the whole chunk, not the row it landed on",
+    );
+}
+
 /// `space g g` pins the goto chord so repeated `n` walks the changes until
 /// Escape. The walk crosses files, and the open that crosses swaps the pane's
 /// editor. A pin left on the old editor releases itself mid-walk.
