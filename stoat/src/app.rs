@@ -20,7 +20,7 @@ use crate::{
         ClipboardKind, EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost,
         NoopFsWatcher,
     },
-    keymap::{self, Keymap, ResolvedAction, StateValue},
+    keymap::{self, Keymap, ResolvedAction, SideButton, StateValue},
     keymap_state::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
@@ -2641,10 +2641,10 @@ impl Stoat {
             kind,
             col,
             row,
-            ..
+            mods,
         } = event
         {
-            return self.handle_aux_mouse(window, kind, col, row);
+            return self.handle_aux_mouse(window, kind, col, row, mods);
         }
 
         // A terminal predating the delivery mode reads the claim as the
@@ -2850,8 +2850,15 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
-    /// Walk the jumplist for a press of the back or forward side button,
-    /// returning [`None`] when `kind` names any other button.
+    /// Run whatever the keymap binds to a press of the back or forward side
+    /// button, returning [`None`] when `kind` names any other button.
+    ///
+    /// The keymap resolves first and the jumplist is what an unbound button
+    /// falls back to, so a mode that binds the button speaks for it. That is
+    /// what lets a pinned `space_goto` walk hunks on these buttons exactly as
+    /// its n and p arms do. Bound actions run with `dismisses_pinned` false,
+    /// as a wheel binding does, so the press repeats under a pin instead of
+    /// releasing it.
     ///
     /// These buttons reach stoat only over the window socket, since no in-band
     /// terminal encoding carries them, so this runs before the window's pane
@@ -2861,10 +2868,15 @@ impl Stoat {
     ///
     /// Handling every gesture of both buttons here is what keeps them away from
     /// [`mouse_event_kind`], which has no crossterm button to map them onto.
-    fn handle_jumplist_buttons(&mut self, window: u32, kind: MouseKind) -> Option<UpdateEffect> {
-        let backward = match kind {
-            MouseKind::Press(IpcMouseButton::Back) => true,
-            MouseKind::Press(IpcMouseButton::Forward) => false,
+    fn handle_side_buttons(
+        &mut self,
+        window: u32,
+        kind: MouseKind,
+        mods: u8,
+    ) -> Option<UpdateEffect> {
+        let button = match kind {
+            MouseKind::Press(IpcMouseButton::Back) => SideButton::Back,
+            MouseKind::Press(IpcMouseButton::Forward) => SideButton::Forward,
             MouseKind::Release(IpcMouseButton::Back | IpcMouseButton::Forward)
             | MouseKind::Drag(IpcMouseButton::Back | IpcMouseButton::Forward) => {
                 return Some(UpdateEffect::None);
@@ -2878,10 +2890,18 @@ impl Stoat {
             self.active_workspace_mut().panes.set_focus(pane_id);
         }
 
-        Some(if backward {
-            action_handlers::jump::jump_backward(self)
-        } else {
-            action_handlers::jump::jump_forward(self)
+        let bound = {
+            let state = StoatKeymapState::from_stoat(self);
+            self.keymap
+                .lookup_side_button(&state, button, ipc_modifiers(mods))
+        };
+        if let Some(actions) = bound {
+            return Some(self.run_bound_actions(&actions, None, false));
+        }
+
+        Some(match button {
+            SideButton::Back => action_handlers::jump::jump_backward(self),
+            SideButton::Forward => action_handlers::jump::jump_forward(self),
         })
     }
 
@@ -2898,8 +2918,9 @@ impl Stoat {
         kind: MouseKind,
         col: u16,
         row: u16,
+        mods: u8,
     ) -> UpdateEffect {
-        if let Some(effect) = self.handle_jumplist_buttons(window, kind) {
+        if let Some(effect) = self.handle_side_buttons(window, kind, mods) {
             return effect;
         }
 
@@ -9027,6 +9048,51 @@ mod tests {
             (focused_buffer(&h), h.primary_head_offset()),
             (b_buffer, 1),
             "a release moves nothing, so one click walks one entry"
+        );
+    }
+
+    /// The buttons resolve the keymap before the jumplist, so a mode that
+    /// binds them speaks for the press. The pinned goto chord is the shipped
+    /// case, where they walk hunks exactly as its n and p arms do.
+    #[test]
+    fn window_ipc_side_buttons_walk_changes_in_a_pinned_goto_chord() {
+        use crate::test_harness::TestHarness;
+        use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
+
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = std::path::PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\ne\n", "a\nX\nc\nd\nY\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+
+        h.type_keys("space g g");
+
+        let press = |h: &mut TestHarness, button| {
+            h.stoat
+                .handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Mouse {
+                    window: 0,
+                    kind: MouseKind::Press(button),
+                    col: 0,
+                    row: 0,
+                    mods: 0,
+                }));
+            h.settle();
+            (h.primary_head_offset(), h.stoat.focused_mode().to_string())
+        };
+
+        assert_eq!(
+            (
+                press(&mut h, IpcMouseButton::Forward),
+                press(&mut h, IpcMouseButton::Forward),
+                press(&mut h, IpcMouseButton::Back),
+            ),
+            (
+                (2, "space_goto".to_string()),
+                (8, "space_goto".to_string()),
+                (2, "space_goto".to_string()),
+            ),
+            "forward walks to each hunk and back returns, with the pin holding throughout"
         );
     }
 

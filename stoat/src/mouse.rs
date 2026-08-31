@@ -35,7 +35,7 @@ use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind};
 /// its button.
 ///
 /// [`None`] for the side buttons, which crossterm does not model.
-/// [`Stoat::handle_jumplist_buttons`] takes every gesture of those before this
+/// [`Stoat::handle_side_buttons`] takes every gesture of those before this
 /// runs, so the case does not arise in practice.
 pub(crate) fn mouse_event_kind(kind: MouseKind) -> Option<MouseEventKind> {
     Some(match kind {

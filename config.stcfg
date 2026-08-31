@@ -1139,12 +1139,18 @@ on key {
     # git submode below also carries. A second `g` pins the mode, so those hops
     # repeat until Escape; the doubled letter spells it the way `space G G`
     # spells the git one.
+    #
+    # The mouse side buttons ride the same hops, forward as n and back as p, so
+    # a pinned chord walks changes from the mouse. Unbound they walk the
+    # jumplist, which is what they do in every other mode.
     mode == space_goto {
         Escape -> SetMode(normal);
         g -> PinMode();
         a -> [GotoLastAccessed(), SetMode(normal)];
         n -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoPrevChange(), SetMode(normal)];
+        MouseForward -> [GotoNextChange(), SetMode(normal)];
+        MouseBack -> [GotoPrevChange(), SetMode(normal)];
     }
     # The git chord. Only a binding changes the mode, never the action it runs,
     # so this chord releases after one key purely because each of its arms

@@ -1412,6 +1412,7 @@ mod tests {
                 modifiers,
                 any_digit: false,
                 wheel: None,
+                side_button: None,
             };
             let token = ck.to_key_token();
             assert_eq!(token, expected);

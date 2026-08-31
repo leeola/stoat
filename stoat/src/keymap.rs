@@ -30,6 +30,17 @@ pub enum WheelDirection {
     Down,
 }
 
+/// Which of the two mouse side buttons was pressed, as the keymap names it.
+///
+/// The buttons reach stoat only over the window socket, so no key code stands
+/// for one. Binding them needs a value of their own, exactly as a wheel notch
+/// does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideButton {
+    Back,
+    Forward,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledKey {
     pub code: KeyCode,
@@ -48,6 +59,13 @@ pub struct CompiledKey {
     /// always refuses, because no [`KeyEvent`] is ever a wheel notch. Reach
     /// these through [`Keymap::lookup_wheel`] instead.
     pub wheel: Option<WheelDirection>,
+    /// A side-button binding, matching a press of that mouse button rather
+    /// than any key press.
+    ///
+    /// When set, [`Self::code`] is an unused sentinel and [`Self::matches`]
+    /// always refuses, because no [`KeyEvent`] is ever a side button. Reach
+    /// these through [`Keymap::lookup_side_button`] instead.
+    pub side_button: Option<SideButton>,
 }
 
 impl CompiledKey {
@@ -87,10 +105,12 @@ impl CompiledKey {
                 modifiers,
                 any_digit: true,
                 wheel: None,
+                side_button: None,
             });
         }
 
-        // Ahead of resolve_key, which has no key code to answer a wheel with.
+        // Ahead of resolve_key, which has no key code to answer a pointer
+        // gesture with.
         if let Key::Named(n) = &kp.keys[key_idx] {
             let wheel = match n.as_str() {
                 "WheelUp" => Some(WheelDirection::Up),
@@ -103,6 +123,22 @@ impl CompiledKey {
                     modifiers,
                     any_digit: false,
                     wheel,
+                    side_button: None,
+                });
+            }
+
+            let side_button = match n.as_str() {
+                "MouseBack" => Some(SideButton::Back),
+                "MouseForward" => Some(SideButton::Forward),
+                _ => None,
+            };
+            if side_button.is_some() {
+                return Some(Self {
+                    code: KeyCode::Null,
+                    modifiers,
+                    any_digit: false,
+                    wheel: None,
+                    side_button,
                 });
             }
         }
@@ -113,12 +149,13 @@ impl CompiledKey {
             modifiers,
             any_digit: false,
             wheel: None,
+            side_button: None,
         })
     }
 
     pub fn matches(&self, event: &KeyEvent) -> bool {
-        // No key event is a wheel notch, so a wheel binding never wins one.
-        if self.wheel.is_some() {
+        // No key event is a pointer gesture, so those bindings never win one.
+        if self.wheel.is_some() || self.side_button.is_some() {
             return false;
         }
         if event.modifiers != self.modifiers {
@@ -152,6 +189,12 @@ impl CompiledKey {
             return self.format_with_modifiers(match dir {
                 WheelDirection::Up => "wheelup",
                 WheelDirection::Down => "wheeldown",
+            });
+        }
+        if let Some(button) = self.side_button {
+            return self.format_with_modifiers(match button {
+                SideButton::Back => "mouseback",
+                SideButton::Forward => "mouseforward",
             });
         }
         let base = match self.code {
@@ -209,6 +252,8 @@ impl CompiledKey {
             _ if self.any_digit => "0-9".to_string(),
             _ if self.wheel == Some(WheelDirection::Up) => "WhUp".to_string(),
             _ if self.wheel == Some(WheelDirection::Down) => "WhDn".to_string(),
+            _ if self.side_button == Some(SideButton::Back) => "MBk".to_string(),
+            _ if self.side_button == Some(SideButton::Forward) => "MFw".to_string(),
             KeyCode::Char(' ') => "Spc".to_string(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::Esc => "Esc".to_string(),
@@ -734,6 +779,38 @@ impl Keymap {
         best.map(|(_, binding)| binding.actions.clone())
     }
 
+    /// Resolve a press of side `button` held with `modifiers` against `state`
+    /// to the winning binding's actions.
+    ///
+    /// Ranks by predicate specificity exactly as a key press does, so a
+    /// `mode == space_goto` binding beats a bare `mode == normal` one and an
+    /// equally specific pair keeps source order. `None` when nothing in
+    /// `state` binds that button, which is the caller's signal to walk the
+    /// jumplist.
+    pub fn lookup_side_button(
+        &self,
+        state: &dyn KeymapState,
+        button: SideButton,
+        modifiers: KeyModifiers,
+    ) -> Option<Arc<[ResolvedAction]>> {
+        let mut best: Option<(usize, &CompiledBinding)> = None;
+        for binding in &self.bindings {
+            if binding.key.side_button != Some(button) || binding.key.modifiers != modifiers {
+                continue;
+            }
+            if !binding.predicates.iter().all(|p| evaluate(p, state)) {
+                continue;
+            }
+            let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
+            // Strict `>` keeps the earliest binding on a tie, matching how a
+            // key press resolves equally specific matches.
+            if best.is_none_or(|(best_score, _)| score > best_score) {
+                best = Some((score, binding));
+            }
+        }
+        best.map(|(_, binding)| binding.actions.clone())
+    }
+
     pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
         let mut results = Vec::new();
         for binding in &self.bindings {
@@ -1152,6 +1229,24 @@ mod tests {
     }
 
     #[test]
+    fn a_side_button_binding_compiles_to_a_button_and_never_matches_a_key() {
+        let config = parse_config("on key { mode == normal { MouseBack -> GotoPrevChange(); } }");
+        let keymap = Keymap::compile(&config);
+        let key = &keymap.bindings[0].key;
+
+        assert_eq!(
+            (key.side_button, key.wheel, key.modifiers, key.any_digit),
+            (Some(SideButton::Back), None, KeyModifiers::NONE, false),
+            "MouseBack compiles to an unmodified back button"
+        );
+        assert!(
+            !key.matches(&key_event(KeyCode::Null, KeyModifiers::NONE))
+                && !key.matches(&key_event(KeyCode::Char('p'), KeyModifiers::NONE)),
+            "no key press ever wins a side-button binding"
+        );
+    }
+
+    #[test]
     fn lookup_wheel_resolves_a_bound_notch_and_ignores_the_rest() {
         let config =
             parse_config("on key { mode == normal { Alt-WheelDown -> GotoNextChange(); } }");
@@ -1231,6 +1326,7 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert!(ck.matches(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL)));
         assert!(!ck.matches(&key_event(KeyCode::Char('s'), KeyModifiers::NONE)));
@@ -1932,6 +2028,36 @@ mod tests {
                 "GotoPrevChange".to_string(),
             ),
             "the two-atom diff block outranks the one-atom normal block"
+        );
+    }
+
+    #[test]
+    fn the_default_side_buttons_walk_changes_in_a_pinned_goto_chord() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+        let bound = |state: &TestState, button| {
+            keymap
+                .lookup_side_button(state, button, KeyModifiers::NONE)
+                .map(|actions| actions[0].name.clone())
+        };
+
+        assert_eq!(
+            (
+                bound(&goto, SideButton::Forward),
+                bound(&goto, SideButton::Back),
+                bound(&normal, SideButton::Forward),
+                bound(&normal, SideButton::Back),
+            ),
+            (
+                Some("GotoNextChange".to_string()),
+                Some("GotoPrevChange".to_string()),
+                None,
+                None,
+            ),
+            "the goto chord binds both buttons to the n and p hops, and no other mode binds them"
         );
     }
 
@@ -2816,6 +2942,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert_eq!(ck.display_label(), "q");
     }
@@ -2827,6 +2954,7 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert_eq!(ck.display_label(), "C-s");
     }
@@ -2839,6 +2967,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
                 any_digit: false,
                 wheel: None,
+                side_button: None,
             }
             .display_label(),
             "Esc"
@@ -2849,6 +2978,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
                 any_digit: false,
                 wheel: None,
+                side_button: None,
             }
             .display_label(),
             "Spc"
@@ -2862,6 +2992,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert_eq!(ck.display_label(), "S-Tab");
     }
@@ -2873,6 +3004,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert_eq!(ck.to_key_token(), "q");
     }
@@ -2884,6 +3016,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert_eq!(ck.to_key_token(), "space");
     }
@@ -2895,6 +3028,7 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
             any_digit: false,
             wheel: None,
+            side_button: None,
         };
         assert_eq!(ck.to_key_token(), "ctrl-s");
     }
