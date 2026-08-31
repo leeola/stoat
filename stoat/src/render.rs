@@ -327,7 +327,7 @@ pub(crate) struct FrameCtx<'a> {
     /// [`review::diff_soften_scale`]. `1.0` paints the shipped
     /// fractions and `0.0` disables softening. Read only by diff-view panes.
     pub(crate) diff_soften_scale: f32,
-    /// Fraction the diff view shifts a changed char toward its status color,
+    /// Fraction the diff view shifts a changed row toward its status color,
     /// resolved from [`crate::app::Stoat::diff_tint`] per
     /// [`review::diff_tint_amount`]. `0.0` paints the syntax color untouched
     /// and `1.0` replaces it. Read only by diff-view panes.

@@ -681,9 +681,13 @@ pub struct Stoat {
     /// whole session rather than one per editor, because how hard to recede is
     /// a reading preference rather than a property of any one file.
     pub(crate) diff_soften: i8,
-    /// How far the diff view shifts a changed char toward its status color,
-    /// as a level [`crate::render::review::diff_tint_amount`] turns into a
+    /// How far the diff view shifts a changed row toward its status color, as
+    /// a level [`crate::render::review::diff_tint_amount`] turns into a
     /// fraction. Level 0 is off, and the ctrl-9 and ctrl-0 chords step it.
+    ///
+    /// The whole row moves, not only the chars the refinement matched, so an
+    /// unchanged token on an added line reads added rather than keeping the
+    /// syntax color the theme gave it.
     ///
     /// Color is the cue the soften leaves free. The soften says where a change
     /// is, and this says what kind it is, so added, deleted, modified, and
