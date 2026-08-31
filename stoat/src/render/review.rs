@@ -47,14 +47,14 @@ pub(crate) const MODIFIED_ROW_SOFTEN: f32 = 0.25;
 
 /// Furthest the diff view's soften may be turned down. Lands the scale on zero,
 /// which disables softening outright and restores the paint from before it.
-pub(crate) const DIFF_SOFTEN_MIN: i8 = -4;
+pub(crate) const DIFF_SOFTEN_MIN: i8 = -2;
 
 /// Furthest the soften turns up, landing the context blend on [`SOFTEN_CAP`].
 ///
 /// The largest level that still moves a context row. One step further scales
 /// past the cap, where the trim takes the excess back and the row paints
 /// exactly as it did a step earlier.
-pub(crate) const DIFF_SOFTEN_MAX: i8 = 6;
+pub(crate) const DIFF_SOFTEN_MAX: i8 = 3;
 
 /// Ceiling on a scaled soften fraction, leaving a twentieth of the syntax color.
 ///
@@ -79,34 +79,34 @@ const FAINT_CONTRAST_FLOOR: f32 = 0.30;
 /// Multiplier `level` applies to [`CONTEXT_SOFTEN`] and [`MODIFIED_ROW_SOFTEN`].
 ///
 /// Level 0 returns 1.0, so an untouched session paints the shipped fractions
-/// exactly. Each step is a quarter, so four steps down turn softening off and
-/// six steps up reach the readability floor. The ends sit at different
+/// exactly. Each step is a half, so two steps down turn softening off and
+/// three steps up reach the readability floor. The ends sit at different
 /// distances because the scale starts at 1.0, which is nearer to zero than to
 /// the 2.5 the floor needs.
 ///
 /// A caller must skip [`soften_style`] entirely on a zero scale rather than pass
 /// it a zero amount, because that call drops bold whatever amount it is given.
 pub(crate) fn diff_soften_scale(level: i8) -> f32 {
-    1.0 + 0.25 * f32::from(level.clamp(DIFF_SOFTEN_MIN, DIFF_SOFTEN_MAX))
+    1.0 + 0.5 * f32::from(level.clamp(DIFF_SOFTEN_MIN, DIFF_SOFTEN_MAX))
 }
 
 /// Furthest the tint dial turns up, landing a changed char on its status color
 /// outright.
 ///
-/// Four steps of a quarter each. The top is where the syntax color is gone
+/// Two steps of a half each. The top is where the syntax color is gone
 /// entirely, which is the readable flat form the theme already tunes its
 /// `diff.*` colors for, so nothing above it would say more.
-pub(crate) const DIFF_TINT_MAX: i8 = 4;
+pub(crate) const DIFF_TINT_MAX: i8 = 2;
 
 /// Fraction a changed char's foreground shifts toward its status color at
 /// `level`.
 ///
 /// Level 0 is off and paints exactly the colors from before the dial, which is
-/// where a session starts. The mid levels lean the syntax color toward the
-/// status hue, and level 4 replaces it. A level below zero is the same as off,
+/// where a session starts. Level 1 leans the syntax color halfway toward the
+/// status hue, and level 2 replaces it. A level below zero is the same as off,
 /// so the dial's bottom needs no separate floor.
 pub(crate) fn diff_tint_amount(level: i8) -> f32 {
-    0.25 * f32::from(level.clamp(0, DIFF_TINT_MAX))
+    0.5 * f32::from(level.clamp(0, DIFF_TINT_MAX))
 }
 
 /// Paint an editor as a side-by-side diff, with base (HEAD) text on the left and

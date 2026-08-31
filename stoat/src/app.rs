@@ -8488,7 +8488,7 @@ mod tests {
         assert_eq!(
             h.stoat.diff_tint,
             crate::render::review::DIFF_TINT_MAX,
-            "four presses reach the top and the fifth holds there",
+            "two presses reach the top and the rest hold there",
         );
 
         for _ in 0..5 {
