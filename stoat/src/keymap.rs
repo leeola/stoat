@@ -2631,7 +2631,11 @@ mod tests {
             "the second G pins the mode it is already in",
         );
 
-        for (key, action) in [('n', "GotoNextChange"), ('s', "StageHunk")] {
+        for (key, action) in [
+            ('n', "GotoNextChange"),
+            ('s', "StageHunk"),
+            ('r', "ReloadAll"),
+        ] {
             let bound = keymap
                 .lookup(
                     &space_git,

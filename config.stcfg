@@ -1157,6 +1157,9 @@ on key {
     # chains SetMode(normal). A second `G` pins the mode, which drops that
     # chained switch, letting n and s repeat to walk and stage hunks until
     # Escape. Escape switches and nothing else, which is what releases the pin.
+    #
+    # `r` re-reads the open buffers, so an external tool's edits reach the diff
+    # without leaving the chord. It spells the same verb `space r` does.
     mode == space_git {
         Escape -> SetMode(normal);
         G -> PinMode();
@@ -1168,6 +1171,7 @@ on key {
         t -> [ToggleStageHunk(), SetMode(normal)];
         n -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoPrevChange(), SetMode(normal)];
+        r -> [ReloadAll(), SetMode(normal)];
         m -> [JumpToMoveSource(), SetMode(normal)];
         M -> [JumpToMoveTarget(), SetMode(normal)];
         l -> GitLs();
