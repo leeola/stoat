@@ -689,6 +689,10 @@ pub struct Stoat {
     /// unchanged token on an added line reads added rather than keeping the
     /// syntax color the theme gave it.
     ///
+    /// The same level drains the color out of the unchanged rows around it, so
+    /// raising the dial concentrates color on the change rather than adding
+    /// more of it to the screen.
+    ///
     /// Color is the cue the soften leaves free. The soften says where a change
     /// is, and this says what kind it is, so added, deleted, modified, and
     /// moved read apart without the gutter.

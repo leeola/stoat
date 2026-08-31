@@ -105,6 +105,9 @@ pub(crate) const DIFF_TINT_MAX: i8 = 2;
 /// where a session starts. Level 1 leans the syntax color halfway toward the
 /// status hue, and level 2 replaces it. A level below zero is the same as off,
 /// so the dial's bottom needs no separate floor.
+///
+/// The same fraction drains the color out of an unchanged row, so one dial
+/// trades color between the two populations rather than only adding it.
 pub(crate) fn diff_tint_amount(level: i8) -> f32 {
     0.5 * f32::from(level.clamp(0, DIFF_TINT_MAX))
 }
@@ -891,6 +894,32 @@ fn tint_style(style: Style, target: Color, amount: f32) -> Style {
     }
 }
 
+/// Drain `amount` of the color out of `style`'s foreground, toward the gray of
+/// its own brightness.
+///
+/// The other half of the tint dial's trade. Changed content gains its status
+/// color as the dial rises, and unchanged content loses the color it had, so
+/// the top reads as status-colored rows on a gray field rather than as one more
+/// palette competing with the rest.
+///
+/// Blending toward the foreground's own luma rather than a fixed gray is what
+/// keeps a dark comment dark and a bright keyword bright, so the row still
+/// reads as code with its emphasis intact.
+///
+/// An amount at or under zero returns the style as it was, and a foreground
+/// that is not an RGB color has no channels to drain and returns unchanged.
+fn desaturate_style(style: Style, amount: f32) -> Style {
+    if amount <= 0.0 {
+        return style;
+    }
+    let Some(fg) = style_rgb(style.fg) else {
+        return style;
+    };
+    let gray = [(luma(fg) * 255.0).round() as u8; 3];
+    let [r, g, b] = dim_rgb(fg, gray, amount);
+    style.fg(Color::Rgb(r, g, b))
+}
+
 /// Lift `style`'s foreground away from `bg` when it sits too close to read.
 ///
 /// A foreground already [`FAINT_CONTRAST_FLOOR`] or further from the background
@@ -1002,6 +1031,10 @@ fn gap_style(
 /// zero leaves both inert, so the dial's off position paints exactly the colors
 /// from before it.
 ///
+/// The same amount drains the color out of an unchanged row per
+/// [`desaturate_style`], so one dial trades color between the two populations
+/// and its top reads as status-colored rows on a gray field.
+///
 /// A changed char whose color lands too near the background is then lifted per
 /// [`brighten_style`], so a muted one still stands off the context receding
 /// behind it. The lift rides on the softening, so a zero `soften_scale` turns
@@ -1052,6 +1085,11 @@ pub(crate) fn paint_base_row(
         };
         if let Some(bg) = soften_row.filter(|_| soften_scale > 0.0) {
             style = soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP));
+        }
+        // Unfiltered, because the gray answers the tint dial rather than the
+        // soften one, so it holds with softening turned off.
+        if soften_row.is_some() {
+            style = desaturate_style(style, tint_amount);
         }
 
         while change_spans
@@ -1266,6 +1304,10 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// it. An amount of zero leaves both inert, so the dial's off position paints
 /// exactly the colors from before it.
 ///
+/// The same amount drains the color out of an unchanged row per
+/// [`desaturate_style`], so one dial trades color between the two populations
+/// and its top reads as status-colored rows on a gray field.
+///
 /// A changed cell whose color lands too near the background is then lifted per
 /// [`brighten_style`], so a muted one still stands off the context receding
 /// behind it. The lift rides on the softening, so a zero `soften_scale` turns
@@ -1314,6 +1356,12 @@ pub(crate) fn paint_highlighted_row(
         let style = match soften_row.filter(|_| soften_scale > 0.0) {
             Some(bg) => soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP)),
             None => style,
+        };
+        // Unfiltered, because the gray answers the tint dial rather than the
+        // soften one, so it holds with softening turned off.
+        let style = match soften_row.is_some() {
+            true => desaturate_style(style, tint_amount),
+            false => style,
         };
         // Resolved per chunk rather than per cell, because a chunk's cells
         // differ only in which side of a change span they fall on.
@@ -3424,6 +3472,94 @@ mod tests {
             paint(1.0),
             [Some(tints.modified), Some(tints.deleted), syntax],
             "the top level hands each span its status color outright",
+        );
+    }
+
+    /// Raising the dial adds color to the changed rows, so leaving the rest of
+    /// the screen at full saturation trades one competing palette for two. The
+    /// same fraction drains the unchanged rows instead, which is what makes the
+    /// top read as status colors on a gray field.
+    ///
+    /// Softening is off throughout, which is the point. The gray answers the
+    /// tint dial, so it holds with the soften dial turned all the way down.
+    #[test]
+    fn the_tint_amount_drains_an_unchanged_row_toward_its_own_gray() {
+        let tints = rgb_tints();
+        let fg = [200, 100, 50];
+
+        let paint = |amount: f32| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 6, 1));
+            paint_base_row(
+                &mut buf,
+                0,
+                0,
+                "word",
+                4,
+                &[],
+                Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
+                &[],
+                Some(&tints),
+                Some(tints.bg),
+                None,
+                0.0,
+                amount,
+                None,
+            );
+            buf[(0, 0)].style().fg
+        };
+
+        let gray = [(luma(fg) * 255.0).round() as u8; 3];
+        let half = dim_rgb(fg, gray, 0.5);
+
+        assert_eq!(
+            (paint(0.0), paint(0.5), paint(1.0)),
+            (
+                Some(Color::Rgb(fg[0], fg[1], fg[2])),
+                Some(Color::Rgb(half[0], half[1], half[2])),
+                Some(Color::Rgb(gray[0], gray[1], gray[2])),
+            ),
+            "the off position keeps the syntax color, a mid level drains half \
+             of it, and the top leaves the char its own brightness in gray",
+        );
+    }
+
+    /// The gray is for unchanged rows alone. A changed row carries a row tint
+    /// instead, and the two never meet on one row, so nothing the reader is
+    /// looking for loses its color.
+    #[test]
+    fn a_changed_row_takes_no_gray_from_the_tint_amount() {
+        let tints = rgb_tints();
+        let fg = [200, 100, 50];
+
+        let paint = |soften_gaps, tint_row| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 6, 1));
+            paint_base_row(
+                &mut buf,
+                0,
+                0,
+                "word",
+                4,
+                &[],
+                Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
+                &[(0..1, ChangeKind::Replaced, false)],
+                Some(&tints),
+                None,
+                soften_gaps,
+                0.0,
+                1.0,
+                tint_row,
+            );
+            buf[(2, 0)].style().fg
+        };
+
+        assert_eq!(
+            (
+                paint(Some(tints.bg), Some(tints.deleted)),
+                paint(None, Some(tints.added)),
+            ),
+            (Some(tints.deleted), Some(tints.added)),
+            "a refined row's gap cell and a span-less row both take their row \
+             status outright, with no gray between",
         );
     }
 
