@@ -19,6 +19,7 @@ use crate::{
     display_map::DisplayPoint,
     editor_state::{EditorState, ScrollGlide},
 };
+use std::ops::Range;
 use stoat_text::{cursor_offset, Bias, SelectionGoal};
 
 #[derive(Copy, Clone, Debug)]
@@ -441,16 +442,64 @@ pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
 /// than scrolling blank space into view. A move over one row seeds the glide
 /// from the pre-jump row, exactly as [`follow_jump`] does.
 pub(crate) fn center_jump_on_cursor(editor: &mut EditorState, down: bool, center_off: u32) -> bool {
-    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let cursor_row = {
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let sel = editor.selections.newest_anchor().clone();
+        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor = cursor_offset(rope, tail_off, head_off);
+        snapshot.buffer_to_display(rope.offset_to_point(cursor)).row
+    };
 
-    let snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let sel = editor.selections.newest_anchor().clone();
-    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-    let cursor = cursor_offset(rope, tail_off, head_off);
-    let cursor_row = snapshot.buffer_to_display(rope.offset_to_point(cursor)).row;
+    center_jump_on_rows(editor, cursor_row..cursor_row + 1, down, center_off)
+}
+
+/// Center the view on a whole display-row `span` after a jump, and report
+/// whether the view moved.
+///
+/// A change jump lands on a chunk, not a point. Centering its first row alone
+/// leaves a tall chunk hanging below the middle with its tail near the bottom
+/// edge, which is the opposite of what a reader wants to see after arriving.
+/// The span's midpoint takes the target instead, so the chunk sits centered
+/// with its rows evenly above and below.
+///
+/// A span taller than the viewport has no whole-span centering to reach, so it
+/// falls back to [`center_jump_on_cursor`] and the landing point leads as
+/// before.
+///
+/// `span` is display rows with an exclusive end. It carries the same `down`
+/// bias and the same one-sided band as [`center_jump_on_cursor`], measured
+/// against the midpoint rather than the cursor.
+pub(crate) fn center_jump_on_span(
+    editor: &mut EditorState,
+    span: Range<u32>,
+    down: bool,
+    center_off: u32,
+) -> bool {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    if span.end.saturating_sub(span.start) > viewport {
+        return center_jump_on_cursor(editor, down, center_off);
+    }
+
+    center_jump_on_rows(editor, span, down, center_off)
+}
+
+/// Scroll so `rows` sits centered, biased `center_off` rows toward the side the
+/// jump arrived from, and report whether the view moved.
+///
+/// The midpoint `(start + end) / 2` is what takes the target. For a one-row
+/// range that is the row itself, so a cursor jump and a span jump run the same
+/// arithmetic rather than two that must be kept in step.
+fn center_jump_on_rows(
+    editor: &mut EditorState,
+    rows: Range<u32>,
+    down: bool,
+    center_off: u32,
+) -> bool {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let midpoint = (rows.start + rows.end) / 2;
 
     let center = viewport / 2;
     let center_off = center_off.min(viewport.saturating_sub(1) / 2);
@@ -458,18 +507,18 @@ pub(crate) fn center_jump_on_cursor(editor: &mut EditorState, down: bool, center
         true => center + center_off,
         false => center.saturating_sub(center_off),
     };
-    let max_scroll = max_scroll_row(snapshot.line_count(), viewport);
+    let max_scroll = max_scroll_row(editor.display_map.snapshot().line_count(), viewport);
 
     let prev = editor.scroll_row;
     let sits_past = match down {
-        true => cursor_row > prev + target,
-        false => cursor_row < prev + target,
+        true => midpoint > prev + target,
+        false => midpoint < prev + target,
     };
-    let on_screen = (prev..prev + viewport).contains(&cursor_row);
+    let on_screen = rows.start >= prev && rows.end <= prev + viewport;
     if !sits_past && on_screen {
         return false;
     }
-    editor.scroll_row = cursor_row.saturating_sub(target).min(max_scroll);
+    editor.scroll_row = midpoint.saturating_sub(target).min(max_scroll);
     // A jump lands on the row grid, whatever fraction the wheel last rested on.
     editor.scroll_frac = 0.0;
 
@@ -785,6 +834,75 @@ mod tests {
         assert_eq!(
             editor.scroll_row, 5,
             "an upward landing sits two rows short of center",
+        );
+    }
+
+    /// A change jump lands on a chunk, so the chunk's midpoint takes the
+    /// target rather than its first row. The one-sided band and the bias read
+    /// that midpoint, exactly as the cursor version reads the cursor row.
+    #[test]
+    fn center_jump_on_span_puts_the_span_midpoint_at_the_target() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        // Viewport 10, so the center row is 5 and a six-row span at 50..56 has
+        // midpoint 53.
+        editor.viewport_rows = Some(10);
+        editor.scroll_row = 0;
+        editor.scroll_offset = 0.0;
+        editor.scroll_glide = ScrollGlide::None;
+
+        assert!(
+            center_jump_on_span(editor, 50..56, true, 0),
+            "a far jump scrolls"
+        );
+        assert_eq!(
+            (editor.scroll_row, editor.scroll_offset, editor.scroll_glide),
+            (48, 0.0, ScrollGlide::Page),
+            "the whole span sits centered, two viewport rows above it and two \
+             below, and the glide starts from the pre-jump row",
+        );
+
+        assert!(
+            !center_jump_on_span(editor, 50..56, true, 0),
+            "the same span, wholly on screen and not past the target, holds \
+             the view rather than pulling it back",
+        );
+
+        editor.scroll_row = 0;
+        assert!(
+            center_jump_on_span(editor, 50..56, true, 2),
+            "the biased jump scrolls too"
+        );
+        assert_eq!(
+            editor.scroll_row, 46,
+            "a downward landing sits two rows past center, so what stays on \
+             screen above the chunk is where the reader came from",
+        );
+    }
+
+    /// A chunk near the document end pins the view to the bottom rather than
+    /// scrolling blank space in behind it.
+    #[test]
+    fn center_jump_on_span_clamps_at_the_document_end() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+        editor.scroll_row = 0;
+
+        // A 101-row document in a viewport of 10 bottoms out at row 91, and
+        // the midpoint of 97 against a target of 5 asks for 92.
+        center_jump_on_span(editor, 95..99, true, 0);
+        assert_eq!(
+            editor.scroll_row, 91,
+            "the span's own arithmetic is clamped to the bottom-most scroll",
         );
     }
 

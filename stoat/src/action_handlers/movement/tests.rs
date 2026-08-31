@@ -6086,6 +6086,39 @@ fn a_hunk_jump_centers_its_landing() {
     );
 }
 
+/// A jump arrives at a chunk, not a point, so the chunk takes the middle of
+/// the screen. Centering its landing row alone leaves a tall chunk hanging off
+/// the bottom edge with only its head in comfortable view.
+#[test]
+fn a_hunk_jump_centers_the_whole_chunk_when_it_fits() {
+    let landing = |hunk: Range<u32>| {
+        let mut h = TestHarness::with_size(40, 20);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+        install_diff_hunk_rows(&mut h, &[hunk, 90..91]);
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .viewport_rows = Some(10);
+
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        let row = focused_head_row(&mut h.stoat);
+        (
+            row,
+            focused_editor_mut(&mut h.stoat).expect("editor").scroll_row,
+        )
+    };
+
+    // Viewport 10, center 5. A six-row hunk at 50..56 has midpoint 53, so it
+    // takes viewport rows 2 through 7 and the cursor sits at row 2.
+    assert_eq!(
+        (landing(50..56), landing(50..70)),
+        ((50, 48), (50, 45)),
+        "a chunk that fits centers whole, and one taller than the viewport \
+         keeps centering its landing row",
+    );
+}
+
 /// A hunk is one stop, so it has one landing point. Arriving from either side
 /// leaves the cursor on the same row, which is what lets a reversal read as
 /// stepping to the neighbor rather than as landing the same hunk twice.

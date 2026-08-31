@@ -4064,7 +4064,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
     // Every selection steps from its own cursor, so a multi-cursor set walks to
     // one hunk each rather than sharing whichever cursor happened to be newest.
-    let landings: Vec<(usize, Range<usize>)> = editor
+    let landings: Vec<(usize, Range<usize>, Range<u32>)> = editor
         .selections
         .all_anchors()
         .iter()
@@ -4075,7 +4075,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
                 .offset_to_point(cursor_offset(rope, tail_off, head_off))
                 .row;
             let rows = nth_hunk_rows(&hunk_rows, cursor_row, dir, count)?;
-            Some((sel.id, hunk_span(rope, rows)))
+            Some((sel.id, hunk_span(rope, rows.clone()), rows))
         })
         .collect();
 
@@ -4086,7 +4086,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, _head_offset, tail_offset| {
-            let Some((_, target)) = landings.iter().find(|(id, _)| *id == sel.id) else {
+            let Some((_, target, _)) = landings.iter().find(|(id, ..)| *id == sel.id) else {
                 return sel.clone();
             };
 
@@ -4119,10 +4119,45 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     // The landing goes to the middle of the screen rather than the edge the
     // walk arrived at. The key epilogue's follow then finds the cursor deep
     // inside its margin and leaves both the view and this glide alone.
+    //
+    // The whole chunk takes the middle, not the row the cursor sits on, so a
+    // tall hunk does not hang off the bottom edge with its landing centered.
     if let Some(editor) = focused_editor_mut(stoat) {
-        view::center_jump_on_cursor(editor, matches!(dir, ChangeDir::Next), center_off);
+        let down = matches!(dir, ChangeDir::Next);
+        let span = landed_display_span(editor, &landings);
+        match span {
+            Some(span) => view::center_jump_on_span(editor, span, down, center_off),
+            None => view::center_jump_on_cursor(editor, down, center_off),
+        };
     }
     UpdateEffect::Redraw
+}
+
+/// Display rows the newest selection's landed stop covers, exclusive end.
+///
+/// A deletion stop holds no buffer rows of its own, so it brackets its seam.
+/// The span runs from the row it landed on through the row after the seam. The
+/// diff view's spliced block sits between those two buffer rows, so the mapped
+/// span covers the removed lines without this reading the block structure.
+///
+/// `None` where the newest selection took no landing, which leaves the caller
+/// on the plain cursor centering.
+fn landed_display_span(
+    editor: &mut EditorState,
+    landings: &[(usize, Range<usize>, Range<u32>)],
+) -> Option<Range<u32>> {
+    let newest_id = editor.selections.newest_anchor().id;
+    let rows = landings
+        .iter()
+        .find(|(id, ..)| *id == newest_id)
+        .map(|(_, _, rows)| rows.clone())?;
+
+    let snapshot = editor.display_map.snapshot();
+    let display_row = |row: u32| snapshot.buffer_to_display(Point::new(row, 0)).row;
+    Some(match rows.is_empty() {
+        true => display_row(rows.start.saturating_sub(1))..display_row(rows.start) + 1,
+        false => display_row(rows.start)..display_row(rows.end),
+    })
 }
 
 /// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when the
