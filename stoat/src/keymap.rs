@@ -2660,6 +2660,41 @@ mod tests {
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
+    /// Follow watches one file's edits land, which is what the diff view's
+    /// live column is for, so the key is bound only there. Elsewhere in the
+    /// chord `R` stays free.
+    #[test]
+    fn the_git_chord_binds_follow_only_on_the_diff_view() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let git = TestState::new().set("mode", StateValue::String("space_git".into()));
+        let in_diff = TestState::new()
+            .set("mode", StateValue::String("space_git".into()))
+            .set("view", StateValue::String("diff".into()));
+
+        let bound = keymap
+            .lookup(&in_diff, &key_event(KeyCode::Char('R'), KeyModifiers::NONE))
+            .expect("R is bound in the git chord on the diff view");
+        assert_eq!(
+            (
+                bound.len(),
+                bound[0].name.as_str(),
+                &bound[0].args[0].value,
+                bound[1].name.as_str(),
+            ),
+            (2, "AutoReload", &Value::Ident("follow".into()), "SetMode"),
+            "follow runs first, and the switch a pin drops rides behind it",
+        );
+
+        assert!(
+            keymap
+                .lookup(&git, &key_event(KeyCode::Char('R'), KeyModifiers::NONE))
+                .is_none(),
+            "off the diff view the chord leaves R unbound",
+        );
+    }
+
     /// The pinned twin of `space G G`, spelled with the doubled letter the
     /// same way.
     #[test]

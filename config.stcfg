@@ -1176,6 +1176,17 @@ on key {
         M -> [JumpToMoveTarget(), SetMode(normal)];
         l -> GitLs();
     }
+    # `r` refreshes once, so watching an external tool work through a file costs
+    # a press per change. `R` hands that loop to follow, which re-reads as edits
+    # land and jumps to each one. A second press stops it, so the key carries no
+    # state of its own.
+    #
+    # The view predicate is what keeps `R` free in the chord everywhere else.
+    # Follow pairs with the diff's live column, and this block outranks the
+    # broader one by naming its context.
+    view == diff && mode == space_git {
+        R -> [AutoReload(follow), SetMode(normal)];
+    }
     # Reading a tour is a run of steps rather than one, so `space W` holds this
     # mode instead of running a single arm. n and p walk the stops and a and A
     # the annotations until Escape. No arm here chains SetMode(normal), which
