@@ -6146,16 +6146,59 @@ fn a_reversal_alternates_between_neighbor_hunks() {
     );
 }
 
-/// A deletion removed the rows it covers, so it holds none of its own.
+/// A deletion removed the rows it covers, so it holds none of its own. The
+/// diff view splices the removed block above the seam row, so the cell that
+/// stands for it is the line the removed text followed rather than the line
+/// that closed over it.
 #[test]
-fn goto_next_change_selects_one_cell_at_a_deletion() {
+fn goto_next_change_selects_one_cell_above_a_deletion() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
     h.open_file(&path);
     install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
 
     h.type_keys("] g");
-    assert_eq!(h.selection_spans(), vec![(6, 7, true)]);
+    assert_eq!(h.selection_spans(), vec![(4, 5, true)]);
+}
+
+/// A removal at the top of the file has no line before it, so its landing
+/// saturates onto the first row rather than wrapping to the file's end.
+#[test]
+fn goto_next_change_lands_a_top_of_file_deletion_on_row_zero() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, &[0..0, 6..7]);
+    set_range(&mut h, 4, 5);
+
+    h.type_keys("[ g");
+    assert_eq!(h.selection_spans(), vec![(0, 1, true)]);
+}
+
+/// The walk reads a removal as occupying the row it lands on, so a step off
+/// that row passes over it and a step back from the seam row reaches it. Both
+/// arms have to agree with the landing or a press re-lands where it started.
+#[test]
+fn the_change_walk_reads_a_deletion_as_the_row_it_lands_on() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
+
+    set_range(&mut h, 4, 5);
+    h.type_keys("] g");
+    let off_the_landing = h.selection_spans();
+
+    set_range(&mut h, 6, 7);
+    h.type_keys("[ g");
+    let back_from_the_seam = h.selection_spans();
+
+    assert_eq!(
+        (off_the_landing, back_from_the_seam),
+        (vec![(12, 14, true)], vec![(4, 5, true)]),
+        "a step forward off the removal reaches the next hunk, and a step back \
+         from the row it was removed above reaches the removal",
+    );
 }
 
 /// The backward step leaves the hunk the cursor is inside rather than

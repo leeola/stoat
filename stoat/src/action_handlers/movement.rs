@@ -4130,8 +4130,12 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 ///
 /// The backward walk compares each hunk's end against the cursor rather than
 /// its start, which is what steps out of the hunk the cursor is already inside
-/// instead of landing on that one again. A deletion hunk stores no rows at all,
-/// so the row it sits on counts as inside it and the walk passes over it.
+/// instead of landing on that one again.
+///
+/// A deletion hunk stores no rows, and [`hunk_span`] lands it on the row above
+/// its seam, so both arms read that row as the one it occupies. A step forward
+/// off a removal the cursor already sits on passes over it, and a step back
+/// from the seam row lands on it.
 fn nth_hunk_rows(
     hunk_rows: &[Range<u32>],
     cursor_row: u32,
@@ -4140,19 +4144,22 @@ fn nth_hunk_rows(
 ) -> Option<Range<u32>> {
     match dir {
         ChangeDir::Next => {
-            let next: Vec<_> = hunk_rows.iter().filter(|r| r.start > cursor_row).collect();
+            let next: Vec<_> = hunk_rows
+                .iter()
+                .filter(|r| match r.is_empty() {
+                    true => r.start.saturating_sub(1) > cursor_row,
+                    false => r.start > cursor_row,
+                })
+                .collect();
             let idx = (count.saturating_sub(1)).min(next.len().checked_sub(1)?);
             Some(next[idx].clone())
         },
         ChangeDir::Prev => {
             let prev: Vec<_> = hunk_rows
                 .iter()
-                .filter(|r| {
-                    if r.is_empty() {
-                        r.end < cursor_row
-                    } else {
-                        r.end <= cursor_row
-                    }
+                .filter(|r| match r.is_empty() {
+                    true => r.start.saturating_sub(1) < cursor_row,
+                    false => r.end <= cursor_row,
                 })
                 .collect();
             let idx = prev.len().checked_sub(count.max(1))?.min(prev.len() - 1);
@@ -4232,10 +4239,17 @@ fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
 /// Byte span a stop's rows cover, from the first row through the start of the
 /// row after the last.
 ///
-/// A deletion stop holds no rows, so it gets the one cell where the removed
-/// text was. The block cursor has no place to sit in an empty span.
+/// A deletion stop holds no rows, so it gets one cell on the row above its
+/// seam. The block cursor has no place to sit in an empty span, and the diff
+/// view splices the deleted block above the seam, so the row above is the last
+/// line the removed text followed. A removal at the top of the file saturates
+/// to row 0.
 fn hunk_span(rope: &Rope, rows: Range<u32>) -> Range<usize> {
-    let start = rope.point_to_offset(Point::new(rows.start, 0));
+    let first_row = match rows.is_empty() {
+        true => rows.start.saturating_sub(1),
+        false => rows.start,
+    };
+    let start = rope.point_to_offset(Point::new(first_row, 0));
     let end = if rows.is_empty() {
         rope.next_grapheme_boundary(start)
     } else {
@@ -4482,15 +4496,22 @@ fn first_hunk_row(
     // The file is not open, so there is no LiveHunks to read stops from. The
     // runs and buffer_start_line are both stored coordinates, which is the
     // space this answer travels in, so reading them here needs no shift.
-    let stop_row = |hunk: &diff_map::DiffHunk, last: bool| match last {
-        true => hunk
-            .marked_rows
-            .last()
-            .map_or(hunk.buffer_start_line, |run| run.start),
-        false => hunk
-            .marked_rows
-            .first()
-            .map_or(hunk.buffer_start_line, |run| run.start),
+    let stop_row = |hunk: &diff_map::DiffHunk, last: bool| {
+        // A deletion covers no rows and lands on the one above its seam, which
+        // is where the in-file walk puts one through hunk_span.
+        if hunk.buffer_line_range.is_empty() {
+            return hunk.buffer_start_line.saturating_sub(1);
+        }
+        match last {
+            true => hunk
+                .marked_rows
+                .last()
+                .map_or(hunk.buffer_start_line, |run| run.start),
+            false => hunk
+                .marked_rows
+                .first()
+                .map_or(hunk.buffer_start_line, |run| run.start),
+        }
     };
     match dir {
         ChangeDir::Next => hunks.first().map(|hunk| stop_row(hunk, false)),
