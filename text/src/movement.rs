@@ -366,10 +366,12 @@ pub fn integer_increment(text: &str, amount: i64) -> Option<String> {
         return None;
     }
 
-    let radix = match &text[..text.len().min(2)] {
-        "0x" => 16,
-        "0o" => 8,
-        "0b" => 2,
+    // Matching bytes rather than a `&text[..2]` slice, which panics when the
+    // first character is wider than the prefix.
+    let radix = match text.as_bytes() {
+        [b'0', b'x', ..] => 16,
+        [b'0', b'o', ..] => 8,
+        [b'0', b'b', ..] => 2,
         _ => 10,
     };
 
@@ -1213,5 +1215,12 @@ mod tests {
         assert_eq!(integer_increment("9_", 1), None);
         assert_eq!(integer_increment("_9", 1), None);
         assert_eq!(integer_increment("_9_", 1), None);
+    }
+
+    #[test]
+    fn integer_increment_rejects_a_multibyte_character() {
+        assert_eq!(integer_increment("€", 1), None);
+        assert_eq!(integer_increment("日本", 1), None);
+        assert_eq!(integer_increment("→0x1", 1), None);
     }
 }
