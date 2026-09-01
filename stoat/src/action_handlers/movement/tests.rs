@@ -214,6 +214,42 @@ fn next_change_crosses_to_next_file_first_hunk() {
     );
 }
 
+/// The in-file walk reads its stops from the diff map. A hop that leaves the
+/// landed editor mapless makes the next press find no hunk in the file it just
+/// opened, so it crosses back out instead of walking on.
+#[test]
+fn next_change_after_a_hop_walks_the_landed_file_rather_than_cross_out() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_review_scenario(
+        &workdir,
+        &[
+            ("a.rs", "a\nb\nc\n", "a\nX\nc\n"),
+            ("b.rs", "d\ne\nf\ng\nh\ni\n", "d\nY\nf\ng\nh\nZ\n"),
+        ],
+    );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            focused_head_row(&mut h.stoat),
+        ),
+        (workdir.join("b.rs"), 5),
+        "the landing installed b.rs's map, so the next press walks to its \
+         second hunk",
+    );
+}
+
 /// A hop crosses into a file whose diff map has not been computed yet, so the
 /// chunk it landed on rides the hop message. That is what puts a hop and an
 /// in-file step onto the same chunk in the same place, so crossing a file
