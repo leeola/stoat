@@ -1160,6 +1160,9 @@ on key {
     #
     # `r` re-reads the open buffers, so an external tool's edits reach the diff
     # without leaving the chord. It spells the same verb `space r` does.
+    #
+    # The mouse side buttons ride the same hops, forward as n and back as p, so
+    # a pinned chord walks changes from the mouse exactly as the keys do.
     mode == space_git {
         Escape -> SetMode(normal);
         G -> PinMode();
@@ -1171,6 +1174,8 @@ on key {
         t -> [ToggleStageHunk(), SetMode(normal)];
         n -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoPrevChange(), SetMode(normal)];
+        MouseForward -> [GotoNextChange(), SetMode(normal)];
+        MouseBack -> [GotoPrevChange(), SetMode(normal)];
         r -> [ReloadAll(), SetMode(normal)];
         m -> [JumpToMoveSource(), SetMode(normal)];
         M -> [JumpToMoveTarget(), SetMode(normal)];

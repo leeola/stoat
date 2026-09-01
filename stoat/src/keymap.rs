@@ -2032,11 +2032,12 @@ mod tests {
     }
 
     #[test]
-    fn the_default_side_buttons_walk_changes_in_a_pinned_goto_chord() {
+    fn the_default_side_buttons_walk_changes_in_the_pinned_goto_and_git_chords() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
+        let git = TestState::new().set("mode", StateValue::String("space_git".into()));
         let normal = TestState::new().set("mode", StateValue::String("normal".into()));
         let bound = |state: &TestState, button| {
             keymap
@@ -2048,16 +2049,21 @@ mod tests {
             (
                 bound(&goto, SideButton::Forward),
                 bound(&goto, SideButton::Back),
+                bound(&git, SideButton::Forward),
+                bound(&git, SideButton::Back),
                 bound(&normal, SideButton::Forward),
                 bound(&normal, SideButton::Back),
             ),
             (
                 Some("GotoNextChange".to_string()),
                 Some("GotoPrevChange".to_string()),
+                Some("GotoNextChange".to_string()),
+                Some("GotoPrevChange".to_string()),
                 None,
                 None,
             ),
-            "the goto chord binds both buttons to the n and p hops, and no other mode binds them"
+            "both chords bind the buttons to their own n and p hops, and no \
+             other mode binds them"
         );
     }
 
