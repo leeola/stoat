@@ -9,7 +9,29 @@ pub(super) enum ConflictChoice {
     Theirs,
 }
 
-pub(super) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
+/// Select the conflicted file at `index`, or do nothing when it names none.
+///
+/// A press selects and nothing more. Taking a side stays on its own key, so a
+/// misclick picks a different file rather than resolving one.
+pub(crate) fn conflict_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+    use crate::rebase::RebasePause;
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(RebasePause::Conflict {
+        files, selected, ..
+    }) = active.pause.as_mut()
+    else {
+        return UpdateEffect::None;
+    };
+    if index >= files.len() || index == *selected {
+        return UpdateEffect::None;
+    }
+    *selected = index;
+    UpdateEffect::Redraw
+}
+
+pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
     use crate::rebase::RebasePause;
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return UpdateEffect::None;

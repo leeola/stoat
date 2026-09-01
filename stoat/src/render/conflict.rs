@@ -11,7 +11,41 @@ use crate::{
     },
     review::ReviewSide,
 };
-use ratatui::{buffer::Buffer, style::Style};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+
+/// Rows the header takes above the file list. It carries the commit being
+/// picked, the key legend, and a blank line under them.
+const HEADER_ROWS: u16 = 3;
+
+/// Columns the right pane keeps, which caps how wide the file list grows.
+const MIN_DETAIL_COLUMNS: u16 = 20;
+
+/// Rows the conflicted-file list occupies within an overlay pane, or `None`
+/// when the pane is too small to paint one.
+///
+/// Shared by the renderer and the pointer, so a clicked row is the row drawn
+/// under the pointer.
+pub(crate) fn conflict_list_rect(pane_area: Rect) -> Option<Rect> {
+    let (inner, _) = split_pane_status(pane_area);
+    if inner.width < 20 || inner.height < 4 {
+        return None;
+    }
+    let width = conflict_list_width(inner.width);
+    Some(Rect::new(
+        inner.x,
+        inner.y + HEADER_ROWS,
+        width,
+        inner.height.saturating_sub(HEADER_ROWS),
+    ))
+}
+
+/// Columns the file list takes out of `total`, a third of the pane held
+/// between its own floor and what the right pane needs.
+fn conflict_list_width(total: u16) -> u16 {
+    (total / 3)
+        .max(MIN_DETAIL_COLUMNS)
+        .min(total.saturating_sub(MIN_DETAIL_COLUMNS))
+}
 
 pub(crate) fn render_conflict(
     pane: &Pane,
@@ -27,9 +61,9 @@ pub(crate) fn render_conflict(
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
     render_overlay_status(status_area, is_focused, frame, buf, &mut *scene);
-    if inner.width < 20 || inner.height < 4 {
+    let Some(list_area) = conflict_list_rect(pane.area) else {
         return;
-    }
+    };
 
     let (source_sha, files, selected, resolutions) = match active.pause.as_ref() {
         Some(RebasePause::Conflict {
@@ -41,8 +75,7 @@ pub(crate) fn render_conflict(
         _ => return,
     };
 
-    let left_w = (inner.width / 3).max(20);
-    let left_w = left_w.min(inner.width.saturating_sub(20));
+    let left_w = list_area.width;
     let sep_x = inner.x + left_w;
     let right_x = sep_x + 1;
     let right_w = inner.width.saturating_sub(left_w + 1);
@@ -76,7 +109,7 @@ pub(crate) fn render_conflict(
         dim,
     );
 
-    let list_top = inner.y + 3;
+    let list_top = list_area.y;
     for (i, file) in files.iter().enumerate() {
         let y = list_top + i as u16;
         if y >= inner.y + inner.height {

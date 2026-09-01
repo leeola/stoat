@@ -20,6 +20,7 @@ use crate::{
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, View},
+    rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
     run::GridSelection,
     term_session::{TermId, TermSelection},
@@ -127,6 +128,7 @@ pub(crate) struct ScreenSurfaces {
 enum ScreenKind {
     Commits,
     Rebase,
+    RebaseConflict,
 }
 
 impl ScreenSurfaces {
@@ -181,6 +183,26 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
                 detail: None,
             })
         },
+        "rebase_conflict" => {
+            let RebasePause::Conflict {
+                files, selected, ..
+            } = ws.rebase_active.as_ref()?.pause.as_ref()?
+            else {
+                return None;
+            };
+            let pane = ws.panes.pane(ws.panes.focus()).area;
+            Some(ScreenSurfaces {
+                kind: ScreenKind::RebaseConflict,
+                pane,
+                list: crate::render::conflict::conflict_list_rect(pane)?,
+                len: files.len(),
+                selected: *selected,
+                // The file list paints from its first entry and stops at the
+                // pane's bottom, so there is no window to offset by.
+                scroll_top: 0,
+                detail: None,
+            })
+        },
         _ => None,
     }
 }
@@ -213,6 +235,7 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
             action_handlers::commits::commits_step(stoat, step)
         },
         ScreenKind::Rebase => action_handlers::rebase::rebase_select(stoat, index),
+        ScreenKind::RebaseConflict => action_handlers::conflict::conflict_select(stoat, index),
     })
 }
 
@@ -1316,6 +1339,15 @@ pub(crate) fn handle_mouse_scroll(
                     let mut effect = UpdateEffect::None;
                     for _ in 0..by {
                         effect = action_handlers::rebase::rebase_move(stoat, step);
+                    }
+                    effect
+                },
+                // One file per notch, for the reason the rebase arm above
+                // spends one call each.
+                ScreenKind::RebaseConflict => {
+                    let mut effect = UpdateEffect::None;
+                    for _ in 0..by {
+                        effect = action_handlers::conflict::conflict_step(stoat, steps > 0);
                     }
                     effect
                 },
@@ -2854,6 +2886,99 @@ mod tests {
             (rebase_selected(&h), ops(&h)),
             (1, before),
             "the second row is selected and every entry keeps its op"
+        );
+    }
+
+    /// Seed a rebase that stops on a conflict over two files, and hand back
+    /// the harness plus the file list rect the paint uses.
+    fn conflict_harness() -> (crate::test_harness::TestHarness, Rect) {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        // The fake conflicts on every path the two trees disagree about, so
+        // both commits carry two files to make the list two rows long.
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c0", "c0: root", &[("a.rs", "a0\n"), ("b.rs", "b0\n")]),
+                ("c1", "c1: tip", &[("a.rs", "a1\n"), ("b.rs", "b1\n")]),
+            ],
+        );
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c1");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("Enter");
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("rebase_conflict"),
+            "the rebase stopped on a conflict"
+        );
+
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let list = crate::render::conflict::conflict_list_rect(pane)
+            .expect("the file list fits this terminal");
+        (h, list)
+    }
+
+    /// The file count, the selection, and the resolution count, all of which
+    /// live on the paused rebase. Reported together so a test pins the
+    /// fixture it depends on alongside what it asserts.
+    fn conflict_state(h: &crate::test_harness::TestHarness) -> (usize, usize, usize) {
+        let RebasePause::Conflict {
+            files,
+            selected,
+            resolutions,
+            ..
+        } = h
+            .stoat
+            .active_workspace()
+            .rebase_active
+            .as_ref()
+            .expect("a rebase is paused")
+            .pause
+            .as_ref()
+            .expect("on a conflict")
+        else {
+            panic!("the pause is not a conflict")
+        };
+        (files.len(), *selected, resolutions.len())
+    }
+
+    #[test]
+    fn a_wheel_over_the_conflict_screen_steps_the_file_selection() {
+        let (mut h, list) = conflict_harness();
+        let before = hidden_scroll_row(&h);
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, list.x + 2, list.y));
+
+        assert_eq!(
+            (conflict_state(&h), hidden_scroll_row(&h)),
+            ((2, 1, 0), before),
+            "the notch steps the file list, resolves nothing, and never \
+             reaches the editor beneath"
+        );
+    }
+
+    /// A press picks which file to look at. Taking a side stays on its own
+    /// key, so a misclick resolves nothing.
+    #[test]
+    fn a_click_on_a_conflict_row_selects_it_without_resolving_it() {
+        let (mut h, list) = conflict_harness();
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + 1,
+        ));
+
+        assert_eq!(
+            conflict_state(&h),
+            (2, 1, 0),
+            "the second file is selected and neither is resolved"
         );
     }
 

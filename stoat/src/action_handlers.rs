@@ -3,7 +3,7 @@ mod amend;
 pub(crate) mod code_search;
 pub(crate) mod commits;
 pub(crate) mod completion;
-mod conflict;
+pub(crate) mod conflict;
 mod conflict_view;
 pub(crate) mod file;
 mod file_finder;
