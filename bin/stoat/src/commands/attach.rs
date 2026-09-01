@@ -342,8 +342,8 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
             &raw mut master,
             &raw mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         )
     };
     if opened != 0 {
@@ -354,7 +354,7 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
     // is a session leader with no controlling terminal, so TIOCSCTTY succeeds
     // and the editor's own process group owns the pty.
     unsafe {
-        libc::ioctl(slave, libc::TIOCSCTTY, 0);
+        libc::ioctl(slave, libc::TIOCSCTTY.into(), 0);
         libc::dup2(slave, 0);
         libc::dup2(slave, 1);
         if slave > 2 {
