@@ -34,6 +34,98 @@ fn stage_two_changed_files(h: &mut TestHarness) -> PathBuf {
     workdir
 }
 
+/// A staged addition has no base blob, so it offers no row to land on. Opening
+/// it anyway drops the cursor at row 0 with nothing under it, and from there
+/// the in-file walk crosses out again on the next press.
+#[test]
+fn next_change_reports_no_more_changes_rather_than_open_a_landing_free_file() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stoat.active_workspace_mut().git_root = workdir.clone();
+    {
+        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+        builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        builder.staged_file("b.rs", "new\n");
+    }
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            h.stoat.pending_message.as_deref(),
+        ),
+        (workdir.join("a.rs"), Some("no more changes")),
+        "the walk exhausts its candidates rather than open b.rs at its top",
+    );
+}
+
+#[test]
+fn next_change_walks_past_a_landing_free_file_to_the_one_beyond_it() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stoat.active_workspace_mut().git_root = workdir.clone();
+    {
+        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+        builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        builder.staged_file("b.rs", "new\n");
+        builder.modified("c.rs", "g\nh\ni\n", "g\nZ\ni\n");
+    }
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            focused_head_row(&mut h.stoat),
+            h.stoat.pending_message.as_deref(),
+        ),
+        (workdir.join("c.rs"), 1, None),
+        "b.rs offers no landing row, so the hop walks on to c.rs's hunk",
+    );
+}
+
+/// A file gone from the working tree diffs its base against nothing, which is
+/// a whole-file removal. A removal covers no rows, so the landing is the row
+/// above it, row 0 here. The file is reachable rather than skipped.
+#[test]
+fn next_change_lands_a_working_tree_deletion_at_its_removal_row() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stoat.active_workspace_mut().git_root = workdir.clone();
+    {
+        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+        builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        builder.deleted("d.rs", "x\ny\n");
+    }
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            focused_cursor_point(&mut h.stoat).row,
+        ),
+        (workdir.join("d.rs"), 0),
+        "the deletion is reachable and lands on its removal row",
+    );
+}
+
 /// A buffer opened through a symlink holds a path the changed list does not,
 /// so the walk cannot find the reader's place by spelling alone. Landing the
 /// first changed file then puts the reader back where they are, and every
