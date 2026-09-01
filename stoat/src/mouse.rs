@@ -7,7 +7,7 @@
 //! whatever the model currently holds.
 
 use crate::{
-    action_handlers,
+    action_handlers::{self, commits::CommitStep},
     app::{
         modal_split_percent, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
@@ -89,6 +89,93 @@ impl ModalSurfaces {
         let index = start + (mouse.row - self.list.y) as usize;
         (index < self.len).then_some(index)
     }
+}
+
+/// The list and pane rects of the screen painted over the focused pane, with
+/// the state a hit test needs.
+///
+/// A pane-overlay screen covers an editor rather than replacing it, so every
+/// gesture inside its pane has to be claimed here or it reaches the editor
+/// underneath. That is what this exists to prevent, and why it reports the
+/// whole pane alongside the list.
+pub(crate) struct ScreenSurfaces {
+    /// The pane the screen paints over. Every pointer event inside it belongs
+    /// to the screen, whether or not it lands on a row.
+    pane: Rect,
+    /// Rows the list occupies. A press here resolves to a row index.
+    list: Rect,
+    /// Rows the list currently holds, which bounds a resolved index.
+    len: usize,
+    /// The selected row, which a click steps the selection to.
+    selected: usize,
+    /// First list row on screen. The commits list keeps its own scroll rather
+    /// than deriving a window from the selection, so the hit test reads this.
+    scroll_top: usize,
+}
+
+impl ScreenSurfaces {
+    /// The list row `mouse` lands on, or [`None`] off the list and past its
+    /// last row.
+    fn row_at(&self, mouse: MouseEvent) -> Option<usize> {
+        if !self.list.contains(Position::new(mouse.column, mouse.row)) {
+            return None;
+        }
+        let index = self.scroll_top + (mouse.row - self.list.y) as usize;
+        (index < self.len).then_some(index)
+    }
+
+    fn holds(&self, mouse: MouseEvent) -> bool {
+        self.pane.contains(Position::new(mouse.column, mouse.row))
+    }
+}
+
+/// The pane-overlay screen in the foreground, or [`None`] when a plain pane or
+/// a boxed modal is what the pointer is over.
+///
+/// The rects come from the same layout the paint reads, so a clicked row is
+/// the row drawn under the pointer.
+pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
+    let ws = stoat.active_workspace();
+    match crate::keymap_state::view_predicate(ws)? {
+        "commits" => {
+            let state = ws.commits.as_ref()?;
+            let pane = ws.panes.pane(ws.panes.focus()).area;
+            Some(ScreenSurfaces {
+                pane,
+                list: crate::render::commits::commits_list_rect(pane, stoat.commits_split)?,
+                len: state.commits.len(),
+                selected: state.selected,
+                scroll_top: state.scroll_top,
+            })
+        },
+        _ => None,
+    }
+}
+
+/// Act on a press over a pane-overlay screen, or report that none is open.
+///
+/// [`None`] leaves the event to the routing below it, which is what keeps a
+/// divider drag and the other split panes working while a screen is up.
+/// [`Some`] claims the event, so nothing reaches the editor the screen covers.
+fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
+    let surfaces = screen_surfaces(stoat).filter(|s| s.holds(mouse))?;
+
+    // A press selects the row without acting on it. The user asked for select
+    // rather than activate, so a second press on the same row is a no-op too,
+    // unlike the modal two-step.
+    let Some(index) = surfaces
+        .row_at(mouse)
+        .filter(|_| matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)))
+    else {
+        return Some(UpdateEffect::None);
+    };
+
+    let delta = index as isize - surfaces.selected as isize;
+    let step = match delta < 0 {
+        true => CommitStep::Up(delta.unsigned_abs()),
+        false => CommitStep::Down(delta as usize),
+    };
+    Some(action_handlers::commits::commits_step(stoat, step))
 }
 
 /// Rows the open modal's preview pane covers, or [`None`] without one.
@@ -660,8 +747,7 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
     }
 
     // The commits separator drag owns the pointer once armed, the same way a
-    // divider drag does below. Armed further down, after the divider arm, so
-    // an ordinary press still reaches the list rows.
+    // divider drag does below.
     if stoat.commits_separator_drag {
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -679,6 +765,8 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
 
     // A divider drag owns the pointer once armed. It resizes on drag,
     // releases on up, and swallows the rest so pane handlers never see it.
+    // Ahead of the screen gate below, because a drag that wanders over a
+    // screen's pane still belongs to the divider it started on.
     if stoat.divider_drag.is_some() {
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -695,6 +783,25 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
             _ => {},
         }
         return UpdateEffect::Redraw;
+    }
+
+    // The separator is the commits screen's own chrome, so it arms ahead of
+    // the screen gate below. That gate claims the whole pane, and a press
+    // swallowed there never reaches this.
+    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
+        && open_commits_separator(stoat).is_some_and(|sep| sep.hit(&mouse))
+    {
+        stoat.commits_separator_drag = true;
+        return UpdateEffect::Redraw;
+    }
+
+    // A pane-overlay screen owns the pointer inside the pane it paints over.
+    // The editor underneath is still open, so an unclaimed press moves a
+    // cursor hidden behind the screen. Outside that pane this reports None and
+    // the routing below carries on, which keeps the other split panes working
+    // while a screen is up.
+    if let Some(effect) = handle_screen_mouse(stoat, mouse) {
+        return effect;
     }
 
     // A left-button drag over an open hover popup selects its text. Routed
@@ -728,12 +835,6 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
                 .divider_at(mouse.column, mouse.row)
         {
             stoat.divider_drag = Some(hit);
-            return UpdateEffect::Redraw;
-        }
-        if button == MouseButton::Left
-            && open_commits_separator(stoat).is_some_and(|sep| sep.hit(&mouse))
-        {
-            stoat.commits_separator_drag = true;
             return UpdateEffect::Redraw;
         }
         focus_at(stoat, mouse.column, mouse.row);
@@ -1144,6 +1245,27 @@ pub(crate) fn handle_mouse_scroll(
             return effect;
         }
         return action_handlers::picker::picker_step(stoat, steps);
+    }
+
+    // A pane-overlay screen owns the wheel inside its pane, the same way a
+    // boxed modal owns it everywhere. Over the list the notches step the
+    // selection. Anywhere else in the pane they are spent and dropped, so the
+    // wheel never reaches the editor the screen covers.
+    if let Some(surfaces) = screen_surfaces(stoat).filter(|s| s.holds(mouse)) {
+        let steps = take_whole_notches(stoat, lines);
+        if steps == 0
+            || !surfaces
+                .list
+                .contains(Position::new(mouse.column, mouse.row))
+        {
+            return UpdateEffect::None;
+        }
+        let by = steps.unsigned_abs() as usize;
+        let step = match steps > 0 {
+            true => CommitStep::Down(by),
+            false => CommitStep::Up(by),
+        };
+        return action_handlers::commits::commits_step(stoat, step);
     }
 
     // A wheel over the open hover popup scrolls the popup, not the pane
@@ -2399,6 +2521,152 @@ mod tests {
         assert!(
             h.stoat.pending_hover.is_none(),
             "a mouse focus change closes the hover popup"
+        );
+    }
+
+    /// Seed a repo with `n` commits, open the commits screen over a long
+    /// buffer, and hand back the harness plus the list rect the paint uses.
+    fn commits_harness(n: usize) -> (crate::test_harness::TestHarness, Rect) {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        let commits: Vec<_> = (0..n)
+            .map(|i| {
+                (
+                    format!("c{i}"),
+                    format!("commit {i}"),
+                    vec![("a.rs", "fn a() {}\n")],
+                )
+            })
+            .collect();
+        let specs: Vec<_> = commits
+            .iter()
+            .map(|(sha, msg, files)| (sha.as_str(), msg.as_str(), files.as_slice()))
+            .collect();
+        h.seed_linear_history("/repo", &specs);
+        h.open_commits("/repo");
+
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let list = crate::render::commits::commits_list_rect(pane, h.stoat.commits_split)
+            .expect("the list fits this terminal");
+        (h, list)
+    }
+
+    /// The hidden editor's scroll row, which every commits pointer test pins
+    /// so a gesture the screen claims is never seen underneath it.
+    fn hidden_scroll_row(h: &crate::test_harness::TestHarness) -> u32 {
+        let ws = h.stoat.active_workspace();
+        let id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        ws.editors[id].scroll_row
+    }
+
+    fn selected_commit(h: &crate::test_harness::TestHarness) -> usize {
+        h.stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("the commits screen is open")
+            .selected
+    }
+
+    #[test]
+    fn a_wheel_over_the_commits_list_steps_the_selection() {
+        let (mut h, list) = commits_harness(8);
+        let before = hidden_scroll_row(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            list.x + 2,
+            list.y + 1,
+        ));
+
+        assert_eq!(
+            (selected_commit(&h), hidden_scroll_row(&h)),
+            (1, before),
+            "the notch walks the list and never reaches the editor beneath"
+        );
+    }
+
+    /// The user asked for the wheel to scroll whichever pane it sits over. The
+    /// detail side belongs to the preview, so the list holds still there, and
+    /// the notch is spent either way rather than falling through.
+    #[test]
+    fn a_wheel_over_the_commits_detail_side_leaves_both_alone() {
+        let (mut h, list) = commits_harness(8);
+        let before = hidden_scroll_row(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            list.x + list.width + 4,
+            list.y + 1,
+        ));
+
+        assert_eq!(
+            (selected_commit(&h), hidden_scroll_row(&h)),
+            (0, before),
+            "neither the list nor the hidden editor moves"
+        );
+    }
+
+    /// A press selects the clicked commit and nothing more. The user named
+    /// "not activate, just select", so a second press on the same row leaves
+    /// the screen up and checks out nothing.
+    #[test]
+    fn a_click_on_a_commit_row_selects_it_without_activating() {
+        let (mut h, list) = commits_harness(8);
+        let workdir = PathBuf::from("/repo");
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + 2,
+        ));
+        assert_eq!(
+            (selected_commit(&h), h.fake_git().checkouts(&workdir)),
+            (2, Vec::new()),
+            "the third row is selected and nothing is checked out"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + 2,
+        ));
+        assert_eq!(
+            (
+                selected_commit(&h),
+                crate::keymap_state::view_predicate(h.stoat.active_workspace()),
+                h.fake_git().checkouts(&workdir),
+            ),
+            (2, Some("commits"), Vec::new()),
+            "a second press on the selected row acts on nothing"
+        );
+    }
+
+    /// The list rect runs the height of the pane, so most of it is empty on a
+    /// short history. A press there resolves to no row and is swallowed all
+    /// the same.
+    #[test]
+    fn a_click_below_the_last_commit_changes_nothing() {
+        let (mut h, list) = commits_harness(3);
+        let cursors = crate::test_harness::editor::cursor_buffer_positions;
+        let before = (selected_commit(&h), cursors(&mut h.stoat));
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + list.height - 1,
+        ));
+
+        assert_eq!(
+            (selected_commit(&h), cursors(&mut h.stoat)),
+            before,
+            "an empty row moves neither the list nor the cursor beneath"
         );
     }
 

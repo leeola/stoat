@@ -1,7 +1,7 @@
 mod agent;
 mod amend;
 pub(crate) mod code_search;
-mod commits;
+pub(crate) mod commits;
 pub(crate) mod completion;
 mod conflict;
 mod conflict_view;

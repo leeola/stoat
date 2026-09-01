@@ -11,7 +11,7 @@ const COMMITS_PREFETCH_GAP: usize = 8;
 const COMMITS_PAGE_STEP: usize = 16;
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum CommitStep {
+pub(crate) enum CommitStep {
     Up(usize),
     Down(usize),
     PageUp,
@@ -64,7 +64,7 @@ pub(super) fn close_commits(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect {
+pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect {
     let moved = {
         let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
             return UpdateEffect::None;
