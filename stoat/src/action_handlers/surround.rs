@@ -4,7 +4,8 @@ use crate::{
     buffer::TextBuffer,
     pane::View,
 };
-use std::{cmp::Reverse, ops::Range};
+use std::{cmp::Reverse, ops::Range, sync::Arc};
+use stoat_language::Language;
 use stoat_text::{Bias, Rope, SelectionGoal};
 
 /// Two-step capture state for [`surround_replace`]: arms after the action
@@ -421,6 +422,44 @@ pub(crate) fn deepest_layer_at(
                 acc
             }
         })
+}
+
+/// The language whose comment tokens govern `offset`.
+///
+/// A fenced block parses under its own grammar, so the tokens that belong on
+/// its rows are that grammar's, not the file's. This answers the innermost
+/// covering layer that declares line tokens, and where none does, the innermost
+/// that declares a block pair. A markup language declaring neither answers
+/// `None`, which leaves the caller to fall back to the document's own language.
+///
+/// Line tokens win over block tokens across layers, not only within one: a rust
+/// fence inside a markdown file comments with `//` even though markdown carries
+/// a block pair of its own.
+pub(crate) fn comment_language_at(
+    snapshot: Option<&stoat_language::SyntaxSnapshot>,
+    offset: usize,
+) -> Option<Arc<Language>> {
+    let mut line_layer: Option<&Arc<Language>> = None;
+    let mut block_layer: Option<&Arc<Language>> = None;
+
+    // Shallowest to deepest, so the last covering layer of each kind is the
+    // innermost one.
+    for layer in snapshot?.iter_layers() {
+        let lstart = layer.start_offset as usize;
+        let lend = layer.end_offset as usize;
+        if lstart > offset || lend < offset {
+            continue;
+        }
+
+        if !layer.language.line_comments.is_empty() {
+            line_layer = Some(&layer.language);
+        }
+        if layer.language.block_comments.is_some() {
+            block_layer = Some(&layer.language);
+        }
+    }
+
+    line_layer.or(block_layer).cloned()
 }
 
 /// Every pair type the closest-pair textobject considers.

@@ -2465,7 +2465,22 @@ fn toggle_comments_with(stoat: &mut Stoat, style: CommentStyle) -> UpdateEffect 
     };
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
-    let Some(language) = ws.buffers.language_for(buffer_id) else {
+
+    // The tokens come from the layer the cursor falls in, so a fenced block
+    // comments under its own grammar rather than the file's.
+    let cursor = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+        cursor_offset(buffer_snapshot.rope(), tail_off, head_off)
+    };
+    let syntax = ws.buffers.syntax_map(buffer_id).map(|sm| sm.snapshot());
+    let Some(language) = surround::comment_language_at(syntax, cursor)
+        .or_else(|| ws.buffers.language_for(buffer_id))
+    else {
         return UpdateEffect::None;
     };
     let line_prefix = language.line_comments.first().copied();

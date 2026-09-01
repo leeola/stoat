@@ -4879,6 +4879,28 @@ fn toggle_comments_prefers_line_tokens_where_a_language_has_both() {
     assert_eq!(focused_buffer_text(&mut h), "// let x = 1;\n");
 }
 
+/// A fenced block comments under its own grammar, not the file's.
+///
+/// Markdown declares no line tokens at all, so reading the file's language
+/// leaves the key doing nothing inside the fence.
+#[test]
+fn toggle_comments_reads_the_injected_layers_tokens() {
+    let mut h = TestHarness::with_size(40, 8);
+    let path = h.write_file("s.md", "```rust\nlet x = 1;\n```\n");
+    h.open_file(&path);
+    h.settle();
+
+    // The fence header is 8 bytes, so the rust row starts there.
+    jump_to_offset(&mut h.stoat, 10);
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "```rust\n// let x = 1;\n```\n",
+        "the fenced row takes rust's token and the fence rows stay as they were",
+    );
+}
+
 /// The line key never reaches for the block pair in a language that has line
 /// tokens, which is the whole of what separates it from the plain key.
 #[test]
