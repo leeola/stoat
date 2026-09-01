@@ -157,6 +157,7 @@ pub(crate) fn render_commit_picker(
     area: Rect,
     zoom: i8,
     list_percent: u16,
+    dials: crate::render::commits::PreviewDials,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -211,7 +212,7 @@ pub(crate) fn render_commit_picker(
             separator_style,
             &mut *scene,
         );
-        render_preview(picker, preview_rect, theme, buf, scene);
+        render_preview(picker, preview_rect, theme, dials, buf, scene);
     }
 
     picker.viewport_rows = Some(layout.list.height as usize);
@@ -712,6 +713,7 @@ fn render_preview(
     picker: &mut CommitPicker,
     area: Rect,
     theme: &Theme,
+    dials: crate::render::commits::PreviewDials,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -732,6 +734,7 @@ fn render_preview(
                 theme,
                 area,
                 picker.preview_scroll,
+                dials,
                 buf,
                 scene,
             )

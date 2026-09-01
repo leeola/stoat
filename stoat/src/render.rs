@@ -214,6 +214,10 @@ pub(crate) struct FrameCtx<'a> {
     /// body. `None` until the reader drags that screen's separator, which
     /// leaves the width to the renderer's own formula.
     pub(crate) commits_split: Option<u16>,
+    /// The diff view's styling dials, resolved for the commit previews. Those
+    /// previews paint through `:diff`'s own painter, so they answer the same
+    /// session dials rather than carrying a second set.
+    pub(crate) preview_dials: commits::PreviewDials,
     /// The gutter, severity, and diff-mark colors already resolved from
     /// [`Self::theme`], so each pane paints from them rather than re-walking
     /// the scope table for every one.
@@ -616,6 +620,9 @@ pub(crate) fn frame(
     // Resolved here for the same reason. It reads the whole &Stoat, where the
     // search query it travels with is read below through a disjoint field.
     let search_smart_case = search::smart_case(stoat);
+    // Resolved here for the same reason. The constructor reads the whole
+    // &Stoat, and the dials are three separate fields on it.
+    let preview_dials = commits::PreviewDials::from_stoat(stoat);
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -678,6 +685,7 @@ pub(crate) fn frame(
         screen,
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
+        preview_dials,
         chrome: &stoat
             .chrome
             .as_ref()
@@ -1070,6 +1078,7 @@ pub(crate) fn frame(
                     full,
                     zoom,
                     split,
+                    preview_dials,
                     buf,
                     &mut *scene,
                 );

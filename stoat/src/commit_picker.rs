@@ -1592,10 +1592,12 @@ mod tests {
 
         let area = ratatui::layout::Rect::new(0, 0, preview.width, preview.height);
         for page in [0u64, 1] {
+            let dials = crate::render::commits::PreviewDials::from_stoat(&h.stoat);
             let pooled = crate::smooth_scroll::render_commit_picker_preview_page(
                 session,
                 page,
                 &h.stoat.theme,
+                dials,
                 preview.width,
                 preview.height,
             );
@@ -1607,6 +1609,7 @@ mod tests {
                 &h.stoat.theme,
                 area,
                 page as usize * preview.height as usize,
+                dials,
                 &mut live,
                 &mut scene,
             );

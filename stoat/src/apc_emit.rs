@@ -234,6 +234,9 @@ pub(crate) fn emit_windows(stoat: &mut Stoat) {
 fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
     let mode = stoat.focused_mode().to_string();
     let lsp_pending = crate::lsp::lsp_pending_label(stoat);
+    // Resolved before the workspace borrow. The constructor reads the whole
+    // &Stoat, and the dials are three separate fields on it.
+    let preview_dials = crate::render::commits::PreviewDials::from_stoat(stoat);
     stoat.refresh_chrome();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let windowed = ws.panes.windowed_panes();
@@ -263,6 +266,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         screen,
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
+        preview_dials,
         chrome: &stoat.chrome.as_ref().expect("refresh_chrome ran above").1,
         pending_count: stoat.pending_count,
         recording_register: stoat
@@ -1470,7 +1474,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             rect.height,
         );
         // A different commit means a different diff, and a rebuilt session
-        // changes its length, so both refill the pages.
+        // changes its length, so both refill the pages. A dial step repaints
+        // every row it reaches, so the three dials ride the hash too.
         let content_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
@@ -1479,8 +1484,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .map(|c| c.sha.as_str())
                 .hash(&mut hasher);
             crate::render::commits::preview_row_count(&session).hash(&mut hasher);
+            stoat.diff_soften.hash(&mut hasher);
+            stoat.diff_tint.hash(&mut hasher);
+            stoat.diff_syntax.hash(&mut hasher);
             hasher.finish()
         };
+        let dials = crate::render::commits::PreviewDials::from_stoat(stoat);
         pool::emit_into(
             &mut out,
             &mut stoat.smooth_scroll,
@@ -1493,6 +1502,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     &session,
                     page,
                     theme,
+                    dials,
                     region.width,
                     region.height,
                 )

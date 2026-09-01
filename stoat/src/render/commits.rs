@@ -8,7 +8,10 @@ use crate::{
         layout::split_pane_status,
         paint::{render_empty_num, render_side_num, render_side_text},
         pane::render_overlay_status,
-        review::{paint_base_row, resolve_diff_tints, DiffColumns, DiffLayout, DiffTints},
+        review::{
+            diff_soften_scale, diff_tint_amount, paint_base_row, resolve_diff_tints, DiffColumns,
+            DiffLayout, DiffTints,
+        },
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -18,7 +21,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
 };
 use std::path::Path;
 
@@ -51,7 +54,15 @@ pub(crate) fn render_commits(
 
     if right_w > 0 {
         let right_area = Rect::new(right_x, inner.y, right_w, inner.height);
-        render_commit_detail_pane(state, workspace_root, theme, right_area, buf, scene);
+        render_commit_detail_pane(
+            state,
+            workspace_root,
+            theme,
+            right_area,
+            frame.preview_dials,
+            buf,
+            scene,
+        );
     }
 }
 
@@ -208,6 +219,7 @@ fn render_commit_detail_pane(
     workspace_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
+    dials: PreviewDials,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -239,7 +251,7 @@ fn render_commit_detail_pane(
         // The commits view has no preview scroll of its own. Only the picker's
         // wheel handling moves one.
         Preview::Built(document) => {
-            render_commit_preview(document, theme, preview_area, 0, buf, scene)
+            render_commit_preview(document, theme, preview_area, 0, dials, buf, scene)
         },
         Preview::Empty => {
             if preview_area.height > 0 {
@@ -322,10 +334,75 @@ pub(crate) fn preview_row_count(doc: &DiffDocument) -> usize {
         .sum()
 }
 
+/// The diff view's session dials, resolved for one preview paint.
+///
+/// A commit preview paints through `:diff`'s own painter, so it answers
+/// `:diff`'s dials rather than carrying a second set. One dial serves both
+/// screens, which is what keeps a step on either of them meaning the same
+/// thing.
+#[derive(Copy, Clone)]
+pub(crate) struct PreviewDials {
+    soften_scale: f32,
+    tint_amount: f32,
+    syntax: bool,
+}
+
+impl PreviewDials {
+    pub(crate) fn from_stoat(stoat: &crate::app::Stoat) -> Self {
+        Self {
+            soften_scale: diff_soften_scale(stoat.diff_soften),
+            tint_amount: diff_tint_amount(stoat.diff_tint),
+            syntax: stoat.diff_syntax,
+        }
+    }
+
+    /// The values a session starts at, which paint exactly what the preview
+    /// painted before any dial existed.
+    #[cfg(test)]
+    fn shipped() -> Self {
+        Self {
+            soften_scale: 1.0,
+            tint_amount: 0.0,
+            syntax: true,
+        }
+    }
+}
+
+/// The status color a base-side changed row takes whole under the tint dial.
+///
+/// A base line is gone from the working tree either way, so moved wins over
+/// deleted on the same test `:diff`'s own base column uses. The two agree
+/// because they read the same rule, not because they were written alike.
+fn base_row_tint(side: &ReviewSide, tints: &DiffTints) -> Color {
+    match side.moved_spans.is_empty() {
+        false => tints.moved,
+        true => tints.deleted,
+    }
+}
+
+/// The status color a live-side changed row takes whole under the tint dial.
+///
+/// `no_base` marks a row with nothing beside it on the base side, which is an
+/// addition rather than a modification. Moved outranks both, matching the
+/// status family `:diff`'s right column resolves.
+fn live_row_tint(side: &ReviewSide, no_base: bool, tints: &DiffTints) -> Color {
+    if !side.moved_spans.is_empty() {
+        return tints.moved;
+    }
+    match no_base {
+        true => tints.added,
+        false => tints.modified,
+    }
+}
+
 /// One side of a preview row, painted the way `:diff`'s base column paints.
 ///
 /// Parity with `:diff` comes from calling its painter, not from copying its
 /// treatment, so the two surfaces cannot drift.
+///
+/// `tint_row` is the row's own status color, which the tint dial shifts every
+/// char outside a change span toward. `None` leaves the row untinted, which is
+/// what a context row takes.
 ///
 /// `spans` is reused across rows rather than allocated per row, and is left
 /// sorted for the painter's monotonic cursor.
@@ -339,6 +416,8 @@ fn paint_preview_side(
     highlights: Option<&BaseHighlights>,
     tints: &DiffTints,
     context: bool,
+    dials: PreviewDials,
+    tint_row: Option<Color>,
     spans: &mut Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
 ) {
     spans.clear();
@@ -358,7 +437,10 @@ fn paint_preview_side(
     spans.sort_by_key(|(range, ..)| range.start);
 
     // line_num is 1-based, and the highlight index is 0-based per line.
+    // An off syntax toggle withholds the spans rather than painting over them,
+    // which is how a diff-view editor spends the same toggle.
     let token_spans = highlights
+        .filter(|_| dials.syntax)
         .and_then(|lines| lines.get(side.line_num.saturating_sub(1) as usize))
         .map(Vec::as_slice)
         .unwrap_or(&[]);
@@ -382,12 +464,9 @@ fn paint_preview_side(
         Some(tints),
         soften_row,
         soften_gaps,
-        // The commit preview is its own screen, so neither the diff view's
-        // soften knob nor its tint dial reaches it. The fractions stay as
-        // shipped and a changed span keeps its syntax color.
-        1.0,
-        0.0,
-        None,
+        dials.soften_scale,
+        dials.tint_amount,
+        tint_row,
     );
 }
 /// Render a compact preview of a [`DiffDocument`]: each chunk's rows
@@ -398,11 +477,13 @@ fn paint_preview_side(
 /// `skip_rows` drops that many rows off the top, counting the same rows
 /// [`preview_row_count`] does, so a caller scrolls the diff by holding a row
 /// offset rather than by owning any of the painting.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_commit_preview(
     doc: &DiffDocument,
     theme: &crate::theme::Theme,
     area: Rect,
     skip_rows: usize,
+    dials: PreviewDials,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -500,6 +581,8 @@ pub(crate) fn render_commit_preview(
                                     file.base_highlights.as_deref(),
                                     tints,
                                     true,
+                                    dials,
+                                    None,
                                     &mut spans,
                                 );
                                 paint_preview_side(
@@ -511,6 +594,8 @@ pub(crate) fn render_commit_preview(
                                     file.buffer_highlights.as_deref(),
                                     tints,
                                     true,
+                                    dials,
+                                    None,
                                     &mut spans,
                                 );
                             },
@@ -556,6 +641,8 @@ pub(crate) fn render_commit_preview(
                                         file.base_highlights.as_deref(),
                                         tints,
                                         false,
+                                        dials,
+                                        Some(base_row_tint(l, tints)),
                                         &mut spans,
                                     ),
                                     None => render_side_text(
@@ -594,6 +681,8 @@ pub(crate) fn render_commit_preview(
                                         file.buffer_highlights.as_deref(),
                                         tints,
                                         false,
+                                        dials,
+                                        Some(live_row_tint(r, left.is_none(), tints)),
                                         &mut spans,
                                     ),
                                     None => render_side_text(
@@ -622,7 +711,10 @@ pub(crate) fn render_commit_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_list_width, render_commit_preview, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS};
+    use super::{
+        commit_list_width, render_commit_preview, PreviewDials, MIN_DETAIL_COLUMNS,
+        MIN_LIST_COLUMNS,
+    };
     use crate::{
         display_map::highlights::HighlightStyle,
         render::{
@@ -692,17 +784,32 @@ mod tests {
 
     /// Render into a wide buffer so both columns fit, and hand back the grid.
     fn rendered(doc: &DiffDocument, theme: &Theme) -> Buffer {
+        rendered_with(doc, theme, PreviewDials::shipped())
+    }
+
+    /// [`rendered`] at a chosen dial setting, for the cases that step one.
+    fn rendered_with(doc: &DiffDocument, theme: &Theme, dials: PreviewDials) -> Buffer {
         let area = Rect::new(0, 0, 120, 20);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
-        render_commit_preview(doc, theme, area, 0, &mut buf, &mut scene);
+        render_commit_preview(doc, theme, area, 0, dials, &mut buf, &mut scene);
         buf
     }
 
     /// The first cell in `row` whose symbol is `ch`.
     fn cell_with(buf: &Buffer, row: u16, ch: &str) -> ratatui::buffer::Cell {
         let area = *buf.area();
-        (area.x..area.x + area.width)
+        cell_in(buf, row, ch, area.x..area.x + area.width)
+    }
+
+    /// [`cell_with`] bounded to a column range, for a symbol both sides carry.
+    fn cell_in(
+        buf: &Buffer,
+        row: u16,
+        ch: &str,
+        columns: std::ops::Range<u16>,
+    ) -> ratatui::buffer::Cell {
+        columns
             .map(|x| buf[(x, row)].clone())
             .find(|cell| cell.symbol() == ch)
             .unwrap_or_else(|| panic!("no {ch:?} cell on row {row}"))
@@ -812,6 +919,106 @@ mod tests {
             cell.style().fg,
             Some(Color::Rgb(softened[0], softened[1], softened[2])),
             "the unchanged prefix softens lightly, not to context strength"
+        );
+    }
+
+    /// The tint dial's other half. A context row keeps its syntax color at
+    /// rest and drains toward its own luma gray as the dial rises, so the
+    /// changed rows gaining status color lead against a graying field.
+    #[test]
+    fn a_stepped_tint_drains_the_color_out_of_a_context_token() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", true);
+        let dials = PreviewDials {
+            tint_amount: 0.5,
+            ..PreviewDials::shipped()
+        };
+        let buf = rendered_with(&session, &rgb_theme(), dials);
+
+        let softened = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN);
+        let gray = [(luma(softened) * 255.0).round() as u8; 3];
+        let drained = dim_rgb(softened, gray, 0.5);
+        assert_eq!(
+            cell_with(&buf, 1, "c").style().fg,
+            Some(Color::Rgb(drained[0], drained[1], drained[2])),
+            "the context token softens first, then drains half its color"
+        );
+    }
+
+    /// The soften dial scales how far context recedes, so a step up puts the
+    /// context further behind the changed rows than the shipped setting does.
+    #[test]
+    fn a_stepped_soften_recedes_a_context_token_further() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", true);
+        let dials = PreviewDials {
+            soften_scale: 2.0,
+            ..PreviewDials::shipped()
+        };
+        let buf = rendered_with(&session, &rgb_theme(), dials);
+
+        let deeper = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN * 2.0);
+        assert_eq!(
+            cell_with(&buf, 1, "c").style().fg,
+            Some(Color::Rgb(deeper[0], deeper[1], deeper[2])),
+            "the context token recedes by twice the shipped fraction"
+        );
+    }
+
+    /// The syntax toggle withholds the token spans rather than painting over
+    /// them, so a row falls back to the diff's own styling with no syntax
+    /// color left to soften.
+    #[test]
+    fn the_syntax_toggle_off_paints_no_token_color() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", true);
+        let theme = rgb_theme();
+        let off = PreviewDials {
+            syntax: false,
+            ..PreviewDials::shipped()
+        };
+
+        let softened = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN);
+        assert_eq!(
+            (
+                cell_with(&rendered(&session, &theme), 1, "c").style().fg,
+                cell_with(&rendered_with(&session, &theme, off), 1, "c")
+                    .style()
+                    .fg,
+            ),
+            (
+                Some(Color::Rgb(softened[0], softened[1], softened[2])),
+                Some(Color::Reset),
+            ),
+            "the toggle trades the softened token color for the diff's own \
+             fallback"
+        );
+    }
+
+    /// The tint dial takes a changed row's chars outside its refinement whole.
+    /// Each side reads its own status family, so the base side lands on
+    /// deleted and a live side with a base beside it lands on modified.
+    #[test]
+    fn a_full_tint_takes_each_changed_side_to_its_own_status_color() {
+        let session = session("ctx\nold tail\n", "ctx\nnew tail\n", true);
+        let dials = PreviewDials {
+            tint_amount: 1.0,
+            ..PreviewDials::shipped()
+        };
+        let buf = rendered_with(&session, &rgb_theme(), dials);
+
+        let gap = |status: [u8; 3]| {
+            let softened = dim_rgb(status, BG, MODIFIED_ROW_SOFTEN);
+            Some(Color::Rgb(softened[0], softened[1], softened[2]))
+        };
+        // The shared " tail" sits outside the refinement, so it is what the
+        // row tint reaches. `i` appears nowhere else on the row, which keeps
+        // the search off the refined "old"/"new". One column each side of the
+        // 120-wide buffer.
+        assert_eq!(
+            (
+                cell_in(&buf, 2, "i", 0..60).style().fg,
+                cell_in(&buf, 2, "i", 60..120).style().fg,
+            ),
+            (gap([0xff, 0x00, 0x00]), gap([0xff, 0xff, 0x00])),
+            "the base side takes deleted whole and the live side modified"
         );
     }
 

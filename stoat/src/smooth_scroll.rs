@@ -757,6 +757,7 @@ pub(crate) fn render_commit_picker_preview_page(
     doc: &crate::review_session::DiffDocument,
     page: u64,
     theme: &crate::theme::Theme,
+    dials: crate::render::commits::PreviewDials,
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
@@ -769,7 +770,7 @@ pub(crate) fn render_commit_picker_preview_page(
         theme,
         |buf, area, skip_rows| {
             crate::render::commits::render_commit_preview(
-                doc, theme, area, skip_rows, buf, &mut scene,
+                doc, theme, area, skip_rows, dials, buf, &mut scene,
             )
         },
     );
