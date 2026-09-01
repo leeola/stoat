@@ -3,15 +3,11 @@
 //! (leaf with literal text).
 //!
 //! Difftastic stores these in a `typed_arena::Arena` so children can be
-//! referenced by `&'a Syntax<'a>` without `Rc` overhead. To avoid pulling
-//! in another arena crate at the scaffolding stage we use index-based
-//! references: each node lives in [`SyntaxArena::nodes`] and children are
-//! [`SyntaxId`]s into that vector. Lookup is `O(1)`, the borrow story
-//! stays trivial, and the arena can hand out shared `&Syntax` borrows
-//! without unsafe interior mutation.
-//!
-//! Swapping in a typed-arena later is mechanical: nodes already own their
-//! data, and `Vec<SyntaxId>` becomes `Vec<&'a Syntax<'a>>`.
+//! referenced by `&'a Syntax<'a>` without `Rc` overhead. This module uses
+//! index-based references instead: each node lives in
+//! [`SyntaxArena::nodes`] and children are [`SyntaxId`]s into that
+//! vector, so lookup is `O(1)` and the arena hands out shared `&Syntax`
+//! borrows without interior mutation.
 //!
 //! See `references/difftastic/src/parse/syntax.rs` for the Difftastic
 //! reference that this scaffolding will eventually feed.
@@ -80,39 +76,24 @@ pub struct Atom<'a> {
 /// Owns every [`Syntax`] node in a single diff invocation. Drop the arena
 /// and the entire tree drops with it.
 #[derive(Default)]
-pub struct SyntaxArena {
-    nodes: Vec<Syntax<'static>>,
+pub struct SyntaxArena<'a> {
+    nodes: Vec<Syntax<'a>>,
 }
 
-impl SyntaxArena {
+impl<'a> SyntaxArena<'a> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Move `node` into the arena and return its [`SyntaxId`]. The node's
-    /// lifetime parameter is erased to `'static` for storage; reads via
-    /// [`get`](Self::get) re-attach the arena's borrow lifetime.
-    pub fn alloc<'a>(&'a mut self, node: Syntax<'a>) -> SyntaxId {
+    /// Move `node` into the arena and return its [`SyntaxId`].
+    pub fn alloc(&mut self, node: Syntax<'a>) -> SyntaxId {
         let id = SyntaxId(self.nodes.len());
-        // SAFETY: We never expose the inner `Syntax<'static>` directly --
-        // [`get`] re-borrows it as `Syntax<'a>` where `'a` is the arena's
-        // borrow. Internal storage at `'static` is sound because the
-        // arena owns the data and any borrowed `&'a str` content fields
-        // (or future borrowed children) are tied to the public lifetime
-        // by the get accessor.
-        let static_node: Syntax<'static> =
-            unsafe { std::mem::transmute::<Syntax<'a>, Syntax<'static>>(node) };
-        self.nodes.push(static_node);
+        self.nodes.push(node);
         id
     }
 
-    pub fn get(&self, id: SyntaxId) -> &Syntax<'_> {
-        // Re-attach the arena's borrow lifetime on the way out.
-        let stored: &Syntax<'static> = &self.nodes[id.0];
-        // SAFETY: storage at `'static` is internal-only; the public
-        // borrow is tied to `&self`, which keeps the underlying data
-        // alive for the returned reference.
-        unsafe { std::mem::transmute::<&Syntax<'static>, &Syntax<'_>>(stored) }
+    pub fn get(&self, id: SyntaxId) -> &Syntax<'a> {
+        &self.nodes[id.0]
     }
 
     pub fn len(&self) -> usize {
@@ -260,7 +241,7 @@ mod tests {
 
     #[test]
     fn list_content_id_collides_for_identical_structure() {
-        fn build(arena: &mut SyntaxArena) -> SyntaxId {
+        fn build(arena: &mut SyntaxArena<'_>) -> SyntaxId {
             let c1 = arena.alloc(mk_atom("ident", "x", 0..1));
             let c2 = arena.alloc(mk_atom("ident", "y", 0..1));
             arena.alloc(mk_list_with(

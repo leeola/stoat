@@ -28,7 +28,7 @@ use tree_sitter::TreeCursor;
 /// `source` must be the same byte slice that produced the tree. Atom
 /// content slices borrow from it, so the arena's lifetime is bounded
 /// by `source`.
-pub fn lower_tree(tree: &tree_sitter::Tree, source: &str) -> (SyntaxArena, SyntaxId) {
+pub fn lower_tree<'a>(tree: &tree_sitter::Tree, source: &'a str) -> (SyntaxArena<'a>, SyntaxId) {
     let mut arena = SyntaxArena::new();
     let mut cursor = tree.walk();
     let root_id = lower_node(&mut arena, &mut cursor, source);
@@ -36,7 +36,11 @@ pub fn lower_tree(tree: &tree_sitter::Tree, source: &str) -> (SyntaxArena, Synta
     (arena, root_id)
 }
 
-fn lower_node(arena: &mut SyntaxArena, cursor: &mut TreeCursor<'_>, source: &str) -> SyntaxId {
+fn lower_node<'a>(
+    arena: &mut SyntaxArena<'a>,
+    cursor: &mut TreeCursor<'_>,
+    source: &'a str,
+) -> SyntaxId {
     let node = cursor.node();
     let kind: &'static str = static_kind(node.kind());
 
@@ -95,7 +99,7 @@ fn lower_node(arena: &mut SyntaxArena, cursor: &mut TreeCursor<'_>, source: &str
 /// boundaries, which is the convention the extent helpers read as "no explicit
 /// delimiter, derive the extent from the children instead".
 fn delimiter_ranges(
-    arena: &SyntaxArena,
+    arena: &SyntaxArena<'_>,
     node: tree_sitter::Node<'_>,
     child_ids: &[SyntaxId],
 ) -> (Range<usize>, Range<usize>) {
@@ -200,7 +204,7 @@ mod tests {
     }
 
     /// Depth-first search for the first list of `kind`.
-    fn find_list<'a>(arena: &'a SyntaxArena, root: SyntaxId, kind: &str) -> &'a List<'a> {
+    fn find_list<'a>(arena: &'a SyntaxArena<'a>, root: SyntaxId, kind: &str) -> &'a List<'a> {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if let Syntax::List(list) = arena.get(id) {

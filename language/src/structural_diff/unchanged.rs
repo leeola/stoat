@@ -113,9 +113,9 @@ pub struct PreprocessResult {
 /// returning a [`PreprocessResult`] that tags every node either
 /// [`ChangeKind::Unchanged`] or [`ChangeKind::Pending`].
 pub fn mark_unchanged(
-    lhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
     lhs_root: SyntaxId,
-    rhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena<'_>,
     rhs_root: SyntaxId,
 ) -> PreprocessResult {
     let mut result = PreprocessResult {
@@ -169,8 +169,8 @@ pub fn mark_unchanged(
 /// changed statement rather than emitting the whole container. Every other
 /// non-empty run is pushed to `sections` for the per-section Dijkstra search.
 fn pair_children(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
     lhs_changes: &mut ChangeMap,
@@ -268,8 +268,8 @@ fn pair_children(
 /// function whose body changed, say -- descends so only its changed statements
 /// become sections rather than the whole body.
 fn recurse_singleton_lists(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
     lhs_changes: &mut ChangeMap,
@@ -298,7 +298,7 @@ fn recurse_singleton_lists(
 }
 
 /// Mark `id` and every transitive descendant in the same arena as `kind`.
-fn mark_subtree(arena: &SyntaxArena, id: SyntaxId, changes: &mut ChangeMap, kind: ChangeKind) {
+fn mark_subtree(arena: &SyntaxArena<'_>, id: SyntaxId, changes: &mut ChangeMap, kind: ChangeKind) {
     let mut stack = vec![id];
     while let Some(current) = stack.pop() {
         changes.mark(current, kind);
@@ -308,7 +308,7 @@ fn mark_subtree(arena: &SyntaxArena, id: SyntaxId, changes: &mut ChangeMap, kind
     }
 }
 
-fn list_children(arena: &SyntaxArena, id: SyntaxId) -> Vec<SyntaxId> {
+fn list_children(arena: &SyntaxArena<'_>, id: SyntaxId) -> Vec<SyntaxId> {
     match arena.get(id) {
         Syntax::List(l) => l.children.clone(),
         Syntax::Atom(_) => Vec::new(),
@@ -327,8 +327,8 @@ fn list_children(arena: &SyntaxArena, id: SyntaxId) -> Vec<SyntaxId> {
 /// degenerate repeats. The per-section Dijkstra search recovers those, so
 /// the diff output is unchanged.
 fn lcs_pairs(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
 ) -> Vec<(usize, usize)> {
@@ -407,13 +407,13 @@ mod tests {
             .unwrap()
     }
 
-    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
+    fn lower(source: &str) -> (SyntaxArena<'_>, SyntaxId) {
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
         lower_tree(&tree, source)
     }
 
-    fn count_unchanged(arena: &SyntaxArena, root: SyntaxId, changes: &ChangeMap) -> usize {
+    fn count_unchanged(arena: &SyntaxArena<'_>, root: SyntaxId, changes: &ChangeMap) -> usize {
         let mut stack = vec![root];
         let mut count = 0usize;
         while let Some(id) = stack.pop() {
@@ -427,7 +427,7 @@ mod tests {
         count
     }
 
-    fn count_total(arena: &SyntaxArena, root: SyntaxId) -> usize {
+    fn count_total(arena: &SyntaxArena<'_>, root: SyntaxId) -> usize {
         let mut stack = vec![root];
         let mut count = 0usize;
         while let Some(id) = stack.pop() {
@@ -508,7 +508,7 @@ mod tests {
             arena::{Atom, Syntax},
             ContentId,
         };
-        let mk = |arena: &mut SyntaxArena, name: &str| {
+        let mk = |arena: &mut SyntaxArena<'_>, name: &str| {
             let id = ContentId::for_atom("ident", name);
             arena.alloc(Syntax::Atom(Atom {
                 kind: "ident",
@@ -543,7 +543,7 @@ mod tests {
             ContentId,
         };
         let mut arena = SyntaxArena::new();
-        let mk = |arena: &mut SyntaxArena, name: &str| {
+        let mk = |arena: &mut SyntaxArena<'_>, name: &str| {
             arena.alloc(Syntax::Atom(Atom {
                 kind: "ident",
                 byte_range: 0..0,

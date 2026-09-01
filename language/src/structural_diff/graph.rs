@@ -207,8 +207,8 @@ pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
 /// `lhs_parent_id` / `rhs_parent_id` separately; we fold those into
 /// the `EnteredDelimiter` payloads.
 pub fn pop_all_parents(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     lhs_pos: Option<SyntaxId>,
     rhs_pos: Option<SyntaxId>,
     parents: Stack<EnteredDelimiter>,
@@ -373,7 +373,7 @@ mod tests {
         ContentId,
     };
 
-    fn mk_atom(arena: &mut SyntaxArena, kind: &'static str, content: &'static str) -> SyntaxId {
+    fn mk_atom(arena: &mut SyntaxArena<'_>, kind: &'static str, content: &'static str) -> SyntaxId {
         arena.alloc(Syntax::Atom(Atom {
             kind,
             byte_range: 0..content.len(),

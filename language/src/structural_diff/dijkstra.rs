@@ -171,8 +171,8 @@ impl VertexArena {
 /// Mirrors `references/difftastic/src/diff/graph.rs:363-410`
 /// `allocate_if_new`.
 pub fn shortest_path(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     lhs_root: Option<SyntaxId>,
     rhs_root: Option<SyntaxId>,
     graph_limit: usize,
@@ -239,8 +239,8 @@ pub fn shortest_path(
 /// Mirrors `references/difftastic/src/diff/graph.rs:493-794`
 /// `set_neighbours`.
 fn expand(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     va: &mut VertexArena,
     seen: &mut SeenMap,
     vid: u32,
@@ -362,8 +362,8 @@ fn expand(
 /// Emit the "novel on lhs" step: skip the lhs node (descending into it if
 /// it is a list) while the rhs position stays put.
 fn expand_novel_lhs(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     va: &mut VertexArena,
     seen: &mut SeenMap,
     lhs_id: SyntaxId,
@@ -385,8 +385,8 @@ fn expand_novel_lhs(
 
 /// The rhs counterpart of [`expand_novel_lhs`].
 fn expand_novel_rhs(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     va: &mut VertexArena,
     seen: &mut SeenMap,
     rhs_id: SyntaxId,
@@ -480,8 +480,8 @@ fn reconstruct_path(va: &VertexArena, end: u32) -> Vec<PathStep> {
 /// Mirrors `references/difftastic/src/diff/graph.rs:796-847`
 /// `populate_change_map`.
 pub fn populate_change_map(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     path: &[PathStep],
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
@@ -529,7 +529,7 @@ pub fn populate_change_map(
     }
 }
 
-fn mark_subtree(arena: &SyntaxArena, id: SyntaxId, changes: &mut ChangeMap, kind: ChangeKind) {
+fn mark_subtree(arena: &SyntaxArena<'_>, id: SyntaxId, changes: &mut ChangeMap, kind: ChangeKind) {
     let mut stack = vec![id];
     while let Some(current) = stack.pop() {
         changes.mark(current, kind);
@@ -555,13 +555,13 @@ mod tests {
             .unwrap()
     }
 
-    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
+    fn lower(source: &str) -> (SyntaxArena<'_>, SyntaxId) {
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
         lower_tree(&tree, source)
     }
 
-    fn mk_atom(arena: &mut SyntaxArena, kind: &'static str, content: &'static str) -> SyntaxId {
+    fn mk_atom(arena: &mut SyntaxArena<'_>, kind: &'static str, content: &'static str) -> SyntaxId {
         arena.alloc(Syntax::Atom(Atom {
             kind,
             byte_range: 0..content.len(),
@@ -574,8 +574,8 @@ mod tests {
     /// Expand a fresh single-vertex arena and return the kinds of edge it
     /// generates, exercising [`expand`] the way the search loop does.
     fn expanded_edges(
-        lhs_arena: &SyntaxArena,
-        rhs_arena: &SyntaxArena,
+        lhs_arena: &SyntaxArena<'_>,
+        rhs_arena: &SyntaxArena<'_>,
         lhs: Option<SyntaxId>,
         rhs: Option<SyntaxId>,
     ) -> Vec<Edge> {

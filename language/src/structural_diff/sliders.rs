@@ -40,13 +40,13 @@ use super::{
 
 /// Run two passes of slider correction over the entire tree rooted at
 /// `root`, updating `changes` in place.
-pub fn fix_all_sliders(arena: &SyntaxArena, root: SyntaxId, changes: &mut ChangeMap) {
+pub fn fix_all_sliders(arena: &SyntaxArena<'_>, root: SyntaxId, changes: &mut ChangeMap) {
     for _ in 0..2 {
         fix_sliders_recursive(arena, root, changes);
     }
 }
 
-fn fix_sliders_recursive(arena: &SyntaxArena, id: SyntaxId, changes: &mut ChangeMap) {
+fn fix_sliders_recursive(arena: &SyntaxArena<'_>, id: SyntaxId, changes: &mut ChangeMap) {
     if let Syntax::List(list) = arena.get(id) {
         slide_within_children(arena, &list.children, changes);
         for child in &list.children {
@@ -72,7 +72,7 @@ fn fix_sliders_recursive(arena: &SyntaxArena, id: SyntaxId, changes: &mut Change
 /// no oscillation between successive passes). Two passes still
 /// run because cascading slides produce different boundaries on
 /// the second iteration.
-fn slide_within_children(arena: &SyntaxArena, children: &[SyntaxId], changes: &mut ChangeMap) {
+fn slide_within_children(arena: &SyntaxArena<'_>, children: &[SyntaxId], changes: &mut ChangeMap) {
     let n = children.len();
     let mut i = 0;
     while i < n {
@@ -110,7 +110,7 @@ mod tests {
         ContentId,
     };
 
-    fn mk_atom(arena: &mut SyntaxArena, kind: &'static str, content: &'static str) -> SyntaxId {
+    fn mk_atom(arena: &mut SyntaxArena<'_>, kind: &'static str, content: &'static str) -> SyntaxId {
         arena.alloc(Syntax::Atom(Atom {
             kind,
             byte_range: 0..0,
@@ -121,7 +121,7 @@ mod tests {
     }
 
     fn mk_list(
-        arena: &mut SyntaxArena,
+        arena: &mut SyntaxArena<'_>,
         kind: &'static str,
         children: Vec<SyntaxId>,
         cids: &[ContentId],
@@ -139,7 +139,7 @@ mod tests {
 
     /// Build a list with children [A, B, A, B, C] all of identical
     /// kind so that `next_sibling` linking puts them in sequence.
-    fn build_test_list(arena: &mut SyntaxArena) -> (SyntaxId, [SyntaxId; 5]) {
+    fn build_test_list(arena: &mut SyntaxArena<'_>) -> (SyntaxId, [SyntaxId; 5]) {
         let a1 = mk_atom(arena, "ident", "A");
         let b1 = mk_atom(arena, "ident", "B");
         let a2 = mk_atom(arena, "ident", "A");

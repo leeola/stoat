@@ -41,7 +41,7 @@ use super::{
 };
 use std::collections::{HashMap, HashSet};
 
-fn precompute_leaf_counts(arena: &SyntaxArena) -> Vec<usize> {
+fn precompute_leaf_counts(arena: &SyntaxArena<'_>) -> Vec<usize> {
     let mut counts = vec![0usize; arena.len()];
     for i in 0..arena.len() {
         match arena.get(SyntaxId(i)) {
@@ -117,8 +117,8 @@ pub struct ChangesetMoveRecord {
 /// change maps the move pass mutates in place (residual `Pending`
 /// nodes become `Moved` when paired).
 pub struct FileMoveInput<'a> {
-    pub lhs_arena: &'a SyntaxArena,
-    pub rhs_arena: &'a SyntaxArena,
+    pub lhs_arena: &'a SyntaxArena<'a>,
+    pub rhs_arena: &'a SyntaxArena<'a>,
     pub lhs_changes: &'a mut ChangeMap,
     pub rhs_changes: &'a mut ChangeMap,
 }
@@ -130,8 +130,8 @@ pub struct FileMoveInput<'a> {
 /// rewriting paired nodes from [`ChangeKind::Pending`] to
 /// [`ChangeKind::Moved`].
 pub fn find_moves(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
 ) -> Vec<MoveRecord> {
@@ -327,7 +327,7 @@ type FileNode = (usize, SyntaxId);
 /// [`MIN_LEAVES`] threshold at index time so noise candidates never
 /// enter the pairing loop.
 fn index_all_candidates(
-    arena: &SyntaxArena,
+    arena: &SyntaxArena<'_>,
     leaf_counts: &[usize],
 ) -> HashMap<ContentId, Vec<SyntaxId>> {
     let mut out: HashMap<ContentId, Vec<SyntaxId>> = HashMap::new();
@@ -348,7 +348,7 @@ fn index_all_candidates(
 /// kinds composed of non-alphabetic characters; filter them out so a
 /// lone `}` never shows up as a move. Applies to atoms only; lists are
 /// guarded by [`MIN_LEAVES`] via [`atom_leaf_count`].
-fn is_trivial(arena: &SyntaxArena, id: SyntaxId) -> bool {
+fn is_trivial(arena: &SyntaxArena<'_>, id: SyntaxId) -> bool {
     match arena.get(id) {
         Syntax::Atom(a) => !a.kind.chars().any(|c| c.is_alphabetic()),
         Syntax::List(_) => false,
@@ -483,7 +483,7 @@ fn emit_records_multi(
     }
 }
 
-fn build_parent_map(arena: &SyntaxArena) -> Vec<Option<SyntaxId>> {
+fn build_parent_map(arena: &SyntaxArena<'_>) -> Vec<Option<SyntaxId>> {
     let mut parents = vec![None; arena.len()];
     for i in 0..arena.len() {
         if let Syntax::List(list) = arena.get(SyntaxId(i)) {
@@ -512,7 +512,7 @@ fn ancestor_in_set_multi(
     false
 }
 
-fn mark_subtree_moved(arena: &SyntaxArena, root: SyntaxId, changes: &mut ChangeMap) {
+fn mark_subtree_moved(arena: &SyntaxArena<'_>, root: SyntaxId, changes: &mut ChangeMap) {
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         changes.mark(id, ChangeKind::Moved);
@@ -522,7 +522,7 @@ fn mark_subtree_moved(arena: &SyntaxArena, root: SyntaxId, changes: &mut ChangeM
     }
 }
 
-fn byte_start(arena: &SyntaxArena, id: SyntaxId) -> usize {
+fn byte_start(arena: &SyntaxArena<'_>, id: SyntaxId) -> usize {
     match arena.get(id) {
         Syntax::Atom(a) => a.byte_range.start,
         Syntax::List(l) => {
@@ -543,7 +543,7 @@ fn is_moved(changes: &ChangeMap, id: SyntaxId) -> bool {
 }
 
 #[cfg(test)]
-fn atom_leaf_count(arena: &SyntaxArena, id: SyntaxId) -> usize {
+fn atom_leaf_count(arena: &SyntaxArena<'_>, id: SyntaxId) -> usize {
     let mut stack = vec![id];
     let mut count = 0usize;
     while let Some(current) = stack.pop() {
@@ -571,13 +571,13 @@ mod tests {
             .unwrap()
     }
 
-    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
+    fn lower(source: &str) -> (SyntaxArena<'_>, SyntaxId) {
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
         lower_tree(&tree, source)
     }
 
-    fn full_byte_range(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
+    fn full_byte_range(arena: &SyntaxArena<'_>, id: SyntaxId) -> Range<usize> {
         match arena.get(id) {
             Syntax::Atom(a) => a.byte_range.clone(),
             Syntax::List(l) => {
@@ -598,12 +598,12 @@ mod tests {
 
     /// Run the standard preprocessing + move pass pipeline on `(lhs, rhs)`
     /// and return everything the tests need to assert on.
-    fn find_moves_in(
-        lhs: &str,
-        rhs: &str,
+    fn find_moves_in<'a>(
+        lhs: &'a str,
+        rhs: &'a str,
     ) -> (
-        SyntaxArena,
-        SyntaxArena,
+        SyntaxArena<'a>,
+        SyntaxArena<'a>,
         SyntaxId,
         SyntaxId,
         PreprocessResult,
@@ -623,7 +623,7 @@ mod tests {
         )
     }
 
-    fn contains_text(arena: &SyntaxArena, id: SyntaxId, source: &str, needle: &str) -> bool {
+    fn contains_text(arena: &SyntaxArena<'_>, id: SyntaxId, source: &str, needle: &str) -> bool {
         let range = full_byte_range(arena, id);
         source[range].contains(needle)
     }
@@ -1087,13 +1087,17 @@ mod tests {
 
     /// Run mark_unchanged + find_moves_changeset on `pairs` and return
     /// the per-file LHS arenas, RHS arenas, and emitted records.
-    fn find_moves_changeset_in(
-        pairs: &[(&str, &str)],
-    ) -> (Vec<SyntaxArena>, Vec<SyntaxArena>, Vec<ChangesetMoveRecord>) {
-        let mut lhs_arenas: Vec<SyntaxArena> = Vec::new();
-        let mut rhs_arenas: Vec<SyntaxArena> = Vec::new();
+    fn find_moves_changeset_in<'a>(
+        pairs: &[(&'a str, &'a str)],
+    ) -> (
+        Vec<SyntaxArena<'a>>,
+        Vec<SyntaxArena<'a>>,
+        Vec<ChangesetMoveRecord>,
+    ) {
+        let mut lhs_arenas: Vec<SyntaxArena<'a>> = Vec::new();
+        let mut rhs_arenas: Vec<SyntaxArena<'a>> = Vec::new();
         let mut roots: Vec<(SyntaxId, SyntaxId)> = Vec::new();
-        for (lhs, rhs) in pairs {
+        for &(lhs, rhs) in pairs {
             let (la, lr) = lower(lhs);
             let (ra, rr) = lower(rhs);
             lhs_arenas.push(la);

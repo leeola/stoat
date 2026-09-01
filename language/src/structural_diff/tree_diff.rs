@@ -165,10 +165,9 @@ pub fn diff_with_language_cancellable(
 /// cross-file [`diff_changeset_from_slots`] both consume it, so the
 /// expensive per-file stages run once even when a file needs both.
 ///
-/// The `'a` marker ties the value to the source texts it was prepared
+/// The `'a` lifetime ties the value to the source texts it was prepared
 /// from. The arenas inside borrow those texts through their atom content
-/// slices -- a borrow the arena type erases internally -- so the marker
-/// is what stops the retained value from outliving its sources.
+/// slices, so the retained value never outlives its sources.
 pub struct PreparedDiff<'a> {
     prepared: PreparedFile<'a>,
     _marker: PhantomData<&'a str>,
@@ -381,8 +380,8 @@ pub fn diff_changeset_from_slots(mut slots: Vec<ChangesetSlot<'_>>) -> Vec<DiffR
 /// identifying [`BufferRef`] travels alongside in [`ChangesetSlot`]
 /// rather than here, since single-file diffs have no buffer.
 struct PreparedFile<'a> {
-    lhs_arena: SyntaxArena,
-    rhs_arena: SyntaxArena,
+    lhs_arena: SyntaxArena<'a>,
+    rhs_arena: SyntaxArena<'a>,
     lhs_root: SyntaxId,
     rhs_root: SyntaxId,
     lhs_changes: ChangeMap,
@@ -404,8 +403,8 @@ struct PreparedFile<'a> {
 /// Used by [`build_move_metadata_changeset`] when materialising
 /// [`MoveSource`]s for cross-file moves.
 struct PreparedFileView<'a> {
-    lhs_arena: &'a SyntaxArena,
-    rhs_arena: &'a SyntaxArena,
+    lhs_arena: &'a SyntaxArena<'a>,
+    rhs_arena: &'a SyntaxArena<'a>,
     lhs_lines: &'a LineIndex,
     rhs_lines: &'a LineIndex,
 }
@@ -549,7 +548,7 @@ fn finalize_per_file(
 /// different metadata stay separate so downstream callers can offer
 /// per-move jump actions.
 fn collect_changes(
-    arena: &SyntaxArena,
+    arena: &SyntaxArena<'_>,
     root: SyntaxId,
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
@@ -637,7 +636,7 @@ fn arc_opt_eq(a: &Option<Arc<MoveMetadata>>, b: &Option<Arc<MoveMetadata>>) -> b
 }
 
 fn walk_emit_atoms(
-    arena: &SyntaxArena,
+    arena: &SyntaxArena<'_>,
     id: SyntaxId,
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
@@ -692,8 +691,8 @@ fn walk_emit_atoms(
 fn pair_replaced_atoms(
     changes: &mut [DiffChange],
     pairs: &[(SyntaxId, SyntaxId)],
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
 ) {
     let mut next_pair_id = 0u32;
     for (lhs_id, rhs_id) in pairs {
@@ -719,7 +718,7 @@ fn pair_replaced_atoms(
 }
 
 /// The byte range of the atom at `id`, or `None` when `id` names a list.
-fn atom_range(arena: &SyntaxArena, id: SyntaxId) -> Option<Range<usize>> {
+fn atom_range(arena: &SyntaxArena<'_>, id: SyntaxId) -> Option<Range<usize>> {
     match arena.get(id) {
         Syntax::Atom(atom) => Some(atom.byte_range.clone()),
         Syntax::List(_) => None,
@@ -823,7 +822,7 @@ fn build_move_metadata_changeset(
     out
 }
 
-fn walk_descendants(arena: &SyntaxArena, root: SyntaxId, f: &mut impl FnMut(SyntaxId)) {
+fn walk_descendants(arena: &SyntaxArena<'_>, root: SyntaxId, f: &mut impl FnMut(SyntaxId)) {
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         f(id);
@@ -848,7 +847,7 @@ fn move_source_for_changeset(
     views: &[PreparedFileView<'_>],
 ) -> MoveSource {
     let view = &views[src_idx];
-    let (arena, lines): (&SyntaxArena, &LineIndex) = match side {
+    let (arena, lines): (&SyntaxArena<'_>, &LineIndex) = match side {
         Side::Lhs => (view.lhs_arena, view.lhs_lines),
         Side::Rhs => (view.rhs_arena, view.rhs_lines),
     };
@@ -867,7 +866,7 @@ fn move_source_for_changeset(
     }
 }
 
-fn full_byte_range(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
+fn full_byte_range(arena: &SyntaxArena<'_>, id: SyntaxId) -> Range<usize> {
     match arena.get(id) {
         Syntax::Atom(a) => a.byte_range.clone(),
         Syntax::List(l) => {
