@@ -2142,6 +2142,21 @@ mod tests {
             ),
             "the commits diff steps on the keys every list preview steps on"
         );
+        assert_eq!(
+            (
+                plain("commits", KeyCode::PageDown),
+                plain("commits", KeyCode::PageUp),
+                bound("commits", KeyCode::Char('f'), KeyModifiers::CONTROL),
+                bound("commits", KeyCode::Char('b'), KeyModifiers::CONTROL),
+            ),
+            (
+                "CommitsPageDown".to_string(),
+                "CommitsPageUp".to_string(),
+                "CommitsPageDown".to_string(),
+                "CommitsPageUp".to_string(),
+            ),
+            "and the list pages on the four keys every list modal pages on"
+        );
     }
 
     /// A view block scores two atoms against the base block's one, since the

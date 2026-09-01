@@ -880,6 +880,10 @@ on key {
         Up -> CommitsPrev();
         g -> CommitsFirst();
         G -> CommitsLast();
+        Ctrl-f -> CommitsPageDown();
+        Ctrl-b -> CommitsPageUp();
+        PageDown -> CommitsPageDown();
+        PageUp -> CommitsPageUp();
         # The diff beside the list scrolls on the same keys every list modal
         # gives its preview, so one pair of keys reads a diff everywhere.
         Ctrl-d -> CommitsDetailDown();
