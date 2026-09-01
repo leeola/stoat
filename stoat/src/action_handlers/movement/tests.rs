@@ -34,6 +34,40 @@ fn stage_two_changed_files(h: &mut TestHarness) -> PathBuf {
     workdir
 }
 
+/// The changed list groups staged files before unstaged ones, so a staged file
+/// late in the alphabet sits ahead of an unstaged file early in it. Walking
+/// that order sends `n` backward through the alphabet and reports a wrap that
+/// the reader has no way to predict.
+#[test]
+fn next_change_visits_a_mixed_changeset_in_path_order() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stoat.active_workspace_mut().git_root = workdir.clone();
+    {
+        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+        builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        builder.head_file("z.rs", "d\ne\nf\n");
+        builder.staged_file("z.rs", "d\nY\nf\n");
+    }
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            h.stoat.pending_message.as_deref(),
+        ),
+        (workdir.join("z.rs"), None),
+        "a.rs comes before z.rs whichever of them is staged, so the hop \
+         forward reaches z.rs without wrapping",
+    );
+}
+
 /// A staged addition has no base blob, so it offers no row to land on. Opening
 /// it anyway drops the cursor at row 0 with nothing under it, and from there
 /// the in-file walk crosses out again on the next press.

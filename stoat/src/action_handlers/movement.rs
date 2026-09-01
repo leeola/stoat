@@ -4485,11 +4485,17 @@ fn scan_changed_file_jump(
                 .collect()
         },
     };
-    let changed: Vec<PathBuf> = listed
+    let mut changed: Vec<PathBuf> = listed
         .into_iter()
         .filter(|f| !f.untracked)
         .map(|f| f.path)
         .collect();
+    // `changed_files` groups staged before unstaged, which is the shape a list
+    // surface paints in two sections. The walk has no sections, so that order
+    // leaves a mixed changeset visiting files with no reading of its own. Path
+    // order is the one the status bar's per-file tally already counts through.
+    changed.sort();
+
     let current_index = current_path
         .as_deref()
         .and_then(|path| changed.iter().position(|c| same_file(fs_host, c, path)));
