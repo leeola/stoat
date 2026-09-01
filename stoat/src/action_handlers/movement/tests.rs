@@ -5280,6 +5280,20 @@ fn indent_selection_with_tabs_ignores_the_leading_spaces() {
     assert_eq!(focused_buffer_text(&mut h), "\ta\n\t\tb\n\t   c\n");
 }
 
+/// A space style gives a tab-led line a whole unit, since a tab is one
+/// character of whatever width the renderer gives it and no top-up counted in
+/// characters measures against that.
+#[test]
+fn indent_selection_gives_a_tab_led_row_a_whole_space_unit() {
+    let mut h = TestHarness::with_size(20, 5);
+    // The 4-space step from the first line to the second sets the style.
+    let path = h.write_file("s.txt", "a\n    b\n\tc\n");
+    h.open_file(&path);
+    h.type_keys("2 j");
+    dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+    assert_eq!(focused_buffer_text(&mut h), "a\n    b\n    \tc\n");
+}
+
 /// A count multiplies the whole units and the alignment is taken once, so the
 /// line still lands on a stop.
 #[test]

@@ -2768,10 +2768,11 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
                         // Indenting leaves all-whitespace rows untouched, like
                         // Helix.
                         if let Some(leading) = leading_whitespace_chars(&line) {
+                            let tab_led = line.starts_with('\t');
                             edits.push((
                                 line_start,
                                 line_start,
-                                indent_text(style, count, leading),
+                                indent_text(style, count, leading, tab_led),
                             ));
                         }
                     },
@@ -2834,10 +2835,16 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
 /// whole unit, so a line three spaces into a four-space style gains one space
 /// and every later press gains four. Tab stops belong to the renderer and no
 /// partial tab exists to insert, so a tab style always inserts whole units.
-fn indent_text(style: IndentStyle, count: usize, leading: usize) -> String {
+///
+/// A tab-led line under a space style gains whole units too. `leading` counts
+/// characters, and a tab is one character of whatever width the renderer gives
+/// it, so no top-up computed from that count measures against the columns the
+/// line actually occupies.
+fn indent_text(style: IndentStyle, count: usize, leading: usize, tab_led: bool) -> String {
     let unit = style.as_str();
     match style {
         IndentStyle::Tabs => unit.repeat(count),
+        IndentStyle::Spaces(_) if tab_led => unit.repeat(count),
         // The width comes from the string actually inserted, which is clamped
         // to at least one character, so the remainder always has a divisor.
         IndentStyle::Spaces(_) => " ".repeat(unit.len() * count - leading % unit.len()),
