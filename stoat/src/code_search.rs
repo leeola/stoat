@@ -773,6 +773,42 @@ mod tests {
         assert_eq!(snippets, ["fn alpha() {}", "fn alpha_again() {}"]);
     }
 
+    /// The workspace scan answers the smart-case rule the buffer search does,
+    /// so an all-lowercase query reaches a hit of any case.
+    #[test]
+    fn a_lowercase_query_reaches_an_uppercase_hit() {
+        let mut h = open_over(&[("a.rs", "fn Alpha() {}\n")]);
+        run_query(&mut h, "alpha");
+
+        let finder = h.stoat.code_search.as_ref().expect("code search open");
+        let snippets: Vec<&str> = finder.matches.iter().map(|m| m.snippet.as_str()).collect();
+        assert_eq!(snippets, ["fn Alpha() {}"]);
+    }
+
+    /// Turning smart case off holds every query to the case it was typed in.
+    #[test]
+    fn a_case_sensitive_setting_holds_a_query_to_its_case() {
+        let mut h = open_over(&[("a.rs", "fn Alpha() {}\n")]);
+        h.stoat.settings.search_smart_case = Some(false);
+        run_query(&mut h, "alpha");
+
+        let finder = h.stoat.code_search.as_ref().expect("code search open");
+        let snippets: Vec<&str> = finder.matches.iter().map(|m| m.snippet.as_str()).collect();
+        assert_eq!(snippets, [] as [&str; 0]);
+    }
+
+    /// The scan runs the regex over a file's whole text, so an anchor has to
+    /// mean a line boundary or it would only ever reach the first line.
+    #[test]
+    fn an_anchor_matches_a_line_rather_than_the_file() {
+        let mut h = open_over(&[("a.rs", "alpha\nbeta\n")]);
+        run_query(&mut h, "^beta");
+
+        let finder = h.stoat.code_search.as_ref().expect("code search open");
+        let snippets: Vec<&str> = finder.matches.iter().map(|m| m.snippet.as_str()).collect();
+        assert_eq!(snippets, ["beta"]);
+    }
+
     /// A session walks the tree once and scans what that walk found from then
     /// on, so a refined query has to still reach every file. A cache missing
     /// what the first query did not match would show up here as the broader

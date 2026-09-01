@@ -12,7 +12,6 @@ use crate::{
     picker::PreviewSource,
 };
 use ast_grep_core::Pattern;
-use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
     ops::ControlFlow,
@@ -361,7 +360,9 @@ pub(crate) fn spawn_code_search(
 
     let task = match finder.mode {
         SearchMode::Regex => {
-            let regex = Regex::new(query).ok()?;
+            let regex =
+                super::search::compile_search_regex(query, super::search::smart_case(stoat))
+                    .ok()?;
             stoat.executor.spawn_blocking(move || {
                 let overlaid_seen: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
 
