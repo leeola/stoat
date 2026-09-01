@@ -42,7 +42,7 @@ fn lower_node<'a>(
     source: &'a str,
 ) -> SyntaxId {
     let node = cursor.node();
-    let kind: &'static str = static_kind(node.kind());
+    let kind = node.kind();
 
     if node.named_child_count() == 0 {
         // Leaf: emit as an atom with the literal source slice for its
@@ -134,15 +134,6 @@ fn delimiter_ranges(
 /// so the set is fixed. The angle brackets are here for generic argument and
 /// parameter lists.
 const BRACKET_PAIRS: [(&str, &str); 4] = [("(", ")"), ("[", "]"), ("{", "}"), ("<", ">")];
-
-/// Tree-sitter node kinds are returned as `&str` borrowed from the
-/// grammar's static string table, so they always live for `'static`.
-/// The function is a thin transmute that documents this invariant.
-fn static_kind(kind: &str) -> &'static str {
-    // SAFETY: tree-sitter grammar kind strings live in the grammar's
-    // statically-linked string pool for the program's entire lifetime.
-    unsafe { std::mem::transmute::<&str, &'static str>(kind) }
-}
 
 #[cfg(test)]
 mod tests {
