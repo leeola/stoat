@@ -111,12 +111,16 @@ impl<T> Task<T> {
     }
 }
 
+// The inner `async_task::Task` is `Unpin` for every `T`, and the `Ready`
+// value is moved out with `take` rather than projected, so neither variant
+// is pinned structurally.
+impl<T> Unpin for Task<T> {}
+
 impl<T> Future for Task<T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
-        // SAFETY: we never move the inner async_task::Task out of the pin
-        match unsafe { self.get_unchecked_mut() } {
+        match self.get_mut() {
             Task::Ready(val) => {
                 Poll::Ready(val.take().expect("Task::Ready polled after completion"))
             },
