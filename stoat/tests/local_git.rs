@@ -126,6 +126,29 @@ impl TestRepo {
             .expect("commit")
             .to_string()
     }
+
+    /// Commit a merge of `other_sha` into HEAD, keeping HEAD's tree.
+    ///
+    /// The tree is the first parent's, so the merge adds a second parent edge
+    /// without changing any file. That is all a first-parent walk reads.
+    fn merge_commit(&self, other_sha: &str, message: &str) -> String {
+        let head = self
+            .repo
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("head commit");
+        let other = self
+            .repo
+            .find_commit(Oid::from_str(other_sha).expect("oid"))
+            .expect("other commit");
+        let tree = head.tree().expect("head tree");
+        let sig = Signature::now("test", "t@t").expect("sig");
+        self.repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head, &other])
+            .expect("commit")
+            .to_string()
+    }
 }
 
 fn staged_blob(workdir: &Path, rel: &str) -> Option<String> {
@@ -866,6 +889,24 @@ fn log_commits_walks_first_parent_from_head() {
     let shas: Vec<_> = log.iter().map(|c| c.sha.clone()).collect();
     let unique: BTreeSet<_> = shas.iter().collect();
     assert_eq!(unique.len(), 3, "shas must be distinct");
+}
+
+#[test]
+fn log_commits_skips_a_merged_branch_and_keeps_both_parents() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "m1");
+    let m1 = tr.head_sha();
+    tr.commit_file("a.rs", "m2");
+    let m2 = tr.head_sha();
+    let side = tr.commit_flat_tree_on("refs/heads/theirs", &m1, &[("b.rs", "s1")], "s1");
+    let merge = tr.merge_commit(&side, "merge");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let log = repo.log_commits(None, 10);
+
+    let shas: Vec<_> = log.iter().map(|c| c.sha.as_str()).collect();
+    assert_eq!(shas, [merge.as_str(), m2.as_str(), m1.as_str()]);
+    assert_eq!(log[0].parents, [m2.clone(), side.clone()]);
 }
 
 #[test]

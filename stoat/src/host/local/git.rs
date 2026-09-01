@@ -802,8 +802,15 @@ impl GitRepo for LocalGitRepo {
 enum WalkMode {
     /// First parents only, so a merge reads as a single row and the branch it
     /// merged stays hidden.
+    ///
+    /// The walk queue holds one commit at a time, because each pop enqueues
+    /// only the first parent. The yield order is the first-parent chain
+    /// whatever the sort mode, so this arm runs unsorted and streams lazily.
     FirstParent,
     /// Every parent, so a merge's side branches appear as commits of their own.
+    ///
+    /// This arm sorts topologically, which a graph layout needs to place a
+    /// child above every parent it points at.
     FullGraph,
 }
 
@@ -816,6 +823,13 @@ enum WalkMode {
 ///
 /// A `hide` sha bounds the walk. That commit and everything reachable from it
 /// are skipped, which is how a range walk stops at a branch's fork point.
+///
+/// Cost follows `mode`. A [`WalkMode::FirstParent`] page costs O(`limit`) and
+/// touches no commit past the ones it returns, so a paged listing stays fast
+/// on a history of any depth. A [`WalkMode::FullGraph`] walk sorts
+/// topologically, and libgit2 satisfies that sort only after it traverses
+/// every commit reachable from `start`, so even a small `limit` pays for the
+/// whole history.
 fn walk_history(
     repo: &Repository,
     start: git2::Oid,
@@ -827,7 +841,7 @@ fn walk_history(
         Ok(w) => w,
         Err(_) => return Vec::new(),
     };
-    if walk.set_sorting(Sort::TOPOLOGICAL).is_err() {
+    if matches!(mode, WalkMode::FullGraph) && walk.set_sorting(Sort::TOPOLOGICAL).is_err() {
         return Vec::new();
     }
     if matches!(mode, WalkMode::FirstParent) && walk.simplify_first_parent().is_err() {
