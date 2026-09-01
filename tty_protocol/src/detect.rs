@@ -18,7 +18,7 @@ use crate::{
     frame,
 };
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     time::Duration,
 };
 
@@ -183,7 +183,7 @@ fn cpr_span(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
 /// Whether fd 0 is a terminal, and so whether anything can answer the probe.
 #[cfg(unix)]
 fn stdin_is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+    io::stdin().is_terminal()
 }
 
 #[cfg(not(unix))]
