@@ -2798,30 +2798,47 @@ impl Stoat {
         }
     }
 
-    /// Flip the diff view's syntax coloring, or do nothing outside it.
+    /// Flip the syntax coloring of whichever diff surface is on screen, or do
+    /// nothing where none is.
+    ///
+    /// The diff view and the commits screen both answer, because both paint
+    /// their rows through the same painter and read the same flag. One key
+    /// therefore means one thing wherever a diff is in front of the reader.
     ///
     /// The chord reaches here whatever is on screen, because the terminal
     /// forwards it on the zoom claim rather than on what the program is
-    /// showing. Off the diff view there is nothing to toggle, so the flag holds
-    /// and the frame is left alone.
+    /// showing. Elsewhere there is nothing to toggle, so the flag holds and the
+    /// frame is left alone.
     fn handle_diff_syntax_toggle(&mut self) -> UpdateEffect {
-        if keymap_state::view_predicate(self.active_workspace()) != Some("diff") {
+        if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
         self.diff_syntax = !self.diff_syntax;
         UpdateEffect::Redraw
     }
 
-    /// Step the diff view's tint dial by `delta` levels, or do nothing outside
-    /// it.
+    /// Whether the screen in front of the reader paints diff rows, which is
+    /// what the three styling dials act on.
     ///
-    /// Off the diff view there is no tint to step, so the level holds and the
+    /// The diff view and the commits screen qualify. A commit preview runs the
+    /// diff view's own row painter, so a dial stepped on either shows on both.
+    fn on_a_diff_surface(&self) -> bool {
+        matches!(
+            keymap_state::view_predicate(self.active_workspace()),
+            Some("diff" | "commits")
+        )
+    }
+
+    /// Step the tint dial by `delta` levels on whichever diff surface is on
+    /// screen, or do nothing where none is.
+    ///
+    /// Off a diff surface there is no tint to step, so the level holds and the
     /// frame is left alone, exactly as [`Self::handle_diff_syntax_toggle`]
     /// answers there. The level is clamped rather than saturated, so a press
     /// past either end is remembered as the end itself and the next press the
     /// other way moves the paint immediately.
     fn handle_diff_tint_step(&mut self, delta: i32) -> UpdateEffect {
-        if keymap_state::view_predicate(self.active_workspace()) != Some("diff") {
+        if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
         let stepped = i32::from(self.diff_tint).saturating_add(delta);
@@ -2835,10 +2852,12 @@ impl Stoat {
     /// shrinks, and one sized entirely by its content swallows the step, since
     /// resizing a pane hidden behind it would be a change the user cannot see.
     ///
-    /// With no modal open, the diff view takes the step as contrast rather than
-    /// size. There is no pane the reader is looking at to resize, and how far
-    /// unchanged code recedes is the one dial that screen has. Every other
-    /// screen and a plain pane resize the focused pane against its split.
+    /// With no modal open, a diff surface takes the step as contrast rather
+    /// than size. There is no pane in front of the reader to resize, and how
+    /// far unchanged code recedes is the one dial those screens have. The
+    /// commits screen paints its overlay over the pane grid, so a resize there
+    /// moves a pane the reader never sees. Every other screen and a plain pane
+    /// resize the focused pane against its split.
     ///
     /// The diff branch subtracts the step where the others add it, because what
     /// the reader is zooming there is the changed code. Deepening the recede
@@ -2865,7 +2884,7 @@ impl Stoat {
             return UpdateEffect::None;
         }
 
-        if keymap_state::view_predicate(self.active_workspace()) == Some("diff") {
+        if self.on_a_diff_surface() {
             let stepped = i32::from(self.diff_soften).saturating_sub(delta);
             self.diff_soften = stepped.clamp(
                 crate::render::review::DIFF_SOFTEN_MIN.into(),
@@ -8485,6 +8504,39 @@ mod tests {
             "a plain pane takes the step as a resize again"
         );
     }
+
+    /// The commits overlay paints over the pane grid, so a resize there moves
+    /// a pane nobody sees. The combo tunes the soften instead, which is the
+    /// contrast the reader is actually looking at.
+    #[test]
+    fn a_zoom_step_on_the_commits_screen_tunes_the_soften() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let left = h.stoat.active_workspace().panes.focus();
+        let right = h
+            .stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        h.stoat.active_workspace_mut().panes.set_focus(left);
+        let widths = |h: &crate::test_harness::TestHarness| {
+            (
+                h.stoat.active_workspace().panes.pane(left).area.width,
+                h.stoat.active_workspace().panes.pane(right).area.width,
+            )
+        };
+        let before = widths(&h);
+
+        h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
+        h.open_commits("/repo");
+        h.stoat.handle_window_ipc(zoom(-1));
+
+        assert_eq!(
+            (h.stoat.diff_soften, widths(&h)),
+            (1, before),
+            "the shrink key recedes the preview's context and moves no pane"
+        );
+    }
+
     /// Syntax color competes with the diff's own marking, so the chord drops it
     /// from both columns and leaves the soften and the bold to speak alone.
     #[test]
@@ -8561,6 +8613,30 @@ mod tests {
             (UpdateEffect::None, UpdateEffect::None, 2),
             "off the diff view both chords leave the level alone",
         );
+    }
+
+    /// A commit preview paints its rows through the diff view's own painter,
+    /// so the dial that colors them answers on that screen too. One key, one
+    /// meaning, wherever a diff is in front of the reader.
+    #[test]
+    fn the_tint_and_syntax_chords_answer_on_the_commits_screen() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
+        h.open_commits("/repo");
+
+        assert_eq!(
+            (h.stoat.diff_tint, h.stoat.diff_syntax),
+            (0, true),
+            "a session opens with the tint off and syntax on",
+        );
+
+        assert_eq!(h.stoat.handle_window_ipc(chord('0')), UpdateEffect::Redraw);
+        assert_eq!(h.stoat.diff_tint, 1, "ctrl-0 steps the dial up");
+        assert_eq!(h.stoat.handle_window_ipc(chord('9')), UpdateEffect::Redraw);
+        assert_eq!(h.stoat.diff_tint, 0, "ctrl-9 steps it back down");
+
+        assert_eq!(h.stoat.handle_window_ipc(chord('8')), UpdateEffect::Redraw);
+        assert!(!h.stoat.diff_syntax, "ctrl-8 flips the syntax coloring");
     }
 
     /// An in-band claim spells a chord as super plus the digit down the pty
