@@ -111,7 +111,9 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
         );
 
         read_back(&device, &queue, &target, width, height)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|texel| texel[0] > 0)
             .count()
     };

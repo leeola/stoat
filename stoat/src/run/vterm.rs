@@ -372,7 +372,7 @@ impl vte::Perform for VtermGrid {
     ) {
         let params_vec: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
-        if intermediates == [b'?']
+        if intermediates == *b"?"
             && action == 'h'
             && (params_vec.contains(&1049) || params_vec.contains(&47))
         {

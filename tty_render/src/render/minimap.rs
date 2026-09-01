@@ -1285,7 +1285,11 @@ mod tests {
             .expect("poll readback");
         let rgba = readback.slice(..).get_mapped_range().to_vec();
 
-        rgba.chunks_exact(4).map(|texel| texel[0]).collect()
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|texel| texel[0])
+            .collect()
     }
 
     /// A strip drawn in pure red over nothing, so a readback byte is coverage.

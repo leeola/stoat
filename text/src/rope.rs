@@ -2229,9 +2229,9 @@ impl Iterator for ReversedCharsAt<'_> {
                 return Some(ch);
             }
             self.chunks.prev();
-            match self.chunks.item() {
-                Some(chunk) => self.local_offset = chunk.text.len(),
-                None => return None,
+            {
+                let chunk = self.chunks.item()?;
+                self.local_offset = chunk.text.len()
             }
         }
     }

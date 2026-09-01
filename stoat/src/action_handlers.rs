@@ -1365,9 +1365,9 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
             let focused = ws.panes.focus();
             ws.panes.pane(focused).view.clone()
         },
-        FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
-            Some(dock) => dock.view.clone(),
-            None => return None,
+        FocusTarget::Dock(dock_id) => {
+            let dock = ws.docks.get(dock_id)?;
+            dock.view.clone()
         },
     };
     match view {

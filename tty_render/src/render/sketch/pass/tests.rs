@@ -536,7 +536,13 @@ fn render_red(
     device.poll(PollType::wait_indefinitely()).ok()?;
     let rgba = readback.slice(..).get_mapped_range().to_vec();
 
-    Some(rgba.chunks_exact(4).map(|texel| texel[0]).collect())
+    Some(
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|texel| texel[0])
+            .collect(),
+    )
 }
 
 /// A ridden mark paints where its host carried it, not where it was generated.

@@ -532,7 +532,7 @@ impl SelectionsCollection {
         let transformed: Vec<Selection<Anchor>> = self
             .disjoint
             .iter()
-            .zip(offsets.chunks_exact(2))
+            .zip(offsets.as_chunks::<2>().0.iter())
             .map(|(sel, ends)| f(sel, ends[0], ends[1]))
             .collect();
         self.replace_with(transformed, snapshot);
@@ -566,7 +566,7 @@ impl SelectionsCollection {
             snapshot.anchors_at_batch(&flat, bias)
         };
 
-        let mut anchors = anchors.chunks_exact(2);
+        let mut anchors = anchors.as_chunks::<2>().0.iter();
         let mut new_disjoint: Vec<Selection<Anchor>> = Vec::with_capacity(self.disjoint.len());
         for (sel, pieces) in self.disjoint.iter().zip(&split_into) {
             if pieces.is_empty() {
@@ -723,7 +723,9 @@ impl SelectionsCollection {
         };
 
         let new_disjoint: Vec<Selection<Anchor>> = anchors
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|span| {
                 let id = self.next_selection_id;
                 self.next_selection_id += 1;
@@ -792,7 +794,9 @@ impl SelectionsCollection {
         let rope = snapshot.rope();
         let snapped = {
             let requests: Vec<(usize, Bias)> = offsets
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .flat_map(|span| [(span[0], Bias::Left), (span[1], Bias::Right)])
                 .collect();
             rope.clip_to_grapheme_boundaries_batch(&requests)
@@ -800,7 +804,13 @@ impl SelectionsCollection {
 
         let mut indexed: Vec<Resolved> = new_disjoint
             .into_iter()
-            .zip(offsets.chunks_exact(2).zip(snapped.chunks_exact(2)))
+            .zip(
+                offsets
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(snapped.as_chunks::<2>().0.iter()),
+            )
             .map(|(mut selection, (span, snapped))| {
                 let (start, end) = (snapped[0], snapped[1]);
                 if start != span[0] {
@@ -889,7 +899,7 @@ impl SelectionsCollection {
 
         self.disjoint
             .iter()
-            .zip(offsets.chunks_exact(2))
+            .zip(offsets.as_chunks::<2>().0.iter())
             .map(|(sel, ends)| ResolvedRead {
                 id: sel.id,
                 head: ends[0],
@@ -1003,7 +1013,7 @@ impl SelectionsCollection {
             snapshot.resolve_anchors_batch(&anchors)
         };
 
-        let mut carried = carried.chunks_exact(2);
+        let mut carried = carried.as_chunks::<2>().0.iter();
         let mut entries: Vec<Landing> = self
             .disjoint
             .iter()
@@ -1041,7 +1051,7 @@ impl SelectionsCollection {
             snapshot.rope().clip_to_grapheme_boundaries_batch(&requests)
         };
 
-        for (entry, snapped) in entries.iter_mut().zip(snapped.chunks_exact(2)) {
+        for (entry, snapped) in entries.iter_mut().zip(snapped.as_chunks::<2>().0.iter()) {
             let (start, end) = (snapped[0], snapped[1]);
             // A clipped endpoint is not where its anchor said, so it gets a new
             // one. An unclipped one keeps whatever it arrived with.

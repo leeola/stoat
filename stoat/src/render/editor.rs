@@ -556,7 +556,9 @@ pub(crate) fn render_editor_with_overlay(
     // one walk for the same reason the anchors above are resolved in one.
     let cursors = {
         let pairs: Vec<(usize, usize)> = endpoints
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|ends| (ends[2], ends[3]))
             .collect();
         stoat_text::cursor_offsets(rope, &pairs)
@@ -575,12 +577,10 @@ pub(crate) fn render_editor_with_overlay(
 
     for ((selection, ends), (&cursor, &cursor_point)) in visible_selections
         .iter()
-        .zip(endpoints.chunks_exact(4))
+        .zip(endpoints.as_chunks::<4>().0.iter())
         .zip(cursors.iter().zip(cursor_points.iter()))
     {
-        let &[start_offset, end_offset, _, _] = ends else {
-            continue;
-        };
+        let &[start_offset, end_offset, _, _] = ends;
 
         let lo = start_offset.max(visible.start);
         let hi = end_offset.min(visible.end);

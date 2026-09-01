@@ -602,7 +602,9 @@ mod tests {
     /// the target there.
     fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
         render_rgba(device, queue, grid, metrics, Color::BLACK)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|texel| texel[0])
             .collect()
     }
@@ -619,7 +621,9 @@ mod tests {
         metrics: CellMetrics,
     ) -> Vec<u8> {
         render_rgba(device, queue, grid, metrics, Color::WHITE)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|texel| 255 - texel[1])
             .collect()
     }

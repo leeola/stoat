@@ -107,7 +107,12 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
         .flat_map(|(start, end)| [start, end])
         .collect();
     let offsets = buffer_snapshot.resolve_anchors_batch(&ends);
-    let mut spans: Vec<(usize, usize)> = offsets.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+    let mut spans: Vec<(usize, usize)> = offsets
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| (p[0], p[1]))
+        .collect();
     spans.sort_unstable();
 
     // Both directions compare where the diagnostic opens, so stepping back from

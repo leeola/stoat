@@ -5417,9 +5417,9 @@ impl Stoat {
                 let focused = ws.panes.focus();
                 ws.panes.pane(focused).view.clone()
             },
-            FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
-                Some(dock) => dock.view.clone(),
-                None => return None,
+            FocusTarget::Dock(dock_id) => {
+                let dock = ws.docks.get(dock_id)?;
+                dock.view.clone()
             },
         };
         match view {
@@ -5629,7 +5629,7 @@ impl Stoat {
             buf_snapshot.resolve_anchors_batch(&anchors)
         };
 
-        ends.chunks_exact(2).all(|ends| {
+        ends.as_chunks::<2>().0.iter().all(|ends| {
             let offset = stoat_text::cursor_offset(rope, ends[0], ends[1]);
             rope.reversed_chars_at(offset)
                 .take_while(|&ch| ch != '\n')
@@ -6388,7 +6388,7 @@ impl Stoat {
             .selections
             .all_anchors()
             .iter()
-            .zip(ends.chunks_exact(2))
+            .zip(ends.as_chunks::<2>().0.iter())
             .map(|(sel, ends)| (sel.id, stoat_text::cursor_offset(rope, ends[0], ends[1])))
             .collect();
         cursors.sort_by_key(|(id, offset)| (*offset, *id));
@@ -6930,7 +6930,7 @@ impl Stoat {
             .selections
             .all_anchors()
             .iter()
-            .zip(ends.chunks_exact(2))
+            .zip(ends.as_chunks::<2>().0.iter())
             .map(|(sel, ends)| {
                 let cursor = stoat_text::cursor_offset(rope, ends[0], ends[1]);
                 let (start, end) = range_for(rope, cursor);

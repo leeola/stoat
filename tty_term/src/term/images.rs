@@ -698,9 +698,7 @@ fn inline_cells(
         Dimension::Auto => None,
         Dimension::Cells(cells) => Some((cells as usize).max(1)),
         Dimension::Pixels(pixels) => Some((pixels.div_ceil(per_cell).max(1)) as usize),
-        Dimension::Percent(percent) => {
-            Some((span * percent as usize / 100).max(1)).filter(|_| span > 0)
-        },
+        Dimension::Percent(percent) => (span > 0).then_some((span * percent as usize / 100).max(1)),
         // A percent of nothing, and a natural size is the better answer than
         // none.
         #[allow(unreachable_patterns)]
@@ -818,7 +816,7 @@ fn expand_rgb(control: &ControlData, bytes: &[u8]) -> Result<DecodedImage, Respo
     }
 
     let mut rgba = Vec::with_capacity(pixels * RGBA);
-    for pixel in bytes.chunks_exact(3) {
+    for pixel in bytes.as_chunks::<3>().0 {
         rgba.extend_from_slice(pixel);
         rgba.push(0xff);
     }

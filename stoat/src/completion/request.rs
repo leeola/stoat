@@ -577,8 +577,7 @@ fn ask_again(
         trigger: LspTrigger::Incomplete,
     };
 
-    let Some(request) =
-        Some(request).filter(|_| !hosts.is_empty() && snapshot.source_path.is_some())
+    let Some(request) = (!hosts.is_empty() && snapshot.source_path.is_some()).then_some(request)
     else {
         // The server is no longer there to ask, so the popup's own items are all
         // of it. Narrowing them to the grown prefix is what the landing request

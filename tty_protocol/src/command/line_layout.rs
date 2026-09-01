@@ -70,7 +70,9 @@ pub(super) fn decode_line_layout(args: &[Vec<u8>]) -> Option<LineLayoutCommand> 
     }
 
     let heights = arg
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
         .collect();
     Some(LineLayoutCommand { heights })

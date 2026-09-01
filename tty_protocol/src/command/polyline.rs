@@ -83,7 +83,9 @@ pub(super) fn decode_polyline(args: &[Vec<u8>]) -> Option<PolylineCommand> {
     }
 
     let points = tail
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| {
             [
                 i16::from_be_bytes([p[0], p[1]]),

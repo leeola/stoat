@@ -354,6 +354,9 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
     // is a session leader with no controlling terminal, so TIOCSCTTY succeeds
     // and the editor's own process group owns the pty.
     unsafe {
+        // macOS declares TIOCSCTTY narrower than the ioctl request type, so
+        // the conversion is required there and a no-op on Linux.
+        #[allow(clippy::useless_conversion)]
         libc::ioctl(slave, libc::TIOCSCTTY.into(), 0);
         libc::dup2(slave, 0);
         libc::dup2(slave, 1);

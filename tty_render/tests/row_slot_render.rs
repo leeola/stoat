@@ -396,8 +396,16 @@ fn a_scrolled_composite_paints_what_a_rebuilt_one_paints() {
 
     let strip = carried.strip(&scrolled, 0..carried.cell_w);
     let differs = strip
-        .chunks_exact(4)
-        .zip(carried.strip(&rebuilt, 0..carried.cell_w).chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(
+            carried
+                .strip(&rebuilt, 0..carried.cell_w)
+                .as_chunks::<4>()
+                .0
+                .iter(),
+        )
         .position(|(got, want)| got != want);
     assert_eq!(
         differs, None,

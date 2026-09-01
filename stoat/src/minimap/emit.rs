@@ -391,8 +391,10 @@ pub(crate) fn minimap_line_tokens(
             let offsets = buffer_snap.resolve_anchors_batch(&anchors);
             let points = rope.offsets_to_points_batch(&offsets);
             offsets
-                .chunks_exact(2)
-                .zip(points.chunks_exact(2))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(points.as_chunks::<2>().0.iter())
                 .map(|(offsets, points)| (offsets[0], offsets[1], points[0].row, points[1].row))
                 .collect::<Vec<_>>()
         };

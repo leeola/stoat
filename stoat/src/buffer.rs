@@ -2556,7 +2556,9 @@ mod tests {
 
             let texts = ["", "X", "hello", "\n"];
             let mut edits: Vec<(Range<usize>, &str)> = cuts
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|w| (w[0]..w[1], texts[next(texts.len())]))
                 .collect();
             edits.reverse();
@@ -4229,7 +4231,9 @@ mod tests {
         cuts.dedup();
 
         let mut edits: Vec<(Range<usize>, &'static str)> = cuts
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let end = if rng.below(3) == 0 { pair[0] } else { pair[1] };
                 (pair[0]..end, inserts[rng.below(inserts.len())])

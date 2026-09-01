@@ -267,7 +267,9 @@ pub(super) fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
     }
 
     let palette = palette_bytes
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|entry| [entry[0], entry[1], entry[2]])
         .collect();
 
@@ -305,7 +307,9 @@ pub(super) fn decode_minimap_lines(args: &[Vec<u8>]) -> Option<MinimapLinesComma
         let end = cursor.checked_add(run_count.checked_mul(3)?)?;
         let run_bytes = arg.get(cursor..end)?;
         let runs = run_bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|run| MinimapRun {
                 start_col: run[0],
                 len: run[1],

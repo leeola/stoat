@@ -426,7 +426,9 @@ impl CreaseMap {
 
         let (resolved, reordered) = self.carry_resolved(buffer, &edits);
         if resolved
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .zip(&self.items)
             .all(|(pair, item)| pair[0] == item.resolved_start && pair[1] == item.resolved_end)
         {
@@ -444,7 +446,7 @@ impl CreaseMap {
     /// the tree is keyed on that order.
     fn write_resolved(&mut self, resolved: &[usize], reordered: bool) {
         let mut items = mem::take(&mut self.items);
-        for (item, pair) in items.iter_mut().zip(resolved.chunks_exact(2)) {
+        for (item, pair) in items.iter_mut().zip(resolved.as_chunks::<2>().0.iter()) {
             item.resolved_start = pair[0];
             item.resolved_end = pair[1];
         }

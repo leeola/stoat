@@ -705,7 +705,8 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             modal_split_percent(&stoat.modal_split, kind),
         )?;
         (kind, layout.inner, layout.list, layout.preview)
-    } else if let Some(finder) = stoat.symbol_finder.as_ref() {
+    } else {
+        let finder = stoat.symbol_finder.as_ref()?;
         let kind = ModalKind::SymbolFinder;
         let (_, inner, list, preview) = crate::render::symbol_finder::symbol_finder_layout(
             size,
@@ -714,8 +715,6 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             modal_split_percent(&stoat.modal_split, kind),
         )?;
         (kind, inner, list, preview)
-    } else {
-        return None;
     };
     preview?;
 

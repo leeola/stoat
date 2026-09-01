@@ -863,7 +863,7 @@ fn push_semantic_endpoints(
     range: &Range<usize>,
     resolver: &AnchorResolver<'_>,
 ) {
-    for (_buffer_id, channel) in semantic.iter() {
+    for channel in semantic.values() {
         let bounds = channel.overlap_bounds(range, resolver.one);
         let lo = bounds.start;
 
