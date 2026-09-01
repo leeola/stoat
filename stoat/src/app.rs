@@ -495,17 +495,19 @@ impl SeparatorAxis {
     }
 }
 
-/// The open modal's list/preview separator: where it sits, and what a drag along
-/// it redistributes.
+/// A list/preview separator: where it sits, and what a drag along it
+/// redistributes.
 ///
-/// One descriptor for both splits the modal family uses. Only the axis and the
-/// floors differ between them -- the pane on one side takes a share of the body,
-/// the separator takes a cell of its own, and the other pane takes the rest --
-/// so resolving a modal into this shape lets one hit-test and one clamp serve
-/// every kind.
-pub(crate) struct ModalSeparator {
-    /// Whose [`Stoat::modal_split`] entry a drag writes.
-    pub(crate) kind: ModalKind,
+/// Every split surface in the app has the same shape. The pane on one side
+/// takes a share of the body, the separator takes a cell of its own, and the
+/// other pane takes the rest. Only the axis and the floors differ, so
+/// resolving a surface into this descriptor lets one hit-test and one clamp
+/// serve them all.
+///
+/// The descriptor carries geometry alone. Where a drag's resulting share is
+/// stored is the caller's business, which is what lets a non-modal surface
+/// reuse it.
+pub(crate) struct SplitSeparator {
     pub(crate) axis: SeparatorAxis,
     /// The separator's own line, in the axis's units.
     pub(crate) line: u16,
@@ -519,7 +521,7 @@ pub(crate) struct ModalSeparator {
     pub(crate) min_preview: u16,
 }
 
-impl ModalSeparator {
+impl SplitSeparator {
     /// Whether `mouse` presses the separator itself rather than a pane beside it.
     pub(crate) fn hit(&self, mouse: &MouseEvent) -> bool {
         self.axis.along(mouse) == self.line && self.span.contains(&self.axis.across(mouse))
@@ -15882,9 +15884,9 @@ mod tests {
     /// A finder-family modal wide enough for two panes, with the list and preview
     /// rects the renderer would paint.
     fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) -> (Rect, Rect) {
-        let separator = mouse::open_modal_separator(&h.stoat)
+        let (open_kind, _) = mouse::open_modal_separator(&h.stoat)
             .expect("the modal shows a preview beside its list");
-        assert_eq!(separator.kind, kind, "the expected modal is the open one");
+        assert_eq!(open_kind, kind, "the expected modal is the open one");
         let content = match kind {
             ModalKind::SymbolFinder => {
                 let finder = h.stoat.symbol_finder.as_ref().expect("open");

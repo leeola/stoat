@@ -9,7 +9,7 @@
 use crate::{
     action_handlers,
     app::{
-        modal_split_percent, modal_zoom_steps, ModalKind, ModalSeparator, PanelHit, SeparatorAxis,
+        modal_split_percent, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
         WHEEL_BINDING_COOLDOWN,
     },
@@ -500,11 +500,15 @@ pub(crate) fn modal_zoom_range(stoat: &Stoat, kind: ModalKind) -> Option<(i8, i8
 }
 
 /// The open modal's list/preview separator, sized from the same inputs the
-/// renderer reads so a hit-test lands where the user sees the line.
+/// renderer reads so a hit-test lands where the user sees the line, paired
+/// with the modal it belongs to.
+///
+/// The kind rides beside the descriptor rather than inside it, so a drag keys
+/// [`Stoat::modal_split`] while the descriptor stays pure geometry.
 ///
 /// `None` when no modal with a separator is open, or when the one that is
 /// shows no preview -- a modal too small for two panes has no line to grab.
-pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<ModalSeparator> {
+pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSeparator)> {
     let size = stoat.size();
 
     // The picker stacks its diff under the table, so its separator runs
@@ -518,15 +522,17 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<ModalSeparator> {
         )?;
         layout.preview?;
         let inner = layout.inner;
-        return Some(ModalSeparator {
-            kind: ModalKind::CommitPicker,
-            axis: SeparatorAxis::Rows,
-            line: layout.list.y + layout.list.height,
-            span: inner.x..inner.x + inner.width,
-            body: layout.list.y..inner.y + inner.height,
-            min_list: MIN_LIST_ROWS,
-            min_preview: MIN_PREVIEW_ROWS,
-        });
+        return Some((
+            ModalKind::CommitPicker,
+            SplitSeparator {
+                axis: SeparatorAxis::Rows,
+                line: layout.list.y + layout.list.height,
+                span: inner.x..inner.x + inner.width,
+                body: layout.list.y..inner.y + inner.height,
+                min_list: MIN_LIST_ROWS,
+                min_preview: MIN_PREVIEW_ROWS,
+            },
+        ));
     }
 
     // The finder family puts its preview beside the list, so the separator
@@ -565,25 +571,27 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<ModalSeparator> {
     };
     preview?;
 
-    Some(ModalSeparator {
+    Some((
         kind,
-        axis: SeparatorAxis::Columns,
-        line: list.x + list.width,
-        span: list.y..list.y + list.height,
-        body: inner.x..inner.x + inner.width,
-        min_list: crate::render::picker::MIN_PANE_COLUMNS,
-        min_preview: crate::render::picker::MIN_PANE_COLUMNS,
-    })
+        SplitSeparator {
+            axis: SeparatorAxis::Columns,
+            line: list.x + list.width,
+            span: list.y..list.y + list.height,
+            body: inner.x..inner.x + inner.width,
+            min_list: crate::render::picker::MIN_PANE_COLUMNS,
+            min_preview: crate::render::picker::MIN_PANE_COLUMNS,
+        },
+    ))
 }
 
 /// Arm a separator drag when `mouse` presses the open modal's list/preview
 /// separator, reporting whether it did.
 fn arm_modal_separator(stoat: &mut Stoat, mouse: MouseEvent) -> bool {
-    let Some(separator) = open_modal_separator(stoat).filter(|s| s.hit(&mouse)) else {
+    let Some((kind, _)) = open_modal_separator(stoat).filter(|(_, s)| s.hit(&mouse)) else {
         return false;
     };
 
-    stoat.modal_separator_drag = Some(separator.kind);
+    stoat.modal_separator_drag = Some(kind);
     true
 }
 
@@ -593,8 +601,8 @@ fn arm_modal_separator(stoat: &mut Stoat, mouse: MouseEvent) -> bool {
 /// the share alone, so a stale arm can never write against a separator that
 /// is no longer there.
 fn drag_modal_separator(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
-    let Some(separator) =
-        open_modal_separator(stoat).filter(|s| Some(s.kind) == stoat.modal_separator_drag)
+    let Some((kind, separator)) =
+        open_modal_separator(stoat).filter(|(kind, _)| Some(*kind) == stoat.modal_separator_drag)
     else {
         return UpdateEffect::None;
     };
@@ -602,7 +610,7 @@ fn drag_modal_separator(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
-    stoat.modal_split.insert(separator.kind, share);
+    stoat.modal_split.insert(kind, share);
     UpdateEffect::Redraw
 }
 
