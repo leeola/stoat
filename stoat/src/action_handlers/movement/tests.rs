@@ -380,6 +380,9 @@ fn next_change_crosses_into_a_file_changed_only_against_the_base() {
         builder.head_file("b.rs", "d\nY\nf\n");
         builder.commit("base0", &[("a.rs", "a\nb\nc\n"), ("b.rs", "d\ne\nf\n")]);
     }
+    // `head_file` seeds only the HEAD blob, and the hop's landing diff reads
+    // the working tree. A file clean against HEAD holds HEAD's text on disk.
+    h.fake_fs().insert_file(workdir.join("b.rs"), "d\nY\nf\n");
     h.stoat.set_diff_warm_auto(true);
 
     h.open_file(&workdir.join("a.rs"));
@@ -416,6 +419,11 @@ fn next_change_crosses_into_a_file_changed_only_against_the_base() {
         focused_buffer_path(&h.stoat),
         workdir.join("b.rs"),
         "under the base the hop reaches the file committed on top of it",
+    );
+    assert_eq!(
+        focused_head_row(&mut h.stoat),
+        1,
+        "and lands on the row that differs from the base, not the file top",
     );
 }
 

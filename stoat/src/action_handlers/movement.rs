@@ -4511,7 +4511,7 @@ fn scan_changed_file_jump(
     {
         return ChangedFileJump::NoMoreChanges;
     }
-    let stop = first_hunk_stop(&*repo, fs_host, &path, dir);
+    let stop = first_hunk_stop(&*repo, fs_host, &path, dir, base);
 
     ChangedFileJump::To {
         path,
@@ -4521,22 +4521,37 @@ fn scan_changed_file_jump(
     }
 }
 
-/// The landing row of `path`'s first (Next) or last (Prev) hunk against HEAD,
-/// paired with the rows that hunk occupies.
+/// The landing row of `path`'s first (Next) or last (Prev) hunk against the
+/// workspace's diff base, paired with the rows that hunk occupies.
+///
+/// The base side mirrors the head side of `resolve_base`, so the row this
+/// lands on is one of the hunks the target's own diff map will show. Reading
+/// HEAD instead leaves a file committed on top of a review base looking
+/// clean, and the hop drops the cursor at the file top with no change under
+/// it.
 ///
 /// The rows travel with the row because the hop's target is not open yet,
 /// which leaves nothing on the far side to look the chunk up from. An empty
 /// range is a deletion, which the display mapping brackets rather than spans.
 ///
-/// `None` when the file has no HEAD blob, cannot be read, or diffs clean, in
+/// `None` when the file has no base text, is unreadable, or diffs clean, in
 /// which case the hop opens it and leaves the cursor where the open put it.
 fn first_hunk_stop(
     repo: &dyn GitRepo,
     fs_host: &Arc<dyn FsHost>,
     path: &Path,
     dir: ChangeDir,
+    base_override: Option<&DiffBase>,
 ) -> Option<(u32, Range<u32>)> {
-    let base = repo.head_content(path)?;
+    let base = match base_override {
+        Some(DiffBase::Rev { sha: Some(sha) }) => repo.content_at(sha, path).unwrap_or_default(),
+        Some(DiffBase::Rev { sha: None }) => String::new(),
+        Some(DiffBase::Memory { files }) => match files.get(path) {
+            Some(text) => text.to_string(),
+            None => repo.head_content(path)?,
+        },
+        None => repo.head_content(path)?,
+    };
     let mut bytes = Vec::new();
     fs_host.read(path, &mut bytes).ok()?;
     let working = String::from_utf8(bytes).ok()?;
