@@ -859,7 +859,7 @@ pub(crate) fn frame(
                 commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
             }
         } else if screen == Some("rebase") {
-            if let Some(state) = ws.rebase.as_ref() {
+            if let Some(state) = ws.rebase.as_mut() {
                 rebase::render_rebase(pane, is_focused, state, frame, buf, &mut *scene);
             }
         } else if screen == Some("reword") {

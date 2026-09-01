@@ -630,6 +630,8 @@ mod tests {
                     todo: vec![],
                     selected: 2,
                     onto: "abc123".to_string(),
+                    scroll_top: 0,
+                    viewport_rows: 0,
                 }),
                 rebase_active: None,
                 mode: "rebase".to_string(),

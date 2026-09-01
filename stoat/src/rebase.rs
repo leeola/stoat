@@ -17,6 +17,17 @@ pub(crate) struct RebaseState {
     /// Sha of the commit this plan stacks onto (typically the parent
     /// of the oldest entry).
     pub onto: String,
+    /// First todo entry painted, which is what keeps a selection past the
+    /// pane's height on screen.
+    ///
+    /// Defaulted for serde so a workspace saved before the list scrolled
+    /// still loads, starting at the top as it did then.
+    #[serde(default)]
+    pub scroll_top: usize,
+    /// Todo rows the pane held on the most recent render, which bounds the
+    /// window the selection is kept inside. Zero until the first paint.
+    #[serde(default)]
+    pub viewport_rows: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,6 +43,20 @@ impl RebaseState {
             todo: entries,
             selected: 0,
             onto,
+            scroll_top: 0,
+            viewport_rows: 0,
+        }
+    }
+
+    /// Keep `selected` within `[scroll_top, scroll_top + height)`.
+    pub(crate) fn ensure_selected_visible(&mut self, height: usize) {
+        if height == 0 {
+            return;
+        }
+        if self.selected < self.scroll_top {
+            self.scroll_top = self.selected;
+        } else if self.selected >= self.scroll_top + height {
+            self.scroll_top = self.selected + 1 - height;
         }
     }
 
@@ -237,6 +262,60 @@ mod tests {
         // Move first entry (c2) down so order becomes c3, c2.
         h.type_keys("J");
         h.assert_snapshot("rebase_reorder");
+    }
+
+    /// A todo taller than the pane walks the selection past the last painted
+    /// row, where nothing marks it and `j` reads as dead. The list scrolls to
+    /// follow instead.
+    #[test]
+    fn the_rebase_list_scrolls_to_follow_its_selection() {
+        let names: Vec<(String, String, String)> = (0..30)
+            .map(|i| (format!("c{i}"), format!("c{i}: commit"), format!("l{i}\n")))
+            .collect();
+        let files: Vec<[(&str, &str); 1]> = names
+            .iter()
+            .map(|(_, _, line)| [("a.rs", line.as_str())])
+            .collect();
+        let specs: Vec<CommitSpec<'_>> = names
+            .iter()
+            .zip(&files)
+            .map(|((sha, msg, _), files)| (sha.as_str(), msg.as_str(), files.as_slice()))
+            .collect();
+
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", &specs);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        assert_eq!(h.stoat.current_view(), Some("rebase"));
+
+        // Ten rows past the top, on a pane that holds far fewer.
+        for _ in 0..10 {
+            h.type_keys("j");
+        }
+        h.snapshot();
+
+        let state = h
+            .stoat
+            .active_workspace()
+            .rebase
+            .as_ref()
+            .expect("the rebase screen is open");
+        assert!(
+            state.viewport_rows > 0 && state.viewport_rows < state.todo.len(),
+            "the pane holds fewer rows than the todo, which is the case under \
+             test: {} of {}",
+            state.viewport_rows,
+            state.todo.len(),
+        );
+        assert!(
+            (state.scroll_top..state.scroll_top + state.viewport_rows).contains(&state.selected),
+            "selected {} sits outside the painted window [{}, {})",
+            state.selected,
+            state.scroll_top,
+            state.scroll_top + state.viewport_rows,
+        );
     }
 
     #[test]

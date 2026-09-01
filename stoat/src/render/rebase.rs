@@ -14,7 +14,7 @@ use ratatui::buffer::Buffer;
 pub(crate) fn render_rebase(
     pane: &Pane,
     is_focused: bool,
-    state: &RebaseState,
+    state: &mut RebaseState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
@@ -41,9 +41,19 @@ pub(crate) fn render_rebase(
     let help_rows: u16 = 2;
     let list_height = inner.height.saturating_sub(help_rows);
 
-    for (i, entry) in state.todo.iter().take(list_height as usize).enumerate() {
+    state.viewport_rows = list_height as usize;
+    state.ensure_selected_visible(state.viewport_rows);
+    let top = state.scroll_top.min(state.todo.len().saturating_sub(1));
+
+    for (i, entry) in state
+        .todo
+        .iter()
+        .skip(top)
+        .take(list_height as usize)
+        .enumerate()
+    {
         let y = inner.y + i as u16;
-        let is_selected = i == state.selected;
+        let is_selected = top + i == state.selected;
         if is_selected {
             for x in inner.x..inner.x + inner.width {
                 buf[(x, y)].set_style(sel_style);
