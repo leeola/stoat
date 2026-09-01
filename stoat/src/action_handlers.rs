@@ -1016,6 +1016,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitsPrev => commits::commits_step(stoat, commits::CommitStep::Up(1)),
         ActionKind::CommitsPageDown => commits::commits_step(stoat, commits::CommitStep::PageDown),
         ActionKind::CommitsPageUp => commits::commits_step(stoat, commits::CommitStep::PageUp),
+        ActionKind::CommitsDetailDown => commits::commits_detail_half_page(stoat, 1),
+        ActionKind::CommitsDetailUp => commits::commits_detail_half_page(stoat, -1),
         ActionKind::CommitsFirst => commits::commits_step(stoat, commits::CommitStep::First),
         ActionKind::CommitsLast => commits::commits_step(stoat, commits::CommitStep::Last),
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),

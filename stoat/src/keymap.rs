@@ -2131,6 +2131,17 @@ mod tests {
             ),
             "reword takes all four arrows, as it takes h/j/k/l"
         );
+        assert_eq!(
+            (
+                bound("commits", KeyCode::Char('d'), KeyModifiers::CONTROL),
+                bound("commits", KeyCode::Char('u'), KeyModifiers::CONTROL),
+            ),
+            (
+                "CommitsDetailDown".to_string(),
+                "CommitsDetailUp".to_string(),
+            ),
+            "the commits diff steps on the keys every list preview steps on"
+        );
     }
 
     /// A view block scores two atoms against the base block's one, since the

@@ -3,8 +3,9 @@ use crate::{
         agent::SpawnClaude,
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         commits::{
-            CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
-            CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, GitLs, OpenCommits,
+            CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
+            CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
+            CommitsRefresh, GitLs, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -910,6 +911,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsPrev::DEF, |_| Ok(Box::new(CommitsPrev)));
     add(CommitsPageDown::DEF, |_| Ok(Box::new(CommitsPageDown)));
     add(CommitsPageUp::DEF, |_| Ok(Box::new(CommitsPageUp)));
+    add(CommitsDetailDown::DEF, |_| Ok(Box::new(CommitsDetailDown)));
+    add(CommitsDetailUp::DEF, |_| Ok(Box::new(CommitsDetailUp)));
     add(CommitsFirst::DEF, |_| Ok(Box::new(CommitsFirst)));
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
@@ -1261,6 +1264,8 @@ mod tests {
         "CommitsPrev",
         "CommitsPageDown",
         "CommitsPageUp",
+        "CommitsDetailDown",
+        "CommitsDetailUp",
         "CommitsFirst",
         "CommitsLast",
         "CommitsRefresh",
@@ -1839,7 +1844,8 @@ mod tests {
         // + 1 PinMode.
         // + 1 Ssh.
         // + 1 Mosh.
-        assert_eq!(all().count(), 420);
+        // + 2 CommitsDetailDown/CommitsDetailUp.
+        assert_eq!(all().count(), 422);
     }
 
     #[test]

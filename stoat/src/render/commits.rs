@@ -23,7 +23,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 pub(crate) fn render_commits(
     pane: &Pane,
@@ -42,8 +42,6 @@ pub(crate) fn render_commits(
         return;
     };
     let sep_x = left_area.x + left_area.width;
-    let right_x = sep_x + 1;
-    let right_w = inner.width.saturating_sub(left_area.width + 1);
 
     let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     crate::render::chrome::vline(buf, sep_x, inner.y, inner.height, sep_style, &mut *scene);
@@ -52,8 +50,7 @@ pub(crate) fn render_commits(
     state.ensure_selected_visible(state.viewport_rows);
     render_commit_list_pane(state, theme, left_area, buf);
 
-    if right_w > 0 {
-        let right_area = Rect::new(right_x, inner.y, right_w, inner.height);
+    if let Some(right_area) = commits_detail_rect(pane.area, frame.commits_split) {
         render_commit_detail_pane(
             state,
             workspace_root,
@@ -93,6 +90,18 @@ pub(crate) fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<R
     }
     let left_w = commit_list_width(inner.width, split);
     Some(Rect::new(inner.x, inner.y, left_w, inner.height))
+}
+
+/// The detail pane's rectangle within an overlay pane, right of the
+/// separator, or `None` when the pane is too small to carry one.
+///
+/// The counterpart to [`commits_list_rect`], so the paint and the hit test
+/// read one geometry and a wheel lands on the pane the reader sees.
+pub(crate) fn commits_detail_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
+    let (inner, _) = split_pane_status(pane_area);
+    let list = commits_list_rect(pane_area, split)?;
+    let width = inner.width.saturating_sub(list.width + 1);
+    (width > 0).then(|| Rect::new(list.x + list.width + 1, inner.y, width, inner.height))
 }
 
 /// The commits list/detail separator, or `None` when the pane is too small to
@@ -215,7 +224,7 @@ pub(crate) fn paint_commit_rows(
 }
 
 fn render_commit_detail_pane(
-    state: &CommitListState,
+    state: &mut CommitListState,
     workspace_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
@@ -224,12 +233,12 @@ fn render_commit_detail_pane(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let dim = theme.get(crate::theme::scope::VCS_COMMIT_METADATA);
-    let Some(sha) = state.selected_sha() else {
+    let Some(sha) = state.selected_sha().map(str::to_owned) else {
         write_str(buf, area.x, area.y, "no selection", dim);
         return;
     };
 
-    let summary_rows = match state.summaries.get(sha) {
+    let summary_rows = match state.summaries.get(&sha) {
         Some(changes) => render_commit_summary(changes, workspace_root, theme, area, buf),
         None => {
             write_str(buf, area.x, area.y, "loading summary...", dim);
@@ -247,11 +256,26 @@ fn render_commit_detail_pane(
         area.width,
         area.y + area.height - preview_y,
     );
-    match state.preview_sessions.get(sha) {
-        // The commits view has no preview scroll of its own. Only the picker's
-        // wheel handling moves one.
+    match state.preview_sessions.get(&sha) {
         Preview::Built(document) => {
-            render_commit_preview(document, theme, preview_area, 0, dials, buf, scene)
+            // Clamped here, where the diff's row count and the pane's height
+            // are both known. Written back so the wheel and the keys step from
+            // the offset actually painted rather than past the last page.
+            let document = Arc::clone(document);
+            state.preview_scroll = crate::render::commit_picker::clamped_preview_scroll(
+                state.preview_scroll,
+                &document,
+                preview_area.height,
+            );
+            render_commit_preview(
+                &document,
+                theme,
+                preview_area,
+                state.preview_scroll,
+                dials,
+                buf,
+                scene,
+            )
         },
         Preview::Empty => {
             if preview_area.height > 0 {

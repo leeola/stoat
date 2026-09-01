@@ -79,6 +79,12 @@ pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect 
         };
         let height = state.viewport_rows;
         state.ensure_selected_visible(height);
+        // The offset belongs to the diff the selection rests on, so a new
+        // commit starts its preview at the top rather than partway down
+        // whatever the last one was scrolled to.
+        if moved {
+            state.preview_scroll = 0;
+        }
         moved
     };
     if !moved {
@@ -88,6 +94,38 @@ pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect 
     ensure_selected_preview(stoat);
     drain_commits_tasks(stoat);
     UpdateEffect::Redraw
+}
+
+/// Scroll the detail pane's diff by `rows`, negative toward the top.
+///
+/// The render clamps the offset against the diff's length and the pane's
+/// height, so this only has to keep it off the top. Nothing here knows how
+/// long the diff is, and a second answer to that question drifts from the
+/// render's.
+pub(crate) fn commits_detail_scroll(stoat: &mut Stoat, rows: i32) -> UpdateEffect {
+    let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let by = rows.unsigned_abs() as usize;
+    state.preview_scroll = match rows > 0 {
+        true => state.preview_scroll.saturating_add(by),
+        false => state.preview_scroll.saturating_sub(by),
+    };
+    UpdateEffect::Redraw
+}
+
+/// Step the detail pane by half its height, the way every list modal's
+/// preview steps under the same keys.
+///
+/// The pane's height comes from the same rect the pointer hit-tests, so a key
+/// step and a wheel notch read one geometry.
+pub(super) fn commits_detail_half_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let ws = stoat.active_workspace();
+    let pane = ws.panes.pane(ws.panes.focus()).area;
+    let Some(rect) = crate::render::commits::commits_detail_rect(pane, stoat.commits_split) else {
+        return UpdateEffect::None;
+    };
+    commits_detail_scroll(stoat, (rect.height as i32 / 2).max(1) * dir)
 }
 
 pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
@@ -115,6 +153,7 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
         state.reached_end = false;
         state.selected = 0;
         state.scroll_top = 0;
+        state.preview_scroll = 0;
         state.summaries.clear();
         state.preview_sessions.clear();
         state.pending_preview = None;

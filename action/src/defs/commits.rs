@@ -68,6 +68,26 @@ define_action!(
 );
 
 define_action!(
+    CommitsDetailDownDef,
+    CommitsDetailDown,
+    "CommitsDetailDown",
+    ActionKind::CommitsDetailDown,
+    "scroll the commit diff down half a pane",
+    "Advance the commits screen's diff preview by half the detail pane's height.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    CommitsDetailUpDef,
+    CommitsDetailUp,
+    "CommitsDetailUp",
+    ActionKind::CommitsDetailUp,
+    "scroll the commit diff up half a pane",
+    "Retreat the commits screen's diff preview by half the detail pane's height.",
+    ActionPriority::Rare
+);
+
+define_action!(
     CommitsFirstDef,
     CommitsFirst,
     "CommitsFirst",

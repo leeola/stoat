@@ -111,6 +111,9 @@ pub(crate) struct ScreenSurfaces {
     /// First list row on screen. The commits list keeps its own scroll rather
     /// than deriving a window from the selection, so the hit test reads this.
     scroll_top: usize,
+    /// The detail pane beside the list, when the screen shows one. A wheel
+    /// here scrolls that pane instead of stepping the list.
+    detail: Option<Rect>,
 }
 
 impl ScreenSurfaces {
@@ -146,6 +149,7 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
                 len: state.commits.len(),
                 selected: state.selected,
                 scroll_top: state.scroll_top,
+                detail: crate::render::commits::commits_detail_rect(pane, stoat.commits_split),
             })
         },
         _ => None,
@@ -1253,19 +1257,30 @@ pub(crate) fn handle_mouse_scroll(
     // wheel never reaches the editor the screen covers.
     if let Some(surfaces) = screen_surfaces(stoat).filter(|s| s.holds(mouse)) {
         let steps = take_whole_notches(stoat, lines);
-        if steps == 0
-            || !surfaces
-                .list
-                .contains(Position::new(mouse.column, mouse.row))
-        {
+        if steps == 0 {
             return UpdateEffect::None;
         }
+        let at = Position::new(mouse.column, mouse.row);
         let by = steps.unsigned_abs() as usize;
-        let step = match steps > 0 {
-            true => CommitStep::Down(by),
-            false => CommitStep::Up(by),
-        };
-        return action_handlers::commits::commits_step(stoat, step);
+
+        if surfaces.list.contains(at) {
+            let step = match steps > 0 {
+                true => CommitStep::Down(by),
+                false => CommitStep::Up(by),
+            };
+            return action_handlers::commits::commits_step(stoat, step);
+        }
+        if surfaces.detail.is_some_and(|rect| rect.contains(at)) {
+            let rows = (by * PREVIEW_WHEEL_ROWS) as i32;
+            return action_handlers::commits::commits_detail_scroll(
+                stoat,
+                match steps > 0 {
+                    true => rows,
+                    false => -rows,
+                },
+            );
+        }
+        return UpdateEffect::None;
     }
 
     // A wheel over the open hover popup scrolls the popup, not the pane
@@ -2574,6 +2589,15 @@ mod tests {
             .selected
     }
 
+    fn detail_scroll(h: &crate::test_harness::TestHarness) -> usize {
+        h.stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("the commits screen is open")
+            .preview_scroll
+    }
+
     #[test]
     fn a_wheel_over_the_commits_list_steps_the_selection() {
         let (mut h, list) = commits_harness(8);
@@ -2592,11 +2616,11 @@ mod tests {
         );
     }
 
-    /// The user asked for the wheel to scroll whichever pane it sits over. The
-    /// detail side belongs to the preview, so the list holds still there, and
-    /// the notch is spent either way rather than falling through.
+    /// The user asked for the wheel to scroll whichever pane it sits over, so
+    /// the detail side moves its own diff and leaves the selection where it
+    /// is. The hidden editor never sees the notch either way.
     #[test]
-    fn a_wheel_over_the_commits_detail_side_leaves_both_alone() {
+    fn a_wheel_over_the_commits_detail_side_scrolls_the_diff() {
         let (mut h, list) = commits_harness(8);
         let before = hidden_scroll_row(&h);
 
@@ -2607,9 +2631,42 @@ mod tests {
         ));
 
         assert_eq!(
-            (selected_commit(&h), hidden_scroll_row(&h)),
-            (0, before),
-            "neither the list nor the hidden editor moves"
+            (
+                selected_commit(&h),
+                detail_scroll(&h),
+                hidden_scroll_row(&h),
+            ),
+            (0, PREVIEW_WHEEL_ROWS, before),
+            "the diff scrolls and neither the list nor the editor beneath moves"
+        );
+    }
+
+    /// The offset belongs to the diff under the selection, so stepping to a
+    /// different commit starts its diff at the top.
+    #[test]
+    fn stepping_the_commit_selection_resets_the_detail_scroll() {
+        let (mut h, list) = commits_harness(8);
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            list.x + list.width + 4,
+            list.y + 1,
+        ));
+        assert_eq!(
+            detail_scroll(&h),
+            PREVIEW_WHEEL_ROWS,
+            "the diff is scrolled before the step"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            list.x + 2,
+            list.y + 1,
+        ));
+
+        assert_eq!(
+            (selected_commit(&h), detail_scroll(&h)),
+            (1, 0),
+            "the new commit's diff starts at its top"
         );
     }
 

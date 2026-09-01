@@ -390,6 +390,8 @@ action_kinds! {
     CommitsPrev,
     CommitsPageDown,
     CommitsPageUp,
+    CommitsDetailDown,
+    CommitsDetailUp,
     CommitsFirst,
     CommitsLast,
     CommitsRefresh,

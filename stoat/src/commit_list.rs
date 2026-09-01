@@ -54,6 +54,13 @@ pub(crate) struct CommitListState {
     /// pending task (if the user scrolled past) can be discarded on
     /// completion.
     pub requested_preview: Option<String>,
+    /// First preview row shown in the detail pane, in the rows
+    /// [`crate::render::commits::preview_row_count`] counts.
+    ///
+    /// Clamped by the render, where the diff's row count and the pane's height
+    /// are both known. Reset to zero whenever the selection moves, because the
+    /// offset belongs to the diff under it rather than to the pane.
+    pub preview_scroll: usize,
 }
 
 pub(crate) struct PendingPreview {
@@ -180,6 +187,7 @@ impl CommitListState {
             preview_sessions: PreviewCache::default(),
             pending_preview: None,
             requested_preview: None,
+            preview_scroll: 0,
         }
     }
 
