@@ -7,7 +7,7 @@
 //! whatever the model currently holds.
 
 use crate::{
-    action_handlers::{self, commits::CommitStep},
+    action_handlers::{self, commits::CommitStep, rebase::RebaseMove},
     app::{
         modal_split_percent, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
@@ -99,6 +99,9 @@ impl ModalSurfaces {
 /// underneath. That is what this exists to prevent, and why it reports the
 /// whole pane alongside the list.
 pub(crate) struct ScreenSurfaces {
+    /// Which screen these belong to, which decides what a click and a notch
+    /// do with the row they resolve to.
+    kind: ScreenKind,
     /// The pane the screen paints over. Every pointer event inside it belongs
     /// to the screen, whether or not it lands on a row.
     pane: Rect,
@@ -114,6 +117,16 @@ pub(crate) struct ScreenSurfaces {
     /// The detail pane beside the list, when the screen shows one. A wheel
     /// here scrolls that pane instead of stepping the list.
     detail: Option<Rect>,
+}
+
+/// A pane-overlay screen the pointer acts on.
+///
+/// Each one keeps its own selection and steps it through its own handler, so
+/// the pointer resolves a row here and hands it to the screen that owns it.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ScreenKind {
+    Commits,
+    Rebase,
 }
 
 impl ScreenSurfaces {
@@ -144,12 +157,28 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
             let state = ws.commits.as_ref()?;
             let pane = ws.panes.pane(ws.panes.focus()).area;
             Some(ScreenSurfaces {
+                kind: ScreenKind::Commits,
                 pane,
                 list: crate::render::commits::commits_list_rect(pane, stoat.commits_split)?,
                 len: state.commits.len(),
                 selected: state.selected,
                 scroll_top: state.scroll_top,
                 detail: crate::render::commits::commits_detail_rect(pane, stoat.commits_split),
+            })
+        },
+        "rebase" => {
+            let state = ws.rebase.as_ref()?;
+            let pane = ws.panes.pane(ws.panes.focus()).area;
+            Some(ScreenSurfaces {
+                kind: ScreenKind::Rebase,
+                pane,
+                list: crate::render::rebase::rebase_list_rect(pane)?,
+                len: state.todo.len(),
+                selected: state.selected,
+                scroll_top: state.scroll_top,
+                // The plan is the whole screen. There is no second pane for a
+                // notch to land in.
+                detail: None,
             })
         },
         _ => None,
@@ -174,12 +203,17 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
         return Some(UpdateEffect::None);
     };
 
-    let delta = index as isize - surfaces.selected as isize;
-    let step = match delta < 0 {
-        true => CommitStep::Up(delta.unsigned_abs()),
-        false => CommitStep::Down(delta as usize),
-    };
-    Some(action_handlers::commits::commits_step(stoat, step))
+    Some(match surfaces.kind {
+        ScreenKind::Commits => {
+            let delta = index as isize - surfaces.selected as isize;
+            let step = match delta < 0 {
+                true => CommitStep::Up(delta.unsigned_abs()),
+                false => CommitStep::Down(delta as usize),
+            };
+            action_handlers::commits::commits_step(stoat, step)
+        },
+        ScreenKind::Rebase => action_handlers::rebase::rebase_select(stoat, index),
+    })
 }
 
 /// Rows the open modal's preview pane covers, or [`None`] without one.
@@ -1264,11 +1298,28 @@ pub(crate) fn handle_mouse_scroll(
         let by = steps.unsigned_abs() as usize;
 
         if surfaces.list.contains(at) {
-            let step = match steps > 0 {
-                true => CommitStep::Down(by),
-                false => CommitStep::Up(by),
+            return match surfaces.kind {
+                ScreenKind::Commits => {
+                    let step = match steps > 0 {
+                        true => CommitStep::Down(by),
+                        false => CommitStep::Up(by),
+                    };
+                    action_handlers::commits::commits_step(stoat, step)
+                },
+                // The rebase step moves one entry, so a multi-notch report
+                // spends one call per notch rather than carrying a count.
+                ScreenKind::Rebase => {
+                    let step = match steps > 0 {
+                        true => RebaseMove::Next,
+                        false => RebaseMove::Prev,
+                    };
+                    let mut effect = UpdateEffect::None;
+                    for _ in 0..by {
+                        effect = action_handlers::rebase::rebase_move(stoat, step);
+                    }
+                    effect
+                },
             };
-            return action_handlers::commits::commits_step(stoat, step);
         }
         if surfaces.detail.is_some_and(|rect| rect.contains(at)) {
             let rows = (by * PREVIEW_WHEEL_ROWS) as i32;
@@ -2724,6 +2775,85 @@ mod tests {
             (selected_commit(&h), cursors(&mut h.stoat)),
             before,
             "an empty row moves neither the list nor the cursor beneath"
+        );
+    }
+
+    /// Seed a repo, open the rebase screen over a long buffer, and hand back
+    /// the harness plus the todo list rect the paint uses.
+    fn rebase_harness() -> (crate::test_harness::TestHarness, Rect) {
+        let (mut h, _) = commits_harness(8);
+        h.type_keys("G");
+        h.type_keys("i");
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("rebase"),
+            "the rebase screen opened"
+        );
+
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let list = crate::render::rebase::rebase_list_rect(pane)
+            .expect("the todo list fits this terminal");
+        (h, list)
+    }
+
+    fn rebase_selected(h: &crate::test_harness::TestHarness) -> usize {
+        h.stoat
+            .active_workspace()
+            .rebase
+            .as_ref()
+            .expect("the rebase screen is open")
+            .selected
+    }
+
+    #[test]
+    fn a_wheel_over_the_rebase_screen_steps_its_selection() {
+        let (mut h, list) = rebase_harness();
+        let before = hidden_scroll_row(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            list.x + 2,
+            list.y + 1,
+        ));
+
+        assert_eq!(
+            (rebase_selected(&h), hidden_scroll_row(&h)),
+            (1, before),
+            "the notch steps the plan and never reaches the editor beneath"
+        );
+    }
+
+    /// A press picks the entry to act on and nothing else. Running the plan
+    /// stays on its own key, so a misclick rewrites no history.
+    #[test]
+    fn a_click_on_a_rebase_row_selects_it_without_changing_its_op() {
+        let (mut h, list) = rebase_harness();
+        let ops = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .rebase
+                .as_ref()
+                .expect("open")
+                .todo
+                .iter()
+                .map(|entry| entry.op)
+                .collect::<Vec<_>>()
+        };
+        let before = ops(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + 1,
+        ));
+
+        assert_eq!(
+            (rebase_selected(&h), ops(&h)),
+            (1, before),
+            "the second row is selected and every entry keeps its op"
         );
     }
 

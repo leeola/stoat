@@ -5,7 +5,7 @@ use crate::{
 use std::path::Path;
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum RebaseMove {
+pub(crate) enum RebaseMove {
     Next,
     Prev,
     SwapUp,
@@ -64,7 +64,22 @@ pub(super) fn abort_rebase(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn rebase_move(stoat: &mut Stoat, step: RebaseMove) -> UpdateEffect {
+/// Select the todo entry at `index`, or do nothing when it names no entry.
+///
+/// A press selects and nothing more, the way the commits list does. Running
+/// the plan stays on its own key, so a misclick edits no rebase.
+pub(crate) fn rebase_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+    let Some(state) = stoat.active_workspace_mut().rebase.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if index >= state.todo.len() || index == state.selected {
+        return UpdateEffect::None;
+    }
+    state.selected = index;
+    UpdateEffect::Redraw
+}
+
+pub(crate) fn rebase_move(stoat: &mut Stoat, step: RebaseMove) -> UpdateEffect {
     let Some(state) = stoat.active_workspace_mut().rebase.as_mut() else {
         return UpdateEffect::None;
     };

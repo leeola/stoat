@@ -19,7 +19,7 @@ mod palette;
 mod pane;
 pub(crate) mod picker;
 pub(crate) mod prompt;
-mod rebase;
+pub(crate) mod rebase;
 pub(crate) mod review;
 pub(crate) mod review_walk;
 mod reword;

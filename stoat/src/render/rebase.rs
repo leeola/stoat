@@ -9,7 +9,28 @@ use crate::{
         FrameCtx,
     },
 };
-use ratatui::buffer::Buffer;
+use ratatui::{buffer::Buffer, layout::Rect};
+
+/// Rows the todo list occupies within an overlay pane, or `None` when the
+/// pane is too small to paint one.
+///
+/// The two help rows at the bottom sit outside it. Shared by the renderer and
+/// the pointer, so a clicked row is the row drawn under the pointer.
+pub(crate) fn rebase_list_rect(pane_area: Rect) -> Option<Rect> {
+    let (inner, _) = split_pane_status(pane_area);
+    if inner.width < 10 || inner.height == 0 {
+        return None;
+    }
+    Some(Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(HELP_ROWS),
+    ))
+}
+
+/// Rows the key legend and the plan summary take at the bottom of the pane.
+const HELP_ROWS: u16 = 2;
 
 pub(crate) fn render_rebase(
     pane: &Pane,
@@ -23,9 +44,9 @@ pub(crate) fn render_rebase(
     let (inner, status_area) = split_pane_status(pane.area);
     render_overlay_status(status_area, is_focused, frame, buf, scene);
 
-    if inner.width < 10 || inner.height == 0 {
+    let Some(list_area) = rebase_list_rect(pane.area) else {
         return;
-    }
+    };
 
     use crate::theme::scope as s;
     let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
@@ -38,8 +59,7 @@ pub(crate) fn render_rebase(
     let summary_style = theme.get(s::UI_TEXT);
     let sha_style = theme.get(s::UI_KEY_LABEL);
 
-    let help_rows: u16 = 2;
-    let list_height = inner.height.saturating_sub(help_rows);
+    let list_height = list_area.height;
 
     state.viewport_rows = list_height as usize;
     state.ensure_selected_visible(state.viewport_rows);
@@ -96,7 +116,7 @@ pub(crate) fn render_rebase(
     }
 
     if list_height < inner.height {
-        let help_y = inner.y + inner.height - help_rows;
+        let help_y = inner.y + inner.height - HELP_ROWS;
         let help1 = "j/k move  K/J reorder  p/s/f/d set op  Enter run  q abort";
         let help2 = format!(
             "{} entries, onto {}",
