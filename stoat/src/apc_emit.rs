@@ -262,6 +262,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         mode: &mode,
         screen,
         theme: &stoat.theme,
+        commits_split: stoat.commits_split,
         chrome: &stoat.chrome.as_ref().expect("refresh_chrome ran above").1,
         pending_count: stoat.pending_count,
         recording_register: stoat
@@ -607,7 +608,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             let ws = stoat.active_workspace();
             ws.commits.as_ref()?;
             let pane = ws.panes.pane(ws.panes.focus());
-            crate::render::commits::commits_list_rect(pane.area)
+            crate::render::commits::commits_list_rect(pane.area, stoat.commits_split)
         })
         .flatten();
 
@@ -4305,7 +4306,7 @@ mod tests {
             let ws = h.stoat.active_workspace();
             ws.panes.pane(ws.panes.focus()).area
         };
-        let list = crate::render::commits::commits_list_rect(focused)
+        let list = crate::render::commits::commits_list_rect(focused, h.stoat.commits_split)
             .expect("the commits list fits the test terminal");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMMITS,

@@ -584,6 +584,22 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
     ))
 }
 
+/// The commits screen's list/detail separator, or `None` when that screen is
+/// not the one in the foreground.
+///
+/// The overlay renders into the focused pane, so the separator is sized from
+/// that pane's area. [`crate::keymap_state::view_predicate`] ranks the rebase
+/// and conflict screens above commits, which is what keeps this from claiming
+/// the pointer under one of those.
+fn open_commits_separator(stoat: &Stoat) -> Option<SplitSeparator> {
+    let ws = stoat.active_workspace();
+    if crate::keymap_state::view_predicate(ws) != Some("commits") {
+        return None;
+    }
+    let pane = ws.panes.pane(ws.panes.focus());
+    crate::render::commits::commits_separator(pane.area, stoat.commits_split)
+}
+
 /// Arm a separator drag when `mouse` presses the open modal's list/preview
 /// separator, reporting whether it did.
 fn arm_modal_separator(stoat: &mut Stoat, mouse: MouseEvent) -> bool {
@@ -643,6 +659,24 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         return handle_modal_mouse(stoat, mouse);
     }
 
+    // The commits separator drag owns the pointer once armed, the same way a
+    // divider drag does below. Armed further down, after the divider arm, so
+    // an ordinary press still reaches the list rows.
+    if stoat.commits_separator_drag {
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(share) =
+                    open_commits_separator(stoat).and_then(|sep| sep.share_at(&mouse))
+                {
+                    stoat.commits_split = Some(share);
+                }
+            },
+            MouseEventKind::Up(MouseButton::Left) => stoat.commits_separator_drag = false,
+            _ => {},
+        }
+        return UpdateEffect::Redraw;
+    }
+
     // A divider drag owns the pointer once armed. It resizes on drag,
     // releases on up, and swallows the rest so pane handlers never see it.
     if stoat.divider_drag.is_some() {
@@ -694,6 +728,12 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
                 .divider_at(mouse.column, mouse.row)
         {
             stoat.divider_drag = Some(hit);
+            return UpdateEffect::Redraw;
+        }
+        if button == MouseButton::Left
+            && open_commits_separator(stoat).is_some_and(|sep| sep.hit(&mouse))
+        {
+            stoat.commits_separator_drag = true;
             return UpdateEffect::Redraw;
         }
         focus_at(stoat, mouse.column, mouse.row);

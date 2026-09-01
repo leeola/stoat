@@ -1,4 +1,5 @@
 use crate::{
+    app::{SeparatorAxis, SplitSeparator},
     commit_list::{CommitListState, Preview},
     diff_map::{BaseHighlights, ChangeKind},
     host::{CommitFileChange, CommitFileChangeKind},
@@ -34,7 +35,7 @@ pub(crate) fn render_commits(
     let (inner, status_area) = split_pane_status(pane.area);
     render_overlay_status(status_area, is_focused, frame, buf, &mut *scene);
 
-    let Some(left_area) = commits_list_rect(pane.area) else {
+    let Some(left_area) = commits_list_rect(pane.area, frame.commits_split) else {
         return;
     };
     let sep_x = left_area.x + left_area.width;
@@ -54,21 +55,66 @@ pub(crate) fn render_commits(
     }
 }
 
+/// Narrowest the commit list gets, however far the separator is dragged toward
+/// it. A sha, a relative date, and a few words of summary is the least that
+/// still identifies a row.
+pub(crate) const MIN_LIST_COLUMNS: u16 = 22;
+
+/// Narrowest the detail pane gets, the counterpart floor on the other side of
+/// the one-column separator.
+pub(crate) const MIN_DETAIL_COLUMNS: u16 = 11;
+
+/// Widest the list grows on its own. A dragged share overrides it, because a
+/// reader who asks for a wider list has said the summaries are what they came
+/// for.
+const DEFAULT_LIST_MAX: u16 = 48;
+
 /// The commit list's rectangle within an overlay pane, or `None` when the pane
 /// is too small. Shared by the renderer and the smooth-scroll emit so the pooled
 /// region matches the painted list.
-pub(crate) fn commits_list_rect(pane_area: Rect) -> Option<Rect> {
+///
+/// `split` is the dragged share of the body as a percentage, `None` until the
+/// reader drags the separator.
+pub(crate) fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
     let (inner, _) = split_pane_status(pane_area);
     if inner.width < 10 || inner.height == 0 {
         return None;
     }
-    let left_w = commit_list_width(inner.width);
+    let left_w = commit_list_width(inner.width, split);
     Some(Rect::new(inner.x, inner.y, left_w, inner.height))
 }
 
-fn commit_list_width(total: u16) -> u16 {
-    let target = (total as u32 * 2 / 5) as u16;
-    target.clamp(22, 48).min(total.saturating_sub(12))
+/// The commits list/detail separator, or `None` when the pane is too small to
+/// carry two panes.
+///
+/// Built from the same inputs the renderer reads, so a hit-test lands on the
+/// line the reader sees.
+pub(crate) fn commits_separator(pane_area: Rect, split: Option<u16>) -> Option<SplitSeparator> {
+    let (inner, _) = split_pane_status(pane_area);
+    let list = commits_list_rect(pane_area, split)?;
+    Some(SplitSeparator {
+        axis: SeparatorAxis::Columns,
+        line: list.x + list.width,
+        span: inner.y..inner.y + inner.height,
+        body: inner.x..inner.x + inner.width,
+        min_list: MIN_LIST_COLUMNS,
+        min_preview: MIN_DETAIL_COLUMNS,
+    })
+}
+
+/// Columns the list takes out of `total`, floored and capped so both panes
+/// keep their minimum whatever `split` asks for.
+///
+/// The percentage divides truncating, which is what [`SplitSeparator::share_at`]
+/// rounds up against, so a dragged separator lands on the cell the pointer left
+/// it on rather than a column short.
+fn commit_list_width(total: u16, split: Option<u16>) -> u16 {
+    let widest = total.saturating_sub(MIN_DETAIL_COLUMNS + 1);
+    let target = match split {
+        Some(pct) => ((total as u32 * pct as u32 / 100) as u16).max(MIN_LIST_COLUMNS),
+        None => ((total as u32 * 2 / 5) as u16).clamp(MIN_LIST_COLUMNS, DEFAULT_LIST_MAX),
+    };
+    target.min(widest)
 }
 
 fn render_commit_list_pane(
@@ -576,7 +622,7 @@ pub(crate) fn render_commit_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::render_commit_preview;
+    use super::{commit_list_width, render_commit_preview, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS};
     use crate::{
         display_map::highlights::HighlightStyle,
         render::{
@@ -766,6 +812,33 @@ mod tests {
             cell.style().fg,
             Some(Color::Rgb(softened[0], softened[1], softened[2])),
             "the unchanged prefix softens lightly, not to context strength"
+        );
+    }
+
+    #[test]
+    fn an_undragged_list_takes_two_fifths_between_its_own_bounds() {
+        assert_eq!(
+            [
+                commit_list_width(60, None),
+                commit_list_width(140, None),
+                commit_list_width(40, None),
+                commit_list_width(30, None),
+            ],
+            [24, 48, MIN_LIST_COLUMNS, 30 - (MIN_DETAIL_COLUMNS + 1)],
+            "two fifths, capped, floored, then held off the detail floor",
+        );
+    }
+
+    #[test]
+    fn a_dragged_share_holds_between_both_floors() {
+        assert_eq!(
+            [
+                commit_list_width(100, Some(50)),
+                commit_list_width(100, Some(1)),
+                commit_list_width(100, Some(99)),
+            ],
+            [50, MIN_LIST_COLUMNS, 100 - (MIN_DETAIL_COLUMNS + 1)],
+            "the share is honored between the two floors, and clamped outside",
         );
     }
 }

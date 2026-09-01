@@ -725,6 +725,14 @@ pub struct Stoat {
     /// that modal restores the split. It is never persisted, because the choice
     /// answers what is on screen right now.
     pub(crate) modal_split: std::collections::BTreeMap<ModalKind, u16>,
+    /// Share of its body the commits screen's list pane takes, as a
+    /// percentage, once the reader has dragged the list/detail separator.
+    ///
+    /// `None` until the first drag, which leaves the width to the renderer's
+    /// own formula. Session-scoped for [`Self::modal_split`]'s reasons: a
+    /// share the reader chose outlives the screen it was chosen on, and it is
+    /// never persisted, because the choice answers what is on screen now.
+    pub(crate) commits_split: Option<u16>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
@@ -1274,6 +1282,14 @@ pub struct Stoat {
     /// is stored per kind, and the modal that armed the drag is the one it has to
     /// land on.
     pub(crate) modal_separator_drag: Option<ModalKind>,
+    /// Whether the pointer moves the commits screen's list/detail separator,
+    /// set on `MouseEventKind::Down(Left)` over that line and cleared on
+    /// `Up(Left)`. While set, `Drag(Left)` writes the pointer's position back
+    /// as [`Self::commits_split`].
+    ///
+    /// A bare flag rather than a kind, because only one screen carries this
+    /// separator and its share has one home.
+    pub(crate) commits_separator_drag: bool,
     /// Set on `MouseEventKind::Down(Left)` over a pane's minimap strip. While
     /// `Some`, `Drag(Left)` scrubs the named editor's viewport to the pointer
     /// position and `Up(Left)` clears it. Takes over the pointer so the press
@@ -2131,6 +2147,7 @@ impl Stoat {
             diff_tint: 0,
             diff_syntax: true,
             modal_split: std::collections::BTreeMap::new(),
+            commits_split: None,
             command_palette: None,
             help: None,
             file_finder: None,
@@ -2254,6 +2271,7 @@ impl Stoat {
             hover_diag: None,
             divider_drag: None,
             modal_separator_drag: None,
+            commits_separator_drag: false,
             minimap_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_drain_hosts: Vec::new(),
@@ -15975,6 +15993,63 @@ mod tests {
             h.stoat.modal_separator_drag, None,
             "releasing clears the arm"
         );
+    }
+
+    /// The commits screen paints into a pane rather than a boxed modal, so its
+    /// separator is armed after the divider arm instead of inside the modal
+    /// pointer path. The share it writes holds for the session.
+    #[test]
+    fn dragging_the_commits_vline_widens_the_list() {
+        use crate::render::commits::{commits_list_rect, MIN_LIST_COLUMNS};
+
+        let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+        h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
+        h.open_commits("/repo");
+
+        let pane_area = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let list = commits_list_rect(pane_area, None).expect("the list fits this terminal");
+        let vline = list.x + list.width;
+        let row = list.y + 1;
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            vline,
+            row,
+        ));
+        assert!(
+            h.stoat.commits_separator_drag,
+            "a press on the vline arms the drag"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            vline + 6,
+            row,
+        ));
+        assert_eq!(
+            commits_list_rect(pane_area, h.stoat.commits_split)
+                .expect("the list still fits")
+                .width,
+            list.width + 6,
+            "the list grows to exactly where the pointer left the line"
+        );
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 0, row));
+        assert_eq!(
+            commits_list_rect(pane_area, h.stoat.commits_split)
+                .expect("the list still fits")
+                .width,
+            MIN_LIST_COLUMNS,
+            "a drag past the left edge floors at the list minimum"
+        );
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 0, row));
+        assert!(!h.stoat.commits_separator_drag, "releasing clears the arm");
     }
 
     #[test]

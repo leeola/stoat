@@ -210,6 +210,10 @@ pub(crate) struct FrameCtx<'a> {
     /// editor with no screen over it.
     pub(crate) screen: Option<&'static str>,
     pub(crate) theme: &'a crate::theme::Theme,
+    /// The commits screen's dragged list share, as a percentage of the pane
+    /// body. `None` until the reader drags that screen's separator, which
+    /// leaves the width to the renderer's own formula.
+    pub(crate) commits_split: Option<u16>,
     /// The gutter, severity, and diff-mark colors already resolved from
     /// [`Self::theme`], so each pane paints from them rather than re-walking
     /// the scope table for every one.
@@ -673,6 +677,7 @@ pub(crate) fn frame(
         mode,
         screen,
         theme: &stoat.theme,
+        commits_split: stoat.commits_split,
         chrome: &stoat
             .chrome
             .as_ref()
