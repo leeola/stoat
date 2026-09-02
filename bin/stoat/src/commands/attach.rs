@@ -15,9 +15,10 @@
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
     ffi::OsString,
+    fs::File,
     io::{Read, Write},
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             net::{UnixListener, UnixStream},
             process::CommandExt,
@@ -55,7 +56,7 @@ const CHUNK: usize = 64 * 1024;
 /// on. [`Self::finish`] is what takes both down in the right order.
 pub struct AttachServer {
     attached_rx: Option<UnboundedReceiver<()>>,
-    master: RawFd,
+    master: Arc<File>,
     current: Arc<Mutex<Option<UnixStream>>>,
     path: PathBuf,
 }
@@ -74,24 +75,25 @@ impl AttachServer {
     /// the way out, and they are still in the PTY when the editor's loop
     /// returns. A client closed before they cross is left in raw mode.
     pub fn finish(self) {
+        let master_fd = self.master.as_raw_fd();
         // SAFETY: fcntl reads and sets this process's own descriptor flags.
         unsafe {
-            let flags = libc::fcntl(self.master, libc::F_GETFL);
+            let flags = libc::fcntl(master_fd, libc::F_GETFL);
             if flags != -1 {
-                libc::fcntl(self.master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
         }
 
         let mut buf = [0u8; CHUNK];
         loop {
-            // SAFETY: read writes at most buf.len() bytes through the pointer,
-            // which borrows a live array for the call.
-            let got = unsafe { libc::read(self.master, buf.as_mut_ptr().cast(), buf.len()) };
-            if got <= 0 {
-                break;
-            }
+            // A `WouldBlock` error is the non-blocking read finding nothing
+            // left, which ends the drain the way end of file does.
+            let got = match (&*self.master).read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(got) => got,
+            };
             let mut wire = Vec::new();
-            attach::encode(&Frame::Bytes(buf[..got as usize].to_vec()), &mut wire);
+            attach::encode(&Frame::Bytes(buf[..got].to_vec()), &mut wire);
             let mut held = self.current.lock().expect("attach client lock");
             let Some(stream) = held.as_mut() else {
                 break;
@@ -350,6 +352,9 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
     if opened != 0 {
         whatever!("open a pty for the attach server: {}", last_error());
     }
+    // SAFETY: openpty just returned this descriptor and nothing else holds it,
+    // so the `File` is its only owner and closes it once.
+    let master = Arc::new(File::from(unsafe { OwnedFd::from_raw_fd(master) }));
 
     // SAFETY: each call names a descriptor this process just opened. The child
     // is a session leader with no controlling terminal, so TIOCSCTTY succeeds
@@ -375,8 +380,8 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
     let current: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
     let (attached_tx, attached_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    spawn_master_reader(master, current.clone());
-    spawn_acceptor(listener, master, current.clone(), attached_tx);
+    spawn_master_reader(master.clone(), current.clone());
+    spawn_acceptor(listener, master.clone(), current.clone(), attached_tx);
 
     Ok(AttachServer {
         attached_rx: Some(attached_rx),
@@ -390,21 +395,19 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
 ///
 /// Output produced while nobody is attached is dropped. The next client is told
 /// to expect nothing, and the editor re-declares its whole terminal for it.
-fn spawn_master_reader(master: RawFd, current: Arc<Mutex<Option<UnixStream>>>) {
+fn spawn_master_reader(master: Arc<File>, current: Arc<Mutex<Option<UnixStream>>>) {
     thread::Builder::new()
         .name("attach-out".to_owned())
         .spawn(move || {
             let mut buf = [0u8; CHUNK];
             loop {
-                // SAFETY: read writes at most buf.len() bytes through the
-                // pointer, which borrows a live array for the call.
-                let got = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
-                if got <= 0 {
-                    return;
-                }
+                let got = match (&*master).read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(got) => got,
+                };
 
                 let mut wire = Vec::new();
-                attach::encode(&Frame::Bytes(buf[..got as usize].to_vec()), &mut wire);
+                attach::encode(&Frame::Bytes(buf[..got].to_vec()), &mut wire);
 
                 let mut held = current.lock().expect("attach client lock");
                 if let Some(stream) = held.as_mut()
@@ -420,7 +423,7 @@ fn spawn_master_reader(master: RawFd, current: Arc<Mutex<Option<UnixStream>>>) {
 /// Take each connection as the session's one client, displacing the last.
 fn spawn_acceptor(
     listener: UnixListener,
-    master: RawFd,
+    master: Arc<File>,
     current: Arc<Mutex<Option<UnixStream>>>,
     attached_tx: UnboundedSender<()>,
 ) {
@@ -444,7 +447,7 @@ fn spawn_acceptor(
                     *held = Some(stream);
                 }
 
-                spawn_client_reader(reader, master, current.clone(), attached_tx.clone());
+                spawn_client_reader(reader, master.clone(), current.clone(), attached_tx.clone());
             }
         })
         .expect("spawn the attach accept thread");
@@ -453,7 +456,7 @@ fn spawn_acceptor(
 /// Feed one client's frames to the editor until that client goes.
 fn spawn_client_reader(
     mut reader: UnixStream,
-    master: RawFd,
+    master: Arc<File>,
     current: Arc<Mutex<Option<UnixStream>>>,
     attached_tx: UnboundedSender<()>,
 ) {
@@ -473,11 +476,7 @@ fn spawn_client_reader(
                 while let Some(frame) = decoder.next_frame() {
                     match frame {
                         Ok(Frame::Bytes(bytes)) => {
-                            // SAFETY: write reads at most bytes.len() through
-                            // the pointer, which borrows a live slice.
-                            unsafe {
-                                libc::write(master, bytes.as_ptr().cast(), bytes.len());
-                            }
+                            let _ = (&*master).write_all(&bytes);
                         },
                         Ok(Frame::Winsize {
                             rows,
@@ -485,7 +484,7 @@ fn spawn_client_reader(
                             xpixel,
                             ypixel,
                         }) => {
-                            set_winsize(master, rows, cols, xpixel, ypixel);
+                            set_winsize(&master, rows, cols, xpixel, ypixel);
                             // The first size of a connection is what says the
                             // grid this client brought, so the editor re-declares
                             // against it rather than the last client's.
@@ -514,7 +513,7 @@ fn spawn_client_reader(
 }
 
 /// Resize the pty, which signals the editor's process group in turn.
-fn set_winsize(master: RawFd, rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
+fn set_winsize(master: &File, rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
     let ws = libc::winsize {
         ws_row: rows,
         ws_col: cols,
@@ -524,7 +523,7 @@ fn set_winsize(master: RawFd, rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
     // SAFETY: the ioctl reads one winsize through the pointer, which borrows a
     // live local for the call.
     unsafe {
-        libc::ioctl(master, libc::TIOCSWINSZ, &raw const ws);
+        libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &raw const ws);
     }
 }
 
