@@ -276,7 +276,7 @@ fn client_input(mut stream: UnixStream) {
             }
         }
 
-        match read_stdin(&mut buf) {
+        match tty::read_stdin(&mut buf, INPUT_POLL) {
             // The terminal went away, so this client has nothing left to send.
             Ok(0) if stdin_closed() => break,
             Ok(0) => {},
@@ -535,36 +535,6 @@ fn same_winsize(a: &libc::winsize, b: &libc::winsize) -> bool {
         && a.ws_ypixel == b.ws_ypixel
 }
 
-/// Read what is on fd 0, waiting up to [`INPUT_POLL`].
-///
-/// Zero means the wait elapsed with nothing to read, which is also what a
-/// closed stdin reports, so the caller separates the two with
-/// [`stdin_closed`].
-fn read_stdin(buf: &mut [u8]) -> std::io::Result<usize> {
-    let mut fds = libc::pollfd {
-        fd: libc::STDIN_FILENO,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: poll reads and writes the one pollfd through the pointer and
-    // touches nothing else. The struct is initialized above.
-    let ready = unsafe { libc::poll(&raw mut fds, 1, INPUT_POLL.as_millis() as libc::c_int) };
-    if ready < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if ready == 0 {
-        return Ok(0);
-    }
-
-    // SAFETY: read writes at most buf.len() bytes through the pointer, which
-    // borrows a live slice for the call.
-    let got = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
-    if got < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(got as usize)
-}
-
 /// Whether fd 0 is at end of file. A read of zero alone leaves that
 /// indistinguishable from a quiet wait.
 fn stdin_closed() -> bool {
@@ -573,7 +543,8 @@ fn stdin_closed() -> bool {
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: as in `read_stdin`.
+    // SAFETY: poll reads and writes the one pollfd through the pointer and
+    // touches nothing else. The struct is initialized above.
     let ready = unsafe { libc::poll(&raw mut fds, 1, 0) };
     ready > 0 && fds.revents & libc::POLLHUP != 0
 }

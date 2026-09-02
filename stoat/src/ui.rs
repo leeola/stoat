@@ -224,7 +224,7 @@ async fn run(
                 },
                 crossterm::event::poll,
                 crossterm::event::read,
-                read_stdin_raw,
+                tty::read_stdin,
                 tty::winsize,
                 stoatty_handshake,
                 move || wait_idle(wake_fd),
@@ -685,36 +685,6 @@ fn wait_idle(wake_fd: RawFd) -> io::Result<IdleWake> {
         libc::read(wake_fd, sink.as_mut_ptr().cast(), sink.len());
     }
     Ok(IdleWake::Slot)
-}
-
-/// Read what is on fd 0 into `buf`, waiting up to `timeout`.
-///
-/// Zero means the wait elapsed with nothing to read, which is also what a
-/// closed stdin reports. Both leave the caller with nothing to forward, and the
-/// loop that calls this ends with the session either way.
-fn read_stdin_raw(buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
-    let mut fds = libc::pollfd {
-        fd: libc::STDIN_FILENO,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: poll reads and writes the one pollfd through the pointer and
-    // touches nothing else. The struct is initialized above.
-    let ready = unsafe { libc::poll(&raw mut fds, 1, timeout.as_millis() as libc::c_int) };
-    if ready < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if ready == 0 {
-        return Ok(0);
-    }
-
-    // SAFETY: read writes at most buf.len() bytes through the pointer, which
-    // borrows a live slice for the call.
-    let got = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
-    if got < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(got as usize)
 }
 
 /// Write `first`, then every APC byte batch already queued on `apc_rx`, to
