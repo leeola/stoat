@@ -1,6 +1,9 @@
 use tree_sitter::Language;
 use tree_sitter_language::LanguageFn;
 
+// SAFETY: each symbol is the entry point a tree-sitter grammar crate links in,
+// and every one of them takes no arguments and returns the grammar's static
+// language pointer, which is the signature declared here.
 unsafe extern "C" {
     fn tree_sitter_rust() -> *const ();
     fn tree_sitter_json() -> *const ();
@@ -10,22 +13,32 @@ unsafe extern "C" {
 }
 
 pub fn rust() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_rust) })
 }
 
 pub fn json() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_json) })
 }
 
 pub fn toml() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_toml) })
 }
 
 pub fn markdown() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_markdown) })
 }
 
 pub fn markdown_inline() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_markdown_inline) })
 }
 

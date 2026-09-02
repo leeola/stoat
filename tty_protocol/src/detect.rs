@@ -209,11 +209,15 @@ fn read_ident_reply(fallback: Duration) -> (Option<IdentReply>, Vec<u8>) {
             events: libc::POLLIN,
             revents: 0,
         }];
+        // SAFETY: poll reads and writes the one pollfd through the pointer and
+        // touches nothing else. The array is initialized above.
         if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) } <= 0 {
             break;
         }
 
         let mut chunk = [0u8; 512];
+        // SAFETY: read writes at most chunk.len() bytes through the pointer,
+        // which borrows a live array for the call.
         let n = unsafe { libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr().cast(), chunk.len()) };
         if n <= 0 {
             break;

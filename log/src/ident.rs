@@ -76,6 +76,8 @@ pub fn get() -> Option<&'static ProcessIdent> {
 #[cfg(unix)]
 pub fn hostname() -> String {
     let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes through the pointer,
+    // which borrows a live array for the call.
     let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if ret != 0 {
         return "unknown".to_string();

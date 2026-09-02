@@ -113,8 +113,9 @@ fn redirect_stderr_to(path: &std::path::Path) {
         },
     };
 
-    // dup2 installs the file's open description onto fd 2. The File can then
-    // drop, since fd 2 keeps that description alive.
+    // SAFETY: dup2 takes two descriptors by value, and `file` is open for the
+    // call. It installs the file's open description onto fd 2, so the File can
+    // then drop and fd 2 keeps that description alive.
     if unsafe { libc::dup2(file.as_raw_fd(), 2) } == -1 {
         tracing::warn!(
             error = %std::io::Error::last_os_error(),
