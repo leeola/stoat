@@ -14,7 +14,7 @@ use std::{
     ffi::{c_char, CStr, OsString},
     io::{self, Read, Write},
     mem::MaybeUninit,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     path::Path,
     ptr,
     sync::{
@@ -532,14 +532,17 @@ fn dup_for_polling(master: &(dyn MasterPty + Send)) -> Option<OwnedFd> {
 /// The duplicate is a descriptor nobody else holds, so the returned [`OwnedFd`]
 /// is solely responsible for closing it and the original is untouched.
 fn dup_fd(raw: i32) -> Option<OwnedFd> {
-    // SAFETY: dup is called on a descriptor its owner still holds open, and it
-    // returns a fresh one that no other value claims.
-    let duped = unsafe { libc::dup(raw) };
-    match duped < 0 {
-        true => None,
-        // SAFETY: from_raw_fd takes the sole ownership dup just handed over.
-        false => Some(unsafe { OwnedFd::from_raw_fd(duped) }),
+    // Rejected before the borrow rather than through the duplication, since
+    // `borrow_raw` asserts a real descriptor in debug builds.
+    if raw < 0 {
+        return None;
     }
+
+    // SAFETY: the caller's owner holds `raw` open for the length of this call,
+    // and the borrow does not outlive it.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(raw) };
+
+    borrowed.try_clone_to_owned().ok()
 }
 
 /// Leave `tail` holding the newest `cap` bytes of itself followed by `bytes`.
