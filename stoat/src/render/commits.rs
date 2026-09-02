@@ -552,6 +552,18 @@ pub(crate) fn render_commit_preview(
             let Some(chunk) = doc.chunks.get(chunk_id) else {
                 continue;
             };
+
+            // A page deep in a long commit would otherwise step every row above
+            // it and build a label for each chunk it never paints. The span is
+            // the one `preview_row_count` sums, so the caller's row numbering
+            // is unchanged, and the per-row check below still carries the one
+            // chunk the offset falls inside.
+            let chunk_rows = 1 + chunk.hunk.rows.len();
+            if row + chunk_rows <= skip_rows {
+                row += chunk_rows;
+                continue;
+            }
+
             let file_total = file.chunks.len();
             let lang_str = file
                 .language
@@ -818,6 +830,62 @@ mod tests {
         let mut scene = stoat_widgets::ApcScene::new();
         render_commit_preview(doc, theme, area, 0, dials, &mut buf, &mut scene);
         buf
+    }
+
+    /// [`rendered_with`] at a chosen `skip_rows`, tall enough that a skipped
+    /// page and the full paint overlap for many rows.
+    fn rendered_at(doc: &DiffDocument, theme: &Theme, skip_rows: usize) -> Buffer {
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        render_commit_preview(
+            doc,
+            theme,
+            area,
+            skip_rows,
+            PreviewDials::shipped(),
+            &mut buf,
+            &mut scene,
+        );
+        buf
+    }
+
+    /// A page deep in a commit paints what the full render holds at that row,
+    /// which is what lets the painter seek past whole chunks rather than
+    /// stepping every row above the offset.
+    #[test]
+    fn a_skipped_preview_paints_the_rows_the_full_one_does() {
+        let theme = rgb_theme();
+        let base: String = (0..12).map(|i| format!("line {i}\n")).collect();
+        let buffer: String = (0..12)
+            .map(|i| match i {
+                0 | 11 => format!("changed {i}\n"),
+                _ => format!("line {i}\n"),
+            })
+            .collect();
+        let doc = session(&base, &buffer, false);
+        assert!(
+            doc.chunks.len() >= 2,
+            "the edits at both ends have to land in separate chunks",
+        );
+
+        let first_chunk = doc
+            .chunks
+            .get(&doc.files[0].chunks[0])
+            .expect("the first chunk");
+        let skip_rows = 1 + first_chunk.hunk.rows.len();
+
+        let full = rendered_at(&doc, &theme, 0);
+        let skipped = rendered_at(&doc, &theme, skip_rows);
+
+        let area = *full.area();
+        for x in area.x..area.x + area.width {
+            assert_eq!(
+                skipped[(x, 0)],
+                full[(x, skip_rows as u16)],
+                "column {x} of the skipped page's first row",
+            );
+        }
     }
 
     /// The first cell in `row` whose symbol is `ch`.
