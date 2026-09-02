@@ -24,6 +24,16 @@
           extensions = [ "rust-analysis" ];
         };
 
+        # The darwin target rides in the devshell only, so scripts/check-darwin.sh
+        # has a std to type-check against while the package builds keep the
+        # host-only toolchain and their closures stay as they are. Built from the
+        # toolchain file rather than by a second override on rust-toolchain, so
+        # the extension list is stated once.
+        devToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+          extensions = [ "rust-analysis" ];
+          targets = [ "aarch64-apple-darwin" ];
+        };
+
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rust-toolchain;
           rustc = rust-toolchain;
@@ -203,9 +213,14 @@
                 rust-analyzer
                 # using a hardcoded rustfmt version to support nightly rustfmt features.
                 rust-bin.nightly."2026-08-20".rustfmt
-                rust-toolchain
+                devToolchain
                 # Drives the feature-powerset compile check in scripts/check-features.sh.
                 cargo-hack
+                # The C compiler scripts/check-darwin.sh points the darwin target
+                # at, for the crates that build C (tree-sitter, the grammars,
+                # libgit2-sys, libz-sys). Zig ships the darwin libc headers; the
+                # host gcc rejects Apple's flags.
+                zig
                 # A color emoji face for the terminal to fall back to. The
                 # bundled faces cover text and symbols but carry no emoji, and
                 # the fallback only finds an installed one.
