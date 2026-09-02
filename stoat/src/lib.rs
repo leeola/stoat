@@ -80,6 +80,7 @@ pub mod term_session;
 pub mod theme;
 pub(crate) mod theme_pool;
 mod theme_vscode;
+pub mod tty;
 pub mod ui;
 mod vt_input;
 pub mod walkthrough;

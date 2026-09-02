@@ -31,6 +31,7 @@ use std::{
 use stoat::{
     attach::{self, Frame, FrameDecoder, REPLACED_EXIT, REPLACED_MESSAGE},
     host::{FsHost, LocalFs},
+    tty,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -255,7 +256,7 @@ fn client_input(mut stream: UnixStream) {
     let mut last: Option<libc::winsize> = None;
 
     loop {
-        let size = tty_winsize();
+        let size = tty::winsize();
         if let Some(ws) = size
             && last.is_none_or(|prev| !same_winsize(&prev, &ws))
         {
@@ -525,15 +526,6 @@ fn set_winsize(master: RawFd, rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
     unsafe {
         libc::ioctl(master, libc::TIOCSWINSZ, &raw const ws);
     }
-}
-
-/// This terminal's size, or `None` when fd 1 is not one.
-fn tty_winsize() -> Option<libc::winsize> {
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    // SAFETY: the ioctl writes one winsize through the pointer, which borrows a
-    // live local for the call.
-    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &raw mut ws) };
-    (ok == 0).then_some(ws)
 }
 
 fn same_winsize(a: &libc::winsize, b: &libc::winsize) -> bool {

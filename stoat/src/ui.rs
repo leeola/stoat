@@ -17,7 +17,7 @@
 use crate::{
     render::undercurl::UndercurlStamp,
     ssh::{PassthroughSlot, SlotState, UiControl},
-    vt_input,
+    tty, vt_input,
 };
 use crossterm::{
     event::{
@@ -225,7 +225,7 @@ async fn run(
                 crossterm::event::poll,
                 crossterm::event::read,
                 read_stdin_raw,
-                tty_winsize,
+                tty::winsize,
                 stoatty_handshake,
                 move || wait_idle(wake_fd),
             )
@@ -449,25 +449,7 @@ fn cell_pixels_from_winsize(ws: &libc::winsize) -> Option<(u16, u16)> {
 /// no pixels leaves it with nothing to divide by. Most do report them, and the
 /// stoatty this usually runs inside always does.
 fn tty_cell_pixels() -> Option<(u16, u16)> {
-    cell_pixels_from_winsize(&tty_winsize()?)
-}
-
-/// The tty text area and the grid it holds, or `None` when the ioctl fails.
-///
-/// Separate from [`tty_cell_pixels`] because the passthrough loop needs the cell
-/// counts rather than the pixel quotient: crossterm reports no resize while a
-/// remote session owns fd 0, so the size is polled instead.
-fn tty_winsize() -> Option<libc::winsize> {
-    // SAFETY: TIOCGWINSZ writes a winsize through the pointer and reads nothing
-    // else. The struct is fully initialized before the call, so a driver that
-    // writes none of it still leaves defined bytes behind.
-    unsafe {
-        let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &raw mut ws) != 0 {
-            return None;
-        }
-        Some(ws)
-    }
+    cell_pixels_from_winsize(&tty::winsize()?)
 }
 
 /// How long a raw read waits before the loop takes another turn.
