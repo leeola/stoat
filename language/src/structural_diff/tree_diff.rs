@@ -59,7 +59,7 @@ use tree_sitter::Tree;
 /// per-edit cost-optimal pairing). On parse failure the function
 /// returns `None` and the caller falls through to [`super::diff_lines`].
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
-    diff_with_language_cancellable(language, lhs, rhs, None, None)
+    diff_with_language_cancellable(language, lhs, rhs, None, None, None)
 }
 
 /// Parsed trees kept by the text they came from, so a side that has not
@@ -149,14 +149,20 @@ fn parse_memoized(language: &Arc<Language>, text: &str, memo: Option<&TreeCache>
 ///
 /// `memo` retains the parsed `lhs` tree, so a caller diffing the same base
 /// repeatedly parses it once. Pass [`None`] to parse both sides every call.
+///
+/// `rhs_tree` is an already-parsed tree for the exact bytes of `rhs`, which
+/// spares the call the parse that dominates its cost. A tree from a different
+/// grammar is ignored rather than trusted, so a caller whose language and tree
+/// disagree gets a correct diff at full price. Pass [`None`] to parse `rhs`.
 pub fn diff_with_language_cancellable(
     language: &Arc<Language>,
     lhs: &str,
     rhs: &str,
     cancel: Option<&AtomicBool>,
     memo: Option<&TreeCache>,
+    rhs_tree: Option<&Tree>,
 ) -> Option<DiffResult> {
-    let prepared = prepare_diff(language, lhs, rhs, cancel, memo)?;
+    let prepared = prepare_diff(language, lhs, rhs, cancel, memo, rhs_tree)?;
     Some(finalize_single(&prepared))
 }
 
@@ -186,8 +192,9 @@ pub fn prepare_diff<'a>(
     rhs: &'a str,
     cancel: Option<&AtomicBool>,
     memo: Option<&TreeCache>,
+    rhs_tree: Option<&Tree>,
 ) -> Option<PreparedDiff<'a>> {
-    prepare_per_file(language, lhs, rhs, cancel, memo).map(|prepared| PreparedDiff {
+    prepare_per_file(language, lhs, rhs, cancel, memo, rhs_tree).map(|prepared| PreparedDiff {
         prepared,
         _marker: PhantomData,
     })
@@ -258,7 +265,7 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>, memo: Option<&TreeCache>) 
                 rhs_text,
             } = input;
             match language.as_ref() {
-                Some(lang) => match prepare_diff(lang, lhs_text, rhs_text, None, memo) {
+                Some(lang) => match prepare_diff(lang, lhs_text, rhs_text, None, memo, None) {
                     Some(prepared) => ChangesetSlot::Prepared(buffer, Box::new(prepared)),
                     None => ChangesetSlot::LineDiff {
                         lhs: lhs_text,
@@ -419,14 +426,28 @@ fn prepare_per_file<'a>(
     rhs: &'a str,
     cancel: Option<&AtomicBool>,
     memo: Option<&TreeCache>,
+    rhs_tree: Option<&Tree>,
 ) -> Option<PreparedFile<'a>> {
     // Only `lhs` is memoized. It is the base in every caller, where `rhs` is
     // the buffer being edited, so retaining `rhs` would never be read back and
     // would evict live base entries.
     let lhs_tree = parse_memoized(language, lhs, memo)?;
-    let rhs_tree = parse(language, rhs, None)?;
+
+    // A tree built from another grammar aborts the process inside tree-sitter,
+    // so the guard lives here rather than at each caller. Editors reach this
+    // with a tree from whatever language the buffer carries, and a language
+    // override moves that away from the path-derived language used to diff.
+    let parsed;
+    let rhs_tree = match rhs_tree.filter(|tree| *tree.language() == language.grammar) {
+        Some(tree) => tree,
+        None => {
+            parsed = parse(language, rhs, None)?;
+            &parsed
+        },
+    };
+
     let (mut lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
-    let (mut rhs_arena, rhs_root) = lower_tree(&rhs_tree, rhs);
+    let (mut rhs_arena, rhs_root) = lower_tree(rhs_tree, rhs);
 
     let mut preprocess = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
@@ -1518,7 +1539,7 @@ mod tests {
         // produces and the shape the memo exists for.
         for rhs in ["fn a() { one(); TWO(); }\nfn b() { three(); }\n", base] {
             let cold = diff_with_language(&lang, base, rhs).expect("cold diff parses");
-            let warm = diff_with_language_cancellable(&lang, base, rhs, None, Some(&memo))
+            let warm = diff_with_language_cancellable(&lang, base, rhs, None, Some(&memo), None)
                 .expect("memoized diff parses");
 
             assert_eq!(
@@ -1544,7 +1565,8 @@ mod tests {
         let text = "fn a() { one(); }\n";
         let memo: TreeCache = TreeCache::default();
 
-        diff_with_language_cancellable(&rust, text, text, None, Some(&memo)).expect("diff parses");
+        diff_with_language_cancellable(&rust, text, text, None, Some(&memo), None)
+            .expect("diff parses");
         let stored = memo.lock().expect("memo poisoned").entries[0].0;
         assert_eq!(
             stored.1, rust.name,
@@ -1590,7 +1612,7 @@ mod tests {
 
         for i in 0..MEMO_CAPACITY + 2 {
             let base = format!("fn f{i}() {{ call(); }}\n");
-            diff_with_language_cancellable(&lang, &base, "fn g() {}\n", None, Some(&memo))
+            diff_with_language_cancellable(&lang, &base, "fn g() {}\n", None, Some(&memo), None)
                 .expect("diff parses");
         }
 
@@ -1613,7 +1635,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let lhs = "fn a() { call(arg1, arg2, arg3); }";
         let rhs = "fn b() { call(arg1, arg2, arg3); }";
-        let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel), None)
+        let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel), None, None)
             .expect("parse succeeds even on cancel");
         assert!(!result.fell_back_to_line_diff);
         // The structural-diff pipeline completed; we got changes even

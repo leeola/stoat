@@ -180,6 +180,7 @@ pub fn extract_review_hunks_single(
             &file.buffer_text,
             cancel,
             memo,
+            None,
         )
         .unwrap_or_else(|| structural_diff::diff(&file.base_text, &file.buffer_text)),
         None => structural_diff::diff(&file.base_text, &file.buffer_text),
@@ -228,6 +229,7 @@ pub(crate) fn aligned_rows(
             buffer_text,
             None,
             memo,
+            None,
         )
         .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text)),
         None => structural_diff::diff(base_text, buffer_text),

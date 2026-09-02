@@ -40,7 +40,7 @@ use std::{
 };
 use stoat_language::{
     extract_highlights, parse, structural_diff, structural_diff::TreeCache, HighlightSpan,
-    Language, LanguageRegistry,
+    Language, LanguageRegistry, Tree,
 };
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::Notify;
@@ -343,6 +343,7 @@ impl DiffState {
                 // The sync open stays line-only so it lands in one frame. The
                 // structural refinement arrives at the background settle.
                 None,
+                None,
             )
         });
         if let Some(shared) = buffers.get(id) {
@@ -501,6 +502,15 @@ impl DiffState {
 
             let language = language_registry.for_path(&path);
             let cached_base = self.base_text.get(&path).cloned();
+            // Parsing this buffer is the largest item in the diff, and the
+            // highlight pipeline has already done it for these exact bytes:
+            // equal versions mean equal text. Cloning a tree is a refcount
+            // bump, and the clone is `Send`, which the background dropper
+            // already relies on. A stale version leaves the diff to parse.
+            let buffer_tree = buffers
+                .syntax(buffer_id)
+                .filter(|state| state.version == cur_version)
+                .map(|state| state.tree.clone());
 
             let task = executor.spawn_blocking({
                 let git_host = git_host.clone();
@@ -529,6 +539,7 @@ impl DiffState {
                             &base_cache,
                             base,
                             Some(&tree_cache),
+                            buffer_tree.as_ref(),
                         )
                         .map(|mut diff_map| {
                             diff_map.anchor_hunks(&buffer_snapshot);
@@ -687,6 +698,10 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// block washes what it actually changed rather than every line's prefix.
 /// Without either, or when the tree pass falls back to lines, the line pass's
 /// char-refined spans stand.
+///
+/// `buffer_tree` is a tree already parsed from `buffer_text`, which the tree
+/// pass takes in place of parsing the buffer a second time. It must describe
+/// exactly those bytes. A tree from another grammar is discarded downstream.
 pub(super) fn compute_diff_map(
     buffer_text: &str,
     language: Option<&Arc<Language>>,
@@ -694,6 +709,7 @@ pub(super) fn compute_diff_map(
     base_cache: &BaseHighlightCache,
     base: &DiffBaseText,
     tree_memo: Option<&TreeCache>,
+    buffer_tree: Option<&Tree>,
 ) -> Option<DiffMap> {
     let base_text = &*base.head;
     let index_text = &*base.index;
@@ -756,6 +772,7 @@ pub(super) fn compute_diff_map(
                 buffer_text,
                 None,
                 tree_memo,
+                buffer_tree,
             )
             && !tree.fell_back_to_line_diff
         {
@@ -1049,8 +1066,9 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_byte_ranges, compute_base_highlights, repo_hunk_position, scan_changed_ranges,
-        BaseHighlightMemo, DiffBase, DIFF_SETTLE,
+        buffer_registry, changed_byte_ranges, compute_base_highlights, compute_diff_map, parse,
+        repo_hunk_position, scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase,
+        DiffBaseText, DIFF_SETTLE,
     };
     use crate::{
         buffer::BufferId,
@@ -1227,6 +1245,64 @@ mod tests {
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    /// The diff job hands the tree pass the tree the highlight pipeline
+    /// already built for the buffer, which is the whole point of the
+    /// parameter. If a supplied tree changes the hunks, the diff a reader sees
+    /// depends on whether a parse happened to have landed.
+    #[test]
+    fn a_supplied_buffer_tree_yields_the_hunks_a_fresh_parse_does() {
+        let language = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .expect("rust language");
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+
+        let head = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
+        let buffer = "fn main() {\n    let x = 41;\n    let y = 2;\n}\n";
+        let base = DiffBaseText {
+            head: Arc::new(head.to_string()),
+            index: Arc::new(head.to_string()),
+            head_hash: buffer_registry::fingerprint_bytes(head),
+            index_hash: buffer_registry::fingerprint_bytes(head),
+        };
+
+        let tree = parse(&language, buffer, None).expect("buffer parses");
+        let hunks = |buffer_tree| {
+            compute_diff_map(
+                buffer,
+                Some(&language),
+                &styles,
+                &cache,
+                &base,
+                None,
+                buffer_tree,
+            )
+            .expect("a tracked file has a diff map")
+            .hunks()
+            .cloned()
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            hunks(Some(&tree)),
+            hunks(None),
+            "the supplied tree stands in for the parse, it does not change the diff",
+        );
+
+        // A language override moves a buffer's tree away from the grammar the
+        // path selects, and tree-sitter aborts the process rather than reject
+        // the mismatch. Discarding the tree is what keeps that unreachable.
+        let foreign = LanguageRegistry::standard()
+            .for_path(Path::new("a.json"))
+            .expect("json language");
+        let foreign_tree = parse(&foreign, buffer, None).expect("buffer parses as json");
+        assert_eq!(
+            hunks(Some(&foreign_tree)),
+            hunks(None),
+            "a tree from another grammar is discarded, not diffed against",
+        );
     }
 
     /// Bucketing the base spans is O(spans) with a style clone per line each
