@@ -143,11 +143,7 @@ impl FrameDecoder {
 /// than needing a table of sizes.
 pub fn encode(frame: &Frame, out: &mut Vec<u8>) {
     match frame {
-        Frame::Bytes(bytes) => {
-            out.push(TAG_BYTES);
-            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-            out.extend_from_slice(bytes);
-        },
+        Frame::Bytes(bytes) => encode_bytes(bytes, out),
         Frame::Winsize {
             rows,
             cols,
@@ -165,6 +161,19 @@ pub fn encode(frame: &Frame, out: &mut Vec<u8>) {
             out.extend_from_slice(&0u32.to_be_bytes());
         },
     }
+}
+
+/// Append a byte frame carrying `payload` to `out`, in the form [`encode`]
+/// writes for [`Frame::Bytes`].
+///
+/// A relay reads into a buffer and forwards a slice of it, so taking the
+/// payload borrowed spares it the owned copy the frame type needs for the
+/// decoder's side. [`encode`]'s byte arm delegates here, so the owned and the
+/// borrowed form are one implementation and cannot drift.
+pub fn encode_bytes(payload: &[u8], out: &mut Vec<u8>) {
+    out.push(TAG_BYTES);
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
 }
 
 /// Whether `name` is safe to build a socket path from.
@@ -199,7 +208,10 @@ pub fn socket_path_in(dir: &Path, name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode, socket_path_in, valid_name, DecodeError, Frame, FrameDecoder, MAX_NAME};
+    use super::{
+        encode, encode_bytes, socket_path_in, valid_name, DecodeError, Frame, FrameDecoder,
+        MAX_NAME,
+    };
     use std::path::{Path, PathBuf};
 
     fn round_trip(frame: &Frame) -> Option<Result<Frame, DecodeError>> {
@@ -208,6 +220,33 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(&wire);
         decoder.next_frame()
+    }
+
+    /// The relay writes this form straight out of its read buffer, so the bytes
+    /// are pinned here rather than only against the encoder that produces them.
+    #[test]
+    fn a_byte_frame_is_a_tag_a_length_and_the_payload() {
+        let mut wire = Vec::new();
+        encode_bytes(b"hi", &mut wire);
+        assert_eq!(wire, [0, 0, 0, 0, 2, b'h', b'i']);
+
+        wire.clear();
+        encode_bytes(b"", &mut wire);
+        assert_eq!(wire, [0, 0, 0, 0, 0], "an empty payload still carries both");
+    }
+
+    /// What the relay encodes is what the other end decodes.
+    #[test]
+    fn a_borrowed_byte_frame_decodes_to_its_payload() {
+        let mut wire = Vec::new();
+        encode_bytes(b"hello", &mut wire);
+
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_frame(),
+            Some(Ok(Frame::Bytes(b"hello".to_vec())))
+        );
     }
 
     #[test]

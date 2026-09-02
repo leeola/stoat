@@ -49,6 +49,10 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 /// Bytes moved per read in either direction.
 const CHUNK: usize = 64 * 1024;
 
+/// A frame tag plus the big-endian length that follows it, so a wire buffer
+/// sized for one chunk never has to grow.
+const FRAME_HEADER: usize = 5;
+
 /// The running end of a detachable session, held by the process being attached
 /// to.
 ///
@@ -85,6 +89,7 @@ impl AttachServer {
         }
 
         let mut buf = [0u8; CHUNK];
+        let mut wire = Vec::with_capacity(CHUNK + FRAME_HEADER);
         loop {
             // A `WouldBlock` error is the non-blocking read finding nothing
             // left, which ends the drain the way end of file does.
@@ -92,8 +97,8 @@ impl AttachServer {
                 Ok(0) | Err(_) => break,
                 Ok(got) => got,
             };
-            let mut wire = Vec::new();
-            attach::encode(&Frame::Bytes(buf[..got].to_vec()), &mut wire);
+            wire.clear();
+            attach::encode_bytes(&buf[..got], &mut wire);
             let mut held = self.current.lock().expect("attach client lock");
             let Some(stream) = held.as_mut() else {
                 break;
@@ -255,6 +260,7 @@ fn client_exit_code(replaced: bool) -> i32 {
 /// threads to reach the same place.
 fn client_input(mut stream: UnixStream) {
     let mut buf = [0u8; CHUNK];
+    let mut wire = Vec::with_capacity(CHUNK + FRAME_HEADER);
     let mut last: Option<libc::winsize> = None;
 
     loop {
@@ -263,7 +269,7 @@ fn client_input(mut stream: UnixStream) {
             && last.is_none_or(|prev| !same_winsize(&prev, &ws))
         {
             last = Some(ws);
-            let mut wire = Vec::new();
+            wire.clear();
             attach::encode(
                 &Frame::Winsize {
                     rows: ws.ws_row,
@@ -283,8 +289,8 @@ fn client_input(mut stream: UnixStream) {
             Ok(0) if stdin_closed() => break,
             Ok(0) => {},
             Ok(n) => {
-                let mut wire = Vec::new();
-                attach::encode(&Frame::Bytes(buf[..n].to_vec()), &mut wire);
+                wire.clear();
+                attach::encode_bytes(&buf[..n], &mut wire);
                 if stream.write_all(&wire).is_err() {
                     return;
                 }
@@ -400,14 +406,15 @@ fn spawn_master_reader(master: Arc<File>, current: Arc<Mutex<Option<UnixStream>>
         .name("attach-out".to_owned())
         .spawn(move || {
             let mut buf = [0u8; CHUNK];
+            let mut wire = Vec::with_capacity(CHUNK + FRAME_HEADER);
             loop {
                 let got = match (&*master).read(&mut buf) {
                     Ok(0) | Err(_) => return,
                     Ok(got) => got,
                 };
 
-                let mut wire = Vec::new();
-                attach::encode(&Frame::Bytes(buf[..got].to_vec()), &mut wire);
+                wire.clear();
+                attach::encode_bytes(&buf[..got], &mut wire);
 
                 let mut held = current.lock().expect("attach client lock");
                 if let Some(stream) = held.as_mut()
