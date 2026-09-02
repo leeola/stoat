@@ -34,8 +34,8 @@ use ratatui::buffer::Buffer;
 use std::time::Instant;
 use std::{
     backtrace::Backtrace,
-    io::{self, Write},
-    os::fd::RawFd,
+    io::{self, PipeReader, Read, Write},
+    os::fd::AsRawFd,
     panic,
     sync::{Arc, Once},
     thread,
@@ -213,7 +213,6 @@ async fn run(
         let cell_pixels_tx = cell_pixels_tx.clone();
         let stoatty_tx = stoatty_tx.clone();
         let slot = slot.clone();
-        let wake_fd = slot.wake_fd();
         move || {
             forward_input(
                 InputChannels {
@@ -227,7 +226,7 @@ async fn run(
                 tty::read_stdin,
                 tty::winsize,
                 stoatty_handshake,
-                move || wait_idle(wake_fd),
+                || wait_idle(slot.wake_reader()),
             )
         }
     });
@@ -648,7 +647,7 @@ fn forward_input(
 /// A signal reads as input. SIGWINCH interrupts `poll` on Linux whatever
 /// `SA_RESTART` says, and crossterm reports that resize through a signal fd of
 /// its own, so falling through to the read is what collects it.
-fn wait_idle(wake_fd: RawFd) -> io::Result<IdleWake> {
+fn wait_idle(wake: &PipeReader) -> io::Result<IdleWake> {
     let mut fds = [
         libc::pollfd {
             fd: libc::STDIN_FILENO,
@@ -656,7 +655,7 @@ fn wait_idle(wake_fd: RawFd) -> io::Result<IdleWake> {
             revents: 0,
         },
         libc::pollfd {
-            fd: wake_fd,
+            fd: wake.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         },
@@ -679,11 +678,9 @@ fn wait_idle(wake_fd: RawFd) -> io::Result<IdleWake> {
     // Drained so a burst of arms leaves the pipe empty rather than waking the
     // next idle wait immediately. The count does not matter, only the state.
     let mut sink = [0u8; 64];
-    // SAFETY: read writes at most sink.len() bytes through the pointer, which
-    // borrows a live array for the call.
-    unsafe {
-        libc::read(wake_fd, sink.as_mut_ptr().cast(), sink.len());
-    }
+    let mut reader = wake;
+    let _ = reader.read(&mut sink);
+
     Ok(IdleWake::Slot)
 }
 
@@ -773,6 +770,7 @@ fn copy_clamped(dst: &mut Buffer, src: &Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::RawFd;
 
     /// A queued fill goes out only if nothing later replaces its page, and
     /// everything else goes out untouched and in order.
@@ -1004,12 +1002,12 @@ mod tests {
 
     /// Assert `slot` woke an idle wait, without risking one that never ends.
     fn assert_wakes(slot: &PassthroughSlot, what: &str) {
-        let wake_fd = slot.wake_fd();
+        let wake = slot.wake_reader();
         // Checked before the blocking wait, so a transition that forgot to wake
         // fails here rather than parking the suite forever.
-        assert!(readable(wake_fd), "{what} wrote its wake byte");
+        assert!(readable(wake.as_raw_fd()), "{what} wrote its wake byte");
         assert_eq!(
-            wait_idle(wake_fd).expect("the wait resolves"),
+            wait_idle(wake).expect("the wait resolves"),
             IdleWake::Slot,
             "and that byte is what ended the wait after {what}",
         );

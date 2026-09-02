@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     io::{PipeReader, PipeWriter, Write},
-    os::fd::{AsRawFd, RawFd},
     sync::{Arc, Mutex},
 };
 use stoatty_protocol::command::{encode_minimap_drop_into, encode_reset_into, MinimapDropCommand};
@@ -189,8 +188,8 @@ impl PassthroughSlot {
     }
 
     /// The wake pipe's read end, for the input thread to park on.
-    pub(crate) fn wake_fd(&self) -> RawFd {
-        self.wake_rx.as_raw_fd()
+    pub(crate) fn wake_reader(&self) -> &PipeReader {
+        &self.wake_rx
     }
 
     /// Tell an idle input thread the state moved under it.
