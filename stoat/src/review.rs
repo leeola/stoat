@@ -78,6 +78,10 @@ pub enum ReviewRow {
     },
 }
 
+// Hunk trimming asks this of the plan that names a row, per
+// [`RowPlan::is_changed`], because it runs before any row is built. Only the
+// tests ask it of a built row.
+#[cfg(test)]
 impl ReviewRow {
     fn is_changed(&self) -> bool {
         matches!(self, ReviewRow::Changed { .. })
@@ -204,8 +208,13 @@ fn extract_review_hunks_from_diff(
     context: u32,
     rel_path_for: &dyn Fn(&Path) -> Option<String>,
 ) -> Vec<ReviewHunk> {
-    let all_rows = aligned_rows_from_diff(diff_result, base_text, buffer_text, rel_path_for);
-    extract_hunks_with_context(&all_rows, context)
+    walk_plans_with(
+        diff_result,
+        base_text,
+        buffer_text,
+        rel_path_for,
+        |plans, lhs, rhs| extract_hunks_with_context(plans, lhs, rhs, context),
+    )
 }
 
 /// The full aligned diff rows for a base/buffer pair, before trimming to hunks.
@@ -234,15 +243,34 @@ pub(crate) fn aligned_rows(
         .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text)),
         None => structural_diff::diff(base_text, buffer_text),
     };
-    aligned_rows_from_diff(&diff, base_text, buffer_text, &|_| None)
+    walk_plans_with(
+        &diff,
+        base_text,
+        buffer_text,
+        &|_| None,
+        |plans, lhs, rhs| {
+            plans
+                .iter()
+                .map(|plan| materialize(plan, lhs, rhs))
+                .collect()
+        },
+    )
 }
 
-fn aligned_rows_from_diff(
+/// Run the aligned walk and hand `consume` the plans it produced together with
+/// the two sides they name.
+///
+/// The sides borrow line, span, and provenance arrays built here, so returning
+/// the plans and the sides together is impossible. A consumer keeps them
+/// together instead. A caller that wants every row materializes inside, and a
+/// caller that wants hunks trims inside and materializes only what it keeps.
+fn walk_plans_with<T>(
     diff_result: &DiffResult,
     base_text: &str,
     buffer_text: &str,
     rel_path_for: &dyn Fn(&Path) -> Option<String>,
-) -> Vec<ReviewRow> {
+    consume: impl FnOnce(&[RowPlan], &WalkSide<'_>, &WalkSide<'_>) -> T,
+) -> T {
     let lhs_lines = split_lines(base_text);
     let rhs_lines = split_lines(buffer_text);
 
@@ -258,22 +286,23 @@ fn aligned_rows_from_diff(
     let rhs_prov =
         collect_moved_provenance(&rhs_lines, &diff_result.changes, Side::Rhs, rel_path_for);
 
-    structural_walk(
-        WalkSide {
-            lines: &lhs_lines,
-            changed: &lhs_changed,
-            spans: &lhs_spans,
-            moved: &lhs_moved,
-            provenance: &lhs_prov,
-        },
-        WalkSide {
-            lines: &rhs_lines,
-            changed: &rhs_changed,
-            spans: &rhs_spans,
-            moved: &rhs_moved,
-            provenance: &rhs_prov,
-        },
-    )
+    let lhs = WalkSide {
+        lines: &lhs_lines,
+        changed: &lhs_changed,
+        spans: &lhs_spans,
+        moved: &lhs_moved,
+        provenance: &lhs_prov,
+    };
+    let rhs = WalkSide {
+        lines: &rhs_lines,
+        changed: &rhs_changed,
+        spans: &rhs_spans,
+        moved: &rhs_moved,
+        provenance: &rhs_prov,
+    };
+
+    let plans = structural_walk(&lhs, &rhs);
+    consume(&plans, &lhs, &rhs)
 }
 
 pub(crate) fn split_lines(text: &str) -> Vec<&str> {
@@ -482,9 +511,89 @@ struct WalkSide<'a> {
     provenance: &'a [Option<MoveProvenance>],
 }
 
+/// One aligned row named by the lines it draws on, before those lines are
+/// copied into a [`ReviewRow`].
+///
+/// A hunk keeps only the rows within its context margin, which on an ordinary
+/// file is a handful out of thousands. Naming a row costs two integers per
+/// side. Building one copies the line text and clones two span vectors. So the
+/// walk plans every row and [`materialize`] pays only for the kept ones.
+///
+/// Every position is a `(line_index, line_num)` pair. The index reads the
+/// side's arrays, and the 1-based number is what the row displays.
+enum RowPlan {
+    Context {
+        left: (usize, u32),
+        right: (usize, u32),
+    },
+    /// A row inside a run of changed lines. Its spans come from the walk
+    /// arrays.
+    Changed {
+        left: Option<(usize, u32)>,
+        right: Option<(usize, u32)>,
+    },
+    /// Lines both sides call unchanged whose text still differs, which the
+    /// structural diff produces by pairing tokens across non-corresponding
+    /// lines. The row reads as changed and carries no spans, since neither
+    /// side marked one.
+    Mismatch {
+        left: Option<(usize, u32)>,
+        right: Option<(usize, u32)>,
+    },
+}
+
+impl RowPlan {
+    fn is_changed(&self) -> bool {
+        !matches!(self, RowPlan::Context { .. })
+    }
+}
+
+/// Build the [`ReviewRow`] a plan names, copying line text and spans out of the
+/// two sides.
+fn materialize(plan: &RowPlan, lhs: &WalkSide<'_>, rhs: &WalkSide<'_>) -> ReviewRow {
+    let plain = |side: &WalkSide<'_>, (index, line_num): (usize, u32)| ReviewSide {
+        text: side.lines[index].to_string(),
+        line_num,
+        change_spans: Vec::new(),
+        moved_spans: Vec::new(),
+        move_provenance: None,
+    };
+    let marked = |side: &WalkSide<'_>, (index, line_num): (usize, u32)| ReviewSide {
+        text: side.lines[index].to_string(),
+        line_num,
+        change_spans: side.spans[index].clone(),
+        moved_spans: side.moved[index].clone(),
+        move_provenance: side.provenance[index].clone(),
+    };
+
+    match plan {
+        RowPlan::Context { left, right } => ReviewRow::Context {
+            left: plain(lhs, *left),
+            right: plain(rhs, *right),
+        },
+        RowPlan::Changed { left, right } => ReviewRow::Changed {
+            left: left.map(|at| marked(lhs, at)),
+            right: right.map(|at| marked(rhs, at)),
+        },
+        RowPlan::Mismatch { left, right } => ReviewRow::Changed {
+            left: left.map(|at| plain(lhs, at)),
+            right: right.map(|at| plain(rhs, at)),
+        },
+    }
+}
+
+/// Whether every line of `run` is a plain change rather than a relocation.
+///
+/// The run-pull below realigns a one-sided in-line change. A relocated block
+/// must stay gap-aligned instead, so it is skipped up front.
+fn is_plain_change(side: &WalkSide<'_>, run: &[(usize, u32)]) -> bool {
+    run.iter()
+        .all(|&(index, _)| side.provenance[index].is_none() && side.moved[index].is_empty())
+}
+
 /// Walk both files using unchanged lines as alignment anchors. Changed
 /// regions are collected and paired into side-by-side rows.
-fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
+fn structural_walk(lhs: &WalkSide<'_>, rhs: &WalkSide<'_>) -> Vec<RowPlan> {
     let mut result = Vec::new();
     let mut li = 0usize;
     let mut ri = 0usize;
@@ -498,21 +607,9 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
         let r_unchanged = r_ok && !rhs.changed[ri];
 
         if l_unchanged && r_unchanged && lhs.lines[li] == rhs.lines[ri] {
-            result.push(ReviewRow::Context {
-                left: ReviewSide {
-                    text: lhs.lines[li].to_string(),
-                    line_num: old_line,
-                    change_spans: Vec::new(),
-                    moved_spans: Vec::new(),
-                    move_provenance: None,
-                },
-                right: ReviewSide {
-                    text: rhs.lines[ri].to_string(),
-                    line_num: new_line,
-                    change_spans: Vec::new(),
-                    moved_spans: Vec::new(),
-                    move_provenance: None,
-                },
+            result.push(RowPlan::Context {
+                left: (li, old_line),
+                right: (ri, new_line),
             });
             li += 1;
             ri += 1;
@@ -522,29 +619,17 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
         }
 
         // Collect runs of changed lines from both sides, then pair them.
-        let mut left_run: Vec<ReviewSide> = Vec::new();
-        let mut right_run: Vec<ReviewSide> = Vec::new();
+        let mut left_run: Vec<(usize, u32)> = Vec::new();
+        let mut right_run: Vec<(usize, u32)> = Vec::new();
 
         while li < lhs.lines.len() && lhs.changed[li] {
-            left_run.push(ReviewSide {
-                text: lhs.lines[li].to_string(),
-                line_num: old_line,
-                change_spans: lhs.spans[li].clone(),
-                moved_spans: lhs.moved[li].clone(),
-                move_provenance: lhs.provenance[li].clone(),
-            });
+            left_run.push((li, old_line));
             li += 1;
             old_line += 1;
         }
 
         while ri < rhs.lines.len() && rhs.changed[ri] {
-            right_run.push(ReviewSide {
-                text: rhs.lines[ri].to_string(),
-                line_num: new_line,
-                change_spans: rhs.spans[ri].clone(),
-                moved_spans: rhs.moved[ri].clone(),
-                move_provenance: rhs.provenance[ri].clone(),
-            });
+            right_run.push((ri, new_line));
             ri += 1;
             new_line += 1;
         }
@@ -561,11 +646,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
         // unrelated content (a moved or consolidated block that should stay
         // gap-aligned), so it is rolled back. Restricting to a non-moved run
         // skips relocated blocks up front.
-        let is_plain_change = |run: &[ReviewSide]| {
-            run.iter()
-                .all(|s| s.move_provenance.is_none() && s.moved_spans.is_empty())
-        };
-        if left_run.is_empty() && !right_run.is_empty() && is_plain_change(&right_run) {
+        if left_run.is_empty() && !right_run.is_empty() && is_plain_change(rhs, &right_run) {
             let (start_li, start_old) = (li, old_line);
             let mut pulled = Vec::new();
             while pulled.len() < right_run.len()
@@ -573,13 +654,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                 && !lhs.changed[li]
                 && (ri >= rhs.lines.len() || lhs.lines[li] != rhs.lines[ri])
             {
-                pulled.push(ReviewSide {
-                    text: lhs.lines[li].to_string(),
-                    line_num: old_line,
-                    change_spans: lhs.spans[li].clone(),
-                    moved_spans: lhs.moved[li].clone(),
-                    move_provenance: lhs.provenance[li].clone(),
-                });
+                pulled.push((li, old_line));
                 li += 1;
                 old_line += 1;
             }
@@ -593,7 +668,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                 li = start_li;
                 old_line = start_old;
             }
-        } else if right_run.is_empty() && !left_run.is_empty() && is_plain_change(&left_run) {
+        } else if right_run.is_empty() && !left_run.is_empty() && is_plain_change(lhs, &left_run) {
             let (start_ri, start_new) = (ri, new_line);
             let mut pulled = Vec::new();
             while pulled.len() < left_run.len()
@@ -601,13 +676,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                 && !rhs.changed[ri]
                 && (li >= lhs.lines.len() || rhs.lines[ri] != lhs.lines[li])
             {
-                pulled.push(ReviewSide {
-                    text: rhs.lines[ri].to_string(),
-                    line_num: new_line,
-                    change_spans: rhs.spans[ri].clone(),
-                    moved_spans: rhs.moved[ri].clone(),
-                    move_provenance: rhs.provenance[ri].clone(),
-                });
+                pulled.push((ri, new_line));
                 ri += 1;
                 new_line += 1;
             }
@@ -624,52 +693,26 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
         }
 
         if left_run.is_empty() && right_run.is_empty() {
-            // Both unchanged but text differs (structural diff paired
-            // tokens across non-corresponding lines). Treat as change.
             if l_ok && r_ok {
-                result.push(ReviewRow::Changed {
-                    left: Some(ReviewSide {
-                        text: lhs.lines[li].to_string(),
-                        line_num: old_line,
-                        change_spans: Vec::new(),
-                        moved_spans: Vec::new(),
-                        move_provenance: None,
-                    }),
-                    right: Some(ReviewSide {
-                        text: rhs.lines[ri].to_string(),
-                        line_num: new_line,
-                        change_spans: Vec::new(),
-                        moved_spans: Vec::new(),
-                        move_provenance: None,
-                    }),
+                result.push(RowPlan::Mismatch {
+                    left: Some((li, old_line)),
+                    right: Some((ri, new_line)),
                 });
                 li += 1;
                 ri += 1;
                 old_line += 1;
                 new_line += 1;
             } else if l_ok {
-                result.push(ReviewRow::Changed {
-                    left: Some(ReviewSide {
-                        text: lhs.lines[li].to_string(),
-                        line_num: old_line,
-                        change_spans: Vec::new(),
-                        moved_spans: Vec::new(),
-                        move_provenance: None,
-                    }),
+                result.push(RowPlan::Mismatch {
+                    left: Some((li, old_line)),
                     right: None,
                 });
                 li += 1;
                 old_line += 1;
             } else {
-                result.push(ReviewRow::Changed {
+                result.push(RowPlan::Mismatch {
                     left: None,
-                    right: Some(ReviewSide {
-                        text: rhs.lines[ri].to_string(),
-                        line_num: new_line,
-                        change_spans: Vec::new(),
-                        moved_spans: Vec::new(),
-                        move_provenance: None,
-                    }),
+                    right: Some((ri, new_line)),
                 });
                 ri += 1;
                 new_line += 1;
@@ -680,9 +723,9 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
         // Pair left and right runs side-by-side.
         let max = left_run.len().max(right_run.len());
         for i in 0..max {
-            result.push(ReviewRow::Changed {
-                left: left_run.get(i).cloned(),
-                right: right_run.get(i).cloned(),
+            result.push(RowPlan::Changed {
+                left: left_run.get(i).copied(),
+                right: right_run.get(i).copied(),
             });
         }
     }
@@ -690,11 +733,22 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
     result
 }
 
-fn extract_hunks_with_context(all_rows: &[ReviewRow], context: u32) -> Vec<ReviewHunk> {
-    let change_indices: Vec<usize> = all_rows
+/// Trim the walk's plans to the regions a hunk covers, and build the rows of
+/// those regions only.
+///
+/// A file's plans are almost all context, and a hunk keeps only the ones within
+/// `context` lines of a change. Materializing before trimming copies every line
+/// of the file to throw nearly all of them away.
+fn extract_hunks_with_context(
+    plans: &[RowPlan],
+    lhs: &WalkSide<'_>,
+    rhs: &WalkSide<'_>,
+    context: u32,
+) -> Vec<ReviewHunk> {
+    let change_indices: Vec<usize> = plans
         .iter()
         .enumerate()
-        .filter(|(_, r)| r.is_changed())
+        .filter(|(_, plan)| plan.is_changed())
         .map(|(i, _)| i)
         .collect();
 
@@ -702,7 +756,7 @@ fn extract_hunks_with_context(all_rows: &[ReviewRow], context: u32) -> Vec<Revie
         return Vec::new();
     }
 
-    let len = all_rows.len();
+    let len = plans.len();
     let ctx = context as usize;
 
     let mut regions: Vec<Range<usize>> = Vec::new();
@@ -718,7 +772,10 @@ fn extract_hunks_with_context(all_rows: &[ReviewRow], context: u32) -> Vec<Revie
     regions
         .into_iter()
         .map(|r| ReviewHunk {
-            rows: all_rows[r].to_vec(),
+            rows: plans[r]
+                .iter()
+                .map(|plan| materialize(plan, lhs, rhs))
+                .collect(),
         })
         .collect()
 }
