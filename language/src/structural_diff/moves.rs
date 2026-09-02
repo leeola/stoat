@@ -37,6 +37,7 @@
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
+    fx::FxBuildHasher,
     unchanged::{ChangeKind, ChangeMap},
 };
 use std::collections::{HashMap, HashSet};
@@ -187,21 +188,21 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
         rhs_depths_per.push(rhs_depths);
     }
 
-    let mut lhs_by_cid: HashMap<ContentId, Vec<FileNode>> = HashMap::new();
-    let mut rhs_by_cid: HashMap<ContentId, Vec<FileNode>> = HashMap::new();
+    let mut lhs_by_cid = CidIndex::default();
+    let mut rhs_by_cid = CidIndex::default();
     for (file_idx, f) in files.iter().enumerate() {
-        for (cid, ids) in index_all_candidates(f.lhs_arena, &lhs_leaf_counts_per[file_idx]) {
-            lhs_by_cid
-                .entry(cid)
-                .or_default()
-                .extend(ids.into_iter().map(|id| (file_idx, id)));
-        }
-        for (cid, ids) in index_all_candidates(f.rhs_arena, &rhs_leaf_counts_per[file_idx]) {
-            rhs_by_cid
-                .entry(cid)
-                .or_default()
-                .extend(ids.into_iter().map(|id| (file_idx, id)));
-        }
+        index_candidates(
+            f.lhs_arena,
+            &lhs_leaf_counts_per[file_idx],
+            file_idx,
+            &mut lhs_by_cid,
+        );
+        index_candidates(
+            f.rhs_arena,
+            &rhs_leaf_counts_per[file_idx],
+            file_idx,
+            &mut rhs_by_cid,
+        );
     }
 
     let mut shared: Vec<(ContentId, usize, usize)> = lhs_by_cid
@@ -230,8 +231,8 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     // tiebreaker.
     shared.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
 
-    let mut paired_lhs: HashSet<FileNode> = HashSet::new();
-    let mut paired_rhs: HashSet<FileNode> = HashSet::new();
+    let mut paired_lhs = NodeSet::default();
+    let mut paired_rhs = NodeSet::default();
     let mut records: Vec<ChangesetMoveRecord> = Vec::new();
 
     // A duplication copies a source that itself stays in place, so its
@@ -241,8 +242,8 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     // phantom change at an untouched location. Only the 1:N duplication
     // shape fills these. A consolidation or plain move still marks its
     // Unchanged nodes as before.
-    let mut stay_lhs: HashSet<FileNode> = HashSet::new();
-    let mut stay_rhs: HashSet<FileNode> = HashSet::new();
+    let mut stay_lhs = NodeSet::default();
+    let mut stay_rhs = NodeSet::default();
 
     for (cid, _, _) in &shared {
         let lhs_cand = lhs_by_cid.get(cid).expect("cid in shared set");
@@ -318,19 +319,34 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
 /// [`ChangesetMoveRecord::rhs_target`] / `lhs_sources`.
 type FileNode = (usize, SyntaxId);
 
-/// Walk every node in `arena` and group by [`ContentId`]. Includes
-/// Unchanged nodes so consolidation and duplication counts reflect
+/// One side's move candidates across the whole changeset, grouped by content.
+///
+/// The map is Fx-hashed rather than SipHash-hashed. Its keys are one `u64`
+/// that is itself already a hash, it is filled and probed once per node of
+/// every file in the changeset, and nothing outside the process chooses a key.
+type CidIndex = HashMap<ContentId, Vec<FileNode>, FxBuildHasher>;
+
+/// A set of changeset nodes, Fx-hashed for the same reason as [`CidIndex`].
+type NodeSet = HashSet<FileNode, FxBuildHasher>;
+
+/// Walk every node in `arena` and group it into `out` by [`ContentId`].
+/// Includes Unchanged nodes so consolidation and duplication counts reflect
 /// every copy in the arena, not just the ones that survived the
 /// unchanged-preprocessing pass. The caller compares LHS and RHS
 /// counts to decide whether a content id is a real move or pure
 /// structural preservation. Applies the [`is_trivial`] denylist and
 /// [`MIN_LEAVES`] threshold at index time so noise candidates never
 /// enter the pairing loop.
-fn index_all_candidates(
+///
+/// Every file of a side fills one shared `out`, so a content id that spans
+/// files accumulates its candidates in place. Grouping per file and merging
+/// afterwards costs more than the whole indexing walk.
+fn index_candidates(
     arena: &SyntaxArena<'_>,
     leaf_counts: &[usize],
-) -> HashMap<ContentId, Vec<SyntaxId>> {
-    let mut out: HashMap<ContentId, Vec<SyntaxId>> = HashMap::new();
+    file_idx: usize,
+    out: &mut CidIndex,
+) {
     for (i, &leaf_count) in leaf_counts.iter().enumerate() {
         let id = SyntaxId(i);
         if is_trivial(arena, id) {
@@ -339,9 +355,10 @@ fn index_all_candidates(
         if leaf_count < MIN_LEAVES {
             continue;
         }
-        out.entry(arena.get(id).content_id()).or_default().push(id);
+        out.entry(arena.get(id).content_id())
+            .or_default()
+            .push((file_idx, id));
     }
-    out
 }
 
 /// Tree-sitter punctuation (braces, semicolons, commas, parens) has
@@ -357,7 +374,7 @@ fn is_trivial(arena: &SyntaxArena<'_>, id: SyntaxId) -> bool {
 
 fn filter_unpaired_multi(
     candidates: &[FileNode],
-    paired: &HashSet<FileNode>,
+    paired: &NodeSet,
     parents_per: &[Vec<Option<SyntaxId>>],
 ) -> Vec<FileNode> {
     candidates
@@ -379,8 +396,8 @@ fn record_duplication_stays(
     files: &[FileMoveInput<'_>],
     src: FileNode,
     targets: &[FileNode],
-    stay_lhs: &mut HashSet<FileNode>,
-    stay_rhs: &mut HashSet<FileNode>,
+    stay_lhs: &mut NodeSet,
+    stay_rhs: &mut NodeSet,
 ) {
     if files[src.0].lhs_changes.get(src.1) != ChangeKind::Unchanged {
         return;
@@ -397,8 +414,8 @@ fn emit_records_multi(
     files: &[FileMoveInput<'_>],
     lhs_avail: &[FileNode],
     rhs_avail: &[FileNode],
-    paired_lhs: &mut HashSet<FileNode>,
-    paired_rhs: &mut HashSet<FileNode>,
+    paired_lhs: &mut NodeSet,
+    paired_rhs: &mut NodeSet,
     records: &mut Vec<ChangesetMoveRecord>,
 ) {
     let mut lhs_sorted = lhs_avail.to_vec();
@@ -499,8 +516,15 @@ fn ancestor_in_set_multi(
     parents_per: &[Vec<Option<SyntaxId>>],
     file_idx: usize,
     id: SyntaxId,
-    set: &HashSet<FileNode>,
+    set: &NodeSet,
 ) -> bool {
+    // An empty set answers `false` for every ancestor, and it stays empty
+    // through the whole pass on a file with no move, which is the ordinary
+    // edit. Answering here skips a walk to the root per candidate.
+    if set.is_empty() {
+        return false;
+    }
+
     let parents = &parents_per[file_idx];
     let mut cur = parents[id.0];
     while let Some(p) = cur {
