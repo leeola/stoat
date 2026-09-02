@@ -95,6 +95,15 @@ type TreeKey = ([u8; 32], &'static str);
 const MEMO_CAPACITY: usize = 8;
 
 impl TreeMemo {
+    /// How many trees the memo holds, at most [`MEMO_CAPACITY`].
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     fn get(&self, key: &TreeKey) -> Option<Tree> {
         self.entries
             .iter()
@@ -122,7 +131,11 @@ impl TreeMemo {
 /// behind whichever job got there first. Two jobs missing at once both parse,
 /// which is the price. Identical text and language give identical trees, so
 /// whichever lands first is kept.
-fn parse_memoized(language: &Arc<Language>, text: &str, memo: Option<&TreeCache>) -> Option<Tree> {
+pub fn parse_memoized(
+    language: &Arc<Language>,
+    text: &str,
+    memo: Option<&TreeCache>,
+) -> Option<Tree> {
     let Some(memo) = memo else {
         return parse(language, text, None);
     };

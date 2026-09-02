@@ -39,8 +39,8 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_language::{
-    extract_highlights, parse, structural_diff, structural_diff::TreeCache, HighlightSpan,
-    Language, LanguageRegistry, Tree,
+    extract_highlights, structural_diff, structural_diff::TreeCache, HighlightSpan, Language,
+    LanguageRegistry, Tree,
 };
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::Notify;
@@ -781,11 +781,14 @@ pub(super) fn compute_diff_map(
         DiffMap::from_hunks(hunks, Some(base.head.clone()))
     };
     if let Some(language) = language {
+        // The structural pass above parsed this exact base into `tree_memo`,
+        // so the highlight parse is already paid for.
         diff_map.set_base_highlights(compute_base_highlights(
             base_text,
             language,
             syntax_styles,
             base_cache,
+            tree_memo,
         ));
     }
     Some(diff_map)
@@ -890,11 +893,16 @@ fn buffer_removed(buffer_text: &str) -> bool {
 /// and its spans are resolved and bucketed once per theme, so a keystroke burst
 /// that leaves the base alone costs two hash lookups rather than a walk over
 /// every span with a style clone per line it touches.
+///
+/// `tree_memo` is the memo the structural diff parses its base into. Sharing it
+/// costs a caller that already diffed this text nothing, because the tree is
+/// then already there. Pass [`None`] and the parse happens here.
 pub(crate) fn compute_base_highlights(
     base_text: &str,
     language: &Arc<Language>,
     syntax_styles: &SyntaxStyles,
     cache: &BaseHighlightCache,
+    tree_memo: Option<&TreeCache>,
 ) -> Arc<BaseHighlights> {
     let content: ContentHash = blake3::hash(base_text.as_bytes()).into();
     let name = language.name.to_string();
@@ -921,7 +929,7 @@ pub(crate) fn compute_base_highlights(
         Some(spans) => spans,
         None => {
             let parsed = Arc::new(
-                parse(language, base_text, None)
+                structural_diff::parse_memoized(language, base_text, tree_memo)
                     .map(|tree| extract_highlights(language, &tree, base_text))
                     .unwrap_or_default(),
             );
@@ -1066,7 +1074,7 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        buffer_registry, changed_byte_ranges, compute_base_highlights, compute_diff_map, parse,
+        buffer_registry, changed_byte_ranges, compute_base_highlights, compute_diff_map,
         repo_hunk_position, scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase,
         DiffBaseText, DIFF_SETTLE,
     };
@@ -1087,7 +1095,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
-    use stoat_language::LanguageRegistry;
+    use stoat_language::{parse, structural_diff::TreeCache, LanguageRegistry};
 
     /// The bar reads the totals and a file list reads the per-file counts, so
     /// both come off one stored tally rather than two walks that could disagree.
@@ -1247,6 +1255,60 @@ mod tests {
         }
     }
 
+    /// A diff map parses its base for the structural pass and again for the
+    /// left column's colors, which is 4 ms twice on a large file. One memo
+    /// serves both, so the second pass finds the tree the first left.
+    ///
+    /// Two things have to hold. The highlight pass must reach the memo at all,
+    /// which an empty one filling by that call alone shows. Both passes must
+    /// then key the same base the same way, which the whole diff leaving one
+    /// entry shows.
+    #[test]
+    fn the_base_highlights_and_the_structural_pass_share_one_parse() {
+        let language = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .expect("rust language");
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+        let memo_len = |memo: &TreeCache| memo.lock().expect("tree memo poisoned").len();
+
+        let head = "fn main() {\n    let x = 1;\n}\n";
+        let buffer = "fn main() {\n    let x = 41;\n}\n";
+
+        let highlights_only = TreeCache::default();
+        compute_base_highlights(head, &language, &styles, &cache, Some(&highlights_only));
+        assert_eq!(
+            memo_len(&highlights_only),
+            1,
+            "the highlight parse goes through the shared memo",
+        );
+
+        let base = DiffBaseText {
+            head: Arc::new(head.to_string()),
+            index: Arc::new(head.to_string()),
+            head_hash: buffer_registry::fingerprint_bytes(head),
+            index_hash: buffer_registry::fingerprint_bytes(head),
+        };
+        let whole_diff = TreeCache::default();
+        compute_diff_map(
+            buffer,
+            Some(&language),
+            &styles,
+            // A fresh style cache, so the highlight pass reaches its parse
+            // instead of answering from the spans the call above filed.
+            &Arc::new(Mutex::new(BaseHighlightMemo::default())),
+            &base,
+            Some(&whole_diff),
+            None,
+        )
+        .expect("a tracked file has a diff map");
+        assert_eq!(
+            memo_len(&whole_diff),
+            1,
+            "both passes key one base the same way",
+        );
+    }
+
     /// The diff job hands the tree pass the tree the highlight pipeline
     /// already built for the buffer, which is the whole point of the
     /// parameter. If a supplied tree changes the hunks, the diff a reader sees
@@ -1318,15 +1380,15 @@ mod tests {
         let base = "fn main() {\n    let x = 1;\n}\n";
         let styles = SyntaxStyles::from_theme(&Theme::empty());
 
-        let first = compute_base_highlights(base, &language, &styles, &cache);
-        let second = compute_base_highlights(base, &language, &styles, &cache);
+        let first = compute_base_highlights(base, &language, &styles, &cache, None);
+        let second = compute_base_highlights(base, &language, &styles, &cache, None);
         assert!(
             Arc::ptr_eq(&first, &second),
             "the same style table serves the bucketed map it already built",
         );
 
         let rebuilt = SyntaxStyles::from_theme(&Theme::empty());
-        let third = compute_base_highlights(base, &language, &rebuilt, &cache);
+        let third = compute_base_highlights(base, &language, &rebuilt, &cache, None);
         assert!(
             !Arc::ptr_eq(&first, &third),
             "a rebuilt style table cannot reuse a resolve made against the old one",

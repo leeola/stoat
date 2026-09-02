@@ -805,12 +805,14 @@ pub(super) fn attach_preview_highlights(
             &language,
             styles,
             cache,
+            None,
         ));
         file.buffer_highlights = Some(compute_base_highlights(
             &file.buffer_text,
             &language,
             styles,
             cache,
+            None,
         ));
     }
 }
