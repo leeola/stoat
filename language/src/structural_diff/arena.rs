@@ -85,6 +85,18 @@ impl<'a> SyntaxArena<'a> {
         Self::default()
     }
 
+    /// An arena sized for `nodes` entries up front.
+    ///
+    /// Lowering pushes one entry per node of a whole parse tree, which is tens
+    /// of thousands for an ordinary source file and a dozen or more reallocs
+    /// from an empty `Vec`. Callers that know the tree's node count in advance
+    /// pay one allocation instead.
+    pub fn with_capacity(nodes: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(nodes),
+        }
+    }
+
     /// Move `node` into the arena and return its [`SyntaxId`].
     pub fn alloc(&mut self, node: Syntax<'a>) -> SyntaxId {
         let id = SyntaxId(self.nodes.len());

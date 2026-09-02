@@ -29,17 +29,38 @@ use tree_sitter::TreeCursor;
 /// content slices borrow from it, so the arena's lifetime is bounded
 /// by `source`.
 pub fn lower_tree<'a>(tree: &tree_sitter::Tree, source: &'a str) -> (SyntaxArena<'a>, SyntaxId) {
-    let mut arena = SyntaxArena::new();
+    let root = tree.root_node();
+
+    // The descendant count bounds the arena from above rather than matching it.
+    // A node with no named children lowers to one atom however many anonymous
+    // descendants it holds. Over-reserving is the safe direction here, and the
+    // bound is tight in practice.
+    let mut arena = SyntaxArena::with_capacity(root.descendant_count());
+
     let mut cursor = tree.walk();
-    let root_id = lower_node(&mut arena, &mut cursor, source);
+    let mut scratch = Scratch::default();
+    let root_id = lower_node(&mut arena, &mut cursor, source, &mut scratch);
     arena.link_siblings();
     (arena, root_id)
+}
+
+/// One stack of pending children shared by every list node of a lowering.
+///
+/// A list reads its children back as the contiguous tail its own frame pushed,
+/// and truncates to the mark before it returns, so a frame never sees another's
+/// entries. Sharing the two vectors this way turns two growing allocations per
+/// list node into one exact-size copy of the children it keeps.
+#[derive(Default)]
+struct Scratch {
+    ids: Vec<SyntaxId>,
+    cids: Vec<ContentId>,
 }
 
 fn lower_node<'a>(
     arena: &mut SyntaxArena<'a>,
     cursor: &mut TreeCursor<'_>,
     source: &'a str,
+    scratch: &mut Scratch,
 ) -> SyntaxId {
     let node = cursor.node();
     let kind = node.kind();
@@ -60,14 +81,13 @@ fn lower_node<'a>(
 
     // The cursor is moved back to the original node before returning so
     // the caller's walk position is preserved.
-    let mut child_ids: Vec<SyntaxId> = Vec::new();
-    let mut child_content_ids: Vec<ContentId> = Vec::new();
+    let base = scratch.ids.len();
     if cursor.goto_first_child() {
         loop {
-            let child_id = lower_node(arena, cursor, source);
+            let child_id = lower_node(arena, cursor, source, scratch);
             let child_cid = arena.get(child_id).content_id();
-            child_ids.push(child_id);
-            child_content_ids.push(child_cid);
+            scratch.ids.push(child_id);
+            scratch.cids.push(child_cid);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -75,13 +95,18 @@ fn lower_node<'a>(
         cursor.goto_parent();
     }
 
-    let (open_byte_range, close_byte_range) = delimiter_ranges(arena, node, &child_ids);
+    let content_id = ContentId::for_list(kind, &scratch.cids[base..]);
+    let children = scratch.ids[base..].to_vec();
+    scratch.ids.truncate(base);
+    scratch.cids.truncate(base);
+
+    let (open_byte_range, close_byte_range) = delimiter_ranges(arena, node, &children);
     arena.alloc(Syntax::List(List {
         kind,
         open_byte_range,
         close_byte_range,
-        children: child_ids,
-        content_id: ContentId::for_list(kind, &child_content_ids),
+        children,
+        content_id,
         next_sibling: None,
         _marker: std::marker::PhantomData,
     }))
