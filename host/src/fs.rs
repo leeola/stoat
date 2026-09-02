@@ -763,7 +763,7 @@ fn copy_ownership(_meta: &std::fs::Metadata, _tmp: &Path) {}
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{FsHost, LocalFs};
+    use super::{process_umask, FsHost, LocalFs};
     use std::{
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
@@ -847,14 +847,10 @@ mod tests {
 
         LocalFs.write_atomic(&path, b"new").expect("write");
 
-        let umask = unsafe {
-            let previous = libc::umask(0o022);
-            libc::umask(previous);
-            previous
-        };
+        let umask = process_umask();
         assert_eq!(
             fs::metadata(&path).expect("meta").mode() & 0o777,
-            0o666 & !(umask as u32),
+            0o666 & !umask,
             "a created file gets what the umask allows, not the temp file's mode"
         );
     }
