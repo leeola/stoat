@@ -15,7 +15,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
 };
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::HashMap};
 use stoat_text::{Bias, Selection, SelectionGoal};
 
 /// Object kinds the unimpaired menu steps between.
@@ -105,10 +105,14 @@ pub(crate) fn goto_textobject_impl(
     // Every selection reads from its own cursor, so a multi-cursor set walks to
     // one object each rather than sharing whichever cursor happened to be
     // newest.
-    let landings: Vec<(usize, std::ops::Range<usize>)> = cursors
+    // One index per layer, shared by every cursor of the press. The query
+    // behind it is milliseconds on a large file, and it used to run once per
+    // cursor per count step.
+    let mut indexes: Vec<(*const stoat_language::Tree, ObjectIndex)> = Vec::new();
+    let landings: HashMap<usize, std::ops::Range<usize>> = cursors
         .into_iter()
         .filter_map(|(id, cursor)| {
-            let target = object_range(ws, buffer_id, cursor, kind, direction, count)?;
+            let target = object_range(ws, buffer_id, &mut indexes, cursor, kind, direction, count)?;
             Some((id, target))
         })
         .collect();
@@ -127,7 +131,7 @@ pub(crate) fn goto_textobject_impl(
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, _head_offset, tail_offset| {
-            let Some((_, target)) = landings.iter().find(|(id, _)| *id == sel.id) else {
+            let Some(target) = landings.get(&sel.id) else {
                 return sel.clone();
             };
 
@@ -155,8 +159,86 @@ pub(crate) fn goto_textobject_impl(
     UpdateEffect::Redraw
 }
 
+/// Every object of one capture in one layer, ordered for both directions of
+/// walk.
+///
+/// Built once per layer per press. The query used to run per cursor per count
+/// step, and on a two-thousand-line file each run is milliseconds, so a
+/// three-cursor press with a count of three paid for nine of them.
+///
+/// Two orderings rather than one, because a step reads whichever bound it
+/// travels toward and a sort by the other bound puts the wrong object first. An
+/// outer object starts before the one nested in it and ends after, so reading
+/// the greatest start going backward reaches the inner object and steps over
+/// the very one containing it.
+struct ObjectIndex {
+    /// Sorted by `(start, Reverse(end))`, so the first entry past a cursor is
+    /// the nearest object ahead and a tie on the start goes to the longer of
+    /// the two, which is the outer one.
+    by_start: Vec<std::ops::Range<usize>>,
+    /// Sorted by `(end, Reverse(start))`, the same rule against the other
+    /// bound.
+    by_end: Vec<std::ops::Range<usize>>,
+}
+
+impl ObjectIndex {
+    /// Run `capture_name`'s patterns over the whole of `layer` and order the
+    /// result both ways.
+    fn build(
+        layer: &stoat_language::SyntaxLayer,
+        rope: &stoat_text::Rope,
+        capture_name: &str,
+    ) -> ObjectIndex {
+        let Some(query) = layer.language.textobjects_query() else {
+            return ObjectIndex {
+                by_start: Vec::new(),
+                by_end: Vec::new(),
+            };
+        };
+
+        let mut by_start = stoat_language::collect_capture_ranges(
+            query,
+            layer.tree.root_node(),
+            rope,
+            capture_name,
+            0..rope.len(),
+        );
+        by_start.sort_unstable_by_key(|r| (r.start, Reverse(r.end)));
+
+        let mut by_end = by_start.clone();
+        by_end.sort_unstable_by_key(|r| (r.end, Reverse(r.start)));
+
+        ObjectIndex { by_start, by_end }
+    }
+
+    /// The nearest object starting after `at`, or `None` past the last one.
+    fn next_after(&self, at: usize) -> Option<&std::ops::Range<usize>> {
+        self.by_start
+            .get(self.by_start.partition_point(|r| r.start <= at))
+    }
+
+    /// The nearest object ending before `at`, or `None` before the first one.
+    fn prev_before(&self, at: usize) -> Option<&std::ops::Range<usize>> {
+        let past = self.by_end.partition_point(|r| r.end < at);
+        // The partition point names the first entry at or after `at`, so the
+        // one before it is the last that ends strictly earlier. Sorting by
+        // `(end, Reverse(start))` puts the longer of two objects sharing an end
+        // first, so a tie is read off the front of the run rather than its
+        // back.
+        let run_end = self.by_end[..past].last()?.end;
+        self.by_end[..past]
+            .iter()
+            .rev()
+            .take_while(|r| r.end == run_end)
+            .last()
+    }
+}
 /// Byte range of the object `count` steps away from `cursor`, or `None` when
 /// the walk runs out of objects before its first step.
+///
+/// `indexes` is filled as layers are met and shared across every cursor of the
+/// press, keyed on the layer's tree. Cursors can sit in different layers, so
+/// the index cannot simply be built once for the buffer.
 ///
 /// The backward walk compares each object's end against the cursor rather than
 /// its start, which is what steps past the object the cursor is already inside
@@ -164,38 +246,39 @@ pub(crate) fn goto_textobject_impl(
 fn object_range(
     ws: &crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
+    indexes: &mut Vec<(*const stoat_language::Tree, ObjectIndex)>,
     cursor: usize,
     kind: NavKind,
     direction: NavDirection,
     count: u32,
 ) -> Option<std::ops::Range<usize>> {
-    let len = ws
-        .buffers
-        .get(buffer_id)
-        .and_then(|buffer| buffer.read().ok().map(|guard| guard.rope().len()))?;
+    let buffer = ws.buffers.get(buffer_id)?;
+    let guard = buffer.read().ok()?;
+    let rope = guard.rope();
+    let len = rope.len();
+    let syntax_map = ws.buffers.syntax_map(buffer_id)?;
+    let snapshot = syntax_map.snapshot();
 
     let mut at = cursor;
     let mut found = None;
     for _ in 0..count {
-        let ranges =
-            collect_capture_ranges_for_buffer(ws, buffer_id, at, kind.capture_name(), direction);
-        // Each step travels toward one bound, so that bound picks the winner:
-        // the nearest start ahead, or the nearest end behind. A tie on it goes
-        // to the longer object, which is the outer one of a nested pair.
-        //
-        // The list arrives sorted by start, which is the wrong key going back.
-        // An outer object starts before the one nested in it and ends after,
-        // so reading the greatest start reaches the inner object and steps
-        // over the very one containing it.
+        // Resolved per step because a step can cross into an injected region,
+        // whose own grammar decides what an object is there.
+        let Some(layer) = super::surround::deepest_layer_at(Some(snapshot), at) else {
+            break;
+        };
+        let key = &layer.tree as *const _;
+        let idx = match indexes.iter().position(|(seen, _)| *seen == key) {
+            Some(idx) => idx,
+            None => {
+                indexes.push((key, ObjectIndex::build(layer, rope, kind.capture_name())));
+                indexes.len() - 1
+            },
+        };
+
         let next = match direction {
-            NavDirection::Next => ranges
-                .iter()
-                .filter(|r| r.start > at)
-                .min_by_key(|r| (r.start, Reverse(r.end))),
-            NavDirection::Prev => ranges
-                .iter()
-                .filter(|r| r.end < at)
-                .max_by_key(|r| (r.end, Reverse(r.start))),
+            NavDirection::Next => indexes[idx].1.next_after(at),
+            NavDirection::Prev => indexes[idx].1.prev_before(at),
         }
         .cloned();
         // A count reaching past the last object walks as far as it goes. Giving
@@ -218,60 +301,6 @@ fn object_range(
         found = Some(next);
     }
     found
-}
-
-fn collect_capture_ranges_for_buffer(
-    ws: &crate::workspace::Workspace,
-    buffer_id: crate::buffer::BufferId,
-    cursor: usize,
-    capture_name: &str,
-    direction: NavDirection,
-) -> Vec<std::ops::Range<usize>> {
-    let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
-        return Vec::new();
-    };
-    let snapshot = syntax_map.snapshot();
-    let layer = snapshot
-        .iter_layers()
-        .fold(None::<&stoat_language::SyntaxLayer>, |acc, layer| {
-            let start = layer.start_offset as usize;
-            let end = layer.end_offset as usize;
-            if start <= cursor && end >= cursor {
-                match acc {
-                    Some(prev) if prev.depth >= layer.depth => acc,
-                    _ => Some(layer),
-                }
-            } else {
-                acc
-            }
-        });
-    let Some(layer) = layer else {
-        return Vec::new();
-    };
-    let Some(query) = layer.language.textobjects_query() else {
-        return Vec::new();
-    };
-    let Some(buffer) = ws.buffers.get(buffer_id) else {
-        return Vec::new();
-    };
-    let Ok(guard) = buffer.read() else {
-        return Vec::new();
-    };
-    // Only objects past the cursor answer a forward seek, and only ones before
-    // it answer a backward one, so the other side of the buffer need not be
-    // visited. The enclosing matches each half also returns are dropped by the
-    // caller's comparison, as they were when the whole file was scanned.
-    let bytes = match direction {
-        NavDirection::Next => cursor..guard.rope().len(),
-        NavDirection::Prev => 0..cursor + 1,
-    };
-    stoat_language::collect_capture_ranges(
-        query,
-        layer.tree.root_node(),
-        guard.rope(),
-        capture_name,
-        bytes,
-    )
 }
 
 #[cfg(test)]
@@ -565,6 +594,39 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
         assert_eq!(selected(&mut h, src), "fn outer() { fn inner() {} }");
+    }
+
+    /// Every cursor walks from where it stands, so three cursors reach three
+    /// different objects. The index behind the walk is shared between them, and
+    /// a shared index that answered from one cursor's position would land all
+    /// three on the same object.
+    #[test]
+    fn each_cursor_steps_to_its_own_function() {
+        let src = "fn one() { zz }\nfn two() {}\nfn three() { zz }\nfn four() {}\nfn five() { zz }\nfn six() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+
+        // One cursor in every marked body, which is one in every other
+        // function.
+        h.type_keys("%");
+        h.type_keys("s");
+        h.type_text("zz");
+        h.type_keys("Enter");
+        assert_eq!(h.selection_spans().len(), 3, "one cursor per marked body");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+
+        let landed: Vec<&str> = h
+            .selection_spans()
+            .into_iter()
+            .map(|(start, end, _)| &src[start..end])
+            .collect();
+        assert_eq!(
+            landed,
+            ["fn two() {}", "fn four() {}", "fn six() {}"],
+            "each cursor took the function after its own",
+        );
     }
 
     /// Alt-. after a function jump repeats the jump, since the motion records
