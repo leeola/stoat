@@ -8,8 +8,8 @@
 use crate::render::CellMetrics;
 use cosmic_text::{
     fontdb::{Query, Weight},
-    Attrs, AttrsList, Buffer as CosmicBuffer, CacheKey, Family, Font, FontSystem, Hinting, Metrics,
-    ShapeLine, Shaping, Wrap,
+    Attrs, AttrsList, Buffer as CosmicBuffer, CacheKey, Ellipsize, Family, Font, FontSystem,
+    Hinting, LayoutLine, Metrics, ShapeBuffer, ShapeLine, Shaping, Wrap,
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -60,6 +60,22 @@ pub(super) fn shape_char(
     Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
 }
 
+/// Allocations [`shape_run`] reuses from one call to the next.
+///
+/// A novel screen shapes one run per word, some six hundred times a frame, and
+/// building the line and its layout afresh each time is about a third of what
+/// that costs. A caller holds one of these for as long as it shapes.
+///
+/// `line` is an option because `ShapeLine` has no `Default` and cosmic-text
+/// keeps its empty constructor to itself, so the first call seeds it through
+/// the public one.
+#[derive(Default)]
+pub(super) struct ShapeScratch {
+    line: Option<ShapeLine>,
+    buffer: ShapeBuffer,
+    layout: Vec<LayoutLine>,
+}
+
 /// Shape `text` as one run with `family`, returning each glyph's source byte
 /// offset paired with its cache key.
 ///
@@ -70,27 +86,45 @@ pub(super) fn shape_char(
 /// character. Each glyph is keyed at subpixel bin zero, since the grid draws it
 /// at an integer cell origin.
 pub(super) fn shape_run(
+    scratch: &mut ShapeScratch,
     font_system: &mut FontSystem,
     text: &str,
     metrics: CellMetrics,
     family: Family<'_>,
 ) -> Vec<(usize, CacheKey)> {
     let attrs = AttrsList::new(&Attrs::new().family(family));
-    let line = ShapeLine::new(font_system, text, &attrs, Shaping::Advanced, TAB_WIDTH);
+    let line = match &mut scratch.line {
+        Some(line) => {
+            line.build(font_system, text, &attrs, Shaping::Advanced, TAB_WIDTH);
+            line
+        },
+        none => none.insert(ShapeLine::new(
+            font_system,
+            text,
+            &attrs,
+            Shaping::Advanced,
+            TAB_WIDTH,
+        )),
+    };
+
     // No width bound, so the run lays out as one line and nothing wraps. The
     // layout is cosmic-text's rather than ours because a fallback font whose
     // monospace em width differs from the primary's has its size adjusted here,
     // and that adjusted size is part of the cache key below.
-    let layout = line.layout(
+    scratch.layout.clear();
+    line.layout_to_buffer(
+        &mut scratch.buffer,
         metrics.font_size,
         None,
         Wrap::None,
+        Ellipsize::None,
         None,
+        &mut scratch.layout,
         None,
         Hinting::Disabled,
     );
 
-    let Some(first) = layout.first() else {
+    let Some(first) = scratch.layout.first() else {
         return Vec::new();
     };
     first
@@ -143,7 +177,7 @@ pub(super) fn shape_run_cached<'a>(
         return &cache.runs[slot].glyphs;
     }
 
-    let shaped = shape_run(font_system, text, metrics, family);
+    let shaped = shape_run(&mut cache.scratch, font_system, text, metrics, family);
     let slot = cache.store(text, shaped);
     &cache.runs[slot].glyphs
 }
@@ -173,6 +207,9 @@ struct CachedRun {
 pub struct RunShapeCache {
     at: FxHashMap<Arc<str>, usize>,
     runs: Vec<CachedRun>,
+    /// Shaping allocations the misses reuse, held here because this is already
+    /// the thing a caller keeps for as long as it shapes.
+    scratch: ShapeScratch,
     /// Slot the next eviction sweep starts at, which trails the most recent
     /// insert so a fresh run gets a full pass around the ring before it is
     /// considered.
@@ -367,10 +404,11 @@ pub fn shape_words(font_system: &mut FontSystem, font_size: u32, text: &str) -> 
     let primary = resolve_primary_family(font_system, &["JetBrains Mono".to_owned()]);
     let family = shape_family(primary.as_deref());
     let metrics = CellMetrics::from_font_size(font_size, 1.0);
+    let mut scratch = ShapeScratch::default();
 
     text.split(' ')
         .filter(|word| !word.is_empty())
-        .map(|word| shape_run(font_system, word, metrics, family).len())
+        .map(|word| shape_run(&mut scratch, font_system, word, metrics, family).len())
         .sum()
 }
 
@@ -482,7 +520,8 @@ mod tests {
     use super::{
         build_font_system, font_covers, glyph_family, load_bundled_fonts, resolve_primary_family,
         resolve_primary_font, run_text_and_columns_into, shape_char, shape_family, shape_run,
-        shape_run_cached, shape_words, RunShapeCache, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
+        shape_run_cached, shape_words, RunShapeCache, ShapeScratch, RUN_SHAPE_CACHE_CAP,
+        SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -549,18 +588,36 @@ mod tests {
         let metrics = CellMetrics::from_font_size(16, 1.0);
         let jbm = Family::Name("JetBrains Mono");
 
-        let offsets: Vec<usize> = shape_run(&mut font_system, "ab", metrics, jbm)
-            .iter()
-            .map(|(offset, _)| *offset)
-            .collect();
+        let offsets: Vec<usize> = shape_run(
+            &mut ShapeScratch::default(),
+            &mut font_system,
+            "ab",
+            metrics,
+            jbm,
+        )
+        .iter()
+        .map(|(offset, _)| *offset)
+        .collect();
         assert_eq!(
             offsets,
             [0, 1],
             "non-ligating characters map to their source byte offsets"
         );
 
-        let alone = shape_run(&mut font_system, "=", metrics, jbm);
-        let ligated = shape_run(&mut font_system, "=>", metrics, jbm);
+        let alone = shape_run(
+            &mut ShapeScratch::default(),
+            &mut font_system,
+            "=",
+            metrics,
+            jbm,
+        );
+        let ligated = shape_run(
+            &mut ShapeScratch::default(),
+            &mut font_system,
+            "=>",
+            metrics,
+            jbm,
+        );
         assert_eq!(alone.len(), 1, "a lone = shapes to one glyph");
         assert_ne!(
             alone[0].1.glyph_id, ligated[0].1.glyph_id,
@@ -585,6 +642,7 @@ mod tests {
         let metrics = CellMetrics::from_font_size(16, 1.0);
 
         let shaped = shape_run(
+            &mut ShapeScratch::default(),
             &mut font_system,
             "aaaa",
             metrics,
@@ -610,6 +668,7 @@ mod tests {
         for size in [11u32, 16, 30] {
             let metrics = CellMetrics::from_font_size(size, 1.0);
             let shaped = shape_run(
+                &mut ShapeScratch::default(),
                 &mut font_system,
                 "a",
                 metrics,
@@ -639,6 +698,7 @@ mod tests {
         // Two Private-Use-Area powerline separators, which only the bundled
         // symbols font carries. Three bytes each in UTF-8.
         let shaped = shape_run(
+            &mut ShapeScratch::default(),
             &mut font_system,
             "\u{e0b6}\u{e0b4}",
             metrics,
@@ -712,7 +772,13 @@ mod tests {
         let fresh = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm).to_vec();
         assert_eq!(
             fresh,
-            shape_run(&mut font_system, "==", metrics, jbm),
+            shape_run(
+                &mut ShapeScratch::default(),
+                &mut font_system,
+                "==",
+                metrics,
+                jbm
+            ),
             "the miss stores the same glyphs a direct shape produces"
         );
         assert_eq!(
@@ -723,7 +789,13 @@ mod tests {
 
         // Poison the stored glyphs with another run's. A reshape would overwrite
         // them, so getting the poisoned glyphs back proves the hit read the cache.
-        let poison = shape_run(&mut font_system, "ab", metrics, jbm);
+        let poison = shape_run(
+            &mut ShapeScratch::default(),
+            &mut font_system,
+            "ab",
+            metrics,
+            jbm,
+        );
         cache.runs[cache.at["=="]].glyphs = poison.clone();
         let hit = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm);
         assert_eq!(
