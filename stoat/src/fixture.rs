@@ -657,10 +657,10 @@ pub enum FixtureError {
 /// - `diff-kinds`: one working tree carrying every git change kind at once -- staged and unstaged
 ///   modifications, a staged addition, an untracked file, staged and unstaged deletions, a staged
 ///   rename, and a two-hunk unstaged edit. It probes the full status surface.
-///   [`crate::host::GitRepo::changed_files`] reports all of them, five staged (the addition, the
-///   staged deletion, the staged modification, and the rename's old and new paths -- status runs no
-///   rename detection, so the old path shows as a deletion) and four unstaged (the untracked file,
-///   the unstaged deletion, and the two unstaged modifications).
+///   [`crate::host::GitRepo::changed_files`] reports all of them, four staged (the addition, the
+///   staged deletion, the staged modification, and the rename, which status pairs into one entry
+///   naming the path it moved from) and four unstaged (the untracked file, the unstaged deletion,
+///   and the two unstaged modifications).
 /// - `many-files`: one HEAD commit of twelve files across `src/`, `docs/`, and `config/`, then five
 ///   staged and five unstaged modifications with two left clean, so
 ///   [`crate::host::GitRepo::changed_files`] reports ten changed files spanning nested directories
@@ -1236,8 +1236,8 @@ impl FixtureRepo {
     }
 
     /// Rename `old` to `new` in both the working tree and the index, leaving a
-    /// staged rename against HEAD. Status carries no rename detection, so this
-    /// surfaces as a deletion of `old` plus an addition of `new`.
+    /// staged rename against HEAD. The index records a deletion and an
+    /// addition. Rename-aware status pairs them back into one entry.
     fn staged_rename(&mut self, old: &str, new: &str) -> Result<&mut Self, FixtureError> {
         let workdir = self.workdir();
         let from = workdir.join(old);
@@ -1445,14 +1445,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         materialize("diff-kinds", dir.path()).unwrap();
 
+        let name = |path: &Path| path.file_name().unwrap().to_str().unwrap().to_string();
         let repo = LocalGit::new().discover(dir.path()).unwrap();
-        let got: Vec<(String, bool)> = repo
+        let got: Vec<(String, bool, Option<String>)> = repo
             .changed_files()
             .iter()
             .map(|f| {
                 (
-                    f.path.file_name().unwrap().to_str().unwrap().to_string(),
+                    name(&f.path),
                     f.staged,
+                    f.renamed_from.as_deref().map(&name),
                 )
             })
             .collect();
@@ -1460,17 +1462,20 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                ("added-staged.txt".to_string(), true),
-                ("deleted-staged.txt".to_string(), true),
-                ("modified-staged.txt".to_string(), true),
-                ("renamed-from.txt".to_string(), true),
-                ("renamed-to.txt".to_string(), true),
-                ("deleted-unstaged.txt".to_string(), false),
-                ("hunks.txt".to_string(), false),
-                ("modified-unstaged.txt".to_string(), false),
-                ("untracked.txt".to_string(), false),
+                ("added-staged.txt".to_string(), true, None),
+                ("deleted-staged.txt".to_string(), true, None),
+                ("modified-staged.txt".to_string(), true, None),
+                (
+                    "renamed-to.txt".to_string(),
+                    true,
+                    Some("renamed-from.txt".to_string()),
+                ),
+                ("deleted-unstaged.txt".to_string(), false, None),
+                ("hunks.txt".to_string(), false, None),
+                ("modified-unstaged.txt".to_string(), false, None),
+                ("untracked.txt".to_string(), false, None),
             ],
-            "every change kind surfaces: the untracked file, both deletions, and the rename source (a delete of the old path, no rename detection) join the modifications and additions",
+            "every change kind surfaces: the untracked file, both deletions, and the modifications and additions, with the move paired into the one entry that names where it came from",
         );
     }
 
