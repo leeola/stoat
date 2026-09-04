@@ -333,6 +333,111 @@ fn walkthrough_drift_fixture_reports_drift_per_stop() {
     });
 }
 
+/// The note each step of the trail fixture's tour sets, in tour order from the
+/// second stop. `None` is a step that found no relation and cleared the trail.
+const TRAIL_NOTES: [(&str, Option<&str>); 8] = [
+    ("2/9", Some("trail: 3")),
+    ("3/9", Some("trail: 2")),
+    ("4/9", Some("trail: 3")),
+    ("5/9", Some("trail: 2")),
+    ("6/9", Some("trail: 3")),
+    ("7/9", None),
+    ("8/9", None),
+    ("9/9", None),
+];
+
+/// How many times to step back and forward waiting for the code index.
+///
+/// The index builds after the workspace opens and the trail is laid from it, so
+/// a step taken too early finds no symbols and reports nothing. Each bounce
+/// re-runs `install_step_trail`, so the loop outlasts the build rather than
+/// racing it.
+const TRAIL_SETTLE_BOUNCES: usize = 40;
+
+/// The trail between two stops is the one part of a step that comes from the
+/// code index rather than from the tour, and every relation it is made of has
+/// its own search. This walks the fixture written for those searches and checks
+/// each step reports the relation it was built to exercise.
+///
+/// The note is read off the status line rather than the frame, because the
+/// narration cards talk about trails too and would match a bare search of the
+/// screen.
+#[test]
+fn walkthrough_trail_fixture_lays_a_trail_between_calling_stops() {
+    let (_dir, _root, mut harness) = fixture_harness("walkthrough-trail");
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":walkthrough tour<Enter>")
+            .await
+            .expect("open the tour");
+        handle
+            .await_frame(|text| text.contains("1/9"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("the tour opens on its first stop");
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("enter walkthrough mode");
+
+        let mut settled = false;
+        for _ in 0..TRAIL_SETTLE_BOUNCES {
+            handle
+                .send_keys("n")
+                .await
+                .expect("step to the second stop");
+            let frame = handle
+                .await_frame(|text| text.contains("2/9"), WALKTHROUGH_TIMEOUT)
+                .await
+                .expect("the second stop is reached");
+            if status_of(&frame).contains("trail: 3") {
+                settled = true;
+                break;
+            }
+            handle.send_keys("p").await.expect("step back");
+            handle
+                .await_frame(|text| text.contains("1/9"), WALKTHROUGH_TIMEOUT)
+                .await
+                .expect("the first stop is reached again");
+        }
+        assert!(
+            settled,
+            "the index built and the two-hop step laid its trail",
+        );
+
+        for (at, note) in &TRAIL_NOTES[1..] {
+            handle.send_keys("n").await.expect("step to the next stop");
+            let frame = handle
+                .await_frame(|text| text.contains(at), WALKTHROUGH_TIMEOUT)
+                .await
+                .unwrap_or_else(|_| panic!("stop {at} is reached"));
+            let status = status_of(&frame);
+
+            match note {
+                Some(note) => assert!(
+                    status.contains(note),
+                    "stop {at} reports {note:?}, got status {status:?}",
+                ),
+                None => assert!(
+                    !status.contains("trail:"),
+                    "stop {at} relates to nothing, so no trail is laid, \
+                     got status {status:?}",
+                ),
+            }
+        }
+
+        handle.send_keys("d").await.expect("end the tour");
+    });
+}
+
+/// The status line of `frame`, being its last line with content.
+fn status_of(frame: &str) -> &str {
+    frame
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+}
+
 /// The conflict view's three columns come from the on-disk index stages, which
 /// only a real repository mid-merge produces. This drives the whole chain --
 /// stage read, merge alignment, and paint -- against one, so a regression

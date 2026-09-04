@@ -62,6 +62,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "walkthrough-drift",
         "the walkthrough crate edited under its tour, so stops report drift",
     ),
+    (
+        "walkthrough-trail",
+        "a pipeline crate whose tour steps through every call relation",
+    ),
 ];
 
 /// The input sequence a fixture opens itself with, for one whose point is a

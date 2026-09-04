@@ -13,6 +13,7 @@ pub(super) mod card;
 pub(super) mod drift;
 pub(super) mod marks;
 pub(super) mod tour;
+pub(super) mod trail;
 
 /// Returns the tour serialized the way the store writes it to disk.
 ///

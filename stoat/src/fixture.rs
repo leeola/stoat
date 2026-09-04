@@ -410,6 +410,10 @@ pub enum FixtureError {
 ///   short, and one is left alone, so the player reports drift on some stops and not others and
 ///   `stoat walkthrough check --workspace <dir>` reports both stale and error ranges. The edits are
 ///   unstaged, so the diff gutter marks the change that caused each one.
+/// - `walkthrough-trail`: a build pipeline of free functions across five modules, committed with a
+///   nine-stop tour whose every step exercises one relation the trail is made of. It stages a
+///   direct call, a two-hop call, the reverse direction, a shared caller, a shared callee, a stop
+///   joined to nothing, and two stops over files the index reads no definitions out of.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -428,6 +432,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "walkthrough-marks" => walkthrough::marks::materialize(dest),
         "walkthrough-card" => walkthrough::card::materialize(dest),
         "walkthrough-drift" => walkthrough::drift::materialize(dest),
+        "walkthrough-trail" => walkthrough::trail::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
