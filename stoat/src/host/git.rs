@@ -279,6 +279,12 @@ pub trait GitRepo: Send + Sync {
     /// Read the full tree at `sha` as a map of repo-relative path to
     /// UTF-8 content. Returns `None` when the sha is unknown or any
     /// entry is not valid UTF-8. Used by commit and commit-range review.
+    ///
+    /// This is the whole-tree read, for a caller that needs every blob as
+    /// text. No commit-writing path uses it: refusing a tree over one binary
+    /// file made an amend impossible in a repository holding a font.
+    /// [`Self::tree_oid`] names a tree without reading it, and
+    /// [`Self::tree_with_updates`] rewrites one in place.
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>>;
 
     /// The files differing between `base` and `new`, each as its
@@ -415,13 +421,13 @@ pub trait GitRepo: Send + Sync {
     /// Parents, author, and committer carry over; signatures are
     /// stripped; hooks are not invoked. Returns the new HEAD sha.
     ///
-    /// Fails when HEAD is orphan, the commit cannot be built, or the
-    /// backend rejects the write.
-    fn amend_head(
-        &self,
-        tree: &BTreeMap<PathBuf, String>,
-        message: Option<&str>,
-    ) -> Result<String, GitApplyError>;
+    /// The tree is named by oid, the same way [`Self::create_commit`] takes
+    /// one. An amend usually rewrites a single path, so building the oid
+    /// through [`Self::tree_with_updates`] leaves every other blob alone.
+    ///
+    /// Fails when HEAD is orphan, the tree is unknown, or the backend rejects
+    /// the write.
+    fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError>;
 
     /// The tree of `base_sha` with each update applied, written as a new tree.
     ///

@@ -171,13 +171,16 @@ pub(super) fn amend_hunk(
         return UpdateEffect::Redraw;
     };
 
-    let Some(mut tree) = repo.commit_tree(&target.head_sha) else {
-        stoat.set_status("could not read the commit's tree");
-        return UpdateEffect::Redraw;
-    };
     let git_root = stoat.active_workspace().git_root.clone();
     let rel = path.strip_prefix(&git_root).unwrap_or(path).to_path_buf();
-    tree.insert(rel, amended);
+    // One path, so every other blob in the commit keeps the entry it had.
+    let tree = match repo.tree_with_updates(&target.head_sha, &[(rel, Some(amended))]) {
+        Ok(tree) => tree,
+        Err(err) => {
+            stoat.set_status(format!("could not build the amended tree: {err}"));
+            return UpdateEffect::Redraw;
+        },
+    };
 
     let new_sha = match repo.amend_head(&tree, None) {
         Ok(new_sha) => new_sha,

@@ -612,18 +612,15 @@ impl GitRepo for LocalGitRepo {
         head.shorthand().ok().map(|name| name.to_string())
     }
 
-    fn amend_head(
-        &self,
-        tree: &BTreeMap<PathBuf, String>,
-        message: Option<&str>,
-    ) -> Result<String, GitApplyError> {
+    fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let head = repo
             .head()
             .and_then(|h| h.peel_to_commit())
             .map_err(err_msg)?;
-        let tree_oid = tree::build_tree_from_map(&repo, tree).map_err(err_msg)?;
-        let new_tree = repo.find_tree(tree_oid).map_err(err_msg)?;
+        let new_tree = git2::Oid::from_str(tree_oid)
+            .and_then(|oid| repo.find_tree(oid))
+            .map_err(err_msg)?;
         let new_id = head
             .amend(Some("HEAD"), None, None, None, message, Some(&new_tree))
             .map_err(err_msg)?;
@@ -1591,6 +1588,47 @@ mod tests {
             repo.find_blob(entry.id()).unwrap().content().to_vec()
         };
         assert_eq!(picked, binary, "and holds it byte for byte");
+    }
+
+    /// The amend walk used to read the whole HEAD tree as text before it could
+    /// rewrite one path, so a repository holding a font refused every amend
+    /// with nothing rewritten. Building the tree from the one path it changes
+    /// never reads the rest.
+    #[test]
+    fn an_amend_over_a_tree_holding_a_binary_blob_keeps_the_blob() {
+        let (dir, repo, _) = seeded_repo();
+        let binary = [0u8, 159, 146, 150];
+        let head = commit_files(&repo, &dir, &[("font.ttf", &binary), ("b.txt", b"before")]);
+        let git = discover(&dir);
+
+        assert_eq!(
+            git.commit_tree(&head),
+            None,
+            "reading the tree as text refuses it, which is what blocked the amend",
+        );
+
+        let tree = git
+            .tree_with_updates(
+                &head,
+                &[(PathBuf::from("b.txt"), Some("after".to_string()))],
+            )
+            .expect("the amended tree builds from the one path it changes");
+        let amended = git.amend_head(&tree, None).expect("the amend commits");
+
+        let entries = {
+            let tree = repo.find_commit(Oid::from_str(&amended).unwrap()).unwrap();
+            let tree = tree.tree().unwrap();
+            let blob = |name: &str| {
+                let entry = tree.get_path(Path::new(name)).expect("the path survived");
+                repo.find_blob(entry.id()).unwrap().content().to_vec()
+            };
+            (blob("font.ttf"), blob("b.txt"))
+        };
+        assert_eq!(
+            entries,
+            (binary.to_vec(), b"after".to_vec()),
+            "the binary rode through untouched and the named path was rewritten",
+        );
     }
 
     #[test]

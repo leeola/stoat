@@ -680,7 +680,7 @@ mod tests {
         let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
         let amended = {
             let head = repo.resolve_rev("HEAD").expect("HEAD");
-            let tree = repo.commit_tree(&head).expect("the picked commit's tree");
+            let tree = repo.tree_oid(&head).expect("the picked commit's tree");
             repo.amend_head(&tree, Some("c2: amended while stopped"))
                 .expect("amend")
         };

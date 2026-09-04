@@ -996,8 +996,12 @@ fn amend_head_replaces_tree_and_updates_head() {
     tr.commit_file("a.rs", "v1\n");
     let before = tr.head_sha();
     let repo = LocalGit::new().discover(tr.path()).unwrap();
-    let mut new_tree = BTreeMap::new();
-    new_tree.insert(PathBuf::from("a.rs"), "amended\n".to_string());
+    let new_tree = repo
+        .tree_with_updates(
+            &before,
+            &[(PathBuf::from("a.rs"), Some("amended\n".to_string()))],
+        )
+        .expect("the amended tree builds");
     let new_sha = repo.amend_head(&new_tree, None).expect("amend ok");
     assert_ne!(new_sha, before, "amend must produce a new sha");
     let tree = repo.commit_tree(&new_sha).unwrap();

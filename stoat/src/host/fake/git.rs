@@ -1298,12 +1298,14 @@ impl GitRepo for FakeGitRepo {
         state.head_branch.clone()
     }
 
-    fn amend_head(
-        &self,
-        tree: &BTreeMap<PathBuf, String>,
-        message: Option<&str>,
-    ) -> Result<String, GitApplyError> {
+    fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
         let mut state = self.state.lock().unwrap();
+        let Some(tree) = state.trees.get(tree_oid).cloned() else {
+            return BackendSnafu {
+                reason: format!("unknown tree oid: {tree_oid}"),
+            }
+            .fail();
+        };
         let Some(head_sha) = state.head.clone() else {
             return BackendSnafu {
                 reason: "HEAD has no commit",
@@ -1327,7 +1329,7 @@ impl GitRepo for FakeGitRepo {
             .unwrap_or(head_commit.message.clone());
         let new_commit = FakeCommit {
             parents: head_commit.parents.clone(),
-            tree: tree.clone(),
+            tree,
             message: new_msg,
             author_name: head_commit.author_name.clone(),
             author_email: head_commit.author_email.clone(),
@@ -2363,7 +2365,8 @@ mod tests {
             .set_head_branch("main");
         let repo = host.discover(&workdir()).unwrap();
 
-        let amended = repo.amend_head(&BTreeMap::new(), None).unwrap();
+        let tree = repo.tree_oid("c1").expect("the commit HEAD is on");
+        let amended = repo.amend_head(&tree, None).unwrap();
         assert_eq!(
             repo.local_branches(),
             [("main".to_string(), amended)],
@@ -2381,7 +2384,8 @@ mod tests {
         let repo = host.discover(&workdir()).unwrap();
         repo.checkout_detached("c2").unwrap();
 
-        repo.amend_head(&BTreeMap::new(), None).unwrap();
+        let tree = repo.tree_oid("c2").expect("the commit HEAD is detached at");
+        repo.amend_head(&tree, None).unwrap();
         assert_eq!(
             repo.local_branches(),
             [("main".to_string(), "c2".to_string())],
