@@ -70,6 +70,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "walkthrough-columns",
         "a tab-indented message table whose tour marks spans past wide glyphs",
     ),
+    (
+        "walkthrough-catalog",
+        "the walkthrough crate with four stored tours, one of them empty",
+    ),
 ];
 
 /// The input sequence a fixture opens itself with, for one whose point is a

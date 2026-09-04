@@ -429,6 +429,84 @@ fn walkthrough_trail_fixture_lays_a_trail_between_calling_stops() {
     });
 }
 
+/// A workspace holding several tours is the only place `open` replaces a run
+/// rather than starting one, and the only place a tour that never becomes a run
+/// has anything to leave behind. This drives both against the fixture written
+/// for them.
+///
+/// Stepping is what proves the swap, since the status line only ever names the
+/// tour it just acted on. A one-stop tour clamps in both directions, so the
+/// message a step reports says which tour is playing without moving anything.
+#[test]
+fn walkthrough_catalog_fixture_swaps_tours_mid_play() {
+    let (_dir, _root, mut harness) = fixture_harness("walkthrough-catalog");
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":walkthrough tour<Enter>")
+            .await
+            .expect("open the six-stop tour");
+        handle
+            .await_frame(
+                |text| text.contains("1/6: Entry point"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the baseline tour opens on its first stop");
+
+        handle
+            .send_keys(":walkthrough solo<Enter>")
+            .await
+            .expect("open the one-stop tour over it");
+        handle
+            .await_frame(|text| text.contains("1/1:"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("the one-stop tour replaces the run mid-play");
+
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("enter walkthrough mode");
+        handle.send_keys("n").await.expect("step off the only stop");
+        handle
+            .await_frame(
+                |text| status_of(text).contains("already on the last stop"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("one stop is both ends, so a step forward reports the end");
+        handle.send_keys("<Esc>").await.expect("leave the mode");
+
+        handle
+            .send_keys(":walkthrough empty<Enter>")
+            .await
+            .expect("open the tour with no stops");
+        handle
+            .await_frame(
+                |text| status_of(text).contains("'empty' has no stops"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("a tour with no stops reports why rather than opening");
+
+        // The status names the tour it refused, so what proves the refusal left
+        // the run alone is stepping it again.
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("enter walkthrough mode");
+        handle.send_keys("p").await.expect("step back");
+        handle
+            .await_frame(
+                |text| status_of(text).contains("already on the first stop"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the one-stop tour is still the one playing");
+
+        handle.send_keys("d").await.expect("end the tour");
+    });
+}
+
 /// The status line of `frame`, being its last line with content.
 fn status_of(frame: &str) -> &str {
     frame

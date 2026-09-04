@@ -419,6 +419,11 @@ pub enum FixtureError {
 ///   is a byte, a character index is another number, and a screen cell is a third, so each stop
 ///   marks a span past one of them. The last stop labels three spans in a script whose glyphs take
 ///   two cells, which the char-counted label and card boxes are sized for as though they took one.
+/// - `walkthrough-catalog`: the `walkthrough` crate committed with four tours over it rather than
+///   one, so the `:walkthrough` picker (which lists them through `store::list` at
+///   [`crate::action_handlers::palette`]) and the badge naming the slug in play have a workspace to
+///   read. Beside the six-stop baseline it stores a one-stop tour, a three-stop tour with no
+///   annotations, and a tour with no stops, which loads and lists but never becomes a run.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -439,6 +444,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "walkthrough-drift" => walkthrough::drift::materialize(dest),
         "walkthrough-trail" => walkthrough::trail::materialize(dest),
         "walkthrough-columns" => walkthrough::columns::materialize(dest),
+        "walkthrough-catalog" => walkthrough::catalog::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }

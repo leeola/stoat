@@ -10,6 +10,7 @@ use crate::walkthrough::{self, Location, Point, Range, Walkthrough};
 use std::path::PathBuf;
 
 pub(super) mod card;
+pub(super) mod catalog;
 pub(super) mod columns;
 pub(super) mod drift;
 pub(super) mod marks;
