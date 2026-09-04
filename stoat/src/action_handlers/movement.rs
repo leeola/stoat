@@ -4126,7 +4126,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
     // Every selection steps from its own cursor, so a multi-cursor set walks to
     // one hunk each rather than sharing whichever cursor happened to be newest.
-    let landings: Vec<(usize, Range<usize>, Range<u32>)> = editor
+    let mut landings: Vec<(usize, Range<usize>, Range<u32>)> = editor
         .selections
         .all_anchors()
         .iter()
@@ -4141,6 +4141,11 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
         })
         .collect();
 
+    // Sorted by id so the transform below and the centering after it reach
+    // their own landing by binary search. A selection that took no landing
+    // leaves a gap, so the list is not indexed by position.
+    landings.sort_unstable_by_key(|(id, ..)| *id);
+
     if landings.is_empty() {
         return goto_change_across_files(stoat, dir, current_path, source_diff_view, origin);
     }
@@ -4148,9 +4153,10 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, _head_offset, tail_offset| {
-            let Some((_, target, _)) = landings.iter().find(|(id, ..)| *id == sel.id) else {
+            let Ok(idx) = landings.binary_search_by_key(&sel.id, |(id, ..)| *id) else {
                 return sel.clone();
             };
+            let target = &landings[idx].1;
 
             let (start, end, reversed) = if extend {
                 extend_span(rope, tail_offset, target)
@@ -4199,15 +4205,17 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 ///
 /// `None` where the newest selection took no landing, which leaves the caller
 /// on the plain cursor centering.
+///
+/// `landings` is sorted by selection id.
 fn landed_display_span(
     editor: &mut EditorState,
     landings: &[(usize, Range<usize>, Range<u32>)],
 ) -> Option<Range<u32>> {
     let newest_id = editor.selections.newest_anchor().id;
-    let rows = landings
-        .iter()
-        .find(|(id, ..)| *id == newest_id)
-        .map(|(_, _, rows)| rows.clone())?;
+    let idx = landings
+        .binary_search_by_key(&newest_id, |(id, ..)| *id)
+        .ok()?;
+    let rows = landings[idx].2.clone();
 
     Some(stop_display_span(&editor.display_map.snapshot(), &rows))
 }
@@ -4237,35 +4245,47 @@ fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32
 /// its seam, so both arms read that row as the one it occupies. A step forward
 /// off a removal the cursor already sits on passes over it, and a step back
 /// from the seam row lands on it.
+///
+/// Both arms split the list at a boundary rather than filter it. The stops a
+/// direction keeps are a run at one end, because the landing row rises across
+/// the list and so does the end row, which is what makes the split answer what
+/// a scan of every stop did.
 fn nth_hunk_rows(
     hunk_rows: &[Range<u32>],
     cursor_row: u32,
     dir: ChangeDir,
     count: usize,
 ) -> Option<Range<u32>> {
+    debug_assert!(
+        hunk_rows
+            .windows(2)
+            .all(|w| landing_row(&w[0]) <= landing_row(&w[1])),
+        "the hunk stops rise by landing row",
+    );
+
     match dir {
         ChangeDir::Next => {
-            let next: Vec<_> = hunk_rows
-                .iter()
-                .filter(|r| match r.is_empty() {
-                    true => r.start.saturating_sub(1) > cursor_row,
-                    false => r.start > cursor_row,
-                })
-                .collect();
-            let idx = (count.saturating_sub(1)).min(next.len().checked_sub(1)?);
-            Some(next[idx].clone())
+            let last = hunk_rows.len().checked_sub(1)?;
+            let first = hunk_rows.partition_point(|r| landing_row(r) <= cursor_row);
+            let idx = (first + count.saturating_sub(1)).min(last);
+            (idx >= first).then(|| hunk_rows[idx].clone())
         },
         ChangeDir::Prev => {
-            let prev: Vec<_> = hunk_rows
-                .iter()
-                .filter(|r| match r.is_empty() {
-                    true => r.start.saturating_sub(1) < cursor_row,
-                    false => r.end <= cursor_row,
-                })
-                .collect();
-            let idx = prev.len().checked_sub(count.max(1))?.min(prev.len() - 1);
-            Some(prev[idx].clone())
+            let end = hunk_rows.partition_point(|r| match r.is_empty() {
+                true => r.start.saturating_sub(1) < cursor_row,
+                false => r.end <= cursor_row,
+            });
+            Some(hunk_rows[end.checked_sub(count.max(1))?].clone())
         },
+    }
+}
+
+/// Row a stop puts the cursor on. A deletion holds no rows of its own, so it
+/// lands on the row above the removal.
+fn landing_row(rows: &Range<u32>) -> u32 {
+    match rows.is_empty() {
+        true => rows.start.saturating_sub(1),
+        false => rows.start,
     }
 }
 

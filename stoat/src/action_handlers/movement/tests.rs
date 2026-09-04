@@ -74,6 +74,45 @@ fn shrink_containment_refuses_interleaved_ranges() {
     );
 }
 
+/// A deletion holds no rows, so it lands on the row above the removal and
+/// shares that row with whatever hunk owns it. The step forward reads the
+/// shared row as occupied and passes over the deletion, and the step back
+/// reads it as behind and lands on it, which is the pair a split of the list
+/// has to answer the same way a scan of every stop did.
+#[test]
+fn a_change_step_lands_the_stop_the_count_reaches() {
+    let stops = [2..5, 7..7, 9..12, 15..16, 20..24];
+    let next = |row, count| nth_hunk_rows(&stops, row, ChangeDir::Next, count);
+    let prev = |row, count| nth_hunk_rows(&stops, row, ChangeDir::Prev, count);
+
+    assert_eq!(next(0, 1), Some(2..5), "a step from above lands the first");
+    assert_eq!(
+        next(3, 1),
+        Some(7..7),
+        "a step out of a hunk takes the next"
+    );
+    assert_eq!(
+        next(6, 1),
+        Some(9..12),
+        "a step off a deletion's own row passes over it",
+    );
+    assert_eq!(next(3, 3), Some(15..16), "a count skips two stops");
+    assert_eq!(next(3, 9), Some(20..24), "a count past the end holds there");
+    assert_eq!(next(21, 1), None, "a step past the last lands nothing");
+
+    assert_eq!(prev(22, 1), Some(15..16), "a step back leaves its own hunk");
+    assert_eq!(prev(7, 1), Some(7..7), "a step back from a seam lands it");
+    assert_eq!(prev(20, 3), Some(7..7), "a count back reaches the deletion");
+    assert_eq!(prev(0, 1), None, "a step back from the first lands nothing");
+
+    let top_deletion = 0..0;
+    assert_eq!(
+        nth_hunk_rows(std::slice::from_ref(&top_deletion), 0, ChangeDir::Prev, 1),
+        None,
+        "a deletion at the top is not behind a cursor on its own row",
+    );
+}
+
 /// The changed list groups staged files before unstaged ones, so a staged file
 /// late in the alphabet sits ahead of an unstaged file early in it. Walking
 /// that order sends `n` backward through the alphabet and reports a wrap that
