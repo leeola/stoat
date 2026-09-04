@@ -39,6 +39,21 @@ pub(crate) fn write_str_clipped(
     }
 }
 
+/// Cells `text` draws in, which is not its character count in every script.
+///
+/// A box sized by characters is half as wide as the text it holds wherever the
+/// glyphs take two cells, so the border cuts the line. Wrapping and sizing both
+/// measure this way, since a box the right width still overruns where the wrap
+/// filled its lines by counting.
+pub(crate) fn text_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+/// Cells `ch` draws in, counting a zero-width glyph as none.
+fn char_width(ch: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
 /// Wrap a line of styled spans to `width` columns, keeping each piece's style.
 ///
 /// [`wrap_text`] cannot take this. A break has to fall between words *across*
@@ -67,7 +82,7 @@ pub(crate) fn wrap_styled(line: &[(String, Style)], width: usize) -> Vec<Vec<(St
     let mut current_w = 0usize;
 
     for word in styled_words(line) {
-        let word_w: usize = word.iter().map(|(text, _)| text.chars().count()).sum();
+        let word_w: usize = word.iter().map(|(text, _)| text_width(text)).sum();
 
         if word_w > width {
             if !current.is_empty() {
@@ -78,7 +93,7 @@ pub(crate) fn wrap_styled(line: &[(String, Style)], width: usize) -> Vec<Vec<(St
             // it stays open for the words after it rather than taking a line to
             // itself.
             current = pieces.pop().unwrap_or_default();
-            current_w = current.iter().map(|(text, _)| text.chars().count()).sum();
+            current_w = current.iter().map(|(text, _)| text_width(text)).sum();
             lines.extend(pieces);
             continue;
         }
@@ -130,21 +145,33 @@ fn split_word(word: Vec<(String, Style)>, width: usize) -> Vec<Vec<(String, Styl
     for (text, style) in word {
         let mut rest = text.as_str();
         while !rest.is_empty() {
-            let take = rest.chars().count().min(width - current_w);
-            let cut = rest
-                .char_indices()
-                .nth(take)
-                .map_or(rest.len(), |(at, _)| at);
+            // Characters until the room is filled, not a count of them, so a
+            // run of two-cell glyphs stops at half as many.
+            let mut taken = 0usize;
+            let mut cut = rest.len();
+            for (at, ch) in rest.char_indices() {
+                if taken + char_width(ch) > width - current_w {
+                    cut = at;
+                    break;
+                }
+                taken += char_width(ch);
+            }
+            // A glyph wider than the whole line has to go somewhere, so it
+            // takes a line of its own rather than stalling the walk.
+            if cut == 0 {
+                cut = rest.char_indices().nth(1).map_or(rest.len(), |(at, _)| at);
+                taken = width - current_w;
+            }
             let (head, tail) = rest.split_at(cut);
 
             match current.last_mut() {
                 Some((last, last_style)) if *last_style == style => last.push_str(head),
                 _ => current.push((head.to_owned(), style)),
             }
-            current_w += take;
+            current_w += taken;
             rest = tail;
 
-            if current_w == width {
+            if current_w >= width {
                 lines.push(std::mem::take(&mut current));
                 current_w = 0;
             }
@@ -198,7 +225,7 @@ pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     }
     let indent_byte_len = text.len() - trimmed_start.len();
     let indent = text[..indent_byte_len].to_string();
-    let indent_w = indent.chars().count();
+    let indent_w = text_width(&indent);
     if indent_w >= width {
         return vec![text.to_string()];
     }
@@ -208,7 +235,7 @@ pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut current_w = indent_w;
     for word in trimmed_start.split_whitespace() {
         let needs_space = current_w > indent_w;
-        let word_w = word.chars().count();
+        let word_w = text_width(word);
         let add_w = word_w + usize::from(needs_space);
         if current_w + add_w <= width {
             if needs_space {
@@ -276,7 +303,7 @@ pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip_to_width, wrap_styled};
+    use super::{clip_to_width, text_width, wrap_styled};
     use ratatui::style::Style;
 
     /// The clip is a byte slice of its input, so a width landing inside a
@@ -381,6 +408,28 @@ mod tests {
             ],
             "the break falls at the width, wherever the styles change",
         );
+    }
+
+    /// A wrap that counts characters fills a line with twice the cells it was
+    /// given wherever the glyphs take two, and the border of the box it wrapped
+    /// for then cuts every line in half.
+    #[test]
+    fn a_wrap_fills_a_line_by_cells_not_characters() {
+        let plain = Style::default();
+        // Six characters, twelve cells.
+        let line = vec![("ある日本語の文".to_owned(), plain)];
+
+        let texts: Vec<String> = wrap_styled(&line, 8)
+            .iter()
+            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
+            .collect();
+
+        assert_eq!(
+            texts,
+            ["ある日本", "語の文"],
+            "four two-cell glyphs fill eight columns",
+        );
+        assert_eq!(text_width("ある日本"), 8, "and that line draws eight wide");
     }
 
     /// A blank line between paragraphs is what separates them, so it survives

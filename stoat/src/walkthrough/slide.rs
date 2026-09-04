@@ -13,6 +13,7 @@
 //! Nothing here reads a `Stoat`, a theme, or a config. The caller supplies the
 //! geometry it already has and applies the colors it already resolved.
 
+use crate::render::text::text_width;
 use ratatui::layout::Rect;
 
 /// Sixteenths in one cell, the unit a mark's geometry is stated in.
@@ -472,7 +473,7 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
 /// `None` for a label with no lines, which draws nothing rather than an empty
 /// box.
 fn label_size(lines: &[String]) -> Option<(u16, u16)> {
-    let widest = lines.iter().map(|line| line.chars().count()).max()?;
+    let widest = lines.iter().map(|line| text_width(line)).max()?;
     Some((widest as u16 + 2, lines.len() as u16 + 2))
 }
 

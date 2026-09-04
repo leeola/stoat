@@ -4,6 +4,7 @@ use crate::{
     code_index::{build, nav},
     render::{
         hover::{HoverFrame, HoverPopup},
+        text::text_width,
         walkthrough::EXIT_MS,
     },
     walkthrough::{
@@ -541,11 +542,7 @@ fn card_text(run: &WalkthroughRun) -> Option<(String, String)> {
 fn card_width(lines: &[Vec<(String, Style)>], frame_width: u16) -> u16 {
     let widest = lines
         .iter()
-        .map(|line| {
-            line.iter()
-                .map(|(text, _)| text.chars().count())
-                .sum::<usize>()
-        })
+        .map(|line| line.iter().map(|(text, _)| text_width(text)).sum::<usize>())
         .max()
         .unwrap_or(0);
     let ceiling = CARD_MAX_WIDTH.min((frame_width / 2).max(CARD_MIN_WIDTH));
