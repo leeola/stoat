@@ -13,6 +13,7 @@ use cosmic_text::{
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use ttf_parser::{gsub::SubstitutionSubtable, opentype_layout::Coverage};
 
 /// Family name of the bundled Nerd Font, registered by [`load_bundled_fonts`].
 ///
@@ -58,6 +59,71 @@ pub(super) fn shape_char(
     let run = buffer.layout_runs().next()?;
     let glyph = run.glyphs.first()?;
     Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
+}
+
+/// Every glyph id `font` substitutes, sorted, or empty where it substitutes
+/// none.
+///
+/// A run whose glyphs all sit outside this set shapes to exactly what shaping
+/// each character alone produces, so it needs no shaper. A substitution fires
+/// only when a glyph sits in some lookup's input coverage, so the union of
+/// every subtable's coverage over-approximates. It keeps a run on the shaping
+/// path that had no substitution to make, and it never lets one past that did.
+///
+/// Empty for a face with no GSUB table, one that fails to parse, or one inside
+/// a collection whose index does not resolve. Each of those reads as
+/// "substitutes nothing", which costs shaping the caller paid anyway.
+pub(super) fn substitution_coverage(font: &Font) -> Vec<u16> {
+    let data = font.data();
+    let Some(index) = face_index(data, font.as_swash().offset) else {
+        return Vec::new();
+    };
+    let Ok(face) = ttf_parser::Face::parse(data, index) else {
+        return Vec::new();
+    };
+    let Some(gsub) = face.tables().gsub else {
+        return Vec::new();
+    };
+
+    let mut ids = Vec::new();
+    for lookup in gsub.lookups {
+        for subtable in lookup.subtables.into_iter::<SubstitutionSubtable<'_>>() {
+            match subtable.coverage() {
+                Coverage::Format1 { glyphs } => ids.extend(glyphs.into_iter().map(|id| id.0)),
+                Coverage::Format2 { records } => {
+                    for record in records {
+                        ids.extend(record.start.0..=record.end.0);
+                    }
+                },
+            }
+        }
+    }
+
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// The index `ttf_parser` selects a face by, given the byte offset of that
+/// face's table directory.
+///
+/// A single font file has one face at index zero. A collection lists its
+/// faces' offsets after the `ttcf` tag, so the index is the position of the
+/// offset in that list. Nothing else identifies a face across the two crates:
+/// one names a face by index and the other by offset.
+fn face_index(data: &[u8], offset: u32) -> Option<u32> {
+    let Some(faces) = ttf_parser::fonts_in_collection(data) else {
+        return Some(0);
+    };
+
+    (0..faces).find(|index| {
+        // The header is the tag, the version, the count, then one big-endian
+        // offset per face.
+        let at = 12 + *index as usize * 4;
+        data.get(at..at + 4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .is_some_and(|bytes| u32::from_be_bytes(bytes) == offset)
+    })
 }
 
 /// Allocations [`shape_run`] reuses from one call to the next.
@@ -520,8 +586,8 @@ mod tests {
     use super::{
         build_font_system, font_covers, glyph_family, load_bundled_fonts, resolve_primary_family,
         resolve_primary_font, run_text_and_columns_into, shape_char, shape_family, shape_run,
-        shape_run_cached, shape_words, RunShapeCache, ShapeScratch, RUN_SHAPE_CACHE_CAP,
-        SYMBOLS_FAMILY,
+        shape_run_cached, shape_words, substitution_coverage, RunShapeCache, ShapeScratch,
+        RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -579,6 +645,39 @@ mod tests {
             Family::Name(SYMBOLS_FAMILY),
             "a Private-Use-Area powerline glyph the primary lacks routes to the symbols font"
         );
+    }
+
+    /// The coverage separates a run the font reshapes from one it leaves
+    /// alone, so it has to hold every glyph the bundled face ligates from. A
+    /// set missing `=` drops the ligature the face forms from it.
+    ///
+    /// It holds letters too, since the face carries character-variant lookups
+    /// over them, and this takes every lookup's coverage rather than only the
+    /// ones a default shaping run reaches. That is the conservative direction:
+    /// it keeps a run on the shaping path that had nothing to gain there, and
+    /// it never lets one past that did.
+    #[test]
+    fn substitution_coverage_holds_the_glyphs_the_face_reshapes() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let font = resolve_primary_font(&mut font_system, Some("JetBrains Mono"))
+            .expect("the bundled face resolves");
+
+        let coverage = substitution_coverage(&font);
+        let charmap = font.as_swash().charmap();
+        let holds = |ch: char| coverage.binary_search(&charmap.map(ch)).is_ok();
+
+        for ch in ['=', '-', '>', '<', ':', '!'] {
+            assert!(holds(ch), "{ch:?} ligates, so the face reshapes it");
+        }
+        for ch in ['b', 'z', 'x', ' '] {
+            assert!(!holds(ch), "{ch:?} no lookup reaches");
+        }
+
+        // The face files its coverage in both formats, a list of glyphs and a
+        // list of ranges, and the characters above all land in the first. The
+        // total is what says the ranges were read too.
+        assert_eq!(coverage.len(), 222, "every subtable of both formats");
     }
 
     #[test]

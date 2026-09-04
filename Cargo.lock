@@ -4282,6 +4282,7 @@ dependencies = [
  "stoatty_term",
  "swash",
  "tracing",
+ "ttf-parser",
  "wgpu",
 ]
 

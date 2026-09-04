@@ -596,6 +596,13 @@ pub struct TextPass {
     /// through to the fallback font. Fixed for the pass's lifetime, as the
     /// family is.
     primary_font: Option<Arc<Font>>,
+    /// Sorted glyph ids [`Self::primary_font`] substitutes, which separates a
+    /// run the font reshapes from one it leaves alone.
+    ///
+    /// A run of ids none of which appear here shapes to what shaping each
+    /// character alone gives, so it needs no shaper. Built once beside the face
+    /// it describes, which is fixed for the pass's lifetime.
+    substitutable: Vec<u16>,
     /// Whether adjacent same-style cells shape together so the font's ligatures
     /// form across cells. When false, every cell is shaped on its own.
     ligatures: bool,
@@ -736,6 +743,10 @@ impl TextPass {
             font::shape_family(family.as_deref()),
         );
         let primary_font = font::resolve_primary_font(&mut font_system, family.as_deref());
+        let substitutable = primary_font
+            .as_deref()
+            .map(font::substitution_coverage)
+            .unwrap_or_default();
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
 
@@ -948,7 +959,7 @@ impl TextPass {
             instance_bytes::<UnderlineInstance>(INITIAL_CAPACITY),
         );
 
-        TextPass {
+        let pass = TextPass {
             pipeline,
             globals,
             globals_bind_group,
@@ -1040,6 +1051,7 @@ impl TextPass {
             font_system,
             family,
             primary_font,
+            substitutable,
             ligatures,
             swash_cache,
             shape_cache: FxHashMap::default(),
@@ -1072,7 +1084,18 @@ impl TextPass {
             last_cursor_cell: None,
             baseline,
             metrics,
-        }
+        };
+
+        // A face reporting none substitutes nothing, or its table did not
+        // parse. Either way every run shapes, so the count is what separates
+        // those two on a machine drawing slowly.
+        tracing::debug!(
+            target: "stoatty_render::text",
+            family = ?pass.family,
+            substitutable = pass.substitutable.len(),
+            "resolved the primary face's substitution coverage",
+        );
+        pass
     }
 
     /// Re-derive the text pass for `metrics` so the next frame shapes and

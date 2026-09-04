@@ -22,6 +22,7 @@ raw-window-handle.workspace = true
 futures = { workspace = true, features = ["executor"] }
 cosmic-text.workspace = true
 swash.workspace = true
+ttf-parser.workspace = true
 etagere.workspace = true
 lru.workspace = true
 rustc-hash.workspace = true
