@@ -961,6 +961,14 @@ pub struct Stoat {
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
     pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
+    /// A conflicted file whose three-way alignment runs off the UI thread,
+    /// applied by [`action_handlers::conflict_view::pump_conflict_file`] when
+    /// it lands.
+    ///
+    /// The alignment runs two structural diffs against the ancestor, which the
+    /// view used to pay on the press that opened it and again on every step
+    /// between files.
+    pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
     /// A review-walk step whose checkout is still running.
     ///
     /// The checkout walks the tree and writes files, and the dirty guard ahead
@@ -2196,6 +2204,7 @@ impl Stoat {
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
             pending_changed_file_jump: None,
+            pending_conflict_file: None,
             pending_walk_landing: None,
             pending_diff_nav_jump: None,
             pending_code_search: None,
@@ -7576,6 +7585,7 @@ impl Stoat {
         let walk_landing = action_handlers::review_walk::pump_walk_landing(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
+        let conflict_file = action_handlers::conflict_view::pump_conflict_file(self);
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
@@ -7597,6 +7607,7 @@ impl Stoat {
             || walk_landing
             || code_search
             || changed_file_jump
+            || conflict_file
             || diff_nav_jump
             || lsp
             || auto_reload

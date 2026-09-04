@@ -2554,6 +2554,9 @@ mod tests {
             Some("a\nX\nc\n"),
         );
         action_handlers::dispatch(&mut h.stoat, &Conflict);
+        // The open leaves the file's alignment to a worker, so the center
+        // editor reaches the pane a pump later.
+        h.settle();
 
         let editor_id = {
             let ws = h.stoat.active_workspace();

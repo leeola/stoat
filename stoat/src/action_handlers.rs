@@ -4,7 +4,7 @@ pub(crate) mod code_search;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
-mod conflict_view;
+pub(crate) mod conflict_view;
 pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;

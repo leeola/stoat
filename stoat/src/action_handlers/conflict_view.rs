@@ -13,10 +13,11 @@ use ratatui::text::Line;
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
-    path::Path,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc},
 };
 use stoat_action::ActionKind;
+use stoat_scheduler::Task;
 use stoat_text::{Anchor, Bias, LineEnding, SelectionGoal};
 
 /// Open the three-way conflict resolve view on the repository's conflicted
@@ -24,9 +25,18 @@ use stoat_text::{Anchor, Bias, LineEnding, SelectionGoal};
 ///
 /// Dispatching while the view is already open closes it (toggle). With no
 /// index conflicts, sets a status and leaves the file view in place.
+///
+/// The first file's alignment runs on a worker, so the pane still shows the
+/// plain file until [`pump_conflict_file`] installs the session.
 pub(super) fn open_conflict(stoat: &mut Stoat) {
     if stoat.active_workspace().conflict.is_some() {
         close_conflict(stoat);
+        return;
+    }
+    // The session is absent until the first alignment lands, so the toggle
+    // above reads a second press as a fresh open. Refusing it here stops a
+    // second alignment from installing over the first.
+    if stoat.pending_conflict_file.is_some() {
         return;
     }
 
@@ -66,17 +76,36 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
     let origin = super::jump::live_entry(stoat);
 
     let file_count = files.len();
-    let Some((file, first_chunk_offset)) = prepare_file(
-        stoat,
-        &repo,
-        &files[current],
+    let path = files[current].clone();
+    let intent = ConflictIntent::Open {
+        repo: repo.clone(),
+        git_root,
+        files,
         current,
-        file_count,
-        &git_root,
-    ) else {
+        saved_editor,
+        origin,
+    };
+    if spawn_conflict_doc(stoat, &repo, &path, current, file_count, intent).is_none() {
         stoat.set_status("no merge conflicts");
+    }
+}
+
+/// Install a landed first alignment as the workspace's conflict session and
+/// swap its center editor into the focused pane.
+fn open_landed(stoat: &mut Stoat, landed: ConflictDoc, intent: ConflictIntent) {
+    let ConflictIntent::Open {
+        repo,
+        git_root,
+        files,
+        current,
+        saved_editor,
+        origin,
+    } = intent
+    else {
         return;
     };
+
+    let (file, first_chunk_offset) = install_conflict_file(stoat, landed, &git_root);
 
     {
         let ws = stoat.active_workspace_mut();
@@ -86,6 +115,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
 
         ws.conflict = Some(ConflictSession {
             workdir: git_root,
+            repo,
             files,
             current,
             file,
@@ -99,21 +129,65 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
     land_first_chunk(stoat, first_chunk_offset, origin);
 }
 
-/// Build the scratch center editor and resolve state for one conflicted file.
+/// A conflicted file's three-way alignment, once the worker has produced it.
 ///
-/// Reads the file's index stages through `repo`, seeds a scratch buffer with the
-/// initial marker text, and inserts a center editor carrying the render cache.
-/// Returns the resolve state and the byte offset of its first chunk, or `None`
-/// when the file no longer reports index conflicts. Leaves the pane and session
-/// untouched, so the caller decides how the editor is displayed.
-fn prepare_file(
+/// The fields beside the document are ones the run loop read before it armed
+/// the alignment. They ride back with the answer rather than being read a
+/// second time on the far side.
+struct ConflictDoc {
+    doc: MergeDoc,
+    /// The terminator the conflicted file uses, read from its stages before
+    /// they were normalized away.
+    ending: LineEnding,
+    path: PathBuf,
+    /// Position of `path` in the session's file list, and the length of that
+    /// list, both painted in the view's header.
+    index: usize,
+    file_count: usize,
+}
+
+/// What the run loop does with a [`ConflictDoc`] once it lands.
+enum ConflictIntent {
+    /// Install the session and swap the center editor into the pane.
+    ///
+    /// Everything the open read before it armed the alignment travels here,
+    /// because there is no session to hold it yet.
+    Open {
+        repo: Arc<dyn GitRepo>,
+        git_root: PathBuf,
+        files: Vec<PathBuf>,
+        current: usize,
+        saved_editor: EditorId,
+        origin: Option<JumpEntry>,
+    },
+    /// Show file `target` of the live session, parking the outgoing one.
+    Switch { target: usize },
+}
+
+/// A conflicted file whose alignment has not landed yet.
+///
+/// Held on [`Stoat`] between the press that armed it and the
+/// [`pump_conflict_file`] that applies it.
+pub(crate) struct PendingConflictFile {
+    rx: mpsc::Receiver<ConflictDoc>,
+    _task: Task<()>,
+    intent: ConflictIntent,
+}
+
+/// Align one conflicted file on a worker, to be finished by
+/// [`pump_conflict_file`] with `intent`.
+///
+/// Returns `None` where the file no longer reports index conflicts, which is
+/// the only answer the caller gets synchronously. The stage read stays here so
+/// that answer does not travel behind the pump.
+fn spawn_conflict_doc(
     stoat: &mut Stoat,
     repo: &Arc<dyn GitRepo>,
     path: &Path,
     index: usize,
     file_count: usize,
-    git_root: &Path,
-) -> Option<(FileResolveState, Option<usize>)> {
+    intent: ConflictIntent,
+) -> Option<()> {
     let stages = repo.conflict_stages(path)?;
     let language = stoat.language_registry.for_path(path);
     // The stages carry the conflicted file's own line endings, and the center
@@ -121,14 +195,60 @@ fn prepare_file(
     // returns become marker-block content, and resolving the file writes them
     // back doubled or mixed depending on which rows the user touched.
     let ending = stage_line_ending(&stages);
-    let ancestor = LineEnding::normalize(stages.ancestor.as_deref().unwrap_or(""));
-    let ours = LineEnding::normalize(stages.ours.as_deref().unwrap_or(""));
-    let theirs = LineEnding::normalize(stages.theirs.as_deref().unwrap_or(""));
-    let doc = MergeDoc::build(&ancestor, &ours, &theirs, language.as_ref());
+    let normalized = |side: Option<&String>| {
+        LineEnding::normalize(side.map(String::as_str).unwrap_or("")).into_owned()
+    };
+    let ancestor = normalized(stages.ancestor.as_ref());
+    let ours = normalized(stages.ours.as_ref());
+    let theirs = normalized(stages.theirs.as_ref());
+
+    let path = path.to_path_buf();
+    let redraw = stoat.redraw_notify.clone();
+    let (tx, rx) = mpsc::channel();
+
+    let task = stoat.executor.spawn_blocking(move || {
+        let doc = MergeDoc::build(&ancestor, &ours, &theirs, language.as_ref());
+        let _ = tx.send(ConflictDoc {
+            doc,
+            ending,
+            path,
+            index,
+            file_count,
+        });
+        redraw.notify_one();
+    });
+
+    stoat.pending_conflict_file = Some(PendingConflictFile {
+        rx,
+        _task: task,
+        intent,
+    });
+    Some(())
+}
+
+/// Build the scratch center editor and resolve state for a landed alignment.
+///
+/// Seeds a scratch buffer with the initial marker text and inserts a center
+/// editor carrying the render cache. Returns the resolve state and the byte
+/// offset of its first chunk. Leaves the pane and session untouched, so the
+/// caller decides how the editor is displayed.
+fn install_conflict_file(
+    stoat: &mut Stoat,
+    landed: ConflictDoc,
+    git_root: &Path,
+) -> (FileResolveState, Option<usize>) {
+    let ConflictDoc {
+        doc,
+        ending,
+        path,
+        index,
+        file_count,
+    } = landed;
+    let language = stoat.language_registry.for_path(&path);
     let (center_text, chunk_ranges) = doc.initial_center_text();
     let first_chunk_offset = chunk_ranges.first().map(|r| r.start);
     let executor = stoat.executor.clone();
-    let rel_path = crate::paths::display_relative(path, git_root);
+    let rel_path = crate::paths::display_relative(&path, git_root);
 
     let ws = stoat.active_workspace_mut();
     let (buffer_id, buffer) = ws.buffers.new_scratch_preview();
@@ -180,9 +300,9 @@ fn prepare_file(
     )));
     let editor_id = ws.editors.insert(editor);
 
-    Some((
+    (
         FileResolveState {
-            path: path.to_path_buf(),
+            path,
             doc,
             picks,
             chunk_anchors,
@@ -190,7 +310,7 @@ fn prepare_file(
             editor_id,
         },
         first_chunk_offset,
-    ))
+    )
 }
 
 /// The line terminator the conflicted file uses, read from its index stages.
@@ -369,8 +489,14 @@ pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool) {
 ///
 /// A no-op when `target` is already current or out of range. Parking keeps the
 /// outgoing file's picks and scratch buffer alive for a later return.
+///
+/// A parked target is shown at once. An unparked one is aligned on a worker,
+/// so the view keeps showing the outgoing file until [`pump_conflict_file`]
+/// lands the document. A second switch replaces the first before it lands,
+/// which drops the older alignment rather than showing a file the reader
+/// already stepped past.
 fn switch_to_file(stoat: &mut Stoat, target: usize) {
-    let (current, file_count, git_root, target_path) = {
+    let (file_count, repo, target_path) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
         };
@@ -378,9 +504,8 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
             return;
         }
         (
-            session.current,
             session.files.len(),
-            session.workdir.clone(),
+            session.repo.clone(),
             session.files[target].clone(),
         )
     };
@@ -390,19 +515,21 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
         .conflict
         .as_mut()
         .and_then(|session| session.parked.remove(&target));
-    let target_state = match parked {
-        Some(state) => state,
+    match parked {
+        Some(state) => show_file(stoat, target, state),
         None => {
-            let Some(repo) = stoat.git_host.discover(&git_root) else {
-                return;
-            };
-            let Some((state, _)) =
-                prepare_file(stoat, &repo, &target_path, target, file_count, &git_root)
-            else {
-                return;
-            };
-            state
+            let intent = ConflictIntent::Switch { target };
+            spawn_conflict_doc(stoat, &repo, &target_path, target, file_count, intent);
         },
+    }
+}
+
+/// Show `target_state` as the session's current file, parking the outgoing
+/// one under its own index and landing the cursor on the first chunk.
+fn show_file(stoat: &mut Stoat, target: usize, target_state: FileResolveState) {
+    let current = match stoat.active_workspace().conflict.as_ref() {
+        Some(session) => session.current,
+        None => return,
     };
 
     let (outgoing_editor, target_editor) = {
@@ -427,6 +554,47 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
     }
 
     land_first_chunk_current(stoat);
+}
+
+/// Apply a landed conflict alignment, opening the view or showing the file the
+/// switch asked for.
+///
+/// Returns whether the frame changed, on the contract every pump in
+/// [`crate::app::Stoat::drive_pumps`] answers.
+pub(crate) fn pump_conflict_file(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_conflict_file.take() else {
+        return false;
+    };
+    let landed = match pending.rx.try_recv() {
+        Ok(landed) => landed,
+        Err(mpsc::TryRecvError::Empty) => {
+            stoat.pending_conflict_file = Some(pending);
+            return false;
+        },
+        Err(mpsc::TryRecvError::Disconnected) => return false,
+    };
+
+    match pending.intent {
+        ConflictIntent::Open { .. } => open_landed(stoat, landed, pending.intent),
+        ConflictIntent::Switch { target } => {
+            // The session closed, or the reader stepped back onto the target,
+            // while the alignment ran. Either way this document describes a
+            // file that is no longer the one to show.
+            let workdir = stoat
+                .active_workspace()
+                .conflict
+                .as_ref()
+                .filter(|session| session.current != target)
+                .map(|session| session.workdir.clone());
+            let Some(workdir) = workdir else {
+                return true;
+            };
+
+            let (state, _) = install_conflict_file(stoat, landed, &workdir);
+            show_file(stoat, target, state);
+        },
+    }
+    true
 }
 
 /// Write the center text to the working file, and when every chunk is resolved

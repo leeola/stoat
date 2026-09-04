@@ -1,11 +1,13 @@
 use crate::{
     display_map::DisplaySnapshot,
     editor_state::EditorId,
+    host::git::GitRepo,
     merge_view::{AlignRow, ChunkState, MergeDoc, RowPick},
 };
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::Arc,
 };
 use stoat_action::ActionKind;
 use stoat_text::{Anchor, BufferId};
@@ -19,6 +21,9 @@ use stoat_text::{Anchor, BufferId};
 pub(crate) struct ConflictSession {
     /// Repository work directory the conflicted paths sit under.
     pub(crate) workdir: PathBuf,
+    /// The repository the open discovered, held so stepping between files
+    /// reads the next one's stages without rediscovering it per press.
+    pub(crate) repo: Arc<dyn GitRepo>,
     /// Every conflicted path in the repository, in discovery order.
     pub(crate) files: Vec<PathBuf>,
     /// Index into [`Self::files`] of the file currently shown.
@@ -245,8 +250,11 @@ mod tests {
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
 
+    /// Open or close the conflict view and settle, since the open leaves the
+    /// file's alignment to a worker and installs the session from the pump.
     fn dispatch_conflict(h: &mut TestHarness) {
         crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        h.settle();
     }
 
     /// Open the seeded conflict view with the cursor already landed on the
@@ -256,8 +264,11 @@ mod tests {
         dispatch_conflict(h);
     }
 
+    /// Dispatch `action` and settle, since a step onto an unvisited file
+    /// leaves its alignment to a worker.
     fn pick(h: &mut TestHarness, action: &dyn Action) {
         crate::action_handlers::dispatch(&mut h.stoat, action);
+        h.settle();
     }
 
     /// Seed one conflicted file at the workspace's git root and return the
@@ -654,6 +665,43 @@ mod tests {
         assert_eq!(cursor_row(&mut h), 1, "GotoPrevChange steps back");
     }
 
+    /// A three-way alignment runs two structural diffs against the ancestor,
+    /// which is why neither the open nor a step onto an unvisited file does it
+    /// on the thread that handled the press. Both leave the view as it was
+    /// until the document lands.
+    #[test]
+    fn opening_and_stepping_leave_the_alignment_to_a_worker() {
+        let mut h = Stoat::test();
+        seed_two_files(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        assert!(
+            h.stoat.active_workspace().conflict.is_none(),
+            "the open installs no session before the document lands",
+        );
+        assert!(h.stoat.pending_conflict_file.is_some(), "an open is armed");
+
+        h.settle();
+        assert_eq!(current_file(&h), 0, "the settle installs the session");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
+        assert_eq!(current_file(&h), 0, "the step still shows the first file");
+        assert!(h.stoat.pending_conflict_file.is_some(), "a step is armed");
+
+        h.settle();
+        assert_eq!(current_file(&h), 1, "the settle shows the second file");
+        assert!(
+            h.stoat.pending_conflict_file.is_none(),
+            "the landed document leaves nothing armed",
+        );
+
+        // A parked file has its document already, so stepping back needs no
+        // worker and no settle.
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictPrevFile);
+        assert_eq!(current_file(&h), 0, "a parked file is shown at once");
+        assert!(h.stoat.pending_conflict_file.is_none(), "nothing is armed");
+    }
+
     #[test]
     fn stepping_between_files_parks_and_restores_picks() {
         let mut h = Stoat::test();
@@ -814,7 +862,7 @@ mod tests {
             Some("start\nT1\nT2\nend\n"),
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        dispatch_conflict(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &ConflictPickOurs);
 
         assert_eq!(h.stoat.current_view(), Some("conflict"));
@@ -837,7 +885,7 @@ mod tests {
             Some("a\nX\nc\nY\ne\n"),
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        dispatch_conflict(&mut h);
 
         assert_eq!(h.stoat.current_view(), Some("conflict"));
         h.assert_snapshot("conflict_view_three_columns");
@@ -854,7 +902,7 @@ mod tests {
             Some("a\nX\nc\n"),
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        dispatch_conflict(&mut h);
 
         assert_eq!(h.stoat.current_view(), Some("conflict"));
         h.assert_snapshot("conflict_view_narrow");
