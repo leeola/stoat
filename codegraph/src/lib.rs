@@ -550,13 +550,26 @@ impl CodeGraph {
     /// only when a symbol of that name is added or removed.
     fn reresolve_unresolved_inner(&mut self) {
         let dirty: Vec<String> = self.dirty_names.drain().collect();
+
+        // Every edge in one bucket waits on that bucket's name, so the answer
+        // varies only by the kind of reference asking, of which there are
+        // three. Without this a bucket rescans the name index once per edge,
+        // and the large buckets hold thousands.
+        let mut memo: HashMap<(&str, RefKind), (Confidence, Option<SymbolKey>)> = HashMap::new();
         let updates: Vec<(u32, SymbolKey, Confidence)> = dirty
             .iter()
             .filter_map(|name| self.unresolved_by_name.get(name))
             .flatten()
             .filter_map(|&id| {
                 let edge = self.edge(id)?;
-                let (confidence, key) = self.resolve_target(&edge.to);
+                let (confidence, key) = match &edge.to {
+                    // A resolved target answers from the target itself, so it
+                    // reaches no index and there is nothing to remember.
+                    Target::Sym(_) => self.resolve_target(&edge.to),
+                    Target::Unresolved { name, kind } => *memo
+                        .entry((name.as_str(), *kind))
+                        .or_insert_with(|| self.resolve_target(&edge.to)),
+                };
                 key.map(|key| (id, key, confidence))
             })
             .collect();
@@ -1080,6 +1093,45 @@ mod tests {
         assert_eq!(
             graph.resolve_target(&call_ref),
             (Confidence::Resolved, Some(fn_key))
+        );
+    }
+
+    /// Re-resolution answers one name once per reference kind rather than once
+    /// per edge waiting on it. The kinds accept disjoint symbol kinds, so a
+    /// name defined as both a function and a struct resolves two ways. An
+    /// answer reused across both kinds sends the call to the struct.
+    #[test]
+    fn re_resolution_answers_one_name_by_the_kind_that_asks() {
+        let mut graph = CodeGraph::new();
+        // The user file lands first, so both of its references to Foo wait in
+        // the same bucket for the definitions that follow.
+        graph.insert_shard(shard_of(
+            FileId(0),
+            "c.rs",
+            "fn use_both() {\n    Foo();\n}\nfn take(x: Foo) {}\n",
+        ));
+        graph.insert_shard(shard_of(FileId(1), "a.rs", "struct Foo;\n"));
+        graph.insert_shard(shard_of(FileId(2), "b.rs", "fn Foo() {}\n"));
+
+        graph.reresolve_unresolved();
+
+        // One call site and one type position, so a kind names one edge each.
+        let target = |kind| {
+            graph
+                .live_edges()
+                .find(|(_, edge)| edge.kind == kind)
+                .map(|(_, edge)| edge.to.clone())
+        };
+
+        assert_eq!(
+            target(EdgeKind::Calls),
+            Some(Target::Sym(key_for(&graph, "Foo", SymbolKind::Function))),
+            "the call reaches the function",
+        );
+        assert_eq!(
+            target(EdgeKind::References),
+            Some(Target::Sym(key_for(&graph, "Foo", SymbolKind::Struct))),
+            "and the type position reaches the struct",
         );
     }
 

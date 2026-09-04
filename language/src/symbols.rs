@@ -81,7 +81,7 @@ pub struct RefSite {
 /// A trait name in an impl header matches both `Type` and `Implements`, so the
 /// same site yields two RefSites of different kinds. This coexistence is
 /// intended and not deduplicated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RefKind {
     Call,
     Type,
