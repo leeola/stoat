@@ -1,10 +1,13 @@
 //! Divan benchmarks for one headless frame through the render passes.
 //!
 //! Each case builds a device, a renderer, and a populated grid once outside the
-//! timed body, then times the encode, the submit, and the wait for the frame to
-//! finish. Divan has no untimed per-iteration teardown, so a body that only
-//! submitted would queue frames without bound and report a shrinking share of
-//! the real cost. Waiting inside means the number is what a frame costs.
+//! timed body, then times the encode and the submit. That is the CPU a frame
+//! spends, which is what the passes here are written to move.
+//!
+//! The wait for the device falls outside the sample. A body returns a [`Wait`]
+//! guard, and divan drops a body's return value after it ends the sample, so
+//! the frame is still waited for before the next iteration starts. That bound
+//! is what keeps the bodies from queueing frames without limit.
 //!
 //! Every case skips with a message when no adapter answers, so a machine
 //! without a GPU still runs the rest of the suite.
@@ -186,17 +189,34 @@ fn add_chrome(grid: &mut Grid) {
     ]);
 }
 
-/// Draw one frame over `damage` and wait for it to finish.
-fn draw(bench: &mut Bench, damage: &Damage) {
-    render_frame(
-        &mut bench.renderer,
-        &bench.device,
-        &bench.queue,
-        &bench.view,
-        &bench.grid,
-        damage,
-    );
-    let _ = bench.device.poll(PollType::wait_indefinitely());
+/// Waits for the submitted frame to finish, on drop.
+///
+/// Returned from a timed body so the wait lands after divan ends the sample.
+/// The wait still happens before the next iteration, which is what stops the
+/// bodies from running ahead of the device.
+struct Wait<'a>(&'a Device);
+
+impl Drop for Wait<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.poll(PollType::wait_indefinitely());
+    }
+}
+
+/// Draw one frame over `damage`, leaving the wait to the guard it returns.
+///
+/// Takes the parts rather than the whole [`Bench`], since a guard borrowing
+/// the device outlives the call, and a mutable borrow of the struct that holds
+/// the device rules that out.
+fn draw<'a>(
+    renderer: &mut Renderer,
+    device: &'a Device,
+    queue: &Queue,
+    view: &TextureView,
+    grid: &Grid,
+    damage: &Damage,
+) -> Wait<'a> {
+    render_frame(renderer, device, queue, view, grid, damage);
+    Wait(device)
 }
 
 /// Encode and submit one frame, leaving the wait to the caller.
@@ -241,11 +261,19 @@ fn skipped(case: &str) {
 /// after a resize or a theme change costs.
 #[divan::bench]
 fn full_damage_text(bencher: divan::Bencher<'_, '_>) {
-    let Some(mut bench) = setup() else {
+    let Some(bench) = setup() else {
         skipped("full_damage_text");
         return;
     };
-    bencher.bench_local(|| draw(&mut bench, &Damage::Full));
+    let Bench {
+        device,
+        queue,
+        view,
+        mut renderer,
+        grid,
+    } = bench;
+
+    bencher.bench_local(|| draw(&mut renderer, &device, &queue, &view, &grid, &Damage::Full));
 }
 
 /// A screenful of prose no run has been shaped for, which is what a fling
@@ -257,10 +285,10 @@ fn full_damage_text(bencher: divan::Bencher<'_, '_>) {
 /// redraw text that was already shaped, so this is the only one whose cost
 /// includes shaping at all.
 ///
-/// It reports a whole frame, not the shaping inside it. The body waits for the
-/// GPU, and at this surface size that wait covers the CPU work, so a change
-/// that only moves shaping cost does not move this number. Counting what gets
-/// shaped is what shows that; timing a frame is what shows whether it matters.
+/// It reports a whole frame's CPU, not the shaping alone, but shaping is part
+/// of that CPU here, so a change that moves shaping cost moves this number.
+/// Counting what gets shaped says how much work a change removed. This says
+/// what the removal is worth against everything else a frame does.
 #[divan::bench]
 fn fresh_rows(bencher: divan::Bencher<'_, '_>) {
     let Some(bench) = setup() else {
@@ -295,10 +323,7 @@ fn fresh_rows(bencher: divan::Bencher<'_, '_>) {
             frame.set(at + 1);
             prose_grid(rows, cols, at)
         })
-        .bench_local_refs(|grid| {
-            render_frame(&mut renderer, &device, &queue, &view, grid, &Damage::Full);
-            let _ = device.poll(PollType::wait_indefinitely());
-        });
+        .bench_local_refs(|grid| draw(&mut renderer, &device, &queue, &view, grid, &Damage::Full));
 }
 
 /// A screen of numbered source-like prose, as though `frame` screenfuls had
@@ -330,18 +355,38 @@ fn full_damage_with_chrome(bencher: divan::Bencher<'_, '_>) {
         return;
     };
     add_chrome(&mut bench.grid);
-    bencher.bench_local(|| draw(&mut bench, &Damage::Full));
+    let Bench {
+        device,
+        queue,
+        view,
+        mut renderer,
+        grid,
+    } = bench;
+
+    bencher.bench_local(|| draw(&mut renderer, &device, &queue, &view, &grid, &Damage::Full));
 }
 
 /// One changed row, which is what a keystroke costs. The gap between this and
 /// the full-damage case is what the per-row caches are worth.
+///
+/// That gap is in CPU. The device wait is the same either way and far larger
+/// than both, so while it sat inside the sample it hid this case entirely, and
+/// one row read slower than a whole novel screen.
 #[divan::bench]
 fn one_damaged_row(bencher: divan::Bencher<'_, '_>) {
-    let Some(mut bench) = setup() else {
+    let Some(bench) = setup() else {
         skipped("one_damaged_row");
         return;
     };
     let cols = bench.grid.cols() as u16;
     let damage = Damage::Partial(vec![Some((0, cols.saturating_sub(1)))]);
-    bencher.bench_local(|| draw(&mut bench, &damage));
+    let Bench {
+        device,
+        queue,
+        view,
+        mut renderer,
+        grid,
+    } = bench;
+
+    bencher.bench_local(|| draw(&mut renderer, &device, &queue, &view, &grid, &damage));
 }
