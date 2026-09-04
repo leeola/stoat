@@ -395,6 +395,11 @@ pub enum FixtureError {
 ///   `.stoat/walkthroughs/tour.json`, so the walkthrough player opens on real code. The tour covers
 ///   a one-line focus, a many-line focus, a step that glides more than a screen, several
 ///   annotations in one file, a cross-file annotation, and an untitled stop with no narration.
+/// - `walkthrough-marks`: the same shape of cargo crate over a lint-rule table, committed with an
+///   eight-stop tour that puts one label and mark placement under the layout per stop. It stages
+///   labels crowded off their rows, two labels starting on one row, a seventh annotation wrapping
+///   the marker color cycle, a rect mark over a three-line annotation, labels with no room to land,
+///   a soft-wrapped focus, and focuses at the left edge and the last line.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -410,6 +415,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "rust-lsp" => materialize_rust_lsp(dest),
         "rust-diff" => materialize_rust_diff(dest),
         "walkthrough" => walkthrough::tour::materialize(dest),
+        "walkthrough-marks" => walkthrough::marks::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }

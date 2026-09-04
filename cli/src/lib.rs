@@ -50,6 +50,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "walkthrough",
         "a four-file crate with a six-stop tour for the walkthrough player",
     ),
+    (
+        "walkthrough-marks",
+        "a rules table whose tour crowds, stacks, boxes, wraps, and drops labels",
+    ),
 ];
 
 /// The input sequence a fixture opens itself with, for one whose point is a

@@ -9,6 +9,7 @@
 use crate::walkthrough::{self, Location, Point, Range, Walkthrough};
 use std::path::PathBuf;
 
+pub(super) mod marks;
 pub(super) mod tour;
 
 /// Returns the tour serialized the way the store writes it to disk.
