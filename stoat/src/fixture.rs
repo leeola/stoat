@@ -405,6 +405,11 @@ pub enum FixtureError {
 ///   over the code when nothing else fits, the narrowest and widest cards, a card taller than the
 ///   frame, every markdown construct the renderer styles, three annotations that narrate for
 ///   themselves, and a titled stop with nothing to say.
+/// - `walkthrough-drift`: the `walkthrough` crate committed with its tour, then edited underneath
+///   it in the working tree. One file gains a line, one is renamed at equal length, one is cut
+///   short, and one is left alone, so the player reports drift on some stops and not others and
+///   `stoat walkthrough check --workspace <dir>` reports both stale and error ranges. The edits are
+///   unstaged, so the diff gutter marks the change that caused each one.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -422,6 +427,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "walkthrough" => walkthrough::tour::materialize(dest),
         "walkthrough-marks" => walkthrough::marks::materialize(dest),
         "walkthrough-card" => walkthrough::card::materialize(dest),
+        "walkthrough-drift" => walkthrough::drift::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }

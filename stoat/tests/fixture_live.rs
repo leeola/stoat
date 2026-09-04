@@ -234,6 +234,105 @@ fn walkthrough_fixture_plays_its_whole_tour() {
     });
 }
 
+/// Drift is only ever reported against what is on screen, so the status line
+/// the reader sees is the thing worth pinning here. This walks the drifted
+/// fixture's tour and checks each stop reports what the edits did to it: two
+/// that no longer read what they captured, one the edits never touched, and one
+/// clean stop with a drifted annotation under it.
+///
+/// The `walkthrough check` findings are pinned in the fixture's own tests. This
+/// is the other half, since a range listed there still has to say so when the
+/// reader steps onto it.
+#[test]
+fn walkthrough_drift_fixture_reports_drift_per_stop() {
+    let (_dir, _root, mut harness) = fixture_harness("walkthrough-drift");
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":walkthrough tour<Enter>")
+            .await
+            .expect("open the tour");
+
+        // The unstaged edits give the status line a repo segment, which cuts
+        // every message here short. Each predicate matches the part that
+        // survives rather than the whole of what is set.
+        handle
+            .await_frame(|text| text.contains("stop s1 drifted"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("the first stop reports the line main.rs gained");
+
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("enter walkthrough mode");
+
+        handle
+            .send_keys("n")
+            .await
+            .expect("step to the second stop");
+        handle
+            .await_frame(|text| text.contains("stop s2 drifted"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("the second stop reports the block config.rs no longer holds");
+
+        handle.send_keys("n").await.expect("step to the third stop");
+        let frame = handle
+            .await_frame(
+                |text| text.contains("src/server.rs") && text.contains("3/6"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the third stop lands on the file no edit touched");
+        assert!(
+            !frame.contains("drifted"),
+            "server.rs is untouched, so its stop reports its title, got frame:\n{frame}",
+        );
+
+        for _ in 0..2 {
+            handle
+                .send_keys("n")
+                .await
+                .expect("step toward the handler");
+        }
+        handle
+            .await_frame(
+                |text| text.contains("src/handler.rs") && text.contains("5/6"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the rename leaves the stop over the whole function clean");
+
+        // The rename is the same length as the name it replaced, so only the
+        // annotation naming it moves. The two arms before it reporting normally
+        // is what makes the third one mean anything.
+        for (at, id) in [(1, "a7"), (2, "a8")] {
+            handle.send_keys("a").await.expect("step to the annotation");
+            let frame = handle
+                .await_frame(
+                    |text| text.contains(&format!("{id} {at}/5")),
+                    WALKTHROUGH_TIMEOUT,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("annotation {at} of 5 reports its label"));
+            assert!(
+                !frame.contains("drifted"),
+                "the arms above the renamed one still cover what they captured, \
+                 got frame:\n{frame}",
+            );
+        }
+
+        handle
+            .send_keys("a")
+            .await
+            .expect("step to the renamed arm");
+        handle
+            .await_frame(|text| text.contains("a9 drifted"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("the annotation over the renamed arm reports drift");
+
+        handle.send_keys("d").await.expect("end the tour");
+    });
+}
+
 /// The conflict view's three columns come from the on-disk index stages, which
 /// only a real repository mid-merge produces. This drives the whole chain --
 /// stage read, merge alignment, and paint -- against one, so a regression
