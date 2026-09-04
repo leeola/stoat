@@ -379,12 +379,34 @@ impl CodeGraph {
             return;
         };
 
+        let ids = self.edges_by_file.remove(&file).unwrap_or_default();
+
+        // Grouped by the name each edge waits under, so a bucket is filtered
+        // once rather than once per edge leaving it. Call targets repeat hard,
+        // so one file's edges wait in a handful of very large buckets, and a
+        // retain per edge rescans a whole bucket every time. The name is
+        // cloned once per distinct name here rather than once per edge.
+        let mut waiting: HashMap<String, HashSet<u32>> = HashMap::new();
+        for id in &ids {
+            if let Some(Target::Unresolved { name, .. }) = self.edge(*id).map(|edge| &edge.to) {
+                waiting.entry(name.clone()).or_default().insert(*id);
+            }
+        }
+        for (name, dead) in waiting {
+            let Some(bucket) = self.unresolved_by_name.get_mut(&name) else {
+                continue;
+            };
+            bucket.retain(|held| !dead.contains(held));
+            if bucket.is_empty() {
+                self.unresolved_by_name.remove(&name);
+            }
+        }
+
         // The file's own edges go first, so an edge from this file into it is
         // already gone by the time the degrade pass reaches it. The sweep this
         // replaced skipped those instead.
-        for id in self.edges_by_file.remove(&file).unwrap_or_default() {
+        for id in ids {
             self.unlink_edge(id);
-            self.clear_unresolved(id);
             if self.edges[id as usize].take().is_some() {
                 self.free_edges.push(id);
             }
