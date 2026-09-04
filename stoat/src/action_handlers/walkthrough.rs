@@ -602,7 +602,10 @@ fn install_step_trail(stoat: &mut Stoat, from: &Anchor, to: &Anchor) -> Option<S
 
     let stops = path.len();
     nav::install_trail(stoat, &path);
-    Some(format!("trail: {stops} stops"))
+    // A one-stop trail is ordinary rather than an edge. Two stops inside one
+    // definition resolve to the same symbol, and the path is that symbol alone.
+    let plural = if stops == 1 { "" } else { "s" };
+    Some(format!("trail: {stops} stop{plural}"))
 }
 
 /// Drop any trail, whether a walkthrough laid it or the reader marked it.
@@ -1083,6 +1086,74 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("this stop has no narration"),
             "a stop with nothing to re-show says so",
+        );
+    }
+
+    /// Two stops inside one definition resolve to the same symbol, so the path
+    /// between them is that symbol alone. That is ordinary rather than an
+    /// edge, and "1 stops" tells the reader the count is generated and leaves
+    /// them wondering what it miscounted.
+    #[test]
+    fn a_trail_within_one_definition_reads_as_one_stop() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        // Both stops sit inside `fn two`, which is the whole point: they
+        // resolve to one symbol and the walk between them has one stop.
+        let mut walkthrough = Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        for (id, cols, snippet) in [("first", (1, 6), "fn two"), ("second", (7, 11), "() {}")] {
+            walkthrough
+                .add_stop(
+                    Some(id.to_owned()),
+                    String::new(),
+                    location("a.rs", 2, cols, snippet),
+                    None,
+                )
+                .expect("append");
+        }
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/a.rs", FIRST);
+        fs.insert_file(
+            "/repo/.stoat/walkthroughs/tour.json",
+            serde_json::to_string(&walkthrough).expect("serialize"),
+        );
+        stoat.set_fs_host(fs);
+
+        stoat
+            .active_workspace_mut()
+            .code_graph
+            .insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![Symbol {
+                    key: SymbolKey([1u8; 16]),
+                    file: build::file_id("a.rs"),
+                    name: "two".to_owned(),
+                    kind: SymbolKind::Function,
+                    container: vec![],
+                    def_range: 12..23,
+                    name_range: 15..18,
+                    body_hash: [0u8; 32],
+                }],
+                edges: Vec::new(),
+            });
+        stoat
+            .active_workspace_mut()
+            .file_paths
+            .insert(build::file_id("a.rs"), PathBuf::from("a.rs"));
+
+        open(&mut stoat, "tour");
+        next(&mut stoat);
+
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("2/2: second (trail: 1 stop)"),
+            "one stop is one stop",
         );
     }
 

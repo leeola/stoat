@@ -316,7 +316,10 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
     });
 
     if related {
-        stoat.set_status(format!("trail: {stops} stops"));
+        // A path of one is ordinary here too, since both ends resolving to the
+        // same symbol is what a relation inside one definition looks like.
+        let plural = if stops == 1 { "" } else { "s" };
+        stoat.set_status(format!("trail: {stops} stop{plural}"));
     } else {
         stoat.set_status("no call relation; direct trail");
     }
@@ -965,6 +968,41 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("trail 2/3: bar"),
             "each step says where along the trail it landed and on what",
+        );
+    }
+
+    /// Both marks landing in one definition is what a trail of one stop is,
+    /// and it is ordinary rather than an edge. The note has to read as one
+    /// stop, since "1 stops" tells the reader the count is generated and
+    /// leaves them wondering what it miscounted.
+    #[test]
+    fn a_trail_inside_one_definition_reads_as_one_stop() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        let foo = SymbolKey([1u8; 16]);
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![sym(1, file, "foo", 0..11)],
+                edges: vec![],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+
+        jump_to_symbol(&mut stoat, foo);
+        mark_trail_start(&mut stoat);
+        jump_to_symbol(&mut stoat, foo);
+        mark_trail_end(&mut stoat);
+
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("trail: 1 stop"),
+            "one stop is one stop",
         );
     }
 
