@@ -204,10 +204,10 @@ pub(super) fn land_diff_on_commit(
             sha: repo.parent_sha(sha),
         }));
 
-    let Some(change) = repo.commit_file_changes(sha).into_iter().next() else {
+    let Some(rel_path) = repo.commit_first_path(sha) else {
         return false;
     };
-    super::file::open_file(stoat, &workdir.join(change.rel_path));
+    super::file::open_file(stoat, &workdir.join(rel_path));
     enter_diff_view(stoat);
     true
 }

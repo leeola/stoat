@@ -794,15 +794,11 @@ impl GitRepo for LocalGitRepo {
                 Ok(d) => d,
                 Err(_) => return Vec::new(),
             };
-        // Before the stats and the indexed patch reads below, both of which
-        // read the delta list this rewrites in place. Without it a commit that
-        // moves a file lists a deletion beside an addition.
+        // Before the indexed patch reads below, which read the delta list this
+        // rewrites in place. Without it a commit that moves a file lists a
+        // deletion beside an addition.
         let _ = diff.find_similar(Some(&mut rename_detection(false)));
 
-        let stats = match diff.stats() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
         let deltas = diff.deltas();
         let mut out: Vec<CommitFileChange> = Vec::with_capacity(deltas.len());
         for (i, delta) in deltas.enumerate() {
@@ -826,7 +822,6 @@ impl GitRepo for LocalGitRepo {
                 },
                 None => (0, 0),
             };
-            let _ = &stats;
             out.push(CommitFileChange {
                 rel_path,
                 kind,
@@ -835,6 +830,34 @@ impl GitRepo for LocalGitRepo {
             });
         }
         out
+    }
+
+    fn commit_first_path(&self, sha: &str) -> Option<PathBuf> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let commit = git2::Oid::from_str(sha)
+            .and_then(|oid| repo.find_commit(oid))
+            .ok()?;
+        let new_tree = commit.tree().ok()?;
+        let parent_tree = commit.parents().next().and_then(|p| p.tree().ok());
+
+        let mut opts = DiffOptions::new();
+        opts.include_typechange(true);
+        let mut diff = repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), Some(&mut opts))
+            .ok()?;
+        // Same pairing the full listing does, so both name a moved file at the
+        // path it moved to rather than at the one it left.
+        let _ = diff.find_similar(Some(&mut rename_detection(false)));
+
+        // No patch is built, so no delta is diffed. The delta list alone is
+        // what makes this cheap enough to run on the run loop.
+        diff.deltas().find_map(|delta| {
+            delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(Path::to_path_buf)
+        })
     }
 }
 

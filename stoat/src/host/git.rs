@@ -415,6 +415,20 @@ pub trait GitRepo: Send + Sync {
     /// background. Empty when the sha is unknown.
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange>;
 
+    /// The first changed path of `sha`, in the order
+    /// [`Self::commit_file_changes`] lists them, or `None` for a commit that
+    /// changes nothing.
+    ///
+    /// A move reads as its destination rather than as a deletion, so this
+    /// names a file that exists at `sha`.
+    ///
+    /// Separate from [`Self::commit_file_changes`] because the line counts are
+    /// what that call costs: it diffs each delta to count them, which on a wide
+    /// commit is the difference between a fraction of a millisecond and a large
+    /// part of a second. A caller that only needs somewhere to open pays
+    /// neither.
+    fn commit_first_path(&self, sha: &str) -> Option<PathBuf>;
+
     /// Replace HEAD's tree (and optionally its message) with the given
     /// values, creating a new commit and writing the ref HEAD points
     /// at, so an attached branch moves onto the new commit with it.

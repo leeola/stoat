@@ -990,6 +990,42 @@ fn commit_file_changes_reports_a_move_as_one_renamed_entry() {
     );
 }
 
+/// The walk opens this path, so it has to name a file that exists at the
+/// commit. A move reported as its old address opens nothing, and one reported
+/// without pairing opens whichever of the two the delta list happens to sort
+/// first.
+#[test]
+fn commit_first_path_names_a_renamed_file_once_at_its_destination() {
+    let tr = TestRepo::new();
+    // The old path sorts first, so an unpaired diff would name a file the
+    // commit deleted.
+    tr.commit_file("alpha.rs", "one\n");
+    tr.git_mv("alpha.rs", "zeta.rs");
+    tr.commit("move");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let sha = tr.head_sha();
+
+    assert_eq!(
+        repo.commit_first_path(&sha).as_deref(),
+        Some(Path::new("zeta.rs")),
+        "the move names where the file went",
+    );
+    assert_eq!(
+        repo.commit_first_path(&sha),
+        repo.commit_file_changes(&sha)
+            .into_iter()
+            .next()
+            .map(|change| change.rel_path),
+        "and agrees with the listing it stands in for",
+    );
+    assert_eq!(
+        repo.commit_first_path("nope"),
+        None,
+        "an unknown sha names no path",
+    );
+}
+
 #[test]
 fn amend_head_replaces_tree_and_updates_head() {
     let tr = TestRepo::new();

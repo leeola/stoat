@@ -1478,6 +1478,13 @@ impl GitRepo for FakeGitRepo {
         Ok(())
     }
 
+    fn commit_first_path(&self, sha: &str) -> Option<PathBuf> {
+        self.commit_file_changes(sha)
+            .into_iter()
+            .next()
+            .map(|change| change.rel_path)
+    }
+
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
         let state = self.state.lock().unwrap();
         let Some(commit) = state.commits.get(sha) else {
