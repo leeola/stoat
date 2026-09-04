@@ -25,6 +25,9 @@ use alacritty_terminal::{
 
 /// Project a fill context's on-screen cells onto a page grid.
 ///
+/// Returns whether any cell it wrote differed from what the slot held, which is
+/// the cell half of a fill's change verdict.
+///
 /// The pool clears the slot before this runs, so it copies each on-screen cell
 /// without damage tracking, resolving colors exactly as [`Terminal::project`]
 /// does for the live grid. Cells past the page's bounds are skipped.
@@ -39,7 +42,7 @@ pub(super) fn project_term_cells(
     term: &Term<ResponseSink>,
     theme: &Theme,
     palette: &[Rgb; PALETTE_LEN],
-) {
+) -> bool {
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
 
@@ -51,12 +54,19 @@ pub(super) fn project_term_cells(
     let rows = grid.rows().min(term.screen_lines());
     let cols = grid.cols().min(term.columns());
 
+    // The comparison rides the write rather than following it. Every cell this
+    // paints is already in a register, so asking whether it differs from the
+    // slot costs nothing next to reading the whole page back afterward.
+    let mut changed = false;
     for row in 0..rows {
         let source = &term_grid[Line(row as i32 - offset)];
         for (col, out) in grid.row_mut(row)[..cols].iter_mut().enumerate() {
-            *out = project_cell(&source[Column(col)], content.colors, theme, palette);
+            let cell = project_cell(&source[Column(col)], content.colors, theme, palette);
+            changed |= cell != *out;
+            *out = cell;
         }
     }
+    changed
 }
 
 /// A cleared row-flag buffer `rows` long, reusing one a past frame gave back

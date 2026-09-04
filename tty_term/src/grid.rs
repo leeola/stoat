@@ -6,10 +6,9 @@
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
 use from_command::{bar_from_command, fill_polyline, text_run_from_command, StoredTextRun};
-use rustc_hash::FxHasher;
 use std::{
     collections::HashMap,
-    hash::{Hash, Hasher},
+    hash::Hash,
     mem,
     ops::{BitOr, BitOrAssign, Range},
     sync::{
@@ -359,13 +358,25 @@ impl Grid {
     /// Everything that is not a cell goes regardless. A cell write replaces
     /// none of it, so the border table, the decorations, the minimap stores,
     /// and the line starts are reset whatever box the caller names.
-    fn clear_except(&mut self, rows: usize, cols: usize) {
+    /// Returns whether any cell it blanked held something else, which is one
+    /// of the three things a fill's change verdict is made of. A painted box
+    /// that shrinks leaves the vacated cells to this, and nothing the caller
+    /// paints afterward sees them.
+    fn clear_except(&mut self, rows: usize, cols: usize) -> bool {
         let kept_rows = rows.min(self.rows);
         let kept_cols = cols.min(self.cols);
+        let blank = Cell::default();
+        let mut cleared_changed = false;
         for row in 0..kept_rows {
-            self.row_mut(row)[kept_cols..].fill(Cell::default());
+            let tail = &mut self.row_mut(row)[kept_cols..];
+            cleared_changed |= tail.iter().any(|cell| *cell != blank);
+            tail.fill(blank);
         }
-        self.cells[kept_rows * self.cols..].fill(Cell::default());
+        {
+            let rest = &mut self.cells[kept_rows * self.cols..];
+            cleared_changed |= rest.iter().any(|cell| *cell != blank);
+            rest.fill(blank);
+        }
 
         self.border_table.clear();
         self.overlays.clear();
@@ -390,16 +401,8 @@ impl Grid {
         self.minimap_epoch += 1;
         self.polylines_epoch += 1;
         self.sketches_epoch += 1;
-    }
 
-    /// Feed everything this grid's cells put on screen into `hasher`.
-    ///
-    /// The border table goes in alongside the cells because [`Self::clear`]
-    /// resets it, so the same [`BorderId`] names different borders across two
-    /// fills. Hashing the id alone reads two different grids as one.
-    pub(crate) fn hash_content(&self, hasher: &mut impl Hasher) {
-        self.cells.hash(hasher);
-        self.border_table.hash(hasher);
+        cleared_changed
     }
 
     /// The border set `id` names, or the borderless set for an id this grid
@@ -1064,7 +1067,8 @@ impl PagePool {
             .map(|_| Page {
                 index: None,
                 refilled: false,
-                content_hash: 0,
+                cleared_changed: false,
+                decorations_changed: false,
                 grid: Grid::new(rows, cols),
                 text_runs: Vec::new(),
                 bars: Vec::new(),
@@ -1093,31 +1097,29 @@ impl PagePool {
         let page = &mut self.pages[slot];
         page.refilled = page.index == Some(index);
         page.index = Some(index);
-        page.grid.clear_except(painted_rows, painted_cols);
-        page.text_runs.clear();
-        page.bars.clear();
-        page.polylines.clear();
+        page.cleared_changed = page.grid.clear_except(painted_rows, painted_cols);
+        page.decorations_changed = false;
         &mut page.grid
     }
 
     /// Whether the page just written into `index`'s slot renders differently
-    /// from what that slot last held, recording the new content for the next
-    /// comparison either way.
+    /// from what that slot last held.
     ///
     /// Called once per fill, after the cells are painted and
-    /// [`Self::set_decorations`] has run, since it digests both. `true` for a
-    /// slot that changed page, whose composition moved whatever the page holds.
+    /// [`Self::set_decorations`] has run. `cells_changed` is what the
+    /// projection reported; the clear and the decorations recorded their own on
+    /// the way through, so between them the three cover everything the slot
+    /// puts on screen. `true` for a slot that changed page, whose composition
+    /// moved whatever the page holds.
     ///
     /// A pool refills pages that did not change, which is what this exists for.
     /// A caller watching one version refills every buffered page when it moves,
     /// and most of those repaint the same bytes. Reporting that as a change
     /// costs a recompose of everything the pool feeds.
-    pub fn content_changed(&mut self, index: u64) -> bool {
-        let slot = self.slot(index);
-        let hash = self.pages[slot].content_hash();
-        let page = &mut self.pages[slot];
-        let same = page.refilled && page.content_hash == hash;
-        page.content_hash = hash;
+    pub fn content_changed(&mut self, index: u64, cells_changed: bool) -> bool {
+        let page = &self.pages[self.slot(index)];
+        let same =
+            page.refilled && !page.cleared_changed && !cells_changed && !page.decorations_changed;
         !same
     }
 
@@ -1141,22 +1143,37 @@ impl PagePool {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
 
-        page.text_runs = text_runs
+        // Built into locals and compared before they are moved in, because
+        // the slot is written in place and there is nothing left to compare
+        // against once it is.
+        let text_runs: Vec<TextRun> = text_runs
             .into_iter()
             .map(|command| {
                 let run = StoredTextRun::from(command);
                 text_run_from_command(&run, run.row, 0)
             })
             .collect();
-        page.bars = bars
+        let bars: Vec<Bar> = bars
             .iter()
             .map(|command| bar_from_command(command, command.y, 0))
             .collect();
 
+        let mut changed = page.text_runs != text_runs || page.bars != bars;
+        page.text_runs = text_runs;
+        page.bars = bars;
+
+        // Refilled in place rather than rebuilt, so each slot is compared as it
+        // is written the way the cell projection compares its own.
+        changed |= page.polylines.len() != polylines.len();
         page.polylines.resize_with(polylines.len(), Polyline::empty);
         for (slot, command) in page.polylines.iter_mut().zip(&polylines) {
-            fill_polyline(slot, command, 0);
+            let mut built = Polyline::empty();
+            fill_polyline(&mut built, command, 0);
+            changed |= built != *slot;
+            *slot = built;
         }
+
+        page.decorations_changed = changed;
     }
 
     /// The page-targeted decorations buffered for document page `index`, or
@@ -1281,13 +1298,12 @@ struct Page {
     /// through the page index, so reading a different page out of this slot
     /// moves the composition whatever that page holds.
     refilled: bool,
-    /// Digest of what this slot last committed, so a refill that paints the
-    /// same bytes is recognized as one.
-    ///
-    /// A digest rather than the content itself because the caller paints over
-    /// the slot in place, so there is nothing left to compare against by the
-    /// time there is something to compare.
-    content_hash: u64,
+    /// Whether the clear that opened this fill blanked a cell holding
+    /// something, which a painted box shrinking over prior content does.
+    cleared_changed: bool,
+    /// Whether the decorations written into this slot differ from the ones it
+    /// held before the fill.
+    decorations_changed: bool,
     grid: Grid,
     /// Page-targeted text runs captured from the fill that painted this slot,
     /// page-local and pre-converted to the grid form at capture time. Empty for a
@@ -1300,18 +1316,6 @@ struct Page {
     /// Page-targeted stroked paths captured from the fill that painted this
     /// slot, page-local. See [`Self::text_runs`].
     polylines: Vec<Polyline>,
-}
-
-impl Page {
-    /// A digest of everything this slot puts on screen.
-    fn content_hash(&self) -> u64 {
-        let mut hasher = FxHasher::default();
-        self.grid.hash_content(&mut hasher);
-        self.text_runs.hash(&mut hasher);
-        self.bars.hash(&mut hasher);
-        self.polylines.hash(&mut hasher);
-        hasher.finish()
-    }
 }
 
 /// A single grid cell: one character and how to render it.
@@ -1760,37 +1764,6 @@ pub struct TextRun {
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
-}
-
-impl Hash for TextRun {
-    /// Hashed by hand because the anchor carries an `f32`, which has no
-    /// [`Hash`] of its own.
-    ///
-    /// The anchor goes in by its bits. That is not consistent with
-    /// [`PartialEq`] in the strict sense, since `-0.0` and `0.0` compare equal
-    /// while their bits differ, and the one caller is a page-content digest
-    /// deciding whether a slot needs repainting. The inconsistency only ever
-    /// makes two equal pages hash apart, which costs a repaint. The dangerous
-    /// direction, two different pages hashing alike, is what bit-hashing
-    /// prevents.
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.col.hash(state);
-        self.row.hash(state);
-        self.scale.hash(state);
-        self.color.hash(state);
-        self.bg.hash(state);
-        self.text.hash(state);
-        self.follow.hash(state);
-        match self.anchor {
-            Some((host, top_rows)) => {
-                state.write_u8(1);
-                host.hash(state);
-                state.write_u32(top_rows.to_bits());
-            },
-            None => state.write_u8(0),
-        }
-        self.seq.hash(state);
-    }
 }
 
 /// A thin rectangle filled off the cell grid in a solid color.
@@ -2244,6 +2217,73 @@ mod tests {
         assert_eq!(grid.get(0, 0).border_id, BorderId::NONE);
         assert_eq!(grid.cell_borders(0, 0), Borders::default());
         assert_eq!(grid.border_table, Vec::new(), "the table went with them");
+    }
+
+    /// One bar at `y`, the smallest decoration a page can carry.
+    fn bar_at(y: i16) -> stoatty_protocol::command::BarCommand {
+        stoatty_protocol::command::BarCommand {
+            x: 0,
+            y,
+            width: 16,
+            height: 16,
+            color: [255, 0, 0],
+        }
+    }
+
+    /// A page's change verdict covers everything it puts on screen, and a
+    /// decoration is on screen. Reading only the cells would call a page whose
+    /// bar moved unchanged, and the pool would never repaint it.
+    #[test]
+    fn a_refill_whose_only_change_is_a_decoration_reports_changed() {
+        let mut pool = PagePool::new(3, 4, 2);
+
+        pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
+        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new());
+        pool.content_changed(0, true);
+
+        pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
+        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new());
+        assert!(
+            !pool.content_changed(0, false),
+            "the same cells under the same bar is not a change",
+        );
+
+        pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
+        pool.set_decorations(0, Vec::new(), vec![bar_at(1)], Vec::new());
+        assert!(
+            pool.content_changed(0, false),
+            "the bar moved, so the page renders differently",
+        );
+    }
+
+    /// A shrinking box is the one change a fill makes without writing a cell:
+    /// the clear blanks what the paint no longer covers, and the paint never
+    /// sees those cells to compare them.
+    #[test]
+    fn a_refill_whose_painted_box_shrinks_reports_changed() {
+        let mut pool = PagePool::new(3, 4, 2);
+
+        let first = pool.fill(0, 3, 4);
+        for row in 0..3 {
+            for col in 0..4 {
+                first.get_mut(row, col).ch = 'a';
+            }
+        }
+        pool.content_changed(0, true);
+
+        // The paint covers the top-left two by two, so the clear takes the rest.
+        pool.fill(0, 2, 2);
+        assert!(
+            pool.content_changed(0, false),
+            "the cells the box gave up were blanked, which is a change",
+        );
+
+        // And once the page is that box, refilling it changes nothing.
+        pool.fill(0, 2, 2);
+        assert!(
+            !pool.content_changed(0, false),
+            "a clear over cells already blank reports nothing",
+        );
     }
 
     #[test]

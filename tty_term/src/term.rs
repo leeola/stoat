@@ -2374,7 +2374,7 @@ impl Terminal {
             let grid =
                 pool.page_pool
                     .fill(fill.index, fill.term.screen_lines(), fill.term.columns());
-            project_term_cells(grid, &fill.term, &self.theme, &self.palette);
+            let cells_changed = project_term_cells(grid, &fill.term, &self.theme, &self.palette);
             pool.page_pool
                 .set_decorations(fill.index, text_runs, bars, polylines);
 
@@ -2383,7 +2383,7 @@ impl Terminal {
             // not change. Reporting one of those costs a recompose of
             // everything the pool feeds, which is why the version moves only
             // when the page does.
-            if pool.page_pool.content_changed(fill.index) {
+            if pool.page_pool.content_changed(fill.index, cells_changed) {
                 pool.content_version = pool.content_version.wrapping_add(1);
                 let window = pool.region.window;
                 self.mark_window_dirty(window);
