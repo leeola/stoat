@@ -300,8 +300,10 @@ impl Grid {
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.rows = rows;
         self.cols = cols;
-        self.cells.clear();
+        // Length first, then one pass to blank. Clearing and pushing the
+        // defaults back walks the cells twice for the same answer.
         self.cells.resize(rows * cols, Cell::default());
+        self.cells.fill(Cell::default());
         self.border_table.clear();
         self.overlays.clear();
         self.scroll_region = None;
@@ -1249,6 +1251,24 @@ impl PagePool {
         for page in &mut self.pages {
             page.index = None;
             page.grid.resize(rows, cols);
+            page.text_runs.clear();
+            page.bars.clear();
+            page.polylines.clear();
+        }
+    }
+
+    /// Mark every page unbuffered without touching its cells.
+    ///
+    /// For a caller that empties the window at the size it already holds, such
+    /// as a viewport resize that leaves the pool's region to be redeclared. The
+    /// cells a page holds are unreachable once its index is gone, since
+    /// [`Self::page`] answers `None` and [`Self::compose`] refuses the window,
+    /// and the refill that follows blanks whatever its paint does not cover.
+    ///
+    /// Use [`Self::rebuild`] where the page size itself changes.
+    pub fn invalidate(&mut self) {
+        for page in &mut self.pages {
+            page.index = None;
             page.text_runs.clear();
             page.bars.clear();
             page.polylines.clear();
@@ -2827,6 +2847,37 @@ mod tests {
             (page.rows(), page.cols()),
             (3, 5),
             "pages track the new viewport"
+        );
+    }
+
+    /// A viewport resize empties the window at the size the pages already
+    /// hold, since the redeclare that follows is what resizes them. So the
+    /// pages have to go unreachable without their grids being rebuilt, and the
+    /// refill after has to blank the cells left standing.
+    #[test]
+    fn invalidate_drops_the_pages_and_keeps_their_grids() {
+        let mut pool = PagePool::new(2, 3, 2);
+        {
+            let page = pool.fill(0, 2, 3);
+            page.row_mut(0)[0].ch = 'x';
+        }
+        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new());
+
+        pool.invalidate();
+
+        assert!(pool.page(0).is_none(), "the page is unreachable");
+        assert!(
+            !pool.compose(0, &mut Grid::new(2, 3)),
+            "and the window composes nothing",
+        );
+
+        let page = pool.fill(0, 0, 0);
+        assert_eq!((page.rows(), page.cols()), (2, 3), "the grid kept its size");
+        assert_eq!(page.row(0)[0].ch, ' ', "the refill blanked what stood");
+        assert_eq!(
+            pool.page_decorations(0),
+            Some((&[][..], &[][..], &[][..])),
+            "and the dropped page took its decorations",
         );
     }
 

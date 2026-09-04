@@ -2647,17 +2647,15 @@ impl Terminal {
         self.term.resize(GridSize { rows, cols });
         self.damage_pending = true;
         // Pages are sized to each pool's region, not the viewport, so a viewport
-        // resize only empties them: the app re-declares regions and refills as
-        // its layout recomputes. Any half-painted page is abandoned.
+        // resize only empties them. The app re-declares regions and refills as
+        // its layout recomputes, and that redeclare is what resizes the pages.
+        // Any half-painted page is abandoned.
         for pool in self
             .pools
             .values_mut()
             .filter(|pool| pool.region.window == 0)
         {
-            pool.page_pool.rebuild(
-                pool.region.height.max(1) as usize,
-                pool.region.width.max(1) as usize,
-            );
+            pool.page_pool.invalidate();
             pool.content_version = pool.content_version.wrapping_add(1);
         }
         // Doomed rather than closed. The page in flight has nowhere to land now,
