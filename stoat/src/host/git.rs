@@ -483,10 +483,15 @@ pub trait GitRepo: Send + Sync {
     /// author identity. Committer is set to the configured identity
     /// (or the same as author when not configured). Returns the new
     /// commit's sha; does not update HEAD.
+    ///
+    /// The tree is named by oid, from [`Self::tree_oid`],
+    /// [`Self::tree_with_updates`], or a clean [`CherryPickOutcome`]. Every
+    /// blob in it is already written, so nothing here re-hashes a file the
+    /// commit does not change.
     fn create_commit(
         &self,
         parent_sha: Option<&str>,
-        tree: &BTreeMap<PathBuf, String>,
+        tree_oid: &str,
         message: &str,
         author_name: &str,
         author_email: &str,
@@ -575,7 +580,12 @@ pub enum RebaseTodoOp {
 #[derive(Clone, Debug)]
 pub enum CherryPickOutcome {
     Clean {
-        tree: BTreeMap<PathBuf, String>,
+        /// Oid of the merged tree, already written to the object database.
+        ///
+        /// The tree rather than its contents, so a blob neither side touched
+        /// is carried by reference. Reading it out as text dropped anything
+        /// that was not UTF-8, which took the file out of every picked commit.
+        tree: String,
         /// Commit message carried from the source commit.
         message: String,
         author_name: String,

@@ -204,7 +204,7 @@ pub(super) fn run_rebase(
 }
 
 pub(super) fn cherry_pick_tree(
-    state: &FakeRepoState,
+    state: &mut FakeRepoState,
     source_sha: &str,
     onto_sha: &str,
 ) -> Result<CherryPickOutcome, GitApplyError> {
@@ -274,8 +274,12 @@ pub(super) fn cherry_pick_tree(
             tree.remove(path);
         }
     }
+    state.next_tree += 1;
+    let oid = format!("tree-{}", state.next_tree);
+    state.trees.insert(oid.clone(), tree);
+
     Ok(CherryPickOutcome::Clean {
-        tree,
+        tree: oid,
         message: source.message.clone(),
         author_name: source.author_name.clone(),
         author_email: source.author_email.clone(),

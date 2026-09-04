@@ -143,33 +143,10 @@ pub(super) fn cherry_pick_tree(
     }
 
     let tree_oid = index.write_tree_to(repo).map_err(super::err_msg)?;
-    let tree = repo.find_tree(tree_oid).map_err(super::err_msg)?;
-    let mut out: BTreeMap<PathBuf, String> = BTreeMap::new();
-    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-        if entry.kind() != Some(git2::ObjectType::Blob) {
-            return git2::TreeWalkResult::Ok;
-        }
-        let name = match entry.name() {
-            Ok(n) => n,
-            Err(_) => return git2::TreeWalkResult::Ok,
-        };
-        let rel = if dir.is_empty() {
-            PathBuf::from(name)
-        } else {
-            PathBuf::from(dir).join(name)
-        };
-        if let Ok(blob) = entry.to_object(repo).and_then(|o| o.peel_to_blob())
-            && let Ok(text) = std::str::from_utf8(blob.content())
-        {
-            out.insert(rel, text.to_string());
-        }
-        git2::TreeWalkResult::Ok
-    })
-    .map_err(super::err_msg)?;
 
     let author = source.author();
     Ok(CherryPickOutcome::Clean {
-        tree: out,
+        tree: tree_oid.to_string(),
         message: source.message().unwrap_or("").to_string(),
         author_name: author.name().unwrap_or("").to_string(),
         author_email: author.email().unwrap_or("").to_string(),

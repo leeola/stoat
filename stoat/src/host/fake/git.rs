@@ -1369,14 +1369,14 @@ impl GitRepo for FakeGitRepo {
         source_sha: &str,
         onto_sha: &str,
     ) -> Result<CherryPickOutcome, GitApplyError> {
-        let state = self.state.lock().unwrap();
-        rebase::cherry_pick_tree(&state, source_sha, onto_sha)
+        let mut state = self.state.lock().unwrap();
+        rebase::cherry_pick_tree(&mut state, source_sha, onto_sha)
     }
 
     fn create_commit(
         &self,
         parent_sha: Option<&str>,
-        tree: &BTreeMap<PathBuf, String>,
+        tree_oid: &str,
         message: &str,
         author_name: &str,
         author_email: &str,
@@ -1390,6 +1390,12 @@ impl GitRepo for FakeGitRepo {
             }
             .fail();
         }
+        let Some(tree) = state.trees.get(tree_oid).cloned() else {
+            return BackendSnafu {
+                reason: format!("unknown tree oid: {tree_oid}"),
+            }
+            .fail();
+        };
         state.synth_counter += 1;
         let parent_frag = parent_sha.unwrap_or("root");
         let new_sha = format!(
@@ -1399,7 +1405,7 @@ impl GitRepo for FakeGitRepo {
         );
         let commit = FakeCommit {
             parents: parent_sha.map(str::to_string).into_iter().collect(),
-            tree: tree.clone(),
+            tree,
             message: message.to_string(),
             author_name: author_name.to_string(),
             author_email: author_email.to_string(),

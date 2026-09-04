@@ -70,7 +70,7 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
         emit_rebase_error(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
-    let Some(tree) = repo.commit_tree(&picked_sha) else {
+    let Some(tree) = repo.tree_oid(&picked_sha) else {
         emit_rebase_error(stoat, "reword: commit tree unreadable", None);
         return UpdateEffect::Redraw;
     };

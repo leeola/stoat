@@ -2,6 +2,7 @@ use crate::{
     action_handlers::rebase::{drive_rebase, emit_rebase_error},
     app::{Stoat, UpdateEffect},
 };
+use std::path::PathBuf;
 
 #[derive(Copy, Clone, Debug)]
 pub(super) enum ConflictChoice {
@@ -109,7 +110,7 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
         rebase::{ConflictResolution, RebasePause},
     };
 
-    let (workdir, resolved_tree, author_name, author_email, message, parent) = {
+    let (workdir, updates, author_name, author_email, message, parent) = {
         let Some(active) = stoat.active_workspace().rebase_active.as_ref() else {
             return UpdateEffect::None;
         };
@@ -123,39 +124,28 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
             return UpdateEffect::None;
         };
 
-        let Some(repo) = stoat.git_host.discover(&active.workdir) else {
-            return UpdateEffect::None;
-        };
-        let Some(mut tree) = repo.commit_tree(&active.current_head) else {
-            return UpdateEffect::None;
-        };
-        for file in files {
-            let choice = resolutions
-                .get(&file.path)
-                .copied()
-                .unwrap_or(ConflictResolution::TakeTheirs);
-            match choice {
-                ConflictResolution::TakeOurs => {
-                    if let Some(content) = &file.ours {
-                        tree.insert(file.path.clone(), content.clone());
-                    } else {
-                        tree.remove(&file.path);
-                    }
-                },
-                ConflictResolution::TakeTheirs => {
-                    if let Some(content) = &file.theirs {
-                        tree.insert(file.path.clone(), content.clone());
-                    } else {
-                        tree.remove(&file.path);
-                    }
-                },
-                ConflictResolution::SkipEntry => {},
-            }
-        }
+        // One entry per conflicted file, against the head the rebase has
+        // reached. Every path the conflict did not name keeps the entry it
+        // already had, so a binary the merge left alone rides through.
+        let updates: Vec<(PathBuf, Option<String>)> = files
+            .iter()
+            .filter_map(|file| {
+                let choice = resolutions
+                    .get(&file.path)
+                    .copied()
+                    .unwrap_or(ConflictResolution::TakeTheirs);
+                let side = match choice {
+                    ConflictResolution::TakeOurs => &file.ours,
+                    ConflictResolution::TakeTheirs => &file.theirs,
+                    ConflictResolution::SkipEntry => return None,
+                };
+                Some((file.path.clone(), side.clone()))
+            })
+            .collect();
         let message = format!("conflict-resolved {source_sha}");
         (
             active.workdir.clone(),
-            tree,
+            updates,
             "stoat".to_string(),
             "stoat@example.invalid".to_string(),
             message,
@@ -167,13 +157,14 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
         emit_rebase_error(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
-    match repo.create_commit(
-        Some(&parent),
-        &resolved_tree,
-        &message,
-        &author_name,
-        &author_email,
-    ) {
+    let tree = match repo.tree_with_updates(&parent, &updates) {
+        Ok(tree) => tree,
+        Err(err) => {
+            emit_rebase_error(stoat, &format!("conflict apply failed: {err}"), None);
+            return UpdateEffect::Redraw;
+        },
+    };
+    match repo.create_commit(Some(&parent), &tree, &message, &author_name, &author_email) {
         Ok(new_sha) => {
             let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
                 return UpdateEffect::None;

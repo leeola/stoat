@@ -714,14 +714,15 @@ impl GitRepo for LocalGitRepo {
     fn create_commit(
         &self,
         parent_sha: Option<&str>,
-        tree: &BTreeMap<PathBuf, String>,
+        tree_oid: &str,
         message: &str,
         author_name: &str,
         author_email: &str,
     ) -> Result<String, GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
-        let tree_oid = tree::build_tree_from_map(&repo, tree).map_err(err_msg)?;
-        let tree = repo.find_tree(tree_oid).map_err(err_msg)?;
+        let tree = git2::Oid::from_str(tree_oid)
+            .and_then(|oid| repo.find_tree(oid))
+            .map_err(err_msg)?;
         let sig = git2::Signature::now(author_name, author_email).map_err(err_msg)?;
         let parent_commit = match parent_sha {
             Some(sha) => {
@@ -1268,7 +1269,7 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
 #[cfg(test)]
 mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
-    use crate::host::git::{GitHost, GitRepo};
+    use crate::host::git::{CherryPickOutcome, GitHost, GitRepo};
     use git2::{Oid, Repository, RepositoryInitOptions, Signature};
     use std::{
         collections::BTreeMap,
@@ -1563,6 +1564,33 @@ mod tests {
             "the oid is the commit's tree",
         );
         assert_eq!(git.tree_oid("nope"), None, "an unknown sha names no tree");
+    }
+
+    /// A pick used to read its merged tree out as text, which skipped every
+    /// blob that was not UTF-8 and so took the file out of the commit the
+    /// rebase then wrote. Carrying the tree by oid never reads the blob at all.
+    #[test]
+    fn a_pick_keeps_a_binary_blob_in_its_tree() {
+        let (dir, repo, shas) = seeded_repo();
+        let binary = [0u8, 159, 146, 150];
+        let with_font = commit_files(&repo, &dir, &[("font.ttf", &binary)]);
+        let git = discover(&dir);
+
+        let outcome = git
+            .cherry_pick_tree(&with_font, &shas[1])
+            .expect("adding a file applies cleanly onto an older commit");
+        let CherryPickOutcome::Clean { tree, .. } = outcome else {
+            panic!("the pick adds a path neither side touched, so it is clean");
+        };
+
+        let picked = {
+            let tree = repo.find_tree(Oid::from_str(&tree).unwrap()).unwrap();
+            let entry = tree
+                .get_path(Path::new("font.ttf"))
+                .expect("the picked tree still holds the file the commit added");
+            repo.find_blob(entry.id()).unwrap().content().to_vec()
+        };
+        assert_eq!(picked, binary, "and holds it byte for byte");
     }
 
     #[test]
