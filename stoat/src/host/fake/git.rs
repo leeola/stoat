@@ -750,6 +750,15 @@ struct FakeRepoState {
     /// Commit objects keyed by opaque sha. Populated via
     /// [`FakeRepoBuilder::commit`] and friends.
     commits: HashMap<String, FakeCommit>,
+    /// Trees by synthetic oid, so a tree named by
+    /// [`GitRepo::tree_with_updates`] outlives the call that built it.
+    ///
+    /// A real backend writes the tree object and hands back its hash. The fake
+    /// keeps its map model and hands back a key into this one, which is what
+    /// lets a caller carry a tree it never has to materialize.
+    trees: HashMap<String, BTreeMap<PathBuf, String>>,
+    /// Number for the next tree this repo writes, so each gets its own oid.
+    next_tree: usize,
     /// The tip of the simulated branch. Defaults to the last inserted
     /// commit, overridable via [`FakeRepoBuilder::set_head`].
     head: Option<String>,
@@ -1151,6 +1160,41 @@ impl GitRepo for FakeGitRepo {
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
         let state = self.state.lock().unwrap();
         state.commits.get(sha).map(|c| c.tree.clone())
+    }
+
+    fn tree_oid(&self, sha: &str) -> Option<String> {
+        let mut state = self.state.lock().unwrap();
+        let tree = state.commits.get(sha)?.tree.clone();
+        let oid = format!("tree-of-{sha}");
+        state.trees.insert(oid.clone(), tree);
+        Some(oid)
+    }
+
+    fn tree_with_updates(
+        &self,
+        base_sha: &str,
+        updates: &[(PathBuf, Option<String>)],
+    ) -> Result<String, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(commit) = state.commits.get(base_sha) else {
+            return BackendSnafu {
+                reason: format!("unknown commit {base_sha}"),
+            }
+            .fail();
+        };
+
+        let mut tree = commit.tree.clone();
+        for (path, content) in updates {
+            match content {
+                Some(content) => tree.insert(path.clone(), content.clone()),
+                None => tree.remove(path),
+            };
+        }
+
+        state.next_tree += 1;
+        let oid = format!("tree-{}", state.next_tree);
+        state.trees.insert(oid.clone(), tree);
+        Ok(oid)
     }
 
     fn parent_sha(&self, sha: &str) -> Option<String> {
@@ -2076,6 +2120,38 @@ mod tests {
         host.add_repo(workdir());
         let repo = host.discover(&workdir()).unwrap();
         assert!(repo.commit_tree("nope").is_none());
+    }
+
+    /// The fake keeps its map model, so the oids it hands back are keys into a
+    /// map rather than hashes of content. What a caller relies on either way is
+    /// that a commit names one tree and every update names a new one.
+    ///
+    /// What each oid holds is checked where it is read, which is the caller that
+    /// carries a tree through a commit rather than this one that builds it.
+    #[test]
+    fn tree_oid_is_stable_and_every_update_names_a_new_tree() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).commit("sha1", &[("a.rs", "A")]);
+        let repo = host.discover(&workdir()).unwrap();
+        let update = |content: &str| {
+            repo.tree_with_updates(
+                "sha1",
+                &[(PathBuf::from("a.rs"), Some(content.to_string()))],
+            )
+        };
+
+        assert_eq!(
+            (repo.tree_oid("sha1"), repo.tree_oid("nope")),
+            (repo.tree_oid("sha1"), None),
+            "a commit names the same tree twice over, and an unknown sha names none",
+        );
+
+        let (first, second) = (update("B").unwrap(), update("C").unwrap());
+        assert_ne!(first, second, "each update writes a tree of its own");
+        assert!(
+            repo.tree_with_updates("nope", &[]).is_err(),
+            "an update over an unknown commit has no base to build on",
+        );
     }
 
     #[test]

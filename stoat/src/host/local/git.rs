@@ -387,6 +387,48 @@ impl GitRepo for LocalGitRepo {
         Some(out)
     }
 
+    fn tree_oid(&self, sha: &str) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).ok()?;
+        Some(repo.find_commit(oid).ok()?.tree_id().to_string())
+    }
+
+    fn tree_with_updates(
+        &self,
+        base_sha: &str,
+        updates: &[(PathBuf, Option<String>)],
+    ) -> Result<String, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let base = git2::Oid::from_str(base_sha)
+            .and_then(|oid| repo.find_commit(oid))
+            .and_then(|commit| commit.tree())
+            .map_err(err_msg)?;
+
+        // The blobs are written before the builder runs because upsert takes an
+        // oid, and a blob written for an update the builder then rejects is
+        // unreferenced rather than wrong: git gc collects it.
+        let mut builder = git2::build::TreeUpdateBuilder::new();
+        let mut written = Vec::with_capacity(updates.len());
+        for (path, content) in updates {
+            match content {
+                Some(content) => {
+                    written.push((path, repo.blob(content.as_bytes()).map_err(err_msg)?))
+                },
+                None => {
+                    builder.remove(path);
+                },
+            }
+        }
+        for (path, blob) in &written {
+            builder.upsert(path, *blob, git2::FileMode::Blob);
+        }
+
+        builder
+            .create_updated(&repo, &base)
+            .map(|oid| oid.to_string())
+            .map_err(err_msg)
+    }
+
     /// Reads only the blobs the tree diff names, so the cost tracks the
     /// commit's size rather than the repository's.
     ///
@@ -1228,7 +1270,11 @@ mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
     use crate::host::git::{GitHost, GitRepo};
     use git2::{Oid, Repository, RepositoryInitOptions, Signature};
-    use std::{path::Path, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use tempfile::TempDir;
 
     const NAMED_SIDES: &str = "--- a/a.rs\n+++ b/a.rs\n";
@@ -1372,6 +1418,151 @@ mod tests {
 
     fn discover(dir: &TempDir) -> Arc<dyn GitRepo> {
         LocalGit::new().discover(dir.path()).unwrap()
+    }
+
+    /// Commit `contents` on top of HEAD, adding every named path to the index.
+    fn commit_files(repo: &Repository, dir: &TempDir, files: &[(&str, &[u8])]) -> String {
+        let sig = Signature::now("test", "t@t").unwrap();
+        for (name, bytes) in files {
+            std::fs::write(dir.path().join(name), bytes).unwrap();
+        }
+        let tree = {
+            let mut index = repo.index().unwrap();
+            for (name, _) in files {
+                index.add_path(Path::new(name)).unwrap();
+            }
+            index.write().unwrap();
+            repo.find_tree(index.write_tree().unwrap()).unwrap()
+        };
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "add", &tree, &[&parent])
+            .unwrap()
+            .to_string()
+    }
+
+    /// Every entry of the tree `oid` names, as `(path, blob oid)`.
+    fn entries(repo: &Repository, oid: &str) -> BTreeMap<PathBuf, String> {
+        let tree = repo.find_tree(Oid::from_str(oid).unwrap()).unwrap();
+        let mut out = BTreeMap::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob) {
+                let name = entry.name().expect("the fixture writes utf-8 names");
+                let rel = if dir.is_empty() {
+                    PathBuf::from(name)
+                } else {
+                    PathBuf::from(dir).join(name)
+                };
+                out.insert(rel, entry.id().to_string());
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .unwrap();
+        out
+    }
+
+    /// `commit_tree` refuses a tree holding anything that is not UTF-8, which is
+    /// why amend and reword cannot run in a repository carrying a font. Updating
+    /// a tree by oid never reads the blob it does not name, so the binary rides
+    /// through untouched.
+    #[test]
+    fn tree_with_updates_keeps_a_binary_blob_it_does_not_name() {
+        let (dir, repo, _) = seeded_repo();
+        let binary = [0u8, 159, 146, 150];
+        let base = commit_files(&repo, &dir, &[("font.ttf", &binary), ("b.txt", b"keep")]);
+        let git = discover(&dir);
+
+        assert_eq!(
+            git.commit_tree(&base),
+            None,
+            "reading the tree as text refuses it, which is the fault this avoids",
+        );
+
+        let oid = git
+            .tree_with_updates(
+                &base,
+                &[(PathBuf::from("b.txt"), Some("edited".to_string()))],
+            )
+            .expect("the update writes a tree");
+
+        let blob = {
+            let tree = repo.find_tree(Oid::from_str(&oid).unwrap()).unwrap();
+            let entry = tree.get_path(Path::new("font.ttf")).unwrap();
+            repo.find_blob(entry.id()).unwrap().content().to_vec()
+        };
+        assert_eq!(
+            blob, binary,
+            "the blob nothing named came through as it was"
+        );
+    }
+
+    /// The cost of the old shape was re-hashing every blob in the tree. What
+    /// makes the new one cheap is that an entry the updates do not name keeps
+    /// the oid it already had, so this pins the oids rather than the contents.
+    #[test]
+    fn tree_with_updates_leaves_every_unnamed_entry_at_its_own_oid() {
+        let (dir, repo, _) = seeded_repo();
+        let base = commit_files(&repo, &dir, &[("b.txt", b"keep"), ("c.txt", b"also keep")]);
+        let git = discover(&dir);
+        let before = entries(&repo, &git.tree_oid(&base).expect("the commit has a tree"));
+
+        let after = entries(
+            &repo,
+            &git.tree_with_updates(
+                &base,
+                &[(PathBuf::from("b.txt"), Some("edited".to_string()))],
+            )
+            .expect("the update writes a tree"),
+        );
+
+        assert_eq!(
+            after
+                .iter()
+                .filter(|(path, oid)| before.get(*path) != Some(*oid))
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("b.txt")],
+            "only the named path got a new blob",
+        );
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>(),
+            "and the tree still holds the same paths",
+        );
+    }
+
+    /// A conflict resolved by deleting a file, and a rebased pick over a commit
+    /// that removed one, both need a path taken out rather than blanked.
+    #[test]
+    fn tree_with_updates_removes_the_path_a_none_names() {
+        let (dir, repo, _) = seeded_repo();
+        let base = commit_files(&repo, &dir, &[("b.txt", b"keep"), ("gone.txt", b"bye")]);
+        let git = discover(&dir);
+
+        let oid = git
+            .tree_with_updates(&base, &[(PathBuf::from("gone.txt"), None)])
+            .expect("the update writes a tree");
+
+        assert_eq!(
+            entries(&repo, &oid).keys().cloned().collect::<Vec<_>>(),
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            "the removed path is gone and the rest is untouched",
+        );
+    }
+
+    /// The oid is what a caller carries in place of the whole tree, so it has to
+    /// name the tree the commit actually has.
+    #[test]
+    fn tree_oid_names_the_commits_own_tree() {
+        let (dir, repo, shas) = seeded_repo();
+        let git = discover(&dir);
+
+        let commit = repo.find_commit(Oid::from_str(&shas[2]).unwrap()).unwrap();
+        assert_eq!(
+            git.tree_oid(&shas[2]),
+            Some(commit.tree_id().to_string()),
+            "the oid is the commit's tree",
+        );
+        assert_eq!(git.tree_oid("nope"), None, "an unknown sha names no tree");
     }
 
     #[test]

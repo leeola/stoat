@@ -329,6 +329,14 @@ pub trait GitRepo: Send + Sync {
     /// `CommitRange` review should be used for multi-parent walks.
     fn parent_sha(&self, sha: &str) -> Option<String>;
 
+    /// Oid of the tree `sha` commits, or `None` for an unknown sha.
+    ///
+    /// A tree named by its oid is a tree nothing had to read. Where
+    /// [`Self::commit_tree`] decompresses every blob to build a map, and so
+    /// refuses a tree holding anything that is not UTF-8, this reaches past
+    /// the contents entirely.
+    fn tree_oid(&self, sha: &str) -> Option<String>;
+
     /// Every parent of `sha`, first parent first.
     ///
     /// Empty for a root commit or an unknown sha. This is the case
@@ -413,6 +421,23 @@ pub trait GitRepo: Send + Sync {
         &self,
         tree: &BTreeMap<PathBuf, String>,
         message: Option<&str>,
+    ) -> Result<String, GitApplyError>;
+
+    /// The tree of `base_sha` with each update applied, written as a new tree.
+    ///
+    /// An update carrying `Some` content upserts that path, and one carrying
+    /// `None` removes it. Every path the updates do not name keeps the entry
+    /// oid it already had, so an untouched blob is never read, never re-hashed,
+    /// and never required to be UTF-8. Returns the new tree's oid.
+    ///
+    /// Writes objects but no commit and no ref, so a caller that builds a tree
+    /// and then fails leaves the branch where it was.
+    ///
+    /// Fails when `base_sha` is unknown or the backend rejects the write.
+    fn tree_with_updates(
+        &self,
+        base_sha: &str,
+        updates: &[(PathBuf, Option<String>)],
     ) -> Result<String, GitApplyError>;
 
     /// Replace the commit at `sha` with one carrying `tree` (and
