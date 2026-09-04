@@ -309,6 +309,16 @@ fn watch_workspace_dirs(fs: &dyn FsHost, watcher: &dyn FsWatchHost, root: &Path)
     }
 }
 
+/// Whether an index drain that has merged `drained` updates in `elapsed` has
+/// used up its turn.
+///
+/// Either bound ends it. The count guards against a flood of updates too
+/// cheap for the clock to notice, and the time against the handful that are
+/// expensive enough that a count says nothing about what they cost.
+fn index_turn_spent(drained: usize, elapsed: std::time::Duration) -> bool {
+    drained >= INDEX_DRAIN_CAP || elapsed >= INDEX_DRAIN_BUDGET
+}
+
 /// Index into [`SPINNER_FRAMES`] for a spinner that has animated for `clock`
 /// seconds, wrapping once per full cycle.
 pub(crate) fn spinner_phase(clock: f32) -> u8 {
@@ -343,6 +353,19 @@ pub(crate) const WHEEL_BINDING_COOLDOWN: std::time::Duration = std::time::Durati
 /// stall input. On hitting the cap the drain reschedules itself to finish the
 /// remainder on the next turn.
 const INDEX_DRAIN_CAP: usize = 512;
+
+/// Time [`Stoat::drain_index_updates`] spends merging before it returns to the
+/// event loop, about half a frame.
+///
+/// The count alone is no bound on cost. One update is 95 us for a cold shard
+/// and tens of milliseconds for a reindex of a large file, and the update
+/// channel is unbounded, so a cold build queues every shard at once and a cap
+/// of five hundred never engages. One turn then merges the whole build.
+///
+/// Nothing queued is lost. What is left wakes the next turn through the redraw
+/// notify, and the frame timer paints between the two, which is how the pty
+/// drain in the same function bounds itself.
+const INDEX_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Hidden buffers that keep their full highlight state when `editor.highlight_retention`
 /// is unset. Beyond this many, the least-recently-shown hidden buffers are evicted.
@@ -3894,9 +3917,12 @@ impl Stoat {
     /// blocking thread once, which is what keeps a drain covering a whole
     /// checkout from performing a write per file between two frames.
     ///
-    /// At most [`INDEX_DRAIN_CAP`] updates are processed per call. On hitting
-    /// the cap the drain schedules a redraw and returns, leaving the remainder
-    /// queued for the next turn.
+    /// The turn ends at [`INDEX_DRAIN_CAP`] updates or [`INDEX_DRAIN_BUDGET`]
+    /// of merging, whichever comes first. On either the drain schedules a
+    /// redraw and returns, leaving the remainder queued for the next turn.
+    ///
+    /// The re-resolution after the loop is outside both bounds. It runs once
+    /// and has to see every update the loop merged.
     pub(crate) fn drain_index_updates(&mut self) {
         let started = std::time::Instant::now();
         let mut resolve_pending: std::collections::HashSet<WorkspaceId> =
@@ -3986,7 +4012,7 @@ impl Stoat {
                 },
             }
 
-            if drained >= INDEX_DRAIN_CAP {
+            if index_turn_spent(drained, started.elapsed()) {
                 self.redraw_notify.notify_one();
                 break;
             }
@@ -10225,6 +10251,31 @@ mod tests {
             callees_after(true),
             callees_after(false),
             "batching two reindexes into one drain matches draining them one at a time",
+        );
+    }
+
+    /// A cold build queues every shard at once, so the count never engages and
+    /// one turn merges the whole thing. The time bound is what ends that turn,
+    /// and it has to end it on its own rather than only alongside the count.
+    ///
+    /// The bound is read here rather than driven through a drain, since a wall
+    /// clock does not advance on command, and eight milliseconds of real
+    /// merging ties the answer to how fast the machine is.
+    #[test]
+    fn an_index_turn_ends_on_either_bound() {
+        let under = INDEX_DRAIN_BUDGET - std::time::Duration::from_millis(1);
+
+        assert!(
+            !index_turn_spent(INDEX_DRAIN_CAP - 1, under),
+            "inside both bounds the turn continues",
+        );
+        assert!(
+            index_turn_spent(INDEX_DRAIN_CAP, under),
+            "the count ends a turn of updates too cheap for the clock to see",
+        );
+        assert!(
+            index_turn_spent(1, INDEX_DRAIN_BUDGET),
+            "and the time ends a turn of one update the count would let run on",
         );
     }
 
