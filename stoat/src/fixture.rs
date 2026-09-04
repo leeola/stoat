@@ -400,6 +400,11 @@ pub enum FixtureError {
 ///   labels crowded off their rows, two labels starting on one row, a seventh annotation wrapping
 ///   the marker color cycle, a rect mark over a three-line annotation, labels with no room to land,
 ///   a soft-wrapped focus, and focuses at the left edge and the last line.
+/// - `walkthrough-card`: a text report builder committed with an eight-stop tour that pushes the
+///   narration card into every placement and content shape. It stages the card below the focus and
+///   over the code when nothing else fits, the narrowest and widest cards, a card taller than the
+///   frame, every markdown construct the renderer styles, three annotations that narrate for
+///   themselves, and a titled stop with nothing to say.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -416,6 +421,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "rust-diff" => materialize_rust_diff(dest),
         "walkthrough" => walkthrough::tour::materialize(dest),
         "walkthrough-marks" => walkthrough::marks::materialize(dest),
+        "walkthrough-card" => walkthrough::card::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
