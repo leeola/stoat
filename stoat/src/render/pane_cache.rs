@@ -105,8 +105,15 @@ pub(crate) struct PaneCacheKey {
 /// A pane paints into three channels and all three are reset per frame, so all
 /// three are captured. Cells alone would replay the grid and lose the rich
 /// gutter, the minimap strip, and the undercurls that ride beside it.
+///
+/// The storage is reused across captures rather than rebuilt, so a pane that
+/// misses writes over what it held instead of allocating its rect again. The
+/// render site therefore takes the entry out of the map before it knows
+/// whether this frame captures anything, which is why `key` is `None` until a
+/// capture fills it.
+#[derive(Default)]
 pub(crate) struct PaneCacheEntry {
-    pub(crate) key: PaneCacheKey,
+    pub(crate) key: Option<PaneCacheKey>,
     /// The rectangles the pane painted, each with its cells row-major.
     ///
     /// Usually one, the pane's own rect. A pane whose status row runs on under
@@ -123,8 +130,8 @@ pub(crate) struct PaneCacheEntry {
     undercurls: Vec<(u16, u16, u16, [u8; 3])>,
 }
 
-/// The scene length and span count to hand [`PaneCacheEntry::capture`] once the
-/// pane has painted.
+/// The scene length and span count to hand [`PaneCacheEntry::capture_into`]
+/// once the pane has painted.
 #[derive(Clone, Copy)]
 pub(crate) struct PaintMark {
     scene_len: usize,
@@ -144,27 +151,46 @@ impl PaintMark {
 impl PaneCacheEntry {
     /// Record what the pane just painted, given where the channels stood before
     /// it started.
-    pub(crate) fn capture(
+    ///
+    /// Writes over whatever this entry held, keeping its allocations. The
+    /// render site passes the same rects in the same order every frame, so a
+    /// region slot is matched by position and its held rect overwritten.
+    pub(crate) fn capture_into(
+        &mut self,
         key: PaneCacheKey,
         rects: &[Rect],
         buf: &Buffer,
         scene: &ApcScene,
         undercurls: &UndercurlBatch,
         mark: PaintMark,
-    ) -> Self {
-        Self {
-            key,
-            regions: rects
-                .iter()
-                .filter(|rect| rect.width > 0 && rect.height > 0)
-                .map(|&rect| (rect, cells_in(buf, rect)))
-                .collect(),
-            scene: scene.bytes()[mark.scene_len..].to_vec(),
-            undercurls: undercurls.spans()[mark.spans..]
-                .iter()
-                .map(|span| (span.x, span.y, span.len, span.color))
-                .collect(),
+    ) {
+        self.key = Some(key);
+
+        let painted = rects
+            .iter()
+            .filter(|rect| rect.width > 0 && rect.height > 0);
+        let mut slots = 0;
+        for &rect in painted {
+            if slots == self.regions.len() {
+                self.regions.push((rect, Vec::new()));
+            }
+            let (held, cells) = &mut self.regions[slots];
+            *held = rect;
+            cells_into(buf, rect, cells);
+            slots += 1;
         }
+        self.regions.truncate(slots);
+
+        self.scene.clear();
+        self.scene
+            .extend_from_slice(&scene.bytes()[mark.scene_len..]);
+
+        self.undercurls.clear();
+        self.undercurls.extend(
+            undercurls.spans()[mark.spans..]
+                .iter()
+                .map(|span| (span.x, span.y, span.len, span.color)),
+        );
     }
 
     /// Put the recorded paint back into this frame's three channels.
@@ -179,13 +205,11 @@ impl PaneCacheEntry {
         undercurls: &mut UndercurlBatch,
     ) {
         for (rect, cells) in &self.regions {
-            let mut cells = cells.iter();
-            for y in rect.top()..rect.bottom() {
-                for x in rect.left()..rect.right() {
-                    if let Some(cell) = cells.next() {
-                        buf[(x, y)] = cell.clone();
-                    }
-                }
+            let width = rect.width as usize;
+            for (row, y) in (rect.top()..rect.bottom()).enumerate() {
+                let start = buf.index_of(rect.left(), y);
+                buf.content[start..start + width]
+                    .clone_from_slice(&cells[row * width..(row + 1) * width]);
             }
         }
         scene.buffer().extend_from_slice(&self.scene);
@@ -255,14 +279,20 @@ pub(crate) fn pane_cache_key(
     })
 }
 
-fn cells_in(buf: &Buffer, rect: Rect) -> Vec<Cell> {
-    let mut cells = Vec::with_capacity(rect.width as usize * rect.height as usize);
-    for y in rect.top()..rect.bottom() {
-        for x in rect.left()..rect.right() {
-            cells.push(buf[(x, y)].clone());
-        }
+/// Copy `rect`'s cells into `out`, row-major, reusing whatever it already
+/// holds.
+///
+/// A rect's row is contiguous in the buffer, so each one is a single slice
+/// copy rather than a cell at a time.
+fn cells_into(buf: &Buffer, rect: Rect, out: &mut Vec<Cell>) {
+    let width = rect.width as usize;
+    // Resized rather than cleared and refilled, since every cell is written
+    // below and a same-sized rect leaves the length alone.
+    out.resize(width * rect.height as usize, Cell::EMPTY);
+    for (row, y) in (rect.top()..rect.bottom()).enumerate() {
+        let start = buf.index_of(rect.left(), y);
+        out[row * width..(row + 1) * width].clone_from_slice(&buf.content[start..start + width]);
     }
-    cells
 }
 
 #[cfg(test)]

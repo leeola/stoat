@@ -776,7 +776,7 @@ pub(crate) fn frame(
             .flatten();
         if let Some(key) = key
             && let Some(entry) = stoat.pane_cache.get(&id)
-            && entry.key == key
+            && entry.key == Some(key)
         {
             entry.replay(buf, scene, undercurls);
             continue;
@@ -802,16 +802,13 @@ pub(crate) fn frame(
 
         if let Some(key) = key {
             let (content, status) = pane::pane_areas(pane.area, frame.minimap_band);
-            stoat.pane_cache.insert(
-                id,
-                pane_cache::PaneCacheEntry::capture(
-                    key,
-                    &[content, status],
-                    buf,
-                    scene,
-                    undercurls,
-                    mark,
-                ),
+            stoat.pane_cache.entry(id).or_default().capture_into(
+                key,
+                &[content, status],
+                buf,
+                scene,
+                undercurls,
+                mark,
             );
         }
     }
