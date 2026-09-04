@@ -35,7 +35,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 /// Pause after each key, long enough for a frame to be painted and flushed.
 const KEY_SETTLE: Duration = Duration::from_millis(600);
 
-/// How long to wait for the process to exit after Ctrl-c.
+/// How long to wait for the process to exit after the quit.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The commit picker is where the leak was reported, so this drives the surface
@@ -103,8 +103,12 @@ fn a_foreign_terminal_receives_nothing_but_the_hello_probe() {
         thread::sleep(KEY_SETTLE);
     }
 
-    writer.write_all(b"\x03").expect("write ctrl-c");
-    writer.flush().expect("flush ctrl-c");
+    // Through the command rather than ctrl-c, which quits nothing here. Normal
+    // mode binds that key to a comment toggle and a run pane to an interrupt,
+    // and no signal handler stands behind either. Nothing is modified in a
+    // fresh fixture workspace, so this quits with no confirmation to answer.
+    writer.write_all(b":quit-all\r").expect("write the quit");
+    writer.flush().expect("flush the quit");
     drop(writer);
 
     let status = wait_for_exit(&mut child);
@@ -119,7 +123,7 @@ fn a_foreign_terminal_receives_nothing_but_the_hello_probe() {
     );
     assert!(
         status.success(),
-        "the session should quit cleanly on ctrl-c, got {status:?}",
+        "the session should quit cleanly when asked, got {status:?}",
     );
 }
 
@@ -202,7 +206,7 @@ fn wait_for_exit(
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("stoat did not exit within {EXIT_TIMEOUT:?} of ctrl-c");
+            panic!("stoat did not exit within {EXIT_TIMEOUT:?} of the quit");
         }
         thread::sleep(Duration::from_millis(50));
     }
