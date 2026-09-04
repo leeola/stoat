@@ -61,14 +61,32 @@ pub(super) fn shape_char(
     Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
 }
 
-/// Every glyph id `font` substitutes, sorted, or empty where it substitutes
-/// none.
+/// GSUB features a shaping run turns on for horizontal text without being
+/// asked, so a lookup only some other feature reaches never fires here.
+///
+/// The list errs long rather than short. Leaving one out drops whatever
+/// ligature it forms, where an extra one only keeps a run on the shaping path
+/// it was already on.
+const DEFAULT_FEATURES: [ttf_parser::Tag; 8] = [
+    ttf_parser::Tag::from_bytes(b"ccmp"),
+    ttf_parser::Tag::from_bytes(b"locl"),
+    ttf_parser::Tag::from_bytes(b"rvrn"),
+    ttf_parser::Tag::from_bytes(b"rlig"),
+    ttf_parser::Tag::from_bytes(b"rclt"),
+    ttf_parser::Tag::from_bytes(b"calt"),
+    ttf_parser::Tag::from_bytes(b"liga"),
+    ttf_parser::Tag::from_bytes(b"clig"),
+];
+
+/// Every glyph id `font` substitutes under [`DEFAULT_FEATURES`], sorted, or
+/// empty where it substitutes none.
 ///
 /// A run whose glyphs all sit outside this set shapes to exactly what shaping
 /// each character alone produces, so it needs no shaper. A substitution fires
-/// only when a glyph sits in some lookup's input coverage, so the union of
-/// every subtable's coverage over-approximates. It keeps a run on the shaping
-/// path that had no substitution to make, and it never lets one past that did.
+/// only when a glyph sits in some reachable lookup's input coverage, so the
+/// union of those subtables' coverage over-approximates. It keeps a run on the
+/// shaping path that had no substitution to make, and it never lets one past
+/// that did.
 ///
 /// Empty for a face with no GSUB table, one that fails to parse, or one inside
 /// a collection whose index does not resolve. Each of those reads as
@@ -85,8 +103,25 @@ pub(super) fn substitution_coverage(font: &Font) -> Vec<u16> {
         return Vec::new();
     };
 
+    // A lookup no default feature reaches never fires, so its coverage puts
+    // runs on the shaping path for substitutions that never happen. The
+    // bundled face files character variants over the letters that way, which
+    // is most of its coverage.
+    let mut reachable: Vec<u16> = Vec::new();
+    for feature in gsub.features {
+        if !DEFAULT_FEATURES.contains(&feature.tag) {
+            continue;
+        }
+        reachable.extend(feature.lookup_indices);
+    }
+    reachable.sort_unstable();
+    reachable.dedup();
+
     let mut ids = Vec::new();
-    for lookup in gsub.lookups {
+    for index in reachable {
+        let Some(lookup) = gsub.lookups.get(index) else {
+            continue;
+        };
         for subtable in lookup.subtables.into_iter::<SubstitutionSubtable<'_>>() {
             match subtable.coverage() {
                 Coverage::Format1 { glyphs } => ids.extend(glyphs.into_iter().map(|id| id.0)),
@@ -670,14 +705,14 @@ mod tests {
         for ch in ['=', '-', '>', '<', ':', '!'] {
             assert!(holds(ch), "{ch:?} ligates, so the face reshapes it");
         }
-        for ch in ['b', 'z', 'x', ' '] {
-            assert!(!holds(ch), "{ch:?} no lookup reaches");
+        for ch in ['a', 'A', '0', 'w', 'b', 'z', 'x', ' '] {
+            assert!(!holds(ch), "no default feature reshapes {ch:?}");
         }
 
         // The face files its coverage in both formats, a list of glyphs and a
         // list of ranges, and the characters above all land in the first. The
         // total is what says the ranges were read too.
-        assert_eq!(coverage.len(), 222, "every subtable of both formats");
+        assert_eq!(coverage.len(), 81, "every reachable subtable, both formats");
     }
 
     #[test]
