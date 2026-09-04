@@ -248,6 +248,63 @@ fn edit_delimiters(buffer: &mut TextBuffer, mut edits: Vec<(usize, usize, &str)>
     buffer.edit_batch(&batch);
 }
 
+/// One [`PairScan`] per syntax tree, built lazily and shared across the cursors
+/// of one press.
+///
+/// Collecting a scan's skip zones walks the tree over a window tens of
+/// kilobytes wide, which on a large file is milliseconds. Every cursor of a
+/// multi-cursor chord asks the same question of the same tree, so the answer is
+/// worth keeping.
+///
+/// Keyed on the tree rather than shared outright, because a cursor inside an
+/// injected region reads that region's own tree and a scan over the outer one
+/// says nothing about it.
+pub(crate) struct PairScans<'a> {
+    /// The window every scan is collected over: wide enough for the furthest
+    /// cursor either way.
+    ///
+    /// One window rather than one per cursor. A window wider than a single
+    /// cursor needs only adds zones nothing asks about, and the alternative is
+    /// a scan per cursor, which is the cost this exists to avoid.
+    window: Range<usize>,
+    scans: Vec<(*const stoat_language::Tree, PairScan<'a>)>,
+}
+
+impl<'a> PairScans<'a> {
+    /// The scan for `tree`, collecting it on first ask.
+    pub(crate) fn scan_for(&mut self, tree: Option<&'a stoat_language::Tree>) -> &PairScan<'a> {
+        let key = tree.map_or(std::ptr::null(), |t| t as *const _);
+        let idx = match self.scans.iter().position(|(seen, _)| *seen == key) {
+            Some(idx) => idx,
+            None => {
+                self.scans
+                    .push((key, PairScan::over(tree, self.window.clone())));
+                self.scans.len() - 1
+            },
+        };
+        &self.scans[idx].1
+    }
+}
+
+/// Prepare the shared scans for a press whose cursors sit at `heads`.
+///
+/// Nothing is collected here. The window is settled and the trees are met as
+/// [`PairScans::scan_for`] is called, so a press whose cursors all miss their
+/// pair by text alone collects nothing.
+pub(crate) fn shared_pair_scans<'a>(heads: impl Iterator<Item = usize>) -> PairScans<'a> {
+    let mut first = usize::MAX;
+    let mut last = 0;
+    for head in heads {
+        first = first.min(head);
+        last = last.max(head);
+    }
+    let first = first.min(last);
+
+    PairScans {
+        window: window_around(first).start..window_around(last).end,
+        scans: Vec::new(),
+    }
+}
 /// Walk every selection's primary cursor in the focused editor and
 /// gather the enclosing surround pair per cursor, each carrying its own
 /// delimiter chars as `(open_off, close_off, open, close)`. Returns the
@@ -304,19 +361,8 @@ fn collect_surround_pairs(
     let rope = buffer.read().expect("poisoned").rope().clone();
     let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
 
-    // One window covering every cursor's reach, so cursors in the same layer
-    // collect their zones once between them rather than once each. A window
-    // wider than any single cursor needs only adds zones nothing asks about.
-    // Only the closest-pair walk reads zones, so only it pays for them.
-    let window = {
-        let first = cursors.iter().map(|(head, _)| *head).min().unwrap_or(0);
-        let last = cursors.iter().map(|(head, _)| *head).max().unwrap_or(0);
-        window_around(first).start..window_around(last).end
-    };
-
-    // Cursors can sit in different layers, so the zones are keyed on the tree
-    // they came from rather than shared outright.
-    let mut scans: Vec<(*const stoat_language::Tree, PairScan<'_>)> = Vec::new();
+    // Only the closest-pair walk reads zones, so only it collects any.
+    let mut scans = shared_pair_scans(cursors.iter().map(|(head, _)| *head));
 
     let mut pairs: Vec<(usize, usize, char, char)> = Vec::with_capacity(cursors.len());
     let mut claimed: Vec<usize> = Vec::with_capacity(cursors.len() * 2);
@@ -329,18 +375,8 @@ fn collect_surround_pairs(
                 find_surround_pair(&rope, head, open, close, &scan, skip)
                     .map(|(open_off, close_off)| (open_off, close_off, open, close))
             },
-            None => {
-                let key = tree.map_or(std::ptr::null(), |t| t as *const _);
-                let idx = match scans.iter().position(|(seen, _)| *seen == key) {
-                    Some(idx) => idx,
-                    None => {
-                        scans.push((key, PairScan::over(tree, window.clone())));
-                        scans.len() - 1
-                    },
-                };
-                closest_surround_pair(&rope, head, &scans[idx].1, skip, span)
-                    .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close))
-            },
+            None => closest_surround_pair(&rope, head, scans.scan_for(tree), skip, span)
+                .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close)),
         };
         // Both misses abort the whole operation rather than dropping the
         // cursor. A partial edit across cursors is the one outcome the user has

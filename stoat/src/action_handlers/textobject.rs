@@ -144,13 +144,29 @@ pub(crate) fn execute_select_textobject(
     };
     let ws = stoat.active_workspace_mut();
 
+    // The closest-pair object is the one that reads skip zones, and collecting
+    // them walks the tree over a window tens of kilobytes wide. Every cursor
+    // asks the same question of the same tree, so they ask it once between
+    // them.
+    let mut scans = (ch == 'm')
+        .then(|| super::surround::shared_pair_scans(cursors.iter().map(|(_, at)| at.cursor)));
+
     let targets: HashMap<usize, (std::ops::Range<usize>, ObjectDirection)> = cursors
-        .into_iter()
+        .iter()
         .filter_map(|(id, at)| {
-            find_textobject(ws, buffer_id, &at, mode, ch, count, &change_hunks)
-                .map(|target| (id, target))
+            find_textobject(
+                ws,
+                buffer_id,
+                at,
+                ObjectRequest { mode, ch, count },
+                &change_hunks,
+                scans.as_mut(),
+            )
+            .map(|target| (*id, target))
         })
         .collect();
+    // The scans borrow the workspace, and the transform below needs it back.
+    drop(scans);
 
     if targets.is_empty() {
         return UpdateEffect::None;
@@ -191,15 +207,27 @@ pub(crate) fn execute_select_textobject(
 ///
 /// Each arm names the direction its object comes out in, so the rule stays with
 /// the type that decides it rather than in a second table beside this one.
-fn find_textobject(
-    ws: &crate::workspace::Workspace,
+/// The object one press asked for, as typed.
+#[derive(Clone, Copy)]
+struct ObjectRequest {
+    mode: TextobjectMode,
+    /// The object key: `f` for a function, `m` for the closest enclosing pair,
+    /// a bracket for that bracket.
+    ch: char,
+    /// How many objects out to reach, so a count of two takes the pair around
+    /// the one a count of one would.
+    count: usize,
+}
+
+fn find_textobject<'a>(
+    ws: &'a crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
     at: &SelectionOffsets,
-    mode: TextobjectMode,
-    ch: char,
-    count: usize,
+    request: ObjectRequest,
     change_hunks: &[std::ops::Range<u32>],
+    scans: Option<&mut super::surround::PairScans<'a>>,
 ) -> Option<(std::ops::Range<usize>, ObjectDirection)> {
+    let ObjectRequest { mode, ch, count } = request;
     let SelectionOffsets { cursor, span } = at;
     let cursor = *cursor;
     let skip = count.saturating_sub(1);
@@ -235,8 +263,17 @@ fn find_textobject(
             };
             let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
             let tree = super::surround::deepest_tree_at(snapshot, cursor);
-            let scan = crate::action_handlers::movement::PairScan::around(tree, cursor);
-            super::surround::closest_surround_pair(&rope, cursor, &scan, skip, span.clone()).map(
+            // A caller with no shared scans collects one for this cursor, which
+            // is what a single-cursor path wants anyway.
+            let owned;
+            let scan = match scans {
+                Some(scans) => scans.scan_for(tree),
+                None => {
+                    owned = crate::action_handlers::movement::PairScan::around(tree, cursor);
+                    &owned
+                },
+            };
+            super::surround::closest_surround_pair(&rope, cursor, scan, skip, span.clone()).map(
                 |(open, close, open_off, close_off)| {
                     (
                         pair_to_range(open, close, open_off, close_off, mode),
@@ -1251,6 +1288,35 @@ mod tests {
 
         h.type_keys("m i (");
         assert_eq!(h.selection_spans(), vec![(1, 3, false), (6, 8, false)]);
+    }
+
+    /// Cursors can sit in different injected layers, and the skip zones they
+    /// read belong to the layer, not to the file. Sharing one scan between
+    /// them would answer the markdown cursor from the rust tree or the other
+    /// way about.
+    #[test]
+    fn cursors_in_two_layers_each_find_their_own_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        // The fenced paren sits inside a rust string, which only rust's own
+        // grammar marks as a skip zone. Read through the markdown tree it is an
+        // ordinary paren, so the two layers pair it differently.
+        seed(&mut h, "doc.md", "(zz1)\n```rust\nfoo(\"(zz2)\");\n```\n");
+        h.settle();
+
+        // One cursor in the prose paren, one in the fenced rust paren.
+        h.type_keys("%");
+        h.type_keys("s");
+        h.type_text("zz");
+        h.type_keys("Enter");
+        assert_eq!(h.selection_spans(), vec![(1, 3, false), (20, 22, false)]);
+
+        h.type_keys("m i m");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(1, 4, false), (18, 25, false)],
+            "the fenced cursor skipped the parens inside its string and took the \
+             call's own, which only rust's zones say to do",
+        );
     }
 
     #[test]
