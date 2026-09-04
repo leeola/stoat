@@ -46,9 +46,11 @@ pub(crate) fn write_str_clipped(
 /// word, so wrapping each span alone breaks in the wrong places and loses the
 /// styles besides.
 ///
-/// A single word wider than `width` gets a line of its own rather than being
-/// split. Code spans are the usual case, and a broken identifier is worse to
-/// read than one that overruns.
+/// A single word wider than `width` is broken across lines at the width. A
+/// break mid-identifier reads poorly, but the box this wraps for paints a
+/// border, and the border cuts the overrun. So the alternative is not a token
+/// that runs past the edge. It is one that ends there, with no mark to say the
+/// rest went.
 ///
 /// An empty input line yields one empty output line, so a blank line between
 /// paragraphs survives the wrap.
@@ -66,6 +68,21 @@ pub(crate) fn wrap_styled(line: &[(String, Style)], width: usize) -> Vec<Vec<(St
 
     for word in styled_words(line) {
         let word_w: usize = word.iter().map(|(text, _)| text.chars().count()).sum();
+
+        if word_w > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut pieces = split_word(word, width);
+            // The tail is short of the width unless the word divided evenly, so
+            // it stays open for the words after it rather than taking a line to
+            // itself.
+            current = pieces.pop().unwrap_or_default();
+            current_w = current.iter().map(|(text, _)| text.chars().count()).sum();
+            lines.extend(pieces);
+            continue;
+        }
+
         let needs_space = current_w > 0;
         let add_w = word_w + usize::from(needs_space);
 
@@ -89,6 +106,49 @@ pub(crate) fn wrap_styled(line: &[(String, Style)], width: usize) -> Vec<Vec<(St
             }
         }
         current_w += word_w;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Break one word into runs of at most `width` columns, keeping each run's
+/// style.
+///
+/// For a word no line has room for, so the break falls at the width rather
+/// than between words. Every run but the last is exactly `width` wide, which
+/// is what lets the caller carry the last one on rather than closing the line
+/// after it. `width` is at least one, which [`wrap_styled`] has already
+/// checked.
+fn split_word(word: Vec<(String, Style)>, width: usize) -> Vec<Vec<(String, Style)>> {
+    let mut lines: Vec<Vec<(String, Style)>> = Vec::new();
+    let mut current: Vec<(String, Style)> = Vec::new();
+    let mut current_w = 0usize;
+
+    for (text, style) in word {
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            let take = rest.chars().count().min(width - current_w);
+            let cut = rest
+                .char_indices()
+                .nth(take)
+                .map_or(rest.len(), |(at, _)| at);
+            let (head, tail) = rest.split_at(cut);
+
+            match current.last_mut() {
+                Some((last, last_style)) if *last_style == style => last.push_str(head),
+                _ => current.push((head.to_owned(), style)),
+            }
+            current_w += take;
+            rest = tail;
+
+            if current_w == width {
+                lines.push(std::mem::take(&mut current));
+                current_w = 0;
+            }
+        }
     }
 
     if !current.is_empty() {
@@ -277,10 +337,11 @@ mod tests {
         assert_eq!(texts, ["aaa", "Foobar", "baz"], "Foobar never split");
     }
 
-    /// A code span longer than the card overruns rather than being cut. A
-    /// broken identifier is harder to read than one that runs past the edge.
+    /// A token no line has room for is broken at the width. Left whole it runs
+    /// past the border of the box it is wrapped for, and the border cuts it,
+    /// so the reader loses the end with no mark to say so.
     #[test]
-    fn a_word_wider_than_the_width_takes_its_own_line() {
+    fn a_word_wider_than_the_width_breaks_across_lines() {
         let line = vec![
             ("see ".to_owned(), Style::default()),
             ("a_very_long_identifier_name".to_owned(), Style::default()),
@@ -292,7 +353,34 @@ mod tests {
             .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
             .collect();
 
-        assert_eq!(texts, ["see", "a_very_long_identifier_name", "here"]);
+        assert_eq!(
+            texts,
+            ["see", "a_very_lon", "g_identifi", "er_name", "here"],
+            "every character survives the break",
+        );
+    }
+
+    /// The break keeps the styles the word was made of, so a code span broken
+    /// across two lines is still code on both.
+    #[test]
+    fn a_broken_word_keeps_the_styles_it_crossed() {
+        let code = Style::default().fg(ratatui::style::Color::Red);
+        let line = vec![
+            ("Foo".to_owned(), code),
+            ("barbaz".to_owned(), Style::default()),
+        ];
+
+        let wrapped = wrap_styled(&line, 4);
+
+        assert_eq!(
+            wrapped,
+            vec![
+                vec![("Foo".to_owned(), code), ("b".to_owned(), Style::default()),],
+                vec![("arba".to_owned(), Style::default())],
+                vec![("z".to_owned(), Style::default())],
+            ],
+            "the break falls at the width, wherever the styles change",
+        );
     }
 
     /// A blank line between paragraphs is what separates them, so it survives
