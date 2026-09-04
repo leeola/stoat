@@ -236,9 +236,10 @@ on init {
     # default.
     config.auto_reload = true;
 
-    # Warm the diff cache in the background so opening review is near-instant. On
-    # by default. Set false to turn the background diffing off.
-    review.precompute = true;
+    # Warm the diff cache in the background. Off by default. The cache it fills
+    # serves the viewport diff RPC and nothing else, so a session with no client
+    # attached warms hunks nobody reads.
+    review.precompute = false;
 
     # Mouse-capture policy at startup: auto disables capture under a parent
     # multiplexer ($TMUX / $ZELLIJ) so it keeps drag-select, always forces

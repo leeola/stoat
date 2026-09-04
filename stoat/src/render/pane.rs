@@ -1687,6 +1687,8 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(100, 12);
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "b\n")]);
         h.stoat.set_diff_warm_auto(true);
+        // The warm is opt-in, so a spinner for it needs the option on.
+        h.stoat.settings.review_precompute = Some(true);
         crate::diff_warm::ensure_diff_warm(&mut h.stoat);
 
         let buf = h.render_composited();

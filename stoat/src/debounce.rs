@@ -69,16 +69,8 @@ const FS_WATCH_DRAIN_CAP: usize = 256;
 /// files queues them over several windows rather than in one turn.
 const INDEX_EXTERNAL_DRAIN_CAP: usize = 256;
 
-/// Edited paths above which [`drain_pending_diff_warm_files`] gives up on
 /// warming them one at a time and defers to the whole-changeset warm.
 ///
-/// Each per-file warm reads a HEAD blob and a worktree file and runs a
-/// structural diff, so a batch is only worth the per-file path while it stays
-/// smaller than the changeset the wholesale warm walks anyway. A save burst or
-/// a formatter run stays well under this. A checkout or a branch switch does
-/// not, and that is the case this routes away.
-const DIFF_WARM_BATCH_MAX: usize = 64;
-
 /// Directory verdicts [`Stoat::ignored_dir_cache`] holds before dropping the
 /// lot. Far above the directory count of any one build, so the bound is a
 /// backstop against a pathological tree rather than a working limit.
@@ -97,10 +89,9 @@ pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
 /// Drain queued [`crate::host::FsWatchEvent`]s from the active
 /// [`FsWatchHost`], routing each to the debounce its path calls for.
 ///
-/// A `.git` write goes to [`arm_diff_refresh_debounce`], a working-tree file to
-/// [`arm_diff_warm_file_debounce`] and [`arm_index_external_edit_debounce`].
-/// None of them does the work here: each arms a timer whose drain lands on the
-/// main loop later.
+/// A `.git` write goes to [`arm_diff_refresh_debounce`] and a working-tree file
+/// to [`arm_index_external_edit_debounce`]. Neither does the work here. Each
+/// arms a timer whose drain lands on the main loop later.
 ///
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
 /// again when it stops there, so a checkout's worth of paths drains over
@@ -131,11 +122,9 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     if events.is_empty() {
         return;
     }
-    // Keep the diff cache warm incrementally, gated the same as the full
-    // background warm.
-    let precompute = stoat.diff_warm_auto && stoat.settings.review_precompute.unwrap_or(true);
     let git_root = stoat.active_workspace().git_root.clone();
     let git_dir = git_root.join(".git");
+    // Opened at most once for the batch, and only where a verdict is needed.
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
     for (path, kind) in events {
         let in_git_dir = path.starts_with(&git_dir);
@@ -200,13 +189,6 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             // the shared debounce. Its drain clears the diff_warmed flag and
             // stales every open buffer's diff map.
             arm_diff_refresh_debounce(stoat);
-        } else if precompute && path.starts_with(&git_root) {
-            // An edited working-tree file warms its own diff, unless
-            // gitignored so build churn cannot thrash the recompute.
-            let repo = repo.get_or_insert_with(|| stoat.git_host.discover(&git_root));
-            if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
-                arm_diff_warm_file_debounce(stoat, path.clone());
-            }
         }
         if path.starts_with(&git_root) && stoat.language_registry.for_path(&path).is_some() {
             arm_index_external_edit_debounce(stoat, path);
@@ -433,30 +415,6 @@ pub(crate) fn arm_workspace_autosave(stoat: &mut Stoat) {
     stoat.pending_workspace_autosave = Some(task);
 }
 
-/// Collect `path` for a debounced diff warm after an external change.
-///
-/// A burst shares one window rather than getting a timer each. The window opens
-/// on the first path and covers every path that arrives before it closes, so a
-/// checkout costs one task however many files it touches.
-fn arm_diff_warm_file_debounce(stoat: &mut Stoat, path: PathBuf) {
-    let opening = stoat.diff_warm_pending_paths.is_empty();
-    stoat.diff_warm_pending_paths.insert(path);
-    if opening {
-        arm_diff_warm_file_timer(stoat);
-    }
-}
-
-/// Start the shared debounce window, replacing any timer already held.
-fn arm_diff_warm_file_timer(stoat: &mut Stoat) {
-    let executor = stoat.executor.clone();
-    let tx = stoat.diff_warm_file_tx.clone();
-    let redraw = stoat.redraw_notify.clone();
-    stoat.diff_warm_file_timer = Some(stoat.executor.spawn_with_redraw(redraw, async move {
-        executor.timer(FS_WATCH_DEBOUNCE).await;
-        let _ = tx.send(()).await;
-    }));
-}
-
 /// Drain the diff-refresh debounce marker, staling every diff the moved HEAD
 /// left describing a base that no longer exists.
 ///
@@ -518,42 +476,6 @@ pub(crate) fn drain_pending_workspace_autosave(stoat: &mut Stoat) -> bool {
         stoat.save_workspace(stoat.active_workspace);
     }
     false
-}
-
-/// Warm the diffs of the edited paths whose debounce window has closed.
-///
-/// Returns `true` if a warm spawned, so the test harness settle loop
-/// re-iterates.
-///
-/// Two kinds of batch go to the whole-changeset warm instead. One is a batch
-/// past [`DIFF_WARM_BATCH_MAX`]. The other is a batch that arrives while the
-/// whole warm is already owed, which a `.git` write in the same window causes
-/// and which also holds before the first warm of a workspace runs.
-///
-/// Both drop the set and clear `diff_warmed`, which leaves
-/// [`crate::diff_warm::ensure_diff_warm`] to cover the batch in one pass that
-/// skips whatever the cache already holds. That is what keeps a checkout from
-/// diffing the tree file by file and then again wholesale.
-pub(crate) fn drain_pending_diff_warm_files(stoat: &mut Stoat) -> bool {
-    if stoat.diff_warm_file_rx.try_recv().is_err() {
-        return false;
-    }
-    stoat.diff_warm_file_timer = None;
-
-    let paths = std::mem::take(&mut stoat.diff_warm_pending_paths);
-    if !stoat.diff_warm_auto || !stoat.settings.review_precompute.unwrap_or(true) {
-        return false;
-    }
-
-    let whole_warm_is_owed =
-        stoat.pending_diff_refresh.is_some() || !stoat.active_workspace().diff_warmed;
-    if whole_warm_is_owed || paths.len() > DIFF_WARM_BATCH_MAX {
-        stoat.active_workspace_mut().diff_warmed = false;
-        return false;
-    }
-
-    crate::diff_warm::spawn_file_warm(stoat, paths.into_iter().collect());
-    true
 }
 
 /// Collect `path` for a debounced reindex after an external change.
@@ -773,7 +695,7 @@ mod tests {
         drain_fs_watch_events(&mut h.stoat);
 
         assert_eq!(
-            h.stoat.diff_warm_pending_paths.len(),
+            h.stoat.index_pending_external_edits.len(),
             1,
             "and that one event arms one debounce",
         );
@@ -844,12 +766,8 @@ mod tests {
         drain_fs_watch_events(&mut h.stoat);
 
         assert!(
-            h.stoat.diff_warm_pending_paths.is_empty(),
-            "no diff warm is armed for build output"
-        );
-        assert!(
             h.stoat.index_pending_external_edits.is_empty(),
-            "and none of it reaches the code graph"
+            "none of the build output reaches the code graph"
         );
 
         h.fake_fs_watcher()

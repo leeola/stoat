@@ -1407,28 +1407,6 @@ pub struct Stoat {
     /// drained by [`debounce::drain_pending_workspace_autosave`].
     pub(crate) workspace_autosave_tx: Sender<()>,
     pub(crate) workspace_autosave_rx: Receiver<()>,
-    /// Edited working-tree files waiting on the shared debounce window to have
-    /// their diffs warmed.
-    ///
-    /// A set covered by one timer rather than a task per path. A checkout names
-    /// thousands of files at once and each warm is a libgit2 open plus two
-    /// reads, so what a per-path timer costs is a task and a job per file for
-    /// files nobody has open.
-    pub(crate) diff_warm_pending_paths: std::collections::HashSet<PathBuf>,
-    /// The one debounce timer covering whatever
-    /// [`Self::diff_warm_pending_paths`] holds. Armed when the set goes from
-    /// empty to occupied, so the window closes a fixed
-    /// [`debounce::FS_WATCH_DEBOUNCE`] after the burst starts.
-    pub(crate) diff_warm_file_timer: Option<stoat_scheduler::Task<()>>,
-    /// Channel the diff-warm debounce timer pushes onto once it fires, drained
-    /// by [`debounce::drain_pending_diff_warm_files`].
-    pub(crate) diff_warm_file_tx: Sender<()>,
-    pub(crate) diff_warm_file_rx: Receiver<()>,
-    /// In-flight single-file diff warms. Held so their tasks are not dropped
-    /// (which would cancel them) and so the status bar's diff segment stays up
-    /// until every one finishes. [`crate::diff_warm::install_finished`] drops the
-    /// completed ones.
-    pub(crate) diff_warm_files: Vec<crate::diff_warm::PendingFileWarm>,
     /// Large files reading on the blocking pool, awaiting install by
     /// [`crate::buffer_lifecycle::install_pending_opens`] in
     /// [`Self::drive_background`]. Holding the task here keeps the read alive;
@@ -1582,10 +1560,6 @@ pub struct Stoat {
     /// Memoized tree-sitter parses of git-base texts, so the diff view's
     /// syntax-highlighted left column parses each base once across edits.
     pub(crate) base_highlights_cache: crate::workspace::diff::BaseHighlightCache,
-    /// Memoized tree-sitter parses of git-base texts for the structural diff,
-    /// so the per-file warm that re-runs on every debounced edit parses that
-    /// file's unchanged HEAD text once rather than per edit.
-    pub(crate) diff_tree_cache: stoat_language::structural_diff::TreeCache,
     /// Tracks `$/progress` notifications so the status bar can show
     /// the freshest in-progress operation. Drained from
     /// [`crate::host::LspHost::try_recv_notification`] inside
@@ -2137,7 +2111,6 @@ impl Stoat {
         let (signature_help_tx, signature_help_rx) = tokio::sync::mpsc::channel(256);
         let (workspace_autosave_tx, workspace_autosave_rx) = tokio::sync::mpsc::channel(256);
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
-        let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (auto_reload_tx, auto_reload_rx) = tokio::sync::mpsc::channel(1);
         // Dropped at once, leaving the channel closed until `set_stoatty_rx`
@@ -2318,11 +2291,6 @@ impl Stoat {
             diff_refresh_rx,
             workspace_autosave_tx,
             workspace_autosave_rx,
-            diff_warm_pending_paths: std::collections::HashSet::new(),
-            diff_warm_file_timer: None,
-            diff_warm_file_tx,
-            diff_warm_file_rx,
-            diff_warm_files: Vec::new(),
             pending_file_opens: Vec::new(),
             pending_auto_reloads: Vec::new(),
             index_pending_external_edits: std::collections::HashSet::new(),
@@ -2354,7 +2322,6 @@ impl Stoat {
             base_highlights_cache: Arc::new(std::sync::Mutex::new(
                 crate::workspace::diff::BaseHighlightMemo::default(),
             )),
-            diff_tree_cache: stoat_language::structural_diff::TreeCache::default(),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
             lsp_server_list: crate::render::LspServerList::default(),
             lsp_message: None,
@@ -4298,12 +4265,11 @@ impl Stoat {
 
         let diff_refresh = debounce::drain_pending_diff_refresh(self);
         let code_search = debounce::drain_pending_code_search(self);
-        let diff_warm_files = debounce::drain_pending_diff_warm_files(self);
         let index_edits = debounce::drain_pending_index_edits(self);
         let autosave = debounce::drain_pending_workspace_autosave(self);
         let signature_help = debounce::drain_pending_signature_help(self);
 
-        diff_refresh || code_search || diff_warm_files || index_edits || autosave || signature_help
+        diff_refresh || code_search || index_edits || autosave || signature_help
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
@@ -4434,7 +4400,7 @@ impl Stoat {
     /// transient diff spinner segment and keeping the frame clock ticking so it
     /// animates.
     pub(crate) fn diff_warm_busy(&self) -> bool {
-        self.pending_diff_warm.is_some() || !self.diff_warm_files.is_empty()
+        self.pending_diff_warm.is_some()
     }
 
     /// The binding `key` resolves to, deriving it on the first reader and

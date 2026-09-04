@@ -91,9 +91,12 @@ pub struct Settings {
     /// in-process, and the terminal is told to re-read its own when that file
     /// is the one saved.
     pub config_auto_reload: Option<bool>,
-    /// Whether the diff cache is warmed in the background so opening review is
-    /// near-instant. `None` falls back to enabled. Set `review.precompute =
-    /// false;` in stcfg to turn the background diffing off.
+    /// Whether the diff cache is warmed in the background. `None` falls back to
+    /// disabled. Set `review.precompute = true;` in stcfg to turn it on.
+    ///
+    /// The cache it fills serves the viewport diff RPC and nothing else, so a
+    /// session with no client attached warms hunks nobody reads. The gutter and
+    /// the review screen each diff through their own path.
     pub review_precompute: Option<bool>,
     /// Name of the active theme block. Resolves against `theme NAME { ... }`
     /// blocks in the config. `None` means "use the compiled-in default".

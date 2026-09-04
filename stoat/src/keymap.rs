@@ -2881,7 +2881,7 @@ mod tests {
                 format_on_save: Some(false),
                 search_smart_case: Some(true),
                 config_auto_reload: Some(true),
-                review_precompute: Some(true),
+                review_precompute: Some(false),
                 theme: Some("default_dark".to_string()),
                 mouse_capture: Some(MouseCapturePolicy::Auto),
                 scrolloff: Some(3),
