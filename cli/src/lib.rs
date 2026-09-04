@@ -59,10 +59,8 @@ pub const FIXTURES: &[(&str, &str)] = &[
 /// sequence rather than every caller repeating it. An explicit `--inputs`
 /// outranks this, since the reader asked for something specific.
 pub fn default_inputs(name: &str) -> Option<&'static str> {
-    match name {
-        "walkthrough" => Some(":walkthrough tour<Enter>"),
-        _ => None,
-    }
+    (name == "walkthrough" || name.starts_with("walkthrough-"))
+        .then_some(":walkthrough tour<Enter>")
 }
 
 /// A clap value parser accepting only the [`FIXTURES`] names, so an unknown
@@ -199,28 +197,32 @@ mod tests {
     use clap::Parser;
     use std::path::PathBuf;
 
-    /// A fixture whose point is a screen names the sequence that opens it, so
-    /// no caller has to know which one that is.
+    /// Every fixture in the walkthrough family commits a tour, and the player
+    /// is the only reason to open one, so each opens on its tour rather than
+    /// on a workspace the reader has to navigate out of.
     #[test]
-    fn only_the_walkthrough_fixture_opens_itself() {
+    fn every_walkthrough_fixture_opens_its_tour() {
         assert_eq!(
             default_inputs("walkthrough"),
             Some(":walkthrough tour<Enter>"),
         );
+        assert_eq!(
+            default_inputs("walkthrough-drift"),
+            Some(":walkthrough tour<Enter>"),
+        );
         assert_eq!(default_inputs("basic-diff"), None);
-        assert_eq!(default_inputs("not-a-fixture"), None);
     }
 
     /// Every name that opens itself must be one the catalog carries, or the
-    /// sequence is dead text nothing can reach.
+    /// sequence is dead text nothing reaches. The walkthrough family is the
+    /// whole of that set, so the two lists are one list.
     #[test]
-    fn every_self_opening_fixture_is_in_the_catalog() {
-        let named: Vec<&str> = FIXTURES
-            .iter()
-            .map(|(name, _)| *name)
-            .filter(|name| default_inputs(name).is_some())
-            .collect();
-        assert_eq!(named, ["walkthrough"]);
+    fn the_self_opening_fixtures_are_the_walkthrough_family() {
+        let names = || FIXTURES.iter().map(|(name, _)| *name);
+        let self_opening: Vec<&str> = names().filter(|n| default_inputs(n).is_some()).collect();
+        let walkthroughs: Vec<&str> = names().filter(|n| n.starts_with("walkthrough")).collect();
+
+        assert_eq!(self_opening, walkthroughs);
     }
 
     #[derive(Parser)]
