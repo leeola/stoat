@@ -91,6 +91,17 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     };
 
     let slide = slide::layout(&input);
+
+    // The card is part of the slide, so it goes where the slide puts it. The
+    // popup paints from its placement on the line after this one, and the size
+    // it was pinned with is what `measure` fed the placement, so moving it
+    // here settles at the same rect on every later frame.
+    if let Some(card) = slide.card
+        && let Some(popup) = stoat.pending_hover.as_mut().filter(|popup| popup.pinned)
+    {
+        popup.placement = Some(card);
+    }
+
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return;
     };
@@ -814,6 +825,17 @@ mod tests {
         command::decode_stream(&bytes)
     }
 
+    /// The rect the narration card occupies after a frame has placed it.
+    fn card_rect(h: &mut TestHarness) -> ratatui::layout::Rect {
+        h.stoat.render();
+        h.stoat
+            .pending_hover
+            .as_ref()
+            .expect("the stop narrates")
+            .placement
+            .expect("the card is placed")
+    }
+
     fn sketches(h: &mut TestHarness) -> Vec<SketchCommand> {
         frame(h)
             .into_iter()
@@ -1248,6 +1270,28 @@ mod tests {
             h.stoat.pending_hover.is_some(),
             "and the narration is still up",
         );
+    }
+
+    /// The card is placed against the focus and the code beside it, so it has
+    /// to arrive where the slide put it. Pinned top right at every stop, it
+    /// covers the same corner whatever the stop is about, and the connector
+    /// the slide draws to it reaches a card that is not there.
+    #[test]
+    fn the_card_lands_where_the_slide_placed_it() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+
+        let first = card_rect(&mut h);
+        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        let second = card_rect(&mut h);
+
+        assert_eq!(
+            second.y,
+            first.y + 1,
+            "the card follows the focus down a row, rather than holding one",
+        );
+        assert_eq!(second.width, first.width, "at the width it was pinned with");
+        assert_eq!(second.height, first.height, "and the height");
     }
 
     /// A foreign terminal draws no chrome at all, so it gets no marks either.
