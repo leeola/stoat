@@ -308,18 +308,20 @@ impl GitRepo for LocalGitRepo {
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
         let repo = self.repo.lock().expect("git repo lock");
-        read_index_conflicts(&repo)
-            .map(|files| files.into_iter().map(|f| f.path).collect())
+        conflicted_entries(&repo)
+            .map(|entries| entries.into_iter().map(|e| e.path).collect())
             .unwrap_or_default()
     }
 
     fn conflict_stages(&self, path: &Path) -> Option<ConflictedFile> {
         let repo = self.repo.lock().expect("git repo lock");
         let target = abs_in_workdir(&repo, path);
-        read_index_conflicts(&repo)
+        let entry = conflicted_entries(&repo)
             .ok()?
             .into_iter()
-            .find(|f| f.path == target)
+            .find(|e| e.path == target)?;
+
+        Some(read_stages(&repo, entry))
     }
 
     fn mark_resolved(&self, path: &Path) -> Result<(), GitApplyError> {
@@ -1132,7 +1134,7 @@ fn index_blob_text(repo: &Repository, rel: &Path) -> Option<String> {
 
 /// Returns `path` unchanged when it is already absolute, otherwise joins
 /// it onto the repo workdir so it lines up with the absolute paths that
-/// [`read_index_conflicts`] produces.
+/// [`conflicted_entries`] produces.
 fn abs_in_workdir(repo: &Repository, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -1142,10 +1144,24 @@ fn abs_in_workdir(repo: &Repository, path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
-/// Every unmerged entry in the repository's on-disk index as a
-/// [`ConflictedFile`] with an absolute path. Each stage blob is `None` when
-/// that side is absent or not valid UTF-8, mirroring the cherry-pick path.
-fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApplyError> {
+/// One unmerged index entry, naming its three stage blobs without holding
+/// their content.
+///
+/// A caller that only wants to know which files conflict stops here. Reading
+/// the blobs is a separate step, [`read_stages`], because the conflict view
+/// lists every file but opens one at a time.
+struct ConflictEntry {
+    /// Absolute, so it lines up with the paths the rest of this module hands
+    /// out.
+    path: PathBuf,
+    /// `None` where that side has no entry, which is a file one side added.
+    ancestor: Option<git2::Oid>,
+    ours: Option<git2::Oid>,
+    theirs: Option<git2::Oid>,
+}
+
+/// Every unmerged entry in the repository's on-disk index.
+fn conflicted_entries(repo: &Repository) -> Result<Vec<ConflictEntry>, GitApplyError> {
     let workdir = repo.workdir().map(Path::to_path_buf);
     let index = repo.index().map_err(err_msg)?;
     let mut out = Vec::new();
@@ -1163,26 +1179,28 @@ fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApp
             Some(wd) => wd.join(&rel),
             None => rel,
         };
-        let ancestor = conflict
-            .ancestor
-            .as_ref()
-            .and_then(|e| tree::read_blob(repo, e.id));
-        let ours = conflict
-            .our
-            .as_ref()
-            .and_then(|e| tree::read_blob(repo, e.id));
-        let theirs = conflict
-            .their
-            .as_ref()
-            .and_then(|e| tree::read_blob(repo, e.id));
-        out.push(ConflictedFile {
+        out.push(ConflictEntry {
             path,
-            ancestor,
-            ours,
-            theirs,
+            ancestor: conflict.ancestor.as_ref().map(|e| e.id),
+            ours: conflict.our.as_ref().map(|e| e.id),
+            theirs: conflict.their.as_ref().map(|e| e.id),
         });
     }
     Ok(out)
+}
+
+/// Read `entry`'s three stage blobs into a [`ConflictedFile`].
+///
+/// A stage is `None` where that side is absent or its blob is not valid
+/// UTF-8, mirroring the cherry-pick path.
+fn read_stages(repo: &Repository, entry: ConflictEntry) -> ConflictedFile {
+    let blob = |oid: Option<git2::Oid>| oid.and_then(|oid| tree::read_blob(repo, oid));
+    ConflictedFile {
+        path: entry.path,
+        ancestor: blob(entry.ancestor),
+        ours: blob(entry.ours),
+        theirs: blob(entry.theirs),
+    }
 }
 
 /// Status options that report a moved file as one renamed entry on either side

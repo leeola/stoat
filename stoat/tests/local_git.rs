@@ -1238,6 +1238,46 @@ fn conflicted_paths_and_stages_read_on_disk_index_conflicts() {
     assert_eq!(staged_blob(tr.path(), "f.txt").as_deref(), Some("merged\n"));
 }
 
+/// The stage read is per file, so a set with more than one conflict has to
+/// answer each name with its own three sides rather than whichever entry the
+/// index walk reaches first.
+#[test]
+fn conflict_stages_answers_each_file_with_its_own_sides() {
+    let tr = TestRepo::new();
+    tr.commit_file("f.txt", "f base\n");
+    tr.commit_file("g.txt", "g base\n");
+    let base = tr.head_sha();
+
+    let theirs = tr.commit_flat_tree_on(
+        "refs/heads/theirs",
+        &base,
+        &[("f.txt", "f theirs\n"), ("g.txt", "g theirs\n")],
+        "both on theirs",
+    );
+    tr.write_and_stage("f.txt", "f ours\n")
+        .write_and_stage("g.txt", "g ours\n")
+        .commit("both on ours");
+
+    let annotated = tr
+        .repo
+        .find_annotated_commit(Oid::from_str(&theirs).unwrap())
+        .unwrap();
+    tr.repo.merge(&[&annotated], None, None).unwrap();
+    tr.repo.index().unwrap().write().unwrap();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let (f, g) = (tr.join("f.txt"), tr.join("g.txt"));
+    assert_eq!(repo.conflicted_paths(), vec![f.clone(), g.clone()]);
+
+    for (path, name) in [(&f, "f"), (&g, "g")] {
+        let stages = repo.conflict_stages(path).expect("the file conflicted");
+        assert_eq!(stages.path, *path);
+        assert_eq!(stages.ancestor.as_deref(), Some(&*format!("{name} base\n")));
+        assert_eq!(stages.ours.as_deref(), Some(&*format!("{name} ours\n")));
+        assert_eq!(stages.theirs.as_deref(), Some(&*format!("{name} theirs\n")));
+    }
+}
+
 #[test]
 fn conflict_stages_add_add_conflict_has_no_ancestor() {
     let tr = TestRepo::new();
