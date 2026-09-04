@@ -34,6 +34,46 @@ fn stage_two_changed_files(h: &mut TestHarness) -> PathBuf {
     workdir
 }
 
+/// The walk advances the outer list only when it is certain no later inner
+/// range needs it, so an inner range straddling two outer ones has to be
+/// refused rather than matched against whichever it reaches first.
+#[test]
+fn shrink_containment_refuses_interleaved_ranges() {
+    let outer = [0..4, 8..12];
+    assert!(
+        ranges_contain(&outer, &[1..3, 9..11]),
+        "each inner range sits inside one outer range",
+    );
+    let straddling = 2..9;
+    assert!(
+        !ranges_contain(&outer, std::slice::from_ref(&straddling)),
+        "an inner range spanning the gap between two outer ones is in neither",
+    );
+    assert!(
+        !ranges_contain(&outer, &[1..3, 5..6, 9..11]),
+        "an inner range in the gap is refused however many around it fit",
+    );
+    assert!(
+        !ranges_contain(&outer, &[1..3, 9..13]),
+        "and one reaching past its outer range's end is refused",
+    );
+
+    let cursor = 4..4;
+    assert!(
+        ranges_contain(&[0..4, 4..4], std::slice::from_ref(&cursor)),
+        "an empty inner range is inside an empty outer one at its offset",
+    );
+    assert!(
+        ranges_contain(&outer, &[]),
+        "nothing to contain is contained",
+    );
+    let one = 1..2;
+    assert!(
+        !ranges_contain(&[], std::slice::from_ref(&one)),
+        "and nothing contains something",
+    );
+}
+
 /// The changed list groups staged files before unstaged ones, so a staged file
 /// late in the alphabet sits ahead of an unstaged file early in it. Walking
 /// that order sends `n` backward through the alphabet and reports a wrap that

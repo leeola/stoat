@@ -3368,10 +3368,7 @@ fn shrink_one_step(
         let current = resolved_ranges(&editor.selections.shared_anchors(), buffer_snapshot);
         let prev_ranges = resolved_ranges(&prev, buffer_snapshot);
 
-        if prev_ranges
-            .iter()
-            .all(|p| current.iter().any(|c| c.start <= p.start && c.end >= p.end))
-        {
+        if ranges_contain(&current, &prev_ranges) {
             editor.selections.restore(prev);
             return true;
         }
@@ -3402,6 +3399,49 @@ fn shrink_one_step(
             }
         });
     dived
+}
+
+/// Whether every range in `inner` sits inside one of `outer`'s.
+///
+/// Both lists must be sorted by start and disjoint, which is how a selection
+/// collection keeps them. One walk over the two rather than a scan of `outer`
+/// per entry of `inner`: after an expand the two are the same length, so the
+/// scan was quadratic in the cursor count and a wide multi-cursor selection
+/// reaches ten thousand.
+///
+/// An empty range is a cursor, and one is contained by an outer range starting
+/// at the same offset. That is why an outer range is passed over only when it
+/// ends at or before the inner's start *and* the two starts differ: without the
+/// second half, an empty pair at one offset would step past each other and read
+/// as a miss.
+fn ranges_contain(outer: &[Range<usize>], inner: &[Range<usize>]) -> bool {
+    debug_assert!(
+        outer.windows(2).all(|w| w[0].start <= w[1].start),
+        "the outer ranges are sorted by start",
+    );
+    debug_assert!(
+        inner.windows(2).all(|w| w[0].start <= w[1].start),
+        "the inner ranges are sorted by start",
+    );
+
+    let mut outer = outer.iter();
+    let mut current = outer.next();
+    for want in inner {
+        loop {
+            let Some(have) = current else {
+                return false;
+            };
+            if have.end <= want.start && have.start != want.start {
+                current = outer.next();
+                continue;
+            }
+            if have.start > want.start || have.end < want.end {
+                return false;
+            }
+            break;
+        }
+    }
+    true
 }
 
 /// Byte range of the first named child of the node covering `from..to`.
