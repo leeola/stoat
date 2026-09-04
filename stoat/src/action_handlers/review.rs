@@ -180,38 +180,6 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Point the diff view at what `sha` changed, with the tree already on it.
-///
-/// The base becomes the commit's first parent, so the diff on screen is the
-/// commit itself. A root commit has no parent, and the empty tree is the base
-/// that makes every one of its lines read as added rather than as nothing.
-///
-/// The caller is responsible for the tree: this reads the commit to decide what
-/// to open, but the buffers it opens are whatever is on disk, so a tree that is
-/// not on `sha` yields a diff of something else entirely.
-///
-/// Returns whether a file was opened. A commit that changed nothing has none to
-/// open, so the view is left exactly where it was and only the base moves.
-pub(super) fn land_diff_on_commit(
-    stoat: &mut Stoat,
-    repo: &dyn GitRepo,
-    workdir: &Path,
-    sha: &str,
-) -> bool {
-    stoat
-        .active_workspace_mut()
-        .set_diff_base(Some(DiffBase::Rev {
-            sha: repo.parent_sha(sha),
-        }));
-
-    let Some(rel_path) = repo.commit_first_path(sha) else {
-        return false;
-    };
-    super::file::open_file(stoat, &workdir.join(rel_path));
-    enter_diff_view(stoat);
-    true
-}
-
 /// Turn the diff view on, whatever it was showing before.
 ///
 /// [`toggle_diff_view`] closes an open view, so a caller that means "show this"

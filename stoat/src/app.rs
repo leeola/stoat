@@ -961,6 +961,12 @@ pub struct Stoat {
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
     pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
+    /// A review-walk step whose checkout is still running.
+    ///
+    /// The checkout walks the tree and writes files, and the dirty guard ahead
+    /// of it walks the whole status, so a step used to hold the loop for as
+    /// long as the repository is large.
+    pub(crate) pending_walk_landing: Option<action_handlers::review_walk::PendingWalkLanding>,
     /// A diff-filtered call-graph hop whose working-tree scan runs off the UI
     /// thread, applied by [`crate::code_index::nav::pump_diff_nav_jump`] when it
     /// lands.
@@ -2217,6 +2223,7 @@ impl Stoat {
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
             pending_changed_file_jump: None,
+            pending_walk_landing: None,
             pending_diff_nav_jump: None,
             pending_code_search: None,
             code_search_debounce: None,
@@ -7600,6 +7607,8 @@ impl Stoat {
         let code_search = action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
 
+        let walk_landing = action_handlers::review_walk::pump_walk_landing(self);
+
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
@@ -7619,6 +7628,7 @@ impl Stoat {
         external
             || commits
             || commit_picker
+            || walk_landing
             || code_search
             || changed_file_jump
             || diff_nav_jump

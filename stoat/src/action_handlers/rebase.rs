@@ -147,22 +147,21 @@ pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
 /// rebase does when it stops to let you edit, so the tree the user lands in is
 /// the one they would expect.
 ///
+/// The checkout runs off the loop, the same way a review-walk step does, so the
+/// badge and the diff appear when it lands.
+///
 /// A failed checkout badges and leaves the pause standing. The stepper is
 /// stopped either way, and reporting it is better than showing a diff against a
 /// tree that is not there.
 fn install_edit_pause(stoat: &mut Stoat, workdir: &Path, sha: &str) {
-    let Some(repo) = stoat.git_host.discover(workdir) else {
-        emit_rebase_error(stoat, "git repo not found", None);
-        return;
-    };
-    if let Err(err) = repo.checkout_detached(sha) {
-        emit_rebase_error(stoat, "checkout failed", Some(err.to_string()));
-        return;
-    }
-
     let short = &sha[..sha.len().min(7)];
-    super::review::emit_review_info_badge(stoat, &format!("editing {short}, C continues"));
-    super::review::land_diff_on_commit(stoat, &*repo, workdir, sha);
+    super::review_walk::spawn_walk_landing(
+        stoat,
+        super::review_walk::WalkLandingKind::EditPause,
+        workdir.to_path_buf(),
+        sha.to_string(),
+        format!("editing {short}, C continues"),
+    );
 }
 
 /// Core rebase stepper. Pops entries from `remaining`, applying each via

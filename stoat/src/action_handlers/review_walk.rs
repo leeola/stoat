@@ -4,12 +4,14 @@ use crate::{
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     host::CommitInfo,
     review_walk::{ReturnRef, ReviewWalk},
+    workspace::diff::DiffBase,
 };
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{mpsc, Arc},
 };
+use stoat_scheduler::Task;
 
 /// Commits the picker loads for a ref. Bounds the eager walk on a long
 /// history without paging, which fuzzy filtering could not work across.
@@ -159,7 +161,7 @@ fn spawn_history_walk(
     executor: &stoat_scheduler::Executor,
     redraw: Arc<tokio::sync::Notify>,
     walk: impl FnOnce() -> LoadedCommits + Send + 'static,
-) -> stoat_scheduler::Task<LoadedCommits> {
+) -> Task<LoadedCommits> {
     executor.spawn_blocking(move || {
         let loaded = walk();
         redraw.notify_one();
@@ -408,44 +410,18 @@ pub(super) fn walk_one_commit(
 /// files, which is what lets the user look around a commit and then step on
 /// without a screen of its own to leave first.
 ///
-/// A commit that changed nothing still moves the base, because the base names
-/// what the tree is compared against and the tree did move. Only the landing is
-/// skipped: there is no file the commit would open onto, so whatever the last
-/// step showed stays up and the badge reports where the walk now stands.
+/// The git work runs off the loop, so this only arms it. A step taken while a
+/// job is out moves the cursor and nothing else, and the pump spawns again for
+/// the final cursor when the job lands.
 fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((workdir, sha, standing)) =
-        stoat.active_workspace().review_walk.as_ref().map(|walk| {
-            (
-                walk.workdir.clone(),
-                walk.current().sha.clone(),
-                format!(
-                    "reviewing {} ({}/{})",
-                    walk.current().short_sha,
-                    walk.cursor + 1,
-                    walk.commits.len()
-                ),
-            )
-        })
-    else {
+    let Some((workdir, sha, standing)) = walk_position(stoat) else {
         return UpdateEffect::None;
     };
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        return review_error(stoat, "not in a git repository", None);
-    };
-
-    // Re-entering a commit the tree already sits on has nothing to check out,
-    // so the dirty guard would only reject a tree the walk itself is fine with.
-    if repo.resolve_rev("HEAD").as_deref() != Some(sha.as_str()) {
-        if repo.has_tracked_changes() {
-            return dirty_tree_error(stoat);
-        }
-        if let Err(err) = repo.checkout_detached(&sha) {
-            return review_error(stoat, "checkout failed", Some(err.to_string()));
-        }
+    if stoat.pending_walk_landing.is_some() {
+        return UpdateEffect::Redraw;
     }
 
-    super::review::emit_review_info_badge(stoat, &standing);
-    super::review::land_diff_on_commit(stoat, &*repo, &workdir, &sha);
+    spawn_walk_landing(stoat, WalkLandingKind::Walk, workdir, sha, standing);
     UpdateEffect::Redraw
 }
 
@@ -727,7 +703,7 @@ fn spawn_preview_load(
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
     highlights: super::commits::PreviewHighlights,
-) -> stoat_scheduler::Task<crate::commit_list::PreviewLoad> {
+) -> Task<crate::commit_list::PreviewLoad> {
     executor.spawn_blocking(move || {
         let parent = repo.parent_sha(&sha);
         let document = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
@@ -746,6 +722,213 @@ fn spawn_preview_load(
             summary: None,
             document,
         }
+    })
+}
+
+/// A walk step whose git work has not landed yet.
+///
+/// Held on [`Stoat`] between the keypress that armed it and the
+/// [`pump_walk_landing`] that applies it, the same shape every other
+/// background request in the editor takes.
+pub(crate) struct PendingWalkLanding {
+    rx: mpsc::Receiver<Result<WalkLanding, WalkFailure>>,
+    _task: Task<()>,
+    /// Where the landing opens its file, held rather than re-read because a
+    /// rebase pause has no walk to read it from.
+    workdir: PathBuf,
+    /// The badge text for the commit this step is landing on. The caller knows
+    /// where the cursor went. The job does not.
+    standing: String,
+    /// Which commit the job was spawned for, so the pump can tell a landing
+    /// that still describes the cursor from one the reader has stepped past.
+    sha: String,
+    kind: WalkLandingKind,
+}
+
+/// Which caller armed a landing, which decides both what the job guards
+/// against and who reports a failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WalkLandingKind {
+    /// A review-walk step. Refuses to check out over tracked changes, since the
+    /// walk is a way of reading history rather than of discarding work.
+    Walk,
+    /// A rebase edit pause. The stepper wrote the commit a moment ago, so the
+    /// checkout is unconditional and a failure is the rebase's to report.
+    EditPause,
+}
+
+/// What one step's git work produced.
+struct WalkLanding {
+    /// The commit's parent, which becomes the diff base.
+    parent: Option<String>,
+    /// The first path the commit changed, or `None` for one that changed
+    /// nothing and so has no file to open onto.
+    first_path: Option<PathBuf>,
+}
+
+/// Why a step's git work did not land.
+enum WalkFailure {
+    /// No repository at the workdir the caller named.
+    NoRepository,
+    /// Tracked changes stand in the way of the checkout.
+    DirtyTree,
+    /// The checkout itself failed, with what the backend said.
+    Checkout(String),
+}
+
+/// Run a step's git work off the run loop and hold the result for the pump.
+///
+/// The checkout walks the tree and writes files, and the dirty guard before it
+/// walks the whole status. On a large repository that is most of a second, and
+/// it used to run where the key was pressed.
+///
+/// Re-entering a commit the tree already sits on has nothing to check out, so
+/// the dirty guard is skipped there: it would only reject a tree the walk
+/// itself is fine with.
+pub(super) fn spawn_walk_landing(
+    stoat: &mut Stoat,
+    kind: WalkLandingKind,
+    workdir: PathBuf,
+    sha: String,
+    standing: String,
+) {
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        report_failure(stoat, kind, WalkFailure::NoRepository);
+        return;
+    };
+    let redraw = stoat.redraw_notify.clone();
+    let (tx, rx) = mpsc::channel();
+
+    let task = {
+        let sha = sha.clone();
+        stoat.executor.spawn_blocking(move || {
+            let landed = walk_landing(&*repo, kind, &sha);
+            let _ = tx.send(landed);
+            redraw.notify_one();
+        })
+    };
+
+    stoat.pending_walk_landing = Some(PendingWalkLanding {
+        rx,
+        _task: task,
+        workdir,
+        standing,
+        sha,
+        kind,
+    });
+}
+
+/// Check `sha` out and read what the landing needs, on whatever thread calls.
+fn walk_landing(
+    repo: &dyn crate::host::GitRepo,
+    kind: WalkLandingKind,
+    sha: &str,
+) -> Result<WalkLanding, WalkFailure> {
+    if repo.resolve_rev("HEAD").as_deref() != Some(sha) {
+        if kind == WalkLandingKind::Walk && repo.has_tracked_changes() {
+            return Err(WalkFailure::DirtyTree);
+        }
+        if let Err(err) = repo.checkout_detached(sha) {
+            return Err(WalkFailure::Checkout(err.to_string()));
+        }
+    }
+
+    Ok(WalkLanding {
+        parent: repo.parent_sha(sha),
+        first_path: repo.commit_first_path(sha),
+    })
+}
+
+/// Apply a landed step, or report why it did not land.
+///
+/// Returns whether anything moved, which is what [`Stoat::drive_pumps`] reads
+/// to decide whether another pass is worth making.
+pub(crate) fn pump_walk_landing(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_walk_landing.take() else {
+        return false;
+    };
+    let landed = match pending.rx.try_recv() {
+        Ok(landed) => landed,
+        Err(mpsc::TryRecvError::Empty) => {
+            stoat.pending_walk_landing = Some(pending);
+            return false;
+        },
+        Err(mpsc::TryRecvError::Disconnected) => return false,
+    };
+
+    match landed {
+        Ok(landing) => land_walk(stoat, &pending.workdir, &pending.standing, landing),
+        Err(failure) => report_failure(stoat, pending.kind, failure),
+    }
+
+    // The reader keeps stepping while a job is out, so the cursor may have
+    // moved past the commit this landing describes. Spawning again for where it
+    // now stands is what converges, the same way the preview pump does.
+    if let Some((workdir, sha, standing)) = walk_position(stoat)
+        && sha != pending.sha
+    {
+        spawn_walk_landing(stoat, WalkLandingKind::Walk, workdir, sha, standing);
+    }
+    true
+}
+
+/// Show a landed commit: its parent becomes the diff base, and its first
+/// changed path becomes what is on screen.
+///
+/// The same three steps [`super::review::land_diff_on_commit`] takes, against
+/// values the job already read rather than reads made here.
+fn land_walk(stoat: &mut Stoat, workdir: &Path, standing: &str, landing: WalkLanding) {
+    stoat
+        .active_workspace_mut()
+        .set_diff_base(Some(DiffBase::Rev {
+            sha: landing.parent,
+        }));
+    super::review::emit_review_info_badge(stoat, standing);
+
+    // A commit that changed nothing has no file to open onto, so whatever the
+    // last step showed stays up and only the base moves.
+    if let Some(rel_path) = landing.first_path {
+        super::file::open_file(stoat, &workdir.join(rel_path));
+        super::review::enter_diff_view(stoat);
+    }
+}
+
+/// Badge a failed landing through whoever armed it.
+///
+/// A walk step reports as the review walk, a rebase pause as the rebase, since
+/// each is what the reader was doing when the step was taken.
+fn report_failure(stoat: &mut Stoat, kind: WalkLandingKind, failure: WalkFailure) {
+    let (label, detail) = match failure {
+        WalkFailure::NoRepository => ("not in a git repository", None),
+        WalkFailure::DirtyTree => {
+            dirty_tree_error(stoat);
+            return;
+        },
+        WalkFailure::Checkout(detail) => ("checkout failed", Some(detail)),
+    };
+
+    match kind {
+        WalkLandingKind::Walk => {
+            review_error(stoat, label, detail);
+        },
+        WalkLandingKind::EditPause => {
+            super::rebase::emit_rebase_error(stoat, label, detail);
+        },
+    }
+}
+/// Where the walk cursor stands: its workdir, sha, and badge text.
+fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
+    stoat.active_workspace().review_walk.as_ref().map(|walk| {
+        (
+            walk.workdir.clone(),
+            walk.current().sha.clone(),
+            format!(
+                "reviewing {} ({}/{})",
+                walk.current().short_sha,
+                walk.cursor + 1,
+                walk.commits.len()
+            ),
+        )
     })
 }
 
@@ -1773,6 +1956,45 @@ mod tests {
         h.settle();
         assert_eq!(walk_cursor(&h), Some(2), "a step past the tip is a no-op");
         assert_eq!(checkouts(&h).len(), 3, "and checks nothing else out");
+    }
+
+    /// A checkout walks the tree and writes files, and the dirty guard ahead of
+    /// it walks the whole status. On a large repository that is most of a
+    /// second, and a step used to spend all of it where the key was pressed.
+    ///
+    /// What the press does now is hand the work off. The test executor runs a
+    /// blocking job inline, so the checkout itself is not what shows the split.
+    /// The landing is: it waits for the pump, and the diff base holds still
+    /// until then.
+    #[test]
+    fn a_step_leaves_the_checkout_to_a_worker() {
+        let mut h = harness();
+        start_walk(&mut h);
+        let before = diff_base_sha(&h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+
+        assert_eq!(
+            (h.stoat.pending_walk_landing.is_some(), diff_base_sha(&h)),
+            (true, before.clone()),
+            "the press armed the landing and applied none of it",
+        );
+
+        h.settle();
+        assert_eq!(
+            (h.stoat.pending_walk_landing.is_some(), diff_base_sha(&h)),
+            (false, Some("a1b2c3d4".to_string())),
+            "and the pump applied it once the job landed",
+        );
+        assert_ne!(diff_base_sha(&h), before, "the base moved with the step");
+    }
+
+    /// The sha the workspace diffs against, which a landed step moves.
+    fn diff_base_sha(h: &TestHarness) -> Option<String> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Rev { sha }) => sha.clone(),
+            _ => None,
+        }
     }
 
     #[test]
