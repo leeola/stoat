@@ -129,8 +129,17 @@ impl TermScreen {
             clipboard_writes: clipboard_writes.clone(),
         };
 
+        // No scrollback. The pane exposes no scroll offset, so nothing reads
+        // the default ten thousand rows of history back. They still cost a
+        // full-width allocation each, and every column change reflows all of
+        // them on the run loop.
+        let config = Config {
+            scrolling_history: 0,
+            ..Config::default()
+        };
+
         TermScreen {
-            term: Term::new(Config::default(), &dimensions, listener),
+            term: Term::new(config, &dimensions, listener),
             parser: Processor::new(),
             replies,
             clipboard_writes,
@@ -173,6 +182,11 @@ impl TermScreen {
     /// hosting pane calls this as its area changes so the program redraws within
     /// the live size. Pair it with a PTY resize so the child process learns the
     /// size too.
+    ///
+    /// Rows that a shrink pushes off the top are dropped, since the screen
+    /// keeps no history. A later grow adds blank rows below what is left
+    /// rather than bringing the dropped ones back. A full-screen program
+    /// repaints on the size change and fills them.
     ///
     /// Returns any reply the resize produced, on the same contract as
     /// [`Self::feed`]. In practice a resize emits none.
@@ -286,8 +300,8 @@ impl TermScreen {
 
 /// Adapts stoat's row/column count to `alacritty_terminal`'s [`Dimensions`].
 ///
-/// `total_lines` equals `screen_lines`, since the terminal grows its own
-/// scrollback from the config and no history rows are declared up front.
+/// `total_lines` equals `screen_lines`. The screen keeps no history, so the
+/// viewport is the whole grid.
 struct GridSize {
     rows: usize,
     cols: usize,
@@ -491,6 +505,35 @@ mod tests {
         term.resize(10, 20);
         assert_eq!((term.rows(), term.cols()), (10, 20));
         assert_eq!(text_row(&term, 0), "hi");
+    }
+
+    /// A row scrolled past the top is dropped rather than held, so a shrink
+    /// and a grow back have nothing to restore from and the grow adds blank
+    /// rows below what survived. The cursor stays on the row it occupies at
+    /// both sizes, since a reader indexes it straight into the rows.
+    #[test]
+    fn a_shrink_and_a_grow_recover_no_scrolled_rows() {
+        let rows = |term: &TermScreen| {
+            (0..term.rows())
+                .map(|idx| text_row(term, idx))
+                .collect::<Vec<_>>()
+        };
+
+        let mut term = TermScreen::new(4, 10);
+        term.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        assert_eq!(rows(&term), ["three", "four", "five", "six"]);
+
+        term.resize(2, 10);
+        assert_eq!(rows(&term), ["five", "six"], "the shrink drops two rows");
+        assert_eq!(term.cursor().map(|c| c.row), Some(1));
+
+        term.resize(6, 10);
+        assert_eq!(
+            rows(&term),
+            ["five", "six", "", "", "", ""],
+            "the grow adds blank rows rather than the dropped ones",
+        );
+        assert_eq!(term.cursor().map(|c| c.row), Some(1));
     }
 
     #[test]
