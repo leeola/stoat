@@ -1,5 +1,4 @@
 use crate::{
-    merge_view,
     pane::Pane,
     rebase::{ActiveRebase, RebasePause},
     render::{
@@ -65,13 +64,14 @@ pub(crate) fn render_conflict(
         return;
     };
 
-    let (source_sha, files, selected, resolutions) = match active.pause.as_ref() {
+    let (source_sha, files, selected, resolutions, merge_rows) = match active.pause.as_ref() {
         Some(RebasePause::Conflict {
             source_sha,
             files,
             selected,
             resolutions,
-        }) => (source_sha, files, *selected, resolutions),
+            merge_rows,
+        }) => (source_sha, files, *selected, resolutions, merge_rows),
         _ => return,
     };
 
@@ -191,10 +191,13 @@ pub(crate) fn render_conflict(
             y += 1;
         }
 
-        let ancestor = file.ancestor.as_deref().unwrap_or("");
-        let ours = file.ours.as_deref().unwrap_or("");
-        let theirs = file.theirs.as_deref().unwrap_or("");
-        for row in merge_view::build_merge_rows(ancestor, ours, theirs, None) {
+        // Aligned where the selection moved, so the paint only reads. Every
+        // path that sets a selection fills its slot, so an empty one means the
+        // file index no longer names a file.
+        let Some(rows) = merge_rows.get(selected).and_then(Option::as_ref) else {
+            return;
+        };
+        for row in rows {
             if y >= max_y {
                 break;
             }

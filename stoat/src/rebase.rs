@@ -177,6 +177,17 @@ pub(crate) enum RebasePause {
         files: Vec<ConflictedFile>,
         selected: usize,
         resolutions: HashMap<PathBuf, ConflictResolution>,
+        /// Aligned three-column rows per file, `None` until that file is
+        /// selected. Parallel to `files`.
+        ///
+        /// Aligning a file diffs its ancestor against both sides and builds a
+        /// string per line per side, which the paint used to redo on every
+        /// frame. The files here are captured once at the cherry-pick and never
+        /// edited while the pause stands, so a file aligned once stays aligned.
+        ///
+        /// Lazy per file, so a pause over twenty of them aligns only the ones
+        /// the reader opens.
+        merge_rows: Vec<Option<Vec<crate::merge_view::MergeRow>>>,
     },
 }
 
@@ -399,6 +410,55 @@ mod tests {
         assert!(
             matches!(active.pause, Some(RebasePause::Conflict { .. })),
             "paused on a conflict"
+        );
+    }
+
+    /// Aligning a file diffs its ancestor against both sides and builds a
+    /// string per line per side. The paint used to redo that on every frame, so
+    /// a held `j` or a badge tick re-aligned a file nothing had touched.
+    ///
+    /// Three claims, in the order they matter: the pause arrives already
+    /// aligned, so no frame has to do it; the paint shows those rows, which is
+    /// the only source it has left; and a second frame reads the same
+    /// allocation rather than a fresh one.
+    #[test]
+    fn the_conflict_screen_paints_twice_and_aligns_once() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("Enter");
+
+        let rows_ptr = |h: &Stoat| -> *const crate::merge_view::MergeRow {
+            let ws = h.active_workspace();
+            let Some(RebasePause::Conflict { merge_rows, .. }) =
+                ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref())
+            else {
+                panic!("paused on a conflict");
+            };
+            merge_rows[0]
+                .as_ref()
+                .expect("the pause aligned its selected file")
+                .as_ptr()
+        };
+
+        let first = rows_ptr(&h.stoat);
+
+        let _ = h.stoat.render();
+        let painted = h.rendered_text();
+        assert!(
+            painted.contains("ours") && painted.contains("line1"),
+            "the frame painted the rows the pause aligned:\n{painted}",
+        );
+
+        let _ = h.stoat.render();
+        assert_eq!(
+            rows_ptr(&h.stoat),
+            first,
+            "and the second frame read the same allocation",
         );
     }
 

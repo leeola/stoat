@@ -10,6 +10,41 @@ pub(super) enum ConflictChoice {
     Theirs,
 }
 
+/// One empty row slot per file, with `selected`'s filled.
+///
+/// Called where a pause is installed, so the file the screen opens on is
+/// aligned before its first paint rather than during it.
+pub(crate) fn aligned_slots(
+    files: &[crate::host::ConflictedFile],
+    selected: usize,
+) -> Vec<Option<Vec<crate::merge_view::MergeRow>>> {
+    let mut slots = vec![None; files.len()];
+    fill_slot(files, &mut slots, selected);
+    slots
+}
+
+/// Align `index`'s file into its slot, unless it is aligned already.
+///
+/// Both halves of the paint read the slot, so this runs where the selection
+/// moves rather than where it is drawn.
+fn fill_slot(
+    files: &[crate::host::ConflictedFile],
+    slots: &mut [Option<Vec<crate::merge_view::MergeRow>>],
+    index: usize,
+) {
+    let (Some(file), Some(slot)) = (files.get(index), slots.get_mut(index)) else {
+        return;
+    };
+    if slot.is_some() {
+        return;
+    }
+    *slot = Some(crate::merge_view::build_merge_rows(
+        file.ancestor.as_deref().unwrap_or(""),
+        file.ours.as_deref().unwrap_or(""),
+        file.theirs.as_deref().unwrap_or(""),
+        None,
+    ));
+}
 /// Select the conflicted file at `index`, or do nothing when it names none.
 ///
 /// A press selects and nothing more. Taking a side stays on its own key, so a
@@ -20,7 +55,10 @@ pub(crate) fn conflict_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
         return UpdateEffect::None;
     };
     let Some(RebasePause::Conflict {
-        files, selected, ..
+        files,
+        selected,
+        merge_rows,
+        ..
     }) = active.pause.as_mut()
     else {
         return UpdateEffect::None;
@@ -29,6 +67,7 @@ pub(crate) fn conflict_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
         return UpdateEffect::None;
     }
     *selected = index;
+    fill_slot(files, merge_rows, index);
     UpdateEffect::Redraw
 }
 
@@ -38,7 +77,10 @@ pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
         return UpdateEffect::None;
     };
     let Some(RebasePause::Conflict {
-        files, selected, ..
+        files,
+        selected,
+        merge_rows,
+        ..
     }) = active.pause.as_mut()
     else {
         return UpdateEffect::None;
@@ -54,11 +96,11 @@ pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
     } else if *selected > 0 {
         *selected -= 1;
     }
-    if *selected != before {
-        UpdateEffect::Redraw
-    } else {
-        UpdateEffect::None
+    if *selected == before {
+        return UpdateEffect::None;
     }
+    fill_slot(files, merge_rows, *selected);
+    UpdateEffect::Redraw
 }
 
 pub(super) fn conflict_set(stoat: &mut Stoat, choice: ConflictChoice) -> UpdateEffect {

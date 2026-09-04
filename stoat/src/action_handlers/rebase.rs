@@ -270,11 +270,13 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                             .rebase_active
                             .as_mut()
                             .expect("rebase_active present");
+                        let merge_rows = super::conflict::aligned_slots(&files, 0);
                         active.pause = Some(RebasePause::Conflict {
                             source_sha: entry.commit.sha.clone(),
                             files,
                             selected: 0,
                             resolutions: std::collections::HashMap::new(),
+                            merge_rows,
                         });
                         return UpdateEffect::Redraw;
                     },
@@ -355,11 +357,13 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                             .rebase_active
                             .as_mut()
                             .expect("rebase_active present");
+                        let merge_rows = super::conflict::aligned_slots(&files, 0);
                         active.pause = Some(RebasePause::Conflict {
                             source_sha: entry.commit.sha.clone(),
                             files,
                             selected: 0,
                             resolutions: std::collections::HashMap::new(),
+                            merge_rows,
                         });
                         return UpdateEffect::Redraw;
                     },

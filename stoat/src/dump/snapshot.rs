@@ -82,6 +82,10 @@ impl ActiveRebaseSnap {
                 files,
                 selected,
                 resolutions,
+                // The aligned rows are rebuilt on load. They are derived from
+                // the files beside them, so persisting them would only make the
+                // snapshot larger and let the two disagree.
+                merge_rows: _,
             }) => Some(RebasePauseSnap::Conflict {
                 source_sha: source_sha.clone(),
                 files: files.clone(),
@@ -134,6 +138,10 @@ impl RebasePauseSnap {
                 selected,
                 resolutions,
             } => RebasePause::Conflict {
+                // Rebuilt rather than restored. The rows are derived from the
+                // files beside them, so persisting them would only make the
+                // snapshot larger and let the two disagree.
+                merge_rows: crate::action_handlers::conflict::aligned_slots(&files, selected),
                 source_sha,
                 files,
                 selected,
