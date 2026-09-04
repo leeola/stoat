@@ -2,7 +2,7 @@ use crate::{
     commit_graph::{self, GraphRow},
     commit_list::{PendingPreview, PreviewCache},
     fuzzy,
-    host::CommitInfo,
+    host::{CommitInfo, GitRepo},
     input_view::{InputView, SubmitTarget},
     picker,
     workspace::Workspace,
@@ -12,6 +12,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     mem,
     path::PathBuf,
+    sync::Arc,
 };
 use stoat_scheduler::{Executor, Task};
 
@@ -163,6 +164,9 @@ pub(crate) enum LoadedCommits {
 pub(crate) struct CommitPicker {
     pub(crate) role: CommitPickerRole,
     pub(crate) workdir: PathBuf,
+    /// The repository the picker walks, held rather than rediscovered on every
+    /// selection change.
+    pub(crate) repo: Arc<dyn GitRepo>,
     /// Full sha of the ref the picker was opened over. Excluded from
     /// [`Self::default_selection`], which looks for a branch other than the one
     /// the user is already looking at.
@@ -281,6 +285,7 @@ impl CommitPicker {
         executor: Executor,
         role: CommitPickerRole,
         workdir: PathBuf,
+        repo: Arc<dyn GitRepo>,
         ref_sha: String,
         now_epoch: i64,
     ) -> Self {
@@ -289,6 +294,7 @@ impl CommitPicker {
             now_epoch,
             role,
             workdir,
+            repo,
             ref_sha,
             input,
             commits: Vec::new(),
@@ -723,6 +729,12 @@ mod tests {
         let mut p = CommitPicker {
             role: CommitPickerRole::PickBase,
             workdir: PathBuf::from("/repo"),
+            repo: {
+                let host = crate::host::FakeGit::new();
+                host.add_repo("/repo");
+                crate::host::GitHost::discover(&host, std::path::Path::new("/repo"))
+                    .expect("the repo was just added")
+            },
             ref_sha: ref_sha.to_string(),
             input: InputView {
                 editor_id: EditorId::default(),
@@ -2301,12 +2313,18 @@ mod tests {
             (repo.log_from("c3d4e5f6", 100), branch_tips)
         };
 
+        let repo = h
+            .stoat
+            .git_host
+            .discover(std::path::Path::new("/repo"))
+            .expect("seeded repo");
         let executor = h.stoat.executor.clone();
         let mut picker = CommitPicker::new(
             h.stoat.active_workspace_mut(),
             executor,
             CommitPickerRole::PickBase,
             PathBuf::from("/repo"),
+            repo,
             "c3d4e5f6".to_string(),
             SEEDED_NOW_EPOCH,
         );
@@ -2341,12 +2359,18 @@ mod tests {
             (repo.log_from("c3d4e5f6", 100), branch_tips)
         };
 
+        let repo = h
+            .stoat
+            .git_host
+            .discover(std::path::Path::new("/repo"))
+            .expect("seeded repo");
         let executor = h.stoat.executor.clone();
         let mut picker = CommitPicker::new(
             h.stoat.active_workspace_mut(),
             executor,
             CommitPickerRole::PickBase,
             PathBuf::from("/repo"),
+            repo,
             "c3d4e5f6".to_string(),
             SEEDED_NOW_EPOCH,
         );

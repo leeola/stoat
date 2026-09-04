@@ -4308,7 +4308,19 @@ mod tests {
 
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
-        h.stoat.active_workspace_mut().commits = Some(CommitListState::new(PathBuf::from("/work")));
+        let repo = h
+            .stoat
+            .git_host
+            .discover(std::path::Path::new("/work"))
+            .unwrap_or_else(|| {
+                h.fake_git.add_repo("/work");
+                h.stoat
+                    .git_host
+                    .discover(std::path::Path::new("/work"))
+                    .expect("the repo was just added")
+            });
+        h.stoat.active_workspace_mut().commits =
+            Some(CommitListState::new(PathBuf::from("/work"), repo));
         h.stoat.set_focused_mode("commits".to_string());
 
         emit_smooth_scroll(&mut h.stoat);

@@ -134,6 +134,7 @@ fn open_commit_picker(
         executor,
         role,
         workdir,
+        repo.clone(),
         ref_sha,
         // Ages are measured against the moment the picker opened, so they hold
         // still while the user scrolls rather than drifting under them.
@@ -653,9 +654,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
     }
 
     let workdir = picker.workdir.clone();
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        return;
-    };
+    let repo = picker.repo.clone();
     let task = spawn_preview_load(
         &stoat.executor,
         repo,
@@ -691,20 +690,17 @@ fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut pending.task).poll(&mut cx) {
-        Poll::Ready(Some(document)) => {
+        Poll::Ready(load) => {
             if picker.requested_preview.as_deref() == Some(pending.sha.as_str()) {
-                picker
-                    .preview_sessions
-                    .insert(pending.sha, Arc::new(document));
-            }
-            true
-        },
-        // A commit that changed nothing yields no document, and that is a final
-        // answer. Recording it is what stops the pump asking again on the very
-        // next pass, which never converged.
-        Poll::Ready(None) => {
-            if picker.requested_preview.as_deref() == Some(pending.sha.as_str()) {
-                picker.preview_sessions.insert_empty(pending.sha);
+                // A commit that changed nothing yields no document, and that is
+                // a final answer. Recording it is what stops the pump asking
+                // again on the very next pass, which never converged.
+                match load.document {
+                    Some(document) => picker
+                        .preview_sessions
+                        .insert(pending.sha, Arc::new(document)),
+                    None => picker.preview_sessions.insert_empty(pending.sha),
+                }
             }
             true
         },
@@ -731,10 +727,10 @@ fn spawn_preview_load(
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
     highlights: super::commits::PreviewHighlights,
-) -> stoat_scheduler::Task<Option<crate::review_session::DiffDocument>> {
+) -> stoat_scheduler::Task<crate::commit_list::PreviewLoad> {
     executor.spawn_blocking(move || {
         let parent = repo.parent_sha(&sha);
-        let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
+        let document = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
             Some(changes) => {
                 super::review::build_document_from_changes(&language_registry, &workdir, changes)
                     .map(|mut doc| {
@@ -745,7 +741,11 @@ fn spawn_preview_load(
             None => None,
         };
         redraw.notify_one();
-        built
+        // The picker paints no file-change summary, so it reads none.
+        crate::commit_list::PreviewLoad {
+            summary: None,
+            document,
+        }
     })
 }
 

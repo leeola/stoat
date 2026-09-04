@@ -1,5 +1,5 @@
 use crate::{
-    host::{CommitFileChange, CommitInfo},
+    host::{CommitFileChange, CommitInfo, GitRepo},
     review_session::DiffDocument,
 };
 use std::{
@@ -35,6 +35,12 @@ const PREVIEW_CACHE_CAP: usize = 8;
 // handles and are intentionally not restorable.
 pub(crate) struct CommitListState {
     pub workdir: PathBuf,
+    /// The repository the list walks, held rather than rediscovered.
+    ///
+    /// Every paging and preview handler needs it, and discovery walks the
+    /// filesystem upward for a `.git`. The screen cannot outlive the workdir it
+    /// opened over, so one handle answers for the life of the list.
+    pub repo: Arc<dyn GitRepo>,
     pub commits: Vec<CommitInfo>,
     /// True once the backing walk hit a root commit; further
     /// `log_commits` calls with `after = last_sha` would return empty,
@@ -65,7 +71,21 @@ pub(crate) struct CommitListState {
 
 pub(crate) struct PendingPreview {
     pub sha: String,
-    pub task: Task<Option<DiffDocument>>,
+    pub task: Task<PreviewLoad>,
+}
+
+/// What one background preview build produces.
+///
+/// Both halves come from the same task because both read the same commit, and
+/// a caller that reads one on the run loop pays for the tree walk there.
+pub(crate) struct PreviewLoad {
+    /// The commit's file-change summary, or `None` from a surface that paints
+    /// none. Distinct from an empty list, which is a commit that changed
+    /// nothing.
+    pub summary: Option<Vec<CommitFileChange>>,
+    /// `None` when the commit yields no diff to show, which is a final answer
+    /// rather than a failure to retry.
+    pub document: Option<DiffDocument>,
 }
 
 /// Built diff previews for the commits a surface's selection has rested on,
@@ -174,9 +194,10 @@ impl PreviewCache {
 }
 
 impl CommitListState {
-    pub(crate) fn new(workdir: PathBuf) -> Self {
+    pub(crate) fn new(workdir: PathBuf, repo: Arc<dyn GitRepo>) -> Self {
         Self {
             workdir,
+            repo,
             commits: Vec::new(),
             reached_end: false,
             selected: 0,
@@ -274,13 +295,16 @@ impl CommitListState {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut pending.task).poll(&mut cx) {
-            Poll::Ready(Some(document)) => {
-                self.preview_sessions
-                    .insert(pending.sha, Arc::new(document));
-                true
-            },
-            Poll::Ready(None) => {
-                self.preview_sessions.insert_empty(pending.sha);
+            Poll::Ready(load) => {
+                if let Some(summary) = load.summary {
+                    self.summaries.insert(pending.sha.clone(), summary);
+                }
+                match load.document {
+                    Some(document) => self
+                        .preview_sessions
+                        .insert(pending.sha, Arc::new(document)),
+                    None => self.preview_sessions.insert_empty(pending.sha),
+                }
                 true
             },
             Poll::Pending => {

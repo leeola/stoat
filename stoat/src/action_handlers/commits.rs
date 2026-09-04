@@ -39,7 +39,7 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     // or not, is untouched.
     super::review::exit_diff_view(stoat);
 
-    let mut state = CommitListState::new(workdir);
+    let mut state = CommitListState::new(workdir, repo.clone());
     state.pending_load = Some(spawn_commit_log_load(
         &stoat.executor,
         repo,
@@ -129,15 +129,12 @@ pub(super) fn commits_detail_half_page(stoat: &mut Stoat, dir: i32) -> UpdateEff
 }
 
 pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(git_root) = stoat
+    let Some(repo) = stoat
         .active_workspace()
         .commits
         .as_ref()
-        .map(|s| s.workdir.clone())
+        .map(|s| s.repo.clone())
     else {
-        return UpdateEffect::None;
-    };
-    let Some(repo) = stoat.git_host.discover(&git_root) else {
         return UpdateEffect::None;
     };
     let task = spawn_commit_log_load(
@@ -185,10 +182,7 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
         return;
     }
     let last_sha = state.commits[loaded - 1].sha.clone();
-    let workdir = state.workdir.clone();
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        return;
-    };
+    let repo = state.repo.clone();
     let task = spawn_commit_log_load(
         &stoat.executor,
         repo,
@@ -202,8 +196,8 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
 }
 
 /// Spawn a background preview build for the current selection if one is
-/// not already cached, and no build is in flight for any commit. Also
-/// populates the file-change summary synchronously (cheap: one tree-diff).
+/// not already cached, and no build is in flight for any commit. The summary
+/// lands with it, out of the same task.
 ///
 /// Only one build runs at a time. Dropping a [`stoat_scheduler::Task`] leaves
 /// the blocking pool running the closure regardless, so spawning per row would
@@ -218,46 +212,24 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
         return;
     };
     let workdir = state.workdir.clone();
-    let need_summary = !state.summaries.contains_key(&sha);
-    let need_preview = !state.preview_sessions.mark_used(&sha) && state.pending_preview.is_none();
-
-    if !need_summary && !need_preview {
+    let repo = state.repo.clone();
+    if state.preview_sessions.mark_used(&sha) || state.pending_preview.is_some() {
         return;
     }
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        return;
-    };
 
-    let summary = if need_summary {
-        Some(repo.commit_file_changes(&sha))
-    } else {
-        None
-    };
-    let preview_task = if need_preview {
-        let language_registry = stoat.language_registry.clone();
-        let highlights = PreviewHighlights::from_stoat(stoat);
-        Some(spawn_commit_preview_load(
-            &stoat.executor,
-            repo.clone(),
-            workdir.clone(),
-            sha.clone(),
-            language_registry,
-            stoat.redraw_notify.clone(),
-            highlights,
-        ))
-    } else {
-        None
-    };
+    let task = spawn_commit_preview_load(
+        &stoat.executor,
+        repo,
+        workdir,
+        sha.clone(),
+        stoat.language_registry.clone(),
+        stoat.redraw_notify.clone(),
+        PreviewHighlights::from_stoat(stoat),
+    );
 
-    let ws = stoat.active_workspace_mut();
-    if let Some(state) = ws.commits.as_mut() {
-        if let Some(changes) = summary {
-            state.summaries.insert(sha.clone(), changes);
-        }
-        if let Some(task) = preview_task {
-            state.requested_preview = Some(sha.clone());
-            state.pending_preview = Some(crate::commit_list::PendingPreview { sha, task });
-        }
+    if let Some(state) = stoat.active_workspace_mut().commits.as_mut() {
+        state.requested_preview = Some(sha.clone());
+        state.pending_preview = Some(crate::commit_list::PendingPreview { sha, task });
     }
 }
 
@@ -359,8 +331,8 @@ impl PreviewHighlights {
         super::review::attach_preview_highlights(doc, &self.styles, &self.cache);
     }
 }
-/// Spawn the blocking diff build for `sha`, waking the run loop through `redraw`
-/// when it lands.
+/// Spawn the blocking summary read and diff build for `sha`, waking the run
+/// loop through `redraw` when they land.
 ///
 /// The wake is what makes the preview appear on its own, for the reason
 /// [`spawn_commit_log_load`] describes. It fires on a failed tree read too,
@@ -373,10 +345,14 @@ fn spawn_commit_preview_load(
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
     highlights: PreviewHighlights,
-) -> stoat_scheduler::Task<Option<DiffDocument>> {
+) -> stoat_scheduler::Task<crate::commit_list::PreviewLoad> {
     executor.spawn_blocking(move || {
+        // Read here rather than on the run loop. The tree walk behind it costs
+        // tens of milliseconds on a wide commit, which held a frame per row
+        // while the selection moved.
+        let summary = repo.commit_file_changes(&sha);
         let parent = repo.parent_sha(&sha);
-        let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
+        let document = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
             Some(changes) => {
                 super::review::build_document_from_changes(&language_registry, &workdir, changes)
                     .map(|mut doc| {
@@ -387,7 +363,10 @@ fn spawn_commit_preview_load(
             None => None,
         };
         redraw.notify_one();
-        built
+        crate::commit_list::PreviewLoad {
+            summary: Some(summary),
+            document,
+        }
     })
 }
 
@@ -440,6 +419,99 @@ mod tests {
         assert!(
             matches!(state.preview_sessions.get("bbbb2222"), Preview::Empty),
             "the empty answer is cached, not left looking unbuilt",
+        );
+    }
+
+    /// Open `:commits` over a two-commit history and settle, leaving the newer
+    /// commit selected.
+    fn open_two_commit_history(h: &mut crate::test_harness::TestHarness) {
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("aaaa1111", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                (
+                    "bbbb2222",
+                    "feat: add b.rs",
+                    // Carries a.rs forward, so the newer commit is one addition
+                    // rather than an addition beside a deletion.
+                    &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+                ),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "bbbb2222")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+
+        h.type_text(":commits");
+        h.type_keys("enter");
+        h.settle();
+    }
+
+    /// Reading the summary took a tree walk, and a wide commit made that tens of
+    /// milliseconds. Doing it where the selection moves held a frame per row,
+    /// so the read has to be in the spawned task and nowhere else.
+    ///
+    /// The absence is what this pins: right after the selection lands on a
+    /// commit, nothing about that commit has been read yet.
+    #[test]
+    fn stepping_the_selection_reads_no_summary_on_the_run_loop() {
+        let mut h = Stoat::test();
+        open_two_commit_history(&mut h);
+
+        let sha = {
+            let state = h
+                .stoat
+                .active_workspace_mut()
+                .commits
+                .as_mut()
+                .expect("commits state");
+            state.selected = 1;
+            state.selected_sha().expect("the older commit").to_string()
+        };
+
+        super::ensure_selected_preview(&mut h.stoat);
+
+        let state = h
+            .stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("commits state");
+        assert_eq!(
+            (
+                state.summaries.contains_key(&sha),
+                state.pending_preview.is_some(),
+            ),
+            (false, true),
+            "the step spawned the read rather than doing it",
+        );
+    }
+
+    /// The summary and the preview come out of one task, so the row that paints
+    /// "loading summary..." is the same row that has no diff yet, and both
+    /// arrive together rather than one on the loop and one off it.
+    #[test]
+    fn a_commits_summary_lands_with_its_preview() {
+        let mut h = Stoat::test();
+        open_two_commit_history(&mut h);
+
+        let state = h
+            .stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("commits state");
+        let sha = state.selected_sha().expect("a selected commit");
+
+        assert_eq!(
+            (
+                state.summaries.get(sha).map(Vec::len),
+                matches!(state.preview_sessions.get(sha), Preview::Built(_)),
+            ),
+            (Some(1), true),
+            "the commit's one changed file and its diff both landed",
         );
     }
 
