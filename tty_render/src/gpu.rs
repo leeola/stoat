@@ -10,7 +10,7 @@
 //! well as the window surface that [`GpuContext`] wraps.
 
 pub use crate::render::{
-    text::{build_font_system, shape_words},
+    text::{build_font_system, shape_words, shape_words_cached, RunShapeCache},
     AnchoredPanel, Frame, Scroll,
 };
 use crate::{

@@ -170,7 +170,7 @@ struct CachedRun {
 /// Evicting only runs nothing asked for keeps those and drops the stream of
 /// one-off runs that pushed the cache to its bound.
 #[derive(Default)]
-pub(super) struct RunShapeCache {
+pub struct RunShapeCache {
     at: FxHashMap<Arc<str>, usize>,
     runs: Vec<CachedRun>,
     /// Slot the next eviction sweep starts at, which trails the most recent
@@ -371,6 +371,36 @@ pub fn shape_words(font_system: &mut FontSystem, font_size: u32, text: &str) -> 
     text.split(' ')
         .filter(|word| !word.is_empty())
         .map(|word| shape_run(font_system, word, metrics, family).len())
+        .sum()
+}
+
+/// Shape every space-separated word of `text` through `cache`, and answer how
+/// many glyphs came back.
+///
+/// What a frame of scrolling prose actually pays. Terminal rows repeat their
+/// words, so the renderer shapes the few a line introduces and takes hits for
+/// the rest, and a caller holding one cache across frames measures that rather
+/// than the all-novel bound [`shape_words`] reports.
+///
+/// The glyph count comes back so a caller cannot have the work optimized out
+/// from under it.
+///
+/// See also:
+/// - [`shape_words`] for the same walk with every word shaped afresh.
+/// - [`build_font_system`] for the font system to hand in.
+pub fn shape_words_cached(
+    cache: &mut RunShapeCache,
+    font_system: &mut FontSystem,
+    font_size: u32,
+    text: &str,
+) -> usize {
+    let primary = resolve_primary_family(font_system, &["JetBrains Mono".to_owned()]);
+    let family = shape_family(primary.as_deref());
+    let metrics = CellMetrics::from_font_size(font_size, 1.0);
+
+    text.split(' ')
+        .filter(|word| !word.is_empty())
+        .map(|word| shape_run_cached(cache, font_system, word, metrics, family).len())
         .sum()
 }
 

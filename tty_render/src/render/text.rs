@@ -38,7 +38,7 @@ use wgpu::{
 mod font;
 mod powerline;
 
-pub use font::{build_font_system, shape_words};
+pub use font::{build_font_system, shape_words, shape_words_cached, RunShapeCache};
 
 /// Instance buffer capacity, in glyphs, allocated up front. Grows by doubling
 /// when a frame exceeds it.
@@ -610,7 +610,7 @@ pub struct TextPass {
     /// cells in the constant primary family, matching [`Self::shape_cache`]'s
     /// family-blind invariant. Bounded, evicting the runs nothing has asked for
     /// lately once it is full.
-    run_shape_cache: font::RunShapeCache,
+    run_shape_cache: RunShapeCache,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
     /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
@@ -1043,7 +1043,7 @@ impl TextPass {
             ligatures,
             swash_cache,
             shape_cache: FxHashMap::default(),
-            run_shape_cache: font::RunShapeCache::default(),
+            run_shape_cache: RunShapeCache::default(),
             glyph_row_cache: Vec::new(),
             exposed_from: None,
             plain_row_instances: Vec::new(),
