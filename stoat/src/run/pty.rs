@@ -37,6 +37,24 @@ pub enum PtyNotification {
     },
 }
 
+impl PtyNotification {
+    /// Bytes of terminal output this notification carries, or 0 for one that
+    /// carries none.
+    ///
+    /// The run loop parses this many bytes when it handles the notification, so
+    /// it is what a per-turn parse budget counts against.
+    pub(crate) fn payload_len(&self) -> usize {
+        match self {
+            PtyNotification::Output { data, .. }
+            | PtyNotification::TermOutput { data, .. }
+            | PtyNotification::SshOutput { data } => data.len(),
+            PtyNotification::CommandDone { .. }
+            | PtyNotification::TermExited { .. }
+            | PtyNotification::SshExited { .. } => 0,
+        }
+    }
+}
+
 pub struct ShellHandle {
     session: Arc<dyn TerminalSession>,
 }

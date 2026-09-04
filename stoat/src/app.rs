@@ -88,6 +88,20 @@ pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml
 /// advancing the inertial scroll one step per fire.
 const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// Terminal output bytes one run-loop turn parses before it returns to
+/// `select!`, about six milliseconds of parse.
+///
+/// The VT parse runs on the app thread, which is the runtime's only thread, so
+/// a command flooding its pty starves the frame timer and the key reader for as
+/// long as the flood lasts. The reader relays 64 KiB at a time into a 256-slot
+/// channel, which is 16 MiB of parse in one turn without a bound.
+///
+/// Nothing queued is lost. What is left wakes the `pty_rx.recv()` arm on the
+/// next turn, and the frame timer paints between the two. Alacritty bounds the
+/// same loop the same way, releasing the terminal after a fixed read so the
+/// renderer gets a turn.
+const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
+
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
 /// to read as motion, slow enough not to churn repaints while progress streams.
 const SPINNER_FRAME_SECS: f32 = 0.1;
@@ -3737,7 +3751,12 @@ impl Stoat {
             effect = effect.merge(self.update(event));
             coalesced += 1;
         }
-        while let Ok(notif) = self.pty_rx.try_recv() {
+        let mut pty_bytes = 0;
+        while pty_bytes < PTY_TURN_BUDGET_BYTES {
+            let Ok(notif) = self.pty_rx.try_recv() else {
+                break;
+            };
+            pty_bytes += notif.payload_len();
             effect = effect.merge(self.handle_pty_notification(notif));
             coalesced += 1;
         }
@@ -10878,6 +10897,44 @@ mod tests {
         let term = &stoat.active_workspace().terms[agent_id].term;
         let row: String = term.row(0).iter().map(|cell| cell.ch).collect();
         assert!(row.starts_with("hello"), "row: {row:?}");
+    }
+
+    /// A command flooding its pty must not hold the run loop for as long as it
+    /// floods. The parse runs on the app thread, so bytes drained in one turn
+    /// are milliseconds the frame timer and the key reader do not get.
+    ///
+    /// The notifications name no run, so the handler returns at once and what
+    /// is measured is the budget rather than the parse behind it.
+    #[test]
+    fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
+        let mut h = Stoat::test();
+        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+
+        let chunks = 32;
+        let chunk = 64 * 1024;
+        for _ in 0..chunks {
+            h.stoat
+                .pty_tx
+                .try_send(PtyNotification::Output {
+                    run_id: RunId::default(),
+                    data: vec![b'x'; chunk],
+                })
+                .expect("the channel holds 256 chunks");
+        }
+
+        let (_, first) = h.stoat.drain_pending(&mut rx);
+        assert_eq!(
+            first,
+            PTY_TURN_BUDGET_BYTES / chunk,
+            "one turn drains its budget and no more",
+        );
+
+        let (_, second) = h.stoat.drain_pending(&mut rx);
+        assert_eq!(
+            second,
+            chunks - first,
+            "the rest waits for the next turn rather than being dropped",
+        );
     }
 
     #[test]
