@@ -317,6 +317,18 @@ pub struct RunShapeCache {
     hand: usize,
 }
 
+impl RunShapeCache {
+    /// Whether `text` is already shaped here.
+    ///
+    /// For a caller choosing between this cache and shaping each character
+    /// against its own. A hit here costs one hash of the whole run, where the
+    /// per-character path costs one per character, so the per-character path
+    /// only wins where this answers false.
+    pub(super) fn holds(&self, text: &str) -> bool {
+        self.at.contains_key(text)
+    }
+}
+
 #[cfg(test)]
 impl RunShapeCache {
     /// Every run text held, sorted, so a caller can assert what was shaped

@@ -1937,9 +1937,16 @@ impl TextPass {
             let primary_font = self.primary_font.clone();
             let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
             let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
+            let substitutable = mem::take(&mut self.substitutable);
+            let reshapes = |ch: char| {
+                charmap
+                    .as_ref()
+                    .is_some_and(|map| substitutable.binary_search(&map.map(ch)).is_ok())
+            };
             let shaping = RowShaping {
                 primary,
                 covers: &covers,
+                reshapes: &reshapes,
                 cursor_cell: None,
             };
 
@@ -1948,6 +1955,10 @@ impl TextPass {
                 glyph_rows[at].clear();
                 self.rasterize_row(device, queue, grid, row, &shaping, &mut glyph_rows[at]);
             }
+            // Lent out for the pass rather than borrowed, since the closure
+            // reading it and the rasterize call writing the atlas both want
+            // the pass.
+            self.substitutable = substitutable;
         }
 
         // Any run pack ran before the rows above, so either pass may have grown
@@ -2950,6 +2961,7 @@ impl TextPass {
         let primary_font = self.primary_font.clone();
         let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
         let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
+        let substitutable = mem::take(&mut self.substitutable);
 
         // The per-row cache holds the previous frame's glyphs. Every row rebuilds
         // when the grid was resized or the terminal reported full damage;
@@ -2969,9 +2981,15 @@ impl TextPass {
         let entered_row = cursor_cell.map(|(row, _)| row);
         self.last_cursor_cell = cursor_cell;
 
+        let reshapes = |ch: char| {
+            charmap
+                .as_ref()
+                .is_some_and(|map| substitutable.binary_search(&map.map(ch)).is_ok())
+        };
         let shaping = RowShaping {
             primary,
             covers: &covers,
+            reshapes: &reshapes,
             cursor_cell,
         };
         let rotation = self.grid_rotation();
@@ -2994,6 +3012,9 @@ impl TextPass {
             }
         }
 
+        // Lent out for the pass rather than borrowed, since the closure reading
+        // it and the rasterize call writing the atlas both want the pass.
+        self.substitutable = substitutable;
         rebuilt
     }
 
@@ -3393,6 +3414,30 @@ impl TextPass {
 
             let (fg, _) = cell.draw_colors();
             font::run_text_and_columns_into(&run, &mut run_text, &mut run_cols);
+
+            // No lookup the face turns on reaches any of these glyphs, so
+            // shaping the run returns exactly what shaping each cell alone
+            // returns, and the per-cell path answers that from its own cache.
+            //
+            // The cache is asked first, and the cells only where it misses. A
+            // hit costs one hash of the whole run, where testing the cells
+            // costs a charmap lookup and a search each, so a run the cache
+            // already holds must not pay for the question at all.
+            if !self.run_shape_cache.holds(&run_text)
+                && !run.iter().any(|&(_, ch)| (shaping.reshapes)(ch))
+            {
+                for &(glyph_col, ch) in &run {
+                    let mut one = cell;
+                    one.ch = ch;
+                    if let Some(glyph) = self.single_glyph(device, queue, &one, row, glyph_col, 1.0)
+                    {
+                        pending.push(glyph);
+                    }
+                }
+                col = end;
+                continue;
+            }
+
             let shaped = font::shape_run_cached(
                 &mut self.run_shape_cache,
                 &mut self.font_system,
@@ -3603,6 +3648,10 @@ impl TextPass {
 struct RowShaping<'a> {
     primary: Family<'a>,
     covers: &'a dyn Fn(char) -> bool,
+    /// Whether the primary face reshapes the glyph this char maps to. A run of
+    /// cells none of which answer true shapes to what shaping each alone
+    /// gives, so it skips the shaper.
+    reshapes: &'a dyn Fn(char) -> bool,
     cursor_cell: Option<(usize, usize)>,
 }
 
@@ -5457,12 +5506,87 @@ mod tests {
         let shaping = RowShaping {
             primary: font::shape_family(family.as_deref()),
             covers: &covers,
+            reshapes: &|_| true,
             cursor_cell: None,
         };
         let mut pending = Vec::new();
         for row in 0..rows.len() {
             pass.rasterize_row(device, queue, &grid, row, &shaping, &mut pending);
         }
+    }
+
+    /// Rasterize `rows` with the pass's own substitution coverage, so a run the
+    /// face reshapes takes the shaper and one it leaves alone does not.
+    ///
+    /// [`rasterize_rows`] forces every run onto the shaper, which is what the
+    /// run-splitting tests above are about. This is for reading which runs
+    /// reach it at all.
+    fn rasterize_rows_by_coverage(
+        pass: &mut TextPass,
+        device: &Device,
+        queue: &Queue,
+        rows: &[&str],
+    ) {
+        let cols = rows
+            .iter()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut grid = Grid::new(rows.len().max(1), cols.max(1));
+        for (row, text) in rows.iter().enumerate() {
+            fill_row(&mut grid, row, text);
+        }
+
+        let font = pass.primary_font.clone();
+        let charmap = font.as_ref().map(|font| font.as_swash().charmap());
+        let substitutable = std::mem::take(&mut pass.substitutable);
+        let covers = |_: char| true;
+        let reshapes = |ch: char| {
+            charmap
+                .as_ref()
+                .is_some_and(|map| substitutable.binary_search(&map.map(ch)).is_ok())
+        };
+        let family = Some("JetBrains Mono".to_owned());
+        let shaping = RowShaping {
+            primary: font::shape_family(family.as_deref()),
+            covers: &covers,
+            reshapes: &reshapes,
+            cursor_cell: None,
+        };
+        let mut pending = Vec::new();
+        for row in 0..rows.len() {
+            pass.rasterize_row(device, queue, &grid, row, &shaping, &mut pending);
+        }
+        pass.substitutable = substitutable;
+    }
+
+    /// A run holding nothing the face reshapes takes the per-cell path, which
+    /// answers from the glyph cache rather than the shaper. A run holding an
+    /// operator that ligates still takes the shaper, or the ligature is lost.
+    ///
+    /// Novel prose is almost all the first kind, and shaping a word costs some
+    /// twenty-five times what looking its characters up does, so this is what
+    /// a fling through scrollback pays.
+    #[test]
+    fn only_a_run_the_face_reshapes_reaches_the_shaper() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("coverage routing test: no wgpu adapter available, skipping");
+            return;
+        };
+
+        rasterize_rows_by_coverage(&mut pass, &device, &queue, &["4f2a b91c 0e7d"]);
+        assert_eq!(
+            pass.run_shape_cache.cached_texts(),
+            Vec::<String>::new(),
+            "hex tokens hold nothing the face reshapes, so none reaches the shaper",
+        );
+
+        rasterize_rows_by_coverage(&mut pass, &device, &queue, &["a => b"]);
+        assert_eq!(
+            pass.run_shape_cache.cached_texts(),
+            vec!["=>".to_owned()],
+            "and the one run that ligates is the only one that does",
+        );
     }
 
     /// A run is one word, so a row of several words fills the cache with each of
@@ -5567,6 +5691,7 @@ mod tests {
         let shaping = RowShaping {
             primary: font::shape_family(family.as_deref()),
             covers: &covers,
+            reshapes: &|_| true,
             cursor_cell: None,
         };
         pass.rasterize_row(&device, &queue, &grid, 0, &shaping, &mut pending);
