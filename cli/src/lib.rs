@@ -66,6 +66,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "walkthrough-trail",
         "a pipeline crate whose tour steps through every call relation",
     ),
+    (
+        "walkthrough-columns",
+        "a tab-indented message table whose tour marks spans past wide glyphs",
+    ),
 ];
 
 /// The input sequence a fixture opens itself with, for one whose point is a

@@ -414,6 +414,11 @@ pub enum FixtureError {
 ///   nine-stop tour whose every step exercises one relation the trail is made of. It stages a
 ///   direct call, a two-hop call, the reverse direction, a shared caller, a shared callee, a stop
 ///   joined to nothing, and two stops over files the index reads no definitions out of.
+/// - `walkthrough-columns`: a message table indented with tab characters whose greetings are
+///   accented, CJK, and supplementary-plane text, committed with a five-stop tour. A stored column
+///   is a byte, a character index is another number, and a screen cell is a third, so each stop
+///   marks a span past one of them. The last stop labels three spans in a script whose glyphs take
+///   two cells, which the char-counted label and card boxes are sized for as though they took one.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -433,6 +438,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "walkthrough-card" => walkthrough::card::materialize(dest),
         "walkthrough-drift" => walkthrough::drift::materialize(dest),
         "walkthrough-trail" => walkthrough::trail::materialize(dest),
+        "walkthrough-columns" => walkthrough::columns::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
