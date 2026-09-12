@@ -857,6 +857,85 @@ fn a_fill_quad_is_nudged_and_stays_convex() {
     }
 }
 
+/// The ceiling widens a gap only when the declared one asks for more scanlines
+/// than it allows. A shape the screen can show asks far fewer, so the fill it
+/// gets is the one its stroke weight declared.
+#[test]
+fn a_shape_under_the_line_ceiling_keeps_its_declared_gap() {
+    let square = [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]];
+    let gap = 10.0;
+
+    // The scan runs across the rotated box, whose height is the square's
+    // diagonal, and the first line sits half a gap in.
+    let diagonal = (80.0_f64 * 80.0 * 2.0).sqrt();
+    let asked = ((diagonal - gap / 2.0) / gap).ceil() as usize;
+    assert!(
+        asked < MAX_HACHURE_LINES,
+        "{asked} asked, under the ceiling"
+    );
+
+    assert_eq!(
+        hachure_lines(&square, gap, HACHURE_ANGLE).len(),
+        asked,
+        "the ceiling widened a gap it had no reason to",
+    );
+}
+
+/// A stroke weight of one 256th of a cell puts the lines a fraction of a pixel
+/// apart, and a declared box reaches 4,095 cells. The two together ask for half
+/// a million chords over a shape no screen shows.
+#[test]
+fn a_shape_over_the_line_ceiling_lays_only_what_it_allows() {
+    let tall = [[0.0, 0.0], [200.0, 0.0], [200.0, 81_900.0], [0.0, 81_900.0]];
+    let gap = HACHURE_GAP / f64::from(WIDTH_FRACTION) * 10.0;
+
+    assert_eq!(
+        hachure_lines(&tall, gap, HACHURE_ANGLE).len(),
+        MAX_HACHURE_LINES,
+        "a convex shape lays one chord per scanline, and that is all of them",
+    );
+}
+
+/// The sketch pass rebuilds every span from this geometry each frame, so an
+/// unbounded fill costs the render thread for as long as the emitter holds the
+/// mark. Cross-hatch doubles the count, since it runs two angles.
+#[test]
+fn a_cross_hatched_box_taller_than_a_screen_is_bounded() {
+    let bounds = SketchBounds {
+        x: 0,
+        y: 0,
+        w: 65_535,
+        h: 65_535,
+    };
+    let rect = |fill| SketchShape::Rect {
+        bounds,
+        radius: 0,
+        fill,
+    };
+
+    let outline = geometry(&command(rect(None), 64), metrics(), &nothing_resolves);
+    assert_eq!(outline.strokes.len(), 8, "four wobbled sides");
+
+    let mut hatched = command(
+        rect(Some(SketchFill {
+            color: [0, 0, 255],
+            alpha: 128,
+            style: SketchFillStyle::CrossHatch,
+        })),
+        64,
+    );
+    hatched.style.width = 1;
+
+    // Two angles, one chord per scanline over a convex shape, and a chord
+    // wobbles into two strokes.
+    assert_eq!(
+        geometry(&hatched, metrics(), &nothing_resolves)
+            .strokes
+            .len(),
+        4 * MAX_HACHURE_LINES + outline.strokes.len(),
+    );
+}
+
 /// A hachure fill lays parallel pen strokes across the shape, which is the
 /// reference's default look and leaves the cells under a mark legible.
 ///

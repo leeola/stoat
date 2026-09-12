@@ -1200,18 +1200,37 @@ const HACHURE_ANGLE: f64 = -41.0 * PI / 180.0;
 /// Gap between hatch lines, as a multiple of the mark's stroke weight.
 const HACHURE_GAP: f64 = 4.0;
 
+/// Most scanlines one hatch angle lays over a shape.
+///
+/// The gap comes from the declared stroke weight, and a weight arrives as a
+/// `u16` of cell-width 256ths, so a light one puts the lines a fraction of a
+/// pixel apart. A declared box reaches 4,095 cells, so the two together ask for
+/// half a million chords over a shape the screen cannot show, each of which the
+/// pass rebuilds every frame.
+///
+/// The ceiling sits above what any on-screen shape asks for. A 40-cell box at a
+/// quarter-cell weight asks 320. Past the ceiling the gap widens to fit, which
+/// costs no detail. The lines there already sit closer together than the stroke
+/// drawn along them.
+const MAX_HACHURE_LINES: usize = 512;
+
 /// A hatch line's weight, as a fraction of the mark's stroke weight.
 pub(crate) const HACHURE_WEIGHT: f32 = 0.5;
 
 /// The chords that hatch `polygon`, each `gap` apart at `angle`.
 ///
-/// Scanline fill in the rotated frame: turn the polygon so the hatch runs
-/// horizontal, walk y in `gap` steps, pair the crossings of each scanline with
-/// the edges, and turn each pair back. Pairing sorted crossings is what keeps a
-/// concave shape hatched only where it is solid.
+/// Scanline fill runs in the rotated frame. The polygon turns so the hatch runs
+/// horizontal, y walks in `gap` steps, each scanline's crossings with the edges
+/// are paired, and each pair turns back. Pairing sorted crossings is what keeps
+/// a concave shape hatched only where it is solid.
 ///
 /// The first scanline sits half a gap in, so a hatch never lands exactly on an
 /// edge, where a crossing count is ambiguous.
+///
+/// `gap` widens if it would ask for more than [`MAX_HACHURE_LINES`] scanlines.
+/// A convex shape lays one chord per scanline, so the ceiling bounds the result.
+/// A concave one lays one chord per pair of crossings, which its edge count
+/// bounds.
 fn hachure_lines(polygon: &[[f64; 2]], gap: f64, angle: f64) -> Vec<[[f64; 2]; 2]> {
     if polygon.len() < 3 || gap <= 0.0 {
         return Vec::new();
@@ -1227,6 +1246,10 @@ fn hachure_lines(polygon: &[[f64; 2]], gap: f64, angle: f64) -> Vec<[[f64; 2]; 2
         top = top.min(point[1]);
         bottom = bottom.max(point[1]);
     }
+
+    // The declared weight sets the gap, and nothing about the weight bounds it
+    // against the shape it fills, so the sweep gets the ceiling instead.
+    let gap = gap.max((bottom - top) / MAX_HACHURE_LINES as f64);
 
     let (back_sin, back_cos) = angle.sin_cos();
     let mut lines = Vec::new();
