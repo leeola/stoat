@@ -502,10 +502,7 @@ pub(super) fn resolve_primary_font(
 /// - [`bundled_font_system`] for the half that reads no file, which a first frame shapes with while
 ///   the scan runs.
 pub fn build_font_system() -> FontSystem {
-    let bundled = bundled_font_system();
-    let locale = bundled.locale().to_owned();
-
-    FontSystem::new_with_locale_and_db(locale, scan_system_fonts(bundled.db().clone()))
+    FontSystem::new_with_locale_and_db(locale(), scan_system_fonts(bundled_database()))
 }
 
 /// Build a [`FontSystem`] over the bundled faces alone, opening no file.
@@ -530,12 +527,20 @@ pub fn bundled_font_system() -> FontSystem {
 ///
 /// Split from [`bundled_font_system`] so the database build stays clear of the
 /// environment the locale is read from.
-fn bundled_font_system_with_locale(locale: String) -> FontSystem {
+pub(crate) fn bundled_font_system_with_locale(locale: String) -> FontSystem {
+    FontSystem::new_with_locale_and_db(locale, bundled_database())
+}
+
+/// A font database holding the bundled faces alone.
+///
+/// The seed [`scan_system_fonts`] adds the installed fonts to, and what
+/// [`bundled_font_system`] shapes against. Both start here, so the bundled faces
+/// carry the same ids whichever of the two a pass holds.
+pub(crate) fn bundled_database() -> Database {
     let mut db = Database::new();
     load_bundled_fonts(&mut db);
     db.set_monospace_family(BUNDLED_FAMILY);
-
-    FontSystem::new_with_locale_and_db(locale, db)
+    db
 }
 
 /// Add every font installed on the system to `db`.
@@ -646,7 +651,7 @@ pub(super) fn load_bundled_fonts(db: &mut Database) {
 ///
 /// Shared rather than owned, since the shaping paths need the name alongside a
 /// mutable borrow of the pass and so take a copy on every frame.
-pub(super) fn resolve_primary_family(
+pub(crate) fn resolve_primary_family(
     font_system: &FontSystem,
     cascade: &[String],
 ) -> Option<Arc<str>> {

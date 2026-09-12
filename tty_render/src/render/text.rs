@@ -17,7 +17,10 @@ use crate::{
     },
 };
 use bytemuck::{Pod, Zeroable};
-use cosmic_text::{fontdb::Weight, CacheKey, Family, Font, FontSystem, SwashCache};
+use cosmic_text::{
+    fontdb::{Database, Weight},
+    CacheKey, Family, Font, FontSystem, SwashCache,
+};
 use rustc_hash::FxHashMap;
 use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
@@ -35,7 +38,7 @@ use wgpu::{
     VertexState, VertexStepMode,
 };
 
-mod font;
+pub(crate) mod font;
 mod powerline;
 
 pub use font::{build_font_system, shape_words, shape_words_cached, RunShapeCache};
@@ -1117,6 +1120,42 @@ impl TextPass {
             font::shape_family(self.family.as_deref()),
         );
         self.cap_height = font::probe_cap_height(self.primary_font.as_deref(), metrics);
+        self.shape_cache.clear();
+        self.run_shape_cache.clear();
+    }
+
+    /// Shape against `scanned` from the next frame on, in place of the database
+    /// this pass was built with.
+    ///
+    /// A launch that shapes with the bundled faces draws its first frames before
+    /// the system-font scan finishes, and hands the result here when it does.
+    /// `scanned` must be a superset of the database this pass holds, so the
+    /// configured family keeps resolving to the face it already shaped with.
+    ///
+    /// Clears the shape caches, whose entries were keyed while a glyph the
+    /// bundled faces lack had no face to fall back to. A cell that shaped to
+    /// tofu reshapes against the full database on the next frame, so the caller
+    /// asks for a frame over every cell rather than over the damaged ones.
+    pub(crate) fn merge_fonts(&mut self, scanned: Database) {
+        let locale = self.font_system.locale().to_owned();
+        self.font_system = FontSystem::new_with_locale_and_db(locale, scanned);
+
+        // Re-derived rather than kept. The family resolves to the same face, the
+        // bundled ids being unchanged, but nothing here has to rely on that.
+        self.baseline = font::probe_baseline(
+            &mut self.font_system,
+            self.metrics,
+            font::shape_family(self.family.as_deref()),
+        );
+        self.primary_font =
+            font::resolve_primary_font(&mut self.font_system, self.family.as_deref());
+        self.cap_height = font::probe_cap_height(self.primary_font.as_deref(), self.metrics);
+        self.substitutable = self
+            .primary_font
+            .as_deref()
+            .map(font::substitution_coverage)
+            .unwrap_or_default();
+
         self.shape_cache.clear();
         self.run_shape_cache.clear();
     }
@@ -5510,6 +5549,21 @@ mod tests {
         Some((device, queue, pass))
     }
 
+    /// A text pass over the bundled faces alone, at a fixed locale so a test
+    /// never reads the environment's.
+    fn bundled_text_pass() -> Option<(Device, Queue, TextPass)> {
+        let (device, queue) = headless_device()?;
+        let pass = TextPass::new(
+            &device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics::from_font_size(16, 1.0),
+            font::bundled_font_system_with_locale("en-US".into()),
+            &["JetBrains Mono".to_owned()],
+            true,
+        );
+        Some((device, queue, pass))
+    }
+
     fn fill_row(grid: &mut Grid, row: usize, text: &str) {
         for (col, ch) in text.chars().enumerate() {
             grid.get_mut(row, col).ch = ch;
@@ -8602,6 +8656,32 @@ mod tests {
 
     /// The ring's extent is physical, so the inset that clears it is a constant
     /// rather than something scaled with the display.
+    #[test]
+    fn merging_the_scan_holds_the_text_band_and_drops_the_shaped_runs() {
+        let Some((device, queue, mut pass)) = bundled_text_pass() else {
+            return;
+        };
+        rasterize_rows(&mut pass, &device, &queue, &["hello"]);
+        let band = pass.text_band();
+
+        assert!(
+            pass.run_shape_cache.holds("hello"),
+            "the run shaped against the bundled faces is cached",
+        );
+
+        pass.merge_fonts(font::scan_system_fonts(font::bundled_database()));
+
+        assert_eq!(
+            pass.text_band(),
+            band,
+            "the scan adds faces without moving the band the bundled family sets",
+        );
+        assert!(
+            !pass.run_shape_cache.holds("hello"),
+            "a run shaped before the scan reshapes against the full database",
+        );
+    }
+
     #[test]
     fn the_ring_inset_covers_the_bands_outer_edge() {
         // The shader fades the border band out at border_px + 1.0, which is 2.5

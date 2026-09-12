@@ -27,7 +27,7 @@ use crate::{
         panel::PanelPass,
         polyline::PolylinePass,
         sketch::SketchPass,
-        text::TextPass,
+        text::{self, TextPass},
         CellMetrics, Occluder, PoolOccluders,
     },
 };
@@ -391,6 +391,14 @@ impl Renderer {
     /// build its own from without a second scan of the system's fonts.
     pub fn fonts(&self) -> SharedFonts {
         self.text.fonts()
+    }
+
+    /// Shape against `scanned` from the next frame on.
+    ///
+    /// See [`TextPass::merge_fonts`](crate::render::text::TextPass::merge_fonts)
+    /// for what the caller owes the next frame.
+    pub fn merge_fonts(&mut self, scanned: fontdb::Database) {
+        self.text.merge_fonts(scanned);
     }
 
     /// The (rows, cols) cell grid that fills the target at the current size.
@@ -1286,6 +1294,9 @@ fn clamp_scissor(scissor: [u32; 4], width: u32, height: u32) -> Option<[u32; 4]>
 /// capabilities.
 pub struct GpuContext {
     surface: Surface<'static>,
+    /// The system-font scan this context did not wait for, `None` once taken or
+    /// when the context waited. See [`Self::pending_fonts`].
+    pending_fonts: Option<FontLoad>,
     /// The handles another window's context can build on rather than requesting
     /// its own, held past their use here for [`GpuContext::shared`]. The device
     /// and queue below are the same two, kept beside the surface because that is
@@ -1384,24 +1395,35 @@ impl SharedFonts {
     }
 }
 
-/// A [`FontSystem`] being built on a background thread, handed to
+/// The system-font scan running on a background thread, handed to
 /// [`GpuContext::new`].
 ///
 /// Enumerating the system fonts dominates startup and needs no window or GPU,
-/// so the app starts it via [`Self::spawn`] before creating the window; the
-/// font build then runs concurrently with the main-thread window and GPU setup
+/// so the app starts it via [`Self::spawn`] before creating the window. The
+/// scan then runs concurrently with the main-thread window and GPU setup
 /// instead of after it.
-pub struct FontLoad(thread::JoinHandle<FontSystem>);
+///
+/// A launch whose configured family is one of the bundled faces does not wait
+/// for the scan at all. [`GpuContext::new`] shapes its first frames against the
+/// bundled database and leaves this handle on the context for the app to join
+/// off the startup path, through [`GpuContext::pending_fonts`].
+pub struct FontLoad(thread::JoinHandle<fontdb::Database>);
 
 impl FontLoad {
-    /// Start building the font system on a background thread.
+    /// Start scanning the system fonts on a background thread.
+    ///
+    /// The scan starts from the bundled database, so the faces it comes back
+    /// with are a superset of the ones a bundled-only pass already shaped with,
+    /// at the same ids.
     pub fn spawn() -> FontLoad {
-        FontLoad(thread::spawn(build_font_system))
+        FontLoad(thread::spawn(|| {
+            text::font::scan_system_fonts(text::font::bundled_database())
+        }))
     }
 
-    /// Block until the font system is ready.
-    fn join(self) -> FontSystem {
-        self.0.join().expect("font system thread panicked")
+    /// Block until the scan is done, and take what it found.
+    pub fn join(self) -> fontdb::Database {
+        self.0.join().expect("font scan thread panicked")
     }
 }
 
@@ -1526,8 +1548,21 @@ impl GpuContext {
         surface.configure(&device, &config);
         let surface_time = t_surface.elapsed();
 
+        // A launch whose configured family is bundled shapes its first frames
+        // without the scan. One that needs an installed family waits: shaping it
+        // against the bundled faces would resolve a different face, and the swap
+        // would change every cell's metrics mid-session.
         let t_font = Instant::now();
-        let font_system = font_load.join();
+        let bundled = text::font::bundled_font_system();
+        let (font_system, pending_fonts) =
+            match text::font::resolve_primary_family(&bundled, font.family).is_some() {
+                true => (bundled, Some(font_load)),
+                false => {
+                    let locale = bundled.locale().to_owned();
+                    let scanned = FontSystem::new_with_locale_and_db(locale, font_load.join());
+                    (scanned, None)
+                },
+            };
         let font_time = t_font.elapsed();
 
         let t_renderer = Instant::now();
@@ -1557,6 +1592,7 @@ impl GpuContext {
 
         GpuContext {
             surface,
+            pending_fonts,
             shared: SharedGpu {
                 instance,
                 adapter,
@@ -1638,6 +1674,7 @@ impl GpuContext {
 
         Some(GpuContext {
             surface,
+            pending_fonts: None,
             shared: shared.clone(),
             device: shared.device.clone(),
             queue: shared.queue.clone(),
@@ -1654,6 +1691,25 @@ impl GpuContext {
     /// on through [`Self::with_shared`].
     pub fn shared(&self) -> SharedGpu {
         self.shared.clone()
+    }
+
+    /// Take the system-font scan this context drew its first frames without.
+    ///
+    /// `Some` once per context, and only when the configured family resolved in
+    /// the bundled faces. The caller joins the scan off the startup path and
+    /// hands the result back through [`Self::merge_fonts`]. A caller that drops
+    /// it keeps the bundled faces for the session.
+    pub fn pending_fonts(&mut self) -> Option<FontLoad> {
+        self.pending_fonts.take()
+    }
+
+    /// Shape against `scanned` from the next frame on.
+    ///
+    /// Takes what [`Self::pending_fonts`] handed out. A glyph that shaped to
+    /// tofu against the bundled faces reshapes, so the caller draws the next
+    /// frame over every cell rather than over the damaged ones.
+    pub fn merge_fonts(&mut self, scanned: fontdb::Database) {
+        self.renderer.merge_fonts(scanned);
     }
 
     /// The font database this context's font system holds, for a second window
