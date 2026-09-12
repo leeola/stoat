@@ -29,7 +29,7 @@ use crate::{
 use codegraph::FileId;
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     ops::Range,
     path::{Path, PathBuf},
@@ -662,22 +662,93 @@ pub(super) struct DiffBaseText {
     index_hash: [u8; 32],
 }
 
+/// Base texts each layer holds before the oldest goes.
+///
+/// A base outlives its use the moment HEAD moves past it, and nothing keyed by
+/// content can know that, so the bound is what keeps the memo to the working
+/// set. One entry per open buffer's live base plus headroom, which is what
+/// [`DEFAULT_HIGHLIGHT_RETENTION`](crate::app::DEFAULT_HIGHLIGHT_RETENTION)
+/// allows the same way.
+const BASE_HIGHLIGHT_MEMO_CAPACITY: usize = 64;
+
 /// Memoized diff-view base-text work, shared across the blocking jobs that
 /// build diff maps.
 ///
-/// Two layers, because they go stale on different inputs. Both grow without
-/// bound, which is what an editor session's finite set of base texts, languages,
-/// and themes makes acceptable.
+/// Two layers, because they go stale on different inputs. Each is bounded at
+/// [`BASE_HIGHLIGHT_MEMO_CAPACITY`] and drops its oldest entry to stay there.
+///
+/// A bound rather than an expiry, because a key is a content hash: nothing here
+/// can tell a base still in use from one a commit moved past. Every commit that
+/// touches an open file adds a pair, a review adds a pair per file per commit
+/// stepped, and a theme reload gives each base recomputed after it a second
+/// bucket.
 #[derive(Default)]
 pub(crate) struct BaseHighlightMemo {
     /// Tree-sitter highlight spans for a base text, keyed by its content hash
     /// and language name, so an unchanged base is parsed once across edits.
     /// Theme-independent.
-    parses: HashMap<(ContentHash, String), Arc<Vec<HighlightSpan>>>,
+    parses: VecDeque<(ParseKey, Arc<Vec<HighlightSpan>>)>,
     /// Those spans resolved to styles and split per base line. Keyed
     /// additionally by the [`SyntaxStyles`] generation, since the resolution is
     /// what the theme changes.
-    buckets: HashMap<(ContentHash, String, u64), Arc<BaseHighlights>>,
+    buckets: VecDeque<(BucketKey, Arc<BaseHighlights>)>,
+}
+
+/// A base text and the language that parsed it.
+type ParseKey = (ContentHash, String);
+
+/// A [`ParseKey`] and the [`SyntaxStyles`] generation its spans resolved under.
+type BucketKey = (ContentHash, String, u64);
+
+impl BaseHighlightMemo {
+    /// How many base texts each layer holds, at most
+    /// [`BASE_HIGHLIGHT_MEMO_CAPACITY`].
+    #[cfg(test)]
+    fn len(&self) -> (usize, usize) {
+        (self.parses.len(), self.buckets.len())
+    }
+
+    fn get_parse(&self, key: &ParseKey) -> Option<Arc<Vec<HighlightSpan>>> {
+        entry_of(&self.parses, key)
+    }
+
+    fn insert_parse(&mut self, key: ParseKey, spans: Arc<Vec<HighlightSpan>>) {
+        insert_bounded(&mut self.parses, key, spans);
+    }
+
+    fn get_bucket(&self, key: &BucketKey) -> Option<Arc<BaseHighlights>> {
+        entry_of(&self.buckets, key)
+    }
+
+    fn insert_bucket(&mut self, key: BucketKey, bucketed: Arc<BaseHighlights>) {
+        insert_bounded(&mut self.buckets, key, bucketed);
+    }
+}
+
+/// The value `key` names, over at most [`BASE_HIGHLIGHT_MEMO_CAPACITY`] entries.
+///
+/// A scan that short costs less than the hash of the base text every caller has
+/// already paid to build the key.
+fn entry_of<K: PartialEq, V: Clone>(entries: &VecDeque<(K, V)>, key: &K) -> Option<V> {
+    entries
+        .iter()
+        .find(|(entry, _)| entry == key)
+        .map(|(_, value)| value.clone())
+}
+
+/// File `value` under `key`, dropping the oldest entry when the layer is full.
+///
+/// A key already present keeps the value it has. Two jobs can miss at once and
+/// both compute, and the same key means the same value, so whichever landed
+/// first stands.
+fn insert_bounded<K: PartialEq, V>(entries: &mut VecDeque<(K, V)>, key: K, value: V) {
+    if entries.iter().any(|(entry, _)| *entry == key) {
+        return;
+    }
+    if entries.len() == BASE_HIGHLIGHT_MEMO_CAPACITY {
+        entries.pop_front();
+    }
+    entries.push_back((key, value));
 }
 
 pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
@@ -911,10 +982,10 @@ pub(crate) fn compute_base_highlights(
     let parse_key = (content, name);
     let hit = {
         let guard = cache.lock().expect("base highlight cache poisoned");
-        if let Some(bucketed) = guard.buckets.get(&bucket_key) {
-            return bucketed.clone();
+        if let Some(bucketed) = guard.get_bucket(&bucket_key) {
+            return bucketed;
         }
-        guard.parses.get(&parse_key).cloned()
+        guard.get_parse(&parse_key)
     };
 
     // Parsed outside the lock, which a miss holds only long enough to look up.
@@ -933,13 +1004,9 @@ pub(crate) fn compute_base_highlights(
                     .map(|tree| extract_highlights(language, &tree, base_text))
                     .unwrap_or_default(),
             );
-            cache
-                .lock()
-                .expect("base highlight cache poisoned")
-                .parses
-                .entry(parse_key)
-                .or_insert(parsed)
-                .clone()
+            let mut guard = cache.lock().expect("base highlight cache poisoned");
+            guard.insert_parse(parse_key.clone(), parsed.clone());
+            guard.get_parse(&parse_key).unwrap_or(parsed)
         },
     };
 
@@ -949,8 +1016,7 @@ pub(crate) fn compute_base_highlights(
     cache
         .lock()
         .expect("base highlight cache poisoned")
-        .buckets
-        .insert(bucket_key, bucketed.clone());
+        .insert_bucket(bucket_key, bucketed.clone());
     bucketed
 }
 
@@ -1253,6 +1319,62 @@ mod tests {
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    /// A base outlives its use the moment HEAD moves past it, and a key of
+    /// content hash and language cannot tell the two apart. The bound is what
+    /// keeps a session's memo to its working set.
+    #[test]
+    fn the_base_highlight_memo_holds_its_capacity() {
+        let language = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .expect("rust language");
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+        let lengths = || cache.lock().expect("cache poisoned").len();
+
+        let base = |i: usize| format!("fn main() {{\n    let x = {i};\n}}\n");
+        let filed = |text: &str| {
+            cache
+                .lock()
+                .expect("cache poisoned")
+                .get_parse(&(
+                    blake3::hash(text.as_bytes()).into(),
+                    language.name.to_string(),
+                ))
+                .is_some()
+        };
+
+        let first = base(0);
+        compute_base_highlights(&first, &language, &styles, &cache, None);
+        assert!(filed(&first), "the first base is filed");
+
+        // A rebuilt style table misses the bucket, so the second call reaches
+        // the parse layer rather than returning ahead of it. A tree memo of its
+        // own is what shows whether it parsed: a parse would file a tree there,
+        // and a hit on the spans never calls the parser at all.
+        let rebuilt = SyntaxStyles::from_theme(&Theme::empty());
+        let second_trees = TreeCache::default();
+        compute_base_highlights(&first, &language, &rebuilt, &cache, Some(&second_trees));
+        assert!(
+            second_trees.lock().expect("tree memo poisoned").is_empty(),
+            "a base the memo still holds takes no second parse",
+        );
+
+        // One past the capacity, so the first base is the one evicted.
+        for i in 1..=super::BASE_HIGHLIGHT_MEMO_CAPACITY {
+            compute_base_highlights(&base(i), &language, &styles, &cache, None);
+        }
+
+        assert_eq!(
+            lengths(),
+            (
+                super::BASE_HIGHLIGHT_MEMO_CAPACITY,
+                super::BASE_HIGHLIGHT_MEMO_CAPACITY
+            ),
+            "both layers stop at the capacity rather than growing with the bases",
+        );
+        assert!(!filed(&first), "and the oldest base is the one that went",);
     }
 
     /// A diff map parses its base for the structural pass and again for the
