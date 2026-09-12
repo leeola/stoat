@@ -1511,13 +1511,38 @@ impl<'a> WrappedChunksInner<'a> {
         let row_start = fold.row_start_offset(tab_row);
         let row_end = FoldOffset(row_start.0 + fold.output_line_len(tab_row) as usize);
 
+        // A sub-row deep in a wrapped line starts where it starts. Opening at
+        // the tab row's column zero would leave the window's own offset for
+        // slice_chunk_to_window to decode and discard, a character at a time.
+        let tab_snapshot = &self.snapshot.tab_snapshot;
+        let target = TabPoint::new(tab_row, window.target_start);
+        // Clipped, because a fold is one indivisible position: a stream opened
+        // inside a placeholder emits the whole placeholder, and the window would
+        // then measure the bytes before its own start as its own.
+        let start_fold =
+            fold.clip_point(tab_snapshot.to_fold_point(target, Bias::Left), Bias::Left);
+
+        // A multi-row placeholder clips to a row above this one, whose offset
+        // this row's start does not name. The row's own start always reads
+        // correctly, so it stands in.
+        let (start_offset, start_column) = match start_fold.row() == tab_row {
+            // Not target_start itself. The clip, and a left bias off a column
+            // landing inside a character's width, both open the stream below the
+            // column asked for.
+            true => (
+                FoldOffset(row_start.0 + start_fold.column() as usize),
+                tab_snapshot.to_tab_point(start_fold).column(),
+            ),
+            false => (row_start, 0),
+        };
+
         // Rows are visited in order, so one replay carried across them costs
         // what a single row's used to. Opening each row's stream unseeded would
         // have it re-walk every endpoint the rows above it already walked.
-        self.cursor.advance_to(row_start.0, &self.endpoints);
-        let tab_chunks = self.snapshot.tab_snapshot.chunks_seeded(
-            row_start..row_end,
-            0,
+        self.cursor.advance_to(start_offset.0, &self.endpoints);
+        let tab_chunks = tab_snapshot.chunks_seeded(
+            start_offset..row_end,
+            start_column,
             self.endpoints.clone(),
             Some(&self.cursor),
         );
@@ -1525,7 +1550,7 @@ impl<'a> WrappedChunksInner<'a> {
         Some(RowChunksState {
             tab_chunks,
             tab_row,
-            column: 0,
+            column: start_column,
             target_start: window.target_start,
             target_end: window.target_end,
             done: false,
@@ -1949,6 +1974,38 @@ mod tests {
             "aaaae\u{301}bbb",
             "and the rows together are still the source text",
         );
+    }
+
+    /// Every row's stream opens where the row starts, including rows the stream
+    /// reaches only by skipping a fold.
+    ///
+    /// A row deep in a wrapped line opens its stream at its own offset rather
+    /// than at the tab row's column zero. A fold is one indivisible position, so
+    /// an offset inside one reads the whole placeholder, and a row opening there
+    /// would take the bytes before its own start for its own.
+    #[test]
+    fn a_row_after_a_fold_reads_the_text_it_shows() {
+        let line = format!("{}xyz{}", "ab".repeat(20), "cd".repeat(20));
+        let endpoints: Arc<[_]> = Arc::from(Vec::new());
+
+        // Swept, since only the widths whose break falls between the
+        // placeholder's first and last column open a stream inside it.
+        for width in 4..=12 {
+            let snap = folded_snapshot(&line, (0, 10)..(0, 30), Some(width));
+            assert!(
+                snap.line_count() > 3,
+                "width {width}: the line wraps into rows past the fold",
+            );
+            for row in 0..snap.line_count() {
+                let chunks: Vec<_> = snap.chunks(row..row + 1, endpoints.clone()).collect();
+                let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
+                assert_eq!(
+                    recovered,
+                    snap.display_line(row),
+                    "width {width}: row {row}'s chunks reconstruct its text",
+                );
+            }
+        }
     }
 
     /// The chunk stream places the mark the same way the row text does.
