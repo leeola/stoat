@@ -7,25 +7,56 @@ use crate::{
     error::ParseError,
 };
 use chumsky::{
-    error::{Rich, RichReason},
-    extra,
+    error::{EmptyErr, Rich, RichReason},
+    extra::{self, ParserExtra},
     prelude::*,
     span::SimpleSpan,
 };
 
+/// The rich extra, whose errors carry the message a reader is shown.
 type Extra<'src> = extra::Err<Rich<'src, char>>;
+
+/// What a config parser needs of its error type.
+///
+/// The grammar runs twice over a source that fails: once under a recognizer
+/// whose errors hold nothing, and again under [`Extra`] to build the messages.
+/// Every parser here is written over this so one body serves both.
+///
+/// chumsky's own `LabelError` has no constructor for a message the grammar
+/// writes itself, which two sites here need, so that constructor lives on this
+/// trait. One bound at each signature rather than two, which is what keeps
+/// forty of them readable.
+trait ConfigExtra<'src>: ParserExtra<'src, &'src str> + 'src {
+    /// This extra's error for a message the grammar writes itself.
+    ///
+    /// The recognizer discards it. A source that reaches a message is already
+    /// on the path that re-parses to collect them.
+    fn custom(span: SimpleSpan<usize>, message: &'static str) -> Self::Error;
+}
+
+impl<'src> ConfigExtra<'src> for Extra<'src> {
+    fn custom(span: SimpleSpan<usize>, message: &'static str) -> Self::Error {
+        Rich::custom(span, message)
+    }
+}
+
+impl<'src> ConfigExtra<'src> for extra::Default {
+    fn custom(_span: SimpleSpan<usize>, _message: &'static str) -> Self::Error {
+        EmptyErr::default()
+    }
+}
 
 fn span_to_range(span: SimpleSpan<usize>) -> std::ops::Range<usize> {
     span.into_range()
 }
 
-fn comment<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
+fn comment<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, (), E> + Clone {
     just('#')
         .then(any().and_is(just('\n').not()).repeated().count().ignored())
         .ignored()
 }
 
-fn ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
+fn ws<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, (), E> + Clone {
     any()
         .filter(|c: &char| c.is_whitespace())
         .ignored()
@@ -35,7 +66,7 @@ fn ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
         .ignored()
 }
 
-fn required_ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
+fn required_ws<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, (), E> + Clone {
     any()
         .filter(|c: &char| c.is_whitespace())
         .repeated()
@@ -44,7 +75,7 @@ fn required_ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone 
         .ignored()
 }
 
-fn ident<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> + Clone {
+fn ident<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, String, E> + Clone {
     any()
         .filter(|c: &char| c.is_ascii_alphabetic() || *c == '_')
         .then(
@@ -61,11 +92,12 @@ fn ident<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> + Clone {
         })
 }
 
-fn spanned_ident<'src>() -> impl Parser<'src, &'src str, Spanned<String>, Extra<'src>> + Clone {
+fn spanned_ident<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<String>, E> + Clone {
     ident().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn string_literal<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> + Clone {
+fn string_literal<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, String, E> + Clone {
     just('"')
         .ignore_then(
             any()
@@ -77,12 +109,12 @@ fn string_literal<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> +
         .then_ignore(just('"'))
 }
 
-fn spanned_string_literal<'src>(
-) -> impl Parser<'src, &'src str, Spanned<String>, Extra<'src>> + Clone {
+fn spanned_string_literal<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<String>, E> + Clone {
     string_literal().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn number<'src>() -> impl Parser<'src, &'src str, f64, Extra<'src>> + Clone {
+fn number<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, f64, E> + Clone {
     let digits = any()
         .filter(|c: &char| c.is_ascii_digit())
         .repeated()
@@ -113,18 +145,18 @@ fn number<'src>() -> impl Parser<'src, &'src str, f64, Extra<'src>> + Clone {
         })
         .try_map(|s, span: SimpleSpan<usize>| {
             s.parse::<f64>()
-                .map_err(|_| Rich::custom(span, "invalid number"))
+                .map_err(|_| E::custom(span, "invalid number"))
         })
 }
 
-fn enum_value<'src>() -> impl Parser<'src, &'src str, Value, Extra<'src>> + Clone {
+fn enum_value<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Value, E> + Clone {
     ident()
         .then_ignore(just("::"))
         .then(ident())
         .map(|(ty, variant)| Value::Enum { ty, variant })
 }
 
-fn value<'src>() -> impl Parser<'src, &'src str, Value, Extra<'src>> + Clone {
+fn value<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Value, E> + Clone {
     recursive(|value| {
         let state_ref = just('$').ignore_then(ident()).map(Value::StateRef);
 
@@ -179,11 +211,12 @@ fn value<'src>() -> impl Parser<'src, &'src str, Value, Extra<'src>> + Clone {
     })
 }
 
-fn spanned_value<'src>() -> impl Parser<'src, &'src str, Spanned<Value>, Extra<'src>> + Clone {
+fn spanned_value<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<Value>, E> + Clone {
     value().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn expr<'src>() -> impl Parser<'src, &'src str, Expr, Extra<'src>> + Clone {
+fn expr<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Expr, E> + Clone {
     recursive(|expr| {
         let state_ref = just('$')
             .ignore_then(ident())
@@ -247,7 +280,8 @@ fn expr<'src>() -> impl Parser<'src, &'src str, Expr, Extra<'src>> + Clone {
     })
 }
 
-fn spanned_expr<'src>() -> impl Parser<'src, &'src str, Spanned<Expr>, Extra<'src>> + Clone {
+fn spanned_expr<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<Expr>, E> + Clone {
     expr().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
@@ -257,13 +291,13 @@ fn is_key_char(c: &char) -> bool {
     !KEY_TERMINATORS.contains(c) && *c != '-'
 }
 
-fn key<'src>() -> impl Parser<'src, &'src str, Key, Extra<'src>> + Clone {
+fn key<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Key, E> + Clone {
     let named = ident().try_map(|s, span: SimpleSpan<usize>| {
         if s.len() == 1 {
             s.chars()
                 .next()
                 .map(Key::Char)
-                .ok_or_else(|| Rich::custom(span, "empty key"))
+                .ok_or_else(|| E::custom(span, "empty key"))
         } else {
             Ok(Key::Named(s))
         }
@@ -276,7 +310,7 @@ fn key<'src>() -> impl Parser<'src, &'src str, Key, Extra<'src>> + Clone {
     named.or(punct)
 }
 
-fn key_part<'src>() -> impl Parser<'src, &'src str, KeyPart, Extra<'src>> + Clone {
+fn key_part<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, KeyPart, E> + Clone {
     key()
         .separated_by(just('-'))
         .at_least(1)
@@ -284,11 +318,12 @@ fn key_part<'src>() -> impl Parser<'src, &'src str, KeyPart, Extra<'src>> + Clon
         .map(|keys| KeyPart { keys })
 }
 
-fn spanned_key_part<'src>() -> impl Parser<'src, &'src str, Spanned<KeyPart>, Extra<'src>> + Clone {
+fn spanned_key_part<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<KeyPart>, E> + Clone {
     key_part().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn arg<'src>() -> impl Parser<'src, &'src str, Spanned<Arg>, Extra<'src>> + Clone {
+fn arg<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Spanned<Arg>, E> + Clone {
     let named = spanned_ident()
         .then_ignore(ws())
         .then_ignore(just(':'))
@@ -303,7 +338,7 @@ fn arg<'src>() -> impl Parser<'src, &'src str, Spanned<Arg>, Extra<'src>> + Clon
         .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn action<'src>() -> impl Parser<'src, &'src str, Action, Extra<'src>> + Clone {
+fn action<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Action, E> + Clone {
     ident()
         .then_ignore(ws())
         .then_ignore(just('('))
@@ -319,11 +354,13 @@ fn action<'src>() -> impl Parser<'src, &'src str, Action, Extra<'src>> + Clone {
         .map(|(name, args)| Action { name, args })
 }
 
-fn spanned_action<'src>() -> impl Parser<'src, &'src str, Spanned<Action>, Extra<'src>> + Clone {
+fn spanned_action<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<Action>, E> + Clone {
     action().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn action_expr<'src>() -> impl Parser<'src, &'src str, ActionExpr, Extra<'src>> + Clone {
+fn action_expr<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, ActionExpr, E> + Clone
+{
     let sequence = just('[')
         .ignore_then(ws())
         .ignore_then(
@@ -339,12 +376,13 @@ fn action_expr<'src>() -> impl Parser<'src, &'src str, ActionExpr, Extra<'src>> 
     sequence.or(action().map(ActionExpr::Single))
 }
 
-fn spanned_action_expr<'src>(
-) -> impl Parser<'src, &'src str, Spanned<ActionExpr>, Extra<'src>> + Clone {
+fn spanned_action_expr<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<ActionExpr>, E> + Clone {
     action_expr().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn predicate_inner<'src>() -> impl Parser<'src, &'src str, Predicate, Extra<'src>> + Clone {
+fn predicate_inner<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Predicate, E> + Clone {
     recursive(|pred| {
         let spanned_pred = pred
             .clone()
@@ -432,11 +470,12 @@ fn predicate_inner<'src>() -> impl Parser<'src, &'src str, Predicate, Extra<'src
     })
 }
 
-fn predicate<'src>() -> impl Parser<'src, &'src str, Spanned<Predicate>, Extra<'src>> + Clone {
+fn predicate<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<Predicate>, E> + Clone {
     predicate_inner().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn setting<'src>() -> impl Parser<'src, &'src str, Setting, Extra<'src>> + Clone {
+fn setting<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Setting, E> + Clone {
     spanned_ident()
         .then(
             just('.')
@@ -455,7 +494,7 @@ fn setting<'src>() -> impl Parser<'src, &'src str, Setting, Extra<'src>> + Clone
         })
 }
 
-fn binding<'src>() -> impl Parser<'src, &'src str, Binding, Extra<'src>> + Clone {
+fn binding<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Binding, E> + Clone {
     spanned_key_part()
         .then_ignore(ws())
         .then_ignore(just("->"))
@@ -464,7 +503,7 @@ fn binding<'src>() -> impl Parser<'src, &'src str, Binding, Extra<'src>> + Clone
         .map(|(key, action)| Binding { key, action })
 }
 
-fn let_stmt<'src>() -> impl Parser<'src, &'src str, LetBinding, Extra<'src>> + Clone {
+fn let_stmt<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, LetBinding, E> + Clone {
     just("let")
         .ignore_then(required_ws())
         .ignore_then(spanned_ident())
@@ -475,9 +514,9 @@ fn let_stmt<'src>() -> impl Parser<'src, &'src str, LetBinding, Extra<'src>> + C
         .map(|(name, value)| LetBinding { name, value })
 }
 
-fn fn_decl<'src>(
-    stmt: impl Parser<'src, &'src str, Spanned<Statement>, Extra<'src>> + Clone + 'src,
-) -> impl Parser<'src, &'src str, FnDecl, Extra<'src>> + Clone {
+fn fn_decl<'src, E: ConfigExtra<'src>>(
+    stmt: impl Parser<'src, &'src str, Spanned<Statement>, E> + Clone + 'src,
+) -> impl Parser<'src, &'src str, FnDecl, E> + Clone {
     just("fn")
         .ignore_then(required_ws())
         .ignore_then(spanned_ident())
@@ -494,7 +533,8 @@ fn fn_decl<'src>(
         .map(|(name, body)| FnDecl { name, body })
 }
 
-fn fn_call<'src>() -> impl Parser<'src, &'src str, Spanned<String>, Extra<'src>> + Clone {
+fn fn_call<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Spanned<String>, E> + Clone
+{
     spanned_ident()
         .then_ignore(ws())
         .then_ignore(just('('))
@@ -502,9 +542,9 @@ fn fn_call<'src>() -> impl Parser<'src, &'src str, Spanned<String>, Extra<'src>>
         .then_ignore(just(')'))
 }
 
-fn predicate_block<'src>(
-    stmt: impl Parser<'src, &'src str, Spanned<Statement>, Extra<'src>> + Clone + 'src,
-) -> impl Parser<'src, &'src str, PredicateBlock, Extra<'src>> + Clone {
+fn predicate_block<'src, E: ConfigExtra<'src>>(
+    stmt: impl Parser<'src, &'src str, Spanned<Statement>, E> + Clone + 'src,
+) -> impl Parser<'src, &'src str, PredicateBlock, E> + Clone {
     predicate()
         .then_ignore(ws())
         .then_ignore(just('{'))
@@ -515,11 +555,12 @@ fn predicate_block<'src>(
         .map(|(predicate, body)| PredicateBlock { predicate, body })
 }
 
-fn semicolon<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
+fn semicolon<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, (), E> + Clone {
     ws().ignore_then(just(';')).ignored()
 }
 
-fn statement<'src>() -> impl Parser<'src, &'src str, Spanned<Statement>, Extra<'src>> + Clone {
+fn statement<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<Statement>, E> + Clone {
     recursive(|stmt| {
         let fn_decl_stmt = fn_decl(stmt.clone()).map(Statement::FnDecl);
         let fn_call_stmt = fn_call().map(Statement::FnCall).then_ignore(semicolon());
@@ -541,7 +582,7 @@ fn statement<'src>() -> impl Parser<'src, &'src str, Spanned<Statement>, Extra<'
     })
 }
 
-fn event_type<'src>() -> impl Parser<'src, &'src str, EventType, Extra<'src>> + Clone {
+fn event_type<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, EventType, E> + Clone {
     choice((
         just("init").to(EventType::Init),
         just("buffer").to(EventType::Buffer),
@@ -549,7 +590,8 @@ fn event_type<'src>() -> impl Parser<'src, &'src str, EventType, Extra<'src>> + 
     ))
 }
 
-fn event_block<'src>() -> impl Parser<'src, &'src str, Spanned<EventBlock>, Extra<'src>> + Clone {
+fn event_block<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<EventBlock>, E> + Clone {
     just("on")
         .ignore_then(required_ws())
         .ignore_then(event_type())
@@ -563,7 +605,8 @@ fn event_block<'src>() -> impl Parser<'src, &'src str, Spanned<EventBlock>, Extr
         .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
-fn theme_block<'src>() -> impl Parser<'src, &'src str, Spanned<ThemeBlock>, Extra<'src>> + Clone {
+fn theme_block<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<ThemeBlock>, E> + Clone {
     just("theme")
         .ignore_then(required_ws())
         .ignore_then(spanned_ident())
@@ -593,7 +636,7 @@ enum TopLevel {
     Theme(Spanned<ThemeBlock>),
 }
 
-fn config<'src>() -> impl Parser<'src, &'src str, Config, Extra<'src>> {
+fn config<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Config, E> {
     let item = theme_block()
         .map(TopLevel::Theme)
         .or(event_block().map(TopLevel::Event));
@@ -613,7 +656,11 @@ fn config<'src>() -> impl Parser<'src, &'src str, Config, Extra<'src>> {
         })
 }
 
-pub fn parser<'src>() -> impl Parser<'src, &'src str, Config, Extra<'src>> {
+/// The config grammar, over either extra.
+///
+/// [`parse`] runs it under both: a recognizer for the answer, and [`Extra`]
+/// for the messages when the recognizer finds no answer.
+fn parser<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Config, E> {
     config()
 }
 
@@ -647,7 +694,16 @@ pub fn parse_action(source: &str) -> Result<Action, Vec<ParseError>> {
     } else {
         format!("{source}()")
     };
-    let (result, errs) = action()
+    // Recognized first, for the reason [`parse`] gives.
+    if let Some(action) = action::<extra::Default>()
+        .then_ignore(end())
+        .parse(source.as_str())
+        .into_output()
+    {
+        return Ok(action);
+    }
+
+    let (result, errs) = action::<Extra<'_>>()
         .then_ignore(end())
         .parse(source.as_str())
         .into_output_errors();
@@ -664,7 +720,17 @@ pub fn parse_action(source: &str) -> Result<Action, Vec<ParseError>> {
 }
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
-    let (result, errs) = parser().parse(source).into_output_errors();
+    // Recognized first. Under the rich extra chumsky builds an error with its
+    // expected-token set at every failed alternative, including the ones a
+    // successful parse backtracks out of, and that bookkeeping is most of what
+    // a parse of a good config costs.
+    if let Some(config) = parser::<extra::Default>().parse(source).into_output() {
+        return (Some(config), Vec::new());
+    }
+
+    // A source that fails is parsed again for the messages. It is already on
+    // an error path, where the second pass costs a reader nothing.
+    let (result, errs) = parser::<Extra<'_>>().parse(source).into_output_errors();
     let errors = errs.into_iter().map(rich_to_parse_error).collect();
     (result, errors)
 }

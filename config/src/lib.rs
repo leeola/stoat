@@ -75,6 +75,27 @@ mod tests {
         Key::Named(s.to_string())
     }
 
+    /// A source that fails still reports what it always reported.
+    ///
+    /// The parse recognizes first under an extra whose errors hold nothing, so
+    /// only the second pass has a message at all. A message that read
+    /// "unexpected" where it used to name what was expected would be this
+    /// change leaking into a diagnostic.
+    #[test]
+    fn a_malformed_source_names_what_it_expected() {
+        let (config, errors) = parse("on init { editor.wrap = }\n");
+
+        assert!(config.is_none(), "the source does not parse");
+        let message = errors
+            .first()
+            .map(|error| error.message.clone())
+            .expect("a failure reports at least one error");
+        assert!(
+            message.starts_with("expected ") && message.contains(", found "),
+            "the message names what was expected, not only what was found: {message:?}",
+        );
+    }
+
     #[test]
     fn empty_config() {
         let config = parse_ok("");
