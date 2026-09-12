@@ -2357,22 +2357,34 @@ impl TextPass {
 
     /// One run's backing rect, shifted down by `dy` pixels, or `None` for a run
     /// that carries no background or draws nothing.
+    ///
+    /// Every edge snaps the way the run's glyph pen does (see [`snap_cell`]), so
+    /// the rect's left edge lands on the pixel its first glyph starts on, and
+    /// two runs at one column back the same pixels. Sizing from the raw product
+    /// instead leaves each run's width to its own rounding.
+    ///
+    /// `dy` is added after the snap, the way the bar pass orders its own glide,
+    /// so a following rect stays whole-pixel and the glide moves it.
     fn run_rect(&self, grid: &Grid, run: &TextRun, dy: f32) -> Option<RectInstance> {
         let bg = run.bg?;
         let scale = f32::from(run.scale) / 256.0;
         if scale <= 0.0 {
             return None;
         }
-        let width = run.text.chars().count() as f32 * scale * self.metrics.width;
-        if width <= 0.0 {
+        let chars = run.text.chars().count() as f32;
+        if chars * scale * self.metrics.width <= 0.0 {
             return None;
         }
 
         let col = f32::from(run.col) / 16.0;
         let row = f32::from(run.row) / 16.0;
+        let left = snap_cell(col, 0.0, self.metrics.width);
+        let right = snap_cell(col + chars * scale, 0.0, self.metrics.width);
+        let top = snap_cell(row, 0.0, self.metrics.height);
+        let bottom = snap_cell(row + 1.0, 0.0, self.metrics.height);
         Some(RectInstance {
-            pos: [col * self.metrics.width, row * self.metrics.height + dy],
-            dim: [width, self.metrics.height],
+            pos: [left, top + dy],
+            dim: [right - left, bottom - top],
             color: rgb_f32(bg),
             seq: run.seq,
             follow: follow_slot(grid, run.follow),
@@ -2522,26 +2534,11 @@ impl TextPass {
             if rides_a_pool(run, &self.riding_hosts) {
                 continue;
             }
-            let Some(bg) = run.bg else {
-                continue;
-            };
-            let scale = f32::from(run.scale) / 256.0;
-            if scale <= 0.0 {
-                continue;
+            // A run on the live grid rides no glide, so it takes the same rect
+            // as a riding one at rest.
+            if let Some(rect) = self.run_rect(grid, run, 0.0) {
+                out.push(rect);
             }
-            let width = run.text.chars().count() as f32 * scale * self.metrics.width;
-            if width <= 0.0 {
-                continue;
-            }
-            let col = f32::from(run.col) / 16.0;
-            let row = f32::from(run.row) / 16.0;
-            out.push(RectInstance {
-                pos: [col * self.metrics.width, row * self.metrics.height],
-                dim: [width, self.metrics.height],
-                color: rgb_f32(bg),
-                seq: run.seq,
-                follow: follow_slot(grid, run.follow),
-            });
         }
     }
 
@@ -6101,6 +6098,45 @@ mod tests {
             bytemuck::cast_slice::<RectInstance, u8>(&scratch),
             bytemuck::cast_slice::<RectInstance, u8>(&fresh),
             "reuse clears the stale rects and rebuilds only the run's rect"
+        );
+    }
+
+    /// A backing rect covers whole pixels, so it lands on the pixel its first
+    /// glyph starts on and two runs at one column back the same pixels.
+    ///
+    /// A run declares its column in sixteenths of a cell and its scale in
+    /// 256ths, so the raw product is fractional on both axes whenever either
+    /// one is off a whole cell.
+    #[test]
+    fn a_run_rect_covers_whole_pixels() {
+        let Some((_device, _queue, pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(2, 12);
+        grid.set_text_runs(vec![TextRun {
+            col: 3 * 16 + 5,
+            row: 0,
+            scale: 200,
+            color: Rgb::new(1, 2, 3),
+            bg: Some(Rgb::new(4, 5, 6)),
+            follow: 0,
+            anchor: None,
+            text: "42".into(),
+            seq: 7,
+        }]);
+
+        let rects = pass.build_run_rects(&grid);
+        let [pos, dim] = [rects[0].pos, rects[0].dim];
+
+        assert_eq!(
+            [
+                pos[0].fract(),
+                pos[1].fract(),
+                dim[0].fract(),
+                dim[1].fract()
+            ],
+            [0.0; 4],
+            "rect at {pos:?} sized {dim:?}"
         );
     }
 
