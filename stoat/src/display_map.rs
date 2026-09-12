@@ -3542,6 +3542,53 @@ mod tests {
     }
 
     #[test]
+    fn a_viewport_in_a_long_line_resolves_only_the_rows_it_shows() {
+        use super::highlights::{HighlightKey, HighlightLayer, HighlightStyle};
+        use stoat_text::Bias;
+
+        const TOKEN_STRIDE: usize = 6;
+        const WRAP_WIDTH: u32 = 10;
+        const ROWS: u32 = 40;
+
+        let text = "ab cd ".repeat(4000);
+        let mut display_map = create_display_map(&text);
+        display_map.set_wrap_width(Some(WRAP_WIDTH));
+
+        let ranges = {
+            let snap = display_map.multi_buffer.snapshot();
+            (0..text.len() / TOKEN_STRIDE)
+                .map(|i| {
+                    let start = i * TOKEN_STRIDE;
+                    snap.anchor_at(start, Bias::Right)..snap.anchor_at(start + 2, Bias::Left)
+                })
+                .collect()
+        };
+        let key = HighlightKey::layer(HighlightLayer::DocumentHighlightRead);
+        display_map.highlight_text(key, ranges, HighlightStyle::default());
+
+        let snapshot = display_map.snapshot();
+        assert!(
+            snapshot.line_count() > ROWS * 4,
+            "the line wraps into far more rows than the window shows",
+        );
+
+        // Two endpoints per token, and a window of ROWS rows at WRAP_WIDTH
+        // columns shows at most ROWS * WRAP_WIDTH bytes of this ASCII text.
+        let cap = 2 * (ROWS as usize * WRAP_WIDTH as usize / TOKEN_STRIDE + 2);
+        let endpoints = snapshot.highlighted_endpoints(0..ROWS);
+
+        assert!(
+            endpoints.len() <= cap,
+            "a window over {ROWS} rows resolved {} endpoints, over a cap of {cap}",
+            endpoints.len(),
+        );
+        assert!(
+            !endpoints.is_empty(),
+            "the tokens the window does show still resolve",
+        );
+    }
+
+    #[test]
     fn soft_wrap_indent_exposed() {
         let mut display_map = create_display_map("    hello world foo");
         display_map.set_wrap_width(Some(8));

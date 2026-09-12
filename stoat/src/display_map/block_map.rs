@@ -1330,11 +1330,19 @@ impl BlockSnapshot {
 
     /// Conservatively bound the rope byte range covering `rows`.
     ///
-    /// Walks forward from `rows.start` (and backward from `rows.end - 1`) to
-    /// find the first display rows that map to a buffer point. Display rows
-    /// inside custom blocks have no buffer mapping and are skipped. The end
-    /// is taken at the start of the buffer line *after* the last visible row
-    /// so its full content is included.
+    /// Walks forward from `rows.start` to find the first display row that maps
+    /// to a buffer point. Display rows inside custom blocks have no buffer
+    /// mapping and are skipped.
+    ///
+    /// The end is the buffer point the row after the window starts at, which is
+    /// where the last visible row's content stops. A soft-wrapped line holds
+    /// many display rows, so ending at the next buffer line instead would cover
+    /// the whole line however few of its rows the window shows.
+    ///
+    /// When that row carries a custom block, or the window reaches the end of
+    /// the map, the end falls back to the start of the buffer line after the
+    /// last visible row. That is wider than the window rather than shorter, so
+    /// the range still covers every visible byte.
     ///
     /// Used by [`crate::display_map::DisplayMap::build_endpoints`] to bound
     /// highlight endpoint construction to the viewport instead of the whole
@@ -1356,16 +1364,23 @@ impl BlockSnapshot {
             .map(|p| rope.point_to_offset(p))
             .unwrap_or(total);
 
-        let end_offset = (start_row..end_row)
-            .rev()
-            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0)))
-            .map(|p| {
-                // Take through the start of the next buffer line so the
-                // entire visible row's content (incl. any trailing newline)
-                // is covered. point_to_offset clamps past-the-end points.
-                rope.point_to_offset(Point::new(p.row + 1, 0)).min(total)
-            })
-            .unwrap_or(start_offset);
+        let after_window = (end_row < max_row)
+            .then(|| self.block_to_buffer(BlockPoint::new(end_row, 0)))
+            .flatten()
+            .map(|p| rope.point_to_offset(p));
+
+        let end_offset = after_window.unwrap_or_else(|| {
+            (start_row..end_row)
+                .rev()
+                .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0)))
+                .map(|p| {
+                    // Take through the start of the next buffer line so the
+                    // entire visible row's content (incl. any trailing newline)
+                    // is covered. point_to_offset clamps past-the-end points.
+                    rope.point_to_offset(Point::new(p.row + 1, 0)).min(total)
+                })
+                .unwrap_or(start_offset)
+        });
 
         start_offset.min(end_offset)..end_offset.max(start_offset)
     }
