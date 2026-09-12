@@ -564,6 +564,16 @@ mod tests {
         queue: &Queue,
         record: impl FnOnce(&mut RenderPass<'_>),
     ) -> Option<u32> {
+        let rgba = render_rgba(device, queue, record);
+        (0..TARGET).find(|row| (0..TARGET).any(|col| rgba[((row * TARGET + col) * 4) as usize] > 0))
+    }
+
+    /// What `record` painted over black, read back as rgba texels.
+    fn render_rgba(
+        device: &Device,
+        queue: &Queue,
+        record: impl FnOnce(&mut RenderPass<'_>),
+    ) -> Vec<u8> {
         let size = Extent3d {
             width: TARGET,
             height: TARGET,
@@ -630,9 +640,50 @@ mod tests {
         device
             .poll(PollType::wait_indefinitely())
             .expect("poll readback");
-        let rgba = readback.slice(..).get_mapped_range().to_vec();
+        readback.slice(..).get_mapped_range().to_vec()
+    }
 
-        (0..TARGET).find(|row| (0..TARGET).any(|col| rgba[((row * TARGET + col) * 4) as usize] > 0))
+    /// A bar thinner than two pixels takes its width from its declared size, so
+    /// two of them differ in where they sit rather than in how heavy they read.
+    ///
+    /// A snapped bar's width is the difference of two roundings, which moves by
+    /// a pixel with the phase, and at this size that pixel is half the bar. A
+    /// gutter's marks then read at different weights from row to row.
+    #[test]
+    fn a_thin_bar_holds_its_width_across_pixel_phases() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("bar width test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // A fractional cell is what puts the two bars on different sub-pixel
+        // phases. Two sixteenths of it is 1.5625 pixels: rounding each edge on
+        // its own gives two pixels of ink at x 0 and one at x 5, whose left
+        // edge lands on 3.906.
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.5,
+            height: 12.5,
+            scale_factor: 1.0,
+        };
+        let lit = |x| {
+            let bar = Bar {
+                x,
+                y: 0,
+                width: 2,
+                height: 16,
+                color: Rgb::new(255, 0, 0),
+                seq: 0,
+            };
+            let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+            bars.prepare(&device, &queue, &[bar], &[], [TARGET as f32, TARGET as f32]);
+            let rgba = render_rgba(&device, &queue, |pass| bars.draw(pass));
+            (0..TARGET)
+                .filter(|col| rgba[((3 * TARGET + col) * 4) as usize] > 0)
+                .count()
+        };
+
+        assert_eq!((lit(0), lit(5)), (2, 2), "both phases read one width");
     }
 
     /// A gliding pool moves its cells and its bars by the same shift, so a bar

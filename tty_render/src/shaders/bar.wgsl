@@ -64,12 +64,23 @@ fn vs_main(
     // boundaries at a different phase than the rows the bars annotate, so a
     // gliding pool's hairlines wobble a pixel against their content and settle
     // only once it stops.
+    //
+    // A bar under two pixels takes its width from its declared size instead.
+    // The width of a snapped bar is the difference of two roundings, so it
+    // moves by a pixel with the phase the bar lands on, and at that size a
+    // pixel is half of it: a gutter's marks read at different weights from row
+    // to row. Above it the two-edge snap stands, because a fixed width puts a
+    // bar's right edge off where its neighbour's left edge snapped to and a
+    // tiled run gaps.
     let shift_px = vec2<f32>(0.0, globals.shift_rows * globals.cell_size.y);
     let min_px = round((origin + globals.origin_cells) * globals.cell_size) + shift_px;
-    let max_px = max(
+    let snapped = max(
         round((origin + globals.origin_cells + size) * globals.cell_size) + shift_px,
         min_px + vec2<f32>(1.0, 1.0)
     );
+    let size_px = size * globals.cell_size;
+    let held = min_px + max(vec2<f32>(1.0, 1.0), round(size_px));
+    let max_px = select(snapped, held, size_px < vec2<f32>(2.0, 2.0));
     let pixel = min_px + corner * (max_px - min_px);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
