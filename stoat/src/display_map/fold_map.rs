@@ -1733,6 +1733,33 @@ impl FoldSnapshot {
         Some(rope.measured_chunks_in_range(start..end))
     }
 
+    /// The rope and the byte range `fold_row` covers of it.
+    ///
+    /// `None` on a row an inlay or a fold writes into, exactly as
+    /// [`Self::plain_line_runs`] is, since the text such a row paints is not the
+    /// buffer's and the rope cannot answer for it.
+    ///
+    /// A caller measuring the row by a rope summary seeks against these two
+    /// offsets rather than walking the row.
+    pub fn plain_line_range(&self, fold_row: u32) -> Option<(&Rope, Range<usize>)> {
+        if self.inlay_snapshot.has_inlays() {
+            return None;
+        }
+
+        let start = FoldPoint::new(fold_row, 0);
+        let end = FoldPoint::new(fold_row, self.line_len(fold_row));
+        let inlay_range = self.to_inlay_point(start)..self.to_inlay_point(end);
+        if !self.folds_in_range(inlay_range.clone()).is_empty() {
+            return None;
+        }
+
+        let rope = self.inlay_snapshot.rope();
+        let start = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.start));
+        let end = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.end));
+
+        Some((rope, start..end))
+    }
+
     /// Whether the row holds a tab.
     ///
     /// Answered off the rope's tab map for a plain row, where the walk it

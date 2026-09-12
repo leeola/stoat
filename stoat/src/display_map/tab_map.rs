@@ -8,7 +8,7 @@ use std::{
     ops::{Deref, Range},
     sync::Arc,
 };
-use stoat_text::{patch::Patch, Bias, MeasuredChunk};
+use stoat_text::{patch::Patch, Bias, MeasuredChunk, Rope};
 
 const MAX_EXPANSION_COLUMN: u32 = 256;
 
@@ -592,14 +592,44 @@ pub(super) fn expand_line_column(
     tab_size: u32,
     max_expansion_column: u32,
 ) -> u32 {
-    match fold_snapshot.plain_line_runs(fold_row) {
-        Some(runs) => expand_column_runs(runs, fold_column, tab_size, max_expansion_column),
-        None => expand_column(
-            fold_snapshot.fold_line_chars(fold_row),
-            fold_column,
-            tab_size,
-            max_expansion_column,
-        ),
+    if let Some((rope, row)) = fold_snapshot.plain_line_range(fold_row) {
+        return expand_column_seeking(rope, row, fold_column, tab_size, max_expansion_column);
+    }
+    expand_column(
+        fold_snapshot.fold_line_chars(fold_row),
+        fold_column,
+        tab_size,
+        max_expansion_column,
+    )
+}
+
+/// [`expand_column`] over a row the rope holds verbatim.
+///
+/// Tabs expand only below `max_expansion_column`, so the walk stops there and
+/// the rest is the difference of two cell seeks. Past the cap a tab is one cell,
+/// which is what the rope's own summary counts it as, so the two agree.
+fn expand_column_seeking(
+    rope: &Rope,
+    row: Range<usize>,
+    fold_column: u32,
+    tab_size: u32,
+    max_expansion_column: u32,
+) -> u32 {
+    let target = row.start + (fold_column as usize).min(row.len());
+    let mut expanded = 0u32;
+    let mut offset = row.start;
+
+    for ch in rope.chars_at(offset) {
+        if offset >= target || expanded >= max_expansion_column {
+            break;
+        }
+        advance_column_for_char(&mut expanded, ch, tab_size, max_expansion_column);
+        offset += ch.len_utf8();
+    }
+
+    match offset >= target {
+        true => expanded,
+        false => expanded + rope.offset_to_cells(target) - rope.offset_to_cells(offset),
     }
 }
 
@@ -649,16 +679,91 @@ pub(super) fn collapse_line_column(
     bias: Bias,
     max_expansion_column: u32,
 ) -> u32 {
-    match fold_snapshot.plain_line_runs(fold_row) {
-        Some(runs) => collapse_column_runs(runs, tab_column, tab_size, bias, max_expansion_column),
-        None => collapse_column(
-            fold_snapshot.fold_line_chars(fold_row),
+    if let Some((rope, row)) = fold_snapshot.plain_line_range(fold_row) {
+        return collapse_column_seeking(
+            rope,
+            row,
             tab_column,
             tab_size,
             bias,
             max_expansion_column,
-        ),
+        );
     }
+    collapse_column(
+        fold_snapshot.fold_line_chars(fold_row),
+        tab_column,
+        tab_size,
+        bias,
+        max_expansion_column,
+    )
+}
+
+/// [`collapse_column`] over a row the rope holds verbatim.
+///
+/// The counterpart of [`expand_column_seeking`], and bounded the same way: the
+/// walk covers the columns where a tab expands, and one cell seek carries the
+/// rest. The walk finishes the row from the seek's landing, so the bias and the
+/// trailing-mark sweep stay the character walk's own.
+fn collapse_column_seeking(
+    rope: &Rope,
+    row: Range<usize>,
+    tab_column: u32,
+    tab_size: u32,
+    bias: Bias,
+    max_expansion_column: u32,
+) -> u32 {
+    let row_chars = |from: usize| rope.chunks_in_range(from..row.end).flat_map(str::chars);
+    let walk_whole_row = || {
+        collapse_column(
+            row_chars(row.start),
+            tab_column,
+            tab_size,
+            bias,
+            max_expansion_column,
+        )
+    };
+
+    // Below the cap a tab's width is positional, so only the walk answers. The
+    // cap bounds what that costs.
+    if tab_column <= max_expansion_column {
+        return walk_whole_row();
+    }
+
+    let mut expanded = 0u32;
+    let mut offset = row.start;
+    for ch in row_chars(row.start) {
+        if expanded >= max_expansion_column {
+            break;
+        }
+        advance_column_for_char(&mut expanded, ch, tab_size, max_expansion_column);
+        offset += ch.len_utf8();
+    }
+
+    // A tab straddling the cap can carry the walk past the target, which leaves
+    // nothing for the seek to cover.
+    if expanded >= tab_column || offset >= row.end {
+        return walk_whole_row();
+    }
+
+    // Past the cap every character is worth what the rope counts it, so the
+    // seek is exact. Its left bias lands at the start of a character the target
+    // falls inside, so the walk below still meets that character and answers
+    // for the bias itself.
+    let wanted = rope.offset_to_cells(offset) + (tab_column - expanded);
+    let landed = rope
+        .cells_to_offset(wanted, Bias::Left)
+        .clamp(offset, row.end);
+    let landed_expanded = expanded + rope.offset_to_cells(landed) - rope.offset_to_cells(offset);
+
+    collapse_column_from(
+        row_chars(landed),
+        tab_column,
+        tab_size,
+        bias,
+        max_expansion_column,
+        landed_expanded,
+        (landed - row.start) as u32,
+    )
 }
 
 /// [`collapse_column`] over runs that carry whether they measure by length.
@@ -1013,6 +1118,67 @@ mod tests {
             super::collapse_column_detailed("e\u{301}x".chars(), 1, 4, Bias::Left, u32::MAX),
             (3, 1, 3),
         );
+    }
+
+    /// The snapshot conversions against the character walk they replace.
+    ///
+    /// A row the rope holds verbatim is measured by walking to the tab-expansion
+    /// cap and then seeking the rope's cell summary. The walk is the oracle, and
+    /// it has to answer identically at every column, on both sides of the cap
+    /// and through a character the seek cannot split.
+    #[test]
+    fn a_snapshot_conversion_agrees_with_walking_a_long_row() {
+        let head = format!(
+            "{}\tafter\t",
+            "a".repeat(super::MAX_EXPANSION_COLUMN as usize / 2)
+        );
+        let lines = [
+            // A wide character and a mark past the cap, where the seek answers.
+            format!("{head}{}\u{4e00}x\u{301}y", "b".repeat(200)),
+            // A tab past the cap, which the summary counts as one cell.
+            format!("{head}{}\tz", "c".repeat(200)),
+            // No tab at all, so the seek carries the whole row past the cap.
+            "d".repeat(super::MAX_EXPANSION_COLUMN as usize * 3),
+        ];
+
+        for line in lines {
+            let snap = make_snapshot(&line);
+            let fold = snap.fold_snapshot();
+            let chars = || fold.fold_line_chars(0);
+
+            for column in 0..=line.len() as u32 + 2 {
+                assert_eq!(
+                    super::expand_line_column(fold, 0, column, 4, super::MAX_EXPANSION_COLUMN),
+                    super::expand_column(chars(), column, 4, super::MAX_EXPANSION_COLUMN),
+                    "expanding byte {column}",
+                );
+            }
+
+            let widest =
+                super::expand_column(chars(), line.len() as u32, 4, super::MAX_EXPANSION_COLUMN);
+            for column in 0..=widest + 2 {
+                for bias in [Bias::Left, Bias::Right] {
+                    assert_eq!(
+                        super::collapse_line_column(
+                            fold,
+                            0,
+                            column,
+                            4,
+                            bias,
+                            super::MAX_EXPANSION_COLUMN,
+                        ),
+                        super::collapse_column(
+                            chars(),
+                            column,
+                            4,
+                            bias,
+                            super::MAX_EXPANSION_COLUMN,
+                        ),
+                        "collapsing column {column} under {bias:?}",
+                    );
+                }
+            }
+        }
     }
 
     fn make_snapshot(content: &str) -> super::TabSnapshot {

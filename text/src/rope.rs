@@ -722,8 +722,10 @@ impl Rope {
     ///
     /// One tree seek plus a walk of the chunk `offset` falls in, so the cost is
     /// the tree's depth rather than the text's length. `offset` is clamped to
-    /// the rope's length, and one inside a character counts that character's
-    /// width as already passed.
+    /// the rope's length.
+    ///
+    /// An offset inside a character counts that character's full width, which
+    /// is what a column walk stopping at the same byte does.
     pub fn offset_to_cells(&self, offset: usize) -> u32 {
         let offset = offset.min(self.len());
         let (start, _end, chunk) =
@@ -735,11 +737,16 @@ impl Rope {
             return cells_before.0;
         };
         let local = offset - chunk_start;
-        cells_before.0
-            + chunk.text.as_str()[..local]
-                .chars()
-                .map(cell_width)
-                .sum::<u32>()
+        let mut cells = cells_before.0;
+        let mut seen = 0usize;
+        for ch in chunk.text.as_str().chars() {
+            if seen >= local {
+                break;
+            }
+            cells += cell_width(ch);
+            seen += ch.len_utf8();
+        }
+        cells
     }
 
     /// The offset `cells` display cells into the text, per
