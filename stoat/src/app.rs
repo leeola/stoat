@@ -124,9 +124,13 @@ const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// channel, which is 16 MiB of parse in one turn without a bound.
 ///
 /// Nothing queued is lost. What is left wakes the `pty_rx.recv()` arm on the
-/// next turn, and the frame timer paints between the two. Alacritty bounds the
-/// same loop the same way, releasing the terminal after a fixed read so the
-/// renderer gets a turn.
+/// next turn, and the frame timer paints between the two.
+///
+/// This bound alone does not buy that frame. The timer's arm sits ahead of the
+/// pty arm in a biased select, and the turn ends on a yield, without which a
+/// channel that refills never hands the runtime back for the timer to come due.
+/// Alacritty bounds the same loop the same way, releasing the terminal after a
+/// fixed read so the renderer gets a turn.
 const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
 
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
@@ -3434,6 +3438,27 @@ impl Stoat {
                     self.perf.record_update(started.elapsed());
                     effect
                 }
+                // Second, ahead of every channel arm. A biased select returns at
+                // its first ready arm, and a producer that keeps one of those
+                // channels non-empty would otherwise starve the timer for as
+                // long as it runs. Terminal output only marks the screen dirty,
+                // so this arm is what turns a flood into frames.
+                _ = frame_timer.tick(), if animating || building || dirty || spinning => {
+                    let now = std::time::Instant::now();
+                    let dt = last_tick
+                        .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
+                        .unwrap_or_else(|| SCROLL_FRAME.as_secs_f32());
+                    #[cfg(feature = "perf")]
+                    self.perf
+                        .record_anim_tick(std::time::Duration::from_secs_f32(dt));
+                    let effect = self.frame_tick(dt);
+                    // Measure the next dt from here, after any synchronous page
+                    // refill inside emit_smooth_scroll. Otherwise a refill's
+                    // render time inflates the following step into a visible
+                    // multi-row jump instead of smooth motion.
+                    last_tick = Some(std::time::Instant::now());
+                    effect
+                }
                 // The spawn waits for the input thread to confirm it stopped
                 // parsing fd 0, so a fast remote's ident never reaches
                 // crossterm and arrives as garbage keys.
@@ -3492,25 +3517,17 @@ impl Stoat {
                     }
                 }
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
-                _ = frame_timer.tick(), if animating || building || dirty || spinning => {
-                    let now = std::time::Instant::now();
-                    let dt = last_tick
-                        .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
-                        .unwrap_or_else(|| SCROLL_FRAME.as_secs_f32());
-                    #[cfg(feature = "perf")]
-                    self.perf
-                        .record_anim_tick(std::time::Duration::from_secs_f32(dt));
-                    let effect = self.frame_tick(dt);
-                    // Measure the next dt from here, after any synchronous page
-                    // refill inside emit_smooth_scroll. Otherwise a refill's
-                    // render time inflates the following step into a visible
-                    // multi-row jump instead of smooth motion.
-                    last_tick = Some(std::time::Instant::now());
-                    effect
-                }
             };
 
             let (drained, coalesced) = self.drain_pending(&mut events);
+
+            // A select arm that is ready returns without awaiting, so a turn
+            // whose channel refilled never hands the runtime back. The timer
+            // driver runs only when it does, so without this the frame timer
+            // above never comes due under a flood, whatever order its arm sits
+            // in.
+            tokio::task::yield_now().await;
+
             let effect = first.merge(drained);
             #[cfg(feature = "perf")]
             self.perf.record_coalesced(coalesced);
@@ -3768,8 +3785,11 @@ impl Stoat {
     /// before that one render.
     ///
     /// Each channel is drained only to its currently-queued extent. Messages
-    /// that arrive mid-drain are handled on the next loop iteration, which
-    /// keeps render forward-progress under a sustained producer.
+    /// that arrive mid-drain are handled on the next loop iteration.
+    ///
+    /// That bound decides how much work one turn does, and nothing more. The
+    /// frame between two turns comes from the caller's select, where the timer
+    /// sits ahead of every channel arm, and from the yield that turn ends on.
     fn drain_pending(&mut self, events: &mut UnboundedReceiver<Event>) -> (UpdateEffect, usize) {
         let mut effect = UpdateEffect::None;
         let mut coalesced = 0;
@@ -10979,6 +10999,59 @@ mod tests {
     ///
     /// The notifications name no run, so the handler returns at once and what
     /// is measured is the budget rather than the parse behind it.
+    /// A biased select returns at its first ready arm, so an arm ahead of the
+    /// frame timer that is never empty starves it. Terminal output sets a dirty
+    /// flag and paints nothing itself, so the timer is the only arm that turns a
+    /// flood into a frame.
+    #[tokio::test]
+    async fn a_pty_flood_still_paints() {
+        let mut h = Stoat::test();
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let agent_id = h
+            .stoat
+            .active_workspace_mut()
+            .terms
+            .insert(TermSession::new(
+                crate::term_screen::TermScreen::new(24, 80),
+                session,
+                TermSession::next_token(),
+            ));
+        // Only output the screen shows marks the frame dirty, and only a dirty
+        // frame arms the timer arm at all.
+        let pane = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
+
+        let (events_tx, events) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let (render, mut frames) = watch::channel(None);
+
+        // A thread rather than a task, the way the pty reader is one. A task on
+        // this runtime only runs where the loop awaits, and a select arm that is
+        // ready never awaits, so a task could not keep the channel full.
+        //
+        // It ends when the test drops the receiver, which is why nothing joins
+        // it: a send parked on a full channel has no other way out.
+        let pty_tx = h.stoat.pty_tx.clone();
+        std::thread::spawn(move || {
+            while pty_tx
+                .blocking_send(PtyNotification::TermOutput {
+                    agent_id,
+                    data: vec![b'x'; 64 * 1024],
+                })
+                .is_ok()
+            {}
+        });
+
+        let painted = tokio::select! {
+            _ = h.stoat.run(events, render) => false,
+            changed = frames.changed() => changed.is_ok(),
+            _ = tokio::time::sleep(SCROLL_FRAME * 60) => false,
+        };
+
+        drop(events_tx);
+        assert!(painted, "the flood starved the frame timer");
+    }
+
     #[test]
     fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
         let mut h = Stoat::test();
