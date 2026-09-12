@@ -29,7 +29,10 @@ const TAB_WIDTH: u32 = 4;
 
 /// Runs kept per line. The last run swallows any overflow to end-of-line, so a
 /// busy line never emits an unbounded number of blocks.
-const MAX_RUNS: usize = 12;
+///
+/// A line splits on glyph weight as well as on class, so a line of code carries
+/// roughly twice the runs its coloring alone would give.
+const MAX_RUNS: usize = 24;
 
 /// Lines summarized per [`MinimapContent::sync`] during the initial build, so a
 /// large file fills over several frames rather than stalling one.
@@ -60,21 +63,24 @@ pub const LINES_PER_CELL: u8 = 8;
 const LANE_WIDTH: u32 = 2;
 
 /// A single colored run on one line, `len` display columns from `start_col`
-/// drawn in palette class `class`.
+/// drawn in palette class `class` at opacity `weight`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Run {
     pub start_col: u8,
     pub len: u8,
     pub class: u8,
+    /// How much ink the glyphs under this run put on the page, from
+    /// [`glyph_weight`]. A run covers one weight class, so a word and the
+    /// punctuation beside it are separate runs even in one color.
+    pub weight: u8,
 }
 
 /// One line's runs, held inline rather than in a heap allocation of their own.
 ///
-/// A [`Run`] is three bytes and [`MAX_RUNS`] caps a line at twelve of them, so
-/// the whole summary is thirty-six bytes and fits where a `Vec`'s pointer, its
-/// length, and its capacity went. One allocation per buffer line is what a
-/// hundred-thousand-line file paid to build its strip, and every splice paid
-/// again to carry a copy to the wire.
+/// A [`Run`] is four bytes and [`MAX_RUNS`] caps a line at twenty-four of them,
+/// so the whole summary is ninety-seven bytes held inline. One allocation per
+/// buffer line is what a hundred-thousand-line file paid to build its strip,
+/// and every splice paid again to carry a copy to the wire.
 ///
 /// Copies rather than clones for the same reason, so a splice that hands the
 /// emitter its payload is a memcpy.
@@ -91,6 +97,7 @@ impl Default for LineRuns {
                 start_col: 0,
                 len: 0,
                 class: 0,
+                weight: 0,
             }; MAX_RUNS],
             len: 0,
         }
@@ -933,10 +940,10 @@ fn line_count(rope: &Rope) -> u32 {
 /// Content walks the line by display column, a tab advancing to the next multiple
 /// of [`TAB_WIDTH`] and other chars advancing one, capped at [`MAX_COLUMNS`]. A
 /// non-whitespace char extends the current run when it is contiguous and shares
-/// the covering token's class, otherwise opens a new run. Whitespace ends the
-/// current run, so a gap breaks the blocks. A char uncovered by any token is
-/// class 0. Once [`MAX_RUNS`] runs exist, the last run swallows the rest of the
-/// line.
+/// both the covering token's class and the glyph weight, otherwise opens a new
+/// run. Whitespace ends the current run, so a gap breaks the blocks. A char
+/// uncovered by any token is class 0. Once [`MAX_RUNS`] runs exist, the last run
+/// swallows the rest of the line.
 pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> LineRuns {
     let mut runs = LineRuns::default();
     if let Some(class) = edge {
@@ -944,6 +951,9 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> Lin
             start_col: 0,
             len: LANE_WIDTH as u8,
             class,
+            // A mark rather than a glyph, so it carries no glyph's weight and
+            // draws at full strength.
+            weight: 255,
         });
     }
     let mut col: u32 = LANE_WIDTH;
@@ -971,8 +981,11 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> Lin
                 _ => 0,
             };
 
+            let weight = glyph_weight(ch);
             let contiguous = runs.last().is_some_and(|last| {
-                last.class == class && last.start_col as u32 + last.len as u32 == col
+                last.class == class
+                    && last.weight == weight
+                    && last.start_col as u32 + last.len as u32 == col
             });
             if overflowed || contiguous {
                 let last = runs.last_mut().expect("a run to extend");
@@ -982,6 +995,7 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> Lin
                     start_col: col as u8,
                     len: width as u8,
                     class,
+                    weight,
                 });
             } else {
                 overflowed = true;
@@ -995,6 +1009,23 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> Lin
     }
 
     runs
+}
+
+/// How much ink `ch` puts on the page, as a run's weight.
+///
+/// A strip draws a line a couple of pixels tall, far under what a letter needs,
+/// so a run carries the weight of its glyphs rather than their shapes. Capitals
+/// and digits fill the line's band, other letters sit within the x height, and
+/// punctuation is a mark in the middle of one. Without the split a line of code
+/// and a line of underscores cover the same pixels at the same strength.
+fn glyph_weight(ch: char) -> u8 {
+    if ch.is_uppercase() || ch.is_numeric() {
+        255
+    } else if ch.is_alphabetic() {
+        190
+    } else {
+        110
+    }
 }
 
 /// Maps a buffer's syntax highlight styles to compact minimap classes and the
@@ -1178,10 +1209,15 @@ mod tests {
     }
 
     fn run(start_col: u8, len: u8, class: u8) -> Run {
+        weighted(start_col, len, class, 190)
+    }
+
+    fn weighted(start_col: u8, len: u8, class: u8, weight: u8) -> Run {
         Run {
             start_col,
             len,
             class,
+            weight,
         }
     }
 
@@ -1253,19 +1289,45 @@ mod tests {
     }
 
     #[test]
-    fn summarize_line_twelfth_run_swallows_overflow() {
-        // 20 space-separated distinct-class chars would be 20 runs, but the 12th
-        // run absorbs everything from its start to the last char.
-        let line: String = (0..20).map(|_| "x ").collect();
-        let tokens: Vec<LineToken> = (0..20)
+    fn summarize_line_last_run_swallows_overflow() {
+        // Forty space-separated distinct-class chars would be forty runs, but
+        // the last one absorbs everything from its start to the last char.
+        const CHARS: usize = 40;
+        let line: String = (0..CHARS).map(|_| "x ").collect();
+        let tokens: Vec<LineToken> = (0..CHARS)
             .map(|i| tok(i * 2..i * 2 + 1, (i % 3 + 1) as u8))
             .collect();
         let runs = summarize_line(&line, &tokens, None);
-        assert_eq!(runs.len(), 12, "runs cap at twelve");
-        let last = runs.as_slice()[11];
-        // The last char sits at display column 40 (x at even columns, shifted
-        // past the 2-column lane); run 12 stretches to cover it.
-        assert_eq!(last.start_col as u32 + last.len as u32, 41);
+        assert_eq!(runs.len(), MAX_RUNS, "runs cap at the maximum");
+
+        // An x sits at every even column, shifted past the 2-column lane, so
+        // the last one ends at column 2 * CHARS + 1 and the last run reaches it.
+        let last = runs.as_slice()[MAX_RUNS - 1];
+        assert_eq!(
+            (
+                last.start_col as usize,
+                last.start_col as usize + last.len as usize
+            ),
+            (2 * MAX_RUNS, 2 * CHARS + 1)
+        );
+    }
+
+    /// A strip draws a line too small for letters, so the weight of the glyphs
+    /// is what separates a line of code from a line of underscores. A run
+    /// covers one weight, which is what puts that texture on the strip.
+    #[test]
+    fn summarize_line_splits_runs_on_glyph_weight() {
+        // One class over the whole word, so only the weight breaks it: a
+        // capital, then lowercase, then the punctuation after them.
+        let runs = summarize_line("Abc;", &[tok(0..4, 1)], None);
+        assert_eq!(
+            runs.as_slice(),
+            [
+                weighted(2, 1, 1, 255),
+                weighted(3, 2, 1, 190),
+                weighted(5, 1, 1, 110),
+            ]
+        );
     }
 
     /// An edit can insert rows past the build cursor, since the cursor sits
@@ -2023,7 +2085,7 @@ mod tests {
     fn summarize_line_prepends_the_edge_lane() {
         // An edge fills the reserved cols 0-1 and content starts at col 2.
         let runs = summarize_line("ab", &[tok(0..2, 1)], Some(40));
-        assert_eq!(runs.as_slice(), [run(0, 2, 40), run(2, 2, 1)]);
+        assert_eq!(runs.as_slice(), [weighted(0, 2, 40, 255), run(2, 2, 1)]);
     }
 
     #[test]
@@ -2067,7 +2129,7 @@ mod tests {
         );
         assert_eq!(
             built[1].as_slice()[0],
-            run(0, 2, 40),
+            weighted(0, 2, 40, 255),
             "a marked line leads with its edge"
         );
     }
@@ -2787,7 +2849,7 @@ mod tests {
         assert_eq!(splices[0].removed, 1);
         assert_eq!(
             splices[0].lines[0].as_slice()[0],
-            run(0, 2, 40),
+            weighted(0, 2, 40, 255),
             "the mark leads the line"
         );
     }

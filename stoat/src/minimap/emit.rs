@@ -67,8 +67,13 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
     }
 }
 
+/// The protocol version that decodes a weighted run. An older terminal drops
+/// the frame whole, so the splice goes as `minimap_lines` and its runs draw at
+/// the flat strength that terminal already renders.
+const WEIGHTED_RUN_PROTOCOL: u32 = 4;
+
 /// Sync each visible minimap strip's buffer and drain its summary changes to
-/// the terminal as `minimap_lines`, retiring content for buffers that closed.
+/// the terminal, retiring content for buffers that closed.
 ///
 /// Runs at the frame seam after [`Stoat::emit_smooth_scroll`], so each editor's
 /// reserved strip rect from the paint is current. The strip declaration rides
@@ -194,6 +199,9 @@ fn sync_minimap_strip(
         minimap_syntax_other_version(stoat.syntax_highlight, lsp_token_version);
 
     let syntax_on = stoat.syntax_highlight;
+    // Read before the store is borrowed below, which holds `stoat` for the rest
+    // of the function.
+    let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
     let class_table = &stoat.minimap_class_table;
 
     // Resolve only the tokens overlapping the rows each sync branch touches, so
@@ -226,15 +234,17 @@ fn sync_minimap_strip(
     );
 
     for splice in content.take_queued() {
-        stoatty_protocol::command::encode_minimap_lines_into(
-            out,
-            &stoatty_protocol::command::MinimapLinesCommand {
-                content_id,
-                start: splice.start,
-                removed: splice.removed,
-                lines: splice.lines.into_iter().map(convert_minimap_runs).collect(),
-            },
-        );
+        let command = stoatty_protocol::command::MinimapLinesCommand {
+            content_id,
+            start: splice.start,
+            removed: splice.removed,
+            lines: splice.lines.into_iter().map(convert_minimap_runs).collect(),
+        };
+        if weighted {
+            stoatty_protocol::command::encode_minimap_runs_into(out, &command);
+        } else {
+            stoatty_protocol::command::encode_minimap_lines_into(out, &command);
+        }
     }
 }
 
@@ -514,7 +524,7 @@ fn minimap_edge_class(
     }
 }
 
-/// Convert the engine's [`crate::minimap::Run`]s to their `minimap_lines` wire form.
+/// Convert the engine's [`crate::minimap::Run`]s to their wire form.
 fn convert_minimap_runs(runs: crate::minimap::LineRuns) -> stoatty_protocol::command::LineSummary {
     runs.as_slice()
         .iter()
@@ -522,7 +532,7 @@ fn convert_minimap_runs(runs: crate::minimap::LineRuns) -> stoatty_protocol::com
             start_col: run.start_col,
             len: run.len,
             class: run.class,
-            weight: 255,
+            weight: run.weight,
         })
         .collect()
 }
