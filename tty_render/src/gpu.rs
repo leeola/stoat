@@ -40,7 +40,7 @@ use stoatty_term::{
     term::Damage,
 };
 use wgpu::{
-    Adapter, Color, CommandEncoder, CommandEncoderDescriptor, CompositeAlphaMode,
+    Adapter, Backends, Color, CommandEncoder, CommandEncoderDescriptor, CompositeAlphaMode,
     CurrentSurfaceTexture, Device, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
     Operations, PowerPreference, PresentMode, Queue, RenderPass, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
@@ -1402,7 +1402,19 @@ impl GpuContext {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+        // GL is excluded rather than merely unused. wgpu initializes every
+        // requested backend eagerly, and the GLES one loads libEGL and builds a
+        // context on the way. That context can never present here. GLES needs the
+        // display handle to present, and this instance carries none, so the
+        // surface is built non-presentable and the adapter request discards the
+        // backend. The software fallback below is lavapipe, a Vulkan adapter.
+        let t_instance = Instant::now();
+        let instance = Instance::new(InstanceDescriptor {
+            backends: Backends::PRIMARY,
+            ..InstanceDescriptor::new_without_display_handle()
+        });
+        let instance_time = t_instance.elapsed();
+
         let surface = instance
             .create_surface(window)
             .expect("create wgpu surface");
@@ -1505,6 +1517,7 @@ impl GpuContext {
         // The font wait is the residual after the concurrent scan. A small value
         // means the scan finished before the GPU was ready.
         tracing::info!(
+            instance = ?instance_time,
             adapter = ?adapter_time,
             device = ?device_time,
             surface = ?surface_time,
@@ -2138,10 +2151,14 @@ fn rgb_to_color(rgb: Rgb) -> Color {
 /// Request a wgpu adapter and device with no surface, for off-screen rendering.
 ///
 /// `None` when no adapter is available, so a GPU-less caller (such as a test in
-/// headless CI) can skip rather than fail. Uses the same power preference and
-/// device descriptor as [`GpuContext::new`].
+/// headless CI) can skip rather than fail. Uses the same backends, power
+/// preference, and device descriptor as [`GpuContext::new`], so a caller reaches
+/// the adapter a launch reaches.
 pub fn headless_device() -> Option<(Device, Queue)> {
-    let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::PRIMARY,
+        ..InstanceDescriptor::new_without_display_handle()
+    });
 
     let adapter = executor::block_on(instance.request_adapter(&RequestAdapterOptions {
         power_preference: PowerPreference::HighPerformance,
