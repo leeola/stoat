@@ -36,8 +36,8 @@ pub use movement::{
 pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};
 pub use rope::{
-    BytesInRange, CharsAt, ChunksInLine, ChunksInRange, Cursor as RopeCursor, FindIter, Lines,
-    MeasuredChunk, MeasuredChunksInRange, ReversedCharsAt, Rope, TextSummary,
+    display_width, BytesInRange, CharsAt, ChunksInLine, ChunksInRange, Cursor as RopeCursor,
+    FindIter, Lines, MeasuredChunk, MeasuredChunksInRange, ReversedCharsAt, Rope, TextSummary,
 };
 pub use selection::{
     cursor_offset, cursor_offsets, next_char_boundaries_batch, next_char_boundary,

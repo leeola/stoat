@@ -44,7 +44,6 @@ use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use tokio::sync::Notify;
-use unicode_width::UnicodeWidthChar;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
 
 /// Shared empty text-highlight map, used as the `unwrap_or` fallback when an
@@ -53,9 +52,7 @@ pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
 /// `Arc<HashMap>` allocation on the rare `None` case.
 static EMPTY_TEXT_HIGHLIGHTS: LazyLock<TextHighlights> = LazyLock::new(|| Arc::new(HashMap::new()));
 
-pub(crate) fn display_width(ch: char) -> u32 {
-    ch.width().unwrap_or(0) as u32
-}
+pub(crate) use stoat_text::display_width;
 
 /// Restate `edits` in buffer rows, reading each side against the text that side
 /// indexes into.

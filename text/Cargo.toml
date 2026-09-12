@@ -11,6 +11,7 @@ workspace = true
 arrayvec.workspace = true
 smallvec.workspace = true
 unicode-general-category.workspace = true
+unicode-width.workspace = true
 unicode-segmentation.workspace = true
 serde = { workspace = true, features = ["derive"] }
 regex-cursor.workspace = true

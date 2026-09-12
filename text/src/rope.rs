@@ -6,6 +6,16 @@ use arrayvec::ArrayString;
 use regex_cursor::{Cursor as RegexCursor, Input};
 use std::{cmp, ops::Range};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+use unicode_width::UnicodeWidthChar;
+
+/// Display cells `ch` occupies on a terminal grid.
+///
+/// Two for a wide character, zero for a combining mark and for anything with
+/// no width of its own, one otherwise. A tab is not positional here: it reports
+/// its own width, and a caller that expands tabs to stops answers for it.
+pub fn display_width(ch: char) -> u32 {
+    ch.width().unwrap_or(0) as u32
+}
 
 #[cfg(not(test))]
 type Bitmap = u128;
