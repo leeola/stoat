@@ -19,7 +19,14 @@ use crate::{
         syntax_theme::SyntaxStyles,
     },
 };
-use std::{borrow::Cow, ops::Range, sync::Arc};
+use std::{
+    borrow::Cow,
+    ops::Range,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use stoat_language::{self as language, Language, SyntaxMapCapture, SyntaxSnapshot, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Bias, Rope};
@@ -59,6 +66,15 @@ pub(crate) struct ParseJobOutput {
     pub(crate) changed_token_rows: Option<Range<u32>>,
 }
 
+/// Whether a caller's cancel flag is set.
+///
+/// [`parse_buffer_step`] reads it at each stretch of work that honors no
+/// deadline of its own, so a superseded parse stops between them rather than
+/// running to the end.
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
 /// Synchronous core of the parse pipeline. When `deadline` is `Some`, every
 /// parse it runs aborts if it would exceed it and the function returns `None`,
 /// signalling that the caller should fall back to the background path. An
@@ -84,6 +100,7 @@ pub(crate) fn parse_buffer_step(
     prior_token_anchors: Option<&BufferSemanticTokens>,
     styles: &SyntaxStyles,
     deadline: Option<(std::time::Instant, &Executor)>,
+    cancel: Option<&AtomicBool>,
     viewport: Option<Range<u32>>,
 ) -> Option<ParseJobOutput> {
     let cur_version = snapshot.version;
@@ -107,18 +124,22 @@ pub(crate) fn parse_buffer_step(
     let edited_tree = edited.as_ref().map(|(tree, _)| tree);
     let edits = edited.as_ref().map(|(_, edits)| edits);
 
-    let tree = match edited_tree {
-        Some(old_tree) => match deadline {
-            Some((dl, exec)) => {
-                language::parse_rope_within(lang, &new_rope, Some(old_tree), dl, exec)?
-            },
-            None => language::parse_rope(lang, &new_rope, Some(old_tree))?,
+    let tree = match (deadline, cancel) {
+        (Some((dl, exec)), _) => {
+            language::parse_rope_within(lang, &new_rope, edited_tree, dl, exec)?
         },
-        None => match deadline {
-            Some((dl, exec)) => language::parse_rope_within(lang, &new_rope, None, dl, exec)?,
-            None => language::parse_rope(lang, &new_rope, None)?,
+        (None, Some(cancel)) => {
+            language::parse_rope_cancellable(lang, &new_rope, edited_tree, cancel)?
         },
+        (None, None) => language::parse_rope(lang, &new_rope, edited_tree)?,
     };
+
+    // The captures walk and the injection re-walk below honor no deadline, so a
+    // parse cancelled while they run would finish them for a result nothing
+    // reads. A set flag stops here instead, leaving `prior` as it was.
+    if cancelled(cancel) {
+        return None;
+    }
 
     // Everything this edit could have restyled, which the injection re-walk
     // and the token recapture are both narrowed to. One union serves both
@@ -141,6 +162,10 @@ pub(crate) fn parse_buffer_step(
     // same budget. A spent budget takes the `?` here rather than the rebuild
     // below, since rebuilding from nothing would parse every one of those
     // layers again only to abort again.
+    if cancelled(cancel) {
+        return None;
+    }
+
     let incremental = match (prior_syntax_map.as_ref(), prior.as_ref(), edited.as_ref()) {
         (Some(prior_map), Some(prev), Some((_, edits))) => {
             let mut map = prior_map.clone();
@@ -857,6 +882,7 @@ mod tests {
                 None,
                 &styles,
                 None,
+                None,
                 viewport,
             )
             .expect("parse should succeed")
@@ -928,6 +954,7 @@ mod tests {
             &styles,
             None,
             None,
+            None,
         )
         .expect("first parse should succeed");
         let initial_version = out.syntax.version;
@@ -948,6 +975,7 @@ mod tests {
             None,
             &styles,
             Some((deadline, &executor)),
+            None,
             None,
         );
         assert!(result.is_none(), "expected deadline abort to return None");
@@ -972,6 +1000,7 @@ mod tests {
             None,
             None,
             &styles,
+            None,
             None,
             None,
         )
@@ -1012,6 +1041,7 @@ mod tests {
             &styles,
             None,
             None,
+            None,
         )
         .expect("first parse should succeed");
 
@@ -1031,6 +1061,7 @@ mod tests {
             None,
             &styles,
             Some((deadline, &executor)),
+            None,
             None,
         )
         .expect("deadline far in the future should not abort");
@@ -1053,10 +1084,69 @@ mod tests {
             &styles,
             Some((deadline, &executor)),
             None,
+            None,
         );
         assert!(
             aborted.is_none(),
             "after advance_clock past the deadline, parse must abort",
+        );
+    }
+
+    /// A parse the finder superseded has to leave the prior state alone.
+    ///
+    /// The pool arm runs with no deadline, so the flag is the only thing that
+    /// stops it. An aborted parse that wrote to `prior` would leave the registry
+    /// holding a tree for text the preview no longer shows.
+    #[test]
+    fn parse_buffer_step_preserves_prior_on_cancel() {
+        let lang = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .unwrap();
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let buffer_id = BufferId::new(1);
+
+        let text = "fn a() {}\n".repeat(10_000);
+        let mut buf = TextBuffer::with_text(buffer_id, &text);
+        let out = parse_buffer_step(
+            buffer_id,
+            buf.snapshot.clone(),
+            &lang,
+            &mut None,
+            &mut None,
+            None,
+            None,
+            &styles,
+            None,
+            None,
+            None,
+        )
+        .expect("the first parse succeeds");
+
+        let landed = out.syntax.version;
+        let mut prior: Option<SyntaxState> = Some(out.syntax);
+        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(out.syntax_map);
+        buf.edit(0..0, "// edit\n");
+
+        let cancel = AtomicBool::new(true);
+        let aborted = parse_buffer_step(
+            buffer_id,
+            buf.snapshot.clone(),
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            None,
+            None,
+            &styles,
+            None,
+            Some(&cancel),
+            None,
+        );
+
+        assert!(aborted.is_none(), "a set flag stops the parse");
+        assert_eq!(
+            prior.as_ref().map(|state| state.version),
+            Some(landed),
+            "and leaves the prior state on the version that landed",
         );
     }
 
@@ -1097,6 +1187,7 @@ mod tests {
                 &styles,
                 None,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -1118,6 +1209,7 @@ mod tests {
                 &styles,
                 None,
                 None,
+                None,
             )
             .expect("incremental parse should succeed")
         };
@@ -1133,6 +1225,7 @@ mod tests {
                 None,
                 None,
                 &styles,
+                None,
                 None,
                 None,
             )
@@ -1238,6 +1331,7 @@ mod tests {
             styles,
             None,
             None,
+            None,
         )
         .expect("carried parse should succeed");
 
@@ -1253,6 +1347,7 @@ mod tests {
                 None,
                 None,
                 styles,
+                None,
                 None,
                 None,
             )
@@ -1598,6 +1693,7 @@ mod tests {
                 &styles,
                 None,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -1705,6 +1801,7 @@ mod tests {
                 &styles,
                 None,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -1773,6 +1870,7 @@ mod tests {
                 &styles,
                 None,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -1789,6 +1887,7 @@ mod tests {
             Some(&first.token_spans),
             Some(&first.token_channel),
             &styles,
+            None,
             None,
             None,
         )
@@ -1861,6 +1960,7 @@ mod tests {
             &styles,
             None,
             None,
+            None,
         )
         .expect("parse should succeed");
 
@@ -1901,6 +2001,7 @@ mod tests {
                 None,
                 None,
                 &styles,
+                None,
                 None,
                 None,
             )

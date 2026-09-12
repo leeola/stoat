@@ -44,7 +44,10 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -331,6 +334,12 @@ pub struct Workspace {
 /// decides nothing once it is in flight.
 struct ParseJob {
     task: Task<Option<ParseJobOutput>>,
+    /// Set to stop the parse this job runs.
+    ///
+    /// Dropping the task cancels nothing: the closure is already with the
+    /// blocking pool, so the drop takes only the channel the result would come
+    /// back on. See [`Workspace::cancel_parse_job`].
+    cancel: Arc<AtomicBool>,
 }
 
 /// A one-pane tree showing a fresh scratch buffer, the shape a workspace and
@@ -620,12 +629,25 @@ impl Workspace {
     /// The file finder reuses one preview buffer id for every file it shows, so
     /// an unfinished parse of the previously-previewed file would otherwise
     /// complete and paint its anchored tokens onto the swapped-in content.
-    /// Removing the parse job drops its task, which cancels the parse, so the
-    /// stale result is never applied.
+    /// Cancelling the parse job stops the work as well as dropping its result,
+    /// so a held arrow key through the finder leaves no parse running over text
+    /// nothing will paint.
     pub(crate) fn reset_preview_syntax(&mut self, id: BufferId) {
         self.buffers.clear_syntax(id);
-        self.parse_jobs.remove(&id);
+        self.cancel_parse_job(id);
         self.diff.invalidate(id);
+    }
+
+    /// Stop `id`'s parse and forget the job.
+    ///
+    /// Dropping the task alone would leave the parse running: the closure is
+    /// already with the blocking pool, so the drop takes only the channel the
+    /// result would come back on. The parse reads the flag as it goes, so a
+    /// superseded one stops partway rather than running the file out.
+    fn cancel_parse_job(&mut self, id: BufferId) {
+        if let Some(job) = self.parse_jobs.remove(&id) {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Drop every piece of per-buffer state this workspace holds for `id`,
@@ -642,7 +664,7 @@ impl Workspace {
     /// keeps them on purpose, since an edit does not move the base, but a close
     /// leaves nothing to reuse them.
     pub(crate) fn release_buffer(&mut self, id: BufferId, path: Option<&Path>) {
-        self.parse_jobs.remove(&id);
+        self.cancel_parse_job(id);
         self.partial_token_buffers.remove(&id);
         self.index_jobs.remove(&id);
         self.index_debounce.remove(&id);
@@ -960,6 +982,7 @@ impl Workspace {
                     prior_anchors.as_ref(),
                     syntax_styles,
                     Some((deadline, executor)),
+                    None,
                     viewport.clone(),
                 );
                 if let Some(out) = inline {
@@ -980,24 +1003,29 @@ impl Workspace {
             // runtime. A spawned future would poll it on the run-loop thread and
             // freeze the UI until the whole file was done.
             let styles = syntax_styles.clone();
-            let parse = executor.spawn_blocking(move || {
-                let mut prior = prior;
-                let mut prior_map = prior_map;
-                parse_buffer_step(
-                    buffer_id,
-                    snapshot,
-                    &lang,
-                    &mut prior,
-                    &mut prior_map,
-                    prior_spans.as_deref(),
-                    prior_anchors.as_ref(),
-                    &styles,
-                    None,
-                    viewport,
-                )
+            let cancel = Arc::new(AtomicBool::new(false));
+            let parse = executor.spawn_blocking({
+                let cancel = cancel.clone();
+                move || {
+                    let mut prior = prior;
+                    let mut prior_map = prior_map;
+                    parse_buffer_step(
+                        buffer_id,
+                        snapshot,
+                        &lang,
+                        &mut prior,
+                        &mut prior_map,
+                        prior_spans.as_deref(),
+                        prior_anchors.as_ref(),
+                        &styles,
+                        None,
+                        Some(&cancel),
+                        viewport,
+                    )
+                }
             });
             let task = executor.spawn_with_redraw(redraw_notify.clone(), parse);
-            self.parse_jobs.insert(buffer_id, ParseJob { task });
+            self.parse_jobs.insert(buffer_id, ParseJob { task, cancel });
         }
 
         // Cap retained highlight state, on the passes where a parse landed.
@@ -1330,7 +1358,10 @@ mod tests {
     use crate::{buffer::BufferId, pane::View, test_harness::TestHarness};
     use std::{
         path::{Path, PathBuf},
-        sync::Arc,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
     };
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
@@ -1511,10 +1542,12 @@ mod tests {
         let executor = Arc::new(TestScheduler::new()).executor();
         let mut ws = Workspace::new(PathBuf::new(), &executor, crate::test_notify());
         let (id, _) = ws.buffers.new_scratch_preview();
+        let cancel = Arc::new(AtomicBool::new(false));
         ws.parse_jobs.insert(
             id,
             ParseJob {
                 task: Task::Ready(None),
+                cancel: cancel.clone(),
             },
         );
 
@@ -1523,6 +1556,12 @@ mod tests {
         assert!(
             !ws.parse_jobs.contains_key(&id),
             "swapping preview content drops the prior file's parse job"
+        );
+        // Dropping the task cancels nothing, the closure being with the pool
+        // already. The flag is what the parse itself reads.
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "and stops the parse rather than only dropping its result",
         );
     }
 

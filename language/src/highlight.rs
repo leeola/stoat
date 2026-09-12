@@ -3,6 +3,7 @@ use std::{
     cell::Cell,
     ops::{ControlFlow, Deref, DerefMut, Range},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{channel, Sender},
         LazyLock, Mutex,
     },
@@ -152,7 +153,7 @@ pub fn parse(language: &Language, text: &str, old_tree: Option<&Tree>) -> Option
 /// `old_tree` enables incremental parsing: pass the previous [`Tree`] (after
 /// applying [`edit_tree`]) so tree-sitter can reuse unchanged subtrees.
 pub fn parse_rope(language: &Language, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tree> {
-    parse_rope_inner(language, rope, old_tree, None, None)
+    parse_rope_inner(language, rope, old_tree, None, None, None)
 }
 
 /// Parse `rope` with a wall-clock deadline. Returns `None` if the parser
@@ -167,7 +168,32 @@ pub fn parse_rope_within(
     deadline: Instant,
     executor: &Executor,
 ) -> Option<Tree> {
-    parse_rope_inner(language, rope, old_tree, None, Some((deadline, executor)))
+    parse_rope_inner(
+        language,
+        rope,
+        old_tree,
+        None,
+        Some((deadline, executor)),
+        None,
+    )
+}
+
+/// Parse `rope`, stopping early once `cancel` is set.
+///
+/// For a parse whose result a caller can supersede: a preview pane swapping
+/// files, where the parse already running is over text nothing will paint. The
+/// flag is read on tree-sitter's own progress callback, so a set flag stops the
+/// parse partway rather than at the next whole-file boundary.
+///
+/// `None` on cancellation, as on any other failure. A caller that has to tell
+/// them apart reads the flag itself.
+pub fn parse_rope_cancellable(
+    language: &Language,
+    rope: &Rope,
+    old_tree: Option<&Tree>,
+    cancel: &AtomicBool,
+) -> Option<Tree> {
+    parse_rope_inner(language, rope, old_tree, None, None, Some(cancel))
 }
 
 /// Parse `rope` restricted to the given byte range via
@@ -196,21 +222,22 @@ pub fn parse_rope_range(
         start_point,
         end_point,
     }];
-    parse_rope_inner(language, rope, old_tree, Some(&included), deadline)
+    parse_rope_inner(language, rope, old_tree, Some(&included), deadline, None)
 }
 
 /// Parse `rope` under every option the wrappers above expose.
 ///
-/// `included_ranges` restricts the parse to a set of byte ranges, and a
-/// `deadline` aborts it once passed. Both an abort and an ordinary parse
-/// failure come back as `None`. A caller that must tell them apart checks the
-/// clock itself.
+/// `included_ranges` restricts the parse to a set of byte ranges, and either a
+/// passed `deadline` or a set `cancel` aborts it. Both an abort and an ordinary
+/// parse failure come back as `None`. A caller that must tell them apart checks
+/// the clock or the flag itself.
 pub(crate) fn parse_rope_inner(
     language: &Language,
     rope: &Rope,
     old_tree: Option<&Tree>,
     included_ranges: Option<&[tree_sitter::Range]>,
     deadline: Option<(Instant, &Executor)>,
+    cancel: Option<&AtomicBool>,
 ) -> Option<Tree> {
     with_parser(|parser| {
         parser.set_language(&language.grammar).ok()?;
@@ -283,25 +310,29 @@ pub(crate) fn parse_rope_inner(
             }
         };
 
-        if let Some((deadline, executor)) = deadline {
-            let timed_out = Cell::new(false);
-            let mut progress = |_state: &ParseState| -> ControlFlow<()> {
-                if executor.now() >= deadline {
-                    timed_out.set(true);
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
-            };
-            let options = ParseOptions::new().progress_callback(&mut progress);
-            let tree = parser.parse_with_options(&mut callback, old_tree, Some(options));
-            if timed_out.get() {
-                None
+        if deadline.is_none() && cancel.is_none() {
+            return parser.parse_with_options(&mut callback, old_tree, None);
+        }
+
+        // A partial tree is worse than none: it names rows the text does not
+        // hold. Both stops therefore discard what the parser hands back.
+        let aborted = Cell::new(false);
+        let mut progress = |_state: &ParseState| -> ControlFlow<()> {
+            let past_deadline =
+                deadline.is_some_and(|(deadline, executor)| executor.now() >= deadline);
+            let cancelled = cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+            if past_deadline || cancelled {
+                aborted.set(true);
+                ControlFlow::Break(())
             } else {
-                tree
+                ControlFlow::Continue(())
             }
-        } else {
-            parser.parse_with_options(&mut callback, old_tree, None)
+        };
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let tree = parser.parse_with_options(&mut callback, old_tree, Some(options));
+        match aborted.get() {
+            true => None,
+            false => tree,
         }
     })
 }
@@ -460,8 +491,34 @@ pub fn extract_highlights(language: &Language, tree: &Tree, text: &str) -> Vec<H
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_highlights, parse, HighlightSpan};
+    use super::{extract_highlights, parse, parse_rope_cancellable, HighlightSpan};
     use crate::language::LanguageRegistry;
+    use std::sync::atomic::AtomicBool;
+    use stoat_text::Rope;
+
+    /// A cancelled parse stops inside the parser rather than at the next whole
+    /// file boundary, which is the only thing that saves the work.
+    ///
+    /// The same text parses without the flag, so a `None` here is the flag and
+    /// not the text.
+    #[test]
+    fn a_set_cancel_flag_stops_the_parse() {
+        let language = rust();
+        let rope = Rope::from("fn a() {}\n".repeat(2_000).as_str());
+
+        assert!(
+            super::parse_rope(&language, &rope, None).is_some(),
+            "the text parses when nothing stops it",
+        );
+        assert!(
+            parse_rope_cancellable(&language, &rope, None, &AtomicBool::new(true)).is_none(),
+            "and a set flag stops it",
+        );
+        assert!(
+            parse_rope_cancellable(&language, &rope, None, &AtomicBool::new(false)).is_some(),
+            "a clear flag leaves the parse alone",
+        );
+    }
 
     fn rust() -> std::sync::Arc<crate::Language> {
         LanguageRegistry::standard()

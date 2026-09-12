@@ -573,7 +573,14 @@ impl SyntaxMap {
                     .iter()
                     .find(|l| l.depth == 0)
                     .map(|l| l.tree.clone());
-                parse_rope_inner(&language, rope, prior_root_tree.as_ref(), None, deadline)?
+                parse_rope_inner(
+                    &language,
+                    rope,
+                    prior_root_tree.as_ref(),
+                    None,
+                    deadline,
+                    None,
+                )?
             },
         };
 
@@ -1468,7 +1475,7 @@ fn parse_rope_combined_ranges(
     let old_tree = prior
         .filter(|p| p.host_ranges == ts_ranges)
         .map(|p| &p.tree);
-    parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline)
+    parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline, None)
 }
 
 fn stoat_to_ts(p: stoat_text::Point) -> tree_sitter::Point {
