@@ -260,48 +260,81 @@ fn edit_delimiters(buffer: &mut TextBuffer, mut edits: Vec<(usize, usize, &str)>
 /// injected region reads that region's own tree and a scan over the outer one
 /// says nothing about it.
 pub(crate) struct PairScans<'a> {
-    /// The window every scan is collected over: wide enough for the furthest
-    /// cursor either way.
+    /// The windows this press's cursors reach, merged where they overlap, and
+    /// ascending by start. A cursor reads the one holding it.
     ///
-    /// One window rather than one per cursor. A window wider than a single
-    /// cursor needs only adds zones nothing asks about, and the alternative is
-    /// a scan per cursor, which is the cost this exists to avoid.
-    window: Range<usize>,
-    scans: Vec<(*const stoat_language::Tree, PairScan<'a>)>,
+    /// Clustered rather than one window spanning them all. Cursors typing
+    /// together share a scan, which is the cost this exists to avoid, while
+    /// cursors at the ends of a large file share nothing and a window covering
+    /// both would make either scan walk the whole tree.
+    windows: Vec<Range<usize>>,
+    scans: Vec<(*const stoat_language::Tree, usize, PairScan<'a>)>,
 }
 
 impl<'a> PairScans<'a> {
-    /// The scan for `tree`, collecting it on first ask.
-    pub(crate) fn scan_for(&mut self, tree: Option<&'a stoat_language::Tree>) -> &PairScan<'a> {
+    /// The scan covering `cursor` in `tree`, collecting it on first ask.
+    pub(crate) fn scan_for(
+        &mut self,
+        tree: Option<&'a stoat_language::Tree>,
+        cursor: usize,
+    ) -> &PairScan<'a> {
         let key = tree.map_or(std::ptr::null(), |t| t as *const _);
-        let idx = match self.scans.iter().position(|(seen, _)| *seen == key) {
+        let cluster = self.cluster_of(cursor);
+        let idx = match self
+            .scans
+            .iter()
+            .position(|(seen, at, _)| *seen == key && *at == cluster)
+        {
             Some(idx) => idx,
             None => {
-                self.scans
-                    .push((key, PairScan::over(tree, self.window.clone())));
+                self.scans.push((
+                    key,
+                    cluster,
+                    PairScan::over(tree, self.windows[cluster].clone()),
+                ));
                 self.scans.len() - 1
             },
         };
-        &self.scans[idx].1
+        &self.scans[idx].2
+    }
+
+    /// The cluster whose window holds `cursor`.
+    ///
+    /// Every cursor the press was built from sits in one, its own window having
+    /// gone into the merge. A cursor from anywhere else takes the nearest,
+    /// which collects zones it does not ask about rather than answering wrongly.
+    fn cluster_of(&self, cursor: usize) -> usize {
+        self.windows
+            .partition_point(|window| window.end <= cursor)
+            .min(self.windows.len() - 1)
     }
 }
 
 /// Prepare the shared scans for a press whose cursors sit at `heads`.
 ///
-/// Nothing is collected here. The window is settled and the trees are met as
+/// Nothing is collected here. The windows are settled and the trees are met as
 /// [`PairScans::scan_for`] is called, so a press whose cursors all miss their
 /// pair by text alone collects nothing.
 pub(crate) fn shared_pair_scans<'a>(heads: impl Iterator<Item = usize>) -> PairScans<'a> {
-    let mut first = usize::MAX;
-    let mut last = 0;
+    let mut heads: Vec<usize> = heads.collect();
+    heads.sort_unstable();
+
+    let mut windows: Vec<Range<usize>> = Vec::with_capacity(heads.len().max(1));
     for head in heads {
-        first = first.min(head);
-        last = last.max(head);
+        let window = window_around(head);
+        match windows.last_mut() {
+            Some(prev) if window.start <= prev.end => prev.end = prev.end.max(window.end),
+            _ => windows.push(window),
+        }
     }
-    let first = first.min(last);
+    // A press with no cursors still answers, so there is always a cluster to
+    // find.
+    if windows.is_empty() {
+        windows.push(window_around(0));
+    }
 
     PairScans {
-        window: window_around(first).start..window_around(last).end,
+        windows,
         scans: Vec::new(),
     }
 }
@@ -375,7 +408,7 @@ fn collect_surround_pairs(
                 find_surround_pair(&rope, head, open, close, &scan, skip)
                     .map(|(open_off, close_off)| (open_off, close_off, open, close))
             },
-            None => closest_surround_pair(&rope, head, scans.scan_for(tree), skip, span)
+            None => closest_surround_pair(&rope, head, scans.scan_for(tree, head), skip, span)
                 .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close)),
         };
         // Both misses abort the whole operation rather than dropping the
@@ -965,7 +998,10 @@ fn walk_left_for_symmetric(
 mod tests {
     use super::*;
     use crate::{
-        action_handlers::{focused_editor_mut, movement::MAX_PAIR_SCAN},
+        action_handlers::{
+            focused_editor_mut,
+            movement::{MAX_PAIR_SCAN, PAIR_SCAN_WINDOW_BYTES},
+        },
         test_harness::TestHarness,
     };
     use std::path::PathBuf;
@@ -1125,6 +1161,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Two cursors at the ends of a large file reach nothing in common, so each
+    /// collects the zones of its own window.
+    ///
+    /// One window spanning them both made either scan walk the whole tree,
+    /// which is the file rather than what a scan can read. A twenty-thousand
+    /// line file is about a hundred thousand node visits per press that way.
+    #[test]
+    fn far_apart_cursors_each_collect_their_own_window() {
+        let mut h = TestHarness::with_size(60, 10);
+        // Wider than two windows, so neither cursor's reach can touch the
+        // other's string.
+        let pad = "fn pad() {}\n";
+        let filler = pad.repeat(3 * PAIR_SCAN_WINDOW_BYTES / pad.len());
+        let src = format!("let a = \"(early)\";\n{filler}let b = \"(late)\";\n");
+        let path = seed_rs(&mut h, &src);
+
+        let early = src.find("(early)").expect("the fixture holds it");
+        let late = src.find("(late)").expect("the fixture holds it");
+        assert!(
+            late - early > 2 * PAIR_SCAN_WINDOW_BYTES,
+            "the two cursors have to be further apart than their reaches",
+        );
+
+        let ws = h.stoat.active_workspace();
+        let buffer_id = ws.buffers.id_for_path(&path).expect("buffer is open");
+        let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+        let tree = deepest_tree_at(snapshot, early).expect("a covering layer");
+
+        let mut scans = shared_pair_scans([early, late].into_iter());
+        assert!(
+            scans.scan_for(Some(tree), early).skips(early),
+            "the early cursor sits in a string",
+        );
+        assert!(
+            !scans.scan_for(Some(tree), early).skips(late),
+            "and its window never reaches the late one",
+        );
+        assert!(
+            scans.scan_for(Some(tree), late).skips(late),
+            "the late cursor sits in a string",
+        );
+        assert!(
+            !scans.scan_for(Some(tree), late).skips(early),
+            "and its window never reaches the early one",
+        );
     }
 
     /// The collected zones answer exactly what asking the tree per character

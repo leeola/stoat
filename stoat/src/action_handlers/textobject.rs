@@ -267,7 +267,7 @@ fn find_textobject<'a>(
             // is what a single-cursor path wants anyway.
             let owned;
             let scan = match scans {
-                Some(scans) => scans.scan_for(tree),
+                Some(scans) => scans.scan_for(tree, cursor),
                 None => {
                     owned = crate::action_handlers::movement::PairScan::around(tree, cursor);
                     &owned

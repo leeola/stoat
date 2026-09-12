@@ -5001,13 +5001,23 @@ pub(super) fn match_brackets(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     // through that grammar's tree and that language's query.
     let mut targets: Vec<(usize, usize)> = {
         let snapshot = ws.buffers.syntax_map(buffer_id).map(|sm| sm.snapshot());
+
+        // Only the character-scan fallback reads zones, so only it collects
+        // any. Cursors near each other share the collection, which is what a
+        // multi-cursor press over one region would otherwise repeat.
+        let mut scans = surround::shared_pair_scans(
+            reads
+                .iter()
+                .map(|read| cursor_offset(rope, read.tail, read.head)),
+        );
         reads
             .iter()
             .filter_map(|read| {
                 let cursor = cursor_offset(rope, read.tail, read.head);
                 let layer = surround::deepest_layer_at(snapshot, cursor);
                 let query = layer.and_then(|layer| layer.language.bracket_query());
-                let target = bracket_partner(rope, cursor, query, layer.map(|l| &l.tree))?;
+                let target =
+                    bracket_partner(rope, cursor, query, layer.map(|l| &l.tree), &mut scans)?;
                 Some((read.id, target))
             })
             .collect()
@@ -5039,11 +5049,12 @@ pub(super) fn match_brackets(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
 /// Text with no tree at all falls to the character scan, which matches only a
 /// cursor already on a delimiter. Nothing there says which side of a quote
 /// opens, or whether a bracket is inside a comment.
-fn bracket_partner(
+fn bracket_partner<'a>(
     rope: &Rope,
     cursor: usize,
     query: Option<&stoat_language::Query>,
-    tree: Option<&stoat_language::Tree>,
+    tree: Option<&'a stoat_language::Tree>,
+    scans: &mut surround::PairScans<'a>,
 ) -> Option<usize> {
     if let (Some(query), Some(tree)) = (query, tree) {
         return stoat_language::matching_bracket(query, tree.root_node(), rope, cursor);
@@ -5057,11 +5068,11 @@ fn bracket_partner(
 
     let ch = rope.chars_at(cursor).next()?;
     let (open, close, forward) = bracket_pair(ch)?;
-    let scan = PairScan::around(tree, cursor);
+    let scan = scans.scan_for(tree, cursor);
     if scan.skips(cursor) {
         return None;
     }
-    scan_bracket_match(rope, cursor, ch, open, close, forward, &scan)
+    scan_bracket_match(rope, cursor, ch, open, close, forward, scan)
 }
 
 /// How far a pair scan walks before giving up, in characters each way.
@@ -5107,7 +5118,7 @@ fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
 ///
 /// [`MAX_PAIR_SCAN`] counts characters and a character is at most four bytes,
 /// so this is the furthest a scan can look however the text is encoded.
-const PAIR_SCAN_WINDOW_BYTES: usize = MAX_PAIR_SCAN * 4;
+pub(crate) const PAIR_SCAN_WINDOW_BYTES: usize = MAX_PAIR_SCAN * 4;
 
 /// The byte ranges a pair scan reads as text rather than as code.
 ///
