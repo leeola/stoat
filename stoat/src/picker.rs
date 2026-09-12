@@ -9,6 +9,7 @@ use crate::{
     workspace::Workspace,
 };
 use std::{
+    collections::{HashMap, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
     sync::{
@@ -1415,6 +1416,57 @@ pub(crate) enum PreviewSource {
     Buffer(BufferId),
 }
 
+/// Paths [`PreviewTextCache`] holds before the oldest goes.
+///
+/// At [`PREVIEW_BYTE_LIMIT`] that is 2 MiB, which is what a reader arrowing
+/// through a list is worth: a walk down and back up re-reads nothing, and a
+/// deliberate scroll past this many files re-reads the ones it left behind.
+pub(crate) const PREVIEW_TEXT_CACHE_CAP: usize = 16;
+
+/// One finder session's previewed file texts, least recently used first.
+///
+/// A selection change re-renders the pane, and without this a walk down a list
+/// and back up opens and reads every file it passes, on the run loop. The cache
+/// goes with the preview, so a file edited between two finder sessions is read
+/// afresh in the second.
+#[derive(Default)]
+struct PreviewTextCache {
+    texts: HashMap<PathBuf, Arc<str>>,
+    /// Cached paths, least recently used first, so eviction takes the front.
+    recent: VecDeque<PathBuf>,
+}
+
+impl PreviewTextCache {
+    /// `path`'s cached text, marking it most recently used when it is held.
+    ///
+    /// This is the call a sync makes to decide whether to read, so asking and
+    /// recording the use are the same act.
+    fn get(&mut self, path: &Path) -> Option<Arc<str>> {
+        let text = self.texts.get(path)?.clone();
+        if let Some(at) = self.recent.iter().position(|held| held == path) {
+            self.recent.remove(at);
+        }
+        self.recent.push_back(path.to_path_buf());
+        Some(text)
+    }
+
+    /// Cache `text` for `path` as the most recently used, dropping the least
+    /// recently used when that puts the cache over the cap.
+    fn insert(&mut self, path: PathBuf, text: Arc<str>) {
+        if let Some(at) = self.recent.iter().position(|held| *held == path) {
+            self.recent.remove(at);
+        }
+        self.recent.push_back(path.clone());
+        self.texts.insert(path, text);
+
+        while self.recent.len() > PREVIEW_TEXT_CACHE_CAP {
+            if let Some(oldest) = self.recent.pop_front() {
+                self.texts.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// Read-only preview pane backed by a reusable scratch buffer.
 ///
 /// A picker drives this by calling [`Preview::sync`] with the selected source.
@@ -1427,6 +1479,8 @@ pub(crate) struct Preview {
     /// Lets [`Preview::sync`] skip a redundant reload when the selection is
     /// unchanged.
     rendered_for: Option<PreviewSource>,
+    /// Texts read this session, so a walk back up the list reads nothing.
+    texts: PreviewTextCache,
 }
 
 impl Preview {
@@ -1440,6 +1494,7 @@ impl Preview {
             editor,
             buffer,
             rendered_for: None,
+            texts: PreviewTextCache::default(),
         }
     }
 
@@ -1461,14 +1516,30 @@ impl Preview {
         if self.rendered_for.as_ref() == Some(&source) {
             return;
         }
-        let (content, language) = match &source {
-            PreviewSource::File(path) => (
-                read_preview(fs_host, path),
-                language_registry.for_path(path),
-            ),
+        // Each arm loads the pane itself, rather than handing one type of text
+        // back to a shared call: the cache holds an `Arc<str>` and the other two
+        // build a `String`, and unifying those would copy a live buffer's whole
+        // rope a second time.
+        let language = match &source {
+            PreviewSource::File(path) => {
+                let text = match self.texts.get(path) {
+                    Some(text) => text,
+                    None => {
+                        let text: Arc<str> = read_preview(fs_host, path).into();
+                        self.texts.insert(path.clone(), text.clone());
+                        text
+                    },
+                };
+                replace_preview_text(ws, self.editor, self.buffer, &text);
+                language_registry.for_path(path)
+            },
             // No language: a listing is names, not source, and highlighting it
             // as code would read meaning into them that is not there.
-            PreviewSource::Directory(path) => (list_preview(fs_host, path), None),
+            PreviewSource::Directory(path) => {
+                let listing = list_preview(fs_host, path);
+                replace_preview_text(ws, self.editor, self.buffer, &listing);
+                None
+            },
             PreviewSource::Buffer(id) => {
                 let content = ws
                     .buffers
@@ -1480,10 +1551,10 @@ impl Preview {
                             .to_string()
                     })
                     .unwrap_or_default();
-                (content, ws.buffers.language_for(*id))
+                replace_preview_text(ws, self.editor, self.buffer, &content);
+                ws.buffers.language_for(*id)
             },
         };
-        replace_preview_text(ws, self.editor, self.buffer, &content);
         ws.reset_preview_syntax(self.buffer);
         if let Some(language) = language {
             ws.buffers.set_language(self.buffer, language);
@@ -1547,6 +1618,7 @@ impl Preview {
             editor: EditorId::default(),
             buffer: BufferId::new(0),
             rendered_for: None,
+            texts: PreviewTextCache::default(),
         }
     }
 }

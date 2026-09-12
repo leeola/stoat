@@ -2326,6 +2326,110 @@ mod tests {
         );
     }
 
+    /// The pane text the finder currently shows.
+    fn preview_text(h: &TestHarness) -> String {
+        let preview_id = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .core
+            .preview
+            .buffer;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(preview_id)
+            .expect("preview buffer");
+        let guard = buffer.read().expect("poisoned");
+        guard.rope().to_string()
+    }
+
+    /// Walking a list and back up reads nothing it already read.
+    ///
+    /// Stated through an injected read failure rather than a read count: the
+    /// second view of a file shows its text when the cache served it, and the
+    /// unreadable placeholder when it went back to disk.
+    #[test]
+    fn walking_back_up_the_finder_rereads_nothing() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[("a.txt", "first file\n"), ("b.txt", "second file\n")],
+        );
+        h.type_keys("space p");
+        h.snapshot();
+
+        let first = preview_text(&h);
+        assert!(!first.is_empty(), "the pane shows the first selection");
+
+        h.type_keys("down");
+        h.snapshot();
+        let second = preview_text(&h);
+        assert_ne!(second, first, "and moving down shows the other file");
+
+        // Whichever file the first selection was, reading it again now fails.
+        let shown_path = match first.as_str() {
+            "first file\n" => root.join("a.txt"),
+            _ => root.join("b.txt"),
+        };
+        h.fake_fs()
+            .fail_next_read(&shown_path, std::io::ErrorKind::PermissionDenied);
+
+        h.type_keys("up");
+        h.snapshot();
+
+        assert_eq!(
+            preview_text(&h),
+            first,
+            "the walk back up reads nothing, so the armed failure never fires",
+        );
+    }
+
+    /// Past the cap the oldest path goes, so one session's cache is bounded.
+    #[test]
+    fn the_preview_cache_evicts_the_oldest_path() {
+        let mut h = crate::Stoat::test();
+        let files: Vec<(String, String)> = (0..=crate::picker::PREVIEW_TEXT_CACHE_CAP)
+            .map(|i| (format!("f{i:03}.txt"), format!("file {i}\n")))
+            .collect();
+        let root = seed_finder_workspace(
+            &mut h,
+            &files
+                .iter()
+                .map(|(name, text)| (name.as_str(), text.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        h.type_keys("space p");
+        h.snapshot();
+
+        let first = preview_text(&h);
+        // Down past the cap and back to the top, so the first path was evicted.
+        for _ in 0..crate::picker::PREVIEW_TEXT_CACHE_CAP {
+            h.type_keys("down");
+            h.snapshot();
+        }
+
+        let evicted = match files.iter().find(|(_, text)| *text == first) {
+            Some((name, _)) => root.join(name),
+            None => panic!("the first selection shows one of the seeded files"),
+        };
+        h.fake_fs()
+            .fail_next_read(&evicted, std::io::ErrorKind::PermissionDenied);
+
+        for _ in 0..crate::picker::PREVIEW_TEXT_CACHE_CAP {
+            h.type_keys("up");
+            h.snapshot();
+        }
+
+        assert_eq!(
+            preview_text(&h),
+            "<unreadable>",
+            "the oldest path went with the cap, so it read from disk again",
+        );
+    }
+
     #[test]
     fn preview_buffer_evicted_on_close() {
         let mut h = crate::Stoat::test();
