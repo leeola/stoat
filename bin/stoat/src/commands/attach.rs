@@ -53,6 +53,77 @@ const CHUNK: usize = 64 * 1024;
 /// sized for one chunk never has to grow.
 const FRAME_HEADER: usize = 5;
 
+/// How long a write to a client may park before it is given up on.
+///
+/// Applied where a parked write would hold up something that must not wait: the
+/// courtesy frame to a client being displaced, and the drain on quit. The
+/// output thread keeps no timeout, so a slow but live link is never dropped.
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The one client a session has, and the write in flight to it.
+///
+/// The two locks are separate because they answer different questions. `current`
+/// says who is attached, and is held only long enough to read or swap that.
+/// `writing` says a frame is going out, and is held across the write itself,
+/// which parks for as long as a client refuses to drain its socket. Taking
+/// `current` for the write would park the acceptor with it, and a replacement
+/// client is exactly what unparks the write.
+#[derive(Default)]
+struct ClientSlot {
+    current: Mutex<Option<Arc<UnixStream>>>,
+    writing: Mutex<()>,
+}
+
+/// Write `wire` to the attached client, reporting whether it arrived.
+///
+/// Clears the slot when the write fails, but only when the stream it failed on
+/// is still the one attached. The acceptor's displace is one cause of a failed
+/// write, and clearing then would drop the client that displaced it.
+fn write_to_client(slot: &ClientSlot, wire: &[u8]) -> bool {
+    let _writing = slot.writing.lock().expect("attach write lock");
+    let held = slot.current.lock().expect("attach client lock").clone();
+    let Some(stream) = held else {
+        return false;
+    };
+
+    if (&*stream).write_all(wire).is_ok() {
+        return true;
+    }
+
+    let mut current = slot.current.lock().expect("attach client lock");
+    if current
+        .as_ref()
+        .is_some_and(|held| Arc::ptr_eq(held, &stream))
+    {
+        *current = None;
+    }
+    false
+}
+
+/// Hand the session to `stream`, telling whoever held it that it was replaced.
+///
+/// The replacement goes in first, so a write racing this reaches the new client
+/// rather than the one leaving.
+///
+/// The courtesy frame that follows carries a timeout. A client being displaced
+/// is often one that stopped reading, whose socket refuses even a five-byte
+/// frame. The shutdown after it is what wakes a write already parked on that
+/// client.
+fn displace(slot: &ClientSlot, stream: UnixStream) {
+    let replaced = slot
+        .current
+        .lock()
+        .expect("attach client lock")
+        .replace(Arc::new(stream));
+
+    let Some(old) = replaced else { return };
+    let mut wire = Vec::new();
+    attach::encode(&Frame::Replaced, &mut wire);
+    let _ = old.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
+    let _ = (&*old).write_all(&wire);
+    let _ = old.shutdown(std::net::Shutdown::Both);
+}
+
 /// The running end of a detachable session, held by the process being attached
 /// to.
 ///
@@ -61,7 +132,7 @@ const FRAME_HEADER: usize = 5;
 pub struct AttachServer {
     attached_rx: Option<UnboundedReceiver<()>>,
     master: Arc<File>,
-    current: Arc<Mutex<Option<UnixStream>>>,
+    slot: Arc<ClientSlot>,
     path: PathBuf,
 }
 
@@ -88,6 +159,18 @@ impl AttachServer {
             }
         }
 
+        // Quit waits at most this long on a client that stopped reading. The
+        // restore bytes are worth a pause; a hung session is not.
+        if let Some(stream) = self
+            .slot
+            .current
+            .lock()
+            .expect("attach client lock")
+            .as_ref()
+        {
+            let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
+        }
+
         let mut buf = [0u8; CHUNK];
         let mut wire = Vec::with_capacity(CHUNK + FRAME_HEADER);
         loop {
@@ -99,16 +182,12 @@ impl AttachServer {
             };
             wire.clear();
             attach::encode_bytes(&buf[..got], &mut wire);
-            let mut held = self.current.lock().expect("attach client lock");
-            let Some(stream) = held.as_mut() else {
-                break;
-            };
-            if stream.write_all(&wire).is_err() {
+            if !write_to_client(&self.slot, &wire) {
                 break;
             }
         }
 
-        if let Some(stream) = self.current.lock().expect("attach client lock").take() {
+        if let Some(stream) = self.slot.current.lock().expect("attach client lock").take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         let _ = LocalFs.remove_file(&self.path);
@@ -383,16 +462,16 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
     }
     let listener = UnixListener::bind(&path).whatever_context("bind the attach socket")?;
 
-    let current: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
+    let slot = Arc::new(ClientSlot::default());
     let (attached_tx, attached_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    spawn_master_reader(master.clone(), current.clone());
-    spawn_acceptor(listener, master.clone(), current.clone(), attached_tx);
+    spawn_master_reader(master.clone(), slot.clone());
+    spawn_acceptor(listener, master.clone(), slot.clone(), attached_tx);
 
     Ok(AttachServer {
         attached_rx: Some(attached_rx),
         master,
-        current,
+        slot,
         path,
     })
 }
@@ -401,7 +480,7 @@ pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
 ///
 /// Output produced while nobody is attached is dropped. The next client is told
 /// to expect nothing, and the editor re-declares its whole terminal for it.
-fn spawn_master_reader(master: Arc<File>, current: Arc<Mutex<Option<UnixStream>>>) {
+fn spawn_master_reader(master: Arc<File>, slot: Arc<ClientSlot>) {
     thread::Builder::new()
         .name("attach-out".to_owned())
         .spawn(move || {
@@ -416,12 +495,7 @@ fn spawn_master_reader(master: Arc<File>, current: Arc<Mutex<Option<UnixStream>>
                 wire.clear();
                 attach::encode_bytes(&buf[..got], &mut wire);
 
-                let mut held = current.lock().expect("attach client lock");
-                if let Some(stream) = held.as_mut()
-                    && stream.write_all(&wire).is_err()
-                {
-                    *held = None;
-                }
+                write_to_client(&slot, &wire);
             }
         })
         .expect("spawn the attach output thread");
@@ -431,7 +505,7 @@ fn spawn_master_reader(master: Arc<File>, current: Arc<Mutex<Option<UnixStream>>
 fn spawn_acceptor(
     listener: UnixListener,
     master: Arc<File>,
-    current: Arc<Mutex<Option<UnixStream>>>,
+    slot: Arc<ClientSlot>,
     attached_tx: UnboundedSender<()>,
 ) {
     thread::Builder::new()
@@ -443,18 +517,8 @@ fn spawn_acceptor(
                     continue;
                 };
 
-                {
-                    let mut held = current.lock().expect("attach client lock");
-                    if let Some(mut old) = held.take() {
-                        let mut wire = Vec::new();
-                        attach::encode(&Frame::Replaced, &mut wire);
-                        let _ = old.write_all(&wire);
-                        let _ = old.shutdown(std::net::Shutdown::Both);
-                    }
-                    *held = Some(stream);
-                }
-
-                spawn_client_reader(reader, master.clone(), current.clone(), attached_tx.clone());
+                displace(&slot, stream);
+                spawn_client_reader(reader, master.clone(), slot.clone(), attached_tx.clone());
             }
         })
         .expect("spawn the attach accept thread");
@@ -464,7 +528,7 @@ fn spawn_acceptor(
 fn spawn_client_reader(
     mut reader: UnixStream,
     master: Arc<File>,
-    current: Arc<Mutex<Option<UnixStream>>>,
+    slot: Arc<ClientSlot>,
     attached_tx: UnboundedSender<()>,
 ) {
     thread::Builder::new()
@@ -508,7 +572,7 @@ fn spawn_client_reader(
 
             // Only when this is still the attached client. A displaced reader
             // reaching EOF must not clear the one that displaced it.
-            let mut held = current.lock().expect("attach client lock");
+            let mut held = slot.current.lock().expect("attach client lock");
             if held
                 .as_ref()
                 .is_some_and(|held| held.as_raw_fd() == reader.as_raw_fd())
@@ -561,9 +625,122 @@ fn last_error() -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{client_exit_code, server_argv};
-    use std::ffi::OsString;
+    use super::{
+        client_exit_code, displace, server_argv, write_to_client, Arc, ClientSlot, Duration,
+        Instant, Mutex, Read, UnixStream, Write, CHUNK,
+    };
+    use std::{ffi::OsString, sync::Condvar, thread};
     use stoat::attach::REPLACED_EXIT;
+
+    /// How long a test waits on something that must not wait at all.
+    const LIMIT: Duration = Duration::from_secs(5);
+
+    /// Write until the socket refuses more, which is the state a client that
+    /// stopped reading leaves it in. A stopped terminal, a frozen link, and a
+    /// paused multiplexer pane all reach it.
+    fn fill(stream: &UnixStream) {
+        stream.set_nonblocking(true).expect("non-blocking");
+        while (&*stream).write(&[0u8; 4096]).is_ok() {}
+        stream.set_nonblocking(false).expect("blocking");
+    }
+
+    /// A slot holding one client that has stopped reading, with the other end
+    /// kept alive so the socket stays open rather than failing fast.
+    fn stalled_client() -> (Arc<ClientSlot>, UnixStream) {
+        let (server, unread) = UnixStream::pair().expect("a socket pair");
+        fill(&server);
+
+        let slot = Arc::new(ClientSlot::default());
+        slot.current
+            .lock()
+            .expect("attach client lock")
+            .replace(Arc::new(server));
+        (slot, unread)
+    }
+
+    /// Whether `body` finished inside `LIMIT`, so a regression that parks
+    /// forever reports rather than hanging the suite.
+    fn finishes_within(body: impl FnOnce() + Send + 'static) -> bool {
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        thread::spawn({
+            let done = done.clone();
+            move || {
+                body();
+                *done.0.lock().expect("done lock") = true;
+                done.1.notify_all();
+            }
+        });
+
+        let (lock, waiting) = &*done;
+        let (finished, _) = waiting
+            .wait_timeout_while(lock.lock().expect("done lock"), LIMIT, |done| !*done)
+            .expect("done lock");
+        *finished
+    }
+
+    /// The session's promise is that a new client displaces a forgotten one.
+    /// The write to a client that stopped reading parks, so that promise holds
+    /// only while the displace waits on neither the write nor its lock.
+    #[test]
+    fn a_parked_write_holds_off_no_displace() {
+        let (slot, _unread) = stalled_client();
+
+        let parked = thread::spawn({
+            let slot = slot.clone();
+            move || write_to_client(&slot, &[b'x'; CHUNK])
+        });
+
+        // Held for the write itself, so a failure to take it says one is out.
+        let deadline = Instant::now() + LIMIT;
+        while slot.writing.try_lock().is_ok() {
+            assert!(Instant::now() < deadline, "no write ever started");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let (next, _reading) = UnixStream::pair().expect("a socket pair");
+        assert!(
+            finishes_within({
+                let slot = slot.clone();
+                move || displace(&slot, next)
+            }),
+            "the displace waited on the parked write",
+        );
+        assert!(
+            finishes_within(move || {
+                assert!(!parked.join().expect("the write thread"), "it failed");
+            }),
+            "the shutdown never woke the parked write",
+        );
+        assert!(
+            slot.current.lock().expect("attach client lock").is_some(),
+            "the failed write cleared the client that displaced it",
+        );
+    }
+
+    /// The displaced client is the one that stopped reading, so its socket
+    /// refuses even the five bytes that tell it so. Waiting on that write would
+    /// hold the session against the client that came to take it over.
+    #[test]
+    fn a_replacement_is_written_to_while_the_client_it_replaced_reads_nothing() {
+        let (slot, _unread) = stalled_client();
+        let (next, mut reading) = UnixStream::pair().expect("a socket pair");
+
+        assert!(
+            finishes_within({
+                let slot = slot.clone();
+                move || displace(&slot, next)
+            }),
+            "the courtesy frame to a full socket has to give up",
+        );
+
+        assert!(
+            write_to_client(&slot, b"hello"),
+            "the replacement takes the write",
+        );
+        let mut got = [0u8; 5];
+        reading.read_exact(&mut got).expect("and receives it");
+        assert_eq!(&got, b"hello");
+    }
 
     fn argv(args: &[&str]) -> Vec<String> {
         server_argv(args.iter().map(OsString::from), "box")
