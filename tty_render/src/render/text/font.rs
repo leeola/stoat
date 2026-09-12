@@ -7,13 +7,19 @@
 
 use crate::render::CellMetrics;
 use cosmic_text::{
-    fontdb::{Query, Weight},
+    fontdb::{Database, Query, Weight},
     Attrs, AttrsList, Buffer as CosmicBuffer, CacheKey, Ellipsize, Family, Font, FontSystem,
     Hinting, LayoutLine, Metrics, ShapeBuffer, ShapeLine, Shaping, Wrap,
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use ttf_parser::{gsub::SubstitutionSubtable, opentype_layout::Coverage};
+
+/// Family name of the bundled text face, registered by [`load_bundled_fonts`].
+///
+/// The shipped config shapes with it, and it is what the generic monospace
+/// resolves to, so it is present whatever the system holds.
+pub(super) const BUNDLED_FAMILY: &str = "JetBrains Mono";
 
 /// Family name of the bundled Nerd Font, registered by [`load_bundled_fonts`].
 ///
@@ -484,17 +490,77 @@ pub(super) fn resolve_primary_font(
     font_system.get_font(id, Weight::NORMAL)
 }
 
-/// Build the [`FontSystem`] a [`super::TextPass`] shapes with: cosmic-text's system
-/// font enumeration plus the bundled fonts.
+/// Build the [`FontSystem`] a [`super::TextPass`] shapes with: the bundled faces
+/// plus every font installed on the system.
 ///
 /// Enumerating the system fonts dominates renderer startup, and this needs no
 /// window or GPU, so it is run on a background thread (see
 /// [`GpuContext::new`](crate::gpu::GpuContext::new)) concurrently with the
 /// main-thread surface and device setup.
+///
+/// See also:
+/// - [`bundled_font_system`] for the half that reads no file, which a first frame shapes with while
+///   the scan runs.
 pub fn build_font_system() -> FontSystem {
-    let mut font_system = FontSystem::new();
-    load_bundled_fonts(&mut font_system);
-    font_system
+    let bundled = bundled_font_system();
+    let locale = bundled.locale().to_owned();
+
+    FontSystem::new_with_locale_and_db(locale, scan_system_fonts(bundled.db().clone()))
+}
+
+/// Build a [`FontSystem`] over the bundled faces alone, opening no file.
+///
+/// The shipped config shapes with the bundled JetBrains Mono, so a launch that
+/// keeps to it can draw its first frame from this and let the system scan finish
+/// behind the frame. [`scan_system_fonts`] takes this system's database and
+/// returns the same faces at the same ids plus everything installed, which is
+/// what lets the two be swapped under a running pass without reshaping a cell
+/// differently.
+///
+/// The generic monospace points at the bundled family rather than at
+/// cosmic-text's `Noto Sans Mono`, which the bundled database does not hold. A
+/// scanned system points it at the same family, so text that shaped through the
+/// generic keeps its metrics across the swap.
+pub fn bundled_font_system() -> FontSystem {
+    bundled_font_system_with_locale(locale())
+}
+
+/// Build a [`FontSystem`] over the bundled faces alone, matching against
+/// `locale`.
+///
+/// Split from [`bundled_font_system`] so the database build stays clear of the
+/// environment the locale is read from.
+fn bundled_font_system_with_locale(locale: String) -> FontSystem {
+    let mut db = Database::new();
+    load_bundled_fonts(&mut db);
+    db.set_monospace_family(BUNDLED_FAMILY);
+
+    FontSystem::new_with_locale_and_db(locale, db)
+}
+
+/// Add every font installed on the system to `db`.
+///
+/// Opens and parses each font file in each configured directory, which is the
+/// dominant cost of a cold launch. The faces already in `db` keep their ids, so
+/// a database seeded by [`bundled_font_system`] comes back a superset of itself.
+///
+/// The scan reads the platform's own generic-family aliases, which name a family
+/// that need not be installed, so the generic monospace is pointed back at
+/// [`BUNDLED_FAMILY`] afterward. A bundled database and a scanned one must agree
+/// on it, or text that shaped through the generic changes metrics when one
+/// replaces the other.
+pub fn scan_system_fonts(mut db: Database) -> Database {
+    db.load_system_fonts();
+    db.set_monospace_family(BUNDLED_FAMILY);
+    db
+}
+
+/// The locale font matching resolves against, the way cosmic-text reads it.
+fn locale() -> String {
+    sys_locale::get_locale().unwrap_or_else(|| {
+        tracing::warn!("no system locale reported, falling back to en-US");
+        String::from("en-US")
+    })
 }
 
 /// Shape every space-delimited word of `text` at `font_size`, returning the
@@ -555,11 +621,14 @@ pub fn shape_words_cached(
         .sum()
 }
 
-/// Register the bundled faces into `font_system`'s font database so they resolve
-/// regardless of which fonts are installed system-wide: the JetBrains Mono
-/// variable faces (the `JetBrains Mono` family) and the Symbols Nerd Font Mono
-/// symbol face ([`SYMBOLS_FAMILY`]) that backs the Private-Use-Area fallback.
-pub(super) fn load_bundled_fonts(font_system: &mut FontSystem) {
+/// Register the bundled faces into `db` so they resolve regardless of which
+/// fonts are installed system-wide: the JetBrains Mono variable faces (the
+/// [`BUNDLED_FAMILY`] family) and the Symbols Nerd Font Mono symbol face
+/// ([`SYMBOLS_FAMILY`]) that backs the Private-Use-Area fallback.
+///
+/// Called before any system font is added, so the bundled faces take the lowest
+/// ids and a database seeded from this one keeps them at those ids.
+pub(super) fn load_bundled_fonts(db: &mut Database) {
     const REGULAR: &[u8] =
         include_bytes!("../../../assets/fonts/JetBrainsMono/JetBrainsMono[wght].ttf");
     const ITALIC: &[u8] =
@@ -567,7 +636,6 @@ pub(super) fn load_bundled_fonts(font_system: &mut FontSystem) {
     const SYMBOLS: &[u8] =
         include_bytes!("../../../assets/fonts/SymbolsNerdFont/SymbolsNerdFontMono-Regular.ttf");
 
-    let db = font_system.db_mut();
     db.load_font_data(REGULAR.to_vec());
     db.load_font_data(ITALIC.to_vec());
     db.load_font_data(SYMBOLS.to_vec());
@@ -652,16 +720,29 @@ pub(super) fn probe_cap_height(font: Option<&Font>, metrics: CellMetrics) -> f32
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, font_covers, glyph_family, load_bundled_fonts, resolve_primary_family,
-        resolve_primary_font, run_text_and_columns_into, shape_char, shape_family, shape_run,
-        shape_run_cached, shape_words, substitution_coverage, RunShapeCache, ShapeScratch,
-        RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
+        build_font_system, bundled_font_system_with_locale, font_covers, glyph_family,
+        resolve_primary_family, resolve_primary_font, run_text_and_columns_into, shape_char,
+        shape_family, shape_run, shape_run_cached, shape_words, substitution_coverage,
+        RunShapeCache, ShapeScratch, BUNDLED_FAMILY, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
-        fontdb::{Database, Query, Weight},
+        fontdb::{Query, Weight, ID},
         Family, FontSystem,
     };
+
+    /// A bundled-only system at a fixed locale, so a test never reads the
+    /// environment's.
+    fn bundled() -> FontSystem {
+        bundled_font_system_with_locale("en-US".into())
+    }
+
+    fn face_of(font_system: &FontSystem, family: Family<'_>) -> Option<ID> {
+        font_system.db().query(&Query {
+            families: &[family],
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn shape_char_bold_resolves_a_distinct_face() {
@@ -681,27 +762,48 @@ mod tests {
     }
 
     #[test]
-    fn bundled_fonts_make_jetbrains_mono_resolvable() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+    fn a_bundled_system_resolves_every_family_the_renderer_shapes_with() {
+        let font_system = bundled();
+        let bundled = face_of(&font_system, Family::Name(BUNDLED_FAMILY));
 
+        assert!(bundled.is_some(), "the bundled text family resolves");
         assert!(
-            font_system
-                .db()
-                .query(&Query {
-                    families: &[Family::Name("JetBrains Mono")],
-                    ..Default::default()
-                })
-                .is_some(),
-            "bundled faces resolve JetBrains Mono in an otherwise empty font db"
+            face_of(&font_system, Family::Name(SYMBOLS_FAMILY)).is_some(),
+            "the bundled symbol family resolves",
+        );
+        assert_eq!(
+            face_of(&font_system, Family::Monospace),
+            bundled,
+            "the generic monospace resolves to the bundled family",
+        );
+    }
+
+    #[test]
+    fn a_scanned_system_keeps_the_bundled_faces_at_their_ids() {
+        let bundled = bundled();
+        let scanned = build_font_system();
+
+        assert_eq!(
+            face_of(&scanned, Family::Name(BUNDLED_FAMILY)),
+            face_of(&bundled, Family::Name(BUNDLED_FAMILY)),
+            "the scan adds faces without moving the bundled text family",
+        );
+        assert_eq!(
+            face_of(&scanned, Family::Name(SYMBOLS_FAMILY)),
+            face_of(&bundled, Family::Name(SYMBOLS_FAMILY)),
+            "the scan adds faces without moving the bundled symbol family",
+        );
+        assert_eq!(
+            face_of(&scanned, Family::Monospace),
+            face_of(&bundled, Family::Monospace),
+            "the generic monospace resolves the same before and after the scan",
         );
     }
 
     #[test]
     fn glyph_family_falls_back_to_symbols_font_for_uncovered_glyphs() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
-        let primary = Family::Name("JetBrains Mono");
+        let mut font_system = bundled();
+        let primary = Family::Name(BUNDLED_FAMILY);
 
         assert_eq!(
             glyph_family(&mut font_system, 'A', primary),
@@ -726,8 +828,7 @@ mod tests {
     /// it never lets one past that did.
     #[test]
     fn substitution_coverage_holds_the_glyphs_the_face_reshapes() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let font = resolve_primary_font(&mut font_system, Some("JetBrains Mono"))
             .expect("the bundled face resolves");
 
@@ -750,8 +851,7 @@ mod tests {
 
     #[test]
     fn shape_run_forms_ligatures_and_maps_clusters() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let metrics = CellMetrics::from_font_size(16, 1.0);
         let jbm = Family::Name("JetBrains Mono");
 
@@ -804,8 +904,7 @@ mod tests {
     /// as the row has columns.
     #[test]
     fn shape_run_keys_a_repeated_character_once() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let metrics = CellMetrics::from_font_size(16, 1.0);
 
         let shaped = shape_run(
@@ -829,8 +928,7 @@ mod tests {
     /// out of place to notice.
     #[test]
     fn shape_run_keys_the_font_size_the_metrics_name() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
 
         for size in [11u32, 16, 30] {
             let metrics = CellMetrics::from_font_size(size, 1.0);
@@ -858,8 +956,7 @@ mod tests {
     /// survive the fallback rather than collapsing to the run's start.
     #[test]
     fn shape_run_maps_clusters_through_a_fallback_font() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let metrics = CellMetrics::from_font_size(16, 1.0);
 
         // Two Private-Use-Area powerline separators, which only the bundled
@@ -890,8 +987,7 @@ mod tests {
     /// if a held charmap is not order-dependent or otherwise single-use.
     #[test]
     fn a_held_charmap_answers_coverage_like_a_fresh_one() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let font = resolve_primary_font(&mut font_system, Some("JetBrains Mono"))
             .expect("the bundled primary family resolves");
 
@@ -922,16 +1018,14 @@ mod tests {
     /// alternate that makes it.
     #[test]
     fn shape_words_shapes_each_word_and_keeps_its_ligature() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
 
         assert_eq!(shape_words(&mut font_system, 15, "a => b"), 3 + 1);
     }
 
     #[test]
     fn shape_run_cached_returns_the_cached_run_without_reshaping() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let metrics = CellMetrics::from_font_size(16, 1.0);
         let jbm = Family::Name("JetBrains Mono");
 
@@ -987,8 +1081,7 @@ mod tests {
     /// prove a rule that is about bookkeeping.
     #[test]
     fn a_full_cache_evicts_the_runs_nothing_asked_for() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let mut font_system = bundled();
         let metrics = CellMetrics::from_font_size(16, 1.0);
         let jbm = Family::Name("JetBrains Mono");
 
@@ -1071,8 +1164,7 @@ mod tests {
 
     #[test]
     fn resolve_primary_family_picks_first_present_then_falls_back() {
-        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
-        load_bundled_fonts(&mut font_system);
+        let font_system = bundled();
 
         assert_eq!(
             resolve_primary_family(

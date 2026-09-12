@@ -4281,6 +4281,7 @@ dependencies = [
  "stoatty_protocol",
  "stoatty_term",
  "swash",
+ "sys-locale",
  "tracing",
  "ttf-parser",
  "wgpu",

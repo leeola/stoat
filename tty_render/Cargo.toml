@@ -21,6 +21,7 @@ bytemuck.workspace = true
 raw-window-handle.workspace = true
 futures = { workspace = true, features = ["executor"] }
 cosmic-text.workspace = true
+sys-locale.workspace = true
 swash.workspace = true
 ttf-parser.workspace = true
 etagere.workspace = true

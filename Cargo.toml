@@ -102,6 +102,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 raw-window-handle = "0.6"
 winit = "0.30"
 cosmic-text = "0.18"
+sys-locale = "0.3"
 swash = "0.2.7"
 ttf-parser = "0.25"
 etagere = "0.3"
