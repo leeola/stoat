@@ -50,8 +50,8 @@ use std::{
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        atomic::{AtomicI64, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        atomic::{AtomicI64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -73,12 +73,16 @@ const REAP_TIMEOUT: Duration = Duration::from_millis(250);
 /// than waited out.
 const REAP_POLL: Duration = Duration::from_millis(10);
 
-/// How many outgoing bodies may wait on the writer thread before senders block.
+/// Queued-body count that trips the writer-stall warning.
 ///
-/// Deep enough that a burst of syncs and requests never waits on a server that
-/// is keeping up, and bounded so one that has stopped reading its stdin cannot
-/// grow the queue without limit.
-const WRITE_QUEUE_DEPTH: usize = 256;
+/// The queue itself is unbounded. A bound would make the senders block, and
+/// they run on the run loop's thread, so a server that stops reading its stdin
+/// would stop the editor with it. Crossing this instead warns once and leaves
+/// the queue growing, which costs memory proportional to what the user typed.
+///
+/// Deep enough that a burst of syncs and requests against a server that is
+/// keeping up never reaches it.
+const WRITE_STALL_THRESHOLD: usize = 256;
 
 /// Waiting requests by id, each holding the raw `result` text its response
 /// carried so the awaiting caller runs the one typed parse itself.
@@ -154,9 +158,14 @@ pub struct LocalLsp {
     /// Writing to the child's stdin blocks once it stops draining its pipe, and
     /// a server busy indexing does exactly that, so the write happens on a
     /// thread of its own rather than wherever the sending task happened to be
-    /// scheduled. The queue is bounded, so a server that never drains
-    /// backpressures the senders instead of growing without limit.
-    writer_tx: SyncSender<Vec<u8>>,
+    /// scheduled. The queue is unbounded, so queueing never blocks the sender,
+    /// which is the run loop's own thread.
+    writer_tx: Sender<Vec<u8>>,
+    /// Bodies sent but not yet written, shared with the writer thread.
+    ///
+    /// Read only to warn at [`WRITE_STALL_THRESHOLD`], since nothing here acts
+    /// on a backlog. A parked writer is the server's to clear.
+    write_queue_depth: Arc<AtomicUsize>,
     child: Mutex<Child>,
     next_id: AtomicI64,
     pending: PendingMap,
@@ -221,14 +230,17 @@ impl LocalLsp {
         });
         std::thread::spawn(move || stderr_loop(stderr));
 
-        let (writer_tx, writer_rx) = mpsc::sync_channel(WRITE_QUEUE_DEPTH);
+        let (writer_tx, writer_rx) = mpsc::channel();
+        let write_queue_depth = Arc::new(AtomicUsize::new(0));
         std::thread::spawn({
             let pending = pending.clone();
-            move || writer_loop(stdin, writer_rx, pending)
+            let depth = write_queue_depth.clone();
+            move || writer_loop(stdin, writer_rx, pending, depth)
         });
 
         Ok(Self {
             writer_tx,
+            write_queue_depth,
             child: Mutex::new(child),
             next_id: AtomicI64::new(1),
             pending,
@@ -307,13 +319,25 @@ impl LocalLsp {
 
     /// Hand `body` to the writer thread, which frames and writes it.
     ///
-    /// Returns once the body is queued, not once the server has it. A write that
-    /// then fails takes the whole transport down, and every request waiting on
-    /// one fails with the same closed-transport error a dead server gives.
+    /// Returns once the body is queued, never blocking on the write itself, so
+    /// a server that has stopped draining its stdin parks the writer thread
+    /// rather than the caller. A write that then fails takes the whole
+    /// transport down, and every request waiting on one fails with the same
+    /// closed-transport error a dead server gives.
     fn write_message(&self, body: Vec<u8>) -> io::Result<()> {
         if let Some(transcript) = &self.tx_transcript {
             transcript.record(&String::from_utf8_lossy(&body));
         }
+
+        let queued = self.write_queue_depth.fetch_add(1, Ordering::Relaxed);
+        if queued == WRITE_STALL_THRESHOLD {
+            tracing::warn!(
+                target: "stoat::lsp",
+                queued = queued + 1,
+                "lsp writer backlog crossed {WRITE_STALL_THRESHOLD}; the server is not reading its stdin"
+            );
+        }
+
         self.writer_tx
             .send(body)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "language server closed"))
@@ -765,12 +789,16 @@ fn reader_loop(
 /// Every waiting request is failed on the way out. A body that never reached the
 /// server has no response coming, and the caller would otherwise wait on a
 /// oneshot nothing will ever send.
-fn writer_loop(mut stdin: ChildStdin, bodies: Receiver<Vec<u8>>, pending: PendingMap) {
+fn writer_loop(
+    mut stdin: ChildStdin,
+    bodies: Receiver<Vec<u8>>,
+    pending: PendingMap,
+    depth: Arc<AtomicUsize>,
+) {
     while let Ok(body) = bodies.recv() {
-        if write_framed(&mut stdin, &body)
-            .and_then(|()| stdin.flush())
-            .is_err()
-        {
+        let wrote = write_framed(&mut stdin, &body).and_then(|()| stdin.flush());
+        depth.fetch_sub(1, Ordering::Relaxed);
+        if wrote.is_err() {
             break;
         }
     }
@@ -1307,9 +1335,9 @@ fn client_capabilities() -> ClientCapabilities {
 mod tests {
     use super::{
         client_capabilities, mpsc, reap_child, transcript_slug, transcript_stem, unbounded_channel,
-        wakes_for, write_framed, Arc, AtomicI64, Command, DiagnosticTag, Duration, Envelope,
-        FrameDecoder, HashSet, Instant, LocalLsp, Mutex, Receiver, Routed, ServerCapabilities,
-        TokioMutex, WRITE_QUEUE_DEPTH,
+        wakes_for, write_framed, writer_loop, Arc, AtomicI64, AtomicUsize, Command, DiagnosticTag,
+        Duration, Envelope, FrameDecoder, HashSet, Instant, LocalLsp, Mutex, Ordering, PendingMap,
+        Receiver, Routed, ServerCapabilities, Stdio, TokioMutex, WRITE_STALL_THRESHOLD,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::{json, Value};
@@ -1380,12 +1408,13 @@ mod tests {
     /// tests are about. The child is a sleep the way [`reap_child`]'s own tests
     /// spawn one, since the struct needs one and nothing here speaks to it.
     fn unanswered_transport() -> (LocalLsp, Receiver<Vec<u8>>) {
-        let (writer_tx, writer_rx) = mpsc::sync_channel(WRITE_QUEUE_DEPTH);
+        let (writer_tx, writer_rx) = mpsc::channel();
         let (_notif_tx, notif_rx) = unbounded_channel();
         let (_incoming_tx, incoming_rx) = unbounded_channel();
 
         let lsp = LocalLsp {
             writer_tx,
+            write_queue_depth: Arc::new(AtomicUsize::new(0)),
             child: Mutex::new(
                 Command::new("sleep")
                     .arg("30")
@@ -1400,6 +1429,66 @@ mod tests {
             tx_transcript: None,
         };
         (lsp, writer_rx)
+    }
+
+    /// The senders run on the run loop's own thread. A queue that blocked when
+    /// full would stop the editor for as long as a server kept its stdin
+    /// unread, taking the input, the frames, and the pty drain with it.
+    #[test]
+    fn a_backlog_past_the_stall_threshold_never_blocks_a_sender() {
+        let (lsp, writer_rx) = unanswered_transport();
+        let sent = WRITE_STALL_THRESHOLD * 2;
+
+        for _ in 0..sent {
+            lsp.notify("textDocument/didChange", json!({}))
+                .expect("queueing answers without a writer");
+        }
+
+        assert_eq!(
+            lsp.write_queue_depth.load(Ordering::Relaxed),
+            sent,
+            "no writer thread runs here, so every body is still queued",
+        );
+        assert_eq!(written_methods(&writer_rx).len(), sent);
+    }
+
+    /// The writer lowers the count as it drains, so the backlog the warning
+    /// reads is what is still waiting rather than everything ever sent.
+    #[test]
+    fn the_writer_lowers_the_backlog_as_it_drains() {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("a child that reads whatever it is given");
+        let stdin = child.stdin.take().expect("stdin was piped");
+
+        let (tx, rx) = mpsc::channel();
+        let depth = Arc::new(AtomicUsize::new(0));
+        let writer = std::thread::spawn({
+            let depth = depth.clone();
+            let pending: PendingMap = Default::default();
+            move || writer_loop(stdin, rx, pending, depth)
+        });
+
+        for _ in 0..8 {
+            depth.fetch_add(1, Ordering::Relaxed);
+            tx.send(b"{}".to_vec()).expect("the writer is running");
+        }
+        drop(tx);
+        writer
+            .join()
+            .expect("the writer ends once the queue closes");
+
+        // The writer drops the stdin it owns on its way out, so the child sees
+        // the end of its input and goes without being killed.
+        child.wait().expect("the child exits once its input closes");
+
+        assert_eq!(
+            depth.load(Ordering::Relaxed),
+            0,
+            "every body it wrote it also counted off",
+        );
     }
 
     /// The method names the transport wrote, in order.
