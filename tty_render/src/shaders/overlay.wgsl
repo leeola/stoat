@@ -7,6 +7,11 @@
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
+    // Physical pixels per logical pixel. The border weight below is stated in
+    // logical pixels, so a 2x display draws it twice as wide and the box keeps
+    // its weight against the panel chrome beside it.
+    scale_factor: f32,
+    pad0: f32,
 }
 
 @group(0) @binding(0)
@@ -105,7 +110,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let box_sdf = rounded_box_sdf(p - center, half, radius);
 
     let box_coverage = clamp(0.5 - box_sdf, 0.0, 1.0);
-    let border_px = 1.5;
+    let border_px = max(1.0, round(globals.scale_factor));
     let border_factor = clamp(box_sdf + border_px + 0.5, 0.0, 1.0);
     let box_color = mix(in.fill, in.border, border_factor);
 

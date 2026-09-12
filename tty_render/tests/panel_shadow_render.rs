@@ -12,7 +12,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
+    grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -44,14 +44,25 @@ impl Rendered {
 }
 
 /// Render the panel `build` produces (given the grid size) over the clear and
-/// read the pixels back. `None` when no GPU adapter is present so a GPU-less CI
-/// stays green.
+/// read the pixels back.
 fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Option<Rendered> {
+    render_scene(1.0, |grid, rows, cols| {
+        grid.set_panels(vec![build(rows, cols)]);
+    })
+}
+
+/// Render the chrome `build` puts on the grid over the clear at `scale_factor`,
+/// and read the pixels back. `None` when no GPU adapter is present so a GPU-less
+/// CI stays green.
+fn render_scene(
+    scale_factor: f32,
+    build: impl FnOnce(&mut Grid, usize, usize),
+) -> Option<Rendered> {
     let (device, queue) = headless_device()?;
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
-    let cell = cell_size(font_size, 1.0);
+    let cell = cell_size(font_size, scale_factor);
     let (width, height) = (256u32, (cell[1] * 8.0).round() as u32);
     let surface = Rgb::new(SURFACE[0], SURFACE[1], SURFACE[2]);
 
@@ -78,7 +89,7 @@ fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Option<Rendered> {
         build_font_system(),
         FontConfig {
             size: font_size,
-            scale_factor: 1.0,
+            scale_factor,
             family: &["JetBrains Mono".to_owned()],
             ligatures: true,
         },
@@ -95,7 +106,7 @@ fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Option<Rendered> {
             grid.get_mut(r, c).bg = surface;
         }
     }
-    grid.set_panels(vec![build(rows, cols)]);
+    build(&mut grid, rows, cols);
 
     renderer.render_into(
         &device,
@@ -242,6 +253,56 @@ fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
             .zip(SURFACE)
             .any(|(&g, want)| g.abs_diff(want) > 1),
         "just inside the inset frame the fill should show, got {interior:?}"
+    );
+}
+
+/// Popover chrome is stated in logical pixels, so a 2x display draws it at
+/// twice the size rather than at half the weight of the panel chrome beside it.
+///
+/// The border is one logical pixel, so it is two opaque rows deep here. The
+/// shadow's blur scales with it, so it still reaches a pixel 24 physical pixels
+/// past the box.
+#[test]
+fn popover_chrome_scales_with_the_display() {
+    const FILL: [u8; 3] = [20, 22, 30];
+    const BORDER: [u8; 3] = [200, 100, 50];
+
+    let Some(r) = render_scene(2.0, |grid, _rows, _cols| {
+        grid.set_overlays(vec![Overlay {
+            top: 1,
+            left: 1,
+            width: 4,
+            height: 3,
+            fill: Rgb::new(FILL[0], FILL[1], FILL[2]),
+            border: Rgb::new(BORDER[0], BORDER[1], BORDER[2]),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: String::new(),
+        }]);
+    }) else {
+        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let box_top = r.cell[1];
+    let box_bottom = 4.0 * r.cell[1];
+    // The column through the box's horizontal middle, clear of both rounded
+    // corners.
+    let mid_x = (3.0 * r.cell[0]) as u32;
+
+    let band = [0, 1, 2].map(|row| r.px(mid_x, box_top as u32 + row));
+    assert_eq!(
+        band,
+        [BORDER, BORDER, FILL],
+        "the border band is two rows deep at twice the density"
+    );
+
+    let below = r.px(mid_x, box_bottom as u32 + 24);
+    assert!(
+        below[0] + 3 < SURFACE[0],
+        "the scaled blur still darkens 24 px past the box, got {below:?}"
     );
 }
 

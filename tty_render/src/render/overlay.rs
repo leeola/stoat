@@ -24,15 +24,15 @@ use wgpu::{
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 16;
 
-/// Drop-shadow blur radius in physical pixels: the distance over which the
+/// Drop-shadow blur radius in logical pixels: the distance over which the
 /// shadow's alpha fades to zero past the shadow rectangle.
 const SHADOW_MARGIN: f32 = 16.0;
 
-/// Drop-shadow displacement in physical pixels, down and to the right, so an
+/// Drop-shadow displacement in logical pixels, down and to the right, so an
 /// overlay reads as floating above the grid rather than pasted onto it.
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
-/// Corner radius in physical pixels for the rounded box, so a popover reads like
+/// Corner radius in logical pixels for the rounded box, so a popover reads like
 /// an IDE tooltip rather than a sharp block. The shader clamps it to the box's
 /// half-extent, so a small box rounds proportionally.
 const CORNER_RADIUS: f32 = 6.0;
@@ -53,12 +53,16 @@ struct OverlayInstance {
 }
 
 /// Uniform shared by every instance: the surface resolution and cell size the
-/// vertex shader maps cell coordinates through.
+/// vertex shader maps cell coordinates through, plus the display density the
+/// border weight is stated in.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    /// Physical pixels per logical pixel, which the border weight scales by.
+    scale_factor: f32,
+    _pad: f32,
 }
 
 /// The instanced overlay pipeline and its per-frame buffers.
@@ -95,7 +99,7 @@ impl OverlayPass {
             label: Some("overlay globals"),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
-                visibility: ShaderStages::VERTEX,
+                visibility: ShaderStages::VERTEX_FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -204,10 +208,12 @@ impl OverlayPass {
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
+            scale_factor: self.metrics.scale_factor,
+            _pad: 0.0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        build_overlay_instances_into(grid.overlays(), &mut self.built);
+        build_overlay_instances_into(grid.overlays(), self.metrics.scale_factor, &mut self.built);
         self.count = self.built.len() as u32;
         if self.built.is_empty() {
             return;
@@ -252,27 +258,45 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 
 /// One instance per overlay, in draw order, into a vector of the caller's.
 #[cfg(test)]
-fn build_overlay_instances(overlays: &[Overlay]) -> Vec<OverlayInstance> {
+fn build_overlay_instances(overlays: &[Overlay], scale_factor: f32) -> Vec<OverlayInstance> {
     let mut instances = Vec::new();
-    build_overlay_instances_into(overlays, &mut instances);
+    build_overlay_instances_into(overlays, scale_factor, &mut instances);
     instances
 }
 
 /// Build into `out` one instance per overlay, in draw order.
 ///
+/// The shadow geometry, the corner radius, and the anchor offset are all stated
+/// in logical pixels and multiplied by `scale_factor` here. Left physical, they
+/// hold their pixel count against a box that doubled, so a popover's chrome
+/// reads half weight beside the panel chrome on a 2x display.
+///
+/// Each product rounds, so the box edges land on the whole pixels the cell
+/// rectangle already uses.
+///
 /// `out` is cleared first, so a reused scratch buffer holds only this frame's
 /// overlays.
-fn build_overlay_instances_into(overlays: &[Overlay], out: &mut Vec<OverlayInstance>) {
+fn build_overlay_instances_into(
+    overlays: &[Overlay],
+    scale_factor: f32,
+    out: &mut Vec<OverlayInstance>,
+) {
     out.clear();
     out.extend(overlays.iter().map(|overlay| OverlayInstance {
         cell: [overlay.left as f32, overlay.top as f32],
         size: [overlay.width as f32, overlay.height as f32],
         fill: rgb_f32(overlay.fill),
         border: rgb_f32(overlay.border),
-        shadow_offset: SHADOW_OFFSET,
-        shadow_margin: SHADOW_MARGIN,
-        corner_radius: CORNER_RADIUS,
-        anchor_offset: [overlay.offset[0] as f32, overlay.offset[1] as f32],
+        shadow_offset: [
+            (SHADOW_OFFSET[0] * scale_factor).round(),
+            (SHADOW_OFFSET[1] * scale_factor).round(),
+        ],
+        shadow_margin: (SHADOW_MARGIN * scale_factor).round(),
+        corner_radius: (CORNER_RADIUS * scale_factor).round(),
+        anchor_offset: [
+            (overlay.offset[0] as f32 * scale_factor).round(),
+            (overlay.offset[1] as f32 * scale_factor).round(),
+        ],
     }));
 }
 
@@ -320,13 +344,13 @@ mod tests {
             content: "x".to_owned(),
         }];
 
-        let mut scratch = build_overlay_instances(&overlays);
-        scratch.extend(build_overlay_instances(&overlays));
-        build_overlay_instances_into(&overlays, &mut scratch);
+        let mut scratch = build_overlay_instances(&overlays, 1.0);
+        scratch.extend(build_overlay_instances(&overlays, 1.0));
+        build_overlay_instances_into(&overlays, 1.0, &mut scratch);
 
         assert_eq!(
             bytemuck::cast_slice::<OverlayInstance, u8>(&scratch),
-            bytemuck::cast_slice::<OverlayInstance, u8>(&build_overlay_instances(&overlays)),
+            bytemuck::cast_slice::<OverlayInstance, u8>(&build_overlay_instances(&overlays, 1.0)),
             "reuse clears the stale overlays and rebuilds only the frame's own"
         );
     }
@@ -347,7 +371,7 @@ mod tests {
             content: "x".to_owned(),
         }];
 
-        let instances = build_overlay_instances(&overlays);
+        let instances = build_overlay_instances(&overlays, 1.0);
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].cell, [5.0, 3.0]);
@@ -358,5 +382,19 @@ mod tests {
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
         assert_eq!(instances[0].corner_radius, super::CORNER_RADIUS);
         assert_eq!(instances[0].anchor_offset, [-4.0, 6.0]);
+
+        // The chrome is stated in logical pixels, so a denser display draws the
+        // same popover with proportionally larger chrome. The cell rectangle it
+        // sits on grew by the same factor.
+        let dense = build_overlay_instances(&overlays, 2.0);
+
+        assert_eq!(dense[0].cell, [5.0, 3.0], "cells do not scale");
+        assert_eq!(
+            dense[0].shadow_offset,
+            [super::SHADOW_OFFSET[0] * 2.0, super::SHADOW_OFFSET[1] * 2.0]
+        );
+        assert_eq!(dense[0].shadow_margin, super::SHADOW_MARGIN * 2.0);
+        assert_eq!(dense[0].corner_radius, super::CORNER_RADIUS * 2.0);
+        assert_eq!(dense[0].anchor_offset, [-8.0, 12.0]);
     }
 }
