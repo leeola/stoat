@@ -49,6 +49,18 @@ use stoatty_protocol::command::IconKind;
 /// width the terminal's GPU minimap pass paints there.
 pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
 
+/// Widest display row [`WrapMode::None`] produces, in columns.
+///
+/// Turning wrapping off asks for a display row per buffer line, which makes a
+/// multi-megabyte line one row. A frame then walks the whole line to paint the
+/// cells the pane shows, and the column of a cell past 65,535 does not fit the
+/// coordinate the painter casts it to.
+///
+/// No pane is this wide, and no horizontal scroll exists, so a row clips at the
+/// pane edge well before this. Nothing a user sees changes; the rows the wrap
+/// layer builds stay bounded.
+pub(super) const MAX_UNWRAPPED_COLUMNS: u32 = 4096;
+
 /// Narrowest pane, in columns, that still reserves a minimap strip.
 ///
 /// At this width 100 text columns remain beside the 8-column strip. Anything
@@ -194,7 +206,7 @@ pub(crate) fn render_editor_with_overlay(
     let text_width = after_gutter.saturating_sub(minimap_cols);
     // A per-editor ToggleWrap override wins over the frame's configured mode.
     let wrap_width = match editor.wrap_override.unwrap_or(wrap) {
-        WrapMode::None => None,
+        WrapMode::None => Some(MAX_UNWRAPPED_COLUMNS),
         WrapMode::EditorWidth => Some(u32::from(text_width).max(1)),
         WrapMode::Bounded => Some(u32::from(text_width).max(1).min(wrap_column)),
     };
@@ -2365,8 +2377,12 @@ fn paint_offset_range(
         }
         let y = inner.y + (display_row - scroll_row) as u16;
         for step in 0..cells {
-            let x = inner.x + (display_col + step) as u16;
-            if x < right && y < bottom {
+            // Widened, since a caller is free to hand in a column past what the
+            // coordinate holds. Narrowing first would wrap it onto a cell the
+            // pane does show.
+            let x = u32::from(inner.x) + display_col + step;
+            if x < u32::from(right) && y < bottom {
+                let x = x as u16;
                 apply(x, y, &mut buf[(x, y)]);
                 if let Some(runs) = runs.as_deref_mut() {
                     match runs.last_mut() {
@@ -3774,8 +3790,9 @@ mod tests {
         let (off_width, off_rows, buffer_rows) =
             wrap_after_render(&mut h.stoat, area, WrapMode::EditorWidth, 80);
         assert_eq!(
-            off_width, None,
-            "a wrap-off override truncates even under the editor_width frame",
+            off_width,
+            Some(super::MAX_UNWRAPPED_COLUMNS),
+            "a wrap-off override wins over the editor_width frame",
         );
         assert_eq!(
             off_rows, buffer_rows,
@@ -3805,10 +3822,37 @@ mod tests {
         let area = Rect::new(0, 0, 40, 10);
         let (width, display_rows, buffer_rows) =
             wrap_after_render(&mut h.stoat, area, WrapMode::None, 80);
-        assert_eq!(width, None, "none disables wrapping");
+        assert_eq!(
+            width,
+            Some(super::MAX_UNWRAPPED_COLUMNS),
+            "none wraps only at the bound no pane reaches",
+        );
         assert_eq!(
             display_rows, buffer_rows,
             "the long line keeps its single row and truncates",
+        );
+    }
+
+    #[test]
+    fn wrap_none_still_breaks_a_line_past_the_bound() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/wrap");
+        let path = root.join("huge.txt");
+        let columns = super::MAX_UNWRAPPED_COLUMNS as usize * 3;
+        h.fake_fs()
+            .insert_file(&path, "a".repeat(columns).as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let area = Rect::new(0, 0, 40, 10);
+        let (_, display_rows, buffer_rows) =
+            wrap_after_render(&mut h.stoat, area, WrapMode::None, 80);
+
+        assert_eq!(buffer_rows, 1, "the buffer is one line");
+        assert_eq!(
+            display_rows, 3,
+            "a line three times the bound spans three display rows",
         );
     }
 

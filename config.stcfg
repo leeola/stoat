@@ -195,6 +195,9 @@ on init {
     # Soft-wrap long lines: editor_width wraps at the pane's text width, bounded
     # wraps at the smaller of the pane width and editor.wrap_column, none turns
     # wrapping off (long lines truncate at the pane edge).
+    #
+    # none still wraps at a bound far wider than any pane, which keeps a frame
+    # over a huge line from walking the whole line. Nothing on screen differs.
     editor.wrap = editor_width;
 
     # Column bounded wrap mode wraps at (applies only to editor.wrap = bounded).

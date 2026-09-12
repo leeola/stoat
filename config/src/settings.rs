@@ -57,6 +57,10 @@ pub enum TabBarMode {
 /// `editor.wrap_column`. `None` disables wrapping, so long lines truncate at the
 /// pane edge. `None` on the setting falls back to `EditorWidth`, and
 /// `false`/`true` are accepted as `None`/`EditorWidth`.
+///
+/// `None` still wraps at a bound far wider than any pane, so a multi-megabyte
+/// line does not become one display row. The bound is out of reach of what a
+/// pane shows, so the truncation a reader sees is the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapMode {
     None,
