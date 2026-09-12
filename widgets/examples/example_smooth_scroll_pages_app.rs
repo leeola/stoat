@@ -28,10 +28,17 @@
 //! screen position. `x` withholds the frame, which leaves the plain VT cursor
 //! resting where the last paint put it.
 //!
+//! The overlay rides the left pane. `Gstoatty;pool_anchor` names the host and
+//! the document row the layout assumed, and the panel and title run carry the
+//! same anchor, so the whole note travels with the pane's eased offset rather
+//! than holding still over moving text. `a` drops the anchor, which leaves the
+//! note screen-fixed for comparison.
+//!
 //! Runs in raw mode with mouse reporting on. Ctrl-F / Ctrl-B page the active
 //! pool a whole region at a time; `j` and `k` move its cursor; `o` toggles the
-//! overlay; `x` toggles the cursor anchor; `q` or Ctrl-C quits. Run as the PTY
-//! shell by the `smooth_scroll_pages` example.
+//! overlay; `a` toggles the overlay's anchor; `x` toggles the cursor anchor;
+//! `q` or Ctrl-C quits. Run as the PTY shell by the `smooth_scroll_pages`
+//! example.
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
@@ -39,7 +46,11 @@ use stoat_widgets::{
     pool::{self, SmoothScrollState},
     ApcSession, SessionOptions,
 };
-use stoatty_protocol::command::{encode_pool_cursor_into, PoolCursorCommand, PoolRegionCommand};
+use stoatty_protocol::command::{
+    encode_panel_into, encode_pool_anchor_into, encode_pool_cursor_into, encode_reset_into,
+    encode_text_run_into, BorderStyle, PanelCommand, PanelShadow, PoolAnchorCommand,
+    PoolCursorCommand, PoolRegionCommand, TextRunCommand,
+};
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
 /// opens.
@@ -298,6 +309,9 @@ fn run(live: bool) {
     // Withheld under `x`, so the plain VT cursor holding its screen position
     // through a glide reads against the anchored one.
     let mut anchor = true;
+    // Withheld under `a`, so a note fixed to the screen while the pane eases
+    // reads against one that travels with it.
+    let mut ridden = true;
     let mut state = SmoothScrollState::default();
 
     let mut out = Vec::new();
@@ -324,7 +338,34 @@ fn run(live: bool) {
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if ctrl => break,
-                    KeyCode::Char('o') => toggle_overlay(&mut overlay, &mut active, &mut out),
+                    KeyCode::Char('o') => {
+                        let host_top = left.position * left.rows() as f32;
+                        toggle_overlay(&mut overlay, &mut active, &mut out, live, ridden, host_top);
+                    },
+                    KeyCode::Char('a') => {
+                        // An anchor clears only with its pool, so the overlay
+                        // is dropped and re-declared to change form.
+                        ridden = !ridden;
+                        let host_top = left.position * left.rows() as f32;
+                        if overlay.is_some() {
+                            toggle_overlay(
+                                &mut overlay,
+                                &mut active,
+                                &mut out,
+                                live,
+                                ridden,
+                                host_top,
+                            );
+                            toggle_overlay(
+                                &mut overlay,
+                                &mut active,
+                                &mut out,
+                                live,
+                                ridden,
+                                host_top,
+                            );
+                        }
+                    },
                     KeyCode::Char('x') => anchor = !anchor,
                     KeyCode::Char('j') => {
                         with_active(active, &mut left, &mut right, &mut overlay, |pool| {
@@ -356,6 +397,19 @@ fn run(live: bool) {
         right.emit(&mut out, &mut state, live, anchor && active == RIGHT_POOL);
         if let Some(overlay) = overlay.as_ref() {
             overlay.emit(&mut out, &mut state, live, anchor && active == OVERLAY_POOL);
+
+            // The anchor ships every tick, so the note stays frame-locked to
+            // the pane it rides while that pane eases.
+            if live && ridden {
+                encode_pool_anchor_into(
+                    &mut out,
+                    &PoolAnchorCommand {
+                        pool: OVERLAY_POOL,
+                        host: LEFT_POOL,
+                        top_rows: left.position * left.rows() as f32,
+                    },
+                );
+            }
         }
 
         // A surface is retired by leaving its id out of the declared set, so a
@@ -388,15 +442,28 @@ fn with_active(
     }
 }
 
-/// Show or hide the overlay pool.
+/// Show or hide the overlay, writing the chrome that frames it.
 ///
-/// Showing makes it active, and its first emit declares its region. Hiding
-/// repaints the chrome, so the divider cells it covered are restored while the
-/// panes' own repaint covers the rest, and leaves the retirement to the frame's
-/// `drop_absent`.
-fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8>) {
+/// `ridden` puts the overlay's frame and title on the left pane's anchor, so
+/// they travel with the pane's eased offset. `host_top` is the document row the
+/// layout assumed, which the terminal measures that offset against.
+///
+/// A reset clears decorations and leaves the pools standing, so the chrome is
+/// re-sent whole on each toggle rather than tracked frame by frame. It is
+/// withheld off a stoatty, like every other frame this demo sends.
+fn toggle_overlay(
+    overlay: &mut Option<Pool>,
+    active: &mut u32,
+    out: &mut Vec<u8>,
+    live: bool,
+    ridden: bool,
+    host_top: f32,
+) {
     match overlay.take() {
         Some(_) => {
+            if live {
+                encode_reset_into(out);
+            }
             write_chrome(out);
             *active = LEFT_POOL;
         },
@@ -411,8 +478,52 @@ fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8
                 "OVL",
             ));
             *active = OVERLAY_POOL;
+
+            if live {
+                let anchor = ridden.then_some((LEFT_POOL, host_top));
+                encode_reset_into(out);
+                write_overlay_chrome(out, anchor);
+            }
         },
     }
+}
+
+/// Draw the overlay's frame and title, either riding `anchor`'s pool or fixed
+/// to the screen.
+///
+/// Both carry the same anchor as the overlay pool itself, so the whole note
+/// travels as one piece rather than leaving its frame behind.
+fn write_overlay_chrome(out: &mut Vec<u8>, anchor: Option<(u32, f32)>) {
+    encode_panel_into(
+        out,
+        &PanelCommand {
+            top: OVERLAY_TOP,
+            left: OVERLAY_LEFT,
+            width: OVERLAY_WIDTH,
+            height: OVERLAY_HEIGHT,
+            style: BorderStyle::Light,
+            border: CHROME_FG,
+            corner_radius: 6,
+            fill: None,
+            shadow: PanelShadow::Drop,
+            inset_x: 0,
+            above_pools: true,
+            anchor,
+        },
+    );
+    encode_text_run_into(
+        out,
+        &TextRunCommand {
+            col: (OVERLAY_LEFT as i16 + 2) * 16,
+            row: OVERLAY_TOP as i16 * 16,
+            scale: 160,
+            color: CHROME_FG,
+            bg: Some(OVERLAY_BG),
+            follow: 0,
+            anchor,
+            text: " note ",
+        },
+    );
 }
 
 /// The pool the pointer at (`col`, `row`) sits over: the overlay when shown and
@@ -441,7 +552,7 @@ fn write_chrome(out: &mut Vec<u8>) {
         "\x1b[7;38;2;{};{};{}m",
         CHROME_FG[0], CHROME_FG[1], CHROME_FG[2],
     );
-    let title = " stoatty multi-pool smooth scroll  (wheel, j/k cursor, x anchor, o overlay, q) ";
+    let title = " stoatty multi-pool smooth scroll  (wheel, j/k, o, a, x, q) ";
     let _ = write!(out, "{title:<COLS$}");
     out.extend_from_slice(b"\x1b[0m");
 
@@ -463,7 +574,7 @@ fn write_chrome(out: &mut Vec<u8>) {
         "\x1b[{};1H\x1b[7;38;2;{};{};{}m",
         VIEWPORT_H, CHROME_FG[0], CHROME_FG[1], CHROME_FG[2],
     );
-    let footer = " the cursor rides the active pool through its glide; x withholds that anchor ";
+    let footer = " the cursor and the overlay ride their pools; x and a withhold those anchors ";
     let _ = write!(out, "{footer:<COLS$}");
     out.extend_from_slice(b"\x1b[0m");
 }
