@@ -34,7 +34,12 @@ use crate::{
 use cosmic_text::{fontdb, FontSystem};
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::{mem, sync::Arc, thread, time::Instant};
+use std::{
+    mem,
+    sync::Arc,
+    thread::{self, ScopedJoinHandle},
+    time::Instant,
+};
 use stoatty_term::{
     grid::{Grid, Panel, Rgb},
     term::Damage,
@@ -322,40 +327,64 @@ impl Renderer {
         cursor: Rgb,
     ) -> Renderer {
         let metrics = CellMetrics::from_font_size(font.size, font.scale_factor);
-        Renderer {
-            background: BackgroundPass::new(device, format, metrics),
-            panel: PanelPass::new(device, format, metrics),
-            decoration: DecorationPass::new(device, format, metrics),
-            text: TextPass::new(
-                device,
-                format,
+        let clear_color = rgb_to_color(background);
+
+        // Each pass parses and validates its WGSL and then waits on a driver
+        // pipeline compile, and the passes share nothing but the device. Built
+        // in sequence they cost their sum on the thread that owes the first
+        // frame; built concurrently they cost the slowest of them.
+        thread::scope(|scope| {
+            let background = scope.spawn(|| BackgroundPass::new(device, format, metrics));
+            let panel = scope.spawn(|| PanelPass::new(device, format, metrics));
+            let decoration = scope.spawn(|| DecorationPass::new(device, format, metrics));
+            let text = scope.spawn(move || {
+                TextPass::new(
+                    device,
+                    format,
+                    metrics,
+                    font_system,
+                    font.family,
+                    font.ligatures,
+                )
+            });
+            let overlay = scope.spawn(|| OverlayPass::new(device, format, metrics));
+            let icon = scope.spawn(|| IconPass::new(device, format, metrics));
+            let bar = scope.spawn(|| BarPass::new(device, format, metrics));
+            let polyline = scope.spawn(|| PolylinePass::new(device, format, metrics));
+            let sketch = scope.spawn(|| SketchPass::new(device, format, metrics));
+            let minimap = scope.spawn(|| MinimapPass::new(device, format, metrics));
+            let image = scope.spawn(|| ImagePass::new(device, format, metrics));
+            #[cfg(feature = "perf")]
+            let hud = scope.spawn(|| HudPass::new(device, format));
+
+            Renderer {
+                background: built(background),
+                panel: built(panel),
+                decoration: built(decoration),
+                text: built(text),
+                overlay: built(overlay),
+                icon: built(icon),
+                bar: built(bar),
+                polyline: built(polyline),
+                sketch: built(sketch),
+                minimap: built(minimap),
+                image: built(image),
+                #[cfg(feature = "perf")]
+                hud: built(hud),
+                width: size[0],
+                height: size[1],
                 metrics,
-                font_system,
-                font.family,
-                font.ligatures,
-            ),
-            overlay: OverlayPass::new(device, format, metrics),
-            icon: IconPass::new(device, format, metrics),
-            bar: BarPass::new(device, format, metrics),
-            polyline: PolylinePass::new(device, format, metrics),
-            sketch: SketchPass::new(device, format, metrics),
-            minimap: MinimapPass::new(device, format, metrics),
-            image: ImagePass::new(device, format, metrics),
-            #[cfg(feature = "perf")]
-            hud: HudPass::new(device, format),
-            width: size[0],
-            height: size[1],
-            metrics,
-            clear_color: rgb_to_color(background),
-            cursor_color: cursor,
-            occluders: Vec::new(),
-            pool_occluders: Vec::new(),
-            riding: Vec::new(),
-            #[cfg(feature = "perf")]
-            gpu_timer: None,
-            #[cfg(feature = "perf")]
-            last_gpu: None,
-        }
+                clear_color,
+                cursor_color: cursor,
+                occluders: Vec::new(),
+                pool_occluders: Vec::new(),
+                riding: Vec::new(),
+                #[cfg(feature = "perf")]
+                gpu_timer: None,
+                #[cfg(feature = "perf")]
+                last_gpu: None,
+            }
+        })
     }
 
     /// The font database this renderer's font system holds, for a second one to
@@ -2135,6 +2164,15 @@ fn surface_formats(available: &[TextureFormat]) -> (TextureFormat, TextureFormat
 /// is what a minimized window reports.
 fn needs_configure(config: &SurfaceConfiguration, width: u32, height: u32) -> bool {
     width != 0 && height != 0 && (config.width != width || config.height != height)
+}
+
+/// Take a render pass off the thread that built it.
+///
+/// A pass constructor fails only when its WGSL or its pipeline layout does not
+/// validate, which is a defect in the shipped shaders rather than a condition a
+/// launch can meet, so the panic carries across the join.
+fn built<T>(pass: ScopedJoinHandle<'_, T>) -> T {
+    pass.join().expect("render pass construction panicked")
 }
 
 /// Convert an [`Rgb`] to a wgpu [`Color`], normalizing each channel to 0..1
