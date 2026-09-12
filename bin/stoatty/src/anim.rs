@@ -1720,12 +1720,15 @@ mod tests {
                     seed: 1,
                 },
                 timing,
-                shape: SketchShape::Ellipse(SketchBounds {
-                    x: 0,
-                    y: 0,
-                    w: 32,
-                    h: 32,
-                }),
+                shape: SketchShape::Ellipse {
+                    bounds: SketchBounds {
+                        x: 0,
+                        y: 0,
+                        w: 32,
+                        h: 32,
+                    },
+                    fill: None,
+                },
                 anchor: None,
             },
             seq: id,

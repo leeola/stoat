@@ -246,7 +246,7 @@ where
     let mut random = Random::new(command.style.seed, command.id);
 
     match command.shape {
-        SketchShape::Ellipse(bounds) => {
+        SketchShape::Ellipse { bounds, .. } => {
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
             // An ellipse alone pins its fitting, so its radii do not wander and

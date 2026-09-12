@@ -38,6 +38,11 @@ pub struct SketchEllipse {
     /// The box the ellipse is inscribed in, in sixteenths from the area's
     /// top-left.
     pub bounds: SketchBounds,
+    /// Painted inside the ring, fading in behind it. `None` leaves it open.
+    ///
+    /// Only a hatched style draws, which is what keeps the cells inside
+    /// readable. A solid fill leaves the ring open.
+    pub fill: Option<SketchFill>,
     /// Pool this mark rides, and that pool's top row, so it glides with a
     /// scrolling pane. `None` leaves it fixed to the screen.
     pub anchor: Option<(u32, f32)>,
@@ -86,7 +91,10 @@ impl StatefulWidget for SketchEllipse {
             self.id,
             self.style,
             self.timing,
-            SketchShape::Ellipse(absolute_bounds(area, self.bounds)),
+            SketchShape::Ellipse {
+                bounds: absolute_bounds(area, self.bounds),
+                fill: self.fill,
+            },
             self.anchor,
         );
     }
@@ -223,6 +231,7 @@ mod tests {
                 w: 96,
                 h: 28,
             },
+            fill: None,
             anchor: None,
         }
         .render(area(), &mut buf, &mut scene);
@@ -257,12 +266,15 @@ mod tests {
                     id: 1,
                     style,
                     timing,
-                    shape: SketchShape::Ellipse(SketchBounds {
-                        x: 2 * 16,
-                        y: 16,
-                        w: 96,
-                        h: 28,
-                    }),
+                    shape: SketchShape::Ellipse {
+                        bounds: SketchBounds {
+                            x: 2 * 16,
+                            y: 16,
+                            w: 96,
+                            h: 28,
+                        },
+                        fill: None,
+                    },
                     anchor: None,
                 },
                 SketchCommand {
@@ -304,18 +316,22 @@ mod tests {
                 w: 64,
                 h: 32,
             },
+            fill: None,
             anchor: None,
         }
         .render(area(), &mut buf, &mut scene);
 
         assert_eq!(
             scene.buffer(),
-            &expected(SketchShape::Ellipse(SketchBounds {
-                x: 2 * 16 + 4,
-                y: 16 + 8,
-                w: 64,
-                h: 32,
-            })),
+            &expected(SketchShape::Ellipse {
+                bounds: SketchBounds {
+                    x: 2 * 16 + 4,
+                    y: 16 + 8,
+                    w: 64,
+                    h: 32,
+                },
+                fill: None,
+            }),
             "the origin shifts, and the size does not",
         );
     }
@@ -413,6 +429,7 @@ mod tests {
                 w: 16,
                 h: 16,
             },
+            fill: None,
             anchor: Some((7, 12.5)),
         }
         .render(area(), &mut buf, &mut scene);
@@ -423,12 +440,15 @@ mod tests {
                 id: 3,
                 style: SketchStyle::marker([255, 0, 0]),
                 timing: SketchTiming::after(100, 400),
-                shape: SketchShape::Ellipse(SketchBounds {
-                    x: 2 * 16,
-                    y: 16,
-                    w: 16,
-                    h: 16,
-                }),
+                shape: SketchShape::Ellipse {
+                    bounds: SketchBounds {
+                        x: 2 * 16,
+                        y: 16,
+                        w: 16,
+                        h: 16,
+                    },
+                    fill: None,
+                },
                 anchor: Some((7, 12.5)),
             }),
         );

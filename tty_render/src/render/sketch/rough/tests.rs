@@ -67,12 +67,15 @@ fn one_seed_reproduces_and_two_seeds_differ() {
 fn an_ellipse_stays_near_its_center() {
     // 80 by 60 pixels at the test metrics, which clears the damping thresholds
     // so the declared roughness reaches the ring.
-    let shape = SketchShape::Ellipse(SketchBounds {
-        x: 0,
-        y: 0,
-        w: 128,
-        h: 48,
-    });
+    let shape = SketchShape::Ellipse {
+        bounds: SketchBounds {
+            x: 0,
+            y: 0,
+            w: 128,
+            h: 48,
+        },
+        fill: None,
+    };
     let (rx, ry) = (40.0_f32, 30.0_f32);
     let slack = options().max_randomness_offset as f32;
 
@@ -106,12 +109,15 @@ fn an_ellipse_stays_near_its_center() {
 /// through 14 curves at 8 flattened segments each, after the opening point.
 #[test]
 fn a_large_ellipse_tessellates_to_its_perimeter_estimate() {
-    let shape = SketchShape::Ellipse(SketchBounds {
-        x: 0,
-        y: 0,
-        w: 256,
-        h: 64,
-    });
+    let shape = SketchShape::Ellipse {
+        bounds: SketchBounds {
+            x: 0,
+            y: 0,
+            w: 256,
+            h: 64,
+        },
+        fill: None,
+    };
     let geometry = geometry(&command(shape, 0), metrics(), &nothing_resolves);
 
     let counts: Vec<usize> = geometry
@@ -481,12 +487,15 @@ fn each_head_bit_adds_its_arrow() {
 /// get the same mark back, or the sketch shimmers.
 #[test]
 fn one_command_regenerates_the_same_geometry() {
-    let shape = SketchShape::Ellipse(SketchBounds {
-        x: 4,
-        y: 4,
-        w: 48,
-        h: 24,
-    });
+    let shape = SketchShape::Ellipse {
+        bounds: SketchBounds {
+            x: 4,
+            y: 4,
+            w: 48,
+            h: 24,
+        },
+        fill: None,
+    };
     let command = command(shape, 96);
     let draw = || geometry(&command, metrics(), &nothing_resolves);
 
@@ -523,7 +532,7 @@ fn the_wobble_is_stated_in_logical_pixels() {
         h: 32,
     };
     let shapes = [
-        SketchShape::Ellipse(bounds),
+        SketchShape::Ellipse { bounds, fill: None },
         SketchShape::Rect {
             bounds,
             radius: 0,

@@ -154,12 +154,15 @@ fn mark(id: u32) -> Sketch {
             },
             // Off in a corner the run does not sit on, which separates the
             // mark's own green stroke from the label's red.
-            shape: SketchShape::Ellipse(SketchBounds {
-                x: 0,
-                y: 96,
-                w: 32,
-                h: 32,
-            }),
+            shape: SketchShape::Ellipse {
+                bounds: SketchBounds {
+                    x: 0,
+                    y: 96,
+                    w: 32,
+                    h: 32,
+                },
+                fill: None,
+            },
             anchor: None,
         },
         seq: 0,

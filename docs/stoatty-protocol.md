@@ -135,7 +135,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `text_run_end` | D | -- | Commits the capture |
 | `bar` | D | 11 B | Thin rect in sixteenths of a cell |
 | `polyline` | D | 5 B + 4 B per point | Max 12283 points |
-| `sketch_ellipse` | D | 29 B, 37 B with anchor | Hand-drawn ellipse the terminal generates |
+| `sketch_ellipse` | D | 35 B, 43 B with anchor | Hand-drawn ellipse the terminal generates, optionally hatched |
 | `sketch_rect` | D | 36 B, 44 B with anchor | Hand-drawn box, optionally filled |
 | `sketch_line` | D | 37 B, 45 B with anchor | Hand-drawn connector between points or components |
 | `line_layout` | D | 2 B per line | Max 24567 lines, replaced whole |

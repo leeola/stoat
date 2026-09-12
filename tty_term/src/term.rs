@@ -6618,12 +6618,15 @@ mod tests {
                 easing: SketchEasing::EaseOutCubic,
                 phase: SketchPhase::Enter,
             },
-            shape: SketchShape::Ellipse(SketchBounds {
-                x: -16,
-                y: 32,
-                w: 240,
-                h: 48,
-            }),
+            shape: SketchShape::Ellipse {
+                bounds: SketchBounds {
+                    x: -16,
+                    y: 32,
+                    w: 240,
+                    h: 48,
+                },
+                fill: None,
+            },
             anchor: Some((3, 2.5)),
         }
     }

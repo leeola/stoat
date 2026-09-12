@@ -725,7 +725,7 @@ fn component_bounds(sketches: &[Sketch], id: u32, metrics: CellMetrics) -> Optio
 /// of its own to point at.
 fn shape_bounds(shape: &SketchShape, metrics: CellMetrics) -> Option<[f32; 4]> {
     let bounds = match shape {
-        SketchShape::Ellipse(bounds) => bounds,
+        SketchShape::Ellipse { bounds, .. } => bounds,
         SketchShape::Rect { bounds, .. } => bounds,
         SketchShape::Line { .. } => return None,
     };
@@ -748,6 +748,8 @@ fn fill_style(shape: &SketchShape) -> ([u8; 3], u8) {
             fill: Some(fill), ..
         } => match fill.style {
             SketchFillStyle::Solid => (fill.color, fill.alpha),
+            // A hatched fill is drawn as strokes, so it builds no fill instance.
+            SketchFillStyle::Hachure | SketchFillStyle::CrossHatch => ([0; 3], 0),
         },
         _ => ([0; 3], 0),
     }

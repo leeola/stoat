@@ -111,7 +111,15 @@ pub enum SketchPhase {
 /// Which mark to draw, and the geometry it needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SketchShape {
-    Ellipse(SketchBounds),
+    Ellipse {
+        bounds: SketchBounds,
+        /// Painted inside the stroke. `None` leaves the ring open.
+        ///
+        /// Only a hatched style draws. A solid ellipse stays open, because the
+        /// renderer resolves a solid fill as a convex quad and an ellipse has
+        /// no quad to give it.
+        fill: Option<SketchFill>,
+    },
     Rect {
         bounds: SketchBounds,
         /// Corner rounding in sixteenths of a cell.
@@ -152,11 +160,16 @@ pub struct SketchFill {
 
 /// How a fill is laid down.
 ///
-/// Only [`Self::Solid`] draws today. The code byte reserves room for hachure,
-/// which then arrives as an appended value rather than a new sub-command.
+/// [`Self::Solid`] paints one flat translucent body. The hatched styles lay
+/// pen strokes across it instead, which is the reference's default look and
+/// leaves the cells under a mark legible in a way a solid body does not.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SketchFillStyle {
     Solid,
+    /// Parallel pen strokes at a fixed angle.
+    Hachure,
+    /// [`Self::Hachure`] crossed with a second pass at a right angle to it.
+    CrossHatch,
 }
 
 /// Where one end of a line sits.
@@ -214,7 +227,10 @@ pub fn encode_sketch_into(out: &mut Vec<u8>, command: &SketchCommand) {
         w.write_all(&[phase_code(command.timing.phase)])?;
 
         match &command.shape {
-            SketchShape::Ellipse(bounds) => write_bounds(w, bounds)?,
+            SketchShape::Ellipse { bounds, fill } => {
+                write_bounds(w, bounds)?;
+                write_fill(w, *fill)?;
+            },
             SketchShape::Rect {
                 bounds,
                 radius,
@@ -222,15 +238,7 @@ pub fn encode_sketch_into(out: &mut Vec<u8>, command: &SketchCommand) {
             } => {
                 write_bounds(w, bounds)?;
                 w.write_all(&[*radius])?;
-                w.write_all(&[fill.is_some() as u8])?;
-                let fill = fill.unwrap_or(SketchFill {
-                    color: [0, 0, 0],
-                    alpha: 0,
-                    style: SketchFillStyle::Solid,
-                });
-                w.write_all(&fill.color)?;
-                w.write_all(&[fill.alpha])?;
-                w.write_all(&[fill_style_code(fill.style)])?;
+                write_fill(w, *fill)?;
             },
             SketchShape::Line {
                 from,
@@ -261,19 +269,19 @@ pub(super) fn decode_sketch(sub: &str, args: &[Vec<u8>]) -> Option<SketchCommand
     let body = arg.get(SKETCH_HEAD..)?;
 
     let (shape, used) = match sub {
-        "sketch_ellipse" => (SketchShape::Ellipse(read_bounds(body)?), 8),
+        "sketch_ellipse" => {
+            let bounds = read_bounds(body)?;
+            // A frame that stops after the bounds predates the fill, so it
+            // reads as an open ring rather than being dropped.
+            match read_fill(body, 8) {
+                Some(fill) => (SketchShape::Ellipse { bounds, fill }, 14),
+                None => (SketchShape::Ellipse { bounds, fill: None }, 8),
+            }
+        },
         "sketch_rect" => {
             let bounds = read_bounds(body)?;
             let radius = *body.get(8)?;
-            let present = *body.get(9)?;
-            let color = [*body.get(10)?, *body.get(11)?, *body.get(12)?];
-            let alpha = *body.get(13)?;
-            let style = decode_fill_style(*body.get(14)?);
-            let fill = (present != 0).then_some(SketchFill {
-                color,
-                alpha,
-                style,
-            });
+            let fill = read_fill(body, 9)?;
             (
                 SketchShape::Rect {
                     bounds,
@@ -330,7 +338,7 @@ pub(super) fn decode_sketch(sub: &str, args: &[Vec<u8>]) -> Option<SketchCommand
 /// ignores the rest whole.
 fn sub_command(shape: &SketchShape) -> &'static str {
     match shape {
-        SketchShape::Ellipse(_) => "sketch_ellipse",
+        SketchShape::Ellipse { .. } => "sketch_ellipse",
         SketchShape::Rect { .. } => "sketch_rect",
         SketchShape::Line { .. } => "sketch_line",
     }
@@ -424,11 +432,52 @@ fn decode_phase(code: u8) -> SketchPhase {
 fn fill_style_code(style: SketchFillStyle) -> u8 {
     match style {
         SketchFillStyle::Solid => 0,
+        SketchFillStyle::Hachure => 1,
+        SketchFillStyle::CrossHatch => 2,
     }
 }
 
-fn decode_fill_style(_code: u8) -> SketchFillStyle {
-    SketchFillStyle::Solid
+/// An unknown code reads as [`SketchFillStyle::Solid`], so a mark from a newer
+/// emitter still fills rather than dropping the frame.
+fn decode_fill_style(code: u8) -> SketchFillStyle {
+    match code {
+        1 => SketchFillStyle::Hachure,
+        2 => SketchFillStyle::CrossHatch,
+        _ => SketchFillStyle::Solid,
+    }
+}
+
+/// Write a fill as the presence byte, the color, the alpha, and the style code.
+fn write_fill(
+    w: &mut (impl std::io::Write + ?Sized),
+    fill: Option<SketchFill>,
+) -> std::io::Result<()> {
+    w.write_all(&[fill.is_some() as u8])?;
+    let fill = fill.unwrap_or(SketchFill {
+        color: [0, 0, 0],
+        alpha: 0,
+        style: SketchFillStyle::Solid,
+    });
+    w.write_all(&fill.color)?;
+    w.write_all(&[fill.alpha])?;
+    w.write_all(&[fill_style_code(fill.style)])
+}
+
+/// Read the six fill bytes at `at`, or `None` when the frame stops before them.
+///
+/// An ellipse gained its fill after the shape shipped, so a frame from an
+/// emitter that predates it ends after the bounds. The outer `None` is what
+/// lets that frame read as an unfilled ellipse rather than being dropped.
+fn read_fill(body: &[u8], at: usize) -> Option<Option<SketchFill>> {
+    let present = *body.get(at)?;
+    let color = [*body.get(at + 1)?, *body.get(at + 2)?, *body.get(at + 3)?];
+    let alpha = *body.get(at + 4)?;
+    let style = decode_fill_style(*body.get(at + 5)?);
+    Some((present != 0).then_some(SketchFill {
+        color,
+        alpha,
+        style,
+    }))
 }
 
 fn side_code(side: SketchSide) -> u8 {
@@ -501,7 +550,13 @@ mod tests {
     #[test]
     fn each_shape_writes_the_documented_payload_length() {
         let cases = [
-            (SketchShape::Ellipse(bounds()), 29),
+            (
+                SketchShape::Ellipse {
+                    bounds: bounds(),
+                    fill: None,
+                },
+                35,
+            ),
             (
                 SketchShape::Rect {
                     bounds: bounds(),
@@ -551,7 +606,10 @@ mod tests {
     #[test]
     fn every_shape_round_trips_without_an_anchor() {
         for shape in [
-            SketchShape::Ellipse(bounds()),
+            SketchShape::Ellipse {
+                bounds: bounds(),
+                fill: None,
+            },
             SketchShape::Rect {
                 bounds: bounds(),
                 radius: 8,
@@ -583,7 +641,10 @@ mod tests {
     #[test]
     fn every_shape_round_trips_with_an_anchor() {
         for shape in [
-            SketchShape::Ellipse(bounds()),
+            SketchShape::Ellipse {
+                bounds: bounds(),
+                fill: None,
+            },
             SketchShape::Rect {
                 bounds: bounds(),
                 radius: 0,
@@ -628,6 +689,67 @@ mod tests {
             panic!("a rect decodes");
         };
         assert_eq!(decoded.shape, command.shape);
+    }
+
+    /// A hatched fill is a code on the wire, not a new sub-command, so both
+    /// styles have to survive the round trip under either shape.
+    #[test]
+    fn a_hatched_fill_round_trips_under_either_shape() {
+        for style in [SketchFillStyle::Hachure, SketchFillStyle::CrossHatch] {
+            let fill = Some(SketchFill {
+                color: [9, 8, 7],
+                alpha: 128,
+                style,
+            });
+            for shape in [
+                SketchShape::Ellipse {
+                    bounds: bounds(),
+                    fill,
+                },
+                SketchShape::Rect {
+                    bounds: bounds(),
+                    radius: 4,
+                    fill,
+                },
+            ] {
+                let command = sketch(shape, None);
+                assert_eq!(
+                    decode(&encode_sketch(&command)),
+                    Some(Command::Sketch(command.clone())),
+                    "{shape:?} round-trips",
+                );
+            }
+        }
+    }
+
+    /// The ellipse gained its fill after the shape shipped, so a body that
+    /// stops after the bounds reads as an open ring rather than dropping the
+    /// frame or reading the absent bytes as an anchor.
+    #[test]
+    fn an_ellipse_without_its_fill_bytes_stays_open() {
+        // The head the decoder reads by index, then the bounds and nothing
+        // else, which is every byte such an emitter writes.
+        let mut arg = vec![0u8; SKETCH_HEAD];
+        arg.extend_from_slice(&[0, 16, 0, 32, 0, 48, 0, 64]);
+
+        let decoded = decode_sketch("sketch_ellipse", &[arg]).expect("a short ellipse decodes");
+
+        assert_eq!(
+            (decoded.shape, decoded.anchor),
+            (
+                SketchShape::Ellipse {
+                    bounds: SketchBounds {
+                        x: 16,
+                        y: 32,
+                        w: 48,
+                        h: 64,
+                    },
+                    fill: None,
+                },
+                None,
+            ),
+            "the ring draws, and nothing reads an anchor out of the gap",
+        );
     }
 
     #[test]
@@ -691,7 +813,10 @@ mod tests {
             id: 3,
             style,
             timing,
-            shape: SketchShape::Ellipse(bounds()),
+            shape: SketchShape::Ellipse {
+                bounds: bounds(),
+                fill: None,
+            },
             anchor: None,
         };
 

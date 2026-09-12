@@ -129,7 +129,13 @@ fn spans(sketches: &[Sketch], progress: &[f32]) -> Vec<SpanInstance> {
 /// slice of it. An overlapping span draws another stroke's points.
 #[test]
 fn every_stroke_names_its_own_span_of_the_shared_points() {
-    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
     let (points, geometry) = marks(&list);
 
     let [mark] = geometry.as_slice() else {
@@ -315,7 +321,13 @@ fn a_boxs_sides_draw_one_after_another() {
 /// second pass after the first. A single-pair mark keeps the look it had.
 #[test]
 fn an_ellipses_two_strokes_advance_together() {
-    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
 
     assert_eq!(
         stroke_progress(&list, 0.5),
@@ -329,7 +341,13 @@ fn an_ellipses_two_strokes_advance_together() {
 /// still rasterizes.
 #[test]
 fn an_unreached_stroke_builds_no_span() {
-    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
 
     assert_eq!(
         build(&list, &[0.0]),
@@ -342,7 +360,13 @@ fn an_unreached_stroke_builds_no_span() {
 /// A caller with no clock passes an empty slice, and every mark draws whole.
 #[test]
 fn a_missing_progress_entry_draws_the_mark_complete() {
-    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
     assert_eq!(build_reveals(&list, &[]).0, instances(&list, &[1.0]));
 }
 
@@ -351,7 +375,13 @@ fn a_missing_progress_entry_draws_the_mark_complete() {
 /// the command applies a restyle in one frame, which reads as a switch.
 #[test]
 fn an_entrys_weight_and_opacity_reach_the_instance() {
-    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
     let declared = &list[0].command.style;
 
     let eased = build_reveals(
@@ -411,7 +441,13 @@ fn a_fill_stays_clear_through_the_first_half_of_the_reveal() {
 #[test]
 fn a_connector_ends_outside_the_component_it_names() {
     let list = [
-        sketch(1, SketchShape::Ellipse(boxed(0, 0, 32, 32))),
+        sketch(
+            1,
+            SketchShape::Ellipse {
+                bounds: boxed(0, 0, 32, 32),
+                fill: None,
+            },
+        ),
         sketch(
             2,
             SketchShape::Line {
@@ -470,7 +506,13 @@ fn a_connector_to_a_missing_component_draws_nothing() {
 /// carries its host's shift, or the composite paints over it.
 #[test]
 fn a_riding_mark_is_shifted_and_held_back() {
-    let mut list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let mut list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
     list[0].command.anchor = Some((3, 0.0));
 
     let (_, geometry) = marks(&list);
@@ -506,7 +548,13 @@ fn a_riding_mark_is_shifted_and_held_back() {
 /// rest, unshifted.
 #[test]
 fn a_mark_whose_host_is_still_does_not_ride() {
-    let mut list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let mut list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 0, 64, 32),
+            fill: None,
+        },
+    )];
     list[0].command.anchor = Some((3, 0.0));
 
     let (_, geometry) = marks(&list);
@@ -694,7 +742,13 @@ fn a_reveal_of_zero_paints_nothing_and_one_paints_the_mark() {
         eprintln!("sketch reveal test: no wgpu adapter, skipping");
         return;
     };
-    let list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(16, 16, 96, 64),
+            fill: None,
+        },
+    )];
 
     let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
     let none = render_red(&device, &queue, &list, &[0.0], &[]).expect("readback");
@@ -714,7 +768,13 @@ fn a_half_reveal_paints_a_prefix_of_the_whole() {
         eprintln!("sketch prefix test: no wgpu adapter, skipping");
         return;
     };
-    let list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(16, 16, 96, 64),
+            fill: None,
+        },
+    )];
 
     let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
     let half = render_red(&device, &queue, &list, &[0.5], &[]).expect("readback");
@@ -758,7 +818,13 @@ fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
     };
     const ALPHA: u8 = 128;
 
-    let mut list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
+    let mut list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(16, 16, 96, 64),
+            fill: None,
+        },
+    )];
     list[0].command.style.alpha = ALPHA;
 
     let ink = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
@@ -789,7 +855,13 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
         eprintln!("sketch joint test: no wgpu adapter, skipping");
         return;
     };
-    let list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
+    let list = [sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(16, 16, 96, 64),
+            fill: None,
+        },
+    )];
     let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
 
     assert!(
@@ -900,7 +972,13 @@ fn the_pen_tip_advances_inside_one_segment() {
 /// one.
 #[test]
 fn an_auto_side_faces_the_connector_s_other_end() {
-    let target = sketch(1, SketchShape::Ellipse(boxed(64, 32, 32, 32)));
+    let target = sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(64, 32, 32, 32),
+            fill: None,
+        },
+    );
     let box_px = shape_bounds(&target.command.shape, metrics()).expect("an ellipse has bounds");
 
     // The connector preserves its vertices at this roughness, so a stroke's last

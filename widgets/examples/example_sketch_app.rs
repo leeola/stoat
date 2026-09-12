@@ -145,6 +145,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene, round: u32) {
             id: id(1),
             style: SketchStyle::marker(CIRCLE_FG),
             timing: SketchTiming::after(200, 700),
+            fill: None,
             bounds: subject,
             anchor: None,
         },

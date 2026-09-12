@@ -370,7 +370,10 @@ impl Painter<'_> {
     /// the wire as it comes out.
     fn mark(&mut self, mark: Mark, stroke: Stroke, _buf: &mut Buffer, scene: &mut ApcScene) {
         let shape = match mark {
-            Mark::Ellipse(rect) => SketchShape::Ellipse(bounds_of(rect)),
+            Mark::Ellipse(rect) => SketchShape::Ellipse {
+                bounds: bounds_of(rect),
+                fill: None,
+            },
             Mark::Rect(rect) => SketchShape::Rect {
                 bounds: bounds_of(rect),
                 radius: 0,
@@ -872,7 +875,13 @@ mod tests {
             .expect("the focus draws");
 
         assert!(
-            matches!(focus.shape, SketchShape::Ellipse(_)),
+            matches!(
+                focus.shape,
+                SketchShape::Ellipse {
+                    bounds: _,
+                    fill: None,
+                }
+            ),
             "one row is circled, got {:?}",
             focus.shape,
         );
