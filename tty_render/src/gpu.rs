@@ -11,7 +11,7 @@
 
 pub use crate::render::{
     text::{build_font_system, shape_words, shape_words_cached, RunShapeCache},
-    AnchoredPanel, Frame, Scroll,
+    AnchoredPanel, Frame, Scroll, SketchReveal,
 };
 use crate::{
     perf::FrameProfiler,
@@ -595,7 +595,7 @@ impl Renderer {
             device,
             queue,
             grid,
-            frame.sketch_progress,
+            frame.sketch_reveals,
             anchored,
             &self.occluders,
             resolution,
@@ -1957,7 +1957,7 @@ impl GpuContext {
                 damage: &full,
                 decoration_damage: &full,
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             };
             self.prepare_pool_frame(live_grid, &heal, pools, anchored);
             // A grow during the healing sweep leaves it stale in turn, and the
@@ -2265,7 +2265,7 @@ mod tests {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         };
 
         // The two pools take the lower bands, leaving the top one to the live grid.
@@ -2437,7 +2437,7 @@ mod tests {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         };
 
         // Covers the middle band, which the panel's left edge runs through.

@@ -89,18 +89,34 @@ pub struct Frame<'a> {
     /// for a frame that did not scroll, and for any grid whose caller does not
     /// track it.
     pub scrolled_rows: isize,
-    /// How much of each hand-drawn mark is revealed, one entry per
-    /// [`Grid::sketches`] index in declaration order.
+    /// Where each hand-drawn mark stands, one entry per [`Grid::sketches`]
+    /// index in declaration order.
     ///
     /// The terminal owns the clocks, so the renderer is told where each mark
     /// stands rather than reading a clock of its own. The same grid and the
-    /// same fractions then always draw the same pixels, which is what makes a
+    /// same entries then always draw the same pixels, which is what makes a
     /// frame reproducible.
     ///
-    /// A short slice leaves the marks past its end complete, so `&[]` draws
-    /// every mark whole. A caller with no animation passes it and nothing else
-    /// changes.
-    pub sketch_progress: &'a [f32],
+    /// A short slice leaves the marks past its end complete, at the style their
+    /// commands declare, so `&[]` draws every mark whole. A caller with no
+    /// animation passes it and nothing else changes.
+    pub sketch_reveals: &'a [SketchReveal],
+}
+
+/// Where one hand-drawn mark stands this frame.
+///
+/// The style rides here rather than being read off the command, because a
+/// walkthrough re-declares its marks under the same ids with a new weight and
+/// opacity as the reader steps on. Reading the command would apply that in one
+/// frame, which reads as a switch where every other terminal-side change eases.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SketchReveal {
+    /// How much of the mark is drawn, from 0 to 1.
+    pub revealed: f32,
+    /// Stroke weight in 256ths of a cell, eased toward the declared width.
+    pub width: f32,
+    /// Stroke opacity from 0 to 1, eased toward the declared alpha.
+    pub alpha: f32,
 }
 
 /// Cell layout metrics in physical pixels, derived from the configured logical

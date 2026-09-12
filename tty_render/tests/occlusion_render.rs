@@ -159,7 +159,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         };
         renderer.render_into(&device, &queue, &view, &grid, frame);
         read_back(&device, &queue, &target, width, height)
@@ -304,7 +304,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
                 damage: &Damage::Full,
                 decoration_damage: &Damage::Partial(Vec::new()),
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             },
         );
     };
@@ -523,7 +523,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         },
         &pools,
         &[],
@@ -687,7 +687,7 @@ fn a_box_riding_a_pool_stops_occluding_it() {
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         },
         &pools,
         &[AnchoredPanel {

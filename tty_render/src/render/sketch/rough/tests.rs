@@ -2,7 +2,7 @@
 
 use super::*;
 use stoatty_protocol::command::{
-    SketchEasing, SketchFill, SketchFillStyle, SketchPhase, SketchTiming,
+    SketchEasing, SketchFill, SketchFillStyle, SketchPhase, SketchStyle, SketchTiming,
 };
 
 fn options() -> Options {
@@ -497,22 +497,11 @@ fn one_command_regenerates_the_same_geometry() {
 /// keeps a mark's apparent weight through a zoom.
 #[test]
 fn stroke_weight_tracks_the_cell_width() {
-    let style = SketchStyle {
-        color: [0, 0, 0],
-        alpha: 255,
-        width: 64,
-        roughness: 64,
-        seed: 1,
-    };
-    assert_eq!(
-        stroke_width(&style, metrics()),
-        2.5,
-        "64/256 of a 10px cell"
-    );
+    assert_eq!(stroke_width(64.0, metrics()), 2.5, "64/256 of a 10px cell");
 
     let mut wide = metrics();
     wide.width = 20.0;
-    assert_eq!(stroke_width(&style, wide), 5.0, "a doubled cell doubles it");
+    assert_eq!(stroke_width(64.0, wide), 5.0, "a doubled cell doubles it");
 }
 
 /// The reference states every jitter in logical pixels, so a roughness-1 mark

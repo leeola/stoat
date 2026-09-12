@@ -505,7 +505,7 @@ impl Harness {
                 damage,
                 decoration_damage: &Damage::Partial(Vec::new()),
                 scrolled_rows,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             },
         );
 

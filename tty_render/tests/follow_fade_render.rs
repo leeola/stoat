@@ -10,7 +10,7 @@ use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
 };
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll, SketchReveal},
     render::cell_size,
 };
 use stoatty_term::{
@@ -106,7 +106,11 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
                 damage: &Damage::Full,
                 decoration_damage: &Damage::Partial(Vec::new()),
                 scrolled_rows: 0,
-                sketch_progress: &[progress],
+                sketch_reveals: &[SketchReveal {
+                    revealed: progress,
+                    width: 64.0,
+                    alpha: 1.0,
+                }],
             },
         );
 

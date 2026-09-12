@@ -10,7 +10,8 @@
 //! the cell size, and neither moves while a mark draws itself.
 
 use crate::render::{
-    sketch::rough, CellMetrics, GridVersion, Occluder, OccluderBuffer, GLOBALS_SLOT_STRIDE,
+    sketch::rough, CellMetrics, GridVersion, Occluder, OccluderBuffer, SketchReveal,
+    GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -328,9 +329,9 @@ impl SketchPass {
     /// Upload the frame's uniform, occluders, generated points, and one
     /// instance per revealed stroke and fill.
     ///
-    /// `progress` carries one reveal fraction per [`Grid::sketches`] entry, in
-    /// order. A short slice leaves the marks past its end complete, so a caller
-    /// with no clock passes `&[]` and every mark draws whole.
+    /// `reveals` carries one entry per [`Grid::sketches`] entry, in order. A
+    /// short slice leaves the marks past its end complete, at the style their
+    /// commands declare, so a caller with no clock passes `&[]`.
     ///
     /// `anchored` names the pools compositing this frame, so a mark anchored to
     /// one is shifted and held back for [`Self::draw_riding`].
@@ -339,7 +340,7 @@ impl SketchPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        progress: &[f32],
+        reveals: &[SketchReveal],
         anchored: &[crate::render::AnchoredPanel],
         occluders: &[Occluder],
         resolution: [f32; 2],
@@ -366,7 +367,7 @@ impl SketchPass {
         build_instances(
             grid.sketches(),
             &self.geometry,
-            progress,
+            reveals,
             anchored,
             self.metrics,
             &mut self.built,
@@ -520,7 +521,7 @@ impl SketchPass {
 fn build_instances(
     sketches: &[Sketch],
     geometry: &[MarkGeometry],
-    progress: &[f32],
+    reveals: &[SketchReveal],
     anchored: &[crate::render::AnchoredPanel],
     metrics: CellMetrics,
     built: &mut Vec<SketchInstance>,
@@ -535,7 +536,15 @@ fn build_instances(
         let Some(mark) = geometry.get(index) else {
             continue;
         };
-        let revealed = progress.get(index).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+        // Past the slice's end a mark is whole, at the style its command
+        // declares, which is what a caller with no clock relies on.
+        let style = &sketch.command.style;
+        let reveal = reveals.get(index).copied().unwrap_or(SketchReveal {
+            revealed: 1.0,
+            width: f32::from(style.width),
+            alpha: f32::from(style.alpha) / 255.0,
+        });
+        let revealed = reveal.revealed.clamp(0.0, 1.0);
         let ride = ride_shift(sketch, anchored);
         let dy = ride.map_or(0.0, |(dy, _)| dy);
 
@@ -553,7 +562,7 @@ fn build_instances(
             let faded = smoothstep(0.5, 1.0, revealed);
             push(SketchInstance {
                 bounds: quad_bounds,
-                color: rgba(color, alpha, faded),
+                color: rgba(color, f32::from(alpha) / 255.0 * faded),
                 half_width: 0.0,
                 _pad0: 0.0,
                 dy,
@@ -565,8 +574,7 @@ fn build_instances(
             });
         }
 
-        let style = &sketch.command.style;
-        let half_width = rough::stroke_width(style, metrics) / 2.0;
+        let half_width = rough::stroke_width(reveal.width, metrics) / 2.0;
         // The pen walks the mark one unit at a time, so a box draws around its
         // perimeter and an arrowhead follows its shaft.
         let target = revealed * mark.strokes.chunks(2).map(unit_length).sum::<f32>();
@@ -604,7 +612,7 @@ fn build_instances(
         if span_count > 0 {
             push(SketchInstance {
                 bounds,
-                color: rgba(style.color, style.alpha, 1.0),
+                color: rgba(style.color, reveal.alpha),
                 half_width,
                 _pad0: 0.0,
                 dy,
@@ -638,14 +646,14 @@ fn unit_length(unit: &[StrokeSpan]) -> f32 {
     unit.iter().map(|stroke| stroke.total).fold(0.0, f32::max)
 }
 
-/// A protocol color and alpha as the straight float the shader blends with,
-/// scaled by `fade`.
-fn rgba(color: [u8; 3], alpha: u8, fade: f32) -> [f32; 4] {
+/// A protocol color with an already-scaled alpha, as the straight float the
+/// shader blends with.
+fn rgba(color: [u8; 3], alpha: f32) -> [f32; 4] {
     [
         f32::from(color[0]) / 255.0,
         f32::from(color[1]) / 255.0,
         f32::from(color[2]) / 255.0,
-        f32::from(alpha) / 255.0 * fade,
+        alpha,
     ]
 }
 

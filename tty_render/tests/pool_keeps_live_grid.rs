@@ -103,7 +103,7 @@ fn pool_composite_keeps_live_instances() {
         damage,
         decoration_damage: &no_decoration,
         scrolled_rows: 0,
-        sketch_progress: &[],
+        sketch_reveals: &[],
     };
 
     // A full live frame establishes the cached instances.
@@ -245,7 +245,7 @@ fn shift_only_composite_reuses_prior_rows() {
         damage,
         decoration_damage: &no_decoration,
         scrolled_rows: 0,
-        sketch_progress: &[],
+        sketch_reveals: &[],
     };
     let full_surface = [0, 0, width, height];
 
@@ -390,7 +390,7 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
         damage,
         decoration_damage: &no_decoration,
         scrolled_rows: 0,
-        sketch_progress: &[],
+        sketch_reveals: &[],
     };
 
     // Each pool owns a horizontal band, so a read-back tells them apart. The ids
@@ -608,7 +608,7 @@ fn pool_grow_heals_live_instances() {
         damage,
         decoration_damage: &no_decoration,
         scrolled_rows: 0,
-        sketch_progress: &[],
+        sketch_reveals: &[],
     };
 
     renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
@@ -855,7 +855,7 @@ fn a_region_sized_pool_draws_at_the_region_origin() {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         },
     );
 

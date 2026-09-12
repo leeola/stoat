@@ -100,7 +100,7 @@ fn oversized_scissors_are_clamped_not_validated() {
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         },
     );
     renderer.composite_pool(

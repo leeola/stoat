@@ -13,7 +13,7 @@ use crate::{
     render::{
         globals_offset, globals_slot_index, row_len, row_uploads, AnchoredPanel, CellMetrics,
         CompositeSlot, CompositeSlots, Frame, GridVersion, Occluder, OccluderBuffer, PoolOccluders,
-        GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -1121,19 +1121,19 @@ impl TextPass {
     /// arrives as the box around it closes rather than before the pen has drawn
     /// anything. The curve is the same smoothstep a filled box fades on.
     ///
-    /// A mark past the end of `progress` reads as complete, matching the render
+    /// A mark past the end of `reveals` reads as complete, matching the render
     /// pass, so a caller with no clock draws every label at full alpha.
     fn upload_sketch_alpha(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        progress: &[f32],
+        reveals: &[SketchReveal],
     ) {
         let mut alphas = mem::take(&mut self.sketch_alpha_scratch);
         alphas.clear();
         alphas.extend((0..grid.sketches().len()).map(|at| {
-            let revealed = progress.get(at).copied().unwrap_or(1.0);
+            let revealed = reveals.get(at).map_or(1.0, |reveal| reveal.revealed);
             smoothstep(FOLLOW_FADE_START, 1.0, revealed)
         }));
 
@@ -1284,7 +1284,7 @@ impl TextPass {
         // groups. Only the static globals carry a non-zero panel count, so only
         // the screen-anchored text-run draws occlude against these.
         self.upload_occluders(device, queue, occluders);
-        self.upload_sketch_alpha(device, queue, grid, frame.sketch_progress);
+        self.upload_sketch_alpha(device, queue, grid, frame.sketch_reveals);
 
         // Which hosts glide decides which runs the base build leaves out, so it
         // is refreshed before the gate below reads it. A change here has to
@@ -4749,7 +4749,9 @@ mod tests {
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
-        render::{row_uploads, AnchoredPanel, CellMetrics, Frame, PoolOccluders, Scroll},
+        render::{
+            row_uploads, AnchoredPanel, CellMetrics, Frame, PoolOccluders, Scroll, SketchReveal,
+        },
     };
     use stoatty_protocol::command::{
         SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle,
@@ -6379,7 +6381,7 @@ mod tests {
                 damage,
                 decoration_damage: damage,
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             }
         }
 
@@ -6701,7 +6703,7 @@ mod tests {
                 damage: &Damage::Full,
                 decoration_damage: &Damage::Full,
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             },
             &[],
             &[],
@@ -6762,7 +6764,7 @@ mod tests {
                 damage,
                 decoration_damage: damage,
                 scrolled_rows,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             }
         }
 
@@ -6855,7 +6857,7 @@ mod tests {
             damage: &Damage::Full,
             decoration_damage: &Damage::Full,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         }
     }
 
@@ -7071,8 +7073,16 @@ mod tests {
         grid.set_sketches(vec![test_sketch(5), test_sketch(7)]);
 
         let alphas_at = |pass: &mut TextPass, progress: &[f32]| {
+            let reveals: Vec<SketchReveal> = progress
+                .iter()
+                .map(|&revealed| SketchReveal {
+                    revealed,
+                    width: 64.0,
+                    alpha: 1.0,
+                })
+                .collect();
             let frame = Frame {
-                sketch_progress: progress,
+                sketch_reveals: &reveals,
                 ..chrome_frame()
             };
             pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
@@ -7217,7 +7227,7 @@ mod tests {
             damage: &Damage::Partial(vec![None; 4]),
             decoration_damage: &Damage::Partial(vec![None; 4]),
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         };
         let build = |region: ScrollRegion| {
             let mut grid = Grid::new(4, 20);
@@ -7310,7 +7320,7 @@ mod tests {
                 damage,
                 decoration_damage: damage,
                 scrolled_rows,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             }
         }
 
@@ -7917,7 +7927,7 @@ mod tests {
                 damage: idle,
                 decoration_damage: idle,
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             }
         }
 
@@ -8046,7 +8056,7 @@ mod tests {
                 damage: idle,
                 decoration_damage: idle,
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             }
         }
 
@@ -8144,7 +8154,7 @@ mod tests {
                 damage: idle,
                 decoration_damage: idle,
                 scrolled_rows: 0,
-                sketch_progress: &[],
+                sketch_reveals: &[],
             }
         }
         let tops = |pass: &TextPass| {
@@ -8307,7 +8317,7 @@ mod tests {
             damage,
             decoration_damage: &idle_damage,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         };
 
         // Warm the cache and atlas.
@@ -8380,7 +8390,7 @@ mod tests {
             damage,
             decoration_damage: &idle_damage,
             scrolled_rows: 0,
-            sketch_progress: &[],
+            sketch_reveals: &[],
         };
         let no_scroll = Scroll {
             grid: 0.0,

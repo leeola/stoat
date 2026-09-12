@@ -80,13 +80,34 @@ fn marks(sketches: &[Sketch]) -> (Vec<[f32; 2]>, Vec<MarkGeometry>) {
     (points, geometry)
 }
 
+/// One reveal per sketch at the given fractions, each at the style its command
+/// declares, which is what a test that only moves the reveal wants.
+fn reveals(sketches: &[Sketch], progress: &[f32]) -> Vec<SketchReveal> {
+    sketches
+        .iter()
+        .enumerate()
+        .map(|(at, sketch)| SketchReveal {
+            revealed: progress.get(at).copied().unwrap_or(1.0),
+            width: f32::from(sketch.command.style.width),
+            alpha: f32::from(sketch.command.style.alpha) / 255.0,
+        })
+        .collect()
+}
+
 fn build(sketches: &[Sketch], progress: &[f32]) -> (Vec<SketchInstance>, Vec<SpanInstance>) {
+    build_reveals(sketches, &reveals(sketches, progress))
+}
+
+fn build_reveals(
+    sketches: &[Sketch],
+    reveals: &[SketchReveal],
+) -> (Vec<SketchInstance>, Vec<SpanInstance>) {
     let (_, geometry) = marks(sketches);
     let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
     build_instances(
         sketches,
         &geometry,
-        progress,
+        reveals,
         &[],
         metrics(),
         &mut built,
@@ -322,7 +343,36 @@ fn an_unreached_stroke_builds_no_span() {
 #[test]
 fn a_missing_progress_entry_draws_the_mark_complete() {
     let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
-    assert_eq!(instances(&list, &[]), instances(&list, &[1.0]));
+    assert_eq!(build_reveals(&list, &[]).0, instances(&list, &[1.0]));
+}
+
+/// A re-declared mark eases toward its new weight and opacity on the terminal
+/// side, so the pass draws the entry's pair rather than the command's. Reading
+/// the command applies a restyle in one frame, which reads as a switch.
+#[test]
+fn an_entrys_weight_and_opacity_reach_the_instance() {
+    let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
+    let declared = &list[0].command.style;
+
+    let eased = build_reveals(
+        &list,
+        &[SketchReveal {
+            revealed: 1.0,
+            width: f32::from(declared.width) / 2.0,
+            alpha: 0.25,
+        }],
+    )
+    .0;
+    let [mark] = eased.as_slice() else {
+        panic!("one sketch draws one instance, got {}", eased.len());
+    };
+
+    let whole = instances(&list, &[1.0]);
+    assert_eq!(
+        (mark.half_width, mark.color[3]),
+        (whole[0].half_width / 2.0, 0.25),
+        "the instance carries the entry's pair, not the command's",
+    );
 }
 
 /// The fill eases in over the back half of the reveal, so the box fills behind
@@ -433,7 +483,7 @@ fn a_riding_mark_is_shifted_and_held_back() {
     build_instances(
         &list,
         &geometry,
-        &[1.0],
+        &reveals(&list, &[1.0]),
         &anchored,
         metrics(),
         &mut built,
@@ -464,7 +514,7 @@ fn a_mark_whose_host_is_still_does_not_ride() {
     build_instances(
         &list,
         &geometry,
-        &[1.0],
+        &reveals(&list, &[1.0]),
         &[],
         metrics(),
         &mut built,
@@ -497,7 +547,7 @@ fn render_red(
         device,
         queue,
         &grid,
-        progress,
+        &reveals(sketches, progress),
         anchored,
         &[],
         [TARGET as f32, TARGET as f32],

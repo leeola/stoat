@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
+use stoatty_render::gpu::SketchReveal;
 use stoatty_term::{
     grid::{Grid, Overlay, PoolRegion, Sketch},
     term::{Cursor, CursorShape, PoolView, Terminal},
@@ -839,6 +840,27 @@ pub(crate) fn advance_pool_glide(
 /// Pruning on first absence restarts the stroke every time that happens.
 pub(crate) const SKETCH_GRACE: Duration = Duration::from_millis(250);
 
+/// How long a re-declared mark takes to reach its new weight and opacity.
+///
+/// Short enough that a reader stepping quickly is never waiting on it, long
+/// enough that the change reads as a hand moving rather than as a switch.
+const STYLE_EASE_MS: u16 = 120;
+
+/// [`STYLE_EASE_MS`] as the span the loop checks an ease against.
+const STYLE_EASE_SPAN: Duration = Duration::from_millis(STYLE_EASE_MS as u64);
+
+/// The curve a style ease runs on, and the span it runs over.
+///
+/// Smoothstep, like every other eased state on this side. Stated as a timing so
+/// the ease shares [`sketch_progress`] with the reveal rather than growing a
+/// second curve of its own.
+const STYLE_EASE: SketchTiming = SketchTiming {
+    delay_ms: 0,
+    duration_ms: STYLE_EASE_MS,
+    easing: SketchEasing::Smoothstep,
+    phase: SketchPhase::Enter,
+};
+
 /// One mark's animation state, from the frame its id first appeared.
 struct SketchClock {
     started: Instant,
@@ -852,6 +874,17 @@ struct SketchClock {
     /// clock driven by each declaration restarts on every frame and the stroke
     /// never finishes.
     latched: SketchTiming,
+    /// The weight and opacity the current ease started from, as the renderer
+    /// takes them: 256ths of a cell and a fraction of one.
+    style_from: (f32, f32),
+    /// The declared pair the ease runs toward, as the protocol states them.
+    ///
+    /// Compared against each declaration to spot a restyle. A walkthrough
+    /// re-declares its whole mark set every frame, so equality here is what
+    /// tells a restyle from the same style arriving again.
+    style_to: (u16, u8),
+    /// When the current style ease began.
+    style_since: Instant,
     /// The reveal this phase started from: zero for a first-seen enter, one for
     /// a first-seen exit, and wherever the pen stood for a phase that flipped.
     ///
@@ -880,18 +913,19 @@ pub(crate) struct SketchStep {
     pub(crate) wake: Option<Instant>,
 }
 
-/// Advance every mark's clock to `now` and write one reveal fraction per entry
+/// Advance every mark's clock to `now` and write one [`SketchReveal`] per entry
 /// of `sketches`, in order.
 ///
 /// A first-seen id starts its clock and latches its timing. A re-declaration
 /// whose phase differs restarts and re-latches, since enter to exit is a new
-/// animation rather than the same one continuing. Any other re-declaration
-/// leaves the clock alone.
+/// animation rather than the same one continuing. A re-declaration whose weight
+/// or opacity differs starts a style ease. Any other re-declaration leaves the
+/// clock alone.
 pub(crate) fn advance_sketches(
     clocks: &mut SketchClocks,
     sketches: &[Sketch],
     now: Instant,
-    out: &mut Vec<f32>,
+    out: &mut Vec<SketchReveal>,
 ) -> SketchStep {
     out.clear();
     let mut step = SketchStep {
@@ -901,6 +935,7 @@ pub(crate) fn advance_sketches(
 
     for sketch in sketches {
         let timing = sketch.command.timing;
+        let declared = (sketch.command.style.width, sketch.command.style.alpha);
         let clock = clocks
             .0
             .entry(sketch.command.id)
@@ -908,6 +943,9 @@ pub(crate) fn advance_sketches(
                 started: now,
                 last_seen: now,
                 latched: timing,
+                style_from: declared_style(declared),
+                style_to: declared,
+                style_since: now,
                 origin: phase_origin(timing.phase),
             });
 
@@ -920,9 +958,22 @@ pub(crate) fn advance_sketches(
             clock.started = now;
             clock.latched = timing;
         }
+        if clock.style_to != declared {
+            // The ease starts wherever the last one had reached, so stepping
+            // twice in quick succession still moves from what is on screen.
+            let held = eased_style(clock, now);
+            clock.style_from = held;
+            clock.style_to = declared;
+            clock.style_since = now;
+        }
         clock.last_seen = now;
 
-        out.push(reveal_at(clock, now));
+        let (width, alpha) = eased_style(clock, now);
+        out.push(SketchReveal {
+            revealed: reveal_at(clock, now),
+            width,
+            alpha,
+        });
 
         let elapsed = now.saturating_duration_since(clock.started);
         let delay = Duration::from_millis(u64::from(clock.latched.delay_ms));
@@ -932,12 +983,37 @@ pub(crate) fn advance_sketches(
         } else if elapsed < span {
             step.animating = true;
         }
+        if clock.style_from != declared_style(clock.style_to)
+            && now.saturating_duration_since(clock.style_since) < STYLE_EASE_SPAN
+        {
+            step.animating = true;
+        }
     }
 
     clocks
         .0
         .retain(|_, clock| now.saturating_duration_since(clock.last_seen) < SKETCH_GRACE);
     step
+}
+
+/// A declared weight and opacity as the renderer takes them.
+fn declared_style(declared: (u16, u8)) -> (f32, f32) {
+    (f32::from(declared.0), f32::from(declared.1) / 255.0)
+}
+
+/// The weight and opacity `clock`'s mark draws with at `now`.
+///
+/// A restyle latches where the pair stood and runs to the new one over
+/// [`STYLE_EASE_MS`], so a mark that gains emphasis thickens and brightens
+/// rather than switching. A mark whose style never moved sits at its declared
+/// pair for every `now`. The blend is written so both ends land exactly.
+fn eased_style(clock: &SketchClock, now: Instant) -> (f32, f32) {
+    let t = sketch_progress(now.saturating_duration_since(clock.style_since), STYLE_EASE);
+    let (to_width, to_alpha) = declared_style(clock.style_to);
+    (
+        clock.style_from.0 * (1.0 - t) + to_width * t,
+        clock.style_from.1 * (1.0 - t) + to_alpha * t,
+    )
 }
 
 /// The reveal a phase starts a mark at when nothing preceded it.
@@ -1628,6 +1704,10 @@ mod tests {
         }
     }
 
+    /// The reveal of each entry, which is what most of these assert against.
+    fn revealed(out: &[SketchReveal]) -> Vec<f32> {
+        out.iter().map(|reveal| reveal.revealed).collect()
+    }
     fn mark(id: u32, timing: SketchTiming) -> Sketch {
         Sketch {
             command: SketchCommand {
@@ -1721,7 +1801,7 @@ mod tests {
             start,
             &mut out,
         );
-        assert_eq!(out, [0.0], "the first frame starts the clock");
+        assert_eq!(revealed(&out), [0.0], "the first frame starts the clock");
 
         // The second declaration names a different duration, which the latch
         // ignores: the mark is already drawing under the first one.
@@ -1731,7 +1811,11 @@ mod tests {
             start + Duration::from_millis(200),
             &mut out,
         );
-        assert_eq!(out, [0.5], "still halfway through the latched duration");
+        assert_eq!(
+            revealed(&out),
+            [0.5],
+            "still halfway through the latched duration"
+        );
         assert!(step.animating, "and still mid-draw");
     }
 
@@ -1742,14 +1826,14 @@ mod tests {
     #[test]
     fn a_phase_change_reverses_from_where_the_pen_is() {
         let start = Instant::now();
-        let at = |clocks: &mut SketchClocks, out: &mut Vec<f32>, ms: u64, phase| {
+        let at = |clocks: &mut SketchClocks, out: &mut Vec<SketchReveal>, ms: u64, phase| {
             advance_sketches(
                 clocks,
                 &[mark(1, timing(0, 400, phase))],
                 start + Duration::from_millis(ms),
                 out,
             );
-            out[0]
+            out[0].revealed
         };
 
         let (mut clocks, mut out) = (SketchClocks::default(), Vec::new());
@@ -1782,6 +1866,60 @@ mod tests {
             "and a half-wiped exit draws back on from half",
         );
     }
+    /// Stepping to the next annotation re-declares every mark under its own id
+    /// with a new weight and opacity. Applying that in one frame reads as a
+    /// switch, where every other state change on this side eases.
+    ///
+    /// The reveal is over by the time the restyle lands, so the frames the loop
+    /// is asked for are the ease's own.
+    #[test]
+    fn a_restyled_mark_eases_its_weight_and_opacity() {
+        let mut clocks = SketchClocks::default();
+        let mut out = Vec::new();
+        let start = Instant::now();
+
+        let styled = |width: u16, alpha: u8| {
+            let mut declared = mark(1, timing(0, 400, SketchPhase::Enter));
+            declared.command.style.width = width;
+            declared.command.style.alpha = alpha;
+            [declared]
+        };
+        let at = |clocks: &mut SketchClocks, out: &mut Vec<SketchReveal>, ms: u64, declared| {
+            let step = advance_sketches(clocks, declared, start + Duration::from_millis(ms), out);
+            (out[0].width, out[0].alpha, step.animating)
+        };
+
+        let plain = styled(64, 255);
+        let current = styled(88, 110);
+        const DIMMED: f32 = 110.0 / 255.0;
+
+        at(&mut clocks, &mut out, 0, &plain);
+        assert_eq!(
+            at(&mut clocks, &mut out, 500, &plain),
+            (64.0, 1.0, false),
+            "a settled mark draws at what it declared and asks for nothing",
+        );
+
+        // The restyle frame starts the ease, so the pair has not moved yet.
+        assert_eq!(
+            at(&mut clocks, &mut out, 500, &current),
+            (64.0, 1.0, true),
+            "the restyle frame starts the ease and asks for another frame",
+        );
+
+        let (width, alpha, animating) = at(&mut clocks, &mut out, 560, &current);
+        assert!(
+            width > 64.0 && width < 88.0 && alpha < 1.0 && alpha > DIMMED,
+            "the restyle is partway there, got {width} and {alpha}",
+        );
+        assert!(animating, "and the loop is asked for another frame");
+
+        assert_eq!(
+            at(&mut clocks, &mut out, 620, &current),
+            (88.0, DIMMED, false),
+            "and it lands on the declared pair and stops asking",
+        );
+    }
 
     /// A pty read can split a reset from the re-declaration that follows it, so
     /// a mark goes missing for a frame through no fault of the emitter. Pruning
@@ -1806,12 +1944,12 @@ mod tests {
             start + Duration::from_millis(200),
             &mut out,
         );
-        assert_eq!(out, [0.5], "the clock survived the gap");
+        assert_eq!(revealed(&out), [0.5], "the clock survived the gap");
 
         // Past the grace the id is gone, so the same declaration is a new mark.
         advance_sketches(&mut clocks, &[], start + SKETCH_GRACE * 2, &mut out);
         advance_sketches(&mut clocks, &declared, start + SKETCH_GRACE * 3, &mut out);
-        assert_eq!(out, [0.0], "a longer absence starts over");
+        assert_eq!(revealed(&out), [0.0], "a longer absence starts over");
     }
 
     /// The grace measures an *absence*, not an age. A long stroke stays
@@ -1835,7 +1973,11 @@ mod tests {
             );
         }
 
-        assert_eq!(out, [0.21875], "one clock, run from the frame it started");
+        assert_eq!(
+            revealed(&out),
+            [0.21875],
+            "one clock, run from the frame it started"
+        );
     }
 
     /// A mark counting down its delay is not animating, so nothing else brings
@@ -1912,13 +2054,13 @@ mod tests {
         );
 
         assert_eq!(
-            (step, out.as_slice()),
+            (step, revealed(&out)),
             (
                 SketchStep {
                     animating: false,
                     wake: None,
                 },
-                [1.0].as_slice(),
+                vec![1.0],
             ),
             "drawn whole, and done asking",
         );
@@ -1948,6 +2090,10 @@ mod tests {
             &mut out,
         );
 
-        assert_eq!(out, [0.5, 1.0, 0.0], "drawing, drawn, and still waiting");
+        assert_eq!(
+            revealed(&out),
+            [0.5, 1.0, 0.0],
+            "drawing, drawn, and still waiting"
+        );
     }
 }

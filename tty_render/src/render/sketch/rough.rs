@@ -22,9 +22,7 @@
 
 use crate::render::CellMetrics;
 use std::f64::consts::PI;
-use stoatty_protocol::command::{
-    SketchBounds, SketchCommand, SketchEnd, SketchShape, SketchSide, SketchStyle,
-};
+use stoatty_protocol::command::{SketchBounds, SketchCommand, SketchEnd, SketchShape, SketchSide};
 
 /// Segments each bezier flattens into.
 ///
@@ -375,13 +373,16 @@ fn rough_kind(shape: &SketchShape) -> RoughKind {
     }
 }
 
-/// Stroke thickness in physical pixels.
+/// Stroke thickness in physical pixels, from a weight in 256ths of a cell.
 ///
 /// Stated against the cell width rather than in pixels, so a mark keeps its
 /// apparent weight through a font-size change instead of thinning as the text
 /// grows.
-pub(crate) fn stroke_width(style: &SketchStyle, metrics: CellMetrics) -> f32 {
-    f32::from(style.width) / WIDTH_FRACTION * metrics.width
+///
+/// Takes the weight rather than the style, because a re-declared mark eases
+/// toward its new weight and draws at a fractional one on the way.
+pub(crate) fn stroke_width(width_256ths: f32, metrics: CellMetrics) -> f32 {
+    width_256ths / WIDTH_FRACTION * metrics.width
 }
 
 /// A connector, with the arrowheads its `heads` mask asks for.

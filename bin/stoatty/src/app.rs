@@ -57,7 +57,7 @@ use stoatty_protocol::{
 use stoatty_render::{
     gpu::{
         AnchoredPanel, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext, PoolComposite,
-        Scroll, SharedFonts, SharedGpu,
+        Scroll, SharedFonts, SharedGpu, SketchReveal,
     },
     render,
 };
@@ -500,7 +500,7 @@ struct AuxWindow {
     sketch_clocks: SketchClocks,
     /// How much of each of this window's marks is revealed, in
     /// [`Grid::sketches`] order.
-    sketch_progress: Vec<f32>,
+    sketch_reveals: Vec<SketchReveal>,
     /// When the loop has to wake to start a delayed stroke in this window.
     ///
     /// An aux window asks for its next frame through [`redraw_aux`]'s return,
@@ -672,7 +672,7 @@ struct State {
     /// How much of each mark is revealed, in [`Grid::sketches`] order, because a
     /// frame takes them as one slice. A view of the clocks above rather than
     /// state of its own, refilled by the step that produces it.
-    sketch_progress: Vec<f32>,
+    sketch_reveals: Vec<SketchReveal>,
     /// When the loop has to wake to start a delayed stroke, or `None` when none
     /// is waiting.
     ///
@@ -1041,7 +1041,7 @@ impl ApplicationHandler<PtyEvent> for App {
             popover_offsets: Vec::new(),
             popover_wake: None,
             sketch_clocks: SketchClocks::default(),
-            sketch_progress: Vec::new(),
+            sketch_reveals: Vec::new(),
             sketch_wake: None,
             grid_scroll: 0.0,
             scrollback_visual: 0.0,
@@ -2277,7 +2277,7 @@ fn open_aux_window(
         pool_anims: BTreeMap::new(),
         last_redraw: None,
         sketch_clocks: SketchClocks::default(),
-        sketch_progress: Vec::new(),
+        sketch_reveals: Vec::new(),
         sketch_wake: None,
         last_geometry: None,
         last_content: None,
@@ -2633,7 +2633,7 @@ fn redraw(state: &mut State) {
         &mut state.sketch_clocks,
         state.grid.sketches(),
         Instant::now(),
-        &mut state.sketch_progress,
+        &mut state.sketch_reveals,
     );
     state.sketch_wake = sketch_step.wake;
 
@@ -2729,7 +2729,7 @@ fn redraw(state: &mut State) {
                     damage: &sb_damage,
                     decoration_damage: &sb_damage,
                     scrolled_rows: moved_rows,
-                    sketch_progress: &[],
+                    sketch_reveals: &[],
                 },
             );
             latch_skipped(&mut state.force_full, &state.window, outcome);
@@ -2776,7 +2776,7 @@ fn redraw(state: &mut State) {
                     // rotate to match or the clean ones redraw from
                     // their pre-slide instances.
                     scrolled_rows: scroll_delta as isize,
-                    sketch_progress: &state.sketch_progress,
+                    sketch_reveals: &state.sketch_reveals,
                 },
             );
             latch_skipped(&mut state.force_full, &state.window, outcome);
@@ -2934,7 +2934,7 @@ fn redraw(state: &mut State) {
                 damage: &damage,
                 decoration_damage: &decoration_damage,
                 scrolled_rows: scroll_delta as isize,
-                sketch_progress: &state.sketch_progress,
+                sketch_reveals: &state.sketch_reveals,
             },
             &composites,
             &anchored_panels,
@@ -3019,7 +3019,7 @@ fn redraw_aux(
         &mut aux.sketch_clocks,
         aux.grid.sketches(),
         Instant::now(),
-        &mut aux.sketch_progress,
+        &mut aux.sketch_reveals,
     );
     aux.sketch_wake = sketch_step.wake;
 
@@ -3135,7 +3135,7 @@ fn redraw_aux(
             damage: &damage,
             decoration_damage: &damage,
             scrolled_rows: 0,
-            sketch_progress: &aux.sketch_progress,
+            sketch_reveals: &aux.sketch_reveals,
         },
         &composites,
         &[],

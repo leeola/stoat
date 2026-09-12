@@ -107,7 +107,7 @@ fn patched_rows_match_a_full_rebuild() {
                     damage,
                     decoration_damage,
                     scrolled_rows: 0,
-                    sketch_progress: &[],
+                    sketch_reveals: &[],
                 },
             );
             read_back(&device, &queue, &target, width, height)
