@@ -478,6 +478,10 @@ pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
 /// that referenced the buffer are rebound to fresh scratch buffers
 /// so panes stay coherent. Refuses to close when the buffer is
 /// dirty so unsaved edits aren't silently lost.
+///
+/// Session state keyed by the buffer goes with it, buffer-local marks
+/// included. Global marks stay. They hold a path and an offset rather
+/// than an anchor into the closed buffer.
 pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -544,6 +548,13 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         .expect("lsp version mutex")
         .remove(&buffer_id);
 
+    // Dropping the task cancels the request, so no answer arrives for a
+    // buffer the workspace no longer holds.
+    stoat.pull_diagnostic_result_ids.remove(&buffer_id);
+    stoat.pending_pull_diagnostics.remove(&buffer_id);
+    stoat.last_pull_diagnostic_key.remove(&buffer_id);
+    stoat.marks.retain(|(id, _), _| *id != buffer_id);
+
     if let Some(path) = path
         && let Some(uri) = crate::action_handlers::lsp::path_to_uri(&path)
     {
@@ -573,7 +584,7 @@ mod tests {
         test_harness::{editor, TestHarness},
     };
     use stoat_action::{
-        CloseBuffer, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SplitRight,
+        CloseBuffer, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark, SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -1185,12 +1196,35 @@ mod tests {
     }
 
     #[test]
-    fn close_buffer_clears_lsp_opened() {
+    fn close_buffer_clears_the_state_keyed_by_the_buffer() {
         let mut h = Stoat::test();
         let (_path, buffer_id) = open_path(&mut h, b"hello\n");
         assert!(h.stoat.lsp_opened.contains(&buffer_id));
+
+        dispatch(&mut h.stoat, &SetMark);
+        h.type_keys("a");
+        h.stoat
+            .pull_diagnostic_result_ids
+            .insert(buffer_id, String::from("rev-1"));
+        h.stoat.last_pull_diagnostic_key.insert(buffer_id, 1);
+        let pending = h.stoat.spawn_woken(async { None });
+        h.stoat.pending_pull_diagnostics.insert(buffer_id, pending);
+        assert_eq!(h.stoat.marks.len(), 1, "the mark the keypress stored");
+
         dispatch(&mut h.stoat, &CloseBuffer);
+
         assert!(!h.stoat.lsp_opened.contains(&buffer_id));
+        let retained = (
+            h.stoat.pull_diagnostic_result_ids.len(),
+            h.stoat.last_pull_diagnostic_key.len(),
+            h.stoat.pending_pull_diagnostics.len(),
+            h.stoat.marks.len(),
+        );
+        assert_eq!(
+            retained,
+            (0, 0, 0, 0),
+            "result ids, pull keys, pending pulls, marks",
+        );
     }
 
     #[test]

@@ -194,11 +194,29 @@ pub(crate) fn pump_lsp_pull_diagnostics(stoat: &mut Stoat) -> bool {
     true
 }
 
+/// Apply one resolved pull, or drop it when its buffer is gone.
+///
+/// A pull outlives the buffer it asked about. The debounce plus the request
+/// round trip leave a window. In that window the buffer closes, or the
+/// workspace switches away from it, before the answer lands.
+///
+/// Both cases leave the answer unusable. The spans resolve against the
+/// active workspace's buffers, and the close already sent `did_close`. No
+/// server publishes over a set applied here again, so a set applied for a
+/// closed path stays until the process exits.
+///
+/// Dropping the key lets the next trigger tick re-pull a buffer that is
+/// still open in another workspace.
 fn apply_pull_diagnostics(
     stoat: &mut Stoat,
     id: BufferId,
     outcome: Option<PullDiagnosticsOutcome>,
 ) {
+    if stoat.active_workspace().buffers.get(id).is_none() {
+        stoat.last_pull_diagnostic_key.remove(&id);
+        return;
+    }
+
     match outcome {
         Some(PullDiagnosticsOutcome::Full {
             path,
@@ -244,6 +262,7 @@ mod tests {
         test_fixture::{diag, open_buffer, seed},
         test_harness::TestHarness,
     };
+    use stoat_action::CloseBuffer;
 
     fn enable_pull_diagnostics(h: &TestHarness) {
         use lsp_types::{DiagnosticOptions, DiagnosticServerCapabilities, ServerCapabilities};
@@ -323,6 +342,39 @@ mod tests {
         h.advance_clock(Duration::from_millis(350));
         assert_eq!(h.stoat.diagnostics.get(&path).len(), 1);
         assert_eq!(h.stoat.diagnostics.get(&path)[0].message, "unused");
+    }
+
+    /// The pull outlives the buffer. `close_buffer` sends `did_close`, so no
+    /// server publishes an empty set for the path again, and a set applied
+    /// after the close would show a file nobody has open.
+    #[test]
+    fn a_pull_answer_for_a_closed_buffer_lands_nowhere() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_pull_diagnostics(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+
+        let outcome = |message: &str| {
+            Some(PullDiagnosticsOutcome::Full {
+                path: path.clone(),
+                diagnostics: vec![diag(0, 4, message)],
+                result_id: Some(String::from("rev-1")),
+            })
+        };
+        apply_pull_diagnostics(&mut h.stoat, id, outcome("unused"));
+        assert_eq!(h.stoat.diagnostics.get(&path).len(), 1, "the open buffer");
+
+        action_handlers::dispatch(&mut h.stoat, &CloseBuffer);
+        apply_pull_diagnostics(&mut h.stoat, id, outcome("stale"));
+
+        let held = h.stoat.diagnostics.get(&path);
+        assert_eq!(held.len(), 1, "the closed buffer adds nothing");
+        assert_eq!(held[0].message, "unused", "the answer replaced nothing");
+        assert!(h.stoat.pull_diagnostic_result_ids.is_empty(), "result ids");
     }
 
     #[test]
