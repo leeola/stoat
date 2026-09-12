@@ -631,6 +631,28 @@ fn build_strip(
         seq,
     });
 
+    // The thumb's outline, one logical pixel wide on rounded rows so the
+    // hairline stays crisp. A translucent fill alone leaves the viewport's
+    // extent to a shift in tint, which a reader loses against a busy strip.
+    let border = rgb_opaque_f32(strip.strip.thumb_border);
+    let weight = metrics.scale_factor.round().max(1.0);
+    let top_y = (layout.strip_y + thumb_offset).round();
+    let bottom_y = (top_y + thumb_height).round();
+    let (x, w, h) = (layout.strip_x, layout.strip_w, bottom_y - top_y);
+    for (origin, size) in [
+        ([x, top_y], [w, weight]),
+        ([x, bottom_y - weight], [w, weight]),
+        ([x, top_y], [weight, h]),
+        ([x + w - weight, top_y], [weight, h]),
+    ] {
+        instances.push(MinimapInstance {
+            origin,
+            size,
+            color: border,
+            seq,
+        });
+    }
+
     (instances, rect)
 }
 
@@ -814,8 +836,9 @@ mod tests {
         // height 10 * 12 = 120.
         assert_eq!(rect, [60.0, 0.0, 48.0, 120.0]);
 
-        // Background first, then the two runs, then the thumb.
-        assert_eq!(instances.len(), 4);
+        // Background first, then the two runs, then the thumb and its four
+        // border edges.
+        assert_eq!(instances.len(), 8);
         let first_run = instances[1];
         assert_eq!(first_run.origin, [60.0, 0.0], "class-1 run at start_col 0");
         assert_eq!(first_run.size[0], 4.0 * 0.4, "width is len * col_w");
@@ -844,9 +867,9 @@ mod tests {
         });
         let (instances, _) = build_strip(&strip(view), &summaries(content), metrics());
 
-        // Background + one run (the single line) + thumb, nothing for the missing
-        // lines the strip window covers.
-        assert_eq!(instances.len(), 3);
+        // Background + one run (the single line) + thumb + its four border
+        // edges, nothing for the missing lines the strip window covers.
+        assert_eq!(instances.len(), 7);
     }
 
     #[test]
@@ -1042,10 +1065,11 @@ mod tests {
         let two_lines = pass.built[0].instances.len();
         pass.prepare(&device, &queue, &second, &[], resolution);
 
-        // A strip's instances are its lines plus its background and its thumb.
+        // A strip's instances are its lines plus its background, its thumb, and
+        // the thumb's four border edges.
         assert_eq!(
             (two_lines, pass.built[0].instances.len(), pass.builds),
-            (4, 8, 2),
+            (8, 12, 2),
             "the second grid's lines are the ones built",
         );
     }
@@ -1346,9 +1370,10 @@ mod tests {
 
         // One cell over 12 columns puts a column, and so a one-column run, at
         // half a pixel. One line a cell keeps the run tall enough that only the
-        // horizontal axis is fractional.
+        // horizontal axis is fractional. The run starts at column 2, clear of
+        // the thumb border down the strip's first column.
         let run = MinimapRun {
-            start_col: 0,
+            start_col: 2,
             len: 1,
             class: 0,
         };
@@ -1358,12 +1383,12 @@ mod tests {
         let at = |x: u32, y: u32| red[(y * TARGET + x) as usize];
 
         assert!(
-            (120..=136).contains(&at(0, 4)),
+            (120..=136).contains(&at(1, 4)),
             "half a pixel of red reads as half intensity, got {}",
-            at(0, 4)
+            at(1, 4)
         );
         assert_eq!(
-            at(1, 4),
+            at(2, 4),
             0,
             "and the run does not smear into the next column"
         );
@@ -1468,6 +1493,32 @@ mod tests {
         );
     }
 
+    /// The thumb's fill is translucent, so the viewport's extent rests on a
+    /// shift in tint that a reader loses against a busy strip. Its border is
+    /// what states where the viewport starts and ends.
+    #[test]
+    fn the_thumb_is_outlined_in_its_declared_border() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("minimap thumb border test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // No view, so the thumb spans the whole four-cell strip: 6 px wide and
+        // 48 tall, with the border on rows 0 and 47 and columns 0 and 5.
+        let mut strip = red_strip(1, 4, 6, 12);
+        strip.thumb_border = Rgb::new(255, 0, 0);
+        let grid = red_grid(strip, vec![Vec::new(); 10], None);
+
+        let red = render_red(&device, &queue, &grid, &[], metrics());
+        let at = |x: u32, y: u32| u32::from(red[(y * TARGET + x) as usize]);
+
+        assert_eq!(
+            [at(2, 0), at(2, 2), at(2, 47), at(0, 24), at(5, 24)],
+            [255, 0, 255, 255, 255],
+            "one pixel of border on each edge, and a clear interior"
+        );
+    }
+
     /// A fractional row pitch puts consecutive lines on different sub-pixel
     /// phases, so one lands whole and the next splits across two rows at half
     /// strength. The strip then beats between strong and weak rows.
@@ -1487,10 +1538,13 @@ mod tests {
                 class: 0,
             }]
         };
-        let grid = red_grid(red_strip(1, 4, 8, 12), vec![run(12), run(12)], None);
+        // Lines 1 and 2, so the rows read are clear of the thumb border along
+        // the strip's top edge.
+        let content = vec![Vec::new(), run(12), run(12)];
+        let grid = red_grid(red_strip(1, 4, 8, 12), content, None);
         let red = render_red(&device, &queue, &grid, &[], metrics());
         // Column 2 sits inside both full-width runs.
-        let rows = [0u32, 1, 2].map(|y| u32::from(red[(y * TARGET + 2) as usize]));
+        let rows = [2u32, 3, 4].map(|y| u32::from(red[(y * TARGET + 2) as usize]));
 
         assert_eq!(
             rows,
