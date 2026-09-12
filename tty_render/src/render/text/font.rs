@@ -628,6 +628,27 @@ pub(super) fn probe_baseline(
         .unwrap_or(metrics.height * 0.8)
 }
 
+/// Cap height in physical pixels, measured off the face so chrome sized to the
+/// capitals matches the text beside it.
+///
+/// The face carries the number, so this needs no shaping pass. A face that
+/// reports none, and a family that resolves to no face at all, both fall back to
+/// seven tenths of the rasterization size, which is about where a latin capital
+/// lands.
+pub(super) fn probe_cap_height(font: Option<&Font>, metrics: CellMetrics) -> f32 {
+    let reported = font.map_or(0.0, |font| {
+        font.as_swash()
+            .metrics(&[])
+            .scale(metrics.font_size)
+            .cap_height
+    });
+    if reported > 0.0 {
+        reported
+    } else {
+        0.7 * metrics.font_size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

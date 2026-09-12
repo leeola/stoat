@@ -42,16 +42,20 @@ struct IconInstance {
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and
-/// cell size the vertex shader maps cell coordinates through, and the
-/// panel-occluder count the fragment shader loops over. Padded to 32 bytes to
-/// match the WGSL uniform layout.
+/// cell size the vertex shader maps cell coordinates through, the
+/// panel-occluder count the fragment shader loops over, and the text band an
+/// icon is placed against. Padded to 32 bytes to match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
     panel_count: u32,
-    _pad: [u32; 3],
+    /// Baseline offset from a cell's top, in physical pixels.
+    baseline: f32,
+    /// Height of a capital above that baseline, in physical pixels.
+    cap_height: f32,
+    _pad: u32,
 }
 
 /// The instanced icon pipeline and its per-frame buffers.
@@ -213,6 +217,7 @@ impl IconPass {
         icons: &[Icon],
         occluders: &[Occluder],
         resolution: [f32; 2],
+        band: [f32; 2],
     ) {
         // With no icon to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
@@ -228,7 +233,9 @@ impl IconPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
-            _pad: [0; 3],
+            baseline: band[0],
+            cap_height: band[1],
+            _pad: 0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 

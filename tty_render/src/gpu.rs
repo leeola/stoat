@@ -372,6 +372,17 @@ impl Renderer {
         grid_dims(self.width, self.height, self.metrics)
     }
 
+    /// The band a line of text occupies within its cell, as the baseline offset
+    /// from the cell's top and the cap height above it, both in physical pixels.
+    ///
+    /// Measured from the loaded face, so it moves with the font and the display
+    /// density. A caller placing a mark beside the text reads these two numbers
+    /// rather than the cell box, which the font's ascent and descent do not fill
+    /// symmetrically.
+    pub fn text_band(&self) -> [f32; 2] {
+        self.text.text_band()
+    }
+
     /// Re-derive every pass's cell metrics from the logical `font_size` and
     /// `scale_factor`, so the next frame lays out and rasterizes the grid at the
     /// new size.
@@ -585,8 +596,14 @@ impl Renderer {
         self.panel
             .prepare(device, queue, grid, anchored, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
-        self.icon
-            .prepare(device, queue, grid.icons(), &self.occluders, resolution);
+        self.icon.prepare(
+            device,
+            queue,
+            grid.icons(),
+            &self.occluders,
+            resolution,
+            self.text.text_band(),
+        );
         self.bar
             .prepare(device, queue, grid.bars(), &self.occluders, resolution);
         self.polyline

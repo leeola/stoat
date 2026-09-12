@@ -221,6 +221,30 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         "the bang cuts through the warning triangle, got {:?}",
         cell(3, 6)
     );
+
+    // An icon stands on the text's band rather than on the cell box, so it
+    // starts no higher than the cap line and ends no lower than the baseline.
+    // One pixel of slack covers the anti-aliased edge.
+    let [baseline, cap_height] = renderer.text_band();
+    let cell_top = 3.0 * cell_h as f32;
+    let lit: Vec<u32> = (3 * cell_h..4 * cell_h)
+        .filter(|&y| {
+            let i = ((y * width + cell_w / 2) * 4) as usize;
+            (pixels[i], pixels[i + 1], pixels[i + 2]) != rgb(modal_bg)
+        })
+        .collect();
+
+    let (top, bottom) = (
+        *lit.first().expect("the icon paints something") as f32,
+        *lit.last().expect("the icon paints something") as f32,
+    );
+    assert!(
+        top >= cell_top + baseline - cap_height - 1.0 && bottom <= cell_top + baseline + 1.0,
+        "the icon sits on the text band, got {top} to {bottom} \
+         against a band of {} to {}",
+        cell_top + baseline - cap_height,
+        cell_top + baseline
+    );
 }
 
 /// A pane pool composited beneath a box is occluded by it, while a non-pane

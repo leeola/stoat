@@ -718,6 +718,9 @@ pub struct TextPass {
     /// left and the row it entered (the cursor breaks ligatures on its cell).
     last_cursor_cell: Option<(usize, usize)>,
     baseline: f32,
+    /// Cap height in physical pixels, which off-grid chrome sizes itself by so a
+    /// mark beside a line of code stands as tall as its capitals.
+    cap_height: f32,
     metrics: CellMetrics,
 }
 
@@ -743,6 +746,7 @@ impl TextPass {
             font::shape_family(family.as_deref()),
         );
         let primary_font = font::resolve_primary_font(&mut font_system, family.as_deref());
+        let cap_height = font::probe_cap_height(primary_font.as_deref(), metrics);
         let substitutable = primary_font
             .as_deref()
             .map(font::substitution_coverage)
@@ -1083,6 +1087,7 @@ impl TextPass {
             glyph_cache_cols: 0,
             last_cursor_cell: None,
             baseline,
+            cap_height,
             metrics,
         };
 
@@ -1111,8 +1116,19 @@ impl TextPass {
             metrics,
             font::shape_family(self.family.as_deref()),
         );
+        self.cap_height = font::probe_cap_height(self.primary_font.as_deref(), metrics);
         self.shape_cache.clear();
         self.run_shape_cache.clear();
+    }
+
+    /// The band a line of text occupies within its cell, as the baseline offset
+    /// from the cell's top and the cap height above it, both in physical pixels.
+    ///
+    /// A pass drawing a mark beside text places it against these two numbers, so
+    /// the mark sits on the capitals rather than on the cell box, which the
+    /// font's ascent and descent do not fill symmetrically.
+    pub(crate) fn text_band(&self) -> [f32; 2] {
+        [self.baseline, self.cap_height]
     }
 
     /// Upload one alpha per declared mark, from this frame's reveal fractions.

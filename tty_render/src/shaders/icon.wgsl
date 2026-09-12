@@ -12,9 +12,13 @@ struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
     panel_count: u32,
+    // The band a line of text occupies in its cell: the baseline offset from the
+    // cell's top, and the height of a capital above it, both in physical pixels.
+    // An icon is placed against these rather than against the cell box, which
+    // the font's ascent and descent do not fill symmetrically.
+    baseline: f32,
+    cap_height: f32,
     pad0: u32,
-    pad1: u32,
-    pad2: u32,
 }
 
 @group(0) @binding(0)
@@ -131,9 +135,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let center = in.extent * 0.5;
+    // Centered on the capitals rather than on the cell box, and sized by their
+    // height, so an icon reads as a mark on the line of text beside it. A block
+    // taller than one cell keeps that placement at its own middle.
+    let center = vec2<f32>(
+        in.extent.x * 0.5,
+        globals.baseline - globals.cap_height * 0.5
+            + (in.extent.y - globals.cell_size.y) * 0.5
+    );
     let q = in.local * in.extent - center;
-    let r = min(center.x, center.y) * 0.9;
+    // The cap height sets the size, and the quad bounds it, so a narrow cell
+    // holds the icon rather than letting it spill past its own block.
+    let r = min(
+        globals.cap_height * 0.6 * (in.extent.y / globals.cell_size.y),
+        min(center.x, center.y) * 0.95
+    );
     // One physical pixel is the thinnest a glyph stroke reads at, so a small
     // icon holds its glyph rather than closing it up.
     let stroke = max(0.1 * r, 0.75);
