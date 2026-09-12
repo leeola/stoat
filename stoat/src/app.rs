@@ -126,9 +126,10 @@ const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Nothing queued is lost. What is left wakes the `pty_rx.recv()` arm on the
 /// next turn, and the frame timer paints between the two.
 ///
-/// This bound alone does not buy that frame. The timer's arm sits ahead of the
-/// pty arm in a biased select, and the turn ends on a yield, without which a
-/// channel that refills never hands the runtime back for the timer to come due.
+/// This bound alone does not buy that frame. The pty arm sits last in a biased
+/// select, behind the timer and behind every other channel, and the turn ends
+/// on a yield, without which a channel that refills never hands the runtime
+/// back for the timer to come due.
 /// Alacritty bounds the same loop the same way, releasing the terminal after a
 /// fixed read so the renderer gets a turn.
 const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
@@ -3465,10 +3466,6 @@ impl Stoat {
                 Some(()) = ssh::ack_recv(&mut self.passthrough_link) => {
                     ssh::spawn_armed(self)
                 }
-                notif = self.pty_rx.recv() => {
-                    let Some(notif) = notif else { continue };
-                    self.handle_pty_notification(notif)
-                }
                 ev = self.agent_event_rx.recv() => {
                     let Some(ev) = ev else { continue };
                     self.handle_agent_event(ev)
@@ -3517,6 +3514,21 @@ impl Stoat {
                     }
                 }
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
+                // Last, because the pty is the one arm whose producer can
+                // saturate. A biased select returns at its first ready arm, so
+                // an arm ahead of the others that is never empty starves every
+                // one of them for as long as the flood lasts, and the fs-watch
+                // drain below only runs from its own arm. Every arm above this
+                // costs one poll of an empty receiver per turn, which is
+                // nanoseconds against that.
+                //
+                // Terminal output keeps its throughput either way: a biased
+                // select reaches the last arm whenever none above it is ready,
+                // which is the ordinary case.
+                notif = self.pty_rx.recv() => {
+                    let Some(notif) = notif else { continue };
+                    self.handle_pty_notification(notif)
+                }
             };
 
             let (drained, coalesced) = self.drain_pending(&mut events);
@@ -3788,8 +3800,8 @@ impl Stoat {
     /// that arrive mid-drain are handled on the next loop iteration.
     ///
     /// That bound decides how much work one turn does, and nothing more. The
-    /// frame between two turns comes from the caller's select, where the timer
-    /// sits ahead of every channel arm, and from the yield that turn ends on.
+    /// frame between two turns comes from the caller's select, where the pty
+    /// arm sits behind every other one, and from the yield that turn ends on.
     fn drain_pending(&mut self, events: &mut UnboundedReceiver<Event>) -> (UpdateEffect, usize) {
         let mut effect = UpdateEffect::None;
         let mut coalesced = 0;
@@ -10993,12 +11005,74 @@ mod tests {
         assert!(row.starts_with("hello"), "row: {row:?}");
     }
 
-    /// A command flooding its pty must not hold the run loop for as long as it
-    /// floods. The parse runs on the app thread, so bytes drained in one turn
-    /// are milliseconds the frame timer and the key reader do not get.
+    /// Fills the pty channel the way the reader thread does, from a thread and
+    /// against a visible pane.
     ///
-    /// The notifications name no run, so the handler returns at once and what
-    /// is measured is the budget rather than the parse behind it.
+    /// A task on this runtime only runs where the loop awaits, and a select arm
+    /// that is ready never awaits, so a task could not keep the channel full.
+    /// Only output the screen shows marks the frame dirty, and only a dirty
+    /// frame arms the timer arm at all.
+    ///
+    /// The thread ends when the caller drops the receiver, which is why nothing
+    /// joins it: a send parked on a full channel has no other way out.
+    fn flood_pty(stoat: &mut Stoat) {
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
+
+        let pane = stoat.active_workspace().panes.focus();
+        stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
+
+        let pty_tx = stoat.pty_tx.clone();
+        let chunk = move || PtyNotification::TermOutput {
+            agent_id,
+            data: vec![b'x'; 64 * 1024],
+        };
+
+        // Filled before the loop starts. A thread that allocates every chunk
+        // cannot outrun the parse from a standing start, so the channel would
+        // be empty at the first poll and no arm below the pty one would wait.
+        while pty_tx.try_send(chunk()).is_ok() {}
+
+        std::thread::spawn(move || while pty_tx.blocking_send(chunk()).is_ok() {});
+    }
+
+    /// The fs-watch drain runs from one select arm and from nowhere else, so a
+    /// flood holding an arm above it stops the editor seeing the files the
+    /// flooding command writes. A build inside a terminal pane is both at once.
+    #[tokio::test]
+    async fn a_pty_flood_starves_no_other_arm() {
+        let mut h = Stoat::test();
+        let watcher = h.fake_fs_watcher().clone();
+        flood_pty(&mut h.stoat);
+
+        let (events_tx, events) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let (render, _frames) = watch::channel(None);
+
+        let drained = tokio::select! {
+            _ = h.stoat.run(events, render) => false,
+            landed = async {
+                // Injected once the loop is running, so the wake it fires has
+                // to reach an arm the flood sits above.
+                watcher.inject("/repo/src/a.rs", FsEventKind::Modified);
+                loop {
+                    if watcher.pending() == 0 {
+                        return true;
+                    }
+                    tokio::time::sleep(SCROLL_FRAME).await;
+                }
+            } => landed,
+            _ = tokio::time::sleep(SCROLL_FRAME * 60) => false,
+        };
+
+        drop(events_tx);
+        assert!(drained, "the flood starved the fs-watch drain");
+    }
+
     /// A biased select returns at its first ready arm, so an arm ahead of the
     /// frame timer that is never empty starves it. Terminal output sets a dirty
     /// flag and paints nothing itself, so the timer is the only arm that turns a
@@ -11006,41 +11080,10 @@ mod tests {
     #[tokio::test]
     async fn a_pty_flood_still_paints() {
         let mut h = Stoat::test();
-        let session: Arc<dyn crate::host::TerminalSession> =
-            Arc::new(crate::host::FakeTerminalSession::new());
-        let agent_id = h
-            .stoat
-            .active_workspace_mut()
-            .terms
-            .insert(TermSession::new(
-                crate::term_screen::TermScreen::new(24, 80),
-                session,
-                TermSession::next_token(),
-            ));
-        // Only output the screen shows marks the frame dirty, and only a dirty
-        // frame arms the timer arm at all.
-        let pane = h.stoat.active_workspace().panes.focus();
-        h.stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
+        flood_pty(&mut h.stoat);
 
         let (events_tx, events) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let (render, mut frames) = watch::channel(None);
-
-        // A thread rather than a task, the way the pty reader is one. A task on
-        // this runtime only runs where the loop awaits, and a select arm that is
-        // ready never awaits, so a task could not keep the channel full.
-        //
-        // It ends when the test drops the receiver, which is why nothing joins
-        // it: a send parked on a full channel has no other way out.
-        let pty_tx = h.stoat.pty_tx.clone();
-        std::thread::spawn(move || {
-            while pty_tx
-                .blocking_send(PtyNotification::TermOutput {
-                    agent_id,
-                    data: vec![b'x'; 64 * 1024],
-                })
-                .is_ok()
-            {}
-        });
 
         let painted = tokio::select! {
             _ = h.stoat.run(events, render) => false,
@@ -11052,6 +11095,12 @@ mod tests {
         assert!(painted, "the flood starved the frame timer");
     }
 
+    /// A command flooding its pty must not hold the run loop for as long as it
+    /// floods. The parse runs on the app thread, so bytes drained in one turn
+    /// are milliseconds the frame timer and the key reader do not get.
+    ///
+    /// The notifications name no run, so the handler returns at once and what
+    /// is measured is the budget rather than the parse behind it.
     #[test]
     fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
         let mut h = Stoat::test();

@@ -80,6 +80,19 @@ impl FakeFsWatcher {
         }
     }
 
+    /// Events queued and not yet taken, so a test can wait on a drain it
+    /// cannot observe through the editor.
+    ///
+    /// A caller running the editor's loop holds it borrowed for as long as the
+    /// loop runs, and this side of the watcher is shared.
+    pub fn pending(&self) -> usize {
+        self.state
+            .lock()
+            .expect("FakeFsWatcher poisoned")
+            .queue
+            .len()
+    }
+
     /// Snapshot of currently-watched paths. Each path appears once
     /// regardless of how many tokens reference it.
     pub fn watched_paths(&self) -> Vec<PathBuf> {
