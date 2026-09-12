@@ -24,6 +24,7 @@ const EMITTERS: &[(&str, &str)] = &[
     ("example_scale_app", "stoat_widgets"),
     ("example_sketch_app", "stoat_widgets"),
     ("example_smooth_scroll_pages_app", "stoat_widgets"),
+    ("example_status_bar_app", "stoat_widgets"),
     ("example_split_scroll_app", "stoat_widgets"),
     ("example_edit_app", "stoatty_protocol"),
     ("example_hello_app", "stoatty_protocol"),
