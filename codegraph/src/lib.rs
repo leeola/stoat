@@ -312,7 +312,16 @@ impl CodeGraph {
             }
             match linked {
                 Some(key) => self.link_edge(id, key),
-                None => self.mark_unresolved(id),
+                // Borrowed from the edge store rather than cloned. The name
+                // index is a field beside it, so the two borrows stay apart and
+                // a bucket that already exists costs no allocation.
+                None => {
+                    if let Some(Target::Unresolved { name, .. }) =
+                        self.edges[id as usize].as_ref().map(|edge| &edge.to)
+                    {
+                        file_unresolved(&mut self.unresolved_by_name, name, id);
+                    }
+                },
             }
         }
     }
@@ -402,11 +411,34 @@ impl CodeGraph {
             }
         }
 
+        // Grouped by target for the same reason the pass above groups by name.
+        // Call targets repeat hard, so one file's edges arrive at a handful of
+        // very long reverse-adjacency lists, and a retain per edge rescans a
+        // whole list every time.
+        //
+        // Only the arriving side. Every edge here leaves one of the file's own
+        // symbols, since an edge is filed under the file of the symbol it
+        // leaves, and the loop below drops those symbols' out-lists whole.
+        let mut arriving: HashMap<SymbolKey, HashSet<u32>> = HashMap::new();
+        for id in &ids {
+            if let Some(Target::Sym(key)) = self.edge(*id).map(|edge| &edge.to) {
+                arriving.entry(*key).or_default().insert(*id);
+            }
+        }
+        for (key, dead) in arriving {
+            let Some(ids) = self.inn.get_mut(&key) else {
+                continue;
+            };
+            ids.retain(|held| !dead.contains(held));
+            if ids.is_empty() {
+                self.inn.remove(&key);
+            }
+        }
+
         // The file's own edges go first, so an edge from this file into it is
         // already gone by the time the degrade pass reaches it. The sweep this
         // replaced skipped those instead.
         for id in ids {
-            self.unlink_edge(id);
             if self.edges[id as usize].take().is_some() {
                 self.free_edges.push(id);
             }
@@ -463,53 +495,7 @@ impl CodeGraph {
             // the `inn` entry for `key` wholesale once this returns.
             let from = edge.from;
             drop_edge_from(&mut self.out, from, id);
-            self.mark_unresolved(id);
-        }
-    }
-
-    /// File an unresolved edge under the name it is waiting on.
-    ///
-    /// A no-op for a resolved edge, which is waiting on nothing.
-    fn mark_unresolved(&mut self, id: u32) {
-        let Some(Target::Unresolved { name, .. }) = self.edge(id).map(|edge| &edge.to) else {
-            return;
-        };
-
-        let name = name.clone();
-        self.unresolved_by_name.entry(name).or_default().push(id);
-    }
-
-    /// Take an edge out of the pending index, by the name it is filed under.
-    fn clear_unresolved(&mut self, id: u32) {
-        let Some(Target::Unresolved { name, .. }) = self.edge(id).map(|edge| &edge.to) else {
-            return;
-        };
-
-        let name = name.clone();
-        if let Some(ids) = self.unresolved_by_name.get_mut(&name) {
-            ids.retain(|held| *held != id);
-            if ids.is_empty() {
-                self.unresolved_by_name.remove(&name);
-            }
-        }
-    }
-
-    /// Take an edge out of both adjacency directions.
-    ///
-    /// A no-op for an unresolved edge, which was never in either.
-    fn unlink_edge(&mut self, id: u32) {
-        let Some(edge) = self.edge(id) else {
-            return;
-        };
-        let from = edge.from;
-        let to = match edge.to {
-            Target::Sym(key) => Some(key),
-            Target::Unresolved { .. } => None,
-        };
-
-        drop_edge_from(&mut self.out, from, id);
-        if let Some(key) = to {
-            drop_edge_from(&mut self.inn, key, id);
+            file_unresolved(&mut self.unresolved_by_name, &name, id);
         }
     }
 
@@ -574,9 +560,22 @@ impl CodeGraph {
             })
             .collect();
 
-        for (id, key, confidence) in updates {
-            self.clear_unresolved(id);
+        // Every bucket a resolved edge could have waited in is one of the dirty
+        // names, so filtering each of those once against the whole set takes
+        // every resolved edge out. A retain per edge rescans the bucket it
+        // leaves, and a dirty name's bucket runs to thousands.
+        let done: HashSet<u32> = updates.iter().map(|&(id, _, _)| id).collect();
+        for name in &dirty {
+            let Some(bucket) = self.unresolved_by_name.get_mut(name) else {
+                continue;
+            };
+            bucket.retain(|held| !done.contains(held));
+            if bucket.is_empty() {
+                self.unresolved_by_name.remove(name);
+            }
+        }
 
+        for (id, key, confidence) in updates {
             let edge = self.edges[id as usize]
                 .as_mut()
                 .expect("resolving a live edge");
@@ -890,6 +889,21 @@ fn drop_edge_from(adjacency: &mut HashMap<SymbolKey, SmallVec<[u32; 4]>>, key: S
         if ids.is_empty() {
             adjacency.remove(&key);
         }
+    }
+}
+
+/// File an unresolved edge under the name it waits on.
+///
+/// Takes the name by reference and clones only into a bucket that is not there
+/// yet, so an edge joining a name others already wait on costs no allocation.
+/// A free function rather than a method, so a caller holding a name borrowed
+/// from the edge store can hand it over without cloning first.
+fn file_unresolved(by_name: &mut HashMap<String, SmallVec<[u32; 4]>>, name: &str, id: u32) {
+    match by_name.get_mut(name) {
+        Some(ids) => ids.push(id),
+        None => {
+            by_name.insert(name.to_owned(), SmallVec::from_slice(&[id]));
+        },
     }
 }
 
