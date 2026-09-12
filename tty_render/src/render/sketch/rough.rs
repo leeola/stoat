@@ -22,7 +22,9 @@
 
 use crate::render::CellMetrics;
 use std::f64::consts::PI;
-use stoatty_protocol::command::{SketchBounds, SketchCommand, SketchEnd, SketchShape, SketchSide};
+use stoatty_protocol::command::{
+    SketchBounds, SketchCommand, SketchEnd, SketchFill, SketchFillStyle, SketchShape, SketchSide,
+};
 
 /// Segments each bezier flattens into.
 ///
@@ -75,10 +77,25 @@ pub(crate) struct Stroke {
     /// Carried rather than recomputed because the reveal asks "where is the pen
     /// at fraction t" every frame, and a prefix sum answers by binary search.
     pub(crate) lengths: Vec<f32>,
+    /// Multiplier on the mark's stroke weight.
+    ///
+    /// One for an outline. A hatch line is half as heavy, which is the weight
+    /// the reference fills at, so the fill reads as shading rather than as a
+    /// second outline.
+    pub(crate) weight: f32,
+    /// Straight color and alpha to draw in, or `None` for the mark's own.
+    ///
+    /// A hatch line takes the fill's color, so one mark's strokes can carry two
+    /// colors while still blending as one shape.
+    pub(crate) color: Option<[u8; 4]>,
 }
 
 impl Stroke {
     fn new(points: Vec<[f32; 2]>) -> Stroke {
+        Stroke::weighted(points, 1.0, None)
+    }
+
+    fn weighted(points: Vec<[f32; 2]>, weight: f32, color: Option<[u8; 4]>) -> Stroke {
         let mut lengths = Vec::with_capacity(points.len());
         let mut total = 0.0;
         for (index, point) in points.iter().enumerate() {
@@ -89,7 +106,12 @@ impl Stroke {
             }
             lengths.push(total);
         }
-        Stroke { points, lengths }
+        Stroke {
+            points,
+            lengths,
+            weight,
+            color,
+        }
     }
 }
 
@@ -246,7 +268,7 @@ where
     let mut random = Random::new(command.style.seed, command.id);
 
     match command.shape {
-        SketchShape::Ellipse { bounds, .. } => {
+        SketchShape::Ellipse { bounds, fill } => {
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
             // An ellipse alone pins its fitting, so its radii do not wander and
@@ -254,10 +276,22 @@ where
             // wanders 5% cuts into the word it circles. The radii draws still
             // consume their two stream values, so every later draw stays put.
             options.curve_fitting = 1.0;
+
+            // The reference lays a fill before the outline it sits under, and
+            // both draw from one stream, so the hatch has to run first.
+            let mut strokes = hatch_strokes(
+                &ellipse_polygon(x, y, w, h),
+                fill,
+                hatch_gap(command, cw),
+                scale,
+                &mut options,
+                &mut random,
+            );
             let ops = ellipse(x + w / 2.0, y + h / 2.0, w, h, &mut options, &mut random);
+            strokes.extend(flatten(&ops, scale));
 
             Geometry {
-                strokes: flatten(&ops, scale),
+                strokes,
                 fill: None,
             }
         },
@@ -268,6 +302,15 @@ where
         } => {
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
+
+            let mut strokes = hatch_strokes(
+                &[[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+                fill,
+                hatch_gap(command, cw),
+                scale,
+                &mut options,
+                &mut random,
+            );
             let ops = rect(
                 x,
                 y,
@@ -277,15 +320,19 @@ where
                 &mut options,
                 &mut random,
             );
+            strokes.extend(flatten(&ops, scale));
 
             Geometry {
-                strokes: flatten(&ops, scale),
+                strokes,
                 // Drawn after the stroke so the stroke's own geometry does not
-                // move when a box gains or loses its fill.
-                fill: fill.map(|_| {
-                    jittered_quad(x, y, w, h, &options, &mut random)
-                        .map(|corner| corner.map(|edge| edge * metrics.scale_factor))
-                }),
+                // move when a box gains or loses its fill. A hatched box has no
+                // quad: its fill is the strokes above.
+                fill: fill
+                    .filter(|fill| fill.style == SketchFillStyle::Solid)
+                    .map(|_| {
+                        jittered_quad(x, y, w, h, &options, &mut random)
+                            .map(|corner| corner.map(|edge| edge * metrics.scale_factor))
+                    }),
             }
         },
         SketchShape::Line {
@@ -1060,6 +1107,135 @@ fn cubic_at(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], t: f64) -> [
     ]
 }
 
+/// The gap between hatch lines, in the logical pixels generation runs in.
+///
+/// Taken from the declared weight rather than the eased one, so a restyle
+/// changes how heavy the fill draws without moving where its lines sit.
+fn hatch_gap(command: &SketchCommand, cw: f64) -> f64 {
+    HACHURE_GAP * f64::from(command.style.width) / f64::from(WIDTH_FRACTION) * cw
+}
+
+/// The ellipse inscribed in the box, as a polygon the hatch fills.
+///
+/// Sampled rather than taken from the stroked ring, so the fill consumes no
+/// draws and the outline's wobble stays where it was.
+fn ellipse_polygon(x: f64, y: f64, w: f64, h: f64) -> Vec<[f64; 2]> {
+    const STEPS: usize = 32;
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (rx, ry) = ((w / 2.0).abs(), (h / 2.0).abs());
+
+    (0..STEPS)
+        .map(|step| {
+            let angle = 2.0 * PI * step as f64 / STEPS as f64;
+            [cx + rx * angle.cos(), cy + ry * angle.sin()]
+        })
+        .collect()
+}
+
+/// The hatch strokes filling `polygon`, or none for a solid or absent fill.
+///
+/// Each chord runs through the same double-line wobble an outline takes, so a
+/// hatch line reads as a pen stroke rather than as a ruled one.
+fn hatch_strokes(
+    polygon: &[[f64; 2]],
+    fill: Option<SketchFill>,
+    gap: f64,
+    scale: f64,
+    options: &mut Options,
+    random: &mut Random,
+) -> Vec<Stroke> {
+    let Some(fill) = fill else {
+        return Vec::new();
+    };
+    let angles: &[f64] = match fill.style {
+        SketchFillStyle::Solid => return Vec::new(),
+        SketchFillStyle::Hachure => &[HACHURE_ANGLE],
+        SketchFillStyle::CrossHatch => &[HACHURE_ANGLE, HACHURE_ANGLE + PI / 2.0],
+    };
+
+    let mut ops = Vec::new();
+    for &angle in angles {
+        for [from, to] in hachure_lines(polygon, gap, angle) {
+            ops.extend(double_line(from[0], from[1], to[0], to[1], options, random));
+        }
+    }
+
+    let color = [fill.color[0], fill.color[1], fill.color[2], fill.alpha];
+    flatten(&ops, scale)
+        .into_iter()
+        .map(|stroke| Stroke {
+            weight: HACHURE_WEIGHT,
+            color: Some(color),
+            ..stroke
+        })
+        .collect()
+}
+/// The angle hachure runs at, in radians.
+///
+/// The reference's default. Off the horizontal and off the vertical, so a hatch
+/// line crosses the box's own sides rather than running along one.
+const HACHURE_ANGLE: f64 = -41.0 * PI / 180.0;
+
+/// Gap between hatch lines, as a multiple of the mark's stroke weight.
+const HACHURE_GAP: f64 = 4.0;
+
+/// A hatch line's weight, as a fraction of the mark's stroke weight.
+pub(crate) const HACHURE_WEIGHT: f32 = 0.5;
+
+/// The chords that hatch `polygon`, each `gap` apart at `angle`.
+///
+/// Scanline fill in the rotated frame: turn the polygon so the hatch runs
+/// horizontal, walk y in `gap` steps, pair the crossings of each scanline with
+/// the edges, and turn each pair back. Pairing sorted crossings is what keeps a
+/// concave shape hatched only where it is solid.
+///
+/// The first scanline sits half a gap in, so a hatch never lands exactly on an
+/// edge, where a crossing count is ambiguous.
+fn hachure_lines(polygon: &[[f64; 2]], gap: f64, angle: f64) -> Vec<[[f64; 2]; 2]> {
+    if polygon.len() < 3 || gap <= 0.0 {
+        return Vec::new();
+    }
+
+    let (sin, cos) = (-angle).sin_cos();
+    let rotate =
+        |p: [f64; 2], sin: f64, cos: f64| [p[0] * cos - p[1] * sin, p[0] * sin + p[1] * cos];
+    let turned: Vec<[f64; 2]> = polygon.iter().map(|&p| rotate(p, sin, cos)).collect();
+
+    let (mut top, mut bottom) = (f64::MAX, f64::MIN);
+    for point in &turned {
+        top = top.min(point[1]);
+        bottom = bottom.max(point[1]);
+    }
+
+    let (back_sin, back_cos) = angle.sin_cos();
+    let mut lines = Vec::new();
+    let mut y = top + gap / 2.0;
+    let mut crossings = Vec::new();
+
+    while y < bottom {
+        crossings.clear();
+        for (index, from) in turned.iter().enumerate() {
+            let to = turned[(index + 1) % turned.len()];
+            let (low, high) = (from[1].min(to[1]), from[1].max(to[1]));
+            if y < low || y >= high {
+                continue;
+            }
+            let t = (y - from[1]) / (to[1] - from[1]);
+            crossings.push(from[0] + (to[0] - from[0]) * t);
+        }
+
+        crossings.sort_by(|a, b| a.total_cmp(b));
+        for &[left, right] in crossings.as_chunks::<2>().0 {
+            lines.push([
+                rotate([left, y], back_sin, back_cos),
+                rotate([right, y], back_sin, back_cos),
+            ]);
+        }
+        y += gap;
+    }
+
+    lines
+}
 /// Roughness damped for a shape too small to carry it.
 ///
 /// A wobble sized for a large box swamps a small one, so the same roughness

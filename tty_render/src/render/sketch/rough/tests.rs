@@ -805,3 +805,62 @@ fn a_fill_quad_is_nudged_and_stays_convex() {
         }
     }
 }
+
+/// A hachure fill lays parallel pen strokes across the shape, which is the
+/// reference's default look and leaves the cells under a mark legible.
+///
+/// The lines have to stay inside the shape and run at the declared angle: a
+/// scanline fill that pairs its crossings wrongly hatches the gaps instead.
+#[test]
+fn a_hachure_fill_lays_parallel_lines_inside_the_box() {
+    let square = [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]];
+    let gap = 10.0;
+    let lines = hachure_lines(&square, gap, HACHURE_ANGLE);
+
+    // The scan runs across the rotated box, whose height is the square's
+    // diagonal, so the count is that over the gap either side of a line.
+    let diagonal = (80.0_f64 * 80.0 * 2.0).sqrt();
+    assert!(
+        !lines.is_empty() && lines.len() as f64 <= diagonal / gap,
+        "{} lines for a {diagonal:.0} pixel scan at a {gap} gap",
+        lines.len(),
+    );
+
+    for [from, to] in &lines {
+        for point in [from, to] {
+            assert!(
+                (-0.01..=80.01).contains(&point[0]) && (-0.01..=80.01).contains(&point[1]),
+                "hatch point {point:?} left the square",
+            );
+        }
+        let heading = (to[1] - from[1]).atan2(to[0] - from[0]);
+        // A chord runs either way along its line, so the difference folds
+        // into a quarter turn before it is judged.
+        let off = (heading - HACHURE_ANGLE).rem_euclid(PI);
+        let off = off.min(PI - off);
+        assert!(
+            off < 2.0 * PI / 180.0,
+            "a line runs at {:.1} degrees, not {:.1}",
+            heading.to_degrees(),
+            HACHURE_ANGLE.to_degrees(),
+        );
+    }
+}
+
+/// Cross-hatch is hachure crossed with a second pass at a right angle, so it
+/// lays strictly more lines than hachure alone over the same shape.
+#[test]
+fn cross_hatch_adds_a_second_pass_at_a_right_angle() {
+    let square = [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]];
+    let one = hachure_lines(&square, 10.0, HACHURE_ANGLE);
+    let other = hachure_lines(&square, 10.0, HACHURE_ANGLE + PI / 2.0);
+
+    assert!(!other.is_empty(), "the crossing pass lays lines too");
+    let heading = |[from, to]: &[[f64; 2]; 2]| (to[1] - from[1]).atan2(to[0] - from[0]);
+    let square_angle = (heading(&other[0]) - heading(&one[0])).abs();
+    assert!(
+        (square_angle - PI / 2.0).abs() < 2.0 * PI / 180.0,
+        "the two passes meet at {:.1} degrees",
+        square_angle.to_degrees(),
+    );
+}

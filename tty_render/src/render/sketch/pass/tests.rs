@@ -240,6 +240,8 @@ fn the_reveal_lands_on_the_segment_holding_its_distance() {
         prefix: vec![0.0, 70.0, 80.0, 90.0, 100.0],
         total: 100.0,
         bounds: [0.0; 4],
+        weight: 1.0,
+        color: None,
     };
 
     assert_eq!(reveal_at(&stroke, 0.0), (0, 0.0), "nothing at the start");
@@ -402,6 +404,40 @@ fn an_entrys_weight_and_opacity_reach_the_instance() {
         (mark.half_width, mark.color[3]),
         (whole[0].half_width / 2.0, 0.25),
         "the instance carries the entry's pair, not the command's",
+    );
+}
+
+/// A hatched box draws its fill as strokes rather than as a quad, and lays them
+/// before the outline so the reveal fills behind the pen.
+///
+/// The two carry different weights and colors, so each run takes its own
+/// instance. A single instance would draw the hatch in the outline's color.
+#[test]
+fn a_hatched_box_strokes_its_fill_before_its_outline() {
+    let hatched = SketchShape::Rect {
+        bounds: boxed(0, 0, 64, 64),
+        radius: 0,
+        fill: Some(SketchFill {
+            color: [0, 0, 255],
+            alpha: 128,
+            style: SketchFillStyle::Hachure,
+        }),
+    };
+    let list = [sketch(1, hatched)];
+    let (built, _) = build(&list, &[1.0]);
+
+    let [fill, outline] = built.as_slice() else {
+        panic!("a hatched box draws a fill run and an outline, got {built:?}");
+    };
+    assert_eq!(
+        (fill.kind, fill.span_first, outline.kind),
+        (KIND_STROKE, 0, KIND_STROKE),
+        "the fill strokes open the run, and no quad instance is built",
+    );
+    assert_eq!(
+        (fill.color, fill.half_width * 2.0),
+        ([0.0, 0.0, 1.0, 128.0 / 255.0], outline.half_width),
+        "and they carry the fill's color at half the outline's weight",
     );
 }
 
@@ -838,6 +874,60 @@ fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
     assert_eq!(
         over, None,
         "a texel reads past the mark's own alpha, at (x, y, red)",
+    );
+}
+
+/// A hatched box paints its interior in bands rather than as one flat body,
+/// which is what keeps the cells under a mark legible.
+///
+/// Only a rendered image separates a hatch from a solid fill: both build fill
+/// ink over the same box, and only the gaps between the lines tell them apart.
+#[test]
+fn a_hatched_box_leaves_gaps_between_its_lines() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("sketch hatch test: no wgpu adapter, skipping");
+        return;
+    };
+
+    let filled = |style| {
+        [sketch(
+            1,
+            SketchShape::Rect {
+                bounds: boxed(16, 16, 96, 64),
+                radius: 0,
+                fill: Some(SketchFill {
+                    color: [255, 0, 0],
+                    alpha: 255,
+                    style,
+                }),
+            },
+        )]
+    };
+
+    let solid = render_red(
+        &device,
+        &queue,
+        &filled(SketchFillStyle::Solid),
+        &[1.0],
+        &[],
+    )
+    .expect("readback");
+    let hatched = render_red(
+        &device,
+        &queue,
+        &filled(SketchFillStyle::Hachure),
+        &[1.0],
+        &[],
+    )
+    .expect("readback");
+
+    let lit = |ink: &[u8]| ink.iter().filter(|&&byte| byte > 0).count();
+    assert!(lit(&hatched) > 0, "the hatch paints");
+    assert!(
+        lit(&hatched) < lit(&solid),
+        "and leaves gaps a solid body covers, {} texels against {}",
+        lit(&hatched),
+        lit(&solid),
     );
 }
 

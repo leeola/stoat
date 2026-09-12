@@ -41,10 +41,6 @@ const KIND_STROKE: u32 = 0;
 /// The instance kind that fills a convex quad.
 const KIND_FILL: u32 = 1;
 
-/// The box a mark's bounds are grown from, inverted so the first union
-/// replaces it.
-const EMPTY_BOUNDS: [f32; 4] = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-
 /// The per-mark instance data.
 ///
 /// One instance covers a whole mark rather than one stroke, because the target
@@ -139,6 +135,12 @@ struct StrokeSpan {
     /// of the one or two strokes whose ink is near it instead of every stroke
     /// the mark carries.
     bounds: [f32; 4],
+    /// Multiplier on the mark's stroke weight, and the color to draw in.
+    ///
+    /// A hatch line is half weight in the fill's own color, so one mark carries
+    /// strokes of two kinds. `None` takes the mark's own color.
+    weight: f32,
+    color: Option<[u8; 4]>,
 }
 
 /// One sketch's generated geometry, as the frame reads it.
@@ -579,8 +581,7 @@ fn build_instances(
         // perimeter and an arrowhead follows its shaft.
         let target = revealed * mark.strokes.chunks(2).map(unit_length).sum::<f32>();
         let mut unit_start = 0.0;
-        let span_first = spans.len() as u32;
-        let mut bounds = EMPTY_BOUNDS;
+        let mut groups: Vec<SpanGroup> = Vec::new();
 
         for unit in mark.strokes.chunks(2) {
             let unit_len = unit_length(unit);
@@ -597,7 +598,23 @@ fn build_instances(
                 if reveal_count < 2 && reveal_t <= 0.0 {
                     continue;
                 }
-                bounds = union(bounds, stroke.bounds);
+
+                // A mark's hatch and its outline differ in weight and color, so
+                // each run of one kind takes its own instance. An unhatched mark
+                // has a single run and so a single instance.
+                match groups.last_mut() {
+                    Some(last) if (last.weight, last.color) == (stroke.weight, stroke.color) => {
+                        last.count += 1;
+                        last.bounds = union(last.bounds, stroke.bounds);
+                    },
+                    _ => groups.push(SpanGroup {
+                        weight: stroke.weight,
+                        color: stroke.color,
+                        first: spans.len() as u32,
+                        count: 1,
+                        bounds: stroke.bounds,
+                    }),
+                }
                 spans.push(SpanInstance {
                     bounds: stroke.bounds,
                     point_offset: stroke.point_offset,
@@ -608,22 +625,33 @@ fn build_instances(
             }
         }
 
-        let span_count = spans.len() as u32 - span_first;
-        if span_count > 0 {
+        for group in groups {
             push(SketchInstance {
-                bounds,
-                color: rgba(style.color, reveal.alpha),
-                half_width,
+                bounds: group.bounds,
+                color: match group.color {
+                    Some([r, g, b, a]) => rgba([r, g, b], f32::from(a) / 255.0),
+                    None => rgba(style.color, reveal.alpha),
+                },
+                half_width: half_width * group.weight,
                 _pad0: 0.0,
                 dy,
                 _pad1: 0.0,
-                span_first,
+                span_first: group.first,
                 seq: sketch.seq,
-                span_count,
+                span_count: group.count,
                 kind: KIND_STROKE,
             });
         }
     }
+}
+
+/// A run of a mark's spans sharing one weight and color, which is one instance.
+struct SpanGroup {
+    weight: f32,
+    color: Option<[u8; 4]>,
+    first: u32,
+    count: u32,
+    bounds: [f32; 4],
 }
 
 /// The smallest box holding both.
@@ -684,6 +712,8 @@ fn generate_marks(
                 total: stroke.lengths.last().copied().unwrap_or(0.0),
                 prefix: stroke.lengths.clone(),
                 bounds: points_bounds(&stroke.points),
+                weight: stroke.weight,
+                color: stroke.color,
             });
         }
 
