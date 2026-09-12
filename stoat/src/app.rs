@@ -19699,7 +19699,8 @@ mod tests {
     #[test]
     fn typing_narrows_the_jumps() {
         let mut h = crate::test_harness::TestHarness::with_size(160, 40);
-        open_jumplist_picker(&mut h, 12);
+        let jumps = 12;
+        open_jumplist_picker(&mut h, jumps);
         let all = h
             .stoat
             .jumplist_picker
@@ -19718,9 +19719,11 @@ mod tests {
             .expect("the picker stays open while typing")
             .filtered()
             .len();
+        // The list holds the fixture's jumps and nothing else: the pane opened
+        // from a scratch it left behind, which goes with the switch.
         assert_eq!(
             (all, narrowed),
-            (13, 1),
+            (jumps, 1),
             "the query keeps only the jump it names"
         );
     }
@@ -19839,10 +19842,20 @@ mod tests {
         page(&mut h, -1);
         assert_eq!(selected(&h), 0, "and a page up returns");
 
+        // Read rather than stated, since the jumps the fixture makes are what
+        // the list holds and the pane it opened from leaves nothing behind.
+        let last = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("open")
+            .filtered()
+            .len()
+            - 1;
         for _ in 0..20 {
             page(&mut h, 1);
         }
-        assert_eq!(selected(&h), 19, "paging past the end stops on it");
+        assert_eq!(selected(&h), last, "paging past the end stops on it");
         for _ in 0..20 {
             page(&mut h, -1);
         }

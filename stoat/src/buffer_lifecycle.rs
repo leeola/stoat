@@ -1116,6 +1116,74 @@ mod tests {
         assert_eq!(new_buffer.read().expect("poisoned").rope().to_string(), "");
     }
 
+    /// A pane starts on a scratch, and a close leaves one behind. Opening a file
+    /// moves the pane off it, and nothing else can reach it afterward.
+    #[test]
+    fn a_pane_moving_off_an_untouched_scratch_drops_it() {
+        let mut h = Stoat::test();
+        let scratch = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
+        let before = h.stoat.active_workspace().buffers.len();
+
+        open_path(&mut h, b"hello\n");
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.buffers.get(scratch).is_none(),
+            "the scratch the pane left goes with it",
+        );
+        assert_eq!(
+            ws.buffers.len(),
+            before,
+            "so the file takes the scratch's place rather than adding to it",
+        );
+    }
+
+    /// Typed text is what separates a scratch worth keeping from one to drop,
+    /// and the buffer's own dirty flag is how that is read.
+    #[test]
+    fn a_scratch_holding_typed_text_survives_the_switch() {
+        let mut h = Stoat::test();
+        let scratch = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
+        {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(scratch)
+                .expect("the pane opens on a scratch");
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(0..0, "kept");
+        }
+
+        open_path(&mut h, b"hello\n");
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(scratch)
+                .is_some_and(|buffer| buffer.read().expect("poisoned").dirty),
+            "a scratch with unsaved text stays",
+        );
+    }
+
+    /// A split shows the same buffer through a second editor, so the pane that
+    /// moves off is not the last reader.
+    #[test]
+    fn a_scratch_a_second_split_shows_survives_the_switch() {
+        let mut h = Stoat::test();
+        let scratch = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
+        dispatch(&mut h.stoat, &SplitRight);
+        h.settle();
+
+        open_path(&mut h, b"hello\n");
+
+        assert!(
+            h.stoat.active_workspace().buffers.get(scratch).is_some(),
+            "the split still shows it, so it is not the pane's to drop",
+        );
+    }
+
     #[test]
     fn close_buffer_clears_lsp_opened() {
         let mut h = Stoat::test();

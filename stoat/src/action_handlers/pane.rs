@@ -135,7 +135,9 @@ pub(crate) fn dispose_view(
             let buffer_id = ws.editors.get(id).map(|editor| editor.buffer_id);
             match editors {
                 EditorDisposal::Remove => {
-                    ws.editors.remove(id);
+                    if let Some(editor) = ws.editors.remove(id) {
+                        super::drop_unreferenced_scratch(ws, editor.buffer_id);
+                    }
                 },
                 EditorDisposal::GcIfUnreferenced => {
                     super::gc_editor_if_unreferenced(ws, id);

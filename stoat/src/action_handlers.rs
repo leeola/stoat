@@ -1403,7 +1403,46 @@ pub(crate) fn gc_editor_if_unreferenced(ws: &mut crate::workspace::Workspace, ed
     if ws.editor_referenced(editor_id) {
         return;
     }
-    ws.editors.remove(editor_id);
+    if let Some(editor) = ws.editors.remove(editor_id) {
+        drop_unreferenced_scratch(ws, editor.buffer_id);
+    }
+}
+
+/// Drop `id` from the workspace when it is a scratch buffer nothing reaches.
+///
+/// A pane left showing a scratch keeps it in the registry for the workspace's
+/// life: a close, a split, and a terminal exit each make one, no picker lists
+/// them, and a session snapshot writes every one with its history. Sweeping
+/// when a pane moves off is what bounds that.
+///
+/// Kept when the buffer has a path, is a preview surface, is dirty, or another
+/// editor still holds it. Dirty rather than empty is the test, so a scratch
+/// whose edits were undone still goes.
+pub(crate) fn drop_unreferenced_scratch(ws: &mut crate::workspace::Workspace, id: BufferId) {
+    if ws.buffers.path_for(id).is_some() || ws.buffers.is_preview(id) {
+        return;
+    }
+    let dirty = ws
+        .buffers
+        .get(id)
+        .is_none_or(|buffer| buffer.read().expect("buffer poisoned").dirty);
+    if dirty || ws.editors.values().any(|editor| editor.buffer_id == id) {
+        return;
+    }
+
+    ws.buffers.remove(id);
+    ws.release_buffer(id, None);
+
+    // A jumplist entry outliving its buffer would resolve into nothing on the
+    // next walk, which is what the close path purges for the same reason.
+    for tree in ws.pane_trees_mut() {
+        for pane_id in tree.split_pane_ids() {
+            tree.pane_mut(pane_id).jumplist.remove_buffer(id);
+        }
+    }
+    if let Some(done) = ws.editor_bridge_waiters.remove(&id) {
+        let _ = done.send(());
+    }
 }
 
 /// Drive [`ActionKind::QuitAll`]. Quits immediately when no buffer is

@@ -432,6 +432,14 @@ impl BufferRegistry {
         }
     }
 
+    /// Whether `id` is flagged as a preview surface.
+    ///
+    /// A preview buffer has no editor of its own, so a sweep that drops what no
+    /// editor holds has to ask before taking one.
+    pub(crate) fn is_preview(&self, id: BufferId) -> bool {
+        self.buffers.get(&id).is_some_and(|entry| entry.preview)
+    }
+
     /// All buffer ids flagged as preview surfaces. The parse pipeline
     /// pulls these into its visibility set so syntax highlighting
     /// reaches transient preview panes (currently only the file
