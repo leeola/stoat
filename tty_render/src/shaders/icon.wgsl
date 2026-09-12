@@ -1,7 +1,12 @@
 // Status icon pass. One instance per icon draws a quad over a size-by-size cell
-// block; the fragment paints a signed-distance silhouette per kind -- a disc for
-// error, an upward triangle for warning, a square for info -- in the icon color
-// and transparent elsewhere, so it alpha-blends over whatever it sits on.
+// block. The fragment paints a signed-distance shape per kind in the icon color
+// and nothing elsewhere, so it alpha-blends over whatever it sits on.
+//
+// Each kind is an outline with its glyph cut out of it, the way a status icon
+// is drawn in an icon set: an error is a disc crossed out, a warning is a
+// rounded triangle holding a bang, and info is a disc holding an i. A filled
+// silhouette carries none of that meaning, and a reader tells one apart from
+// the next by its glyph rather than by its outline.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -75,14 +80,33 @@ fn coverage(sdf: f32) -> f32 {
     return clamp(0.5 - sdf, 0.0, 1.0);
 }
 
-// Signed distance to the upward triangle inscribed in the radius-`r` disc
-// centered at the origin, as the max of its three edge half-planes (apex at the
-// top, base across the bottom). The slant normals are (+-2, -1)/sqrt(5).
+// Signed distance from `q` to the capsule of radius `r` around segment `a`-`b`.
+// Projecting onto the segment and clamping to its ends is what rounds the caps,
+// and a zero-length segment degenerates to a disc for free.
+fn capsule_sdf(q: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let span = b - a;
+    let denom = max(dot(span, span), 0.0001);
+    let t = clamp(dot(q - a, span) / denom, 0.0, 1.0);
+    return distance(q, a + span * t) - r;
+}
+
+// Signed distance to the equilateral triangle of size `r` centered at the
+// origin, apex up. `q.y` is negated first, because the pass works in screen
+// space where y grows downward.
+//
+// The exact distance matters at the three vertices. Taking the max of the edge
+// half-planes under-estimates it there, which widens the anti-aliasing ramp and
+// bulges each tip.
 fn triangle_sdf(q: vec2<f32>, r: f32) -> f32 {
-    let bottom = q.y - r;
-    let left = -0.894427 * q.x - 0.447214 * (q.y + r);
-    let right = 0.894427 * q.x - 0.447214 * (q.y + r);
-    return max(bottom, max(left, right));
+    let k = sqrt(3.0);
+    var p = vec2<f32>(q.x, -q.y);
+    p.x = abs(p.x) - r;
+    p.y = p.y + r / k;
+    if p.x + k * p.y > 0.0 {
+        p = vec2<f32>(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+    }
+    p.x = p.x - clamp(p.x, -2.0 * r, 0.0);
+    return -length(p) * sign(p.y);
 }
 
 @fragment
@@ -110,15 +134,32 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let center = in.extent * 0.5;
     let q = in.local * in.extent - center;
     let r = min(center.x, center.y) * 0.9;
+    // One physical pixel is the thinnest a glyph stroke reads at, so a small
+    // icon holds its glyph rather than closing it up.
+    let stroke = max(0.1 * r, 0.75);
 
-    var sdf: f32;
+    var body: f32;
+    var cutout: f32;
     if in.kind == KIND_WARNING {
-        sdf = triangle_sdf(q, r);
+        let round = 0.12 * r;
+        body = triangle_sdf(q, r - round) - round;
+        let bar = capsule_sdf(q, vec2<f32>(0.0, -0.25 * r), vec2<f32>(0.0, 0.2 * r), stroke);
+        let dot = capsule_sdf(q, vec2<f32>(0.0, 0.5 * r), vec2<f32>(0.0, 0.5 * r), stroke);
+        cutout = min(bar, dot);
     } else if in.kind == KIND_INFO {
-        sdf = max(abs(q.x), abs(q.y)) - r * 0.82;
+        body = length(q) - r;
+        let dot = capsule_sdf(q, vec2<f32>(0.0, -0.4 * r), vec2<f32>(0.0, -0.4 * r), stroke);
+        let bar = capsule_sdf(q, vec2<f32>(0.0, -0.1 * r), vec2<f32>(0.0, 0.45 * r), stroke);
+        cutout = min(dot, bar);
     } else {
-        sdf = length(q) - r;
+        body = length(q) - r;
+        let arm = 0.42 * r;
+        let down = capsule_sdf(q, vec2<f32>(-arm, -arm), vec2<f32>(arm, arm), stroke);
+        let up = capsule_sdf(q, vec2<f32>(-arm, arm), vec2<f32>(arm, -arm), stroke);
+        cutout = min(down, up);
     }
 
-    return vec4<f32>(in.color, coverage(sdf));
+    // Subtracting the glyph leaves the ground showing through it, so the icon
+    // reads as a mark rather than as a blob of color.
+    return vec4<f32>(in.color, coverage(max(body, -cutout)));
 }

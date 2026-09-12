@@ -128,7 +128,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         Icon {
             top: 3,
             left: 3,
-            kind: IconKind::Info,
+            kind: IconKind::Error,
             color: icon_color,
             size: 1,
             offset: [0, 0],
@@ -137,7 +137,16 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         Icon {
             top: 3,
             left: 0,
-            kind: IconKind::Info,
+            kind: IconKind::Error,
+            color: icon_color,
+            size: 1,
+            offset: [0, 0],
+            seq: 3,
+        },
+        Icon {
+            top: 3,
+            left: 6,
+            kind: IconKind::Warning,
             color: icon_color,
             size: 1,
             offset: [0, 0],
@@ -186,8 +195,32 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         "run bg is occluded inside the box"
     );
 
-    assert_eq!(cell(3, 0), rgb(icon_color), "icon paints outside the box");
-    assert_eq!(cell(3, 3), rgb(modal_bg), "icon is occluded inside the box");
+    // An icon is an outline with its glyph cut out of it, so its center is the
+    // ground and its body is the pixel a little way up the vertical axis.
+    let icon_r = 0.45 * cell_w.min(cell_h) as f32;
+    let body = |row: u32, col: u32| -> (u8, u8, u8) {
+        let x = col * cell_w + cell_w / 2;
+        let y = row * cell_h + cell_h / 2 - (0.6 * icon_r) as u32;
+        let i = ((y * width + x) * 4) as usize;
+        (pixels[i], pixels[i + 1], pixels[i + 2])
+    };
+
+    assert_eq!(body(3, 0), rgb(icon_color), "icon paints outside the box");
+    assert_eq!(body(3, 3), rgb(modal_bg), "icon is occluded inside the box");
+
+    assert_eq!(
+        cell(3, 0),
+        rgb(modal_bg),
+        "the error's cross cuts through its disc"
+    );
+    // The bang's bar is thinner than the pixel the probe lands on, so the
+    // center keeps a little of the icon rather than none of it.
+    let midpoint = (u32::from(modal_bg.b) + u32::from(icon_color.b)) / 2;
+    assert!(
+        u32::from(cell(3, 6).2) < midpoint,
+        "the bang cuts through the warning triangle, got {:?}",
+        cell(3, 6)
+    );
 }
 
 /// A pane pool composited beneath a box is occluded by it, while a non-pane
