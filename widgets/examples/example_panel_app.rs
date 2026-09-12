@@ -1,13 +1,20 @@
-//! A panel stoatty demo showing a centered modal dialog drawn as off-grid
-//! chrome. The dialog is a hairline rounded frame with a soft drop shadow
-//! floating over the editor cells, plus a title text run sitting on the top
-//! edge.
+//! A panel stoatty demo. Every shadow style is drawn against every border
+//! weight, so the look of a modal is picked rather than guessed at.
+//!
+//! [`PanelShadow`] has four styles and [`BorderStyle`] four weights, and the
+//! corner radius, the fill, and the horizontal inset change the box as well.
+//! The grid puts a row per shadow beside a column per weight. The other three
+//! vary across it, so all three read against every shadow: square corners on
+//! the left half and rounded on the right, a fill on every other row, and an
+//! inset on the last column.
+//!
+//! Each panel carries its own title, so a combination that reads well is named
+//! where it is seen.
 //!
 //! The frame flows through the [`Panel`] widget and the title through the
-//! [`TextRun`] widget into an [`ApcScene`]. The cells inside keep their own
-//! background. In any other terminal the panel degrades to a box-drawing border
-//! and the title to ordinary cells, so the dialog still reads. Run as the PTY
-//! shell by the `panel` example.
+//! [`TextRun`] widget into an [`ApcScene`]. In any other terminal the panel
+//! degrades to a box-drawing border and the title to ordinary cells, so the
+//! grid still reads. Run as the PTY shell by the `panel` example.
 
 use ratatui::{
     backend::CrosstermBackend,
@@ -29,8 +36,39 @@ const EDITOR_FG: [u8; 3] = [171, 178, 191];
 const FRAME_FG: [u8; 3] = [92, 99, 112];
 const TITLE_FG: [u8; 3] = [97, 175, 239];
 
-/// The title text run's glyph size in 256ths of a cell, matching the body text.
-const TITLE_SCALE: u16 = 256;
+/// The fill the even rows carry (`#31353f`), a shade off the editor background
+/// so a filled box reads against an unfilled one.
+const PANEL_FILL: [u8; 3] = [49, 53, 63];
+
+/// The title's glyph size in 256ths of a cell, small enough that a name fits on
+/// an 18-cell top edge.
+const TITLE_SCALE: u16 = 160;
+
+/// One grid cell's panel, in cells, and the gaps between them.
+const PANEL_W: u16 = 18;
+const PANEL_H: u16 = 6;
+const GAP_X: u16 = 4;
+const GAP_Y: u16 = 2;
+
+/// The grid's top-left corner, in cells.
+const ORIGIN_X: u16 = 2;
+const ORIGIN_Y: u16 = 1;
+
+/// The shadow styles the rows step through, with the name each is titled by.
+const SHADOWS: [(PanelShadow, &str); 4] = [
+    (PanelShadow::None_, "none"),
+    (PanelShadow::Drop, "drop"),
+    (PanelShadow::Tucked, "tuck"),
+    (PanelShadow::Overhang, "over"),
+];
+
+/// The border weights the columns step through, with the name each is titled by.
+const BORDERS: [(BorderStyle, &str); 4] = [
+    (BorderStyle::Light, "light"),
+    (BorderStyle::Heavy, "heavy"),
+    (BorderStyle::Double, "double"),
+    (BorderStyle::Rounded, "round"),
+];
 
 fn main() {
     let mut session = ApcSession::new(SessionOptions {
@@ -56,59 +94,72 @@ fn main() {
     }
 }
 
-/// Fill the background, write the dialog's body text into the cells, then emit
-/// the panel frame and the title text run over it.
+/// Fill the background, then draw one panel per shadow and border pair.
+///
+/// The corner radius, the fill, and the inset vary across the grid rather than
+/// getting rows of their own, so all three read against every shadow without a
+/// grid too large to take in at once.
 fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
     let area = frame.area();
     frame.buffer_mut().set_style(area, editor_style());
 
-    let dialog = centered(area, 34, 8);
+    for (row, (shadow, shadow_name)) in SHADOWS.into_iter().enumerate() {
+        for (column, (style, style_name)) in BORDERS.into_iter().enumerate() {
+            let panel = Rect {
+                x: ORIGIN_X + column as u16 * (PANEL_W + GAP_X),
+                y: ORIGIN_Y + row as u16 * (PANEL_H + GAP_Y),
+                width: PANEL_W,
+                height: PANEL_H,
+            };
+
+            frame.render_stateful_widget(
+                Panel {
+                    style,
+                    border: FRAME_FG,
+                    corner_radius: match column < 2 {
+                        true => 0,
+                        false => 8,
+                    },
+                    fill: (row % 2 == 0).then_some(PANEL_FILL),
+                    shadow,
+                    inset_x: match column == BORDERS.len() - 1 {
+                        true => 4,
+                        false => 0,
+                    },
+                    above_pools: false,
+                    anchor: None,
+                },
+                panel,
+                scene,
+            );
+
+            // The title sits on the top edge, its background masking the
+            // hairline beneath it the way a ratatui block title breaks its
+            // border.
+            frame.render_stateful_widget(
+                TextRun {
+                    col: 2 * 16,
+                    row: 0,
+                    scale: TITLE_SCALE,
+                    color: TITLE_FG,
+                    bg: Some(EDITOR_BG),
+                    text: &format!(" {shadow_name} {style_name} "),
+                    follow: 0,
+                    anchor: None,
+                },
+                panel,
+                scene,
+            );
+        }
+    }
 
     frame.buffer_mut().set_string(
-        dialog.x + 3,
-        dialog.y + 3,
-        "A modal panel drawn off the grid.",
+        ORIGIN_X,
+        ORIGIN_Y + SHADOWS.len() as u16 * (PANEL_H + GAP_Y),
+        "rows: shadow style   columns: border weight   \
+         square corners left, rounded right, fill on alternate rows, inset last column",
         editor_style(),
     );
-
-    frame.render_stateful_widget(
-        Panel {
-            style: BorderStyle::Rounded,
-            border: FRAME_FG,
-            corner_radius: 6,
-            fill: None,
-            shadow: PanelShadow::Drop,
-            inset_x: 0,
-            above_pools: false,
-            anchor: None,
-        },
-        dialog,
-        scene,
-    );
-
-    // The title sits on the top edge, its background masking the hairline
-    // beneath it the way a ratatui block title breaks its border.
-    frame.render_stateful_widget(
-        TextRun {
-            col: 3 * 16,
-            row: 0,
-            scale: TITLE_SCALE,
-            color: TITLE_FG,
-            bg: Some(EDITOR_BG),
-            text: " Panel ",
-            follow: 0,
-            anchor: None,
-        },
-        dialog,
-        scene,
-    );
-}
-
-/// A `width` by `height` rectangle centered within `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
 }
 
 fn editor_style() -> Style {
