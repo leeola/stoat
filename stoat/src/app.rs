@@ -3834,6 +3834,7 @@ impl Stoat {
             languages: self.language_registry.clone(),
             tx: self.index_update_tx.clone(),
             redraw: self.redraw_notify.clone(),
+            drain: self.drain_notify.clone(),
         };
         self._index_build_task = Some(crate::code_index::build::build_index(
             &self.executor,
@@ -4013,7 +4014,9 @@ impl Stoat {
             }
 
             if index_turn_spent(drained, started.elapsed()) {
-                self.redraw_notify.notify_one();
+                // The remainder merges on the next turn, and merging it shows
+                // nothing, so the wake asks for the turn and not for a frame.
+                self.drain_notify.notify_one();
                 break;
             }
         }

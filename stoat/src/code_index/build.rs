@@ -83,13 +83,22 @@ pub(crate) enum IndexUpdate {
 }
 
 /// The shared handles a build job captures while it runs. It holds the
-/// filesystem, the language registry, the update channel, and the loop's
-/// redraw signal.
+/// filesystem, the language registry, the update channel, and the loop's two
+/// wake signals.
 pub(crate) struct IndexBuild {
     pub(crate) fs: Arc<dyn FsHost>,
     pub(crate) languages: Arc<LanguageRegistry>,
     pub(crate) tx: UnboundedSender<IndexUpdate>,
+    /// The wake for an update something on screen reads, which asks for a
+    /// frame of its own.
     pub(crate) redraw: Arc<Notify>,
+    /// The wake for an update nothing on screen reads, which asks the loop to
+    /// merge it and paints only if the merge turns out to change something.
+    ///
+    /// A streamed shard is the case in point. It reaches the graph and no
+    /// pane, so waking on the redraw signal repaints the whole screen once per
+    /// file of the tree while the pool parses.
+    pub(crate) drain: Arc<Notify>,
 }
 
 /// Spawn the index build job for `workspace` rooted at `git_root`.
@@ -118,6 +127,7 @@ pub(crate) fn build_index(
         languages,
         tx,
         redraw,
+        drain,
     } = handles;
     executor.spawn_blocking(move || {
         let started = Instant::now();
@@ -200,7 +210,9 @@ pub(crate) fn build_index(
                     cancelled.store(true, Ordering::Relaxed);
                     return ControlFlow::Break(());
                 }
-                redraw.notify_one();
+                // The shard reaches the graph and no pane, so the loop merges
+                // it on a wake that earns its frame rather than assuming one.
+                drain.notify_one();
             }
 
             // Past the early returns, so a walk the shutdown cut short records
@@ -342,11 +354,14 @@ pub(crate) fn reindex_path(
     handles: IndexBuild,
     target: ExternalReindex,
 ) -> Task<()> {
+    // One file the user is looking at, rather than a stream of them, so its
+    // update takes the wake that asks for a frame.
     let IndexBuild {
         fs,
         languages,
         tx,
         redraw,
+        ..
     } = handles;
     executor.spawn_blocking(move || {
         let ExternalReindex {
@@ -555,6 +570,7 @@ mod tests {
         workspace::WorkspaceId,
     };
     use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
+    use futures::FutureExt;
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -567,7 +583,19 @@ mod tests {
 
     /// Run a build to completion over `fs`, returning the updates it streamed.
     fn run_build(fs: Arc<FakeFs>, index_dir: Option<PathBuf>) -> Vec<IndexUpdate> {
+        run_build_watched(fs, index_dir).0
+    }
+
+    /// The same, beside the two wake signals the build fired.
+    ///
+    /// A signal holds one permit however often it is notified, so what a caller
+    /// reads back is whether the build touched it at all.
+    fn run_build_watched(
+        fs: Arc<FakeFs>,
+        index_dir: Option<PathBuf>,
+    ) -> (Vec<IndexUpdate>, Arc<Notify>, Arc<Notify>) {
         let scheduler = Arc::new(TestScheduler::new());
+        let (redraw, drain) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let task = build_index(
             &scheduler.executor(),
@@ -575,7 +603,8 @@ mod tests {
                 fs,
                 languages: Arc::new(LanguageRegistry::standard()),
                 tx,
-                redraw: Arc::new(Notify::new()),
+                redraw: redraw.clone(),
+                drain: drain.clone(),
             },
             PathBuf::from("/repo"),
             WorkspaceId::default(),
@@ -589,7 +618,40 @@ mod tests {
         while let Ok(update) = rx.try_recv() {
             updates.push(update);
         }
-        updates
+        (updates, redraw, drain)
+    }
+
+    /// A streamed shard reaches the graph and no pane, so it wakes the loop to
+    /// merge rather than to paint. Waking the redraw signal repaints the whole
+    /// screen once per file of the tree while the pool parses, and every key
+    /// pressed during the build queues behind those turns.
+    ///
+    /// The two builds separate the shard's wake from the build's own. A
+    /// completed build asks for its frame either way, and a signal holds one
+    /// permit however often it is notified, so a tree with a file cannot show
+    /// on its own which of the two fired the redraw.
+    #[test]
+    fn a_streamed_shard_wakes_the_loop_to_merge_and_not_to_paint() {
+        let fs = Arc::new(FakeFs::new());
+        fs.write(Path::new("/repo/a.rs"), b"fn helper() {}\n")
+            .unwrap();
+        let (_, _, drain) = run_build_watched(fs, None);
+
+        assert!(
+            drain.notified().now_or_never().is_some(),
+            "the shard woke the loop to merge it",
+        );
+
+        let (_, redraw, drain) = run_build_watched(Arc::new(FakeFs::new()), None);
+
+        assert!(
+            drain.notified().now_or_never().is_none(),
+            "a build with no shard to stream wakes no merge",
+        );
+        assert!(
+            redraw.notified().now_or_never().is_some(),
+            "and the completed build still asks for its frame",
+        );
     }
 
     /// The build writes each shard it extracted, rather than handing the bytes

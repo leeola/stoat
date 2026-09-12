@@ -558,6 +558,7 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
         languages: stoat.language_registry.clone(),
         tx: stoat.index_update_tx.clone(),
         redraw: stoat.redraw_notify.clone(),
+        drain: stoat.drain_notify.clone(),
     };
     let target = crate::code_index::build::ExternalReindex {
         git_root,
