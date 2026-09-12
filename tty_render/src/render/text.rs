@@ -605,7 +605,7 @@ pub struct TextPass {
     /// A run of ids none of which appear here shapes to what shaping each
     /// character alone gives, so it needs no shaper. Built once beside the face
     /// it describes, which is fixed for the pass's lifetime.
-    substitutable: Vec<u16>,
+    substitutable: font::SubstitutionRules,
     /// Whether adjacent same-style cells shape together so the font's ligatures
     /// form across cells. When false, every cell is shaped on its own.
     ligatures: bool,
@@ -758,7 +758,7 @@ impl TextPass {
         let cap_height = font::probe_cap_height(primary_font.as_deref(), metrics);
         let substitutable = primary_font
             .as_deref()
-            .map(font::substitution_coverage)
+            .map(font::substitution_rules)
             .unwrap_or_default();
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
@@ -1160,7 +1160,7 @@ impl TextPass {
         self.substitutable = self
             .primary_font
             .as_deref()
-            .map(font::substitution_coverage)
+            .map(font::substitution_rules)
             .unwrap_or_default();
 
         self.shape_cache.clear();
@@ -2001,10 +2001,12 @@ impl TextPass {
             let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
             let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
             let substitutable = mem::take(&mut self.substitutable);
-            let reshapes = |ch: char| {
-                charmap
-                    .as_ref()
-                    .is_some_and(|map| substitutable.binary_search(&map.map(ch)).is_ok())
+            let reshapes = |run: &[(usize, char)]| {
+                let Some(map) = charmap.as_ref() else {
+                    return false;
+                };
+                let glyphs: Vec<u16> = run.iter().map(|&(_, ch)| map.map(ch)).collect();
+                substitutable.reshapes(&glyphs)
             };
             let shaping = RowShaping {
                 primary,
@@ -3041,10 +3043,12 @@ impl TextPass {
         let entered_row = cursor_cell.map(|(row, _)| row);
         self.last_cursor_cell = cursor_cell;
 
-        let reshapes = |ch: char| {
-            charmap
-                .as_ref()
-                .is_some_and(|map| substitutable.binary_search(&map.map(ch)).is_ok())
+        let reshapes = |run: &[(usize, char)]| {
+            let Some(map) = charmap.as_ref() else {
+                return false;
+            };
+            let glyphs: Vec<u16> = run.iter().map(|&(_, ch)| map.map(ch)).collect();
+            substitutable.reshapes(&glyphs)
         };
         let shaping = RowShaping {
             primary,
@@ -3487,7 +3491,7 @@ impl TextPass {
             let reshapes = shaping.reshapes;
             let cells = &run;
             let shaped = font::shape_run_cached(&mut self.run_shape_cache, &run_text, |scratch| {
-                if cells.iter().any(|&(_, ch)| reshapes(ch)) {
+                if reshapes(cells) {
                     return font::shape_run(scratch, font_system, &run_text, metrics, primary);
                 }
 
@@ -3731,16 +3735,23 @@ fn glyph_key_in(
     key
 }
 
+/// Whether the primary face could substitute inside a run, asked of the run's
+/// cells as [`TextPass::rasterize_row`] groups them.
+type ReshapeTest<'a> = &'a dyn Fn(&[(usize, char)]) -> bool;
+
 /// The per-frame shaping context [`TextPass::rasterize_row`] needs, resolved
 /// once per frame and shared across rows: the primary family, a coverage test
 /// for the face it resolves to, and the cursor cell that breaks ligatures.
 struct RowShaping<'a> {
     primary: Family<'a>,
     covers: &'a dyn Fn(char) -> bool,
-    /// Whether the primary face reshapes the glyph this char maps to. A run of
-    /// cells none of which answer true shapes to what shaping each alone
-    /// gives, so it skips the shaper.
-    reshapes: &'a dyn Fn(char) -> bool,
+    /// Whether the primary face could substitute inside this run. A run no rule
+    /// of the face can match shapes to what shaping each cell alone gives, so
+    /// it skips the shaper.
+    ///
+    /// Asked of the run rather than of a character. A rule needs its glyphs
+    /// present together, which no per-character test can say.
+    reshapes: ReshapeTest<'a>,
     cursor_cell: Option<(usize, usize)>,
 }
 
@@ -5660,10 +5671,12 @@ mod tests {
         let charmap = font.as_ref().map(|font| font.as_swash().charmap());
         let substitutable = std::mem::take(&mut pass.substitutable);
         let covers = |_: char| true;
-        let reshapes = |ch: char| {
-            charmap
-                .as_ref()
-                .is_some_and(|map| substitutable.binary_search(&map.map(ch)).is_ok())
+        let reshapes = |run: &[(usize, char)]| {
+            let Some(map) = charmap.as_ref() else {
+                return false;
+            };
+            let glyphs: Vec<u16> = run.iter().map(|&(_, ch)| map.map(ch)).collect();
+            substitutable.reshapes(&glyphs)
         };
         let family = Some("JetBrains Mono".to_owned());
         let shaping = RowShaping {
@@ -5710,6 +5723,13 @@ mod tests {
             pass.run_shape_cache.shaped_chars(),
             "=>".len(),
             "and the one run that ligates is the only one the shaper laid out",
+        );
+
+        rasterize_rows_by_coverage(&mut pass, &device, &queue, &["fn handle(x) { list[i] }"]);
+        assert_eq!(
+            pass.run_shape_cache.shaped_chars(),
+            "=>".len(),
+            "ordinary code holds no rule the face could fire, so it adds nothing",
         );
     }
 

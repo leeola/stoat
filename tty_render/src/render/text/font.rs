@@ -13,7 +13,11 @@ use cosmic_text::{
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use ttf_parser::{gsub::SubstitutionSubtable, opentype_layout::Coverage, Face as TtfFace};
+use ttf_parser::{
+    gsub::SubstitutionSubtable,
+    opentype_layout::{ClassDefinition, Coverage},
+    Face as TtfFace,
+};
 
 /// Family name of the bundled text face, registered by [`load_bundled_fonts`].
 ///
@@ -96,65 +100,370 @@ const DEFAULT_FEATURES: [ttf_parser::Tag; 8] = [
     ttf_parser::Tag::from_bytes(b"clig"),
 ];
 
-/// Every glyph id `font` substitutes under [`DEFAULT_FEATURES`], sorted, or
-/// empty where it substitutes none.
+/// What a run must hold for the face to substitute inside it.
 ///
-/// A run whose glyphs all sit outside this set shapes to exactly what shaping
-/// each character alone produces, so it needs no shaper. A substitution fires
-/// only when a glyph sits in some reachable lookup's input coverage, so the
-/// union of those subtables' coverage over-approximates. It keeps a run on the
-/// shaping path that had no substitution to make, and it never lets one past
-/// that did.
+/// A coverage says only that a glyph can open some rule. Every glyph of a
+/// `calt` sequence carries its own rule with its partners in backtrack or
+/// lookahead, so a coverage alone sends every run holding a bracket to the
+/// shaper. A rule's other positions say whether the run could satisfy it at
+/// all.
+///
+/// Over-approximates in one direction only, so a ligature is never dropped. A
+/// position matching the catch-all class is left out rather than enumerated,
+/// and a subtable kind this does not model keeps its coverage as an
+/// unconditional trigger. Either way a run is sometimes shaped for nothing, and
+/// never left unshaped where a substitution was there to make.
+#[derive(Default)]
+pub(crate) struct SubstitutionRules {
+    /// Rules by the glyph their first input position names, so a run tests only
+    /// the rules its own glyphs could open.
+    by_first: FxHashMap<u16, Vec<Rule>>,
+    /// Glyphs of a subtable kind the rules do not model, which trigger on their
+    /// own. Sorted.
+    always: Vec<u16>,
+}
+
+/// The positions a run must satisfy for one rule to fire.
+struct Rule {
+    positions: Vec<Position>,
+}
+
+/// One position of a rule, as what satisfies it.
+enum Position {
+    /// This glyph, `count` times over the whole rule. A rule over two dots
+    /// needs two of them, which is what separates `..` from a lone `.`.
+    One { glyph: u16, count: u16 },
+    /// Any one of these, sorted. A class, or a coverage of several glyphs.
+    /// Shared between the rules of one subtable, which all read the same sides.
+    Any(Arc<[u16]>),
+}
+
+impl SubstitutionRules {
+    /// Whether the face could substitute inside a run of `glyphs`.
+    ///
+    /// False means shaping the run returns exactly what shaping each glyph
+    /// alone returns, so the caller may skip the shaper.
+    pub(crate) fn reshapes(&self, glyphs: &[u16]) -> bool {
+        glyphs.iter().any(|id| {
+            self.always.binary_search(id).is_ok()
+                || self
+                    .by_first
+                    .get(id)
+                    .is_some_and(|rules| rules.iter().any(|rule| rule.satisfied(glyphs)))
+        })
+    }
+
+    /// How many rules the table holds, for a caller reporting what it built.
+    pub(crate) fn len(&self) -> usize {
+        self.by_first.values().map(Vec::len).sum::<usize>() + self.always.len()
+    }
+
+    /// File a rule under the glyph its first input position names.
+    fn push(&mut self, first: u16, positions: Vec<Position>) {
+        self.by_first
+            .entry(first)
+            .or_default()
+            .push(Rule { positions });
+    }
+}
+
+impl Rule {
+    fn satisfied(&self, glyphs: &[u16]) -> bool {
+        self.positions.iter().all(|position| match position {
+            Position::One { glyph, count } => {
+                glyphs.iter().filter(|&held| held == glyph).count() >= usize::from(*count)
+            },
+            Position::Any(set) => glyphs.iter().any(|held| set.binary_search(held).is_ok()),
+        })
+    }
+}
+
+/// Every rule the face can fire under [`DEFAULT_FEATURES`], or an empty table
+/// where it can fire none.
 ///
 /// Empty for a face with no GSUB table, one that fails to parse, or one inside
 /// a collection whose index does not resolve. Each of those reads as
 /// "substitutes nothing", which costs shaping the caller paid anyway.
-pub(super) fn substitution_coverage(font: &Font) -> Vec<u16> {
+pub(super) fn substitution_rules(font: &Font) -> SubstitutionRules {
     let data = font.data();
+    let mut rules = SubstitutionRules::default();
+
     let Some(index) = face_index(data, font.as_swash().offset) else {
-        return Vec::new();
+        return rules;
     };
-    let Ok(face) = ttf_parser::Face::parse(data, index) else {
-        return Vec::new();
+    let Ok(face) = TtfFace::parse(data, index) else {
+        return rules;
     };
     let Some(gsub) = face.tables().gsub else {
-        return Vec::new();
+        return rules;
     };
 
-    // A lookup no default feature reaches never fires, so its coverage puts
-    // runs on the shaping path for substitutions that never happen. The
-    // bundled face files character variants over the letters that way, which
-    // is most of its coverage.
-    let mut reachable: Vec<u16> = Vec::new();
-    for feature in gsub.features {
-        if !DEFAULT_FEATURES.contains(&feature.tag) {
-            continue;
-        }
-        reachable.extend(feature.lookup_indices);
-    }
-    reachable.sort_unstable();
-    reachable.dedup();
-
-    let mut ids = Vec::new();
-    for index in reachable {
+    for index in default_lookups(&gsub) {
         let Some(lookup) = gsub.lookups.get(index) else {
             continue;
         };
         for subtable in lookup.subtables.into_iter::<SubstitutionSubtable<'_>>() {
-            match subtable.coverage() {
-                Coverage::Format1 { glyphs } => ids.extend(glyphs.into_iter().map(|id| id.0)),
-                Coverage::Format2 { records } => {
-                    for record in records {
-                        ids.extend(record.start.0..=record.end.0);
-                    }
-                },
-            }
+            collect_rules(&face, &subtable, &mut rules);
         }
     }
 
-    ids.sort_unstable();
-    ids.dedup();
-    ids
+    rules.always.sort_unstable();
+    rules.always.dedup();
+    rules
+}
+
+/// Lookup indices a horizontal Latin run reaches without asking.
+///
+/// Through the default language system of `DFLT` and `latn` rather than the
+/// whole feature list. The bundled face files its Turkish `locl` singles under
+/// a language system only a Turkish run selects, and reading the feature list
+/// instead puts every one of those glyphs on the shaping path.
+fn default_lookups(gsub: &ttf_parser::opentype_layout::LayoutTable<'_>) -> Vec<u16> {
+    let mut features: Vec<u16> = Vec::new();
+    for tag in [
+        ttf_parser::Tag::from_bytes(b"DFLT"),
+        ttf_parser::Tag::from_bytes(b"latn"),
+    ] {
+        let Some(script) = gsub.scripts.find(tag) else {
+            continue;
+        };
+        let Some(language) = script.default_language else {
+            continue;
+        };
+        features.extend(language.required_feature);
+        features.extend(language.feature_indices);
+    }
+
+    let mut lookups: Vec<u16> = Vec::new();
+    for index in features {
+        let Some(feature) = gsub.features.get(index) else {
+            continue;
+        };
+        if !DEFAULT_FEATURES.contains(&feature.tag) {
+            continue;
+        }
+        lookups.extend(feature.lookup_indices);
+    }
+    lookups.sort_unstable();
+    lookups.dedup();
+    lookups
+}
+
+/// Read one subtable's rules into `rules`.
+fn collect_rules(
+    face: &TtfFace<'_>,
+    subtable: &SubstitutionSubtable<'_>,
+    rules: &mut SubstitutionRules,
+) {
+    match subtable {
+        // One glyph in, one or more out. Nothing else has to be present.
+        SubstitutionSubtable::Single(_)
+        | SubstitutionSubtable::Multiple(_)
+        | SubstitutionSubtable::Alternate(_) => {
+            for glyph in coverage_glyphs(&subtable.coverage()) {
+                rules.push(glyph, vec![Position::One { glyph, count: 1 }]);
+            }
+        },
+        SubstitutionSubtable::Ligature(ligature) => {
+            for (index, glyph) in coverage_glyphs(&ligature.coverage).into_iter().enumerate() {
+                let Some(set) = ligature.ligature_sets.get(index as u16) else {
+                    continue;
+                };
+                for entry in set {
+                    let named =
+                        std::iter::once(glyph).chain(entry.components.into_iter().map(|id| id.0));
+                    rules.push(glyph, positions(named.map(Named::One)));
+                }
+            }
+        },
+        SubstitutionSubtable::ChainContext(chain) => collect_chain_rules(face, chain, rules),
+        // A context or a reverse-chain rule this does not read, so its glyphs
+        // stay triggers on their own.
+        SubstitutionSubtable::Context(_) | SubstitutionSubtable::ReverseChainSingle(_) => {
+            rules.always.extend(coverage_glyphs(&subtable.coverage()));
+        },
+    }
+}
+
+/// What one position of a rule names, before the counts are folded together.
+enum Named {
+    One(u16),
+    Any(Arc<[u16]>),
+    /// The catch-all class, or anything else this does not enumerate. No
+    /// constraint on the run.
+    Anything,
+}
+
+/// Read one chained-context subtable's rules into `rules`.
+fn collect_chain_rules(
+    face: &TtfFace<'_>,
+    chain: &ttf_parser::opentype_layout::ChainedContextLookup<'_>,
+    rules: &mut SubstitutionRules,
+) {
+    use ttf_parser::opentype_layout::ChainedContextLookup;
+
+    match chain {
+        ChainedContextLookup::Format1 { coverage, sets } => {
+            for (index, glyph) in coverage_glyphs(coverage).into_iter().enumerate() {
+                let Some(set) = sets.get(index as u16) else {
+                    continue;
+                };
+                for rule in set {
+                    if rule.lookups.is_empty() {
+                        continue;
+                    }
+                    let named = std::iter::once(glyph).chain(
+                        rule.backtrack
+                            .into_iter()
+                            .chain(rule.input)
+                            .chain(rule.lookahead),
+                    );
+                    rules.push(glyph, positions(named.map(Named::One)));
+                }
+            }
+        },
+        ChainedContextLookup::Format2 {
+            coverage,
+            backtrack_classes,
+            input_classes,
+            lookahead_classes,
+            sets,
+        } => {
+            let backtrack = class_members(face, backtrack_classes);
+            let input = class_members(face, input_classes);
+            let lookahead = class_members(face, lookahead_classes);
+            let named_class =
+                |members: &FxHashMap<u16, Arc<[u16]>>, class: u16| match members.get(&class) {
+                    Some(glyphs) if glyphs.len() == 1 => Named::One(glyphs[0]),
+                    Some(glyphs) => Named::Any(Arc::clone(glyphs)),
+                    None => Named::Anything,
+                };
+
+            for glyph in coverage_glyphs(coverage) {
+                let class = input_classes.get(ttf_parser::GlyphId(glyph));
+                let Some(set) = sets.get(class) else {
+                    continue;
+                };
+                for rule in set {
+                    if rule.lookups.is_empty() {
+                        continue;
+                    }
+                    let named = std::iter::once(Named::One(glyph))
+                        .chain(
+                            rule.backtrack
+                                .into_iter()
+                                .map(|c| named_class(&backtrack, c)),
+                        )
+                        .chain(rule.input.into_iter().map(|c| named_class(&input, c)))
+                        .chain(
+                            rule.lookahead
+                                .into_iter()
+                                .map(|c| named_class(&lookahead, c)),
+                        );
+                    rules.push(glyph, positions(named));
+                }
+            }
+        },
+        ChainedContextLookup::Format3 {
+            coverage,
+            backtrack_coverages,
+            input_coverages,
+            lookahead_coverages,
+            lookups,
+        } => {
+            if lookups.is_empty() {
+                return;
+            }
+            // Read once per subtable rather than once per coverage glyph. Every
+            // rule of a format 3 subtable reads the same sides.
+            let sides: Vec<Named> = [backtrack_coverages, input_coverages, lookahead_coverages]
+                .into_iter()
+                .flat_map(|side| (0..side.len()).filter_map(|i| side.get(i)))
+                .map(|coverage| named_coverage(&coverage))
+                .collect();
+
+            for glyph in coverage_glyphs(coverage) {
+                let named =
+                    std::iter::once(Named::One(glyph)).chain(sides.iter().map(Named::clone_of));
+                rules.push(glyph, positions(named));
+            }
+        },
+    }
+}
+
+impl Named {
+    /// A copy of `self`, sharing the glyph list of a wide position rather than
+    /// copying it.
+    fn clone_of(&self) -> Named {
+        match self {
+            Named::One(glyph) => Named::One(*glyph),
+            Named::Any(glyphs) => Named::Any(Arc::clone(glyphs)),
+            Named::Anything => Named::Anything,
+        }
+    }
+}
+
+/// Fold the positions a rule names into the run test, counting the glyphs a
+/// position names alone and dropping the ones that constrain nothing.
+fn positions(named: impl Iterator<Item = Named>) -> Vec<Position> {
+    let mut out: Vec<Position> = Vec::new();
+    for name in named {
+        match name {
+            Named::Anything => {},
+            Named::Any(glyphs) => out.push(Position::Any(glyphs)),
+            Named::One(glyph) => {
+                match out.iter_mut().find(
+                    |held| matches!(held, Position::One { glyph: held, .. } if *held == glyph),
+                ) {
+                    Some(Position::One { count, .. }) => *count += 1,
+                    _ => out.push(Position::One { glyph, count: 1 }),
+                }
+            },
+        }
+    }
+    out
+}
+
+/// What `coverage` names as one position of a rule.
+fn named_coverage(coverage: &Coverage<'_>) -> Named {
+    let mut glyphs = coverage_glyphs(coverage);
+    match glyphs.len() {
+        0 => Named::Anything,
+        1 => Named::One(glyphs[0]),
+        _ => {
+            glyphs.sort_unstable();
+            Named::Any(glyphs.into())
+        },
+    }
+}
+
+/// The glyphs `coverage` names, in order.
+fn coverage_glyphs(coverage: &Coverage<'_>) -> Vec<u16> {
+    match coverage {
+        Coverage::Format1 { glyphs } => glyphs.into_iter().map(|id| id.0).collect(),
+        Coverage::Format2 { records } => records
+            .into_iter()
+            .flat_map(|record| record.start.0..=record.end.0)
+            .collect(),
+    }
+}
+
+/// The glyphs of each class the definition names, sorted, by class.
+///
+/// Class zero holds every glyph the definition does not name, which constrains
+/// nothing, so it is left out rather than enumerated.
+fn class_members(face: &TtfFace<'_>, classes: &ClassDefinition<'_>) -> FxHashMap<u16, Arc<[u16]>> {
+    let mut members: FxHashMap<u16, Vec<u16>> = FxHashMap::default();
+    for id in 1..face.number_of_glyphs() {
+        let class = classes.get(ttf_parser::GlyphId(id));
+        if class != 0 {
+            members.entry(class).or_default().push(id);
+        }
+    }
+    members
+        .into_iter()
+        .map(|(class, glyphs)| (class, glyphs.into()))
+        .collect()
 }
 
 /// The index `ttf_parser` selects a face by, given the byte offset of that
@@ -808,7 +1117,7 @@ mod tests {
     use super::{
         build_font_system, bundled_database, bundled_font_system_with_locale, font_covers,
         glyph_family, resolve_primary_family, resolve_primary_font, run_text_and_columns_into,
-        shape_char, shape_family, shape_run, shape_run_cached, shape_words, substitution_coverage,
+        shape_char, shape_family, shape_run, shape_run_cached, shape_words, substitution_rules,
         CoveredSet, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, RUN_SHAPE_CACHE_CAP,
         SYMBOLS_FAMILY,
     };
@@ -1022,36 +1331,72 @@ mod tests {
         );
     }
 
-    /// The coverage separates a run the font reshapes from one it leaves
-    /// alone, so it has to hold every glyph the bundled face ligates from. A
-    /// set missing `=` drops the ligature the face forms from it.
+    /// A rule fires only where the run holds every glyph the rule names, so an
+    /// ordinary code run skips the shaper and a ligature site does not.
     ///
-    /// It holds letters too, since the face carries character-variant lookups
-    /// over them, and this takes every lookup's coverage rather than only the
-    /// ones a default shaping run reaches. That is the conservative direction:
-    /// it keeps a run on the shaping path that had nothing to gain there, and
-    /// it never lets one past that did.
+    /// A coverage alone put both on the shaping path. Every glyph of a `calt`
+    /// sequence carries its own rule with its partners in backtrack or
+    /// lookahead, so one bracket was enough to send a run to the shaper.
+    ///
+    /// Each run is classified against the shaper itself rather than against a
+    /// list somebody wrote down. A run the shaper leaves alone must take the
+    /// fast path and a run it changes must not, which is the whole contract.
     #[test]
-    fn substitution_coverage_holds_the_glyphs_the_face_reshapes() {
+    fn a_run_reaches_the_shaper_only_for_a_rule_it_could_match() {
         let mut font_system = bundled();
         let font = resolve_primary_font(&mut font_system, Some("JetBrains Mono"))
             .expect("the bundled face resolves");
-
-        let coverage = substitution_coverage(&font);
+        let rules = substitution_rules(&font);
         let charmap = font.as_swash().charmap();
-        let holds = |ch: char| coverage.binary_search(&charmap.map(ch)).is_ok();
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+        let jbm = Family::Name("JetBrains Mono");
 
-        for ch in ['=', '-', '>', '<', ':', '!'] {
-            assert!(holds(ch), "{ch:?} ligates, so the face reshapes it");
-        }
-        for ch in ['a', 'A', '0', 'w', 'b', 'z', 'x', ' '] {
-            assert!(!holds(ch), "no default feature reshapes {ch:?}");
+        let mut ligated = 0;
+        for text in [
+            "fn(x)", "foo_bar", "self.x", "list[i]", "_|", "#(", "=>", "..", "::", "//",
+        ] {
+            // What the caller lays down when it skips: each character shaped on
+            // its own, at the byte offset the run puts it at.
+            let mut covered = None;
+            let mut alone = Vec::new();
+            let mut offset = 0;
+            for ch in text.chars() {
+                if let Some(key) = shape_char(
+                    &mut font_system,
+                    ch,
+                    1.0,
+                    metrics,
+                    jbm,
+                    Weight::NORMAL,
+                    &mut covered,
+                ) {
+                    alone.push((offset, key));
+                }
+                offset += ch.len_utf8();
+            }
+
+            let shaped = shape_run(
+                &mut ShapeScratch::default(),
+                &mut font_system,
+                text,
+                metrics,
+                jbm,
+            );
+            let changes = shaped != alone;
+            ligated += usize::from(changes);
+
+            let glyphs: Vec<u16> = text.chars().map(|ch| charmap.map(ch)).collect();
+            assert_eq!(
+                rules.reshapes(&glyphs),
+                changes,
+                "{text:?}: the table and the shaper disagree about whether it needs shaping",
+            );
         }
 
-        // The face files its coverage in both formats, a list of glyphs and a
-        // list of ranges, and the characters above all land in the first. The
-        // total is what says the ranges were read too.
-        assert_eq!(coverage.len(), 81, "every reachable subtable, both formats");
+        assert!(
+            (1..10).contains(&ligated),
+            "{ligated} of ten runs ligate, so the fixture has to hold both kinds",
+        );
     }
 
     #[test]
