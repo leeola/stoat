@@ -58,9 +58,51 @@ impl StatefulWidget for Minimap<'_> {
     }
 }
 
+/// The first buffer line the strip renders, tracking the editor's viewport.
+///
+/// A strip that can show `visible_lines` lines slides its window across the file
+/// in proportion to how far the viewport (`view_top` over the scrollable
+/// `total - view_visible` span) has scrolled, mapping the whole file onto the
+/// strip. Returns 0 when the file fits the strip.
+pub fn minimap_top(total: f32, visible_lines: f32, view_top: f32, view_visible: f32) -> f32 {
+    if total <= visible_lines {
+        return 0.0;
+    }
+    let scrollable = total - view_visible;
+    let ratio = if scrollable > 0.0 {
+        (view_top / scrollable).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    ratio * (total - visible_lines)
+}
+
+/// The buffer line a pointer at strip cell-row `row` (0-based from the strip top)
+/// points at, for a strip `strip_rows` cells tall over the given viewport.
+///
+/// The strip shows `strip_rows * lines_per_cell` lines from [`minimap_top`], and
+/// each cell spans `lines_per_cell` lines, so the click lands on that cell's
+/// middle line. Pass the `lines_per_cell` the strip was declared with, so the
+/// pointer resolves against the window the terminal drew. A row past the strip
+/// clamps to its last cell.
+pub fn click_target_line(
+    strip_rows: u16,
+    lines_per_cell: u8,
+    row: u16,
+    total: f32,
+    view_top: f32,
+    view_visible: f32,
+) -> u32 {
+    let lines_per_cell = f32::from(lines_per_cell);
+    let visible_lines = strip_rows as f32 * lines_per_cell;
+    let top = minimap_top(total, visible_lines, view_top, view_visible);
+    let row = row.min(strip_rows.saturating_sub(1)) as f32;
+    (top + row * lines_per_cell + lines_per_cell / 2.0).max(0.0) as u32
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Minimap;
+    use super::{click_target_line, minimap_top, Minimap};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{encode_minimap, MinimapCommand};
@@ -117,6 +159,44 @@ mod tests {
             buf,
             Buffer::empty(area),
             "the strip stays blank for the GPU minimap pass"
+        );
+    }
+
+    #[test]
+    fn minimap_top_maps_the_viewport_across_the_file() {
+        assert_eq!(minimap_top(40.0, 120.0, 0.0, 30.0), 0.0, "a fitted file");
+
+        let mid = minimap_top(200.0, 80.0, 85.0, 30.0);
+        assert!(
+            (mid - 60.0).abs() < 1e-4,
+            "half-scrolled lands mid-strip: {mid}"
+        );
+
+        assert_eq!(
+            minimap_top(200.0, 80.0, 1_000.0, 30.0),
+            120.0,
+            "a view past the end clamps to the span bottom"
+        );
+    }
+
+    #[test]
+    fn click_target_line_centers_within_the_cell_row() {
+        assert_eq!(
+            click_target_line(10, 8, 3, 50.0, 0.0, 20.0),
+            28,
+            "cell row 3 of a fitted file centers on line 3*8+4"
+        );
+        assert_eq!(
+            click_target_line(10, 8, 40, 50.0, 0.0, 20.0),
+            76,
+            "a row past the strip clamps to the last cell"
+        );
+
+        let top = minimap_top(800.0, 80.0, 400.0, 20.0);
+        assert_eq!(
+            click_target_line(10, 8, 0, 800.0, 400.0, 20.0),
+            (top + 4.0) as u32,
+            "a slid window shifts the target by minimap_top"
         );
     }
 }

@@ -18,7 +18,7 @@ use crate::{
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    minimap::emit::minimap_view_window,
+    minimap::{emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
@@ -29,6 +29,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use stoat_config::MinimapMode;
 use stoat_text::{Bias, SelectionGoal};
+use stoat_widgets::minimap;
 use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind};
 
 /// Map an aux window's pointer gesture onto the crossterm event kind the pane
@@ -1029,8 +1030,9 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
     // same window the emit ships rather than the editor's display rows.
     let (view_top, view_visible) = minimap_view_window(&snapshot, editor.scroll_offset, viewport);
     let buffer_lines = snapshot.buffer_line_count();
-    let target_line = crate::minimap::click_target_line(
+    let target_line = minimap::click_target_line(
         strip.height,
+        LINES_PER_CELL,
         strip_local_row,
         buffer_lines as f32,
         view_top,
