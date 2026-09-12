@@ -152,12 +152,14 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         return;
     };
 
+    let box_left = 1.0 * r.cell[0];
     let box_right = (1.0 + (r.cols as f32 - 3.0)) * r.cell[0];
     let box_bottom = (1.0 + (r.rows as f32 - 3.0)) * r.cell[1];
 
     let center = r.px((box_right * 0.5) as u32, (box_bottom * 0.5) as u32);
-    // A few px past the box's bottom-right corner, inside the offset shadow rect.
-    let exterior = r.px(box_right as u32 + 3, box_bottom as u32 + 3);
+    // A few px past the box's bottom edge, inside the offset shadow rect and
+    // clear of the corner, where a blurred rect is at its darkest.
+    let exterior = r.px(box_right as u32 - 3, box_bottom as u32 + 3);
 
     assert!(
         center
@@ -168,8 +170,29 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
     );
     assert!(
         exterior[0] < center[0].saturating_sub(20),
-        "a pixel past the box's bottom-right edge should be shadow-darkened, \
+        "a pixel past the box's bottom edge should be shadow-darkened, \
          got exterior {exterior:?} vs center {center:?}"
+    );
+
+    // A blurred rect falls off with distance from its edge. A sharp rect faded
+    // by its exterior distance alone is flat everywhere inside itself, so these
+    // two read the same there.
+    let mid_y = (box_bottom * 0.5) as u32;
+    let near = r.px(box_right as u32 + 1, mid_y);
+    let far = r.px(box_right as u32 + 4, mid_y);
+    assert!(
+        far[0] > near[0] + 2,
+        "the shadow lightens away from the box's right edge, got near {near:?} then far {far:?}"
+    );
+
+    // The blur follows the rect's corner, so the corner casts less than the run
+    // that leaves it. A rect faded by its exterior distance casts a square
+    // plateau that reads the same at both.
+    let corner = r.px(box_left as u32 + 3, box_bottom as u32 + 3);
+    let along = r.px(box_left as u32 + 12, box_bottom as u32 + 3);
+    assert!(
+        corner[0] > along[0] + 4,
+        "the shadow's corner is lighter than its bottom run, got corner {corner:?} then {along:?}"
     );
 }
 

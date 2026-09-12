@@ -36,10 +36,11 @@ const STYLE_DOUBLE: u32 = 2u;
 const STYLE_ROUNDED: u32 = 3u;
 
 // Drop-shadow color and peak alpha. The shadow paints only outside the box
-// exterior (fs_main gates it by interior coverage); this is its peak opacity
-// just past the box edge, falling to zero across the shadow margin.
+// exterior (fs_main gates it by interior coverage); this is its opacity where
+// the blur covers the shadow rect whole, which is well inside the rect. Its own
+// edge carries half of it, and three sigma out it reaches zero.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const SHADOW_ALPHA: f32 = 0.22;
+const SHADOW_ALPHA: f32 = 0.32;
 // Peak opacity of an overhang shadow's interior bottom band, at the box's bottom
 // edge, falling to zero across the margin as it rises. Fainter than SHADOW_ALPHA
 // so it reads as a soft cast rather than a hard line.
@@ -231,22 +232,27 @@ fn coverage_of(in: VsOut) -> Coverage {
     let interior = clamp(0.5 - box_sdf, 0.0, 1.0);
     let fill_alpha = in.fill_flag * interior;
 
-    // Exterior distance to the shadow rectangle (the box shifted by the offset),
-    // faded across the blur margin. A zero margin means no shadow.
+    // The shadow rectangle is the box shifted by the offset, blurred by a
+    // gaussian that reaches zero at the margin. A zero margin means no shadow.
     let offset = in.shadow.xy;
     let margin = in.shadow.z;
+    let sigma = margin / 3.0;
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
-    let d = max(vec2<f32>(0.0, 0.0), max(shadow_min - p, p - shadow_max));
     // A tucked shadow (mode 1) paints nothing below the box's bottom edge, so the
-    // seam with whatever sits below the panel stays clean.
-    let clip = select(1.0, step(p.y, in.box_max.y), in.shadow_mode > 0.5 && in.shadow_mode < 1.5);
+    // seam with whatever sits below the panel stays clean. The cut ends over one
+    // pixel rather than mid-pixel.
+    let clip = select(
+        1.0,
+        clamp(in.box_max.y - p.y + 0.5, 0.0, 1.0),
+        in.shadow_mode > 0.5 && in.shadow_mode < 1.5
+    );
     // Exterior shadow for drop (mode 0) and tucked (mode 1), gated to the box
     // exterior so an unfilled panel's interior is not washed by its own shadow.
     // `interior` is 1 inside the box and 0 outside.
     let shadow_base = select(
         0.0,
-        SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d))),
+        SHADOW_ALPHA * shadow_alpha(p, shadow_min, shadow_max, radius, sigma),
         margin > 0.0 && in.shadow_mode < 1.5
     ) * (1.0 - interior) * clip;
     // Overhang (mode 2): a small interior band rising from the box's bottom edge,

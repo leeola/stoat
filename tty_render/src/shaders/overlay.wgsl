@@ -12,10 +12,11 @@ struct Globals {
 @group(0) @binding(0)
 var<uniform> globals: Globals;
 
-// Drop-shadow color and peak alpha. The alpha falls off to zero across the
-// shadow margin, so this is the opacity directly beneath the box edge.
+// Drop-shadow color and peak alpha. This is the opacity where the blur covers
+// the shadow rect whole, which is well inside the rect. Its own edge carries
+// half of it, and three sigma out it reaches zero.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const SHADOW_ALPHA: f32 = 0.22;
+const SHADOW_ALPHA: f32 = 0.32;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -108,14 +109,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let border_factor = clamp(box_sdf + border_px + 0.5, 0.0, 1.0);
     let box_color = mix(in.fill, in.border, border_factor);
 
-    // Exterior distance to the shadow rectangle (the box shifted by the offset),
-    // faded across the blur margin.
+    // The shadow rectangle is the box shifted by the offset, blurred by a
+    // gaussian that reaches zero at the margin.
     let offset = in.shadow.xy;
     let margin = in.shadow.z;
+    let sigma = margin / 3.0;
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
-    let d = max(vec2<f32>(0.0, 0.0), max(shadow_min - p, p - shadow_max));
-    let shadow_alpha = SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d)));
+    let cast_alpha = SHADOW_ALPHA * shadow_alpha(p, shadow_min, shadow_max, radius, sigma);
 
     // Composite the rounded box over the shadow: its bulk is opaque, the rounded
     // corners fade to the shadow, and beyond the box only the shadow remains.
@@ -126,8 +127,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // understated alpha also weakens the box's own color and lets the ground
     // behind show through: a ring around every corner.
     let premultiplied = box_color * box_coverage
-        + SHADOW_COLOR * shadow_alpha * (1.0 - box_coverage);
-    let alpha = box_coverage + shadow_alpha * (1.0 - box_coverage);
+        + SHADOW_COLOR * cast_alpha * (1.0 - box_coverage);
+    let alpha = box_coverage + cast_alpha * (1.0 - box_coverage);
 
     // The pipeline blends unpremultiplied source alpha, so hand the coverage
     // back out of the color. A zero-coverage fragment paints nothing, so what

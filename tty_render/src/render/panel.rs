@@ -116,7 +116,10 @@ impl PanelPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("panel"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/panel.wgsl")).into(),
+                crate::render::with_shadow(&crate::render::with_occlusion(include_str!(
+                    "../shaders/panel.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -518,8 +521,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/panel.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_occlusion(
+            include_str!("../shaders/panel.wgsl"),
         )))
         .expect("parse panel");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -702,7 +705,7 @@ mod tests {
         // A shadow alone never reaches past SHADOW_ALPHA. So a coverage above
         // that which also exceeds the shadowless panel's is neither of the two
         // inputs, and only compositing them produces it.
-        let ceiling = (0.22 * 255.0) as u8;
+        let ceiling = (0.32 * 255.0) as u8;
         let composited = dropped.iter().zip(&alone).position(|(dropped, alone)| {
             (1..255).contains(alone) && dropped > alone && *dropped > ceiling
         });

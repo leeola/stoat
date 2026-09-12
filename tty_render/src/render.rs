@@ -799,6 +799,17 @@ pub(crate) fn with_occlusion(body: &str) -> String {
 
 const OCCLUSION_WGSL: &str = include_str!("shaders/occlusion.wgsl");
 
+/// Prepend the shared gaussian shadow to a pass's own WGSL.
+///
+/// WGSL has no include, and every pass that casts a drop shadow blurs the same
+/// rounded rect the same way. One definition keeps a shadow under a panel and a
+/// shadow under a popover the same shadow.
+pub(crate) fn with_shadow(body: &str) -> String {
+    format!("{SHADOW_WGSL}\n{body}")
+}
+
+const SHADOW_WGSL: &str = include_str!("shaders/shadow.wgsl");
+
 /// The `[width, height]` of one cell, in pixels, for `font_size` at
 /// `scale_factor`.
 ///
