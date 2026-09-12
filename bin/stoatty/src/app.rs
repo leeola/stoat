@@ -56,8 +56,8 @@ use stoatty_protocol::{
 };
 use stoatty_render::{
     gpu::{
-        AnchoredPanel, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext, PoolComposite,
-        Scroll, SharedFonts, SharedGpu, SketchReveal,
+        fontdb::Database as FontDatabase, AnchoredPanel, FontConfig, FontLoad, Frame, FrameOutcome,
+        GpuContext, PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
     },
     render,
 };
@@ -299,6 +299,11 @@ enum PtyEvent {
     /// The main thread installs it into the matching [`AuxWindow`], which then
     /// requests its first redraw. Boxed so the enum stays small.
     AuxGpuReady { window: u32, gpu: Box<GpuContext> },
+    /// The system-font scan a launch drew its first frames without has finished.
+    /// Every window merges it, and the next frame repaints whole, so a glyph the
+    /// bundled faces lack stops drawing as tofu. Boxed because a scanned database
+    /// holds every installed face.
+    FontsScanned(Box<FontDatabase>),
 }
 
 /// The text-rendering configuration read from the config once, which [`App`]
@@ -355,6 +360,13 @@ struct App {
     /// Bounded by what a child emits in that window, and the reader parses
     /// inline with the child's writes, so a chatty child throttles itself.
     pending_events: Vec<PtyEvent>,
+    /// What the system-font scan found, once it has landed.
+    ///
+    /// Held past the merge for the windows that miss it: an aux window whose
+    /// context is still building on its own thread when the scan lands installs
+    /// afterward, and would otherwise keep the bundled faces for the session.
+    /// `None` while the scan runs, and for a launch that waited for it.
+    scanned_fonts: Option<Box<FontDatabase>>,
 }
 
 impl App {
@@ -390,6 +402,7 @@ impl App {
             size,
             state: None,
             pending_events: Vec::new(),
+            scanned_fonts: None,
         }
     }
 }
@@ -968,7 +981,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let pty_time = t_pty.elapsed();
 
         let t_gpu = Instant::now();
-        let gpu = GpuContext::new(
+        let mut gpu = GpuContext::new(
             window.clone(),
             size.width.max(1),
             size.height.max(1),
@@ -1008,6 +1021,15 @@ impl ApplicationHandler<PtyEvent> for App {
             gpu = ?gpu_time,
             "window, pty, and gpu ready",
         );
+
+        // The scan the context did not wait for, joined off the startup path so
+        // the first frames are already on screen when it lands.
+        if let Some(pending) = gpu.pending_fonts() {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let _ = proxy.send_event(PtyEvent::FontsScanned(Box::new(pending.join())));
+            });
+        }
 
         window.request_redraw();
         let state = State {
@@ -1125,9 +1147,35 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             PtyEvent::AuxGpuReady { window, gpu } => {
                 if let Some(aux) = state.aux.iter_mut().find(|aux| aux.id == window) {
-                    aux.gpu = Some(*gpu);
+                    let gpu = aux.gpu.insert(*gpu);
+                    if let Some(scanned) = self.scanned_fonts.as_deref() {
+                        gpu.merge_fonts(scanned.clone());
+                    }
                     aux.window.request_redraw();
                 }
+            },
+            PtyEvent::FontsScanned(scanned) => {
+                state.gpu.merge_fonts((*scanned).clone());
+
+                // A cell that shaped to tofu is not damaged, so only a whole
+                // repaint reaches it.
+                state.force_full.force();
+                state.window.request_redraw();
+
+                for aux in state.aux.iter_mut() {
+                    if let Some(gpu) = aux.gpu.as_mut() {
+                        gpu.merge_fonts((*scanned).clone());
+                    }
+                    aux.force_full.force();
+                    aux.window.request_redraw();
+                }
+
+                // A window opened from here builds its own font system, and the
+                // shared copy is what it builds from.
+                if let Some((_, fonts)) = state.shared_gpu.as_mut() {
+                    *fonts = state.gpu.fonts();
+                }
+                self.scanned_fonts = Some(scanned);
             },
             PtyEvent::Exited { last_output } => {
                 let status = state.pty.exit_status(Duration::from_millis(500));
@@ -3167,6 +3215,12 @@ impl ForceFull {
         }
         self.0 = true;
         true
+    }
+
+    /// Arm the latch outright, for a change that invalidates every drawn cell
+    /// rather than for a frame that failed to present.
+    fn force(&mut self) {
+        self.0 = true;
     }
 
     /// Take the latch for the frame about to draw, so the widening it causes

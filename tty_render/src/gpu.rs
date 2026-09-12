@@ -31,7 +31,8 @@ use crate::{
         CellMetrics, Occluder, PoolOccluders,
     },
 };
-use cosmic_text::{fontdb, FontSystem};
+pub use cosmic_text::fontdb;
+use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
