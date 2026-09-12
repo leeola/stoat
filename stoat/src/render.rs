@@ -54,7 +54,7 @@ use crate::{
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
-    pane::{DockVisibility, FocusTarget, View},
+    pane::{DockVisibility, FocusTarget, PaneId, View},
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
@@ -749,6 +749,7 @@ pub(crate) fn frame(
     }
 
     let paint_generation = stoat.paint_generation;
+    let workspace = stoat.active_workspace;
     let split_focused = ws.panes.focus();
     let mut lsp_badge_rect: Option<Rect> = None;
     for (id, pane) in ws.panes.split_panes() {
@@ -775,7 +776,7 @@ pub(crate) fn frame(
             })
             .flatten();
         if let Some(key) = key
-            && let Some(entry) = stoat.pane_cache.get(&id)
+            && let Some(entry) = stoat.pane_cache.get(&(workspace, id))
             && entry.key == Some(key)
         {
             entry.replay(buf, scene, undercurls);
@@ -802,20 +803,29 @@ pub(crate) fn frame(
 
         if let Some(key) = key {
             let (content, status) = pane::pane_areas(pane.area, frame.minimap_band);
-            stoat.pane_cache.entry(id).or_default().capture_into(
-                key,
-                &[content, status],
-                buf,
-                scene,
-                undercurls,
-                mark,
-            );
+            stoat
+                .pane_cache
+                .entry((workspace, id))
+                .or_default()
+                .capture_into(key, &[content, status], buf, scene, undercurls, mark);
         }
     }
     stoat.lsp_badge_rect = lsp_badge_rect;
     if lsp_badge_rect.is_none() {
         stoat.lsp_badge_hovered = false;
     }
+
+    // A pane id never returns, so an entry a close left behind would hold one
+    // pane's cells for the process. Every close path meets this sweep, which is
+    // why none of them removes an entry itself. The live set is a handful of
+    // ids, so the walk costs less than a cell blend.
+    let live: Vec<PaneId> = ws
+        .pane_trees()
+        .flat_map(|tree| tree.split_pane_ids())
+        .collect();
+    stoat
+        .pane_cache
+        .retain(|(ws_id, pane_id), _| *ws_id == workspace && live.contains(pane_id));
 
     // Single mode declares one strip over the reserved right-edge band for the
     // focused split pane's buffer. The scene re-stamps every paint, so a focus

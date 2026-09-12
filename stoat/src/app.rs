@@ -1934,10 +1934,16 @@ pub struct Stoat {
     pub(crate) paint_generation: u64,
     /// Each unfocused editor pane's last paint, replayed while its key holds.
     ///
-    /// Keyed by pane so a split's panes cache independently. An entry for a
-    /// pane that has gone away is simply never looked up again, which costs one
-    /// pane's cells until the map is next written.
-    pub(crate) pane_cache: std::collections::HashMap<PaneId, PaneCacheEntry>,
+    /// Keyed by pane so a split's panes cache independently, and by workspace
+    /// because a pane key comes from a per-workspace map: two workspaces can
+    /// name one key, and a split at the same rect in each would replay the
+    /// other's cells.
+    ///
+    /// Swept after every paint down to the panes the active workspace holds. A
+    /// pane id never returns, so an entry left behind would hold one pane's
+    /// cells for the process. A switch back to another workspace repaints its
+    /// unfocused panes once.
+    pub(crate) pane_cache: std::collections::HashMap<(WorkspaceId, PaneId), PaneCacheEntry>,
     /// How many panes this session has actually painted, as opposed to
     /// replayed.
     ///
@@ -12824,7 +12830,7 @@ mod tests {
             let before = h
                 .stoat
                 .pane_cache
-                .get(&unfocused)
+                .get(&(h.stoat.active_workspace, unfocused))
                 .expect("the unfocused pane cached its paint")
                 .key;
 
@@ -12835,7 +12841,7 @@ mod tests {
             let after = h
                 .stoat
                 .pane_cache
-                .get(&unfocused)
+                .get(&(h.stoat.active_workspace, unfocused))
                 .expect("and cached it again")
                 .key;
             assert_ne!(
@@ -12864,7 +12870,12 @@ mod tests {
                 .find(|id| *id != focused)
                 .expect("the split has an unfocused pane")
         };
-        let before = h.stoat.pane_cache.get(&pane).expect("cached paint").key;
+        let before = h
+            .stoat
+            .pane_cache
+            .get(&(h.stoat.active_workspace, pane))
+            .expect("cached paint")
+            .key;
 
         h.stoat.diagnostics.replace_from_server(
             PathBuf::from("/test/elsewhere.rs"),
@@ -12877,8 +12888,57 @@ mod tests {
 
         assert_eq!(
             before,
-            h.stoat.pane_cache.get(&pane).expect("cached again").key,
+            h.stoat
+                .pane_cache
+                .get(&(h.stoat.active_workspace, pane))
+                .expect("cached again")
+                .key,
             "a file this pane does not show cannot invalidate its paint",
+        );
+    }
+
+    /// A pane id never comes back, so an entry a close leaves behind holds one
+    /// pane's cells for the process.
+    #[test]
+    fn closing_a_split_drops_its_cached_paint() {
+        let mut h = Stoat::test();
+        split_pair(&mut h);
+
+        let (workspace, unfocused) = {
+            let workspace = h.stoat.active_workspace;
+            let ws = h.stoat.active_workspace();
+            let focused = ws.panes.focus();
+            let unfocused = ws
+                .panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|id| *id != focused)
+                .expect("the split has an unfocused pane");
+            (workspace, unfocused)
+        };
+        assert!(
+            h.stoat.pane_cache.contains_key(&(workspace, unfocused)),
+            "the unfocused pane cached its paint",
+        );
+
+        // The cached pane is the one to close, so focus moves onto it first.
+        h.type_action("FocusLeft()");
+        h.type_action("ClosePane()");
+        h.settle();
+        let _ = h.stoat.render();
+
+        assert!(
+            !h.stoat
+                .active_workspace()
+                .panes
+                .split_pane_ids()
+                .contains(&unfocused),
+            "the close reached the cached pane",
+        );
+
+        assert!(
+            !h.stoat.pane_cache.contains_key(&(workspace, unfocused)),
+            "and the close takes it rather than leaving it for the process",
         );
     }
 
