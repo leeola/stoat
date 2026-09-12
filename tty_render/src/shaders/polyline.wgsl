@@ -69,7 +69,17 @@ struct VsOut {
     @location(7) @interpolate(flat) p67: vec4<f32>,
     @location(8) @interpolate(flat) p89: vec4<f32>,
     @location(9) @interpolate(flat) p1011: vec4<f32>,
+    // The planes a chunk of a split path gives its shared joints up on, as unit
+    // normals in pixels, and which of its two ends carries one.
+    @location(10) @interpolate(flat) cuts_px: vec4<f32>,
+    @location(11) @interpolate(flat) cut_flags: u32,
 }
+
+// A chunk that starts on a joint shared with the chunk before it.
+const CUT_START: u32 = 1u;
+
+// A chunk that ends on a joint shared with the chunk after it.
+const CUT_END: u32 = 2u;
 
 // A point pair moved to pixels, which is how each packed vec4 of the instance
 // reaches the fragment stage.
@@ -92,6 +102,8 @@ fn vs_main(
     @location(6) bounds: vec4<f32>,
     @location(7) color_width: vec4<f32>,
     @location(8) seq_count: vec2<u32>,
+    @location(9) cuts_px: vec4<f32>,
+    @location(10) cut_flags: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -131,6 +143,9 @@ fn vs_main(
     out.p67 = pair_px(p67_cells, shift);
     out.p89 = pair_px(p89_cells, shift);
     out.p1011 = pair_px(p1011_cells, shift);
+    // Already unit normals in pixels, so they carry no cell size and no shift.
+    out.cuts_px = cuts_px;
+    out.cut_flags = cut_flags;
     return out;
 }
 
@@ -181,6 +196,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         in.p89.xy, in.p89.zw,
         in.p1011.xy, in.p1011.zw
     );
+
+    // A path longer than the array splits into chunks that share their joint
+    // point, and both chunks reach it. Each gives up the far side of the plane
+    // bisecting the turn there, so every pixel of the joint belongs to exactly
+    // one of them and its fringe blends once. The cut is a hard test rather
+    // than a ramp: a ramp leaves both chunks at half coverage on the plane,
+    // which composites to three quarters and beads the seam it removes.
+    //
+    // The plane itself goes to the chunk arriving, so no pixel goes to neither.
+    if (in.cut_flags & CUT_START) != 0u && dot(frag - points[0], in.cuts_px.xy) <= 0.0 {
+        discard;
+    }
+    if (in.cut_flags & CUT_END) != 0u
+        && dot(frag - points[in.point_count - 1u], in.cuts_px.zw) > 0.0 {
+        discard;
+    }
 
     var sdf = capsule_sdf(frag, points[0], points[1], in.half_width);
     for (var i = 1u; i + 1u < in.point_count; i = i + 1u) {

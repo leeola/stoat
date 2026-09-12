@@ -66,7 +66,28 @@ struct PolylineInstance {
     half_width: f32,
     seq: u32,
     point_count: u32,
+    /// Unit normal, in pixels, of the plane this instance starts at, when
+    /// [`Self::cuts`] says it starts on a shared joint. The instance paints only
+    /// the side the normal points to.
+    cut_start: [f32; 2],
+    /// The same for the plane it ends at, which it paints only the far side of.
+    cut_end: [f32; 2],
+    /// Which ends sit on a joint shared with another chunk: bit 0 the start, bit
+    /// 1 the end.
+    ///
+    /// A path longer than [`MAX_PATH_POINTS`] splits into chunks that share
+    /// their joint point, and both chunks reach it. Left whole, each draws the
+    /// round cap there and the two fringes composite, so one joint per chunk
+    /// beads where every other joint blends once. Cutting both at the plane
+    /// bisecting the turn gives each half of the joint and no pixel to both.
+    cuts: u32,
 }
+
+/// [`PolylineInstance::cuts`] bit for a chunk that starts on a shared joint.
+const CUT_START: u32 = 1;
+
+/// [`PolylineInstance::cuts`] bit for a chunk that ends on one.
+const CUT_END: u32 = 2;
 
 /// The uniform shared by every instance. Carries the surface resolution and
 /// cell size the vertex shader maps cell-fraction coordinates through, the
@@ -218,8 +239,8 @@ impl PolylinePass {
                     array_stride: size_of::<PolylineInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     // Six vec4s carry the twelve points, then the bounds, the
-                    // color paired with the half width, and the seq paired with
-                    // the point count.
+                    // color paired with the half width, the seq paired with the
+                    // point count, the two cut normals paired, and the cut bits.
                     attributes: &vertex_attr_array![
                         0 => Float32x4,
                         1 => Float32x4,
@@ -230,6 +251,8 @@ impl PolylinePass {
                         6 => Float32x4,
                         7 => Float32x4,
                         8 => Uint32x2,
+                        9 => Float32x4,
+                        10 => Uint32,
                     ],
                 }],
             },
@@ -353,7 +376,12 @@ impl PolylinePass {
         }
         self.last_polylines = Some(version);
 
-        build_polyline_instances_into(polylines, &mut self.built, &mut self.points_scratch);
+        build_polyline_instances_into(
+            polylines,
+            self.metrics,
+            &mut self.built,
+            &mut self.points_scratch,
+        );
         self.count = self.built.len() as u32;
         if self.built.is_empty() {
             return;
@@ -465,6 +493,7 @@ impl PolylinePass {
 
         build_polyline_instances_into(
             polylines,
+            self.metrics,
             &mut self.composite_built,
             &mut self.points_scratch,
         );
@@ -588,9 +617,11 @@ fn make_bind_group(
 /// here outlive every frame that only moves the pool.
 fn build_polyline_instances_into(
     polylines: &[Polyline],
+    metrics: CellMetrics,
     out: &mut Vec<PolylineInstance>,
     points: &mut Vec<[f32; 2]>,
 ) {
+    let cell = [metrics.width, metrics.height];
     out.clear();
     for polyline in polylines {
         let half_width = f32::from(polyline.width) / SIXTEENTHS / 2.0;
@@ -614,7 +645,7 @@ fn build_polyline_instances_into(
                 polyline.seq,
             )),
             // Chunks overlap by their joint point, so the split path stays
-            // continuous and only that one joint blends twice.
+            // continuous, and each carries the plane it gives the joint up on.
             points => out.extend(
                 points
                     .chunks(MAX_PATH_POINTS - 1)
@@ -622,7 +653,17 @@ fn build_polyline_instances_into(
                     .map(|(index, chunk)| {
                         let start = index * (MAX_PATH_POINTS - 1);
                         let end = (start + chunk.len() + 1).min(points.len());
-                        path_instance(&points[start..end], half_width, color, polyline.seq)
+                        let mut instance =
+                            path_instance(&points[start..end], half_width, color, polyline.seq);
+                        if start > 0 {
+                            instance.cut_start = joint_normal(points, start, cell);
+                            instance.cuts |= CUT_START;
+                        }
+                        if end < points.len() {
+                            instance.cut_end = joint_normal(points, end - 1, cell);
+                            instance.cuts |= CUT_END;
+                        }
+                        instance
                     })
                     .filter(|instance| instance.point_count > 1),
             ),
@@ -656,6 +697,40 @@ fn path_instance(
         half_width,
         seq,
         point_count: points.len() as u32,
+        cut_start: [0.0, 0.0],
+        cut_end: [0.0, 0.0],
+        cuts: 0,
+    }
+}
+
+/// The unit normal, in pixels, of the plane two chunks meet on at `joint`.
+///
+/// The plane bisects the turn the path makes there, so the chunk arriving and
+/// the chunk leaving claim complementary halves of the round joint and the pair
+/// covers it exactly once. A path that doubles straight back has no bisector, so
+/// the direction it arrived on stands in.
+///
+/// A cell is taller than it is wide, so the directions are taken in pixels. A
+/// plane bisecting the turn in cell fractions leans the wrong way on screen.
+fn joint_normal(points: &[[f32; 2]], joint: usize, cell: [f32; 2]) -> [f32; 2] {
+    let at = |i: usize| [points[i][0] * cell[0], points[i][1] * cell[1]];
+    let unit = |[x, y]: [f32; 2]| {
+        let len = (x * x + y * y).sqrt();
+        if len > 0.0 {
+            [x / len, y / len]
+        } else {
+            [0.0, 0.0]
+        }
+    };
+
+    let (before, here, after) = (at(joint - 1), at(joint), at(joint + 1));
+    let incoming = unit([here[0] - before[0], here[1] - before[1]]);
+    let outgoing = unit([after[0] - here[0], after[1] - here[1]]);
+    let bisector = unit([incoming[0] + outgoing[0], incoming[1] + outgoing[1]]);
+    if bisector == [0.0, 0.0] {
+        incoming
+    } else {
+        bisector
     }
 }
 
@@ -687,6 +762,16 @@ mod tests {
         TextureUsages, TextureViewDescriptor,
     };
 
+    /// The square cell the fixtures lay paths out on.
+    fn metrics() -> CellMetrics {
+        CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        }
+    }
+
     /// The square readback target's edge, in pixels. Four bytes a texel makes a
     /// row exactly the 256-byte copy alignment, so the readback needs no stride
     /// padding.
@@ -711,7 +796,7 @@ mod tests {
     /// only want one frame's instances and have no buffer to reuse.
     fn build_polyline_instances(polylines: &[Polyline]) -> Vec<PolylineInstance> {
         let mut instances = Vec::new();
-        build_polyline_instances_into(polylines, &mut instances, &mut Vec::new());
+        build_polyline_instances_into(polylines, metrics(), &mut instances, &mut Vec::new());
         instances
     }
 
@@ -732,7 +817,7 @@ mod tests {
 
         let mut scratch = build_polyline_instances(&paths);
         scratch.extend(build_polyline_instances(&paths));
-        build_polyline_instances_into(&paths, &mut scratch, &mut Vec::new());
+        build_polyline_instances_into(&paths, metrics(), &mut scratch, &mut Vec::new());
 
         assert_eq!(
             bytemuck::cast_slice::<PolylineInstance, u8>(&scratch),
@@ -972,16 +1057,7 @@ mod tests {
     /// Red alone because the fixture strokes in pure red over black, so the byte
     /// at a pixel is the coverage the path resolved there.
     fn render_red(device: &Device, queue: &Queue, paths: &[Polyline]) -> Vec<u8> {
-        let mut pass = PolylinePass::new(
-            device,
-            TextureFormat::Rgba8Unorm,
-            CellMetrics {
-                font_size: 10.0,
-                width: 12.0,
-                height: 12.0,
-                scale_factor: 1.0,
-            },
-        );
+        let mut pass = PolylinePass::new(device, TextureFormat::Rgba8Unorm, metrics());
         pass.prepare_composite(
             device,
             queue,
@@ -1091,25 +1167,40 @@ mod tests {
             seq: 0,
         };
 
+        // A run of thirteen points is longer than one instance carries, so it
+        // splits into two chunks that share point eleven. That joint is the one
+        // the min over an instance's own segments cannot resolve.
+        let long: Vec<[i16; 2]> = (0..13).map(|i| [32, 32 + 2 * i]).collect();
+
         let unsplit = render_red(&device, &queue, &[run(&[[32, 32], [32, 64]])]);
         let split = render_red(&device, &queue, &[run(&[[32, 32], [32, 48], [32, 64]])]);
+        let straight = render_red(&device, &queue, &[run(&[[32, 32], [32, 56]])]);
+        let chunked = render_red(&device, &queue, &[run(&long)]);
 
         assert!(
             unsplit.iter().any(|&byte| byte > 0 && byte < 255),
             "the fixture paints a partly covered fringe to compare"
         );
 
-        let bead = split
-            .iter()
-            .zip(&unsplit)
-            .position(|(split, unsplit)| split != unsplit)
-            .map(|at| {
-                let index = at as u32;
-                (index % TARGET, index / TARGET, split[at], unsplit[at])
-            });
+        let bead = |split: &[u8], whole: &[u8]| {
+            split
+                .iter()
+                .zip(whole)
+                .position(|(split, whole)| split != whole)
+                .map(|at| {
+                    let index = at as u32;
+                    (index % TARGET, index / TARGET, split[at], whole[at])
+                })
+        };
         assert_eq!(
-            bead, None,
-            "the joint adds no coverage of its own, at (x, y, split, unsplit)"
+            bead(&split, &unsplit),
+            None,
+            "a joint within one instance adds no coverage, at (x, y, split, whole)"
+        );
+        assert_eq!(
+            bead(&chunked, &straight),
+            None,
+            "nor does the joint two instances share, at (x, y, chunked, whole)"
         );
     }
 
