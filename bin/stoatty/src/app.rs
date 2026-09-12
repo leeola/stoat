@@ -1653,7 +1653,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     // Re-copy the live selection, keeping it highlighted. An empty
                     // selection falls through so a bare Ctrl-C still SIGINTs.
                     if let Some(text) = selection_copy_text(&state.terminal) {
-                        copy_to_clipboard(state, &text);
+                        copy_to_clipboard(state, text);
                         return;
                     }
                 }
@@ -1816,7 +1816,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         // It is cleared on supersession by a new drag, typing, or
                         // a paste.
                         if let Some(text) = selection_copy_text(&state.terminal) {
-                            copy_to_clipboard(state, &text);
+                            copy_to_clipboard(state, text);
                         }
                     }
                     state.window.request_redraw();
@@ -2153,7 +2153,7 @@ fn handle_term_events(
             TermEvent::ResetTitle => {
                 set_window_title(&state.window, &mut state.last_title, DEFAULT_TITLE)
             },
-            TermEvent::ClipboardStore(text) => copy_to_clipboard(state, &text),
+            TermEvent::ClipboardStore(text) => copy_to_clipboard(state, text),
             TermEvent::Bell => ring_bell(state, Instant::now()),
             TermEvent::Notification { title, body } => {
                 deliver_notification(title.as_deref(), &body)
@@ -3757,13 +3757,17 @@ fn clipboard_handle(state: &mut State) -> Option<&mut arboard::Clipboard> {
 
 /// Copy `text` to the OS clipboard through the handle cached on [`State`].
 ///
+/// Takes the string rather than borrowing it, since the clipboard handle wants
+/// one owned and every caller already owns theirs. An OSC 52 write carries as
+/// much text as the user copied, which a borrow would duplicate here.
+///
 /// A failed copy is reported rather than fatal, and drops the handle so the
 /// next call opens a fresh one.
-fn copy_to_clipboard(state: &mut State, text: &str) {
+fn copy_to_clipboard(state: &mut State, text: String) {
     let Some(clipboard) = clipboard_handle(state) else {
         return;
     };
-    if let Err(err) = clipboard.set_text(text.to_owned()) {
+    if let Err(err) = clipboard.set_text(text) {
         eprintln!("stoatty: failed to copy selection to clipboard: {err}");
         state.clipboard = None;
     }

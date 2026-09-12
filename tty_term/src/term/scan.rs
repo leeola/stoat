@@ -62,6 +62,17 @@ pub(super) enum EscEvent<'a> {
         interior: Range<usize>,
         end: usize,
     },
+    /// An OSC past its cap, as the bytes to leave out of what a parser sees.
+    ///
+    /// Carries no payload. The scanner never buffered these bytes, and the event
+    /// exists only so a caller cuts them from the stream it passes on. The vte
+    /// parser's OSC buffer is an unbounded `Vec` that keeps its capacity for the
+    /// session, so an escape nobody acts on would cost the session its size.
+    ///
+    /// `end` is one past whichever byte ended the escape, and the interior's own
+    /// end when none has yet. An escape spanning several calls is reported once
+    /// per call, since each call's bytes have to be cut on their own.
+    OscOverrun { interior: Range<usize>, end: usize },
     /// A full reset (`ESC c`).
     ///
     /// The parser resets the screen itself, so this reports it only for the
@@ -81,9 +92,15 @@ pub(super) enum EscEvent<'a> {
 /// chunk that ends it.
 ///
 /// All three open on the byte after `ESC`, and no two can be open at once, so one
-/// state machine recognizes all of them for the cost of the one walk. A sequence
-/// written inside another's payload is part of that payload rather than a sequence
-/// of its own, which is how the vte parser reads the same bytes.
+/// state machine recognizes all of them for the cost of the one walk.
+///
+/// A lone `ESC` inside a skipped OSC ends it, which is what the vte parser does
+/// with the same bytes. The two have to agree on where such a payload stops. The
+/// driver cuts an oversized one out of what that parser reads, and a cut reaching
+/// past the end would swallow text the parser goes on to print.
+///
+/// Inside an APC payload a lone `ESC` abandons the frame instead, and the bytes
+/// after it are the abandoned payload's.
 ///
 /// Recognizing a stoatty frame among the APC payloads is the decoder's job, not this
 /// scanner's. Mapping a notification to an event is [`notification_from_osc`]'s.
@@ -98,6 +115,9 @@ pub(super) struct EscScanner {
     /// Set when an OSC payload outgrew its cap, so it is dropped at its terminator
     /// rather than reported truncated.
     overflow: bool,
+    /// Payload bytes the open skipped OSC has taken, across every call it spans,
+    /// measured against [`EscScanner::skip_cap`].
+    skipped: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -130,7 +150,7 @@ enum EscState {
     /// Seen `ESC` inside an image payload.
     OscImageEscape,
     /// Inside any other OSC, skipped to its terminator so a large clipboard write
-    /// is never copied.
+    /// is never copied. Counted, so one past its cap is cut from the stream.
     OscSkip,
     /// Seen `ESC` inside a skipped OSC.
     OscSkipEscape,
@@ -182,6 +202,7 @@ impl EscScanner {
                             self.code = 0;
                             self.payload.clear();
                             self.overflow = false;
+                            self.skipped = 0;
                             EscState::OscPrefix
                         },
                         ESC => EscState::Escape,
@@ -266,9 +287,17 @@ impl EscScanner {
                             _ => EscState::OscSkip,
                         };
                     },
-                    ESC => self.state = EscState::OscSkipEscape,
+                    ESC => {
+                        osc = i..i;
+                        self.state = EscState::OscSkipEscape;
+                    },
                     BEL => self.state = EscState::Ground,
-                    _ => self.state = EscState::OscSkip,
+                    // An OSC with no `;` has no argument to cut at, so the
+                    // interior opens on this byte and takes the rest.
+                    _ => {
+                        osc = i..i;
+                        self.state = EscState::OscSkip;
+                    },
                 },
                 EscState::OscBuffer => match byte {
                     ESC => self.state = EscState::OscBufferEscape,
@@ -306,19 +335,43 @@ impl EscScanner {
                 },
                 EscState::OscSkip => match byte {
                     ESC => self.state = EscState::OscSkipEscape,
-                    BEL => self.state = EscState::Ground,
+                    BEL => self.finish_osc_skip(osc.clone(), i + 1, emit),
                     _ => {
-                        i += payload_run(&bytes[i..]).len();
+                        let run = payload_run(&bytes[i..]).len();
+                        self.count_skipped(run);
+                        i += run;
+                        osc.end = i;
                         continue;
                     },
                 },
                 EscState::OscSkipEscape => match byte {
-                    STRING_TERMINATOR => self.state = EscState::Ground,
+                    STRING_TERMINATOR => self.finish_osc_skip(osc.clone(), i + 1, emit),
                     ESC => self.state = EscState::OscSkipEscape,
-                    _ => self.state = EscState::OscSkip,
+                    // A lone `ESC` ends an OSC for the vte parser, which
+                    // dispatches what it holds and reads this byte as the start
+                    // of an escape. Ending here too keeps a cut from swallowing
+                    // what that parser goes on to print.
+                    _ => {
+                        self.finish_osc_skip(osc.clone(), i, emit);
+                        self.state = EscState::Escape;
+                        continue;
+                    },
                 },
             }
             i += 1;
+        }
+
+        // An open overrun has no terminator to report at, and the bytes it took
+        // in this call must not reach the parser either. Each call reports its
+        // own part, since the caller only ever sees offsets into one call.
+        if self.overflow
+            && matches!(self.state, EscState::OscSkip | EscState::OscSkipEscape)
+            && !osc.is_empty()
+        {
+            emit(EscEvent::OscOverrun {
+                interior: osc.clone(),
+                end: osc.end,
+            });
         }
     }
 
@@ -420,6 +473,49 @@ impl EscScanner {
         self.state = EscState::Ground;
     }
 
+    /// Count `len` more bytes of the open skipped OSC, marking it overrun once
+    /// its payload passes the cap its code allows.
+    fn count_skipped(&mut self, len: usize) {
+        self.skipped = self.skipped.saturating_add(len);
+        if self.skipped > self.skip_cap() {
+            self.overflow = true;
+        }
+    }
+
+    /// How much payload the open skipped OSC may carry before it is cut.
+    ///
+    /// A clipboard write is the one skipped code with a reason to be large. It
+    /// carries a whole selection, which a remote copy through tmux or an editor
+    /// makes as big as the buffer the user copied. Everything else carries a
+    /// title, a path, a palette, or a hyperlink.
+    fn skip_cap(&self) -> usize {
+        match self.code {
+            OSC_CLIPBOARD => MAX_OSC_CLIPBOARD_BYTES,
+            _ => MAX_OSC_PLAIN_BYTES,
+        }
+    }
+
+    /// Close a skipped OSC, cutting its payload from the stream when it overran.
+    ///
+    /// Under the cap the bytes reach the parser untouched, so an ordinary title,
+    /// palette write, or clipboard write behaves as it always did. Past it the
+    /// parser is left the code and the `;` that follows it, which it reads as
+    /// one empty argument. That sets an empty title for OSC 0 and 2, and OSC 52
+    /// wants three arguments so it is ignored outright.
+    fn finish_osc_skip(
+        &mut self,
+        interior: Range<usize>,
+        end: usize,
+        emit: &mut impl FnMut(EscEvent<'_>),
+    ) {
+        if self.overflow {
+            emit(EscEvent::OscOverrun { interior, end });
+        }
+        self.skipped = 0;
+        self.overflow = false;
+        self.state = EscState::Ground;
+    }
+
     /// Emit the buffered OSC payload unless it overran the cap, then reset.
     fn finish_osc(&mut self, emit: &mut impl FnMut(EscEvent<'_>)) {
         if !self.overflow {
@@ -463,6 +559,27 @@ const OSC_INTRODUCER: u8 = b']';
 /// against a sequence that never terminates. A larger notification is discarded.
 const MAX_OSC_NOTIFY_BYTES: usize = 4096;
 
+/// The OSC code that writes the clipboard, which alone among the skipped codes
+/// carries a payload as large as whatever the user copied.
+const OSC_CLIPBOARD: u32 = 52;
+
+/// Cap on the payload of a skipped OSC, past which the bytes are cut from what
+/// the vte parser sees.
+///
+/// A plain OSC carries a title, a working directory, a palette, or a hyperlink.
+/// The largest of those is a single OSC 4 setting all 256 palette entries, which
+/// runs to about 6 KB, so this leaves an order of magnitude of headroom. The
+/// bound matters because the parser's OSC buffer keeps its capacity for the
+/// session, and the pty reader already hands over 256 KiB per call.
+const MAX_OSC_PLAIN_BYTES: usize = 64 * 1024;
+
+/// Cap on the payload of a skipped OSC 52.
+///
+/// A clipboard write carries a whole selection, so it is legitimately far larger
+/// than any other skipped code. This bounds a remote copy of an enormous buffer
+/// without refusing an ordinary one.
+const MAX_OSC_CLIPBOARD_BYTES: usize = 32 * 1024 * 1024;
+
 /// Cap on a buffered OSC 1337 image payload.
 ///
 /// Far above the notification cap because this carries a whole image rather
@@ -500,7 +617,10 @@ pub(super) fn notification_from_osc(code: u32, payload: &[u8]) -> Option<TermEve
 
 #[cfg(test)]
 mod tests {
-    use super::{EscEvent, EscScanner, MAX_APC_PAYLOAD, MAX_OSC_IMAGE_BYTES, MAX_OSC_NOTIFY_BYTES};
+    use super::{
+        EscEvent, EscScanner, MAX_APC_PAYLOAD, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_IMAGE_BYTES,
+        MAX_OSC_NOTIFY_BYTES, MAX_OSC_PLAIN_BYTES,
+    };
 
     #[test]
     fn osc_notify_scan_takes_both_terminators() {
@@ -577,6 +697,96 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_osc_past_its_cap_is_cut_whole() {
+        let mut scanner = EscScanner::default();
+        let payload = MAX_OSC_PLAIN_BYTES + 1;
+        let mut seq = b"\x1b]0;".to_vec();
+        seq.resize(seq.len() + payload, b'a');
+        seq.push(0x07);
+
+        assert_eq!(
+            scan_overruns(&mut scanner, &seq),
+            vec![(4, 4 + payload, 5 + payload)],
+            "the whole payload is cut, so the parser reads one empty argument",
+        );
+    }
+
+    #[test]
+    fn a_plain_osc_at_its_cap_reaches_the_parser() {
+        let mut scanner = EscScanner::default();
+        let mut seq = b"\x1b]0;".to_vec();
+        seq.resize(seq.len() + MAX_OSC_PLAIN_BYTES, b'a');
+        seq.push(0x07);
+
+        assert!(
+            scan_overruns(&mut scanner, &seq).is_empty(),
+            "the cap is what is allowed, not what is refused",
+        );
+    }
+
+    #[test]
+    fn an_osc_52_is_cut_only_past_its_own_cap() {
+        let mut under = EscScanner::default();
+        let mut seq = b"\x1b]52;c;".to_vec();
+        seq.resize(seq.len() + MAX_OSC_PLAIN_BYTES + 1, b'A');
+        seq.push(0x07);
+        assert!(
+            scan_overruns(&mut under, &seq).is_empty(),
+            "a clipboard write carries as much as the user copied",
+        );
+
+        let mut over = EscScanner::default();
+        let mut seq = b"\x1b]52;c;".to_vec();
+        seq.resize(seq.len() + MAX_OSC_CLIPBOARD_BYTES + 1, b'A');
+        seq.push(0x07);
+        assert_eq!(
+            scan_overruns(&mut over, &seq).len(),
+            1,
+            "past its own cap it is cut like any other",
+        );
+    }
+
+    /// An escape larger than one pty read spans several scans. A cut that waited
+    /// for the terminator would leave every earlier call's bytes with the parser,
+    /// which is the whole escape but its tail.
+    #[test]
+    fn an_open_overrun_is_cut_once_per_call() {
+        let mut scanner = EscScanner::default();
+        let head = MAX_OSC_PLAIN_BYTES + 1;
+        let mut first = b"\x1b]0;".to_vec();
+        first.resize(first.len() + head, b'a');
+
+        assert_eq!(
+            scan_overruns(&mut scanner, &first),
+            vec![(4, 4 + head, 4 + head)],
+            "no terminator arrived, so the end stops at the interior",
+        );
+        assert_eq!(
+            scan_overruns(&mut scanner, b"more\x07"),
+            vec![(0, 4, 5)],
+            "the next call cuts its own bytes",
+        );
+    }
+
+    /// A lone `ESC` ends an OSC for the vte parser, which dispatches what it
+    /// holds and reads on from the byte after. The cut stops there too, or it
+    /// would swallow text that parser goes on to print.
+    #[test]
+    fn a_cut_stops_where_a_lone_escape_ends_the_osc() {
+        let mut scanner = EscScanner::default();
+        let payload = MAX_OSC_PLAIN_BYTES + 1;
+        let mut seq = b"\x1b]0;".to_vec();
+        seq.resize(seq.len() + payload, b'a');
+        seq.extend_from_slice(b"\x1bxtail");
+
+        assert_eq!(
+            scan_overruns(&mut scanner, &seq),
+            vec![(4, 4 + payload, 5 + payload)],
+            "the escape closes the sequence and the text after it stays",
+        );
+    }
+
+    #[test]
     fn xtversion_scan_skips_long_plain_runs() {
         let mut scanner = EscScanner::default();
         let mut input = vec![b'.'; 8192];
@@ -616,6 +826,7 @@ mod tests {
             EscEvent::OscNotify { code, payload } => notes.push((code, payload.to_vec())),
             EscEvent::Ris => resets += 1,
             EscEvent::OscImage { .. } => panic!("this stream carries no image escape"),
+            EscEvent::OscOverrun { .. } => panic!("nothing here is past a cap"),
         });
         assert_eq!(resets, 0, "this stream carries no full reset");
 
@@ -630,30 +841,35 @@ mod tests {
         );
     }
 
-    /// A sequence written inside another's payload belongs to that payload.
+    /// A sequence written inside an APC payload belongs to that payload.
     ///
-    /// One state machine reads the stream the way the vte parser does, so an APC
-    /// payload holding what looks like a query is payload, not a query. Only
-    /// malformed input can reach this, since a well-formed stream closes a sequence
-    /// before opening the next.
+    /// The interior `ESC` abandons the frame, and the bytes after it are the
+    /// abandoned payload's rather than a sequence of their own. Only malformed
+    /// input can reach this, since a well-formed stream closes a sequence before
+    /// opening the next.
     #[test]
-    fn a_sequence_inside_a_payload_is_not_its_own() {
+    fn a_sequence_inside_an_apc_payload_is_not_its_own() {
         let mut scanner = EscScanner::default();
 
-        // The interior ESC abandons the APC frame, and the query bytes after it are
-        // the abandoned payload's rather than a query of their own.
         assert_eq!(
             scan_xtversion(&mut scanner, b"\x1b_pay\x1b[>qload\x1b\\"),
             0,
             "a query inside an APC payload is part of the payload"
         );
+    }
 
-        // An OSC 52 write is skipped to its terminator, so an APC frame drawn inside
-        // it is skipped with it.
+    /// A lone `ESC` ends a skipped OSC, so what follows opens on its own.
+    ///
+    /// The vte parser reads the same bytes the same way, which is what lets the
+    /// driver cut an oversized payload out of the stream that parser sees.
+    #[test]
+    fn a_lone_escape_ends_a_skipped_osc() {
         let mut scanner = EscScanner::default();
-        assert!(
-            scan_collect(&mut scanner, b"\x1b]52;c;\x1b_Gstoatty;x\x1b\\\x07").is_empty(),
-            "an APC frame inside an OSC payload is part of that payload"
+
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b]52;c;\x1b_Gstoatty;x\x1b\\\x07"),
+            vec![(b"Gstoatty;x".to_vec(), 21)],
+            "the frame after the escape that closed the OSC is a frame",
         );
     }
 
@@ -691,6 +907,18 @@ mod tests {
     }
 
     /// The OSC notifications one scan of `bytes` completes, as `(code, payload)`.
+    /// Each cut this call reports, as `(interior start, interior end, sequence
+    /// end)`.
+    fn scan_overruns(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(usize, usize, usize)> {
+        let mut out = Vec::new();
+        scanner.scan(bytes, &mut |event| {
+            if let EscEvent::OscOverrun { interior, end } = event {
+                out.push((interior.start, interior.end, end));
+            }
+        });
+        out
+    }
+
     fn scan_osc(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
         let mut out = Vec::new();
         scanner.scan(bytes, &mut |event| {

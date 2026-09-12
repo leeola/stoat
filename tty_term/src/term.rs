@@ -1128,6 +1128,9 @@ impl Terminal {
                 let command = payload.and_then(iterm::parse_file).map(Command::ItermFile);
                 frames.push((command, interior, end));
             },
+            // Cut like a refused image payload, and for the same reason. Nothing
+            // is read from these bytes, so no command travels with the range.
+            EscEvent::OscOverrun { interior, end } => frames.push((None, interior, end)),
             EscEvent::XtVersion => responses.push(XTVERSION_REPLY.as_bytes()),
             EscEvent::OscNotify { code, payload } => {
                 if let Some(event) = notification_from_osc(code, payload) {
@@ -3971,6 +3974,41 @@ mod tests {
             terminal.take_events(),
             vec![TermEvent::ClipboardStore("hi".into())],
             "OSC 52 payload is base64-decoded"
+        );
+    }
+
+    /// The parser's OSC buffer keeps its capacity for the session, so a title no
+    /// program would send must not reach it. The code and its `;` still do,
+    /// which the parser reads as one empty argument.
+    #[test]
+    fn an_oversize_title_reaches_the_parser_empty() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        let mut seq = b"\x1b]0;".to_vec();
+        seq.resize(seq.len() + 1024 * 1024, b'a');
+        seq.push(0x07);
+        terminal.advance(&seq);
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::Title(String::new())]
+        );
+    }
+
+    /// A clipboard write is the one skipped code with a reason to be large, so
+    /// its cap is far above the cap a title gets.
+    #[test]
+    fn a_clipboard_write_past_the_plain_cap_still_stores() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        let mut seq = b"\x1b]52;c;".to_vec();
+        seq.extend_from_slice("QUFB".repeat(256 * 1024).as_bytes());
+        seq.push(0x07);
+        terminal.advance(&seq);
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::ClipboardStore("A".repeat(3 * 256 * 1024))],
         );
     }
 
