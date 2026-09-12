@@ -46,7 +46,10 @@ fn one_seed_reproduces_and_two_seeds_differ() {
     let shape = |seed: u32| {
         let mut random = Random::new(seed, 0);
         let mut opts = options();
-        flatten(&ellipse(50.0, 50.0, 80.0, 40.0, &mut opts, &mut random))
+        flatten(
+            &ellipse(50.0, 50.0, 80.0, 40.0, &mut opts, &mut random),
+            1.0,
+        )
     };
 
     assert_eq!(shape(11), shape(11), "one seed draws one mark");
@@ -127,7 +130,10 @@ fn a_preserved_rect_starts_and_ends_on_its_corners() {
     let mut opts = options();
     assert!(opts.preserve_vertices, "roughness 1 preserves vertices");
 
-    let strokes = flatten(&rect(10.0, 20.0, 60.0, 40.0, 0.0, &mut opts, &mut random));
+    let strokes = flatten(
+        &rect(10.0, 20.0, 60.0, 40.0, 0.0, &mut opts, &mut random),
+        1.0,
+    );
     let corners = [[10.0, 20.0], [70.0, 20.0], [70.0, 60.0], [10.0, 60.0]];
 
     for stroke in &strokes {
@@ -148,7 +154,7 @@ fn a_preserved_rect_starts_and_ends_on_its_corners() {
 fn prefix_lengths_rise_to_the_summed_length() {
     let mut random = Random::new(9, 0);
     let mut opts = options();
-    let strokes = flatten(&ellipse(0.0, 0.0, 120.0, 90.0, &mut opts, &mut random));
+    let strokes = flatten(&ellipse(0.0, 0.0, 120.0, 90.0, &mut opts, &mut random), 1.0);
     assert!(!strokes.is_empty(), "an ellipse draws something");
 
     for stroke in &strokes {
@@ -226,17 +232,20 @@ fn roughness_is_damped_only_for_a_small_shape() {
 /// point and a zero-length distance axis.
 #[test]
 fn a_lone_move_makes_no_stroke() {
-    assert_eq!(flatten(&[Op::Move([1.0, 2.0])]), Vec::new());
+    assert_eq!(flatten(&[Op::Move([1.0, 2.0])], 1.0), Vec::new());
 }
 
 /// Every bezier flattens to the same count, so a mark regenerated at
 /// another size keeps each point at the same place along its stroke.
 #[test]
 fn a_bezier_flattens_to_a_fixed_count() {
-    let strokes = flatten(&[
-        Op::Move([0.0, 0.0]),
-        Op::Curve([1.0, 1.0, 2.0, 1.0, 3.0, 0.0]),
-    ]);
+    let strokes = flatten(
+        &[
+            Op::Move([0.0, 0.0]),
+            Op::Curve([1.0, 1.0, 2.0, 1.0, 3.0, 0.0]),
+        ],
+        1.0,
+    );
 
     let [stroke] = strokes.as_slice() else {
         panic!("one move and one curve make one stroke, got {strokes:?}");
@@ -453,6 +462,57 @@ fn stroke_weight_tracks_the_cell_width() {
     let mut wide = metrics();
     wide.width = 20.0;
     assert_eq!(stroke_width(&style, wide), 5.0, "a doubled cell doubles it");
+}
+
+/// The reference states every jitter in logical pixels, so a roughness-1 mark
+/// wanders the same visible distance on every display. A constant applied in
+/// physical pixels reads at half size on a 2x screen, and a box then escapes
+/// damping at half the logical size the reference damps it at.
+#[test]
+fn the_wobble_is_stated_in_logical_pixels() {
+    let dense = CellMetrics {
+        font_size: metrics().font_size * 2.0,
+        width: metrics().width * 2.0,
+        height: metrics().height * 2.0,
+        scale_factor: 2.0,
+    };
+    let bounds = SketchBounds {
+        x: 16,
+        y: 16,
+        w: 48,
+        h: 32,
+    };
+    let shapes = [
+        SketchShape::Ellipse(bounds),
+        SketchShape::Rect {
+            bounds,
+            radius: 0,
+            fill: None,
+        },
+    ];
+
+    for shape in shapes {
+        let command = command(shape, 64);
+        let at_1x = geometry(&command, metrics(), &nothing_resolves);
+        let at_2x = geometry(&command, dense, &nothing_resolves);
+
+        let points = |mark: &Geometry| -> Vec<[f32; 2]> {
+            mark.strokes.iter().flat_map(|s| s.points.clone()).collect()
+        };
+        let (one, two) = (points(&at_1x), points(&at_2x));
+        assert_eq!(one.len(), two.len(), "the same shape draws the same points");
+
+        for (index, (a, b)) in one.iter().zip(&two).enumerate() {
+            for axis in 0..2 {
+                assert!(
+                    (a[axis] * 2.0 - b[axis]).abs() < 1e-3,
+                    "point {index} axis {axis}: {} at 1x, {} at 2x",
+                    a[axis],
+                    b[axis]
+                );
+            }
+        }
+    }
 }
 
 /// The wobble is a chain of draws from one shared stream, so the order of

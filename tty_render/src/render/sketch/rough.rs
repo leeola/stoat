@@ -5,6 +5,11 @@
 //! against the live cell metrics and a mark redrawn at another font size looks
 //! hand-drawn at that size rather than scaled.
 //!
+//! The reference states every jitter in logical pixels, so the generation runs
+//! on a cell divided by the display density and scales its points back out. A
+//! mark therefore wanders the same visible distance on a 1x display and on a 2x
+//! one.
+//!
 //! Nothing here reads a clock or a GPU. The same seed yields the same points
 //! every call, which is what lets a reveal walk arc length instead of time and
 //! what lets a mark be regenerated on a zoom step without appearing to redraw
@@ -211,9 +216,14 @@ enum RoughKind {
 /// Generate one mark's flattened geometry at the current cell size.
 ///
 /// The shape arrives in cell fractions and leaves in physical pixels. The
-/// wobble must be applied in pixels, because a mark generated once and then
-/// scaled carries a wobble that grows with the font and stops looking
+/// wobble must be applied against the cell, because a mark generated once and
+/// then scaled carries a wobble that grows with the font and stops looking
 /// hand-drawn.
+///
+/// Every wobble constant is stated in logical pixels. The generation therefore
+/// runs on a cell divided by the display density, and the points scale back to
+/// physical at the end. A roughness-1 mark then wanders the same visible
+/// distance on a 1x display and on a 2x one.
 ///
 /// The same command and metrics always yield the same geometry. Nothing here
 /// reads a clock, so a mark regenerated on a zoom step does not appear to
@@ -226,7 +236,15 @@ pub(crate) fn geometry<Resolve>(
 where
     Resolve: Fn(u32) -> Option<[f32; 4]>,
 {
-    let (cw, ch) = (f64::from(metrics.width), f64::from(metrics.height));
+    let scale = f64::from(metrics.scale_factor);
+    let (cw, ch) = (
+        f64::from(metrics.width) / scale,
+        f64::from(metrics.height) / scale,
+    );
+    // A component's bounds arrive in physical pixels, so they join the logical
+    // frame the rest of the generation runs in.
+    let resolve =
+        |id: u32| resolve(id).map(|bounds| bounds.map(|edge| edge / metrics.scale_factor));
     let mut random = Random::new(command.style.seed, command.id);
 
     match command.shape {
@@ -241,7 +259,7 @@ where
             let ops = ellipse(x + w / 2.0, y + h / 2.0, w, h, &mut options, &mut random);
 
             Geometry {
-                strokes: flatten(&ops),
+                strokes: flatten(&ops, scale),
                 fill: None,
             }
         },
@@ -263,10 +281,13 @@ where
             );
 
             Geometry {
-                strokes: flatten(&ops),
+                strokes: flatten(&ops, scale),
                 // Drawn after the stroke so the stroke's own geometry does not
                 // move when a box gains or loses its fill.
-                fill: fill.map(|_| jittered_quad(x, y, w, h, &options, &mut random)),
+                fill: fill.map(|_| {
+                    jittered_quad(x, y, w, h, &options, &mut random)
+                        .map(|corner| corner.map(|edge| edge * metrics.scale_factor))
+                }),
             }
         },
         SketchShape::Line {
@@ -281,7 +302,7 @@ where
                 bend,
                 heads,
             };
-            line_geometry(command, connector, cw, ch, resolve, &mut random)
+            line_geometry(command, connector, cw, ch, scale, &resolve, &mut random)
         },
     }
 }
@@ -369,6 +390,7 @@ fn line_geometry<Resolve>(
     connector: Connector,
     cw: f64,
     ch: f64,
+    scale: f64,
     resolve: &Resolve,
     random: &mut Random,
 ) -> Geometry
@@ -437,7 +459,7 @@ where
     }
 
     Geometry {
-        strokes: flatten(&ops),
+        strokes: flatten(&ops, scale),
         fill: None,
     }
 }
@@ -964,10 +986,13 @@ fn arrow_head(
 
 /// Walk the ops into flattened strokes, one per pen-down run.
 ///
+/// The ops are in logical pixels and `scale` carries them to physical, so the
+/// arc lengths the reveal walks are measured in the pixels it draws.
+///
 /// Every bezier flattens to the same fixed segment count, so a point's distance
 /// along its stroke does not shift when the mark is regenerated at another
 /// size.
-fn flatten(ops: &[Op]) -> Vec<Stroke> {
+fn flatten(ops: &[Op], scale: f64) -> Vec<Stroke> {
     let mut strokes = Vec::new();
     let mut current: Vec<[f32; 2]> = Vec::new();
     let mut pen = [0.0_f64; 2];
@@ -981,14 +1006,14 @@ fn flatten(ops: &[Op]) -> Vec<Stroke> {
                     current.clear();
                 }
                 pen = *to;
-                current.push([to[0] as f32, to[1] as f32]);
+                current.push([(to[0] * scale) as f32, (to[1] * scale) as f32]);
             },
             Op::Curve(c) => {
                 let (p0, p1, p2, p3) = (pen, [c[0], c[1]], [c[2], c[3]], [c[4], c[5]]);
                 for step in 1..=BEZIER_SEGMENTS {
                     let t = step as f64 / BEZIER_SEGMENTS as f64;
                     let point = cubic_at(p0, p1, p2, p3, t);
-                    current.push([point[0] as f32, point[1] as f32]);
+                    current.push([(point[0] * scale) as f32, (point[1] * scale) as f32]);
                 }
                 pen = p3;
             },
