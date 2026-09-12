@@ -40,38 +40,73 @@ const KIND_STROKE: u32 = 0;
 /// The instance kind that fills a convex quad.
 const KIND_FILL: u32 = 1;
 
-/// The per-stroke instance data.
+/// The box a mark's bounds are grown from, inverted so the first union
+/// replaces it.
+const EMPTY_BOUNDS: [f32; 4] = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+
+/// The per-mark instance data.
 ///
-/// One instance covers a whole stroke rather than one segment, for the reason
-/// [`crate::render::polyline`] gives: two capsules meeting at a shared endpoint
-/// composite their anti-aliased fringes twice, which beads every joint. A
-/// generated stroke has dozens of joints, so the bead becomes the whole look.
+/// One instance covers a whole mark rather than one stroke, because the target
+/// blends each instance over the last: a base pass and the overlay that doubles
+/// it run the same path a pixel apart, so two instances composite twice along
+/// their whole length and read as a dark core inside a paler halo. The
+/// reference strokes a whole path in one call for the same reason. Resolving
+/// every stroke inside one fragment blends the union once.
 ///
-/// The points sit in a shared storage buffer this indexes, unlike a polyline's,
-/// which ride inline. That pass binds one group across the live grid and every
-/// composited pool. This one never draws on a pool, so a single arena works
-/// and a stroke is free to run to any length.
+/// The strokes themselves ride [`SpanInstance`], which this names a run of,
+/// so the fragment stage still skips a stroke whose box is nowhere near it.
+///
+/// The points sit in a shared storage buffer the spans index, unlike a
+/// polyline's, which ride inline. That pass binds one group across the live
+/// grid and every composited pool. This one never draws on a pool, so a single
+/// arena works and a stroke is free to run to any length.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
 struct SketchInstance {
     /// The mark's bounding box in physical pixels, as `[min_x, min_y, max_x,
     /// max_y]`, which the vertex stage grows by the stroke reach to size the
-    /// quad.
+    /// quad. For a stroke this is the union of the boxes its spans carry.
     bounds: [f32; 4],
     /// Straight color and alpha, the alpha already carrying a fill's fade.
     color: [f32; 4],
     half_width: f32,
+    _pad0: f32,
+    /// Pixels this mark is shifted down by, for one riding a gliding pane.
+    dy: f32,
+    _pad1: f32,
+    /// The first of this mark's entries in the span buffer.
+    ///
+    /// A fill has no span. It names the first of its four corners in the point
+    /// buffer here instead, which is what its zero [`Self::span_count`] tells
+    /// the fragment stage to read.
+    span_first: u32,
+    seq: u32,
+    /// Revealed strokes this mark carries, or 0 for a fill.
+    span_count: u32,
+    kind: u32,
+}
+
+/// One revealed stroke of a mark, as the fragment stage reads it.
+///
+/// Held apart from [`SketchInstance`] rather than inline, because a mark draws
+/// as one instance and carries however many strokes its shape generated. A
+/// card runs to sixteen.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
+struct SpanInstance {
+    /// This stroke's own pixel box.
+    ///
+    /// Per stroke rather than per mark, so a fragment runs the distance field
+    /// of the one or two strokes whose ink is near it instead of every stroke
+    /// the mark carries.
+    bounds: [f32; 4],
+    point_offset: u32,
+    /// Whole points of this stroke that are revealed.
+    reveal_count: u32,
     /// How far along the segment after the revealed run the pen sits, so the
     /// stroke grows smoothly instead of snapping point to point.
     reveal_t: f32,
-    /// Pixels this mark is shifted down by, for one riding a gliding pane.
-    dy: f32,
-    _pad: f32,
-    point_offset: u32,
-    seq: u32,
-    /// Whole points of this stroke that are revealed, or 4 for a fill.
-    reveal_count: u32,
-    kind: u32,
+    _pad: u32,
 }
 
 /// The uniform shared by every instance.
@@ -125,6 +160,16 @@ pub struct SketchPass {
     /// sketch list or the cell size changes, never for a reveal step.
     points: Buffer,
     points_capacity: usize,
+    /// The revealed strokes of every mark, end to end, which each instance
+    /// names a run of. Rebuilt every frame, because the reveal moves every
+    /// frame while the points behind it do not.
+    spans: Buffer,
+    spans_capacity: usize,
+    /// The spans last uploaded, so an unchanged frame skips the write.
+    last_spans: Vec<SpanInstance>,
+    /// Where each frame's spans are built, before being compared against
+    /// [`Self::last_spans`] and traded with it.
+    built_spans: Vec<SpanInstance>,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<SketchInstance>,
     /// Where each frame's instances are built, before being compared against
@@ -176,6 +221,7 @@ impl SketchPass {
                 },
                 storage_entry(1),
                 storage_entry(2),
+                storage_entry(3),
             ],
         });
 
@@ -189,12 +235,14 @@ impl SketchPass {
         });
         let occluders = OccluderBuffer::new(device, "sketch occluders", 16);
         let points = alloc_points(device, INITIAL_POINTS);
+        let spans = alloc_spans(device, INITIAL_CAPACITY);
         let bind_group = make_bind_group(
             device,
             &bind_group_layout,
             &globals,
             &occluders.buffer,
             &points,
+            &spans,
         );
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -214,8 +262,8 @@ impl SketchPass {
                     array_stride: size_of::<SketchInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     // The bounds, the color with its alpha, the half width
-                    // paired with the reveal fraction and the ride shift, then
-                    // the point span with the seq and the kind.
+                    // paired with the ride shift, then the span run with the
+                    // seq and the kind.
                     attributes: &vertex_attr_array![
                         0 => Float32x4,
                         1 => Float32x4,
@@ -250,6 +298,10 @@ impl SketchPass {
             capacity: INITIAL_CAPACITY,
             points,
             points_capacity: INITIAL_POINTS,
+            spans,
+            spans_capacity: INITIAL_CAPACITY,
+            last_spans: Vec::new(),
+            built_spans: Vec::new(),
             last_instances: Vec::new(),
             built: Vec::new(),
             geometry: Vec::new(),
@@ -318,6 +370,7 @@ impl SketchPass {
             anchored,
             self.metrics,
             &mut self.built,
+            &mut self.built_spans,
             &mut self.riding,
         );
         self.count = self.built.len() as u32;
@@ -325,16 +378,27 @@ impl SketchPass {
         if self.built.is_empty() {
             return;
         }
-        if !crate::render::upload_needed(&self.built, &self.last_instances) {
-            return;
+
+        // The two buffers are compared apart, because a reveal step moves every
+        // span while leaving the instance that names them alone.
+        if crate::render::upload_needed(&self.built_spans, &self.last_spans) {
+            if self.built_spans.len() > self.spans_capacity {
+                self.spans_capacity = self.built_spans.len().next_power_of_two();
+                self.spans = alloc_spans(device, self.spans_capacity);
+                self.rebuild_bind_group(device);
+            }
+            queue.write_buffer(&self.spans, 0, bytemuck::cast_slice(&self.built_spans));
+            mem::swap(&mut self.built_spans, &mut self.last_spans);
         }
 
-        if self.built.len() > self.capacity {
-            self.capacity = self.built.len().next_power_of_two();
-            self.instances = alloc_instances(device, self.capacity);
+        if crate::render::upload_needed(&self.built, &self.last_instances) {
+            if self.built.len() > self.capacity {
+                self.capacity = self.built.len().next_power_of_two();
+                self.instances = alloc_instances(device, self.capacity);
+            }
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
+            mem::swap(&mut self.built, &mut self.last_instances);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
-        mem::swap(&mut self.built, &mut self.last_instances);
     }
 
     /// Record every non-riding mark.
@@ -406,35 +470,43 @@ impl SketchPass {
         if points.len() > self.points_capacity {
             self.points_capacity = points.len().next_power_of_two();
             self.points = alloc_points(device, self.points_capacity);
-            self.bind_group = make_bind_group(
-                device,
-                &self.bind_group_layout,
-                &self.globals,
-                &self.occluders.buffer,
-                &self.points,
-            );
+            self.rebuild_bind_group(device);
         }
         queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&points));
     }
 
     fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
         if self.occluders.upload(device, queue, occluders) {
-            self.bind_group = make_bind_group(
-                device,
-                &self.bind_group_layout,
-                &self.globals,
-                &self.occluders.buffer,
-                &self.points,
-            );
+            self.rebuild_bind_group(device);
         }
+    }
+
+    /// Rebind the group after one of its buffers was replaced by a larger one.
+    ///
+    /// A grown buffer is a new handle, so the old group points at the freed one.
+    fn rebuild_bind_group(&mut self, device: &Device) {
+        self.bind_group = make_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.globals,
+            &self.occluders.buffer,
+            &self.points,
+            &self.spans,
+        );
     }
 }
 
-/// Build one instance per revealed stroke and one per faded fill.
+/// Build one instance per mark, one span per revealed stroke, and one instance
+/// per faded fill.
 ///
 /// Runs every frame, because the reveal moves every frame while the geometry
-/// behind it does not. A stroke the reveal has not reached contributes no
-/// instance at all, rather than an empty one the GPU still rasterizes.
+/// behind it does not. A stroke the reveal has not reached contributes no span
+/// at all, and a mark with no revealed stroke contributes no instance, rather
+/// than an empty one the GPU still rasterizes.
+///
+/// A mark's strokes share one instance so the target blends their union once.
+/// Drawing each as its own instance composites the overlaps twice, which reads
+/// as a dark core inside a paler halo at any alpha below opaque.
 ///
 /// The reveal walks the mark's units in declaration order rather than advancing
 /// every stroke at once. A mark whose strokes all grow together materializes;
@@ -452,9 +524,11 @@ fn build_instances(
     anchored: &[crate::render::AnchoredPanel],
     metrics: CellMetrics,
     built: &mut Vec<SketchInstance>,
+    spans: &mut Vec<SpanInstance>,
     riding: &mut Vec<(u32, [u32; 4])>,
 ) {
     built.clear();
+    spans.clear();
     riding.clear();
 
     for (index, sketch) in sketches.iter().enumerate() {
@@ -481,12 +555,12 @@ fn build_instances(
                 bounds: quad_bounds,
                 color: rgba(color, alpha, faded),
                 half_width: 0.0,
-                reveal_t: 0.0,
+                _pad0: 0.0,
                 dy,
-                _pad: 0.0,
-                point_offset: offset,
+                _pad1: 0.0,
+                span_first: offset,
                 seq: sketch.seq,
-                reveal_count: 4,
+                span_count: 0,
                 kind: KIND_FILL,
             });
         }
@@ -497,6 +571,8 @@ fn build_instances(
         // perimeter and an arrowhead follows its shaft.
         let target = revealed * mark.strokes.chunks(2).map(unit_length).sum::<f32>();
         let mut unit_start = 0.0;
+        let span_first = spans.len() as u32;
+        let mut bounds = EMPTY_BOUNDS;
 
         for unit in mark.strokes.chunks(2) {
             let unit_len = unit_length(unit);
@@ -513,21 +589,43 @@ fn build_instances(
                 if reveal_count < 2 && reveal_t <= 0.0 {
                     continue;
                 }
-                push(SketchInstance {
+                bounds = union(bounds, stroke.bounds);
+                spans.push(SpanInstance {
                     bounds: stroke.bounds,
-                    color: rgba(style.color, style.alpha, 1.0),
-                    half_width,
-                    reveal_t,
-                    dy,
-                    _pad: 0.0,
                     point_offset: stroke.point_offset,
-                    seq: sketch.seq,
                     reveal_count,
-                    kind: KIND_STROKE,
+                    reveal_t,
+                    _pad: 0,
                 });
             }
         }
+
+        let span_count = spans.len() as u32 - span_first;
+        if span_count > 0 {
+            push(SketchInstance {
+                bounds,
+                color: rgba(style.color, style.alpha, 1.0),
+                half_width,
+                _pad0: 0.0,
+                dy,
+                _pad1: 0.0,
+                span_first,
+                seq: sketch.seq,
+                span_count,
+                kind: KIND_STROKE,
+            });
+        }
     }
+}
+
+/// The smallest box holding both.
+fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
 }
 
 /// How far the pen travels through one unit of a mark.
@@ -723,6 +821,7 @@ fn make_bind_group(
     globals: &Buffer,
     occluders: &Buffer,
     points: &Buffer,
+    spans: &Buffer,
 ) -> BindGroup {
     device.create_bind_group(&BindGroupDescriptor {
         label: Some("sketch bind group"),
@@ -744,6 +843,10 @@ fn make_bind_group(
                 binding: 2,
                 resource: points.as_entire_binding(),
             },
+            BindGroupEntry {
+                binding: 3,
+                resource: spans.as_entire_binding(),
+            },
         ],
     })
 }
@@ -761,6 +864,15 @@ fn alloc_points(device: &Device, capacity: usize) -> Buffer {
     device.create_buffer(&BufferDescriptor {
         label: Some("sketch points"),
         size: (capacity * size_of::<[f32; 2]>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn alloc_spans(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("sketch spans"),
+        size: (capacity * size_of::<SpanInstance>()) as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })

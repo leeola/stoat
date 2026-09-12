@@ -1,12 +1,14 @@
-// Hand-drawn mark pass. One instance draws one stroke of one sketch, or one
-// convex fill, and the fragment stage resolves a signed distance so the wobble
-// reads smooth at any font size.
+// Hand-drawn mark pass. One instance draws one whole sketch, or one convex
+// fill, and the fragment stage resolves a signed distance so the wobble reads
+// smooth at any font size.
 //
-// The whole stroke resolves in one fragment, taking the nearest of its
-// revealed segments, for the reason polyline.wgsl gives: two capsules meeting
-// at a shared endpoint composite their anti-aliased fringes twice, and half
-// coverage over half coverage reads three quarters, which beads every joint. A
-// generated stroke has dozens of joints, so the bead becomes the whole look.
+// The whole mark resolves in one fragment, taking the nearest of the revealed
+// segments of every stroke it carries, for the reason polyline.wgsl gives: two
+// capsules meeting at a shared endpoint composite their anti-aliased fringes
+// twice, and half coverage over half coverage reads three quarters, which beads
+// every joint. A mark's base pass and the overlay that doubles it run the same
+// path a pixel apart, so drawing each as its own instance doubles the blend
+// along the mark's whole length rather than only at a joint.
 //
 // The points live in a storage buffer rather than the instance. polyline.wgsl
 // packs its twelve inline because one bind group there serves the live grid and
@@ -40,10 +42,28 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> occluders: array<Occluder>;
 
-// Every stroke's points, end to end, in physical pixels. An instance names its
-// own span with point_offset and reveal_count.
+// Every stroke's points, end to end, in physical pixels. A span names its own
+// run with point_offset and reveal_count.
 @group(0) @binding(2)
 var<storage, read> points: array<vec2<f32>>;
+
+// One revealed stroke. Its own box is here rather than on the instance so a
+// fragment skips the strokes whose ink is nowhere near it, which is what keeps
+// a per-mark quad from costing every fragment every stroke.
+struct Span {
+    bounds: vec4<f32>,
+    point_offset: u32,
+    // Whole points of the stroke that are revealed. The pen sits between the
+    // last two, at reveal_t along that final segment.
+    reveal_count: u32,
+    reveal_t: f32,
+    pad: u32,
+}
+
+// One entry per revealed stroke, in mark order. An instance names its own run
+// with span_first and span_count.
+@group(0) @binding(3)
+var<storage, read> spans: array<Span>;
 
 // Pixels the quad is grown by past the mark, giving the distance field room to
 // ramp coverage to zero instead of clipping the edge at the quad boundary.
@@ -56,16 +76,15 @@ struct VsOut {
     @location(0) @interpolate(flat) color: vec4<f32>,
     @location(1) @interpolate(flat) seq: u32,
     @location(2) @interpolate(flat) half_width: f32,
-    @location(3) @interpolate(flat) point_offset: u32,
-    // Whole points of the stroke that are revealed. The pen sits between the
-    // last two, at reveal_t along that final segment.
-    @location(4) @interpolate(flat) reveal_count: u32,
-    @location(5) @interpolate(flat) reveal_t: f32,
-    @location(6) @interpolate(flat) kind: u32,
+    // This mark's run of spans. A fill carries a span_count of zero and names
+    // the first of its four corners in the point buffer with span_first.
+    @location(3) @interpolate(flat) span_first: u32,
+    @location(4) @interpolate(flat) span_count: u32,
+    @location(5) @interpolate(flat) kind: u32,
     // Pixels this mark rides down by. The quad moves in vs_main, so the
     // fragment stage has to measure its distance fields at the same offset or
     // the ink stays behind while its box slides off it.
-    @location(7) @interpolate(flat) dy: f32,
+    @location(6) @interpolate(flat) dy: f32,
 }
 
 @vertex
@@ -89,9 +108,9 @@ fn vs_main(
     let half_width_px = width_seq.x;
     let dy = width_seq.z;
 
-    // The quad bounds the whole stroke rather than one segment, because a
-    // wobbling path has no single direction to orient a tight box to. The
-    // distance field clips the corners the box adds anyway.
+    // The quad bounds the whole mark rather than one stroke or one segment,
+    // because a wobbling path has no single direction to orient a tight box to.
+    // The distance field clips the corners the box adds anyway.
     let reach = vec2<f32>(half_width_px + AA_MARGIN, half_width_px + AA_MARGIN);
     let shift = vec2<f32>(0.0, dy);
     let min_px = bounds.xy + shift - reach;
@@ -108,9 +127,8 @@ fn vs_main(
     out.color = color;
     out.seq = span.y;
     out.half_width = half_width_px;
-    out.point_offset = span.x;
-    out.reveal_count = span.z;
-    out.reveal_t = width_seq.y;
+    out.span_first = span.x;
+    out.span_count = span.z;
     out.kind = span.w;
     out.dy = dy;
     return out;
@@ -180,30 +198,40 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     var sdf: f32;
     if in.kind == KIND_STROKE {
-        // Nothing is revealed until the pen has left the first point.
-        if in.reveal_count < 2u && in.reveal_t <= 0.0 {
-            discard;
-        }
-
-        let base = in.point_offset;
         sdf = 1.0e9;
-        // The nearest revealed segment decides the coverage, so the stroke
-        // blends once no matter how many of its joints meet at the fragment.
-        for (var i = 0u; i + 1u < in.reveal_count; i = i + 1u) {
-            sdf = min(
-                sdf,
-                capsule_sdf(at, points[base + i], points[base + i + 1u], in.half_width)
-            );
-        }
-        // The pen tip sits partway along the segment after the revealed run, so
-        // the stroke grows smoothly instead of snapping point to point.
-        if in.reveal_t > 0.0 {
-            let last = base + in.reveal_count - 1u;
-            let tip = mix(points[last], points[last + 1u], in.reveal_t);
-            sdf = min(sdf, capsule_sdf(at, points[last], tip, in.half_width));
+        let reach = in.half_width + AA_MARGIN;
+
+        // The nearest revealed segment of the whole mark decides the coverage,
+        // so the mark blends once no matter how many strokes and joints meet at
+        // the fragment.
+        for (var s = 0u; s < in.span_count; s = s + 1u) {
+            let span = spans[in.span_first + s];
+
+            // A stroke whose own box does not reach this fragment cannot hold
+            // the nearest ink, so its segments are never walked. Without this a
+            // mark's quad costs every fragment every stroke the mark carries.
+            if at.x < span.bounds.x - reach || at.x > span.bounds.z + reach
+                || at.y < span.bounds.y - reach || at.y > span.bounds.w + reach {
+                continue;
+            }
+
+            let base = span.point_offset;
+            for (var i = 0u; i + 1u < span.reveal_count; i = i + 1u) {
+                sdf = min(
+                    sdf,
+                    capsule_sdf(at, points[base + i], points[base + i + 1u], in.half_width)
+                );
+            }
+            // The pen tip sits partway along the segment after the revealed run,
+            // so the stroke grows smoothly instead of snapping point to point.
+            if span.reveal_t > 0.0 {
+                let last = base + span.reveal_count - 1u;
+                let tip = mix(points[last], points[last + 1u], span.reveal_t);
+                sdf = min(sdf, capsule_sdf(at, points[last], tip, in.half_width));
+            }
         }
     } else {
-        let base = in.point_offset;
+        let base = in.span_first;
         sdf = quad_sdf(
             at,
             points[base],

@@ -80,9 +80,9 @@ fn marks(sketches: &[Sketch]) -> (Vec<[f32; 2]>, Vec<MarkGeometry>) {
     (points, geometry)
 }
 
-fn instances(sketches: &[Sketch], progress: &[f32]) -> Vec<SketchInstance> {
+fn build(sketches: &[Sketch], progress: &[f32]) -> (Vec<SketchInstance>, Vec<SpanInstance>) {
     let (_, geometry) = marks(sketches);
-    let (mut built, mut riding) = (Vec::new(), Vec::new());
+    let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
     build_instances(
         sketches,
         &geometry,
@@ -90,9 +90,18 @@ fn instances(sketches: &[Sketch], progress: &[f32]) -> Vec<SketchInstance> {
         &[],
         metrics(),
         &mut built,
+        &mut spans,
         &mut riding,
     );
-    built
+    (built, spans)
+}
+
+fn instances(sketches: &[Sketch], progress: &[f32]) -> Vec<SketchInstance> {
+    build(sketches, progress).0
+}
+
+fn spans(sketches: &[Sketch], progress: &[f32]) -> Vec<SpanInstance> {
+    build(sketches, progress).1
 }
 
 /// Every stroke's points land in the shared arena, and each span names its own
@@ -115,13 +124,15 @@ fn every_stroke_names_its_own_span_of_the_shared_points() {
     assert_eq!(next as usize, points.len(), "the spans cover every point");
 }
 
-/// A stroke's quad covers its own points, not the whole mark.
+/// A mark draws as one instance naming one span per revealed stroke, and each
+/// span keeps its own box.
 ///
-/// A quad the size of the mark has every fragment inside it run the distance
-/// field of every stroke the mark carries, which for a card is sixteen deep
-/// where one or two are near enough to paint.
+/// The single instance is what blends the mark's overlapping strokes once. The
+/// per-span box is what keeps that from costing every fragment inside the
+/// mark's quad the distance field of every stroke the mark carries, which for a
+/// card is sixteen deep where one or two are near enough to paint.
 #[test]
-fn a_strokes_quad_covers_only_its_own_points() {
+fn a_mark_draws_as_one_instance_of_per_stroke_spans() {
     let list = [sketch(
         1,
         SketchShape::Rect {
@@ -132,16 +143,34 @@ fn a_strokes_quad_covers_only_its_own_points() {
             fill: None,
         },
     )];
-    // The instance carries what the vertex stage sizes the quad from, so the
-    // claim is checked there rather than on the geometry behind it.
-    let built = instances(&list, &[1.0]);
+    let (built, spans) = build(&list, &[1.0]);
+    let (_, geometry) = marks(&list);
+
+    let [mark] = built.as_slice() else {
+        panic!("one sketch draws one instance, got {}", built.len());
+    };
+    assert_eq!(
+        (mark.span_first, mark.span_count as usize),
+        (0, geometry[0].strokes.len()),
+        "the instance names one span per revealed stroke",
+    );
 
     // `rect` strokes each side twice, in order, so the top edge opens the run
     // and the bottom edge is the third side.
-    let (top, bottom) = (built[0].bounds, built[4].bounds);
+    let (top, bottom) = (spans[0].bounds, spans[4].bounds);
     assert!(
         top[3] < bottom[1],
-        "the top edge's quad stops short of the bottom edge's, {top:?} against {bottom:?}",
+        "the top edge's span stops short of the bottom edge's, {top:?} against {bottom:?}",
+    );
+    assert_eq!(
+        mark.bounds,
+        [
+            spans.iter().map(|s| s.bounds[0]).fold(f32::MAX, f32::min),
+            spans.iter().map(|s| s.bounds[1]).fold(f32::MAX, f32::min),
+            spans.iter().map(|s| s.bounds[2]).fold(f32::MIN, f32::max),
+            spans.iter().map(|s| s.bounds[3]).fold(f32::MIN, f32::max),
+        ],
+        "and its own box is their union, which is what the quad covers",
     );
 }
 
@@ -211,17 +240,15 @@ fn the_reveal_lands_on_the_segment_holding_its_distance() {
 /// it draws, and `Some(true)` once the stroke is whole.
 fn stroke_progress(sketches: &[Sketch], progress: f32) -> Vec<Option<bool>> {
     let (_, geometry) = marks(sketches);
-    let built = instances(sketches, &[progress]);
+    let spans = spans(sketches, &[progress]);
     geometry[0]
         .strokes
         .iter()
         .map(|stroke| {
-            built
+            spans
                 .iter()
-                .find(|instance| {
-                    instance.kind == KIND_STROKE && instance.point_offset == stroke.point_offset
-                })
-                .map(|instance| instance.reveal_count == stroke.count)
+                .find(|span| span.point_offset == stroke.point_offset)
+                .map(|span| span.reveal_count == stroke.count)
         })
         .collect()
 }
@@ -276,14 +303,19 @@ fn an_ellipses_two_strokes_advance_together() {
     );
 }
 
-/// A stroke the reveal has not reached contributes no instance, rather than an
-/// empty one the GPU still rasterizes.
+/// A stroke the reveal has not reached contributes no span, and a mark with no
+/// revealed stroke contributes no instance, rather than an empty one the GPU
+/// still rasterizes.
 #[test]
-fn an_unreached_stroke_builds_no_instance() {
+fn an_unreached_stroke_builds_no_span() {
     let list = [sketch(1, SketchShape::Ellipse(boxed(0, 0, 64, 32)))];
 
-    assert_eq!(instances(&list, &[0.0]), Vec::new(), "nothing at zero");
-    assert!(!instances(&list, &[1.0]).is_empty(), "every stroke at one",);
+    assert_eq!(
+        build(&list, &[0.0]),
+        (Vec::new(), Vec::new()),
+        "nothing at zero"
+    );
+    assert!(!spans(&list, &[1.0]).is_empty(), "every stroke at one",);
 }
 
 /// A caller with no clock passes an empty slice, and every mark draws whole.
@@ -392,7 +424,7 @@ fn a_riding_mark_is_shifted_and_held_back() {
     list[0].command.anchor = Some((3, 0.0));
 
     let (_, geometry) = marks(&list);
-    let (mut built, mut riding) = (Vec::new(), Vec::new());
+    let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
     let anchored = [AnchoredPanel {
         host: 3,
         dy_px: -12.0,
@@ -405,6 +437,7 @@ fn a_riding_mark_is_shifted_and_held_back() {
         &anchored,
         metrics(),
         &mut built,
+        &mut spans,
         &mut riding,
     );
 
@@ -427,7 +460,7 @@ fn a_mark_whose_host_is_still_does_not_ride() {
     list[0].command.anchor = Some((3, 0.0));
 
     let (_, geometry) = marks(&list);
-    let (mut built, mut riding) = (Vec::new(), Vec::new());
+    let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
     build_instances(
         &list,
         &geometry,
@@ -435,6 +468,7 @@ fn a_mark_whose_host_is_still_does_not_ride() {
         &[],
         metrics(),
         &mut built,
+        &mut spans,
         &mut riding,
     );
 
@@ -655,6 +689,42 @@ fn a_half_reveal_paints_a_prefix_of_the_whole() {
     );
 }
 
+/// A dimmed mark reads at one opacity, because the whole mark blends once.
+///
+/// A mark's base pass and the overlay that doubles it run the same path a pixel
+/// apart, and the sides of a box meet at each corner. Drawn as separate
+/// instances the target composites each over the last, so half coverage over
+/// half coverage reads three quarters: a dark core inside a paler halo with a
+/// bead at each corner. That is the state of every mark but the current one
+/// once a reader walks the annotations, so only a rendered image shows it.
+///
+/// The mark is pure red on black, so a texel's red channel is what its coverage
+/// and alpha composited to. One unit of slack covers the target's rounding.
+#[test]
+fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("sketch opacity test: no wgpu adapter, skipping");
+        return;
+    };
+    const ALPHA: u8 = 128;
+
+    let mut list = [sketch(1, SketchShape::Ellipse(boxed(16, 16, 96, 64)))];
+    list[0].command.style.alpha = ALPHA;
+
+    let ink = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
+
+    assert!(ink.iter().any(|&byte| byte > 0), "the dimmed mark paints");
+    let over = ink
+        .iter()
+        .enumerate()
+        .find(|&(_, &byte)| byte > ALPHA + 1)
+        .map(|(at, &byte)| (at as u32 % TARGET, at as u32 / TARGET, byte));
+    assert_eq!(
+        over, None,
+        "a texel reads past the mark's own alpha, at (x, y, red)",
+    );
+}
+
 /// The pen tip is the same shape the finished stroke already covers, so a
 /// growing mark only ever adds ink.
 ///
@@ -723,9 +793,9 @@ fn the_pen_tip_advances_inside_one_segment() {
     )];
 
     let counts = |progress: f32| {
-        instances(&list, &[progress])
+        spans(&list, &[progress])
             .iter()
-            .map(|instance| (instance.reveal_count, instance.reveal_t))
+            .map(|span| (span.reveal_count, span.reveal_t))
             .collect::<Vec<_>>()
     };
     // The flattened segments are not evenly long, so the widest span sharing
