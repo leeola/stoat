@@ -25,8 +25,9 @@ use wgpu::{
 /// Instance buffer capacity, in quads, allocated up front. Grows by doubling.
 const INITIAL_CAPACITY: usize = 256;
 
-/// Minimum viewport-thumb height in pixels, so the thumb stays grabbable on a
-/// large file where the proportional height would collapse to a sliver.
+/// Minimum viewport-thumb height in logical pixels, so the thumb stays grabbable
+/// on a large file where the proportional height would collapse to a sliver.
+/// Left physical, it would floor at half the size on a 2x display.
 const MIN_THUMB_PX: f32 = 12.0;
 
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
@@ -537,8 +538,9 @@ fn minimap_top(total: f32, visible_lines: f32, view_top: f32, view_visible: f32)
 
 /// The viewport thumb's top offset from the strip top and its height, in pixels.
 ///
-/// The height floors at [`MIN_THUMB_PX`] so the thumb stays visible on a large
-/// file where its proportional height would collapse.
+/// The height floors at `min_height` so the thumb stays visible on a large file
+/// where its proportional height would collapse. The caller states that floor in
+/// physical pixels, having scaled [`MIN_THUMB_PX`] by the display density.
 ///
 /// That floor is what makes the offset clamp necessary. A purely proportional
 /// thumb already ends flush with the strip at max scroll, since the offset gives
@@ -552,8 +554,9 @@ fn thumb_geometry(
     view_visible: f32,
     line_h: f32,
     strip_h: f32,
+    min_height: f32,
 ) -> (f32, f32) {
-    let height = (view_visible * line_h).max(MIN_THUMB_PX);
+    let height = (view_visible * line_h).max(min_height);
     let offset = ((view_top - top) * line_h).min(strip_h - height).max(0.0);
     (offset, height)
 }
@@ -622,8 +625,14 @@ fn build_strip(
         }
     }
 
-    let (thumb_offset, thumb_height) =
-        thumb_geometry(view_top, top, view_visible, layout.line_h, layout.strip_h);
+    let (thumb_offset, thumb_height) = thumb_geometry(
+        view_top,
+        top,
+        view_visible,
+        layout.line_h,
+        layout.strip_h,
+        MIN_THUMB_PX * metrics.scale_factor,
+    );
     instances.push(MinimapInstance {
         origin: [layout.strip_x, layout.strip_y + thumb_offset],
         size: [layout.strip_w, thumb_height],
@@ -794,10 +803,14 @@ mod tests {
         const STRIP_H: f32 = 120.0;
 
         // A one-line viewport at 1.5px per line would be a sliver, so it floors.
-        let (_, height) = thumb_geometry(0.0, 0.0, 1.0, 1.5, STRIP_H);
+        let (_, height) = thumb_geometry(0.0, 0.0, 1.0, 1.5, STRIP_H, MIN_THUMB_PX);
         assert_eq!(height, MIN_THUMB_PX);
 
-        let (offset, height) = thumb_geometry(20.0, 10.0, 40.0, 1.5, STRIP_H);
+        // The floor is logical pixels, so a 2x display asks for twice as many.
+        let (_, dense) = thumb_geometry(0.0, 0.0, 1.0, 1.5, STRIP_H, MIN_THUMB_PX * 2.0);
+        assert_eq!(dense, 24.0, "a denser display floors at the same size");
+
+        let (offset, height) = thumb_geometry(20.0, 10.0, 40.0, 1.5, STRIP_H, MIN_THUMB_PX);
         assert_eq!(offset, 15.0, "thumb offset is (view_top - top) * line_h");
         assert_eq!(
             height, 60.0,
@@ -808,11 +821,39 @@ mod tests {
         // 7.5px proportional thumb, which floors to 12. Its unclamped offset of
         // 112.5 would hang 4.5px below the strip.
         let top = minimap_top(10_000.0, 80.0, 9_995.0, 5.0);
-        let (offset, height) = thumb_geometry(9_995.0, top, 5.0, 1.5, STRIP_H);
+        let (offset, height) = thumb_geometry(9_995.0, top, 5.0, 1.5, STRIP_H, MIN_THUMB_PX);
         assert_eq!(
             (offset, height, offset + height),
             (108.0, MIN_THUMB_PX, STRIP_H),
             "a bottom-scrolled floored thumb ends flush with the strip"
+        );
+    }
+
+    /// A strip states its floor in logical pixels, so the thumb a large file
+    /// collapses to stays the same apparent size on a denser display rather
+    /// than halving.
+    #[test]
+    fn a_floored_thumb_holds_its_size_at_twice_the_density() {
+        let dense = CellMetrics {
+            scale_factor: 2.0,
+            ..metrics()
+        };
+        // A one-line viewport over a hundred is two pixels tall, well under the
+        // floor either way.
+        let view = Some(MinimapView {
+            top_256: 0,
+            visible: 1,
+        });
+        let content = summaries(vec![Vec::new(); 100]);
+        let thumb_height = |metrics| {
+            let (instances, _) = build_strip(&strip(view), &content, metrics);
+            instances[1].size[1]
+        };
+
+        assert_eq!(
+            (thumb_height(metrics()), thumb_height(dense)),
+            (MIN_THUMB_PX, MIN_THUMB_PX * 2.0),
+            "the floor is the same twelve logical pixels at either density"
         );
     }
 
