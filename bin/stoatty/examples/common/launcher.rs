@@ -14,6 +14,7 @@ use std::{env, ffi::OsStr, path::PathBuf, process::Command};
 /// the widget crate instead. The failure then surfaces as cargo's own "no
 /// example target" message, which names neither this file nor the absent entry.
 const EMITTERS: &[(&str, &str)] = &[
+    ("example_bar_app", "stoat_widgets"),
     ("example_diagnostics_app", "stoat_widgets"),
     ("example_doc_tooltip_app", "stoat_widgets"),
     ("example_gutter_app", "stoat_widgets"),
