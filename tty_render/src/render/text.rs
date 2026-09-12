@@ -4042,9 +4042,9 @@ fn build_underline_pipeline(
 
 /// Build the run-background rect pipeline sharing `shader` with the glyph pass.
 ///
-/// Binds only the globals and writes opaquely, so each scaled text run's
-/// background box replaces whatever it sits over before the run's glyphs
-/// alpha-blend on top.
+/// Binds only the globals and blends premultiplied, the way the glyphs above it
+/// do. A run's background carries the same fade its glyphs carry, so it has to
+/// reach the target as coverage rather than as an opaque write.
 fn build_rect_pipeline(
     device: &Device,
     shader: &ShaderModule,
@@ -4082,7 +4082,7 @@ fn build_rect_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(ColorTargetState {
                 format,
-                blend: Some(BlendState::REPLACE),
+                blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: ColorWrites::ALL,
             })],
         }),

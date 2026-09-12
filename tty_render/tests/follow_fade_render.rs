@@ -24,6 +24,10 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
+/// The ground beneath the backed run, which a faded rect blends into and an
+/// opaque one wipes away.
+const GROUND: Rgb = Rgb { r: 0, g: 0, b: 255 };
+
 /// A label arrives as the box around it closes, not with the first pen stroke,
 /// which names a shape not yet recognizable.
 #[test]
@@ -72,22 +76,43 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 4 && cols >= 4, "grid too small: {rows}x{cols}");
 
-    // Red on a black surface, so any ink the run paints is unambiguous.
+    // Red on a black surface, so any ink the run paints is unambiguous. The
+    // second run carries a background and no ink of its own, which separates
+    // the rect's fade from the glyphs'.
     let mut grid = Grid::new(rows, cols);
+    // The cells under that second run carry a blue ground, so a rect that
+    // replaces what it sits over reads differently from one that blends into
+    // it.
+    for col in 0..2 {
+        grid.get_mut(5, col).bg = GROUND;
+    }
     grid.set_sketches(vec![mark(1)]);
-    grid.set_text_runs(vec![TextRun {
-        col: 0,
-        row: 16,
-        scale: 256,
-        color: Rgb::new(255, 0, 0),
-        bg: None,
-        follow: 1,
-        anchor: None,
-        text: "MMMM".into(),
-        seq: 1,
-    }]);
+    grid.set_text_runs(vec![
+        TextRun {
+            col: 0,
+            row: 16,
+            scale: 256,
+            color: Rgb::new(255, 0, 0),
+            bg: None,
+            follow: 1,
+            anchor: None,
+            text: "MMMM".into(),
+            seq: 1,
+        },
+        TextRun {
+            col: 0,
+            row: 80,
+            scale: 256,
+            color: Rgb::new(0, 0, 0),
+            bg: Some(Rgb::new(255, 0, 0)),
+            follow: 1,
+            anchor: None,
+            text: "  ".into(),
+            seq: 2,
+        },
+    ]);
 
-    let mut red_at = |progress: f32| {
+    let mut frame_at = |progress: f32| {
         renderer.render_into(
             &device,
             &queue,
@@ -115,20 +140,45 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
         );
 
         read_back(&device, &queue, &target, width, height)
+    };
+    let red_count = |pixels: &[u8]| {
+        pixels
             .as_chunks::<4>()
             .0
             .iter()
             .filter(|texel| texel[0] > 0)
             .count()
     };
+    // A texel through the middle of the second run's background rect.
+    let bg_texel = |pixels: &[u8]| {
+        let (x, y) = ((cell[0] * 0.5) as u32, (cell[1] * 5.5) as u32);
+        let i = ((y * width + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
 
     // The mark is a fifth drawn, well short of where the fade starts.
-    assert_eq!(red_at(0.2), 0, "no ink while the mark is still being drawn");
+    let early = frame_at(0.2);
+    assert_eq!(
+        red_count(&early),
+        0,
+        "no ink while the mark is still being drawn"
+    );
+    assert_eq!(
+        bg_texel(&early),
+        [GROUND.r, GROUND.g, GROUND.b],
+        "and the background waits with the glyphs rather than arriving whole"
+    );
 
-    let whole = red_at(1.0);
+    let full = frame_at(1.0);
+    let whole = red_count(&full);
     assert!(whole > 0, "and the label paints once the mark is finished");
+    assert_eq!(
+        bg_texel(&full),
+        [255, 0, 0],
+        "with its background at full strength"
+    );
 
-    let midway = red_at(0.8);
+    let midway = red_count(&frame_at(0.8));
     assert!(
         midway > 0 && midway <= whole,
         "easing in between, {midway} against {whole}",

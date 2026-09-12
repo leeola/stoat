@@ -368,7 +368,11 @@ fn fs_rect(in: RectVsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // The rect is opaque, so its fade is the alpha alone. It blends straight
-    // rather than premultiplied, unlike the glyphs above it.
-    return vec4<f32>(in.color, follow_alpha(in.follow));
+    // The fade scales the color as well as the coverage, because the pipeline
+    // blends premultiplied like the glyphs above it. Left in the alpha channel
+    // alone, the background would arrive whole on its first frame, and a
+    // surface that inherits its composite alpha would show the desktop through
+    // it.
+    let a = follow_alpha(in.follow);
+    return vec4<f32>(in.color * a, a);
 }
