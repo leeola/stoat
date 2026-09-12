@@ -13,7 +13,7 @@ use cosmic_text::{
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use ttf_parser::{gsub::SubstitutionSubtable, opentype_layout::Coverage};
+use ttf_parser::{gsub::SubstitutionSubtable, opentype_layout::Coverage, Face as TtfFace};
 
 /// Family name of the bundled text face, registered by [`load_bundled_fonts`].
 ///
@@ -27,6 +27,9 @@ pub(super) const BUNDLED_FAMILY: &str = "JetBrains Mono";
 /// programming fonts omit, so it serves as the symbol fallback ahead of any
 /// system font (see [`glyph_family`]).
 pub(super) const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// Words a [`CoveredSet`] holds, one bit per Unicode codepoint.
+const UNICODE_WORDS: usize = 0x11_0000 / 64;
 
 /// Shape `ch` on its own at `scale` times the cell size and return its glyph
 /// cache key, or `None` if it produces no glyph.
@@ -44,8 +47,17 @@ pub(super) fn shape_char(
     metrics: CellMetrics,
     primary: Family<'_>,
     weight: Weight,
+    covered: &mut Option<CoveredSet>,
 ) -> Option<CacheKey> {
-    let family = glyph_family(font_system, ch, primary);
+    let (family, any_face_covers) = glyph_family(font_system, ch, primary, covered);
+    // Nothing in the database maps this character, so a fallback walk would
+    // load and shape every face only to end on the symbols face's glyph zero.
+    // The basic path maps through that face's own charmap and reaches the same
+    // key without the walk.
+    let shaping = match any_face_covers {
+        true => Shaping::Advanced,
+        false => Shaping::Basic,
+    };
     let size = scale;
     let mut buffer = CosmicBuffer::new(
         font_system,
@@ -57,7 +69,7 @@ pub(super) fn shape_char(
         font_system,
         text,
         &Attrs::new().family(family).weight(weight),
-        Shaping::Advanced,
+        shaping,
         None,
     );
     buffer.shape_until_scroll(font_system, false);
@@ -444,11 +456,68 @@ pub(super) fn glyph_family<'a>(
     font_system: &mut FontSystem,
     ch: char,
     primary: Family<'a>,
-) -> Family<'a> {
+    covered: &mut Option<CoveredSet>,
+) -> (Family<'a>, bool) {
     if family_covers(font_system, primary, ch) {
-        primary
-    } else {
-        Family::Name(SYMBOLS_FAMILY)
+        return (primary, true);
+    }
+
+    let symbols = Family::Name(SYMBOLS_FAMILY);
+    if family_covers(font_system, symbols, ch) {
+        return (symbols, true);
+    }
+
+    // Both bundled charmaps missed, which is the only case worth the set. A
+    // launch whose text stays inside them never builds it.
+    let set = covered.get_or_insert_with(|| CoveredSet::of(font_system.db()));
+    (symbols, set.covers(ch))
+}
+
+/// Every codepoint some face in a font database maps.
+///
+/// A character no face covers is what this exists for. Shaping one with fallback
+/// walks the whole database, loading each face and shaping the character with it,
+/// and leaves every face resident for the session. One lookup here decides
+/// instead whether the walk can find anything.
+///
+/// Built from the faces' character maps rather than by loading them, so the cost
+/// is one pass over the database and the pages its maps sit on.
+pub(super) struct CoveredSet(Box<[u64; UNICODE_WORDS]>);
+
+impl CoveredSet {
+    /// Build the union of every face's character map in `db`.
+    pub(super) fn of(db: &Database) -> CoveredSet {
+        let mut bits = Box::new([0u64; UNICODE_WORDS]);
+        for face in db.faces() {
+            db.with_face_data(face.id, |data, index| {
+                let Ok(parsed) = TtfFace::parse(data, index) else {
+                    return;
+                };
+                let Some(cmap) = parsed.tables().cmap else {
+                    return;
+                };
+                for subtable in cmap.subtables {
+                    subtable.codepoints(|codepoint| {
+                        if let Some(word) = bits.get_mut(codepoint as usize / 64) {
+                            *word |= 1 << (codepoint % 64);
+                        }
+                    });
+                }
+            });
+        }
+        CoveredSet(bits)
+    }
+
+    /// Whether some face maps `ch`.
+    ///
+    /// A face may still map it to glyph zero, which `codepoints` reports as
+    /// defined. Answering `true` there costs a fallback walk that finds nothing,
+    /// which is what the character would have cost anyway.
+    pub(super) fn covers(&self, ch: char) -> bool {
+        let codepoint = ch as usize;
+        self.0
+            .get(codepoint / 64)
+            .is_some_and(|word| word & (1 << (codepoint % 64)) != 0)
     }
 }
 
@@ -725,15 +794,16 @@ pub(super) fn probe_cap_height(font: Option<&Font>, metrics: CellMetrics) -> f32
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, bundled_font_system_with_locale, font_covers, glyph_family,
-        resolve_primary_family, resolve_primary_font, run_text_and_columns_into, shape_char,
-        shape_family, shape_run, shape_run_cached, shape_words, substitution_coverage,
-        RunShapeCache, ShapeScratch, BUNDLED_FAMILY, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
+        build_font_system, bundled_database, bundled_font_system_with_locale, font_covers,
+        glyph_family, resolve_primary_family, resolve_primary_font, run_text_and_columns_into,
+        shape_char, shape_family, shape_run, shape_run_cached, shape_words, substitution_coverage,
+        CoveredSet, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, RUN_SHAPE_CACHE_CAP,
+        SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
-        fontdb::{Query, Weight, ID},
-        Family, FontSystem,
+        fontdb::{Database, Query, Weight, ID},
+        Attrs, Buffer as CosmicBuffer, Family, FontSystem, Metrics, Shaping,
     };
 
     /// A bundled-only system at a fixed locale, so a test never reads the
@@ -755,10 +825,26 @@ mod tests {
         let metrics = CellMetrics::from_font_size(30, 1.0);
         let family = Family::Name("JetBrains Mono");
 
-        let normal = shape_char(&mut font_system, 'A', 1.0, metrics, family, Weight::NORMAL)
-            .expect("normal glyph shapes");
-        let bold = shape_char(&mut font_system, 'A', 1.0, metrics, family, Weight::BOLD)
-            .expect("bold glyph shapes");
+        let normal = shape_char(
+            &mut font_system,
+            'A',
+            1.0,
+            metrics,
+            family,
+            Weight::NORMAL,
+            &mut None,
+        )
+        .expect("normal glyph shapes");
+        let bold = shape_char(
+            &mut font_system,
+            'A',
+            1.0,
+            metrics,
+            family,
+            Weight::BOLD,
+            &mut None,
+        )
+        .expect("bold glyph shapes");
 
         assert_ne!(
             normal, bold,
@@ -811,14 +897,116 @@ mod tests {
         let primary = Family::Name(BUNDLED_FAMILY);
 
         assert_eq!(
-            glyph_family(&mut font_system, 'A', primary),
-            primary,
+            glyph_family(&mut font_system, 'A', primary, &mut None),
+            (primary, true),
             "a glyph the primary family carries shapes with the primary"
         );
         assert_eq!(
-            glyph_family(&mut font_system, '\u{e0b6}', primary),
-            Family::Name(SYMBOLS_FAMILY),
+            glyph_family(&mut font_system, '\u{e0b6}', primary, &mut None),
+            (Family::Name(SYMBOLS_FAMILY), true),
             "a Private-Use-Area powerline glyph the primary lacks routes to the symbols font"
+        );
+    }
+
+    /// U+0378 is unassigned, so no face maps it and no fallback walk can find
+    /// one. Reporting that is what spares the walk.
+    #[test]
+    fn a_codepoint_no_face_maps_reports_uncovered_and_still_shapes() {
+        let mut font_system = bundled();
+        let primary = Family::Name(BUNDLED_FAMILY);
+        let mut covered = None;
+
+        assert_eq!(
+            glyph_family(&mut font_system, '\u{378}', primary, &mut covered),
+            (Family::Name(SYMBOLS_FAMILY), false),
+            "a codepoint no face maps routes to the symbols font and reports uncovered",
+        );
+        assert!(covered.is_some(), "and the miss is what builds the set");
+
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+        assert!(
+            shape_char(
+                &mut font_system,
+                '\u{378}',
+                1.0,
+                metrics,
+                primary,
+                Weight::NORMAL,
+                &mut covered,
+            )
+            .is_some(),
+            "and it still shapes, to the symbols face's own glyph for it",
+        );
+    }
+
+    /// Skipping the fallback walk has to reach the glyph the walk reaches.
+    ///
+    /// The walk ends on the symbols face's own glyph for a character nothing
+    /// maps, which is what the basic path takes directly. Were the two to
+    /// differ, the saving would be a rendering change rather than a saving.
+    #[test]
+    fn skipping_the_walk_keys_the_glyph_the_walk_would() {
+        let mut font_system = bundled();
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+        let primary = Family::Name(BUNDLED_FAMILY);
+        let uncovered = '\u{378}';
+
+        let skipped = shape_char(
+            &mut font_system,
+            uncovered,
+            1.0,
+            metrics,
+            primary,
+            Weight::NORMAL,
+            &mut None,
+        );
+
+        let walked = {
+            let mut buffer = CosmicBuffer::new(
+                &mut font_system,
+                Metrics::new(metrics.font_size, metrics.height),
+            );
+            let mut encoded = [0u8; 4];
+            buffer.set_text(
+                &mut font_system,
+                uncovered.encode_utf8(&mut encoded),
+                &Attrs::new()
+                    .family(Family::Name(SYMBOLS_FAMILY))
+                    .weight(Weight::NORMAL),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+            let run = buffer.layout_runs().next().expect("one run");
+            let glyph = run.glyphs.first().expect("one glyph");
+            Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
+        };
+
+        assert_eq!(
+            skipped, walked,
+            "the basic path keys what the fallback walk keys",
+        );
+    }
+
+    /// The set reads the database it is built from, which is what decides
+    /// whether a fallback walk has anything to find.
+    #[test]
+    fn the_covered_set_reports_what_its_database_maps() {
+        let empty = CoveredSet::of(&Database::new());
+        let bundled = CoveredSet::of(&bundled_database());
+
+        assert!(
+            !empty.covers('A'),
+            "a database holding no face maps nothing",
+        );
+        assert!(bundled.covers('A'), "the bundled faces map a letter",);
+        assert!(
+            bundled.covers('\u{e0b6}'),
+            "and the Private-Use-Area powerline glyph the symbols face carries",
+        );
+        assert!(
+            !bundled.covers('\u{378}'),
+            "and not an unassigned codepoint no face maps",
         );
     }
 

@@ -613,6 +613,12 @@ pub struct TextPass {
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
     shape_cache: FxHashMap<(char, u32, u16), Option<CacheKey>>,
+    /// Every codepoint some face in the font database maps, built on the first
+    /// character both bundled charmaps miss and `None` until then.
+    ///
+    /// Holds for the database it was built from, so it is dropped wherever that
+    /// changes. See [`font::CoveredSet`].
+    covered: Option<font::CoveredSet>,
     /// Shaped glyphs of each ligature run, keyed by the run text, so a repainted
     /// row reuses them instead of rebuilding a cosmic-text buffer and reshaping.
     ///
@@ -1062,6 +1068,7 @@ impl TextPass {
             ligatures,
             swash_cache,
             shape_cache: FxHashMap::default(),
+            covered: None,
             run_shape_cache: RunShapeCache::default(),
             glyph_row_cache: Vec::new(),
             exposed_from: None,
@@ -1158,6 +1165,7 @@ impl TextPass {
 
         self.shape_cache.clear();
         self.run_shape_cache.clear();
+        self.covered = None;
     }
 
     /// The band a line of text occupies within its cell, as the baseline offset
@@ -3688,6 +3696,7 @@ impl TextPass {
             self.metrics,
             font::shape_family(self.family.as_deref()),
             weight,
+            &mut self.covered,
         );
         self.shape_cache.insert(cache_key, key);
         key
