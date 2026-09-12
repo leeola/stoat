@@ -148,6 +148,57 @@ fn a_preserved_rect_starts_and_ends_on_its_corners() {
     }
 }
 
+/// A rounded corner meets the straights it joins, as a preserved side meets
+/// its own ends.
+///
+/// An arc that jitters its ends starts beside the side's end and stops beside
+/// the next side's start, which shows as a notch at each of a box's eight
+/// tangent points.
+#[test]
+fn a_preserved_corner_meets_the_sides_it_joins() {
+    let shape = SketchShape::Rect {
+        bounds: SketchBounds {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 64,
+        },
+        radius: 8,
+        fill: None,
+    };
+    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    assert_eq!(
+        geometry.strokes.len(),
+        16,
+        "four sides and four corners, each stroked twice",
+    );
+
+    // `rect` emits a side's two strokes, then its corner's two, four times
+    // over, and the last corner wraps to the first side.
+    let ends = |index: usize| {
+        let points = &geometry.strokes[index].points;
+        (points[0], points[points.len() - 1])
+    };
+    let meet = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01;
+
+    for corner in 0..4 {
+        let (_, side_end) = ends(corner * 4);
+        let (next_side_start, _) = ends((corner * 4 + 4) % 16);
+
+        for pass in [corner * 4 + 2, corner * 4 + 3] {
+            let (start, end) = ends(pass);
+            assert!(
+                meet(start, side_end),
+                "stroke {pass} starts at {start:?}, its side ends at {side_end:?}",
+            );
+            assert!(
+                meet(end, next_side_start),
+                "stroke {pass} ends at {end:?}, the next side starts at {next_side_start:?}",
+            );
+        }
+    }
+}
+
 /// The reveal reads these as a distance axis, so they must rise and the
 /// last must be the whole length. Drifted sums reveal at the wrong rate.
 #[test]

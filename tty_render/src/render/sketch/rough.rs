@@ -889,6 +889,11 @@ fn rect(
 
     for (index, (from, to)) in sides.iter().enumerate() {
         ops.extend(double_line(from[0], from[1], to[0], to[1], options, random));
+
+        // `line` leaves the gain it computed for the side in place, and
+        // `offset_opt` multiplies by it, so a corner would otherwise wobble by
+        // the length of the side before it.
+        options.gain = 1.0;
         let (start, control, end) = corners[index];
         ops.extend(quadratic(start, control, end, options, random));
     }
@@ -903,6 +908,10 @@ fn rect(
 ///
 /// Those offsets rise with the roughness and not with the rounding, so a
 /// generously rounded box keeps corners as clean as the sides they join.
+///
+/// With vertices preserved the ends are pinned, as a side's are, so the arc
+/// meets the straights it joins instead of starting beside them. Only the
+/// control point moves.
 fn quadratic(
     start: [f64; 2],
     control: [f64; 2],
@@ -914,12 +923,27 @@ fn quadratic(
     let rough = options.roughness;
     for amount in [1.0 * (1.0 + 0.2 * rough), 1.5 * (1.0 + 0.22 * rough)] {
         let jitter = |random: &mut Random| options.offset_opt(amount, random);
-        let sx = start[0] + jitter(random);
-        let sy = start[1] + jitter(random);
+
+        // The draws still happen when an end is pinned, so the stream stays in
+        // step with a run that does move it.
+        let (sx, sy) = match options.preserve_vertices {
+            true => {
+                let _ = jitter(random);
+                let _ = jitter(random);
+                (start[0], start[1])
+            },
+            false => (start[0] + jitter(random), start[1] + jitter(random)),
+        };
         let cx = control[0] + jitter(random);
         let cy = control[1] + jitter(random);
-        let ex = end[0] + jitter(random);
-        let ey = end[1] + jitter(random);
+        let (ex, ey) = match options.preserve_vertices {
+            true => {
+                let _ = jitter(random);
+                let _ = jitter(random);
+                (end[0], end[1])
+            },
+            false => (end[0] + jitter(random), end[1] + jitter(random)),
+        };
 
         ops.push(Op::Move([sx, sy]));
         ops.push(Op::Curve([
