@@ -27,6 +27,10 @@ name = "example_gutter_app"
 path = "examples/example_gutter_app.rs"
 
 [[example]]
+name = "example_minimap_app"
+path = "examples/example_minimap_app.rs"
+
+[[example]]
 name = "example_panel_app"
 path = "examples/example_panel_app.rs"
 
