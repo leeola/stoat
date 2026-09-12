@@ -619,7 +619,10 @@ fn build_strip(
             instances.push(MinimapInstance {
                 origin: [x, y],
                 size: [width, layout.run_h],
-                color: rgb_opaque_f32(*color),
+                // The run's opacity is the weight of the glyphs under it, so a
+                // line of capitals reads heavier than one of punctuation and
+                // the strip carries texture at a size too small for letters.
+                color: rgb_weighted_f32(*color, run.weight),
                 seq,
             });
         }
@@ -682,6 +685,12 @@ fn rgba_f32(color: Rgba) -> [f32; 4] {
         color.b as f32 / 255.0,
         color.a as f32 / 255.0,
     ]
+}
+
+/// The palette color at the opacity `weight` names, for a run block.
+fn rgb_weighted_f32(color: Rgb, weight: u8) -> [f32; 4] {
+    let [r, g, b, _] = rgb_opaque_f32(color);
+    [r, g, b, f32::from(weight) / 255.0]
 }
 
 fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
@@ -1539,6 +1548,39 @@ mod tests {
         assert!(
             rest.iter().sum::<u32>().abs_diff(scrolled.iter().sum()) <= 2,
             "the run carries the same ink either way, {rest:?} against {scrolled:?}"
+        );
+    }
+
+    /// A run states the weight of the glyphs under it, and the block it draws
+    /// carries that weight as its opacity. Without it a line of code and a line
+    /// of underscores cover the same pixels at the same strength.
+    #[test]
+    fn a_run_block_reads_at_the_weight_its_glyphs_carry() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("minimap weight test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // Lines 1 and 2, clear of the thumb border along the strip's top edge.
+        let run = |weight| {
+            vec![MinimapRun {
+                start_col: 0,
+                len: 12,
+                class: 0,
+                weight,
+            }]
+        };
+        let content = vec![Vec::new(), run(255), run(110)];
+        let grid = red_grid(red_strip(1, 4, 8, 12), content, None);
+        let red = render_red(&device, &queue, &grid, &[], metrics());
+        let at = |y: u32| u32::from(red[(y * TARGET + 2) as usize]);
+
+        // 110 of 255 over a black ground, within a level of 8-bit rounding.
+        assert_eq!(at(2), 255, "a full-weight run covers its block whole");
+        assert!(
+            (108..=112).contains(&at(4)),
+            "and a lighter one at its own weight, got {}",
+            at(4)
         );
     }
 
