@@ -331,6 +331,12 @@ impl ImagePass {
     }
 
     /// Upload `placed`'s pixels unless the cache already holds that generation.
+    ///
+    /// The texels are premultiplied on the way in, because the sampler filters
+    /// linearly and a filter averages color and alpha on their own. A sample
+    /// between an opaque texel and a transparent one carries half of each, and
+    /// multiplying afterward halves the color again, so a scaled image's
+    /// transparent edge arrives darker than the ground it covers.
     fn ensure_texture(
         &mut self,
         device: &Device,
@@ -365,7 +371,7 @@ impl ImagePass {
                 origin: Origin3d::ZERO,
                 aspect: TextureAspect::All,
             },
-            &placed.rgba,
+            &premultiplied(&placed.rgba),
             TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(placed.width * 4),
@@ -449,6 +455,22 @@ fn crop_uv(placed: &PlacedImage) -> ([f32; 2], [f32; 2]) {
     };
 
     ([x0 / width, y0 / height], [x1 / width, y1 / height])
+}
+
+/// `rgba` with each texel's color scaled by its own alpha.
+///
+/// A linear filter is only meaningful over premultiplied texels, because the
+/// color a transparent texel carries is arbitrary and averaging it in ahead of
+/// the multiply pulls the result toward that arbitrary color. Rounds rather than
+/// truncates, so an opaque texel comes back unchanged.
+fn premultiplied(rgba: &[u8]) -> Vec<u8> {
+    let scale =
+        |channel: u8, alpha: u8| ((u32::from(channel) * u32::from(alpha) + 127) / 255) as u8;
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, a]| [scale(r, a), scale(g, a), scale(b, a), a])
+        .collect()
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {

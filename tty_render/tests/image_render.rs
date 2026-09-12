@@ -174,6 +174,112 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
     );
 }
 
+/// A scaled image with transparent edges arrives darker than the ground it
+/// covers unless its texels are premultiplied before the filter reaches them.
+///
+/// A linear filter averages color and alpha on their own, so a sample between
+/// an opaque texel and a transparent one carries half of each. Multiplying
+/// after that halves the color a second time, and the image's own color lands
+/// under the ground rather than over it.
+#[test]
+fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("image_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 24;
+    let cell = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell[0], cell[1]);
+    let (width, height) = (256u32, (cell_h * 8.0).round() as u32);
+
+    // Mid grey, so the image's red can read either above it or below it.
+    let surface = Rgb::new(128, 128, 128);
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("image fringe target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        surface,
+        Rgb::new(255, 255, 255),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");
+
+    // One opaque red texel and three transparent ones, scaled up over several
+    // cells, so the whole placement but its one corner is filtered.
+    let corner: Arc<[u8]> = [255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        .to_vec()
+        .into();
+    let mut grid = Grid::new(rows, cols);
+    // Every cell carries the grey, so what lies under the image is the ground
+    // the clear names rather than the default cell color.
+    for row in 0..rows {
+        for col in 0..cols {
+            grid.get_mut(row, col).bg = surface;
+        }
+    }
+    grid.set_images(vec![placement(corner, 2, 2, 0)]);
+
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+            sketch_reveals: &[],
+        },
+    );
+    let pixels = read_back(&device, &queue, &target, width, height);
+
+    // The placement covers 3 by 2 cells from (1, 1), so its center samples the
+    // four texels evenly: a quarter of the red and a quarter of the alpha.
+    let (x, y) = ((2.5 * cell_w) as u32, (2.0 * cell_h) as u32);
+    let i = ((y * width + x) * 4) as usize;
+    let [red, green] = [pixels[i], pixels[i + 1]];
+
+    assert!(
+        red > 128 && green < 128,
+        "a quarter of red over grey reads redder than the ground, got {red} red and {green} green"
+    );
+}
+
 fn read_back(
     device: &Device,
     queue: &Queue,

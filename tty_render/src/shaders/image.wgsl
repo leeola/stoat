@@ -6,9 +6,9 @@
 // scaling and the intra-cell offset put them, so the cell grid is the wrong
 // unit to carry it in.
 //
-// Output is premultiplied, matching the text pass's color branch, so a
-// partially transparent image composites over whatever the passes before it
-// left in the framebuffer.
+// The texture holds premultiplied texels and the output is premultiplied too,
+// matching the text pass's color branch, so a partially transparent image
+// composites over whatever the passes before it left in the framebuffer.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -61,8 +61,9 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let texel = textureSample(image, image_sampler, in.uv);
-    // The stored pixels are straight alpha, so premultiply here rather than
-    // asking the terminal to store a second copy in the blend's own form.
-    return vec4<f32>(texel.rgb * texel.a, texel.a);
+    // Premultiplied on the way into the texture, because the sampler filters
+    // linearly and a filter has to average color the alpha is already folded
+    // into. Multiplying here instead would halve the color of every sample that
+    // straddles a transparent texel a second time.
+    return textureSample(image, image_sampler, in.uv);
 }
