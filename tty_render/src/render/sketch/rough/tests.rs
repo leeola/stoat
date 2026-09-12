@@ -106,7 +106,7 @@ fn an_ellipse_stays_near_its_center() {
 /// The reference estimates `sqrt(2 * PI * sqrt((rx^2 + ry^2) / 2))`, which for
 /// the 160 by 80 pixel ellipse here is 19.93. That gives 12.69 steps, so the
 /// ring carries 13 points, plus a lead-in and three tail points. Those 17 run
-/// through 14 curves at 8 flattened segments each, after the opening point.
+/// through 14 curves, each flattened to the chords its own arc needs.
 #[test]
 fn a_large_ellipse_tessellates_to_its_perimeter_estimate() {
     let shape = SketchShape::Ellipse {
@@ -125,7 +125,7 @@ fn a_large_ellipse_tessellates_to_its_perimeter_estimate() {
         .iter()
         .map(|stroke| stroke.points.len())
         .collect();
-    assert_eq!(counts, [113, 113], "both passes ride the same ring");
+    assert_eq!(counts, [60, 60], "both passes ride the same ring");
 }
 
 /// With vertices preserved, a box's sides meet at the corners it was asked
@@ -292,22 +292,49 @@ fn a_lone_move_makes_no_stroke() {
     assert_eq!(flatten(&[Op::Move([1.0, 2.0])], 1.0), Vec::new());
 }
 
-/// Every bezier flattens to the same count, so a mark regenerated at
-/// another size keeps each point at the same place along its stroke.
+/// A bezier flattens to chords no further from it than the tolerance, so a
+/// generous curve carries enough points to read smooth and a straight one
+/// carries two.
 #[test]
-fn a_bezier_flattens_to_a_fixed_count() {
-    let strokes = flatten(
+fn a_bezier_flattens_within_its_tolerance() {
+    let straight = flatten(
         &[
             Op::Move([0.0, 0.0]),
-            Op::Curve([1.0, 1.0, 2.0, 1.0, 3.0, 0.0]),
+            Op::Curve([10.0, 0.0, 20.0, 0.0, 30.0, 0.0]),
         ],
         1.0,
     );
-
-    let [stroke] = strokes.as_slice() else {
-        panic!("one move and one curve make one stroke, got {strokes:?}");
+    let [line] = straight.as_slice() else {
+        panic!("one move and one curve make one stroke, got {straight:?}");
     };
-    assert_eq!(stroke.points.len(), BEZIER_SEGMENTS + 1);
+    assert_eq!(line.points.len(), 3, "a straight cubic needs no bending");
+
+    let (p0, p1, p2, p3) = ([0.0, 0.0], [0.0, 300.0], [600.0, 300.0], [600.0, 0.0]);
+    let wide = flatten(
+        &[
+            Op::Move(p0),
+            Op::Curve([p1[0], p1[1], p2[0], p2[1], p3[0], p3[1]]),
+        ],
+        1.0,
+    );
+    let [arc] = wide.as_slice() else {
+        panic!("one move and one curve make one stroke, got {wide:?}");
+    };
+    assert!(arc.points.len() > 3, "a wide curve bends into many chords");
+
+    let count = arc.points.len() - 1;
+    for step in 0..count {
+        let mid = [
+            f64::from(arc.points[step][0] + arc.points[step + 1][0]) / 2.0,
+            f64::from(arc.points[step][1] + arc.points[step + 1][1]) / 2.0,
+        ];
+        let on_curve = cubic_at(p0, p1, p2, p3, (step as f64 + 0.5) / count as f64);
+        let off = ((mid[0] - on_curve[0]).powi(2) + (mid[1] - on_curve[1]).powi(2)).sqrt();
+        assert!(
+            off <= BEZIER_TOLERANCE,
+            "chord {step} of {count} sits {off} from the curve",
+        );
+    }
 }
 
 fn metrics() -> CellMetrics {
@@ -597,16 +624,16 @@ fn the_draw_order_is_pinned_to_its_transcription() {
         head,
         [
             [0.0, 0.0],
-            [2.7809, -0.1388],
-            [5.9531, -0.1889],
-            [9.638, -0.1748],
+            [3.2072, -0.1508],
+            [6.9483, -0.1903],
+            [11.4042, -0.1552],
         ],
     );
 
     let tail = &geometry.strokes[7];
     assert_eq!(
         (tail.lengths[tail.lengths.len() - 1] * 1e4).round() / 1e4,
-        40.0081,
+        40.0076,
         "the last stroke sits downstream of every draw in the run",
     );
 }
@@ -694,6 +721,25 @@ fn a_rounded_box_strokes_its_corners_inside_its_bounds() {
     }
 }
 
+/// The distance from `point` to the polyline through `path`.
+///
+/// Measured to the segments rather than to the vertices, so how densely a path
+/// is sampled does not move the answer.
+fn distance_to_path(point: [f32; 2], path: &[[f32; 2]]) -> f32 {
+    path.windows(2)
+        .map(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let span = dx * dx + dy * dy;
+            let t = match span > 0.0 {
+                true => (((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / span).clamp(0.0, 1.0),
+                false => 0.0,
+            };
+            ((point[0] - a[0] - dx * t).powi(2) + (point[1] - a[1] - dy * t).powi(2)).sqrt()
+        })
+        .fold(f32::MAX, f32::min)
+}
+
 /// A corner's jitter is sized by the roughness, like the sides it joins.
 ///
 /// Sizing it by the rounding instead made a generously rounded box grow
@@ -719,8 +765,9 @@ fn a_rounded_corners_jitter_does_not_grow_with_its_radius() {
             geometry(&command(shape, roughness), metrics(), &nothing_resolves)
         };
 
-        // Roughness zero draws the same stream and the same point count, so
-        // subtracting it leaves the jitter alone.
+        // Measured against the roughness-zero corner as a path rather than
+        // point for point: each curve takes the chords its own curvature asks
+        // for, so the two runs need not carry the same number of points.
         let (exact, wobbled) = (at(0), at(64));
         exact
             .strokes
@@ -728,19 +775,23 @@ fn a_rounded_corners_jitter_does_not_grow_with_its_radius() {
             .zip(&wobbled.strokes)
             .enumerate()
             .filter(|(index, _)| corner_stroke(*index))
-            .flat_map(|(_, (exact, wobbled))| exact.points.iter().zip(&wobbled.points))
-            .map(|(exact, wobbled)| {
-                (wobbled[0] - exact[0])
-                    .abs()
-                    .max((wobbled[1] - exact[1]).abs())
+            .flat_map(|(_, (exact, wobbled))| {
+                wobbled
+                    .points
+                    .iter()
+                    .map(|point| distance_to_path(*point, &exact.points))
             })
             .fold(0.0_f32, f32::max)
     };
 
+    // A four-fold radius leaves the stray where it was. Sizing the jitter by
+    // the rounding scaled it with the radius instead, which is the regression
+    // this bound catches; the slack covers measuring against two arcs of
+    // different curvature.
     let (tight, generous) = (strayed(4), strayed(16));
     assert!(tight > 0.0, "the corners wobble at all");
     assert!(
-        (tight - generous).abs() < 1e-4,
+        generous < tight * 1.5,
         "a rounder corner strays no further, {tight} against {generous}",
     );
 }

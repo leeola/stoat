@@ -26,12 +26,12 @@ use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEnd, SketchFill, SketchFillStyle, SketchShape, SketchSide,
 };
 
-/// Segments each bezier flattens into.
+/// How far a flattened chord may sit from the curve it replaces, in logical
+/// pixels.
 ///
-/// The reveal walks arc length, so every bezier gets the same count. An
-/// adaptive count moves every later point along the stroke when the mark is
-/// regenerated at another size, and the reveal then runs at the wrong rate.
-const BEZIER_SEGMENTS: usize = 8;
+/// A quarter pixel is under what a stroke's own anti-aliased edge resolves, so
+/// the facets a coarser flattening leaves are gone rather than merely small.
+const BEZIER_TOLERANCE: f64 = 0.25;
 
 /// Sixteenths of a cell, which is the unit the protocol states bounds in.
 const CELL_FRACTION: f64 = 16.0;
@@ -1061,9 +1061,10 @@ fn arrow_head(
 /// The ops are in logical pixels and `scale` carries them to physical, so the
 /// arc lengths the reveal walks are measured in the pixels it draws.
 ///
-/// Every bezier flattens to the same fixed segment count, so a point's distance
-/// along its stroke does not shift when the mark is regenerated at another
-/// size.
+/// Each bezier takes the chords its own curvature needs. The count is free to
+/// vary because the reveal walks arc length through the prefix sums rather than
+/// counting points, so a mark regenerated at another size reveals at the same
+/// rate through a different number of chords.
 fn flatten(ops: &[Op], scale: f64) -> Vec<Stroke> {
     let mut strokes = Vec::new();
     let mut current: Vec<[f32; 2]> = Vec::new();
@@ -1082,8 +1083,9 @@ fn flatten(ops: &[Op], scale: f64) -> Vec<Stroke> {
             },
             Op::Curve(c) => {
                 let (p0, p1, p2, p3) = (pen, [c[0], c[1]], [c[2], c[3]], [c[4], c[5]]);
-                for step in 1..=BEZIER_SEGMENTS {
-                    let t = step as f64 / BEZIER_SEGMENTS as f64;
+                let count = segment_count(p0, p1, p2, p3);
+                for step in 1..=count {
+                    let t = step as f64 / count as f64;
                     let point = cubic_at(p0, p1, p2, p3, t);
                     current.push([(point[0] * scale) as f32, (point[1] * scale) as f32]);
                 }
@@ -1095,6 +1097,25 @@ fn flatten(ops: &[Op], scale: f64) -> Vec<Stroke> {
         strokes.push(Stroke::new(current));
     }
     strokes
+}
+
+/// Chords a cubic needs to stay within [`BEZIER_TOLERANCE`] of its curve.
+///
+/// Wang's bound. A cubic's deviation from its chords is governed by its second
+/// differences, so the larger of the two bounds the whole curve, and the count
+/// falls out of the square root. A straight cubic asks for the floor of two,
+/// which is the one chord its endpoints need.
+///
+/// The ceiling of 64 bounds what a degenerate control net can ask for. At the
+/// tolerance here only a curve hundreds of pixels across comes near it.
+fn segment_count(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], p3: [f64; 2]) -> usize {
+    let second = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        let (x, y) = (a[0] - 2.0 * b[0] + c[0], a[1] - 2.0 * b[1] + c[1]);
+        (x * x + y * y).sqrt()
+    };
+    let deviation = second(p0, p1, p2).max(second(p1, p2, p3));
+
+    ((0.75 * deviation / BEZIER_TOLERANCE).sqrt().ceil() as usize).clamp(2, 64)
 }
 
 /// The point at `t` along the cubic through the four control points.
