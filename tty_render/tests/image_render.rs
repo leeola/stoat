@@ -280,6 +280,126 @@ fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
     );
 }
 
+/// An image drawn at a fraction of its size reads a mip level near that size,
+/// so a fine pattern averages rather than aliasing.
+///
+/// With one level the sampler reads whichever texels the step lands on, and a
+/// single-pixel checkerboard has nothing between black and white to land on.
+/// The pattern then breaks into noise that crawls as the image moves.
+#[test]
+fn a_downscaled_image_averages_rather_than_aliasing() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("image_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 24;
+    let cell = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell[0], cell[1]);
+    let (width, height) = (256u32, (cell_h * 8.0).round() as u32);
+
+    let surface = Rgb::new(0, 0, 0);
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("image mip target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        surface,
+        Rgb::new(255, 255, 255),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");
+
+    // Single-pixel squares, so every level below the first is already the flat
+    // grey their average comes to.
+    const EDGE: u32 = 64;
+    let checker: Arc<[u8]> = (0..EDGE * EDGE)
+        .flat_map(|i| {
+            let lit = ((i % EDGE) + (i / EDGE)).is_multiple_of(2);
+            let shade = if lit { 255 } else { 0 };
+            [shade, shade, shade, 255]
+        })
+        .collect::<Vec<u8>>()
+        .into();
+
+    // One cell holds it, so the placement draws 64 texels across 14 pixels.
+    let mut grid = Grid::new(rows, cols);
+    grid.set_images(vec![PlacedImage {
+        cols: 1,
+        rows: 1,
+        ..placement(checker, EDGE, EDGE, 0)
+    }]);
+
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+            sketch_reveals: &[],
+        },
+    );
+    let pixels = read_back(&device, &queue, &target, width, height);
+
+    // The whole patch the placement covers, clear of its edge pixels. Each
+    // pixel sits on its own phase of the pattern, and with one level a phase
+    // near a texel's own center reads that texel rather than its neighbourhood:
+    // the patch runs between black and white. A level near the drawn size is
+    // flat grey at every phase.
+    let patch: Vec<u8> = ((cell_h as u32 + 2)..(2.0 * cell_h) as u32 - 1)
+        .flat_map(|y| {
+            ((cell_w as u32 + 2)..(2.0 * cell_w) as u32 - 1)
+                .map(move |x| ((y * width + x) * 4) as usize)
+        })
+        .map(|i| pixels[i])
+        .collect();
+
+    let (low, high) = (
+        *patch.iter().min().expect("the placement covers pixels"),
+        *patch.iter().max().expect("the placement covers pixels"),
+    );
+    assert!(
+        high.abs_diff(low) <= 24 && low.abs_diff(128) <= 24,
+        "a checkerboard drawn small reads its own flat mid grey, got {low} to {high}"
+    );
+}
+
 fn read_back(
     device: &Device,
     queue: &Queue,

@@ -26,12 +26,12 @@ use wgpu::{
     vertex_attr_array, AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry,
     BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
     BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState,
-    ColorWrites, Device, Extent3d, FilterMode, FragmentState, Origin3d, PipelineLayoutDescriptor,
-    Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType,
-    SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
-    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
+    ColorWrites, Device, Extent3d, FilterMode, FragmentState, MipmapFilterMode, Origin3d,
+    PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor,
+    SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor, TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in quads, allocated up front. Grows by doubling.
@@ -214,6 +214,10 @@ impl ImagePass {
             address_mode_w: AddressMode::ClampToEdge,
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
+            // A placement often draws an image at a fraction of its size, so
+            // the sampler reads a level near the size it draws and blends the
+            // two it falls between.
+            mipmap_filter: MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -337,6 +341,10 @@ impl ImagePass {
     /// between an opaque texel and a transparent one carries half of each, and
     /// multiplying afterward halves the color again, so a scaled image's
     /// transparent edge arrives darker than the ground it covers.
+    ///
+    /// Every mip level goes up with the base one, so a placement that scales
+    /// the image down reads a level near the size it draws rather than every
+    /// eighth texel of the full-size one.
     fn ensure_texture(
         &mut self,
         device: &Device,
@@ -349,36 +357,45 @@ impl ImagePass {
             return;
         }
 
-        let size = Extent3d {
-            width: placed.width,
-            height: placed.height,
-            depth_or_array_layers: 1,
-        };
+        let levels = mip_chain(premultiplied(&placed.rgba), placed.width, placed.height);
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("image"),
-            size,
-            mip_level_count: 1,
+            size: Extent3d {
+                width: placed.width,
+                height: placed.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: levels.len() as u32,
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba8Unorm,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: Origin3d::ZERO,
-                aspect: TextureAspect::All,
-            },
-            &premultiplied(&placed.rgba),
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(placed.width * 4),
-                rows_per_image: Some(placed.height),
-            },
-            size,
-        );
+
+        let (mut width, mut height) = (placed.width.max(1), placed.height.max(1));
+        for (level, texels) in levels.iter().enumerate() {
+            queue.write_texture(
+                TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level as u32,
+                    origin: Origin3d::ZERO,
+                    aspect: TextureAspect::All,
+                },
+                texels,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            (width, height) = ((width / 2).max(1), (height / 2).max(1));
+        }
 
         let view = texture.create_view(&TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -471,6 +488,56 @@ fn premultiplied(rgba: &[u8]) -> Vec<u8> {
         .iter()
         .flat_map(|&[r, g, b, a]| [scale(r, a), scale(g, a), scale(b, a), a])
         .collect()
+}
+
+/// `base` and every mip level under it, down to a single texel.
+///
+/// A placement often draws an image at a fraction of its size, and a sampler
+/// reading one texel in eight of the full-size level takes whichever texel the
+/// step lands on: a fine pattern aliases into noise, and the noise crawls as the
+/// image moves. Each level averages the one above it, so a level near the drawn
+/// size exists to read.
+///
+/// The average is a 2 by 2 box over premultiplied texels, which is the form an
+/// average of color and alpha is meaningful in. An odd row or column has no
+/// partner to average with, so its last texel stands in for the one past the
+/// edge rather than the level's edge fading toward nothing.
+fn mip_chain(base: Vec<u8>, width: u32, height: u32) -> Vec<Vec<u8>> {
+    let mut levels = vec![base];
+    let (mut width, mut height) = (width.max(1), height.max(1));
+
+    while width > 1 || height > 1 {
+        let above = levels.last().expect("the level to halve");
+        let (half_w, half_h) = ((width / 2).max(1), (height / 2).max(1));
+        let mut level = Vec::with_capacity((half_w * half_h * 4) as usize);
+
+        for y in 0..half_h {
+            for x in 0..half_w {
+                let right = (x * 2 + 1).min(width - 1);
+                let below = (y * 2 + 1).min(height - 1);
+                let corners = [
+                    (x * 2, y * 2),
+                    (right, y * 2),
+                    (x * 2, below),
+                    (right, below),
+                ];
+                for channel in 0..4 {
+                    let sum: u32 = corners
+                        .iter()
+                        .map(|&(cx, cy)| {
+                            u32::from(above[((cy * width + cx) * 4) as usize + channel])
+                        })
+                        .sum();
+                    level.push(((sum + 2) / 4) as u8);
+                }
+            }
+        }
+
+        levels.push(level);
+        (width, height) = (half_w, half_h);
+    }
+
+    levels
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
