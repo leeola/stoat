@@ -5061,15 +5061,28 @@ mod tests {
         assert_eq!(origin, [-2.0, baseline + 3.0]);
     }
 
+    /// A pen lands on a whole physical pixel, so a glyph's bitmap is not
+    /// resampled across two of them.
+    ///
+    /// The cell rectangle is whole pixels, so a region parked on a cell
+    /// boundary puts every cell of it on one already. A region parked part way
+    /// into a cell does not, and the shader adds `origin * size` back
+    /// unrounded, so the pen snaps the sum rather than its own offset.
     #[test]
     fn glyph_origin_snaps_the_cell_origin_to_whole_pixels() {
-        // font_size 13 -> width 7.8, height 15.6, so cell origins are fractional.
-        let metrics = CellMetrics::from_font_size(13, 1.0);
+        // font_size 11 -> a 7 by 13 cell, so half a cell is half a pixel.
+        let metrics = CellMetrics::from_font_size(11, 1.0);
 
-        // col 3 -> round(23.4) = 23, row 2 -> round(31.2) = 31; unsnapped the
-        // origin would be the fractional [24.4, 39.2].
         let origin = glyph_origin(3, 2, [1, 2], 10.0, metrics, [0.0; 2]);
-        assert_eq!(origin, [24.0, 39.0]);
+        assert_eq!(origin, [22.0, 34.0]);
+
+        let parked = [0.5, 0.5];
+        let pen = glyph_origin(3, 2, [1, 2], 10.0, metrics, parked);
+        let absolute = [
+            pen[0] + parked[0] * metrics.width,
+            pen[1] + parked[1] * metrics.height,
+        ];
+        assert_eq!(absolute, [26.0, 41.0], "the shader's sum lands on a pixel");
     }
 
     #[test]
@@ -7524,8 +7537,8 @@ mod tests {
     /// the pooled text up to a pixel off the live grid.
     #[test]
     fn a_moved_composite_rebuilds_against_its_new_origin() {
-        // font_size 16 -> width 9.6, height 19.2, so the snap depends on the
-        // origin. At integer metrics every origin agrees and this pins nothing.
+        // A quarter cell is the move here, because the cell is whole pixels and
+        // a whole-cell move therefore snaps to the same offsets it started on.
         let Some((device, queue, mut pass)) = headless_text_pass() else {
             return;
         };
@@ -7566,8 +7579,8 @@ mod tests {
         };
 
         let (glyphs_at_rest, runs_at_rest) = composite(&mut pass, [0.0; 2], true);
-        let (glyphs_moved, runs_moved) = composite(&mut pass, [1.0, 1.0], false);
-        let (glyphs_rebuilt, runs_rebuilt) = composite(&mut pass, [1.0, 1.0], true);
+        let (glyphs_moved, runs_moved) = composite(&mut pass, [0.25, 0.25], false);
+        let (glyphs_rebuilt, runs_rebuilt) = composite(&mut pass, [0.25, 0.25], true);
 
         assert!(
             !glyphs_rebuilt.is_empty() && !runs_rebuilt.is_empty(),

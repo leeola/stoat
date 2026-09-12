@@ -4871,12 +4871,22 @@ mod tests {
     /// The cell rectangle scales with the display, so the extent has to as well.
     /// Reporting logical pixels to a client drawing physical ones halves the
     /// image on a 2x screen.
+    ///
+    /// The cell rounds to whole pixels, and rounding twice the size is not
+    /// twice the rounded size, so the doubled extent lands within one pixel per
+    /// cell of double rather than exactly on it.
     #[test]
     fn the_extent_follows_the_display_scale() {
         let (one_x, one_y) = grid_pixels(14, 1.0, 24, 80);
         let (two_x, two_y) = grid_pixels(14, 2.0, 24, 80);
 
-        assert_eq!((two_x, two_y), (one_x * 2, one_y * 2));
+        let drift = |scaled: u16, single: u16| i32::from(scaled) - 2 * i32::from(single);
+        assert!(
+            drift(two_x, one_x).abs() <= 80 && drift(two_y, one_y).abs() <= 24,
+            "2x extent {:?} against double the 1x extent {:?}",
+            (two_x, two_y),
+            (one_x * 2, one_y * 2)
+        );
     }
 
     /// A grid wide enough to overflow the field is unreachable, but wrapping one

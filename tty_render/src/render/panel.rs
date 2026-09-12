@@ -430,6 +430,11 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
 /// hold their pixel count against a box that doubled, so the chrome reads half
 /// weight on a 2x display.
 ///
+/// Each product rounds, so the box edges land on the whole pixels the cell
+/// rectangle already uses. A 1.25 or a 1.5 display density otherwise puts a
+/// fraction back on an edge, and the stroke over it covers two pixels at
+/// partial opacity rather than one.
+///
 /// `out` is cleared first, so a reused scratch buffer holds only this frame's
 /// panels.
 fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec<PanelInstance>) {
@@ -447,14 +452,14 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
             fill: panel.fill.map(rgb_f32).unwrap_or([0.0, 0.0, 0.0]),
             border: rgb_f32(panel.border),
             shadow_offset: [
-                shadow_offset[0] * scale_factor,
-                shadow_offset[1] * scale_factor,
+                (shadow_offset[0] * scale_factor).round(),
+                (shadow_offset[1] * scale_factor).round(),
             ],
-            shadow_margin: shadow_margin * scale_factor,
-            corner_radius: panel.corner_radius as f32 * scale_factor,
+            shadow_margin: (shadow_margin * scale_factor).round(),
+            corner_radius: (panel.corner_radius as f32 * scale_factor).round(),
             fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
             style: style_code(panel.style),
-            inset_x: panel.inset_x as f32 * scale_factor,
+            inset_x: (panel.inset_x as f32 * scale_factor).round(),
             shadow_mode,
         }
     }));

@@ -123,10 +123,17 @@ pub struct SketchReveal {
 /// font size and the display scale factor.
 ///
 /// The grid passes need one consistent cell rectangle, and the background and
-/// text passes must agree on it so glyphs land on their cells. `font_size` is
-/// the physical rasterization size, the logical points scaled by the display
-/// density, so glyphs stay crisp on a high-DPI display. Width and height keep a
-/// placeholder ratio to it (0.6 and 1.2) until real font metrics replace them.
+/// text passes must agree on it so glyphs land on their cells.
+///
+/// `width` and `height` are whole physical pixels, so every pass that
+/// multiplies the cell size lands on the grid the background pass rounds to. A
+/// fractional cell puts the panel box, the border quad and the icon quad up to
+/// half a pixel off the background they frame, at a phase that changes per
+/// column and per row.
+///
+/// `font_size` stays fractional. It is the rasterization size, the logical
+/// points scaled by the display density, which keeps glyphs crisp on a
+/// high-DPI display.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CellMetrics {
     pub(crate) font_size: f32,
@@ -146,12 +153,15 @@ impl CellMetrics {
     /// Derive the physical cell rectangle from the logical `font_size` and the
     /// display `scale_factor`, so a given font size keeps the same apparent size
     /// across display densities and rasterizes crisply on each.
+    ///
+    /// The width and the height round to whole pixels, and each stays at least
+    /// one pixel, so a tiny font still leaves a pixel to draw in.
     pub(crate) fn from_font_size(font_size: u32, scale_factor: f32) -> CellMetrics {
         let physical = font_size as f32 * scale_factor;
         CellMetrics {
             font_size: physical,
-            width: physical * 0.6,
-            height: physical * 1.2,
+            width: (physical * 0.6).round().max(1.0),
+            height: (physical * 1.2).round().max(1.0),
             scale_factor,
         }
     }
@@ -866,6 +876,25 @@ mod tests {
     #[test]
     fn a_surface_under_one_cell_still_holds_one() {
         assert_eq!(grid_size(1, 1, 15, 1.0), (1, 1));
+    }
+
+    /// The panel box, the border quad and the icon quad all multiply the cell
+    /// size, so a fraction anywhere in the rectangle puts them off the pixel
+    /// grid the background pass rounds to.
+    #[test]
+    fn a_cell_rectangle_is_whole_physical_pixels() {
+        for font in 8..=40u32 {
+            for scale in [1.0f32, 1.25, 1.5, 2.0] {
+                let metrics = CellMetrics::from_font_size(font, scale);
+                assert_eq!(
+                    (metrics.width.fract(), metrics.height.fract()),
+                    (0.0, 0.0),
+                    "font {font} at scale {scale} gives {} by {}",
+                    metrics.width,
+                    metrics.height
+                );
+            }
+        }
     }
     use stoatty_protocol::command::{
         SketchBounds, SketchCommand, SketchEasing, SketchFill, SketchFillStyle, SketchPhase,
