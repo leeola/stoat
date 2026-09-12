@@ -144,9 +144,23 @@ fn over(under: vec4<f32>, color: vec3<f32>, alpha: f32) -> vec4<f32> {
     );
 }
 
-// Anti-aliased coverage of a stroke `d` pixels from its centerline, weighted by
-// the border style: a heavy line is thicker, a double line is two parallel
-// hairlines, and light and rounded are a single hairline.
+// Coverage of the band that runs from `near` to `far` pixels inward from the
+// edge, for a point `d` pixels inward.
+//
+// Each end ramps over one pixel and covers the exact area of it that falls in
+// the band, so a band one pixel deep is one pixel of ink. A point outside the
+// edge has a negative `d` and takes none.
+fn band(d: f32, near: f32, far: f32) -> f32 {
+    return clamp(min(d - near, far - d) + 0.5, 0.0, 1.0);
+}
+
+// Coverage of the frame at a point `d` pixels inward from the box edge,
+// weighted by the border style: a heavy line is thicker, a double line is two
+// parallel hairlines, and light and rounded are a single hairline.
+//
+// The frame sits inside the box rather than straddling its perimeter, so the
+// box covers exactly the pixels it declares and a frame drawn without a shadow
+// behind it is the same frame as one drawn with a shadow.
 //
 // The heavy width and the double line's separation are logical pixels, scaled
 // to the display, so a heavy frame stays visibly heavier than a light one at
@@ -156,14 +170,12 @@ fn over(under: vec4<f32>, color: vec3<f32>, alpha: f32) -> vec4<f32> {
 fn line_coverage(style: u32, d: f32) -> f32 {
     let s = globals.scale_factor;
     if style == STYLE_HEAVY {
-        return clamp(2.5 * s - d + 0.5, 0.0, 1.0);
+        return band(d, 0.0, 2.0 * s);
     }
     if style == STYLE_DOUBLE {
-        let inner = clamp(1.0 * s - d + 0.5, 0.0, 1.0);
-        let outer = clamp(min(d - 2.0 * s, 3.0 * s - d) + 0.5, 0.0, 1.0);
-        return max(inner, outer);
+        return max(band(d, 0.0, s), band(d, 2.0 * s, 3.0 * s));
     }
-    return clamp(1.0 - d + 0.5, 0.0, 1.0);
+    return band(d, 0.0, 1.0);
 }
 
 /// Discard a fragment that falls inside the box rect of any later panel.
@@ -211,8 +223,8 @@ fn coverage_of(in: VsOut) -> Coverage {
     let radius = min(in.corner_radius, min(half.x, half.y));
     let box_sdf = rounded_box_sdf(p - center, half, radius);
 
-    // Hairline frame straddling the perimeter, weighted by the border style.
-    let stroke = line_coverage(in.style, abs(box_sdf));
+    // Frame band inside the box edge, weighted by the border style.
+    let stroke = line_coverage(in.style, -box_sdf);
     // Optional interior fill, covering the exact area of the pixel that falls
     // inside the rounded edge. The ramp is one pixel wide, so an opaque box
     // meets what surrounds it at a crisp edge.

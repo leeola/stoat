@@ -263,6 +263,116 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
     );
 }
 
+/// A rounded corner carries the weight of the runs it joins, so the arc holds
+/// as much ink as the straight edge four pixels along from it.
+///
+/// An arc drawn as a line centered on the outer radius lays ink on both sides
+/// of it, which reads as a corner heavier than the sides that meet it and as a
+/// bleed past the cell's own corner.
+#[test]
+fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("line_chrome_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 24;
+    let cell = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell[0], cell[1]);
+    let (width, height) = (256u32, (cell_h * 6.0).round() as u32);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("rounded corner target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        Rgb::new(0, 0, 0),
+        Rgb::new(255, 255, 255),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 4 && cols >= 4, "grid too small: {rows}x{cols}");
+
+    let (brow, bcol) = (2, 2);
+    let mut grid = Grid::new(rows, cols);
+    for edge in [BorderEdge::Top, BorderEdge::Left] {
+        grid.set_border_edge(
+            brow,
+            bcol..bcol + 1,
+            edge,
+            Border {
+                style: BorderStyle::Rounded,
+                color: Rgb::new(255, 0, 0),
+            },
+        );
+    }
+
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+            sketch_reveals: &[],
+        },
+    );
+
+    let pixels = read_back(&device, &queue, &target, width, height);
+    let (x0, y0) = (bcol as f32 * cell_w, brow as f32 * cell_h);
+
+    // The arc spans the quadrant a half-cell wide, so the column one pixel
+    // short of it crosses the arc where it meets the straight top run.
+    let radius = cell_w.min(cell_h) * 0.5;
+    let join_x = (x0 + radius) as u32 - 1;
+    let ink = |x: u32| -> u32 {
+        (y0 as u32..(y0 + cell_h) as u32)
+            .map(|y| u32::from(pixels[((y * width + x) * 4) as usize]))
+            .sum()
+    };
+
+    let join = ink(join_x);
+    let run = ink(join_x + 4);
+    assert!(
+        join > 200 && join.abs_diff(run) <= 20,
+        "the arc holds the straight run's ink: {join} at the join against {run} along the run"
+    );
+}
+
 fn read_back(
     device: &Device,
     queue: &Queue,

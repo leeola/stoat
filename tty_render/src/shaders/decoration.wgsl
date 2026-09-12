@@ -84,9 +84,19 @@ fn edge_style(styles: u32, shift: u32) -> u32 {
     return (styles >> shift) & 0xffu;
 }
 
-// Coverage of a straight line `d` pixels in from its edge, by weight. Light and
-// Rounded draw a single line hugging the edge. Heavy widens it. Double adds a
-// second line one pixel further in.
+// Coverage of the band that runs from `near` to `far` pixels inward from the
+// edge, for a point `d` pixels inward.
+//
+// Each end ramps over one pixel and covers the exact area of it that falls in
+// the band, so a band one pixel deep is one pixel of ink. A point outside the
+// edge has a negative `d` and takes none.
+fn band(d: f32, near: f32, far: f32) -> f32 {
+    return clamp(min(d - near, far - d) + 0.5, 0.0, 1.0);
+}
+
+// Coverage of the band an edge style draws, at a point `d` pixels in from the
+// edge. Light and Rounded draw a single line against the edge. Heavy widens it.
+// Double draws a second line a line width further in.
 //
 // The heavy width and the double line's separation are logical pixels, scaled
 // to the display, so a heavy edge stays visibly heavier than a light one at any
@@ -96,22 +106,21 @@ fn edge_style(styles: u32, shift: u32) -> u32 {
 fn line_coverage(style: u32, d: f32) -> f32 {
     let s = globals.scale_factor;
     if style == STYLE_HEAVY {
-        return clamp(2.5 * s - d + 0.5, 0.0, 1.0);
+        return band(d, 0.0, 2.0 * s);
     }
     if style == STYLE_DOUBLE {
-        let inner = clamp(1.0 * s - d + 0.5, 0.0, 1.0);
-        let outer = clamp(min(d - 2.0 * s, 3.0 * s - d) + 0.5, 0.0, 1.0);
-        return max(inner, outer);
+        return max(band(d, 0.0, s), band(d, 2.0 * s, 3.0 * s));
     }
-    return clamp(1.0 - d + 0.5, 0.0, 1.0);
+    return band(d, 0.0, 1.0);
 }
 
 // Coverage of the quarter-circle border line of radius `r` centered at `center`.
-// Full at the outer radius so it meets the straight runs, fading inward, and
-// zero past `r` so the cell corner outside the arc stays transparent.
+//
+// The arc draws only where both of its edges are Rounded, so it carries the one
+// pixel those edges draw and meets each of them at that weight. It is zero past
+// `r`, so the cell corner outside the arc stays transparent.
 fn arc_coverage(pos: vec2<f32>, center: vec2<f32>, r: f32) -> f32 {
-    let dist = length(pos - center);
-    return clamp(1.5 - abs((r - dist) - 0.5), 0.0, 1.0);
+    return band(r - length(pos - center), 0.0, 1.0);
 }
 
 @fragment

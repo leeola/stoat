@@ -676,9 +676,11 @@ mod tests {
             height: 2,
             style: BorderStyle::Light,
             border: Rgb::new(255, 0, 0),
-            corner_radius: 0,
-            // Unfilled, so the stroke's fringe meets the shadow with nothing
-            // opaque between them.
+            // A rounded corner is where the frame's own coverage is partial, so
+            // it is where the frame meets the shadow with neither of them whole.
+            corner_radius: 6,
+            // Unfilled, so the frame meets the shadow with nothing opaque
+            // between them.
             fill: None,
             shadow,
             inset_x: 0,
@@ -692,25 +694,22 @@ mod tests {
             render_coverage(&device, &queue, &grid, metrics)
         };
 
-        // A tucked shadow paints nothing below the box's bottom edge while a
-        // drop shadow is at full strength there, so the pair isolates the
-        // stroke's outer fringe from the shadow under it. A shadowless panel
-        // serves no better. Its quad carries no shadow padding, so it never
-        // rasterizes the fringe outside the box at all.
-        let tucked = coverage(PanelShadow::Tucked);
+        // A shadowless panel carries the frame alone, so it is what the frame
+        // covers with nothing under it.
+        let alone = coverage(PanelShadow::None_);
         let dropped = coverage(PanelShadow::Drop);
 
         // A shadow alone never reaches past SHADOW_ALPHA. So a coverage above
-        // that which also exceeds the tucked panel's is neither of the two
+        // that which also exceeds the shadowless panel's is neither of the two
         // inputs, and only compositing them produces it.
         let ceiling = (0.22 * 255.0) as u8;
-        let composited = dropped.iter().zip(&tucked).position(|(dropped, tucked)| {
-            (1..255).contains(tucked) && dropped > tucked && *dropped > ceiling
+        let composited = dropped.iter().zip(&alone).position(|(dropped, alone)| {
+            (1..255).contains(alone) && dropped > alone && *dropped > ceiling
         });
 
         assert!(
             composited.is_some(),
-            "the stroke's fringe and the shadow beneath it compose"
+            "the frame's rounded corner and the shadow beneath it compose"
         );
     }
 
@@ -765,6 +764,57 @@ mod tests {
             (at(12), at(11)),
             (255, 0),
             "the fill covers the pixel inside the left edge and none of the one outside"
+        );
+    }
+
+    /// A frame is a band inside the box edge, so it lands on the same pixels
+    /// whether or not a shadow pads the quad around it.
+    ///
+    /// A stroke centered on the perimeter puts half its ink outside the box,
+    /// and a shadowless panel's quad stops at the box rect, which clips that
+    /// half away. One style then drew a thinner frame ending in a hard step
+    /// than the same style drew with a shadow behind it.
+    #[test]
+    fn a_frame_band_sits_inside_the_box_edge() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("panel frame band test: no wgpu adapter, skipping");
+            return;
+        };
+
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        // The box's top edge falls on y 12, and the column at x 24 crosses it
+        // clear of the corners.
+        let column = |shadow| {
+            let mut grid = Grid::new(4, 4);
+            grid.set_panels(vec![Panel {
+                top: 1,
+                left: 1,
+                width: 2,
+                height: 2,
+                style: BorderStyle::Light,
+                border: Rgb::new(255, 0, 0),
+                corner_radius: 0,
+                fill: None,
+                shadow,
+                inset_x: 0,
+                above_pools: false,
+                anchor: None,
+                seq: 0,
+            }]);
+            let red = render_red(&device, &queue, &grid, metrics, Halves::Both);
+            let at = |y: u32| red[(y * TARGET + 24) as usize];
+            (at(11), at(12), at(13))
+        };
+
+        assert_eq!(
+            (column(PanelShadow::None_), column(PanelShadow::Tucked)),
+            ((0, 255, 0), (0, 255, 0)),
+            "one full pixel inside the top edge, nothing on either side of it"
         );
     }
 
