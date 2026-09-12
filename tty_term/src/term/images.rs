@@ -14,7 +14,8 @@
 //! Everything the store refuses, it refuses by answering. A client that gets an
 //! error falls back, while one that gets silence waits.
 
-use std::{collections::HashMap, sync::Arc};
+use image::{ImageError, ImageFormat, ImageReader, Limits};
+use std::{collections::HashMap, io::Cursor, sync::Arc};
 use stoatty_protocol::{
     iterm::{Dimension, ItermFile},
     kitty::{
@@ -653,11 +654,22 @@ fn placement_cells(
 /// An animated GIF yields its first frame, which the decoder gives for free and
 /// which is a better answer than nothing.
 fn decode_any_format(bytes: &[u8]) -> Result<DecodedImage, ResponseResult> {
-    let decoded =
-        image::load_from_memory(bytes).map_err(|_| error("EINVAL", "unrecognized image"))?;
+    const UNREADABLE: &str = "unrecognized image";
 
-    let (width, height) = (decoded.width(), decoded.height());
+    let guess = || {
+        capped_reader(bytes)
+            .with_guessed_format()
+            .map_err(|_| error("EINVAL", UNREADABLE))
+    };
+
+    let (width, height) = guess()?
+        .into_dimensions()
+        .map_err(|err| decode_error(&err, UNREADABLE))?;
     check_size(width, height)?;
+
+    let decoded = guess()?
+        .decode()
+        .map_err(|err| decode_error(&err, UNREADABLE))?;
 
     Ok(DecodedImage {
         rgba: decoded.into_rgba8().into_raw().into(),
@@ -791,12 +803,29 @@ fn inflate(bytes: &[u8]) -> Result<Vec<u8>, ResponseResult> {
     }
 }
 
+/// Decode a PNG transmission, reading its size from the header first.
+///
+/// The header states the dimensions, so the size is known before a pixel is
+/// decoded. Refusing an image the store will not hold therefore costs the
+/// header rather than the whole decode, which matters on a thread that holds
+/// the terminal lock while it works.
 fn decode_png(bytes: &[u8]) -> Result<DecodedImage, ResponseResult> {
-    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
-        .map_err(|_| error("EINVAL", "payload is not a valid PNG"))?;
+    const UNREADABLE: &str = "payload is not a valid PNG";
 
-    let (width, height) = (decoded.width(), decoded.height());
+    let png = || {
+        let mut reader = capped_reader(bytes);
+        reader.set_format(ImageFormat::Png);
+        reader
+    };
+
+    let (width, height) = png()
+        .into_dimensions()
+        .map_err(|err| decode_error(&err, UNREADABLE))?;
     check_size(width, height)?;
+
+    let decoded = png()
+        .decode()
+        .map_err(|err| decode_error(&err, UNREADABLE))?;
 
     Ok(DecodedImage {
         rgba: decoded.into_rgba8().into_raw().into(),
@@ -805,6 +834,36 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, ResponseResult> {
         generation: 0,
         number: 0,
     })
+}
+
+/// A reader over `bytes` that may allocate no more than the store keeps.
+///
+/// The cap covers the decode as well as the header read. `decode` reserves the
+/// decoder's native output size against it, so a source stating more bytes per
+/// channel than the store holds is refused rather than decoded and narrowed.
+///
+/// Both `into_dimensions` and `decode` consume the reader, so a decode that
+/// checks its size first builds two.
+fn capped_reader(bytes: &[u8]) -> ImageReader<Cursor<&[u8]>> {
+    let mut limits = Limits::no_limits();
+    limits.max_alloc = Some(MAX_DECODED_BYTES as u64);
+
+    let mut reader = ImageReader::new(Cursor::new(bytes));
+    reader.limits(limits);
+    reader
+}
+
+/// The code a decoder failure answers with.
+///
+/// A limits failure names an image the decoder cannot work on under the cap,
+/// which is a size refusal like [`check_size`]'s and carries its own message to
+/// separate the two. Every other failure is a payload the decoder could not
+/// read. `unreadable` describes that for the format at hand.
+fn decode_error(err: &ImageError, unreadable: &str) -> ResponseResult {
+    match err {
+        ImageError::Limits(_) => error("EFBIG", "image too large to decode"),
+        _ => error("EINVAL", unreadable),
+    }
 }
 
 /// Widen three-byte pixels to the store's four, at full opacity.
@@ -907,7 +966,7 @@ fn respond_as(control: &ControlData, id: u32, result: ResponseResult) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageStore, Screen, MAX_DECODED_BYTES, MAX_IMAGES, MAX_PLACEMENTS};
+    use super::{ImageStore, Screen, MAX_DECODED_BYTES, MAX_IMAGES, MAX_PLACEMENTS, RGBA};
     use base64::Engine;
     use stoatty_protocol::kitty::{
         Action, Compression, ControlData, Format, GraphicsFrame, Medium, Response, ResponseResult,
@@ -922,6 +981,47 @@ mod tests {
             .write_to(&mut out, image::ImageFormat::Png)
             .expect("encode png");
         out.into_inner()
+    }
+
+    /// A PNG carrying a header and no pixel data, so a decode reads the size it
+    /// states without ever reaching contents.
+    ///
+    /// `depth` is the bits per channel. The three IHDR bytes after the color
+    /// type are the compression, filter and interlace methods, each set to the
+    /// one value it defines.
+    fn png_header_only(width: u32, height: u32, depth: u8) -> Vec<u8> {
+        const RGBA_COLOR_TYPE: u8 = 6;
+
+        let mut ihdr = width.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[depth, RGBA_COLOR_TYPE, 0, 0, 0]);
+
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+        out.extend_from_slice(&png_chunk(b"IDAT", &[]));
+        out
+    }
+
+    /// One PNG chunk: the data length, the type, the data, and the CRC over the
+    /// type and data together.
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&png_crc(&out[4..]).to_be_bytes());
+        out
+    }
+
+    /// The CRC-32 a PNG chunk carries, which a decoder rejects a chunk without.
+    fn png_crc(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        !crc
     }
 
     fn base64(bytes: &[u8]) -> Vec<u8> {
@@ -1163,6 +1263,63 @@ mod tests {
             code(&reply(&mut store, frame(control, Vec::new()))),
             Some("EFBIG"),
             "the size is refused before any buffer is grown to hold it",
+        );
+    }
+
+    /// The IHDR states the size, so the store can refuse before a pixel is
+    /// decoded. A decode that checked afterwards grew the whole buffer to learn
+    /// the same number, and then threw it away.
+    #[test]
+    fn a_png_header_past_the_decoded_cap_is_refused() {
+        let mut store = ImageStore::new();
+        let control = ControlData {
+            format: Format::Png,
+            ..transmit(10)
+        };
+        let payload = base64(&png_header_only(20_000, 20_000, 8));
+
+        assert_eq!(
+            reply(&mut store, frame(control, payload)),
+            Some(Response {
+                id: 10,
+                number: 0,
+                placement: 0,
+                result: super::error("EFBIG", "image too large"),
+            }),
+            "refused for the size its header states, before any decode",
+        );
+    }
+
+    #[test]
+    fn an_inline_image_past_the_decoded_cap_is_refused() {
+        let refused = super::decode_any_format(&png_header_only(20_000, 20_000, 8));
+
+        assert_eq!(
+            refused.err(),
+            Some(super::error("EFBIG", "image too large")),
+            "the guessed-format path reads the header ahead of the pixels too",
+        );
+    }
+
+    /// Sixteen bits per channel doubles what the decoder allocates before it
+    /// narrows the image to the store's eight. The cap bounds that buffer too,
+    /// so a source needing more than the cap is refused by size rather than
+    /// decoded and reported as unreadable.
+    #[test]
+    fn a_source_deeper_than_the_store_keeps_is_refused_by_size() {
+        let side = 3_600;
+        assert!(
+            (side * side * RGBA) < MAX_DECODED_BYTES
+                && (side * side * RGBA * 2) > MAX_DECODED_BYTES,
+            "the store holds the narrowed image, and not the decoder's own",
+        );
+
+        let refused = super::decode_png(&png_header_only(side as u32, side as u32, 16));
+
+        assert_eq!(
+            refused.err(),
+            Some(super::error("EFBIG", "image too large to decode")),
+            "refused by the decoder's own cap, which check_size passes",
         );
     }
 
