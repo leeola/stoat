@@ -94,14 +94,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Rounded-rect coverage of the box, with the radius clamped so a small box
     // rounds proportionally, plus a thin border band just inside the edge.
+    //
+    // Both ramp over one pixel and cover the exact area of it that falls inside
+    // their edge, so an opaque box has a crisp edge and the band has a crisp
+    // inner one.
     let center = (in.box_min + in.box_max) * 0.5;
     let half = (in.box_max - in.box_min) * 0.5;
     let radius = min(in.corner_radius, min(half.x, half.y));
     let box_sdf = rounded_box_sdf(p - center, half, radius);
 
-    let box_coverage = 1.0 - smoothstep(-1.0, 1.0, box_sdf);
+    let box_coverage = clamp(0.5 - box_sdf, 0.0, 1.0);
     let border_px = 1.5;
-    let border_factor = 1.0 - smoothstep(border_px - 1.0, border_px + 1.0, -box_sdf);
+    let border_factor = clamp(box_sdf + border_px + 0.5, 0.0, 1.0);
     let box_color = mix(in.fill, in.border, border_factor);
 
     // Exterior distance to the shadow rectangle (the box shifted by the offset),

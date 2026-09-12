@@ -213,8 +213,10 @@ fn coverage_of(in: VsOut) -> Coverage {
 
     // Hairline frame straddling the perimeter, weighted by the border style.
     let stroke = line_coverage(in.style, abs(box_sdf));
-    // Optional interior fill, faded across the rounded edge.
-    let interior = 1.0 - smoothstep(-1.0, 1.0, box_sdf);
+    // Optional interior fill, covering the exact area of the pixel that falls
+    // inside the rounded edge. The ramp is one pixel wide, so an opaque box
+    // meets what surrounds it at a crisp edge.
+    let interior = clamp(0.5 - box_sdf, 0.0, 1.0);
     let fill_alpha = in.fill_flag * interior;
 
     // Exterior distance to the shadow rectangle (the box shifted by the offset),

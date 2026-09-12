@@ -506,6 +506,16 @@ mod tests {
     /// padding.
     const TARGET: u32 = 64;
 
+    /// Which halves of the panel pass a fixture draws.
+    ///
+    /// The frame is recorded above the text it surrounds, so a fixture reading
+    /// what lies under the text draws `Under` and leaves the frame off.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Halves {
+        Under,
+        Both,
+    }
+
     #[test]
     fn shader_is_valid_wgsl() {
         let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
@@ -525,6 +535,7 @@ mod tests {
         grid: &Grid,
         metrics: CellMetrics,
         clear: Color,
+        halves: Halves,
     ) -> Vec<u8> {
         let mut pass = PanelPass::new(device, TextureFormat::Rgba8Unorm, metrics);
         pass.prepare(device, queue, grid, &[], [TARGET as f32, TARGET as f32]);
@@ -570,10 +581,12 @@ mod tests {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // Both halves, in the order the frame chain records them, so this
-            // measures the composite a real frame produces.
+            // In the order the frame chain records them, so a fixture asking
+            // for both measures the composite a real frame produces.
             pass.draw_under(&mut render_pass);
-            pass.draw_stroke(&mut render_pass);
+            if halves == Halves::Both {
+                pass.draw_stroke(&mut render_pass);
+            }
         }
         encoder.copy_texture_to_buffer(
             TexelCopyTextureInfo {
@@ -603,10 +616,16 @@ mod tests {
 
     /// The red the panels painted over black, one byte a pixel.
     ///
-    /// The fixtures stroke in pure red, so the byte at a pixel is what reached
+    /// The fixtures paint in pure red, so the byte at a pixel is what reached
     /// the target there.
-    fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
-        render_rgba(device, queue, grid, metrics, Color::BLACK)
+    fn render_red(
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        metrics: CellMetrics,
+        halves: Halves,
+    ) -> Vec<u8> {
+        render_rgba(device, queue, grid, metrics, Color::BLACK, halves)
             .as_chunks::<4>()
             .0
             .iter()
@@ -625,7 +644,7 @@ mod tests {
         grid: &Grid,
         metrics: CellMetrics,
     ) -> Vec<u8> {
-        render_rgba(device, queue, grid, metrics, Color::WHITE)
+        render_rgba(device, queue, grid, metrics, Color::WHITE, Halves::Both)
             .as_chunks::<4>()
             .0
             .iter()
@@ -695,6 +714,60 @@ mod tests {
         );
     }
 
+    /// An opaque box meets what surrounds it at a crisp edge, so the fill
+    /// covers the pixel inside that edge whole and the pixel outside not at
+    /// all.
+    ///
+    /// A ramp two pixels wide instead lays 84 percent over the inner pixel and
+    /// 16 percent over the outer one, which reads as a soft edge on every side
+    /// of every box.
+    ///
+    /// The frame stays off here. It straddles the perimeter, so in the
+    /// composite it covers both of the pixels this reads.
+    #[test]
+    fn a_box_fill_covers_the_pixel_inside_its_edge_whole() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("panel fill ramp test: no wgpu adapter, skipping");
+            return;
+        };
+
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let mut grid = Grid::new(4, 4);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 1,
+            width: 2,
+            height: 2,
+            style: BorderStyle::Light,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: Some(Rgb::new(255, 0, 0)),
+            // A shadow pads the quad, so the pixel outside the box rasterizes
+            // at all. Its color is black, which leaves the red channel alone.
+            shadow: PanelShadow::Tucked,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+            seq: 0,
+        }]);
+
+        // The box's left edge falls on x 12, and row 24 crosses its vertical
+        // middle, clear of the corners.
+        let red = render_red(&device, &queue, &grid, metrics, Halves::Under);
+        let at = |x: u32| red[(24 * TARGET + x) as usize];
+
+        assert_eq!(
+            (at(12), at(11)),
+            (255, 0),
+            "the fill covers the pixel inside the left edge and none of the one outside"
+        );
+    }
+
     /// A chrome weight left in physical pixels holds its pixel count while the
     /// box it frames doubles, so the frame reads half as heavy on a 2x display.
     #[test]
@@ -732,7 +805,7 @@ mod tests {
         // The row through the box's vertical middle crosses the left and right
         // strokes and nothing else.
         let lit = |scale_factor| {
-            let red = render_red(&device, &queue, &grid, metrics(scale_factor));
+            let red = render_red(&device, &queue, &grid, metrics(scale_factor), Halves::Both);
             (0..TARGET)
                 .filter(|x| red[(24 * TARGET + x) as usize] > 0)
                 .count()
