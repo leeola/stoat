@@ -225,7 +225,15 @@ impl<'a> SeekTarget<'a, TransformSummary, Dimensions<InputRow, OutputRow>> for O
     }
 }
 
+/// Rows an edit may span and still rewrap on the run loop.
 const WRAP_SYNC_THRESHOLD: u32 = 100;
+
+/// Bytes an edit may span and still rewrap on the run loop.
+///
+/// A row count alone lets one keystroke in a multi-megabyte line rewrap the
+/// whole line inline, that line being a single row. What the rewrap costs is
+/// the text it walks, so the gate reads both.
+const WRAP_SYNC_MAX_BYTES: usize = 64 * 1024;
 
 pub struct WrapMap {
     snapshot: WrapSnapshot,
@@ -472,9 +480,18 @@ impl WrapMap {
                     && self
                         .pending_edits
                         .back()
-                        .map(|(_, edits)| {
+                        .map(|(tab_snapshot, edits)| {
+                            let fold = tab_snapshot.fold_snapshot();
                             edits.edits().iter().all(|e| {
-                                e.new.end.saturating_sub(e.new.start) < WRAP_SYNC_THRESHOLD
+                                if e.new.end.saturating_sub(e.new.start) >= WRAP_SYNC_THRESHOLD {
+                                    return false;
+                                }
+                                // Bounded by the row gate above, and each row's
+                                // length is a summary read rather than a walk.
+                                let bytes: usize = (e.new.start..e.new.end)
+                                    .map(|row| fold.output_line_len(row) as usize)
+                                    .sum();
+                                bytes < WRAP_SYNC_MAX_BYTES
                             })
                         })
                         .unwrap_or(false);
@@ -2651,6 +2668,42 @@ mod tests {
                 "display_line mismatch at row {row}"
             );
         }
+    }
+
+    /// A one-row edit is judged by the bytes that row holds, not by the row.
+    ///
+    /// A multi-megabyte line is one row, so a row count alone would rewrap the
+    /// whole line on the run loop for every keystroke in it.
+    #[test]
+    fn an_edit_in_a_huge_line_owes_its_rewrap_to_the_pool() {
+        let one_row_edit = Patch::new(vec![Edit {
+            old: 0..1,
+            new: 0..1,
+        }]);
+
+        let owed = |content: &str| -> bool {
+            let (mut wrap_map, _, multi_buffer) = make_wrap_map(content, Some(20));
+            resync(&multi_buffer, &mut wrap_map);
+
+            multi_buffer
+                .as_singleton()
+                .unwrap()
+                .write()
+                .unwrap()
+                .edit(0..1, "ZZ");
+            resync_with(&multi_buffer, &mut wrap_map, &one_row_edit);
+
+            wrap_map.background_pending()
+        };
+
+        assert!(
+            owed(&"a".repeat(super::WRAP_SYNC_MAX_BYTES + 1)),
+            "a line past the byte bound owes its rewrap rather than paying it inline",
+        );
+        assert!(
+            !owed(&"a".repeat(super::WRAP_SYNC_MAX_BYTES / 2)),
+            "a line under the bound still rewraps inline",
+        );
     }
 
     /// The rewrap walk leaves the run loop entirely.
