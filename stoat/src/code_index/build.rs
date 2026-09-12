@@ -373,6 +373,12 @@ pub(crate) fn reindex_path(
             expected,
         } = target;
 
+        // Resolved before the read, so a file no query touches costs the watch
+        // event nothing. Such a file has no shard in the graph to update.
+        let Some(language) = languages.for_path(&path).filter(|l| indexable(l)) else {
+            return;
+        };
+
         let Some(text) = read_utf8(fs.as_ref(), &path) else {
             let _ = tx.send(IndexUpdate::Remove {
                 workspace,
@@ -389,7 +395,13 @@ pub(crate) fn reindex_path(
         // The caller's rel_path and the one extraction derives are the same
         // string from the same pair of paths, so the caller's is kept and the
         // second is dropped rather than allocated into the update.
-        if let Some((_, shard)) = index_text(&languages, &git_root, &path, &text) {
+        if let Some((_, shard)) = extract_shard(
+            &language,
+            &git_root,
+            &path,
+            &Rope::from(text.as_str()),
+            None,
+        ) {
             let _ = tx.send(IndexUpdate::Reindex {
                 workspace,
                 file,
@@ -415,6 +427,10 @@ enum ShardSource {
 /// A file loads only when `index_dir` is present, `known` holds its
 /// rel-path, the current content fingerprint equals the stored one, and the
 /// on-disk shard decodes. Any miss falls back to extraction.
+///
+/// The language resolves ahead of the fingerprint, which is itself a whole
+/// read. A manifest written before a language lost its queries still lists
+/// entries this takes nothing from, and those are not read for either.
 fn load_or_extract(
     fs: &dyn FsHost,
     languages: &LanguageRegistry,
@@ -423,6 +439,10 @@ fn load_or_extract(
     known: &HashMap<String, [u8; 32]>,
     path: &Path,
 ) -> Option<(String, FileShard, ShardSource)> {
+    if !languages.for_path(path).is_some_and(|l| indexable(&l)) {
+        return None;
+    }
+
     if let Some(dir) = index_dir
         && let Some(rel_path) = relpath(git_root, path)
         && let Some(&known_hash) = known.get(&rel_path)
@@ -481,34 +501,39 @@ fn read_utf8(fs: &dyn FsHost, path: &Path) -> Option<String> {
     Some(LineEnding::normalize(&text).into_owned())
 }
 
-/// Extract one file's shard, or `None` when the file is not an indexable
-/// language, cannot be read, or is not valid UTF-8.
+/// Whether the index takes anything from a language.
+///
+/// A registered language with neither an outline nor a tags query extracts an
+/// empty shard, so reading and parsing a file for one is work with no result.
+/// `toml` is registered and has neither.
+///
+/// Both queries compile on the first call and cache per grammar, so asking
+/// costs nothing on the paths that go on to parse.
+fn indexable(language: &Language) -> bool {
+    language.outline_query().is_some() || language.tags_query().is_some()
+}
+
+/// Extract one file's shard, or `None` when the index takes nothing from the
+/// file, the file cannot be read, or it is not valid UTF-8.
 ///
 /// Returns the file's workspace-relative path alongside the shard. The
 /// shard's `content_hash` fingerprints the source for staleness checks.
+///
+/// The language resolves before the read. A tree holds far more files no query
+/// touches than files one does, and for those the read is the whole cost.
 fn index_file(
     fs: &dyn FsHost,
     languages: &LanguageRegistry,
     git_root: &Path,
     path: &Path,
 ) -> Option<(String, FileShard)> {
-    index_text(languages, git_root, path, &read_utf8(fs, path)?)
-}
-
-/// Extract one file's shard from source already in hand, or `None` when the
-/// file is not an indexable language or sits outside `git_root`.
-///
-/// Split from [`index_file`] so a caller that has read the file for its own
-/// reasons, such as fingerprinting it, extracts from those bytes rather than
-/// reading the file a second time.
-fn index_text(
-    languages: &LanguageRegistry,
-    git_root: &Path,
-    path: &Path,
-    text: &str,
-) -> Option<(String, FileShard)> {
     let language = languages.for_path(path)?;
-    extract_shard(&language, git_root, path, &Rope::from(text), None)
+    if !indexable(&language) {
+        return None;
+    }
+
+    let text = read_utf8(fs, path)?;
+    extract_shard(&language, git_root, path, &Rope::from(text.as_str()), None)
 }
 
 /// Parse `text` as `language` and build the file's shard, or `None` when
@@ -566,7 +591,7 @@ mod tests {
     use crate::{
         buffer_registry::fingerprint_bytes,
         code_index::store,
-        host::{FakeFs, FsHost},
+        host::{FakeFs, FakeFsOp, FsHost},
         workspace::WorkspaceId,
     };
     use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
@@ -920,6 +945,60 @@ mod tests {
             Path::new("/repo/notes.xyz")
         )
         .is_none());
+    }
+
+    /// Every path a read reached, so a test can assert a path was never read
+    /// rather than only that nothing came of reading it.
+    fn reads(fs: &FakeFs) -> Vec<PathBuf> {
+        fs.ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                FakeFsOp::Read { path } => Some(path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A registered language with neither an outline nor a tags query extracts
+    /// an empty shard, so the read and the parse buy nothing. Every crate in a
+    /// tree carries at least one such file.
+    #[test]
+    fn a_language_with_no_query_is_never_read() {
+        let fs = FakeFs::new();
+        let path = Path::new("/repo/Cargo.toml");
+        fs.write(path, b"[package]\nname = \"x\"\n").unwrap();
+        let registry = LanguageRegistry::standard();
+        assert!(
+            registry.for_path(path).is_some(),
+            "toml has to be registered, or this proves nothing",
+        );
+
+        assert_eq!(index_file(&fs, &registry, Path::new("/repo"), path), None);
+        assert_eq!(reads(&fs), Vec::<PathBuf>::new());
+    }
+
+    /// A manifest written before a language lost its queries still lists
+    /// entries the index takes nothing from. The fingerprint check is itself a
+    /// whole read, so the guard runs ahead of it.
+    #[test]
+    fn load_or_extract_reads_nothing_for_a_queryless_language() {
+        let fs = FakeFs::new();
+        let git_root = Path::new("/repo");
+        let index_dir = Path::new("/idx");
+        let path = Path::new("/repo/Cargo.toml");
+        let text = "[package]\n";
+        fs.write(path, text.as_bytes()).unwrap();
+
+        let mut known = HashMap::new();
+        known.insert(String::from("Cargo.toml"), fingerprint_bytes(text));
+
+        let registry = LanguageRegistry::standard();
+        let loaded = load_or_extract(&fs, &registry, git_root, Some(index_dir), &known, path);
+        assert!(
+            loaded.is_none(),
+            "the manifest entry is not reason to read it"
+        );
+        assert_eq!(reads(&fs), Vec::<PathBuf>::new());
     }
 
     #[test]
