@@ -126,17 +126,18 @@ pub use run::RunId;
 pub use stoat_config::{LineNumbers, MouseCapturePolicy, Settings};
 pub use stoat_log as log;
 
-/// Resolves the [`MouseCapturePolicy`] from the compiled-in default
-/// keymap. Returns [`MouseCapturePolicy::Auto`] when the setting is
-/// unset or the keymap has parse errors, since the UI thread starts
-/// before the main `Stoat` instance and must not block on config
-/// failure.
+/// Resolves the [`MouseCapturePolicy`] from the compiled-in defaults, which the
+/// UI thread needs before the main [`Stoat`] exists.
+///
+/// Returns [`MouseCapturePolicy::Auto`] when the setting is unset, which is the
+/// policy a config naming none asks for.
+///
+/// Reads the process-wide parse of the defaults rather than parsing them again
+/// here. This runs ahead of the terminal setup and the stoatty handshake, so a
+/// second parse of the 55 KB source delays both by what it costs.
 pub fn default_mouse_capture_policy() -> MouseCapturePolicy {
-    let (config, _errors) = stoat_config::parse(app::DEFAULT_KEYMAP);
-    config
-        .as_ref()
-        .map(Settings::from_config)
-        .and_then(|s| s.mouse_capture)
+    Settings::from_config(app::embedded_config())
+        .mouse_capture
         .unwrap_or(MouseCapturePolicy::Auto)
 }
 

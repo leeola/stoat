@@ -56,7 +56,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use stoat_action::{Conflict, Diff, OpenFile};
 use stoat_config::{MinimapMode, Settings, TabBarMode, WrapMode};
@@ -81,6 +81,33 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 /// The default stoatty config, embedded so `:open-config stoatty` can seed a
 /// missing one with the same file the terminal ships.
 pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml");
+
+/// [`DEFAULT_KEYMAP`] parsed, once for the process.
+static EMBEDDED_CONFIG: OnceLock<stoat_config::Config> = OnceLock::new();
+
+/// The embedded defaults, parsed on the first call and shared from there on.
+///
+/// Everything the defaults feed reads this one copy: the mouse capture policy a
+/// launch resolves before the UI thread starts, the settings, keymap and theme
+/// pool the editor compiles from them, and the rebuild a config reload runs.
+/// The source is 55 KB, and parsing it is milliseconds a launch used to pay
+/// twice before its first frame.
+///
+/// A parse failure is a defect in the file this binary was built from rather
+/// than a runtime condition, so it takes the whole process down with the errors
+/// logged rather than each caller inventing a fallback.
+pub(crate) fn embedded_config() -> &'static stoat_config::Config {
+    EMBEDDED_CONFIG.get_or_init(|| {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        if !errors.is_empty() {
+            tracing::error!(
+                "default keymap parse errors: {}",
+                stoat_config::format_errors(DEFAULT_KEYMAP, &errors)
+            );
+        }
+        config.expect("the embedded config parses")
+    })
+}
 
 /// Frame interval for scroll-animation ticks, about 60 fps to match a typical
 /// display rather than shipping targets that can never be presented.
@@ -148,7 +175,7 @@ struct ConfigArtifacts {
 /// startup.
 fn build_config_artifacts(
     user: Option<stoat_config::Config>,
-    embedded: stoat_config::Config,
+    embedded: &stoat_config::Config,
     imported: &[Arc<VscodeSource>],
     cli_settings: Settings,
     env_theme: Option<String>,
@@ -179,7 +206,7 @@ fn build_config_artifacts(
         // own config names counts as the explicit choice that outranks it.
         let user_theme_set = from_user.as_ref().is_some_and(|s| s.theme.is_some());
 
-        let mut settings = Settings::from_config(&embedded)
+        let mut settings = Settings::from_config(embedded)
             .merge(from_user.unwrap_or_default())
             .merge(cli_settings);
         if !cli_theme_set
@@ -209,7 +236,7 @@ fn build_config_artifacts(
     };
 
     let (keymap, unknown_actions) = {
-        let (default_keymap, warnings) = Keymap::compile_with_warnings(&embedded);
+        let (default_keymap, warnings) = Keymap::compile_with_warnings(embedded);
         for warning in warnings {
             tracing::warn!(target: "stoat::keymap", "{warning}");
         }
@@ -2081,7 +2108,7 @@ impl Stoat {
             },
             None => (None, None),
         };
-        let embedded = Self::parse_default_keymap().expect("the embedded config parses");
+        let embedded = embedded_config();
 
         // Retaining the sources lets a mid-session reload rebuild the identical
         // pool without re-reading the theme directory, and lets a theme already
@@ -2430,18 +2457,6 @@ impl Stoat {
         stoat
     }
 
-    /// Parse the embedded default keymap ([`DEFAULT_KEYMAP`]), logging any parse errors.
-    fn parse_default_keymap() -> Option<stoat_config::Config> {
-        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
-        if !errors.is_empty() {
-            tracing::error!(
-                "default keymap parse errors: {}",
-                stoat_config::format_errors(DEFAULT_KEYMAP, &errors)
-            );
-        }
-        config
-    }
-
     /// Re-resolve the user config from `source` and swap the running keymap,
     /// settings, theme, and theme-derived tables.
     ///
@@ -2476,7 +2491,7 @@ impl Stoat {
             minimap_class_table,
         } = build_config_artifacts(
             config,
-            Self::parse_default_keymap().expect("the embedded config parses"),
+            embedded_config(),
             &self.imported_themes,
             self.cli_settings.clone(),
             None,
@@ -8099,6 +8114,18 @@ mod tests {
         let detached = ws.panes.split(crate::pane::Axis::Vertical);
         assert!(ws.panes.detach(detached, window));
         (stoat, detached)
+    }
+
+    /// A launch resolves the mouse capture policy before the UI thread starts,
+    /// then builds the settings, keymap and theme pool, and a config reload
+    /// builds them again. Each reads the 55 KB source, so each parsing it
+    /// separately puts milliseconds between the launch and its first frame.
+    #[test]
+    fn every_caller_of_the_embedded_config_reads_one_parse() {
+        assert!(
+            std::ptr::eq(embedded_config(), embedded_config()),
+            "the defaults are parsed once and shared from there on",
+        );
     }
 
     #[test]
