@@ -1615,13 +1615,12 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
     let Some(buffer) = ws.buffers.get(buffer_id) else {
         return;
     };
-    let old_len = {
-        let guard = buffer.read().expect("preview buffer poisoned");
-        guard.snapshot.visible_text.len()
-    };
     {
+        // Reset rather than edited. An edit over the whole range files the
+        // replaced file in the deleted rope and its own text in the op log, so
+        // the pane would carry every file it ever showed.
         let mut guard = buffer.write().expect("preview buffer poisoned");
-        guard.edit(0..old_len, text);
+        guard.reset(text);
     }
     if let Some(editor) = ws.editors.get_mut(editor_id) {
         let snapshot = editor.display_map.snapshot();

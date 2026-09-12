@@ -2270,6 +2270,62 @@ mod tests {
         );
     }
 
+    /// The pane shows forty rows, so it has no business holding every file the
+    /// session scrolled past. An edit over the whole range would keep two
+    /// copies of each: one in the deleted rope and one in the op log.
+    #[test]
+    fn arrowing_through_the_finder_keeps_only_the_shown_file() {
+        let mut h = crate::Stoat::test();
+        let bulk = "// filler\n".repeat(400);
+        seed_finder_workspace(
+            &mut h,
+            &[
+                ("a.rs", bulk.as_str()),
+                ("b.rs", bulk.as_str()),
+                ("c.rs", "fn c() {}\n"),
+            ],
+        );
+        h.type_keys("space p");
+        h.snapshot();
+
+        let preview_id = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .core
+            .preview
+            .buffer;
+
+        for _ in 0..2 {
+            h.type_keys("down");
+            h.snapshot();
+        }
+
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(preview_id)
+            .expect("the preview buffer is open");
+        let guard = buffer.read().expect("poisoned");
+        let shown = guard.snapshot.visible_text.len();
+
+        assert!(shown > 0, "the pane shows a file");
+        assert!(
+            shown < bulk.len(),
+            "and the file it shows is the short one, not one it scrolled past",
+        );
+        // The op log is the other copy an edit would leave. Its contents are
+        // private to the buffer module, where `a_reset_holds_only_the_text_it_was_given`
+        // pins them.
+        assert_eq!(
+            guard.snapshot.deleted_text.len(),
+            0,
+            "and keeps none of the files it scrolled past",
+        );
+    }
+
     #[test]
     fn preview_buffer_evicted_on_close() {
         let mut h = crate::Stoat::test();

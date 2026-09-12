@@ -544,6 +544,27 @@ impl TextBuffer {
         self.recompute_dirty();
     }
 
+    /// Reload this buffer as if `text` were the file it was opened from.
+    ///
+    /// A read-only pane showing one file after another wants this rather than
+    /// an edit over the whole range. An edit files the replaced bytes in the
+    /// deleted rope and its own text in the op log, so a pane that previewed a
+    /// hundred files would hold two copies of each until it closed. This keeps
+    /// one visible fragment, an empty deleted rope, and a log holding no file
+    /// bytes, which is the shape a freshly opened buffer has.
+    ///
+    /// The version steps forward rather than restarting, because an editor and
+    /// a display map hold this same buffer and compare versions: a rewind to
+    /// zero would read to them as history they had already seen.
+    ///
+    /// Every undo point goes, which is what a reload means. `diff_map` comes
+    /// back `None` too, and a caller holding one has to rebuild it.
+    pub fn reset(&mut self, text: &str) {
+        let version = self.snapshot.version;
+        *self = Self::with_text(self.snapshot.buffer_id, text);
+        self.snapshot.version = version + 1;
+    }
+
     /// Replace `range` with `text`, recording the edit in the op log.
     ///
     /// The buffer holds LF whatever a caller hands it. A file's terminators
@@ -2261,6 +2282,55 @@ mod tests {
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    /// A reload keeps nothing of what it replaced, however many times it runs.
+    ///
+    /// An edit over the whole range would file each replaced file in the
+    /// deleted rope and its own text in the op log, so a preview pane would
+    /// carry every file it ever showed.
+    #[test]
+    fn a_reset_holds_only_the_text_it_was_given() {
+        let mut b = buf("first file\n");
+        let version = b.snapshot.version;
+
+        for text in ["second file, a longer one\n", "third\n", "fourth file\n"] {
+            b.reset(text);
+            check_invariants(&b, "after a reset");
+
+            assert_eq!(
+                b.snapshot.visible_text.to_string(),
+                text,
+                "the reload shows what it was given",
+            );
+            assert_eq!(
+                b.snapshot.deleted_text.len(),
+                0,
+                "and keeps none of what it replaced",
+            );
+            assert_eq!(
+                fragment_spans(&b)
+                    .iter()
+                    .filter(|(_, _, visible, _)| *visible)
+                    .count(),
+                1,
+                "on one visible fragment, as a freshly opened buffer has",
+            );
+            assert!(
+                b.ops.iter().all(|op| match op {
+                    BufferOp::Edit { text, .. } => text.is_empty(),
+                    _ => true,
+                }),
+                "and a log holding no file bytes",
+            );
+        }
+
+        // An editor and a display map hold this buffer and compare versions, so
+        // a rewind would read to them as history they had already seen.
+        assert!(
+            b.snapshot.version > version,
+            "and the version steps forward rather than restarting",
+        );
     }
 
     /// A save during an insert session lands its marker on the last edit, and
