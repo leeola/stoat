@@ -17,6 +17,17 @@ pub fn display_width(ch: char) -> u32 {
     ch.width().unwrap_or(0) as u32
 }
 
+/// Cells `ch` contributes to a summed width, a tab counting one.
+///
+/// A tab is one cell past a caller's tab-expansion cap, which is where a summed
+/// count is read. [`TextSummary::cells`] states the contract.
+fn cell_width(ch: char) -> u32 {
+    match ch {
+        '\t' => 1,
+        _ => display_width(ch),
+    }
+}
+
 #[cfg(not(test))]
 type Bitmap = u128;
 #[cfg(test)]
@@ -47,6 +58,12 @@ pub struct TextSummary {
     pub last_line_chars: u32,
     pub longest_row: u32,
     pub longest_row_chars: u32,
+    /// Display cells the text occupies, a tab counting one and a newline none.
+    ///
+    /// A tab's width is positional, so this is the width a tab has past a
+    /// caller's tab-expansion cap, where every tab is one cell. Below the cap a
+    /// caller expands tabs itself, and this does not answer for them.
+    pub cells: u32,
 }
 
 impl TextSummary {
@@ -62,9 +79,12 @@ impl TextSummary {
         let mut first_line_done = false;
         let mut lines_utf16_column = 0u32;
 
+        let mut cells = 0u32;
+
         for ch in text.chars() {
             len_utf16.0 += ch.len_utf16();
             chars += 1;
+            cells += cell_width(ch);
 
             if ch == '\n' {
                 if !first_line_done {
@@ -105,6 +125,7 @@ impl TextSummary {
             last_line_chars,
             longest_row,
             longest_row_chars,
+            cells,
         }
     }
 }
@@ -143,6 +164,7 @@ impl ContextLessSummary for TextSummary {
         self.lines += other.lines;
         self.lines_utf16 += other.lines_utf16;
         self.chars += other.chars;
+        self.cells += other.cells;
     }
 }
 
@@ -212,6 +234,20 @@ impl Chunk {
 
     fn len_utf16(&self) -> usize {
         self.chars_utf16.count_ones() as usize
+    }
+
+    /// Display cells this chunk's text occupies, per [`TextSummary::cells`].
+    ///
+    /// A byte marked `single_width` is one cell on its own, a tab is one, and a
+    /// newline is none, so a chunk those three cover is two popcounts. Anything
+    /// else needs the character to answer for its width, and only such a chunk
+    /// is decoded.
+    fn cells(&self) -> u32 {
+        let covered = self.single_width | self.tabs | self.newlines;
+        match covered == below(self.text.len()) {
+            true => self.single_width.count_ones() + self.tabs.count_ones(),
+            false => self.text.chars().map(cell_width).sum(),
+        }
     }
 
     /// Byte offset ending the line `start` falls on, exclusive of its newline.
@@ -403,6 +439,7 @@ impl Chunk {
             last_line_chars,
             longest_row,
             longest_row_chars,
+            cells: self.cells(),
         }
     }
 
@@ -678,6 +715,70 @@ impl Rope {
         };
 
         chunk_start_offset + line_start + chunk.line_column_capped(line_start, column) as usize
+    }
+
+    /// Display cells the text before `offset` occupies, per
+    /// [`TextSummary::cells`].
+    ///
+    /// One tree seek plus a walk of the chunk `offset` falls in, so the cost is
+    /// the tree's depth rather than the text's length. `offset` is clamped to
+    /// the rope's length, and one inside a character counts that character's
+    /// width as already passed.
+    pub fn offset_to_cells(&self, offset: usize) -> u32 {
+        let offset = offset.min(self.len());
+        let (start, _end, chunk) =
+            self.chunks
+                .find::<Dimensions<usize, Cells>, _>((), &offset, Bias::Right);
+        let Dimensions(chunk_start, cells_before, ()) = start;
+
+        let Some(chunk) = chunk else {
+            return cells_before.0;
+        };
+        let local = offset - chunk_start;
+        cells_before.0
+            + chunk.text.as_str()[..local]
+                .chars()
+                .map(cell_width)
+                .sum::<u32>()
+    }
+
+    /// The offset `cells` display cells into the text, per
+    /// [`TextSummary::cells`].
+    ///
+    /// A seek of the same cost as [`Self::offset_to_cells`], which it inverts
+    /// where an inverse exists. A count landing inside a wide character answers
+    /// that character's start under [`Bias::Left`] and its end under
+    /// [`Bias::Right`]. A count past the text answers the rope's length.
+    ///
+    /// A character of no width shares its predecessor's cell count, so several
+    /// offsets can answer one count and this returns the first of them. Round
+    /// tripping through [`Self::offset_to_cells`] therefore holds in cells but
+    /// not in offsets.
+    pub fn cells_to_offset(&self, cells: u32, bias: Bias) -> usize {
+        let (start, _end, chunk) =
+            self.chunks
+                .find::<Dimensions<Cells, usize>, _>((), &Cells(cells), Bias::Right);
+        let Dimensions(cells_before, chunk_start, ()) = start;
+
+        let Some(chunk) = chunk else {
+            return self.len();
+        };
+        let mut seen = cells_before.0;
+        for (local, ch) in chunk.text.as_str().char_indices() {
+            if seen >= cells {
+                return chunk_start + local;
+            }
+            let next = seen + cell_width(ch);
+            if next > cells {
+                // The count names a column inside this character.
+                return match bias {
+                    Bias::Left => chunk_start + local,
+                    Bias::Right => chunk_start + local + ch.len_utf8(),
+                };
+            }
+            seen = next;
+        }
+        chunk_start + chunk.text.len()
     }
 
     pub fn offset_to_point(&self, offset: usize) -> Point {
@@ -2468,6 +2569,23 @@ impl<'a> Dimension<'a, TextSummary> for usize {
     }
 }
 
+/// A rope position counted in display cells, per [`TextSummary::cells`].
+///
+/// Seeking by this is what lets a caller measure a span's width without
+/// walking it. See [`Rope::offset_to_cells`] and [`Rope::cells_to_offset`].
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Cells(pub u32);
+
+impl<'a> Dimension<'a, TextSummary> for Cells {
+    fn zero(_cx: ()) -> Self {
+        Cells(0)
+    }
+
+    fn add_summary(&mut self, summary: &'a TextSummary, _cx: ()) {
+        self.0 += summary.cells;
+    }
+}
+
 /// Whether the two scalars around `local` in `bytes` are both ASCII and break
 /// between, which decides a grapheme boundary without a cursor.
 ///
@@ -2686,6 +2804,92 @@ fn offset_to_point_in_chunk(newlines: Bitmap, remaining: usize) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The summed cell count against the walk it stands in for.
+    fn walked_cells(text: &str) -> u32 {
+        text.chars().map(cell_width).sum()
+    }
+
+    #[test]
+    fn cells_sum_across_chunks_and_through_wide_characters() {
+        // Long enough to span chunks, and each piece holds a character the
+        // popcount path cannot answer for: a wide one, a mark, and a tab.
+        let text = "ab\u{4f60}c\u{301}d\te".repeat(MAX_BASE);
+        let rope = Rope::from(text.as_str());
+
+        assert!(rope.chunks.iter().count() > 1, "the text spans chunks");
+        assert_eq!(
+            rope.summary().cells,
+            walked_cells(&text),
+            "the summed count is what walking the characters gives",
+        );
+    }
+
+    /// Stated as counts rather than against a walk, so the rule each character
+    /// is measured by is pinned and not only the agreement between two readings
+    /// of it.
+    #[test]
+    fn cells_measure_a_tab_a_newline_a_wide_character_and_a_mark() {
+        assert_eq!(
+            Rope::from("a\tb\nc").summary().cells,
+            4,
+            "three letters and a tab, the newline occupying no cell",
+        );
+        assert_eq!(
+            Rope::from("a\u{4f60}b").summary().cells,
+            4,
+            "two letters and a wide character occupying two cells",
+        );
+        assert_eq!(
+            Rope::from("e\u{301}x").summary().cells,
+            2,
+            "two letters, the combining mark occupying none",
+        );
+    }
+
+    #[test]
+    fn a_cell_seek_answers_what_a_walk_would() {
+        let text = "ab\u{4f60}c\u{301}d\te".repeat(MAX_BASE / 2);
+        let rope = Rope::from(text.as_str());
+
+        let mut cells = 0u32;
+        for (offset, ch) in text.char_indices() {
+            assert_eq!(
+                rope.offset_to_cells(offset),
+                cells,
+                "the cells before byte {offset}",
+            );
+            // Not the offset itself. A character of no width shares its
+            // predecessor's count, so a count can name several offsets.
+            assert_eq!(
+                rope.offset_to_cells(rope.cells_to_offset(cells, Bias::Left)),
+                cells,
+                "and seeking to {cells} cells lands at {cells} cells",
+            );
+            cells += cell_width(ch);
+        }
+        assert_eq!(
+            rope.offset_to_cells(text.len()),
+            rope.summary().cells,
+            "the whole text's cells",
+        );
+    }
+
+    #[test]
+    fn a_cell_seek_inside_a_wide_character_answers_by_bias() {
+        let rope = Rope::from("a\u{4f60}b");
+
+        assert_eq!(
+            rope.cells_to_offset(2, Bias::Left),
+            1,
+            "the left bias stays at the wide character's start",
+        );
+        assert_eq!(
+            rope.cells_to_offset(2, Bias::Right),
+            4,
+            "the right bias moves past it",
+        );
+    }
 
     #[test]
     fn to_string_empty() {
