@@ -313,6 +313,7 @@ fn summarize(line: &str) -> LineSummary {
             start_col: tail.start_col,
             len: (last.start_col + last.len).saturating_sub(tail.start_col),
             class: tail.class,
+            weight: 255,
         });
     }
 
@@ -335,6 +336,7 @@ fn close_run(
         start_col: from as u8,
         len: (col - from) as u8,
         class: class_of(&word, comment),
+        weight: 255,
     });
 }
 

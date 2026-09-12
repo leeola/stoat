@@ -864,11 +864,13 @@ mod tests {
                 start_col: 0,
                 len: 4,
                 class: 1,
+                weight: 255,
             },
             MinimapRun {
                 start_col: 6,
                 len: 2,
                 class: 2,
+                weight: 255,
             },
         ]];
         let (instances, rect) = build_strip(&strip(None), &summaries(content), metrics());
@@ -901,6 +903,7 @@ mod tests {
             start_col: 0,
             len: 1,
             class: 0,
+            weight: 255,
         }]];
         let view = Some(MinimapView {
             top_256: 0,
@@ -928,6 +931,7 @@ mod tests {
                 start_col: 0,
                 len: 4,
                 class: 1,
+                weight: 255,
             }]]),
         )]));
 
@@ -1138,6 +1142,7 @@ mod tests {
                     start_col: 0,
                     len: 4,
                     class: 1,
+                    weight: 255,
                 }]
             })
             .collect()
@@ -1248,6 +1253,7 @@ mod tests {
                 start_col: 0,
                 len: 40,
                 class: 2,
+                weight: 255,
             }]]),
         );
         pass.prepare(&device, &queue, &grid, &[], resolution);
@@ -1417,6 +1423,7 @@ mod tests {
             start_col: 2,
             len: 1,
             class: 0,
+            weight: 255,
         };
         let grid = red_grid(red_strip(1, 1, 1, 12), vec![vec![run]], None);
 
@@ -1503,6 +1510,7 @@ mod tests {
             start_col: 0,
             len: 12,
             class: 0,
+            weight: 255,
         }];
         let strip_at = |top_256: u32| {
             let view = MinimapView {
@@ -1577,6 +1585,7 @@ mod tests {
                 start_col: 0,
                 len,
                 class: 0,
+                weight: 255,
             }]
         };
         // Lines 1 and 2, so the rows read are clear of the thumb border along

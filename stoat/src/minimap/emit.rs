@@ -522,6 +522,7 @@ fn convert_minimap_runs(runs: crate::minimap::LineRuns) -> stoatty_protocol::com
             start_col: run.start_col,
             len: run.len,
             class: run.class,
+            weight: 255,
         })
         .collect()
 }

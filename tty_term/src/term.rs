@@ -5443,6 +5443,7 @@ mod tests {
             start_col: 0,
             len: 1,
             class: 1,
+            weight: 255,
         }])
     }
 
@@ -7974,6 +7975,7 @@ mod tests {
             start_col,
             len,
             class,
+            weight: 255,
         }
     }
 

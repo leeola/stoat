@@ -57,9 +57,13 @@
 /// had before the marks existed, since a terminal that predates them ignores
 /// those frames whole.
 ///
+/// Version 4 reads `minimap_runs`, whose runs carry the glyph weight under them
+/// beside the palette class. An emitter talking to an older terminal sends
+/// `minimap_lines` instead, whose runs are the flat blocks that terminal draws.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub mod command;
 pub mod detect;

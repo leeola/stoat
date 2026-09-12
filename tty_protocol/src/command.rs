@@ -25,7 +25,10 @@ use bar::decode_bar;
 use border::decode_border;
 use icon::decode_icon;
 use line_layout::decode_line_layout;
-use minimap::{decode_minimap, decode_minimap_drop, decode_minimap_lines, decode_minimap_view};
+use minimap::{
+    decode_minimap, decode_minimap_drop, decode_minimap_lines, decode_minimap_runs,
+    decode_minimap_view,
+};
 use panel::decode_panel;
 use polyline::decode_polyline;
 use pool::{
@@ -62,9 +65,9 @@ pub use icon::{encode_icon, encode_icon_into, IconCommand, IconKind};
 pub use line_layout::{encode_line_layout, encode_line_layout_into, LineLayoutCommand};
 pub use minimap::{
     encode_minimap, encode_minimap_drop, encode_minimap_drop_into, encode_minimap_into,
-    encode_minimap_lines, encode_minimap_lines_into, encode_minimap_view, encode_minimap_view_into,
-    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
-    MinimapViewCommand,
+    encode_minimap_lines, encode_minimap_lines_into, encode_minimap_runs_into, encode_minimap_view,
+    encode_minimap_view_into, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
+    MinimapRun, MinimapViewCommand,
 };
 pub use panel::{encode_panel, encode_panel_into, PanelCommand, PanelShadow};
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
@@ -442,6 +445,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "pool_drop" => decode_pool_drop(args).map(Command::PoolDrop),
         "minimap" => decode_minimap(args).map(Command::Minimap),
         "minimap_lines" => decode_minimap_lines(args).map(Command::MinimapLines),
+        "minimap_runs" => decode_minimap_runs(args).map(Command::MinimapLines),
         "minimap_view" => decode_minimap_view(args).map(Command::MinimapView),
         "minimap_drop" => decode_minimap_drop(args).map(Command::MinimapDrop),
         "window_open" => decode_window_open(args).map(Command::WindowOpen),
@@ -1073,6 +1077,7 @@ mod tests {
                         start_col: 0,
                         len: 4,
                         class: 2,
+                        weight: 255,
                     }]
                     .into(),
                     Vec::new().into(),

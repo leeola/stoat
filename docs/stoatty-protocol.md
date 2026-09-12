@@ -148,7 +148,8 @@ session control. "Head" is the fixed prefix of the first argument.
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `reposition` | P | 12 B | Re-anchors across an unbuffered gap |
 | `pool_drop` | P | 4 B | Retires a pool |
-| `minimap_lines` | P | 16 B header + lines | Paginates past the payload cap |
+| `minimap_lines` | P | 16 B header + lines | Paginates past the payload cap; runs of 3 B |
+| `minimap_runs` | P | 16 B header + lines | As `minimap_lines`, runs of 4 B carrying glyph weight |
 | `minimap_view` | P | 10 B | Moves the viewport thumb |
 | `minimap_drop` | P | 4 B | Retires a content store |
 | `window_open` | P | 8 B + title | Aux OS window as a second render target |

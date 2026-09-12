@@ -9,16 +9,23 @@ use crate::frame;
 use std::sync::Arc;
 
 /// A single colored run on one minimap line, `len` columns wide starting at
-/// `start_col`, drawn in palette entry `class`.
+/// `start_col`, drawn in palette entry `class` at opacity `weight`.
 ///
 /// Columns and lengths are minimap columns (0 to `max_columns`), and `class`
 /// indexes the strip's declared palette, so a run names color by class rather
 /// than carrying an rgb triple per run.
+///
+/// `weight` is how much ink the glyphs under the run put on the page: a run of
+/// capitals is heavier than one of punctuation. It is what separates a line of
+/// code from a line of underscores on a strip too small to draw letters. The
+/// three-byte `minimap_lines` form carries no weight and decodes as 255, which
+/// is the flat block every run drew before the field existed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct MinimapRun {
     pub start_col: u8,
     pub len: u8,
     pub class: u8,
+    pub weight: u8,
 }
 
 /// The run summary of one buffer line, its runs left to right.
@@ -167,16 +174,37 @@ pub fn encode_minimap_lines(command: &MinimapLinesCommand) -> Vec<u8> {
 ///
 /// A splice that fits emits exactly one frame, as does a pure deletion.
 pub fn encode_minimap_lines_into(out: &mut Vec<u8>, command: &MinimapLinesCommand) {
+    encode_splice_into(out, command, "minimap_lines", 3);
+}
+
+/// Encode a [`MinimapLinesCommand`] as `Gstoatty;minimap_runs` frames, each run
+/// carrying its glyph weight.
+///
+/// The same splice as [`encode_minimap_lines_into`] under a name a terminal that
+/// predates the weight does not know, so such a terminal drops the frame rather
+/// than reading four-byte runs as three-byte ones. An emitter picks between the
+/// two by the version the handshake reported.
+pub fn encode_minimap_runs_into(out: &mut Vec<u8>, command: &MinimapLinesCommand) {
+    encode_splice_into(out, command, "minimap_runs", 4);
+}
+
+/// Encode `command` as `name` frames whose runs take `run_bytes` each.
+fn encode_splice_into(
+    out: &mut Vec<u8>,
+    command: &MinimapLinesCommand,
+    name: &str,
+    run_bytes: usize,
+) {
     let budget = MINIMAP_LINES_RAW_BUDGET - MINIMAP_LINES_HEADER;
     let mut emitted = 0;
     loop {
         let mut used = 0;
         let mut take = 0;
         for line in &command.lines[emitted..] {
-            let cost = 1 + 3 * line.len();
+            let cost = 1 + run_bytes * line.len();
             // Always take one line, so a hypothetical line past the whole
             // budget still advances rather than looping forever. A line maxes
-            // out at 1 + 3 * 255 bytes, far under it.
+            // out at 1 + 4 * 255 bytes, far under it.
             if take > 0 && used + cost > budget {
                 break;
             }
@@ -186,6 +214,8 @@ pub fn encode_minimap_lines_into(out: &mut Vec<u8>, command: &MinimapLinesComman
 
         write_minimap_lines_frame(
             out,
+            name,
+            run_bytes,
             command.content_id,
             command.start + emitted as u32,
             if emitted == 0 { command.removed } else { 0 },
@@ -199,15 +229,17 @@ pub fn encode_minimap_lines_into(out: &mut Vec<u8>, command: &MinimapLinesComman
     }
 }
 
-/// Append one `Gstoatty;minimap_lines` frame splicing `lines` in at `start`.
+/// Append one `Gstoatty;<name>` frame splicing `lines` in at `start`.
 fn write_minimap_lines_frame(
     out: &mut Vec<u8>,
+    name: &str,
+    run_bytes: usize,
     content_id: u32,
     start: u32,
     removed: u32,
     lines: &[LineSummary],
 ) {
-    frame::begin(out, "minimap_lines");
+    frame::begin(out, name);
     frame::push_arg(out, |w| {
         w.write_all(&content_id.to_be_bytes())?;
         w.write_all(&start.to_be_bytes())?;
@@ -217,6 +249,9 @@ fn write_minimap_lines_frame(
             w.write_all(&[line.len() as u8])?;
             for run in line.iter() {
                 w.write_all(&[run.start_col, run.len, run.class])?;
+                if run_bytes == 4 {
+                    w.write_all(&[run.weight])?;
+                }
             }
         }
         Ok(())
@@ -290,6 +325,18 @@ pub(super) fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
 }
 
 pub(super) fn decode_minimap_lines(args: &[Vec<u8>]) -> Option<MinimapLinesCommand> {
+    decode_splice(args, 3)
+}
+
+pub(super) fn decode_minimap_runs(args: &[Vec<u8>]) -> Option<MinimapLinesCommand> {
+    decode_splice(args, 4)
+}
+
+/// Decode a splice whose runs take `run_bytes` each.
+///
+/// At three bytes the run carries no weight, and 255 is what it takes: the flat
+/// block the strip drew before the field existed.
+fn decode_splice(args: &[Vec<u8>], run_bytes: usize) -> Option<MinimapLinesCommand> {
     let arg = args.first()?;
     let header: &[u8; 16] = arg.get(..16)?.try_into().ok()?;
     let content_id = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
@@ -304,16 +351,15 @@ pub(super) fn decode_minimap_lines(args: &[Vec<u8>]) -> Option<MinimapLinesComma
     for _ in 0..inserted {
         let run_count = *arg.get(cursor)? as usize;
         cursor += 1;
-        let end = cursor.checked_add(run_count.checked_mul(3)?)?;
-        let run_bytes = arg.get(cursor..end)?;
-        let runs = run_bytes
-            .as_chunks::<3>()
-            .0
-            .iter()
+        let end = cursor.checked_add(run_count.checked_mul(run_bytes)?)?;
+        let packed = arg.get(cursor..end)?;
+        let runs = packed
+            .chunks_exact(run_bytes)
             .map(|run| MinimapRun {
                 start_col: run[0],
                 len: run[1],
                 class: run[2],
+                weight: if run_bytes == 4 { run[3] } else { 255 },
             })
             .collect();
         lines.push(runs);
@@ -446,17 +492,20 @@ mod tests {
                         start_col: 0,
                         len: 4,
                         class: 2,
+                        weight: 255,
                     },
                     MinimapRun {
                         start_col: 6,
                         len: 3,
                         class: 5,
+                        weight: 255,
                     },
                 ],
                 vec![MinimapRun {
                     start_col: 2,
                     len: 8,
                     class: 1,
+                    weight: 255,
                 }],
             ]),
         };
@@ -464,6 +513,64 @@ mod tests {
         assert_eq!(
             decode(&encode_minimap_lines(&command)),
             Some(Command::MinimapLines(command))
+        );
+    }
+
+    /// A weight rides the wire only under `minimap_runs`, whose runs are four
+    /// bytes. A terminal that predates the field never sees the frame at all,
+    /// so the three-byte form has no weight to carry and takes the flat 255.
+    #[test]
+    fn minimap_runs_carry_the_glyph_weight() {
+        let weighted = |weight| MinimapLinesCommand {
+            content_id: 9,
+            start: 3,
+            removed: 2,
+            lines: summaries(vec![vec![
+                MinimapRun {
+                    start_col: 0,
+                    len: 4,
+                    class: 2,
+                    weight,
+                },
+                MinimapRun {
+                    start_col: 6,
+                    len: 3,
+                    class: 5,
+                    weight: 110,
+                },
+            ]]),
+        };
+
+        let mut bytes = Vec::new();
+        encode_minimap_runs_into(&mut bytes, &weighted(190));
+        assert_eq!(
+            decode(&bytes),
+            Some(Command::MinimapLines(weighted(190))),
+            "a four-byte run keeps the weight it was given"
+        );
+
+        // The three-byte encoder drops the weight, so what comes back is the
+        // same splice with every run at full strength.
+        assert_eq!(
+            decode(&encode_minimap_lines(&weighted(190))),
+            Some(Command::MinimapLines(MinimapLinesCommand {
+                lines: summaries(vec![vec![
+                    MinimapRun {
+                        start_col: 0,
+                        len: 4,
+                        class: 2,
+                        weight: 255,
+                    },
+                    MinimapRun {
+                        start_col: 6,
+                        len: 3,
+                        class: 5,
+                        weight: 255,
+                    },
+                ]]),
+                ..weighted(190)
+            })),
+            "the older form decodes as the flat blocks it draws"
         );
     }
 
@@ -502,6 +609,7 @@ mod tests {
                             start_col: (r * 2) as u8,
                             len: (i % 7 + 1) as u8,
                             class: (r % 4) as u8,
+                            weight: 255,
                         })
                         .collect()
                 })
