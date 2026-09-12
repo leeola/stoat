@@ -19,6 +19,7 @@ const EMITTERS: &[(&str, &str)] = &[
     ("example_gutter_app", "stoat_widgets"),
     ("example_minimap_app", "stoat_widgets"),
     ("example_panel_app", "stoat_widgets"),
+    ("example_polyline_app", "stoat_widgets"),
     ("example_panes_app", "stoat_widgets"),
     ("example_scale_app", "stoat_widgets"),
     ("example_sketch_app", "stoat_widgets"),
