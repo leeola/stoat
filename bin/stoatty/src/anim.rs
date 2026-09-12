@@ -852,6 +852,14 @@ struct SketchClock {
     /// clock driven by each declaration restarts on every frame and the stroke
     /// never finishes.
     latched: SketchTiming,
+    /// The reveal this phase started from: zero for a first-seen enter, one for
+    /// a first-seen exit, and wherever the pen stood for a phase that flipped.
+    ///
+    /// A phase that began partway through the one before it covers the distance
+    /// that is left over its own duration. Starting an exit at one instead pops
+    /// a half-drawn mark to whole on the frame the exit begins, which a reader
+    /// stepping on mid-draw sees as a flash.
+    origin: f32,
 }
 
 /// Every live mark's clock, keyed by the id the emitter chose.
@@ -900,21 +908,23 @@ pub(crate) fn advance_sketches(
                 started: now,
                 last_seen: now,
                 latched: timing,
+                origin: phase_origin(timing.phase),
             });
 
         if clock.latched.phase != timing.phase {
+            // The new phase carries on from where the pen stands, so a mark
+            // half drawn when its exit begins wipes from half rather than
+            // flashing whole first.
+            let turned = reveal_at(clock, now);
+            clock.origin = turned;
             clock.started = now;
             clock.latched = timing;
         }
         clock.last_seen = now;
 
-        let elapsed = now.saturating_duration_since(clock.started);
-        let drawn = sketch_progress(elapsed, clock.latched);
-        out.push(match clock.latched.phase {
-            SketchPhase::Enter => drawn,
-            SketchPhase::Exit => 1.0 - drawn,
-        });
+        out.push(reveal_at(clock, now));
 
+        let elapsed = now.saturating_duration_since(clock.started);
         let delay = Duration::from_millis(u64::from(clock.latched.delay_ms));
         let span = delay + Duration::from_millis(u64::from(clock.latched.duration_ms));
         if elapsed < delay {
@@ -928,6 +938,29 @@ pub(crate) fn advance_sketches(
         .0
         .retain(|_, clock| now.saturating_duration_since(clock.last_seen) < SKETCH_GRACE);
     step
+}
+
+/// The reveal a phase starts a mark at when nothing preceded it.
+fn phase_origin(phase: SketchPhase) -> f32 {
+    match phase {
+        SketchPhase::Enter => 0.0,
+        SketchPhase::Exit => 1.0,
+    }
+}
+
+/// How much of `clock`'s mark is revealed at `now`.
+///
+/// The phase covers the distance between its origin and its target over the
+/// latched duration, so a phase that began partway through the one before it
+/// runs from there rather than from the end of the stroke. At an origin of zero
+/// for an enter, or one for an exit, this is the eased fraction itself.
+fn reveal_at(clock: &SketchClock, now: Instant) -> f32 {
+    let elapsed = now.saturating_duration_since(clock.started);
+    let drawn = sketch_progress(elapsed, clock.latched);
+    match clock.latched.phase {
+        SketchPhase::Enter => clock.origin + (1.0 - clock.origin) * drawn,
+        SketchPhase::Exit => clock.origin * (1.0 - drawn),
+    }
 }
 
 /// How much of a mark is drawn after `elapsed`, under its latched timing.
@@ -1702,35 +1735,52 @@ mod tests {
         assert!(step.animating, "and still mid-draw");
     }
 
-    /// Enter to exit is a new animation rather than the same one continuing, so
-    /// it restarts and runs the other way.
+    /// Enter to exit is a new animation rather than the same one continuing,
+    /// but it runs from where the pen stands rather than from the end of the
+    /// stroke. A reader who steps on mid-draw otherwise sees every unfinished
+    /// mark flash complete before it wipes.
     #[test]
-    fn a_phase_change_restarts_the_stroke_backwards() {
-        let mut clocks = SketchClocks::default();
-        let mut out = Vec::new();
+    fn a_phase_change_reverses_from_where_the_pen_is() {
         let start = Instant::now();
+        let at = |clocks: &mut SketchClocks, out: &mut Vec<f32>, ms: u64, phase| {
+            advance_sketches(
+                clocks,
+                &[mark(1, timing(0, 400, phase))],
+                start + Duration::from_millis(ms),
+                out,
+            );
+            out[0]
+        };
 
-        advance_sketches(
-            &mut clocks,
-            &[mark(1, timing(0, 400, SketchPhase::Enter))],
-            start,
-            &mut out,
+        let (mut clocks, mut out) = (SketchClocks::default(), Vec::new());
+        at(&mut clocks, &mut out, 0, SketchPhase::Enter);
+        let whole = at(&mut clocks, &mut out, 400, SketchPhase::Exit);
+        let wiping = at(&mut clocks, &mut out, 600, SketchPhase::Exit);
+        assert_eq!(
+            (whole, wiping),
+            (1.0, 0.5),
+            "a finished enter exits from whole and wipes itself off",
         );
-        advance_sketches(
-            &mut clocks,
-            &[mark(1, timing(0, 400, SketchPhase::Exit))],
-            start + Duration::from_millis(400),
-            &mut out,
-        );
-        assert_eq!(out, [1.0], "an exit starts whole");
 
-        advance_sketches(
-            &mut clocks,
-            &[mark(1, timing(0, 400, SketchPhase::Exit))],
-            start + Duration::from_millis(600),
-            &mut out,
+        let (mut clocks, mut out) = (SketchClocks::default(), Vec::new());
+        at(&mut clocks, &mut out, 0, SketchPhase::Enter);
+        let turned = at(&mut clocks, &mut out, 200, SketchPhase::Exit);
+        let later = at(&mut clocks, &mut out, 400, SketchPhase::Exit);
+        assert_eq!(
+            (turned, later),
+            (0.5, 0.25),
+            "a half-drawn enter exits from half, over its own duration",
         );
-        assert_eq!(out, [0.5], "and wipes itself off");
+
+        let (mut clocks, mut out) = (SketchClocks::default(), Vec::new());
+        at(&mut clocks, &mut out, 0, SketchPhase::Exit);
+        let turned = at(&mut clocks, &mut out, 200, SketchPhase::Enter);
+        let later = at(&mut clocks, &mut out, 400, SketchPhase::Enter);
+        assert_eq!(
+            (turned, later),
+            (0.5, 0.75),
+            "and a half-wiped exit draws back on from half",
+        );
     }
 
     /// A pty read can split a reset from the re-declaration that follows it, so
