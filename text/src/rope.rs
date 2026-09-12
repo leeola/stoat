@@ -239,15 +239,44 @@ impl Chunk {
     /// Display cells this chunk's text occupies, per [`TextSummary::cells`].
     ///
     /// A byte marked `single_width` is one cell on its own, a tab is one, and a
-    /// newline is none, so a chunk those three cover is two popcounts. Anything
-    /// else needs the character to answer for its width, and only such a chunk
-    /// is decoded.
+    /// newline is none, so those three between them answer for most text
+    /// outright. What they leave is every character start none of them
+    /// decides: a multi-byte lead byte, or an ASCII control byte, which is
+    /// worth no cells but has to be asked rather than assumed.
+    ///
+    /// Three cases, by how much of the chunk that mask holds:
+    ///
+    /// - Nothing: two popcounts, which is a chunk of plain ASCII text. That case is tested for
+    ///   before the mask is built, so it pays nothing for the other two.
+    /// - A quarter of the bytes or more: one walk of the characters. Every character needs its own
+    ///   width there, and a walk beats a seek per character. Text in a wide script lands here.
+    /// - Anything between: one seek per undecided start. Source text carrying an occasional
+    ///   accented letter is this case, and it would otherwise pay a whole-chunk decode for one
+    ///   character.
     fn cells(&self) -> u32 {
         let covered = self.single_width | self.tabs | self.newlines;
-        match covered == below(self.text.len()) {
-            true => self.single_width.count_ones() + self.tabs.count_ones(),
-            false => self.text.chars().map(cell_width).sum(),
+        if covered == below(self.text.len()) {
+            return self.single_width.count_ones() + self.tabs.count_ones();
         }
+
+        // Derived only past the test above, so a chunk of plain ASCII pays
+        // nothing for it. A continuation byte starts no character and is in
+        // none of the three, so it never reaches the mask.
+        let undecided = self.chars & !covered;
+        if undecided.count_ones() as usize * 4 >= self.text.len() {
+            return self.text.chars().map(cell_width).sum();
+        }
+
+        let mut cells = self.single_width.count_ones() + self.tabs.count_ones();
+        let mut bits = undecided;
+        while bits != 0 {
+            let at = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            if let Some(ch) = self.text.as_str()[at..].chars().next() {
+                cells += cell_width(ch);
+            }
+        }
+        cells
     }
 
     /// Byte offset ending the line `start` falls on, exclusive of its newline.
@@ -2815,6 +2844,36 @@ mod tests {
     /// The summed cell count against the walk it stands in for.
     fn walked_cells(text: &str) -> u32 {
         text.chars().map(cell_width).sum()
+    }
+
+    /// Each of the three paths answers what the character walk answers.
+    ///
+    /// The mask of undecided starts picks between them, so a chunk that lands
+    /// in the wrong one is a wrong count rather than a slow one.
+    #[test]
+    fn cells_agree_with_the_walk_on_every_path() {
+        // Plain ASCII: nothing undecided, so two popcounts answer.
+        let ascii = "let value = compute(index) + offset;\n".repeat(8);
+        // One two-byte character among ASCII: the seek-per-start case, which a
+        // whole-chunk decode is what this exists to avoid.
+        let sprinkled = "caf\u{e9} au lait, served warm and plain\n".repeat(8);
+        // Mostly multi-byte: a quarter of the bytes or more start a character
+        // needing its own width, so the walk answers.
+        let wide = "\u{4f60}\u{597d}\u{4e16}\u{754c}\n".repeat(8);
+        // ASCII control bytes, which are undecided starts worth no cells.
+        let controls = "a\u{7}b\u{1b}c\u{0}d\u{7f}e\n".repeat(8);
+        // A tab and a newline beside an undecided start, so the decided
+        // popcount and the seek have to agree on the same chunk.
+        let mixed = "\tone\u{2014}two\n\tthree\u{7}four\n".repeat(8);
+
+        for text in [&ascii, &sprinkled, &wide, &controls, &mixed] {
+            let rope = Rope::from(text.as_str());
+            assert_eq!(
+                rope.summary().cells,
+                walked_cells(text),
+                "the summed count differs from the walk on {text:?}",
+            );
+        }
     }
 
     #[test]
