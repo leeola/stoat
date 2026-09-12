@@ -22,9 +22,16 @@
 //! stoatty the pooled lane is withheld entirely rather than ignored, because a
 //! page's cells stream outside the APC wrapper and print over the screen.
 //!
-//! Runs in raw mode with mouse reporting on. Ctrl-F / Ctrl-B page the active pool
-//! a whole region at a time; `o` toggles the overlay; `q` or Ctrl-C quits. Run as
-//! the PTY shell by the `smooth_scroll_pages` example.
+//! The cursor rides the active pool. `Gstoatty;pool_cursor` names the pool and
+//! the document row it sits on, and the terminal draws it from that frame while
+//! the pool eases, so the cursor glides with the text rather than holding its
+//! screen position. `x` withholds the frame, which leaves the plain VT cursor
+//! resting where the last paint put it.
+//!
+//! Runs in raw mode with mouse reporting on. Ctrl-F / Ctrl-B page the active
+//! pool a whole region at a time; `j` and `k` move its cursor; `o` toggles the
+//! overlay; `x` toggles the cursor anchor; `q` or Ctrl-C quits. Run as the PTY
+//! shell by the `smooth_scroll_pages` example.
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
@@ -32,7 +39,7 @@ use stoat_widgets::{
     pool::{self, SmoothScrollState},
     ApcSession, SessionOptions,
 };
-use stoatty_protocol::command::PoolRegionCommand;
+use stoatty_protocol::command::{encode_pool_cursor_into, PoolCursorCommand, PoolRegionCommand};
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
 /// opens.
@@ -95,6 +102,9 @@ struct Pool {
     label: &'static str,
     /// Scroll position in document pages; a page is `region.height` rows.
     position: f32,
+    /// Document row the cursor sits on, which the anchor frame names and the
+    /// live paint rests the VT cursor at.
+    cursor_line: usize,
 }
 
 impl Pool {
@@ -120,6 +130,7 @@ impl Pool {
             bg,
             label,
             position: 0.0,
+            cursor_line: 0,
         }
     }
 
@@ -135,6 +146,28 @@ impl Pool {
         self.position = (self.position + pages).max(0.0);
     }
 
+    /// Move the cursor by `lines`, bringing the viewport with it when it leaves
+    /// the visible rows.
+    ///
+    /// Scrolling by one step rather than jumping the page is what puts the
+    /// glide and the cursor in motion together, which is the thing the anchor
+    /// frame exists to keep aligned.
+    fn move_cursor(&mut self, lines: isize) {
+        self.cursor_line = self.cursor_line.saturating_add_signed(lines);
+
+        let top = self.top_line();
+        if self.cursor_line < top {
+            self.scroll_by(-self.step());
+        } else if self.cursor_line >= top + self.rows() {
+            self.scroll_by(self.step());
+        }
+    }
+
+    /// The first document row the viewport shows.
+    fn top_line(&self) -> usize {
+        (self.position * self.rows() as f32).floor() as usize
+    }
+
     /// Paint the visible rows into the live grid, and on a stoatty declare the
     /// region, refill the buffered window, and report the scroll target.
     ///
@@ -146,7 +179,7 @@ impl Pool {
     /// The document never changes, so the content version is a constant, and the
     /// demo emits only on an event rather than every frame, so it does not hold
     /// while idle.
-    fn emit(&self, out: &mut Vec<u8>, state: &mut SmoothScrollState, live: bool) {
+    fn emit(&self, out: &mut Vec<u8>, state: &mut SmoothScrollState, live: bool, anchor: bool) {
         self.paint_live(out);
         if !live {
             return;
@@ -161,19 +194,47 @@ impl Pool {
             false,
             |page| self.page_bytes(page),
         );
+
+        // The frame names a document row, so the terminal keeps the cursor on
+        // its line through the ease rather than at the screen position the last
+        // paint left it at. Withheld under `x`, which is what makes the two
+        // behaviors comparable.
+        if anchor {
+            encode_pool_cursor_into(
+                out,
+                &PoolCursorCommand {
+                    pool: self.id,
+                    row: self.cursor_line as u64,
+                    col: self.region.left + 1,
+                },
+            );
+        }
     }
 
     /// Paint the document rows currently under `position` into the live grid's
     /// region, the "live screen" the renderer shows whenever the glide rests and
     /// the degradation any non-stoatty terminal renders.
+    ///
+    /// The cursor rests on its own line when that line is on the page, so a host
+    /// that draws no anchor frame still shows it somewhere sensible.
     fn paint_live(&self, out: &mut Vec<u8>) {
-        let start = (self.position * self.rows() as f32).floor() as usize;
+        let start = self.top_line();
         for r in 0..self.rows() {
             let (fg, text) = document_line(self.label, start + r);
             let row = self.region.top + 1 + r as u16;
             let col = self.region.left + 1;
             let _ = write!(out, "\x1b[{row};{col}H");
             write_line(out, fg, self.bg, self.region.width as usize, &text);
+        }
+
+        if let Some(offset) = self
+            .cursor_line
+            .checked_sub(start)
+            .filter(|r| *r < self.rows())
+        {
+            let row = self.region.top + 1 + offset as u16;
+            let col = self.region.left + 1;
+            let _ = write!(out, "\x1b[{row};{col}H");
         }
     }
 
@@ -194,13 +255,14 @@ impl Pool {
 }
 
 fn main() {
-    // The session holds raw mode, mouse reporting, and the hidden cursor for as
-    // long as it lives, and gives all three back on the way out of main --
-    // including the way out an `expect` below takes, which its panic hook covers.
+    // The session holds raw mode and mouse reporting for as long as it lives,
+    // and gives both back on the way out of main -- including the way out an
+    // `expect` below takes, which its panic hook covers.
     let session = ApcSession::new(SessionOptions {
         raw_mode: true,
         mouse_capture: true,
-        hide_cursor: true,
+        // Shown, because the cursor is the thing the anchor frame moves.
+        hide_cursor: false,
         ..SessionOptions::default()
     });
 
@@ -233,12 +295,15 @@ fn run(live: bool) {
     );
     let mut overlay: Option<Pool> = None;
     let mut active = LEFT_POOL;
+    // Withheld under `x`, so the plain VT cursor holding its screen position
+    // through a glide reads against the anchored one.
+    let mut anchor = true;
     let mut state = SmoothScrollState::default();
 
     let mut out = Vec::new();
     write_chrome(&mut out);
-    left.emit(&mut out, &mut state, live);
-    right.emit(&mut out, &mut state, live);
+    left.emit(&mut out, &mut state, live, anchor && active == LEFT_POOL);
+    right.emit(&mut out, &mut state, live, anchor && active == RIGHT_POOL);
     flush(&mut out);
 
     loop {
@@ -260,6 +325,17 @@ fn run(live: bool) {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if ctrl => break,
                     KeyCode::Char('o') => toggle_overlay(&mut overlay, &mut active, &mut out),
+                    KeyCode::Char('x') => anchor = !anchor,
+                    KeyCode::Char('j') => {
+                        with_active(active, &mut left, &mut right, &mut overlay, |pool| {
+                            pool.move_cursor(1)
+                        });
+                    },
+                    KeyCode::Char('k') => {
+                        with_active(active, &mut left, &mut right, &mut overlay, |pool| {
+                            pool.move_cursor(-1)
+                        });
+                    },
                     KeyCode::Char('f') if ctrl => {
                         with_active(active, &mut left, &mut right, &mut overlay, |pool| {
                             pool.scroll_by(PAGE_STEP)
@@ -276,10 +352,10 @@ fn run(live: bool) {
             _ => continue,
         }
 
-        left.emit(&mut out, &mut state, live);
-        right.emit(&mut out, &mut state, live);
+        left.emit(&mut out, &mut state, live, anchor && active == LEFT_POOL);
+        right.emit(&mut out, &mut state, live, anchor && active == RIGHT_POOL);
         if let Some(overlay) = overlay.as_ref() {
-            overlay.emit(&mut out, &mut state, live);
+            overlay.emit(&mut out, &mut state, live, anchor && active == OVERLAY_POOL);
         }
 
         // A surface is retired by leaving its id out of the declared set, so a
@@ -365,7 +441,7 @@ fn write_chrome(out: &mut Vec<u8>) {
         "\x1b[7;38;2;{};{};{}m",
         CHROME_FG[0], CHROME_FG[1], CHROME_FG[2],
     );
-    let title = " stoatty multi-pool smooth scroll  (wheel a pane, o = overlay, q quits) ";
+    let title = " stoatty multi-pool smooth scroll  (wheel, j/k cursor, x anchor, o overlay, q) ";
     let _ = write!(out, "{title:<COLS$}");
     out.extend_from_slice(b"\x1b[0m");
 
@@ -387,7 +463,7 @@ fn write_chrome(out: &mut Vec<u8>) {
         "\x1b[{};1H\x1b[7;38;2;{};{};{}m",
         VIEWPORT_H, CHROME_FG[0], CHROME_FG[1], CHROME_FG[2],
     );
-    let footer = " left + right panes scroll independently; the overlay floats on top ";
+    let footer = " the cursor rides the active pool through its glide; x withholds that anchor ";
     let _ = write!(out, "{footer:<COLS$}");
     out.extend_from_slice(b"\x1b[0m");
 }
