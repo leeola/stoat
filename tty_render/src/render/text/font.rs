@@ -193,6 +193,11 @@ pub(super) struct ShapeScratch {
     line: Option<ShapeLine>,
     buffer: ShapeBuffer,
     layout: Vec<LayoutLine>,
+    /// Characters [`shape_run`] has laid out through this scratch. A cache
+    /// holding a run says nothing about whether the shaper built it, since a
+    /// caller may fill an entry from per-character keys instead.
+    #[cfg(test)]
+    shaped_chars: usize,
 }
 
 /// Shape `text` as one run with `family`, returning each glyph's source byte
@@ -211,6 +216,11 @@ pub(super) fn shape_run(
     metrics: CellMetrics,
     family: Family<'_>,
 ) -> Vec<(usize, CacheKey)> {
+    #[cfg(test)]
+    {
+        scratch.shaped_chars += text.chars().count();
+    }
+
     let attrs = AttrsList::new(&Attrs::new().family(family));
     let line = match &mut scratch.line {
         Some(line) => {
@@ -274,19 +284,23 @@ const TAB_WIDTH: u16 = 8;
 /// evicts rather than growing.
 const RUN_SHAPE_CACHE_CAP: usize = 4096;
 
-/// Shape `text` as one run, reusing an identical run's glyphs from `cache`.
+/// The glyphs `text` lays out as one run, from `cache` or from `miss`.
 ///
-/// [`shape_run`] rebuilds a cosmic-text buffer and reshapes from scratch, the
-/// dominant per-frame cost when a ligature row is repainted. The run text alone
-/// keys the result, since runs group only same-scale primary-covered cells in
-/// the constant `family`. On a miss the run is shaped and stored, evicting a
-/// run nothing has asked for lately once the cache is full.
+/// The run text alone keys the result, since runs group only same-scale
+/// primary-covered cells in one family. On a miss `miss` builds the glyphs and
+/// they are stored, evicting a run nothing has asked for lately once the cache
+/// is full.
+///
+/// `miss` decides how to build them, because the two ways cost very different
+/// things. A run holding something the face reshapes has to go through
+/// [`shape_run`], which rebuilds a cosmic-text buffer. A run holding nothing it
+/// reshapes lays out as its characters do, which a per-character cache answers
+/// far more cheaply. Either way the answer is cached, so a hit costs one hash
+/// and neither.
 pub(super) fn shape_run_cached<'a>(
     cache: &'a mut RunShapeCache,
-    font_system: &mut FontSystem,
     text: &str,
-    metrics: CellMetrics,
-    family: Family<'_>,
+    miss: impl FnOnce(&mut ShapeScratch) -> Vec<(usize, CacheKey)>,
 ) -> &'a [(usize, CacheKey)] {
     // The slot copies out, so the lookup's borrow ends before the miss path
     // needs the cache mutably. A map holding the glyphs themselves cannot do that,
@@ -296,8 +310,8 @@ pub(super) fn shape_run_cached<'a>(
         return &cache.runs[slot].glyphs;
     }
 
-    let shaped = shape_run(&mut cache.scratch, font_system, text, metrics, family);
-    let slot = cache.store(text, shaped);
+    let glyphs = miss(&mut cache.scratch);
+    let slot = cache.store(text, glyphs);
     &cache.runs[slot].glyphs
 }
 
@@ -335,18 +349,6 @@ pub struct RunShapeCache {
     hand: usize,
 }
 
-impl RunShapeCache {
-    /// Whether `text` is already shaped here.
-    ///
-    /// For a caller choosing between this cache and shaping each character
-    /// against its own. A hit here costs one hash of the whole run, where the
-    /// per-character path costs one per character, so the per-character path
-    /// only wins where this answers false.
-    pub(super) fn holds(&self, text: &str) -> bool {
-        self.at.contains_key(text)
-    }
-}
-
 #[cfg(test)]
 impl RunShapeCache {
     /// Every run text held, sorted, so a caller can assert what was shaped
@@ -362,10 +364,11 @@ impl RunShapeCache {
         self.at.get(text).map(|&slot| &self.runs[slot].glyphs[..])
     }
 
-    /// Characters shaped to fill this cache, which is the work a screen of text
-    /// costs: every distinct run is shaped exactly once.
+    /// Characters the shaper laid out to fill this cache, which is the work a
+    /// screen of text costs. A run whose entry was built from per-character keys
+    /// counts nothing, since the shaper never saw it.
     pub(super) fn shaped_chars(&self) -> usize {
-        self.at.keys().map(|key| key.chars().count()).sum()
+        self.scratch.shaped_chars
     }
 }
 
@@ -375,6 +378,10 @@ impl RunShapeCache {
         self.at.clear();
         self.runs.clear();
         self.hand = 0;
+        #[cfg(test)]
+        {
+            self.scratch.shaped_chars = 0;
+        }
     }
 
     /// Store `glyphs` under `text` and return the slot holding them.
@@ -691,7 +698,12 @@ pub fn shape_words_cached(
 
     text.split(' ')
         .filter(|word| !word.is_empty())
-        .map(|word| shape_run_cached(cache, font_system, word, metrics, family).len())
+        .map(|word| {
+            shape_run_cached(cache, word, |scratch| {
+                shape_run(scratch, font_system, word, metrics, family)
+            })
+            .len()
+        })
         .sum()
 }
 
@@ -1223,7 +1235,10 @@ mod tests {
         let jbm = Family::Name("JetBrains Mono");
 
         let mut cache = RunShapeCache::default();
-        let fresh = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm).to_vec();
+        let fresh = shape_run_cached(&mut cache, "==", |scratch| {
+            shape_run(scratch, &mut font_system, "==", metrics, jbm)
+        })
+        .to_vec();
         assert_eq!(
             fresh,
             shape_run(
@@ -1251,7 +1266,9 @@ mod tests {
             jbm,
         );
         cache.runs[cache.at["=="]].glyphs = poison.clone();
-        let hit = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm);
+        let hit = shape_run_cached(&mut cache, "==", |scratch| {
+            shape_run(scratch, &mut font_system, "==", metrics, jbm)
+        });
         assert_eq!(
             hit,
             poison.as_slice(),
@@ -1286,7 +1303,9 @@ mod tests {
 
         // Ask for one run near the hand's start and leave its neighbour alone,
         // so the next sweep meets both and has to choose between them.
-        shape_run_cached(&mut cache, &mut font_system, "run0", metrics, jbm);
+        shape_run_cached(&mut cache, "run0", |scratch| {
+            shape_run(scratch, &mut font_system, "run0", metrics, jbm)
+        });
 
         cache.store("first new run", Vec::new());
         assert!(

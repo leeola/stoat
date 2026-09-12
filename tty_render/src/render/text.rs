@@ -3475,36 +3475,44 @@ impl TextPass {
             let (fg, _) = cell.draw_colors();
             font::run_text_and_columns_into(&run, &mut run_text, &mut run_cols);
 
-            // No lookup the face turns on reaches any of these glyphs, so
-            // shaping the run returns exactly what shaping each cell alone
-            // returns, and the per-cell path answers that from its own cache.
-            //
-            // The cache is asked first, and the cells only where it misses. A
-            // hit costs one hash of the whole run, where testing the cells
-            // costs a charmap lookup and a search each, so a run the cache
-            // already holds must not pay for the question at all.
-            if !self.run_shape_cache.holds(&run_text)
-                && !run.iter().any(|&(_, ch)| (shaping.reshapes)(ch))
-            {
-                for &(glyph_col, ch) in &run {
-                    let mut one = cell;
-                    one.ch = ch;
-                    if let Some(glyph) = self.single_glyph(device, queue, &one, row, glyph_col, 1.0)
-                    {
-                        pending.push(glyph);
-                    }
+            // The cache answers for every run, whether or not the face reshapes
+            // it, so a repaint costs one hash of the run text and nothing else.
+            // Testing the cells instead costs a charmap lookup and a search
+            // each, every frame, for a run whose answer never changes.
+            let font_system = &mut self.font_system;
+            let shape_cache = &mut self.shape_cache;
+            let covered = &mut self.covered;
+            let metrics = self.metrics;
+            let primary = shaping.primary;
+            let reshapes = shaping.reshapes;
+            let cells = &run;
+            let shaped = font::shape_run_cached(&mut self.run_shape_cache, &run_text, |scratch| {
+                if cells.iter().any(|&(_, ch)| reshapes(ch)) {
+                    return font::shape_run(scratch, font_system, &run_text, metrics, primary);
                 }
-                col = end;
-                continue;
-            }
 
-            let shaped = font::shape_run_cached(
-                &mut self.run_shape_cache,
-                &mut self.font_system,
-                &run_text,
-                self.metrics,
-                shaping.primary,
-            );
+                // No lookup the face turns on reaches any of these glyphs, so
+                // the run lays out exactly as its characters do alone, which the
+                // per-character cache answers without building a shaping buffer.
+                let mut glyphs = Vec::with_capacity(cells.len());
+                let mut offset = 0;
+                for &(_, ch) in cells {
+                    if let Some(key) = glyph_key_in(
+                        shape_cache,
+                        font_system,
+                        covered,
+                        metrics,
+                        primary,
+                        ch,
+                        1.0,
+                        Weight::NORMAL,
+                    ) {
+                        glyphs.push((offset, key));
+                    }
+                    offset += ch.len_utf8();
+                }
+                glyphs
+            });
             for &(offset, key) in shaped {
                 let Some(&glyph_col) = run_cols.get(offset) else {
                     continue;
@@ -3684,23 +3692,43 @@ impl TextPass {
     /// `None` for a character that produces no glyph. The key is distinct per
     /// scale, so the atlas rasterizes each scale of a character separately.
     fn glyph_key(&mut self, ch: char, scale: f32, weight: Weight) -> Option<CacheKey> {
-        let cache_key = (ch, scale.to_bits(), weight.0);
-        if let Some(key) = self.shape_cache.get(&cache_key) {
-            return *key;
-        }
-
-        let key = font::shape_char(
+        glyph_key_in(
+            &mut self.shape_cache,
             &mut self.font_system,
-            ch,
-            scale,
+            &mut self.covered,
             self.metrics,
             font::shape_family(self.family.as_deref()),
+            ch,
+            scale,
             weight,
-            &mut self.covered,
-        );
-        self.shape_cache.insert(cache_key, key);
-        key
+        )
     }
+}
+
+/// [`TextPass::glyph_key`] over the fields it reads rather than over the pass.
+///
+/// A caller inside a closure that already borrows another of the pass's fields
+/// cannot reach the method, which wants the whole pass. Naming the fields lets
+/// the borrows stay apart.
+#[allow(clippy::too_many_arguments)]
+fn glyph_key_in(
+    shape_cache: &mut FxHashMap<(char, u32, u16), Option<CacheKey>>,
+    font_system: &mut FontSystem,
+    covered: &mut Option<font::CoveredSet>,
+    metrics: CellMetrics,
+    family: Family<'_>,
+    ch: char,
+    scale: f32,
+    weight: Weight,
+) -> Option<CacheKey> {
+    let cache_key = (ch, scale.to_bits(), weight.0);
+    if let Some(key) = shape_cache.get(&cache_key) {
+        return *key;
+    }
+
+    let key = font::shape_char(font_system, ch, scale, metrics, family, weight, covered);
+    shape_cache.insert(cache_key, key);
+    key
 }
 
 /// The per-frame shaping context [`TextPass::rasterize_row`] needs, resolved
@@ -5651,13 +5679,13 @@ mod tests {
         pass.substitutable = substitutable;
     }
 
-    /// A run holding nothing the face reshapes takes the per-cell path, which
-    /// answers from the glyph cache rather than the shaper. A run holding an
-    /// operator that ligates still takes the shaper, or the ligature is lost.
+    /// A run holding nothing the face reshapes is cached like one that does.
+    /// Its entry is built from the per-character glyph cache rather than from
+    /// the shaper, so a repaint of either costs one hash of the run text.
     ///
     /// Novel prose is almost all the first kind, and shaping a word costs some
-    /// twenty-five times what looking its characters up does, so this is what
-    /// a fling through scrollback pays.
+    /// twenty-five times what looking its characters up does. Leaving those runs
+    /// uncached made a styled screen pay the per-character path every frame.
     #[test]
     fn only_a_run_the_face_reshapes_reaches_the_shaper() {
         let Some((device, queue, mut pass)) = headless_text_pass() else {
@@ -5668,15 +5696,20 @@ mod tests {
         rasterize_rows_by_coverage(&mut pass, &device, &queue, &["4f2a b91c 0e7d"]);
         assert_eq!(
             pass.run_shape_cache.cached_texts(),
-            Vec::<String>::new(),
-            "hex tokens hold nothing the face reshapes, so none reaches the shaper",
+            ["0e7d", "4f2a", "b91c"],
+            "every run is cached, so a repaint asks the cache and nothing else",
+        );
+        assert_eq!(
+            pass.run_shape_cache.shaped_chars(),
+            0,
+            "hex tokens hold nothing the face reshapes, so none reached the shaper",
         );
 
         rasterize_rows_by_coverage(&mut pass, &device, &queue, &["a => b"]);
         assert_eq!(
-            pass.run_shape_cache.cached_texts(),
-            vec!["=>".to_owned()],
-            "and the one run that ligates is the only one that does",
+            pass.run_shape_cache.shaped_chars(),
+            "=>".len(),
+            "and the one run that ligates is the only one the shaper laid out",
         );
     }
 
@@ -8674,7 +8707,7 @@ mod tests {
         let band = pass.text_band();
 
         assert!(
-            pass.run_shape_cache.holds("hello"),
+            pass.run_shape_cache.cached_glyphs("hello").is_some(),
             "the run shaped against the bundled faces is cached",
         );
 
@@ -8686,7 +8719,7 @@ mod tests {
             "the scan adds faces without moving the band the bundled family sets",
         );
         assert!(
-            !pass.run_shape_cache.holds("hello"),
+            pass.run_shape_cache.cached_glyphs("hello").is_none(),
             "a run shaped before the scan reshapes against the full database",
         );
     }
