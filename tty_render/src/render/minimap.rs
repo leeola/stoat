@@ -29,10 +29,6 @@ const INITIAL_CAPACITY: usize = 256;
 /// large file where the proportional height would collapse to a sliver.
 const MIN_THUMB_PX: f32 = 12.0;
 
-/// A run quad's height as a fraction of the line height, leaving a hairline gap
-/// between lines so the run blocks read as distinct rows.
-const RUN_HEIGHT_RATIO: f32 = 0.75;
-
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
 /// fill, and the strip's declaration-order seq the fragment shader occludes by.
 #[repr(C)]
@@ -64,6 +60,9 @@ struct StripLayout {
     strip_w: f32,
     strip_h: f32,
     line_h: f32,
+    /// A run quad's height, one pixel short of the line so the rows read as
+    /// distinct blocks rather than as a solid column.
+    run_h: f32,
     col_w: f32,
     /// How many minimap lines fit the strip height, the window the thumb rides in
     /// and the slice of the file the strip renders.
@@ -498,13 +497,20 @@ fn make_bind_group(
 fn strip_layout(strip: &MinimapStrip, metrics: CellMetrics) -> StripLayout {
     let strip_w = strip.width as f32 * metrics.width;
     let strip_h = strip.height as f32 * metrics.height;
-    let line_h = metrics.height / strip.lines_per_cell.max(1) as f32;
+    // Whole pixels. A fractional pitch puts consecutive lines on different
+    // sub-pixel phases, and the coverage math is exact, so one line lands whole
+    // while the next splits across two rows at half strength: the strip beats
+    // between strong and weak rows rather than reading as even text.
+    let line_h = (metrics.height / strip.lines_per_cell.max(1) as f32)
+        .round()
+        .max(1.0);
     StripLayout {
         strip_x: strip.left as f32 * metrics.width,
         strip_y: strip.top as f32 * metrics.height,
         strip_w,
         strip_h,
         line_h,
+        run_h: (line_h - 1.0).max(1.0),
         col_w: strip_w / strip.max_columns.max(1) as f32,
         visible_lines: strip_h / line_h,
     }
@@ -609,7 +615,7 @@ fn build_strip(
             }
             instances.push(MinimapInstance {
                 origin: [x, y],
-                size: [width, layout.line_h * RUN_HEIGHT_RATIO],
+                size: [width, layout.run_h],
                 color: rgb_opaque_f32(*color),
                 seq,
             });
@@ -1444,27 +1450,52 @@ mod tests {
             [7u32, 8, 9].map(|y| u32::from(red[(y * TARGET + 2) as usize]))
         };
 
-        // Line 4 spans y 8.0 to 9.5 at rest. A quarter line later it spans 7.5
-        // to 9.0, so row 7 takes the half row 9 gives up.
+        // Line 4 spans y 8.0 to 9.0 at rest, one whole row with the gap row
+        // below it clear. A quarter line later it spans 7.5 to 8.5, so row 7
+        // takes the half row 8 gives up.
         let rest = strip_at(0);
         let scrolled = strip_at(64);
 
-        assert_eq!(rest[0], 0, "at rest nothing reaches the row above");
+        assert_eq!(rest, [0, 255, 0], "at rest the run lights one row alone");
         assert!(
-            (120..=136).contains(&scrolled[0]),
-            "a quarter-line scroll lights it half way, got {}",
-            scrolled[0]
+            (120..=136).contains(&scrolled[0]) && (120..=136).contains(&scrolled[1]),
+            "a quarter-line scroll splits it across the two, got {scrolled:?}"
         );
+        assert_eq!(scrolled[2], 0, "and nothing reaches the gap row below");
         assert!(
-            (120..=136).contains(&rest[2]),
-            "the row below starts half lit, got {}",
-            rest[2]
+            rest.iter().sum::<u32>().abs_diff(scrolled.iter().sum()) <= 2,
+            "the run carries the same ink either way, {rest:?} against {scrolled:?}"
         );
-        assert_eq!(scrolled[2], 0, "and gives that up as the run moves off it");
+    }
+
+    /// A fractional row pitch puts consecutive lines on different sub-pixel
+    /// phases, so one lands whole and the next splits across two rows at half
+    /// strength. The strip then beats between strong and weak rows.
+    #[test]
+    fn consecutive_minimap_rows_read_alike_across_a_clear_gap() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("minimap pitch test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // Eight lines a cell on the 12px cell asks for a 1.5px line, which the
+        // layout rounds to 2: one row of run and one row of gap.
+        let run = |len| {
+            vec![MinimapRun {
+                start_col: 0,
+                len,
+                class: 0,
+            }]
+        };
+        let grid = red_grid(red_strip(1, 4, 8, 12), vec![run(12), run(12)], None);
+        let red = render_red(&device, &queue, &grid, &[], metrics());
+        // Column 2 sits inside both full-width runs.
+        let rows = [0u32, 1, 2].map(|y| u32::from(red[(y * TARGET + 2) as usize]));
+
         assert_eq!(
-            rest.iter().sum::<u32>(),
-            scrolled.iter().sum::<u32>(),
-            "the run carries the same ink either way"
+            rows,
+            [255, 0, 255],
+            "two rows of run either side of one clear gap row"
         );
     }
 }
