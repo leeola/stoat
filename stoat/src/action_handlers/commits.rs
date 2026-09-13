@@ -349,19 +349,23 @@ fn spawn_commit_preview_load(
     executor.spawn_blocking(move || {
         // Read here rather than on the run loop. The tree walk behind it costs
         // tens of milliseconds on a wide commit, which held a frame per row
-        // while the selection moved.
-        let summary = repo.commit_file_changes(&sha);
-        let parent = repo.parent_sha(&sha);
-        let document = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
-            Some(changes) => {
-                super::review::build_document_from_changes(&language_registry, &workdir, changes)
-                    .map(|mut doc| {
-                        highlights.attach(&mut doc);
-                        doc
-                    })
-            },
-            None => None,
+        // while the selection moved. One walk answers both halves.
+        let (summary, changes) = match repo.commit_changes(&sha) {
+            Some(both) => both,
+            // A commit the walk cannot read leaves the whole tree as the
+            // change, which is what a shallow clone's first commit is.
+            None => (
+                repo.commit_file_changes(&sha),
+                repo.changed_contents(None, &sha).unwrap_or_default(),
+            ),
         };
+        let document =
+            super::review::build_document_from_changes(&language_registry, &workdir, changes).map(
+                |mut doc| {
+                    highlights.attach(&mut doc);
+                    doc
+                },
+            );
         redraw.notify_one();
         crate::commit_list::PreviewLoad {
             summary: Some(summary),

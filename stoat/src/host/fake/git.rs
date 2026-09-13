@@ -2451,4 +2451,31 @@ mod tests {
         assert_eq!(by_path.len(), 1);
         assert_eq!(by_path[0].0, workdir().join("gone.rs"));
     }
+
+    /// A host that reads a commit's summary and its contents from separate
+    /// walks answers the pair, so a preview built on it sees what the two
+    /// reads it stands for see.
+    #[test]
+    fn commit_changes_answers_the_pair_of_reads_it_stands_for() {
+        let host = FakeGit::new();
+        let wd = workdir();
+        host.add_repo(&wd)
+            .commit("aaaa1111", &[("a.rs", "one\n")])
+            .commit_with_parent(
+                "bbbb2222",
+                "aaaa1111",
+                &[("a.rs", "ONE\n"), ("b.rs", "two\n")],
+            );
+        let repo = host.discover(&wd).expect("repo discovered");
+
+        assert_eq!(
+            repo.commit_changes("bbbb2222"),
+            Some((
+                repo.commit_file_changes("bbbb2222"),
+                repo.changed_contents(Some("aaaa1111"), "bbbb2222")
+                    .expect("both commits are seeded"),
+            )),
+            "the pair is what one call answers",
+        );
+    }
 }

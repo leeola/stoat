@@ -132,6 +132,12 @@ pub struct CommitFileChange {
     pub deletions: u32,
 }
 
+/// The two answers [`GitRepo::commit_changes`] reads from one walk.
+///
+/// The first is the per-file summary. The second names each changed file by
+/// its repo-relative path and carries its content on either side.
+pub type CommitChanges = (Vec<CommitFileChange>, Vec<(PathBuf, String, String)>);
+
 /// Discovers repositories. Kept separate from [`GitRepo`] so the host
 /// can be a cheap cloneable value (`Arc<dyn GitHost>`) while repository
 /// handles carry per-repo state.
@@ -414,6 +420,25 @@ pub trait GitRepo: Send + Sync {
     /// stats while the heavier hunk-level preview loads in the
     /// background. Empty when the sha is unknown.
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange>;
+
+    /// The per-file summary and the changed contents of `sha` together, from
+    /// one read of its tree.
+    ///
+    /// A commit preview needs both, and each of the two calls this stands for
+    /// walks the same pair of trees. The contents diff against the first
+    /// parent, or against an empty tree for a root commit.
+    ///
+    /// The default runs [`Self::commit_file_changes`] and
+    /// [`Self::changed_contents`] as a pair. An implementation whose summary
+    /// pairs a rename pairs it in the contents too, so a moved file arrives as
+    /// one entry against the content it moved from, rather than as a deletion
+    /// beside an addition.
+    ///
+    /// `None` when the sha is unknown.
+    fn commit_changes(&self, sha: &str) -> Option<CommitChanges> {
+        let contents = self.changed_contents(self.parent_sha(sha).as_deref(), sha)?;
+        Some((self.commit_file_changes(sha), contents))
+    }
 
     /// The first changed path of `sha`, in the order
     /// [`Self::commit_file_changes`] lists them, or `None` for a commit that

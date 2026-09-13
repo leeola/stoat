@@ -2,9 +2,9 @@ mod rebase;
 mod tree;
 
 use crate::host::git::{
-    BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-    CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, RebaseError,
-    RebaseTodo, RewriteResult,
+    BackendSnafu, ChangedFile, CherryPickOutcome, CommitChanges, CommitFileChange,
+    CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies,
+    RebaseError, RebaseTodo, RewriteResult,
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Delta, Diff, DiffFindOptions,
@@ -808,30 +808,65 @@ impl GitRepo for LocalGitRepo {
                 Some(p) => p.to_path_buf(),
                 None => continue,
             };
-            let kind = match delta.status() {
-                Delta::Added => CommitFileChangeKind::Added,
-                Delta::Deleted => CommitFileChangeKind::Deleted,
-                Delta::Modified => CommitFileChangeKind::Modified,
-                Delta::Renamed => CommitFileChangeKind::Renamed,
-                Delta::Typechange => CommitFileChangeKind::TypeChange,
-                _ => CommitFileChangeKind::Modified,
-            };
-            let patch = git2::Patch::from_diff(&diff, i).ok().flatten();
-            let (additions, deletions) = match patch {
-                Some(p) => match p.line_stats() {
-                    Ok((_ctx, add, del)) => (add as u32, del as u32),
-                    Err(_) => (0, 0),
-                },
-                None => (0, 0),
-            };
-            out.push(CommitFileChange {
-                rel_path,
-                kind,
-                additions,
-                deletions,
-            });
+            out.push(delta_summary(&diff, i, rel_path, delta.status()));
         }
         out
+    }
+
+    /// One `diff_tree_to_tree` answers both, where the pair of calls it stands
+    /// for walks the same two trees one after the other.
+    ///
+    /// Rename detection runs before either answer is read, so the contents
+    /// name a moved file once, at its destination, against the content it
+    /// moved from.
+    ///
+    /// A changed file that is not UTF-8 stays in the summary and is left out
+    /// of the contents, which is what each call answers alone.
+    fn commit_changes(&self, sha: &str) -> Option<CommitChanges> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).ok()?;
+        let commit = repo.find_commit(oid).ok()?;
+        let new_tree = commit.tree().ok()?;
+        let parent_tree = commit.parents().next().and_then(|p| p.tree().ok());
+
+        let mut opts = DiffOptions::new();
+        opts.include_typechange(true);
+        let mut diff = repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), Some(&mut opts))
+            .ok()?;
+        // Before the indexed patch reads below, which read the delta list this
+        // rewrites in place.
+        let _ = diff.find_similar(Some(&mut rename_detection(false)));
+
+        // A side with no blob reads as empty, which is how an addition and a
+        // deletion each become one entry rather than a shape of their own.
+        let blob_text = |id: git2::Oid| -> Option<String> {
+            if id.is_zero() {
+                return Some(String::new());
+            }
+            let blob = repo.find_blob(id).ok()?;
+            std::str::from_utf8(blob.content()).ok().map(str::to_string)
+        };
+
+        let deltas = diff.deltas();
+        let mut summary: Vec<CommitFileChange> = Vec::with_capacity(deltas.len());
+        let mut contents: Vec<(PathBuf, String, String)> = Vec::new();
+        for (i, delta) in deltas.enumerate() {
+            let Some(rel_path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
+                continue;
+            };
+            let rel_path = rel_path.to_path_buf();
+
+            if let (Some(before), Some(after)) = (
+                blob_text(delta.old_file().id()),
+                blob_text(delta.new_file().id()),
+            ) && before != after
+            {
+                contents.push((rel_path.clone(), before, after));
+            }
+            summary.push(delta_summary(&diff, i, rel_path, delta.status()));
+        }
+        Some((summary, contents))
     }
 
     fn commit_first_path(&self, sha: &str) -> Option<PathBuf> {
@@ -1214,6 +1249,39 @@ fn rename_aware_status() -> StatusOptions {
     opts
 }
 
+/// The summary row for the delta `index` names in `diff`.
+///
+/// The line counts come from that delta's own patch, which is the read that
+/// makes a wide commit's summary cost what it does.
+fn delta_summary(
+    diff: &Diff<'_>,
+    index: usize,
+    rel_path: PathBuf,
+    status: Delta,
+) -> CommitFileChange {
+    let kind = match status {
+        Delta::Added => CommitFileChangeKind::Added,
+        Delta::Deleted => CommitFileChangeKind::Deleted,
+        Delta::Modified => CommitFileChangeKind::Modified,
+        Delta::Renamed => CommitFileChangeKind::Renamed,
+        Delta::Typechange => CommitFileChangeKind::TypeChange,
+        _ => CommitFileChangeKind::Modified,
+    };
+    let (additions, deletions) = git2::Patch::from_diff(diff, index)
+        .ok()
+        .flatten()
+        .and_then(|patch| patch.line_stats().ok())
+        .map(|(_context, additions, deletions)| (additions as u32, deletions as u32))
+        .unwrap_or((0, 0));
+
+    CommitFileChange {
+        rel_path,
+        kind,
+        additions,
+        deletions,
+    }
+}
+
 /// Find options that pair a diff's deletions and additions back into renames.
 ///
 /// `untracked` extends the pairing to files git has never seen, which a diff
@@ -1307,7 +1375,7 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
 #[cfg(test)]
 mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
-    use crate::host::git::{CherryPickOutcome, GitHost, GitRepo};
+    use crate::host::git::{CherryPickOutcome, CommitFileChangeKind, GitHost, GitRepo};
     use git2::{Oid, Repository, RepositoryInitOptions, Signature};
     use std::{
         collections::BTreeMap,
@@ -1916,5 +1984,78 @@ mod tests {
         assert!(git.checkout_ref("nope").is_err());
         assert_eq!(git.head_branch().as_deref(), Some("main"));
         assert_eq!(git.resolve_rev("HEAD").as_deref(), Some(shas[2].as_str()));
+    }
+
+    /// Commit a move of `from` to `to`, with `content` on the destination.
+    fn commit_move(
+        repo: &Repository,
+        dir: &TempDir,
+        from: &str,
+        to: &str,
+        content: &str,
+    ) -> String {
+        let sig = Signature::now("test", "t@t").unwrap();
+        std::fs::remove_file(dir.path().join(from)).unwrap();
+        std::fs::write(dir.path().join(to), content).unwrap();
+        let tree = {
+            let mut index = repo.index().unwrap();
+            index.remove_path(Path::new(from)).unwrap();
+            index.add_path(Path::new(to)).unwrap();
+            index.write().unwrap();
+            repo.find_tree(index.write_tree().unwrap()).unwrap()
+        };
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "move", &tree, &[&parent])
+            .unwrap()
+            .to_string()
+    }
+
+    /// A commit preview reads a summary and the changed contents, which two
+    /// calls read from two walks of the same pair of trees.
+    ///
+    /// A rename is the one place the combined walk answers differently. The
+    /// summary needs the pairing, and one delta list cannot be both paired and
+    /// unpaired, so the contents name the move once at its destination.
+    #[test]
+    fn one_walk_answers_a_summary_and_the_changed_contents() {
+        let (dir, repo, _shas) = seeded_repo();
+        let lines: String = (0..10).map(|n| format!("line {n}\n")).collect();
+        let added = commit_files(&repo, &dir, &[("b.rs", lines.as_bytes())]);
+        let git = discover(&dir);
+
+        let parent = git.parent_sha(&added);
+        assert_eq!(
+            git.commit_changes(&added),
+            Some((
+                git.commit_file_changes(&added),
+                git.changed_contents(parent.as_deref(), &added)
+                    .expect("both commits are readable"),
+            )),
+            "both answers match the two reads they replace",
+        );
+
+        let moved_lines = lines.replace("line 9\n", "line nine\n");
+        let moved = commit_move(&repo, &dir, "b.rs", "c.rs", &moved_lines);
+        let (summary, contents) = git.commit_changes(&moved).expect("the commit is readable");
+        assert_eq!(
+            summary
+                .iter()
+                .map(|change| (change.rel_path.clone(), change.kind))
+                .collect::<Vec<_>>(),
+            vec![(PathBuf::from("c.rs"), CommitFileChangeKind::Renamed)],
+            "the move is one renamed row",
+        );
+        assert_eq!(
+            contents,
+            vec![(PathBuf::from("c.rs"), lines, moved_lines)],
+            "and the contents name it once, against what it moved from",
+        );
+        assert_eq!(
+            git.changed_contents(git.parent_sha(&moved).as_deref(), &moved)
+                .expect("the commit is readable")
+                .len(),
+            2,
+            "where the unpaired read splits it into a deletion and an addition",
+        );
     }
 }
