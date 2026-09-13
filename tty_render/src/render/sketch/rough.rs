@@ -61,8 +61,51 @@ const FORWARD_REACH: f64 = 0.5;
 /// send the pen away from the target and back.
 const HOOK_REACH: f64 = 6.25;
 
+/// How far along a side a connector may meet it, as a fraction of the side's
+/// length held back from either end.
+///
+/// A point near a corner reads as missing the box rather than arriving at it,
+/// and a rounded corner has no outline there to arrive on.
+const SIDE_INSET: f64 = 0.2;
+
 /// How far outside a mark's outline a connector's end sits, in pixels.
-const COMPONENT_GAP: f64 = 4.0;
+pub(crate) const COMPONENT_GAP: f64 = 4.0;
+
+/// The box a connector points at, and how its outline rounds inside it.
+///
+/// A connector meets the outline rather than the box. A ring's own curve lies
+/// inside its bounds everywhere but the four midpoints, so a point taken off
+/// the box floats outside the mark, and a rounded corner has no outline at the
+/// corner of its box at all.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct ComponentBox {
+    pub(crate) bounds: [f32; 4],
+    pub(crate) rounding: Rounding,
+}
+
+/// How a component's outline rounds inside its bounds.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Rounding {
+    /// The ellipse those bounds inscribe.
+    Ellipse,
+    /// A rectangle whose corners round by `radius_px`.
+    Rect { radius_px: f32 },
+}
+
+impl ComponentBox {
+    /// The same box in the logical frame the generation runs in.
+    fn logical(self, scale: f32) -> ComponentBox {
+        ComponentBox {
+            bounds: self.bounds.map(|edge| edge / scale),
+            rounding: match self.rounding {
+                Rounding::Ellipse => Rounding::Ellipse,
+                Rounding::Rect { radius_px } => Rounding::Rect {
+                    radius_px: radius_px / scale,
+                },
+            },
+        }
+    }
+}
 
 /// Flattened geometry for one mark, ready to stroke.
 #[derive(Clone, PartialEq, Debug)]
@@ -262,7 +305,7 @@ pub(crate) fn geometry<Resolve>(
     resolve: &Resolve,
 ) -> Geometry
 where
-    Resolve: Fn(u32) -> Option<[f32; 4]>,
+    Resolve: Fn(u32) -> Option<ComponentBox>,
 {
     let scale = f64::from(metrics.scale_factor);
     let (cw, ch) = (
@@ -271,8 +314,7 @@ where
     );
     // A component's bounds arrive in physical pixels, so they join the logical
     // frame the rest of the generation runs in.
-    let resolve =
-        |id: u32| resolve(id).map(|bounds| bounds.map(|edge| edge / metrics.scale_factor));
+    let resolve = |id: u32| resolve(id).map(|component| component.logical(metrics.scale_factor));
     let mut random = Random::new(command.style.seed, command.id);
 
     match command.shape {
@@ -451,7 +493,7 @@ fn line_geometry<Resolve>(
     random: &mut Random,
 ) -> Geometry
 where
-    Resolve: Fn(u32) -> Option<[f32; 4]>,
+    Resolve: Fn(u32) -> Option<ComponentBox>,
 {
     let Connector {
         from,
@@ -565,12 +607,12 @@ fn s_curve_controls(
 /// component as the center of its box.
 fn end_center<Resolve>(end: SketchEnd, cw: f64, ch: f64, resolve: &Resolve) -> Option<[f64; 2]>
 where
-    Resolve: Fn(u32) -> Option<[f32; 4]>,
+    Resolve: Fn(u32) -> Option<ComponentBox>,
 {
     match end {
         SketchEnd::Point { x, y } => Some(point_px(x, y, cw, ch)),
         SketchEnd::Component { id, .. } => {
-            let [min_x, min_y, max_x, max_y] = resolve(id)?.map(f64::from);
+            let [min_x, min_y, max_x, max_y] = resolve(id)?.bounds.map(f64::from);
             Some([(min_x + max_x) / 2.0, (min_y + max_y) / 2.0])
         },
     }
@@ -588,17 +630,17 @@ fn attach<Resolve>(
     resolve: &Resolve,
 ) -> Option<([f64; 2], SketchSide)>
 where
-    Resolve: Fn(u32) -> Option<[f32; 4]>,
+    Resolve: Fn(u32) -> Option<ComponentBox>,
 {
     match end {
         SketchEnd::Point { x, y } => Some((point_px(x, y, cw, ch), SketchSide::Auto)),
         SketchEnd::Component { id, side } => {
-            let bounds = resolve(id)?.map(f64::from);
+            let component = resolve(id)?;
             let side = match side {
-                SketchSide::Auto => facing_side(bounds, toward),
+                SketchSide::Auto => facing_side(component.bounds.map(f64::from), toward),
                 named => named,
             };
-            Some((side_midpoint(bounds, side), side))
+            Some((side_point(&component, side, toward), side))
         },
     }
 }
@@ -623,19 +665,62 @@ fn facing_side(bounds: [f64; 4], toward: [f64; 2]) -> SketchSide {
     }
 }
 
-/// The midpoint of one side of `bounds`, pushed out by [`COMPONENT_GAP`].
+/// Where a connector meets `component` on `side`, nearest `toward`.
 ///
-/// The gap is what keeps a connector from crossing the outline it points at. A
-/// line that touched the stroke would read as passing through the mark rather
-/// than arriving at it.
-fn side_midpoint(bounds: [f64; 4], side: SketchSide) -> [f64; 2] {
-    let [min_x, min_y, max_x, max_y] = bounds;
+/// The along-side coordinate follows the other end, so a link to a card eight
+/// rows tall meets it level with the mark it comes from rather than at the
+/// card's middle, and a label is met beside the word its mark circles.
+///
+/// It is held inset from the side's ends by the larger of [`SIDE_INSET`] of the
+/// side and the corner's own radius, and never crosses the middle. A point in a
+/// corner reads as missing the box rather than arriving at it.
+///
+/// A ring's outline lies inside its bounds everywhere but the four midpoints,
+/// so the across coordinate follows the ellipse at that position. The point
+/// then pushes out by [`COMPONENT_GAP`] along the side's axis, which is what
+/// keeps a connector clear of the stroke it points at.
+fn side_point(component: &ComponentBox, side: SketchSide, toward: [f64; 2]) -> [f64; 2] {
+    let [min_x, min_y, max_x, max_y] = component.bounds.map(f64::from);
     let center = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
+    let (half_w, half_h) = ((max_x - min_x) / 2.0, (max_y - min_y) / 2.0);
+    let corner = match component.rounding {
+        Rounding::Ellipse => 0.0,
+        Rounding::Rect { radius_px } => f64::from(radius_px),
+    };
+
+    // Half the side is the floor, which is the middle: a side shorter than two
+    // insets has no straight run to meet on.
+    let along = |half: f64, at: f64, want: f64| {
+        let inset = (half * 2.0 * SIDE_INSET).max(corner).min(half);
+        want.clamp(at - half + inset, at + half - inset)
+    };
+    // The ellipse's own half-extent across the side at `t`, which is the
+    // position along it as a fraction of the half-extent there.
+    let curve = |half: f64, t: f64| half * (1.0 - t * t).max(0.0).sqrt();
+
     match side {
-        SketchSide::Left => [min_x - COMPONENT_GAP, center[1]],
-        SketchSide::Right => [max_x + COMPONENT_GAP, center[1]],
-        SketchSide::Top => [center[0], min_y - COMPONENT_GAP],
-        SketchSide::Bottom | SketchSide::Auto => [center[0], max_y + COMPONENT_GAP],
+        SketchSide::Left | SketchSide::Right => {
+            let y = along(half_h, center[1], toward[1]);
+            let out = match component.rounding {
+                Rounding::Ellipse => curve(half_w, (y - center[1]) / half_h.max(f64::EPSILON)),
+                Rounding::Rect { .. } => half_w,
+            } + COMPONENT_GAP;
+            match side {
+                SketchSide::Left => [center[0] - out, y],
+                _ => [center[0] + out, y],
+            }
+        },
+        SketchSide::Top | SketchSide::Bottom | SketchSide::Auto => {
+            let x = along(half_w, center[0], toward[0]);
+            let out = match component.rounding {
+                Rounding::Ellipse => curve(half_h, (x - center[0]) / half_w.max(f64::EPSILON)),
+                Rounding::Rect { .. } => half_h,
+            } + COMPONENT_GAP;
+            match side {
+                SketchSide::Top => [x, center[1] - out],
+                _ => [x, center[1] + out],
+            }
+        },
     }
 }
 

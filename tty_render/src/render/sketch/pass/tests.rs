@@ -1,7 +1,10 @@
 //! Tests for the hand-drawn mark pass.
 
 use super::*;
-use crate::{gpu::headless_device, render::AnchoredPanel};
+use crate::{
+    gpu::headless_device,
+    render::{sketch::rough::COMPONENT_GAP, AnchoredPanel},
+};
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
     SketchStyle, SketchTiming,
@@ -503,7 +506,9 @@ fn a_connector_ends_outside_the_component_it_names() {
         "a resolvable connector draws",
     );
 
-    let target = shape_bounds(&list[0].command.shape, metrics()).expect("an ellipse has bounds");
+    let target = shape_bounds(&list[0].command.shape, metrics())
+        .expect("an ellipse has bounds")
+        .bounds;
     let leftmost = geometry[1]
         .strokes
         .iter()
@@ -1069,7 +1074,9 @@ fn an_auto_side_faces_the_connector_s_other_end() {
             fill: None,
         },
     );
-    let box_px = shape_bounds(&target.command.shape, metrics()).expect("an ellipse has bounds");
+    let box_px = shape_bounds(&target.command.shape, metrics())
+        .expect("an ellipse has bounds")
+        .bounds;
 
     // The connector preserves its vertices at this roughness, so a stroke's last
     // point is exactly where the line met the box.
@@ -1136,8 +1143,125 @@ fn an_auto_side_faces_the_connector_s_other_end() {
         (diagonal[0] / metrics().width * 16.0) as i16,
         (diagonal[1] / metrics().height * 16.0) as i16,
     );
+    // The meeting follows the probe along the side rather than sitting at the
+    // side's middle, held back from either end, and lies on the ring's own
+    // curve at that position plus the gap.
+    let inset = half_h * 2.0 * 0.2;
+    let want_y = diagonal[1].clamp(min_y + inset, max_y - inset);
+    let across = (1.0 - ((want_y - center[1]) / half_h).powi(2)).sqrt();
+    let want_x = center[0] + half_w * across + COMPONENT_GAP as f32;
     assert!(
-        corner[0] > max_x && (corner[1] - center[1]).abs() < 0.01,
-        "proportion wins, so it meets the right edge, got {corner:?}",
+        (corner[0] - want_x).abs() < 0.01 && (corner[1] - want_y).abs() < 0.01,
+        "proportion picks the right side and the point follows the probe onto \
+         the curve, got {corner:?} against [{want_x}, {want_y}]",
+    );
+}
+
+/// A card eight rows tall is met level with the mark its connector comes from,
+/// so the line runs straight across rather than sloping to the card's middle.
+#[test]
+fn a_tall_box_is_met_level_with_its_other_end() {
+    let target = sketch(
+        1,
+        SketchShape::Rect {
+            bounds: boxed(64, 0, 32, 128),
+            radius: 0,
+            fill: None,
+        },
+    );
+    let box_px = shape_bounds(&target.command.shape, metrics())
+        .expect("a rect has bounds")
+        .bounds;
+
+    // Level with the box's second row, and well to its left.
+    let row = metrics().height;
+    let probe_y = box_px[1] + row * 1.5;
+    let list = [
+        target.clone(),
+        sketch(
+            2,
+            SketchShape::Line {
+                from: SketchEnd::Point {
+                    x: 0,
+                    y: (probe_y / metrics().height * 16.0) as i16,
+                },
+                to: SketchEnd::Component {
+                    id: 1,
+                    side: SketchSide::Left,
+                },
+                bend: 0,
+                heads: 0,
+            },
+        ),
+    ];
+    let (points, geometry) = marks(&list);
+    let stroke = &geometry[1].strokes[0];
+    let met = points[(stroke.point_offset + stroke.count - 1) as usize];
+
+    assert!(
+        (met[1] - probe_y).abs() <= row,
+        "the line meets within a row of where it came from, got {met:?} for a \
+         probe at {probe_y} and a box at {box_px:?}",
+    );
+    assert!(
+        met[0] < box_px[0],
+        "and clear of the box's left edge at {}",
+        box_px[0],
+    );
+}
+
+/// A ring's outline lies inside its bounds everywhere but the four midpoints,
+/// so a point taken off the box floats beside the stroke rather than meeting
+/// it.
+#[test]
+fn a_ring_is_met_on_its_own_curve() {
+    let target = sketch(
+        1,
+        SketchShape::Ellipse {
+            bounds: boxed(0, 32, 128, 32),
+            fill: None,
+        },
+    );
+    let box_px = shape_bounds(&target.command.shape, metrics())
+        .expect("an ellipse has bounds")
+        .bounds;
+    let [min_x, min_y, max_x, max_y] = box_px;
+    let center = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
+    let (half_w, half_h) = ((max_x - min_x) / 2.0, (max_y - min_y) / 2.0);
+
+    // Above the ring and a third of the way along it, so the meeting point is
+    // nowhere near the top's middle.
+    let probe = [center[0] + half_w * 0.6, min_y - half_h * 4.0];
+    let list = [
+        target.clone(),
+        sketch(
+            2,
+            SketchShape::Line {
+                from: SketchEnd::Point {
+                    x: (probe[0] / metrics().width * 16.0) as i16,
+                    y: (probe[1] / metrics().height * 16.0) as i16,
+                },
+                to: SketchEnd::Component {
+                    id: 1,
+                    side: SketchSide::Top,
+                },
+                bend: 0,
+                heads: 0,
+            },
+        ),
+    ];
+    let (points, geometry) = marks(&list);
+    let stroke = &geometry[1].strokes[0];
+    let met = points[(stroke.point_offset + stroke.count - 1) as usize];
+
+    assert!(
+        (met[0] - center[0]).abs() > half_w * 0.4,
+        "the fixture meets well off the top's middle, got {met:?}",
+    );
+    let on_curve = ((met[0] - center[0]) / half_w).powi(2)
+        + ((met[1] + COMPONENT_GAP as f32 - center[1]) / half_h).powi(2);
+    assert!(
+        (on_curve - 1.0).abs() < 0.01,
+        "and on the ring's own curve before the gap, got {met:?} at {on_curve}",
     );
 }

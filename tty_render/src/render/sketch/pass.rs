@@ -10,8 +10,8 @@
 //! the cell size, and neither moves while a mark draws itself.
 
 use crate::render::{
-    sketch::rough, CellMetrics, GridVersion, Occluder, OccluderBuffer, SketchReveal,
-    GLOBALS_SLOT_STRIDE,
+    sketch::rough::{self, ComponentBox, Rounding},
+    CellMetrics, GridVersion, Occluder, OccluderBuffer, SketchReveal, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -746,28 +746,36 @@ fn ride_shift(
 /// decided by the geometry generator, which sees both ends; this only says
 /// where the box is. An unknown id yields `None`, which drops the connector,
 /// because a line to nowhere points at the wrong thing.
-fn component_bounds(sketches: &[Sketch], id: u32, metrics: CellMetrics) -> Option<[f32; 4]> {
+fn component_bounds(sketches: &[Sketch], id: u32, metrics: CellMetrics) -> Option<ComponentBox> {
     let target = sketches.iter().find(|sketch| sketch.command.id == id)?;
     shape_bounds(&target.command.shape, metrics)
 }
 
-/// A boxed shape's pixel rectangle, or `None` for a connector, which has no box
-/// of its own to point at.
-fn shape_bounds(shape: &SketchShape, metrics: CellMetrics) -> Option<[f32; 4]> {
-    let bounds = match shape {
-        SketchShape::Ellipse { bounds, .. } => bounds,
-        SketchShape::Rect { bounds, .. } => bounds,
+/// A boxed shape's pixel rectangle and how its outline rounds inside it, or
+/// `None` for a connector, which has no box of its own to point at.
+fn shape_bounds(shape: &SketchShape, metrics: CellMetrics) -> Option<ComponentBox> {
+    let (cw, ch) = (metrics.width, metrics.height);
+    let (bounds, rounding) = match shape {
+        SketchShape::Ellipse { bounds, .. } => (bounds, Rounding::Ellipse),
+        SketchShape::Rect { bounds, radius, .. } => (
+            bounds,
+            Rounding::Rect {
+                radius_px: f32::from(*radius) / 16.0 * cw,
+            },
+        ),
         SketchShape::Line { .. } => return None,
     };
-    let (cw, ch) = (metrics.width, metrics.height);
     let x = f32::from(bounds.x) / 16.0 * cw;
     let y = f32::from(bounds.y) / 16.0 * ch;
-    Some([
-        x,
-        y,
-        x + f32::from(bounds.w) / 16.0 * cw,
-        y + f32::from(bounds.h) / 16.0 * ch,
-    ])
+    Some(ComponentBox {
+        bounds: [
+            x,
+            y,
+            x + f32::from(bounds.w) / 16.0 * cw,
+            y + f32::from(bounds.h) / 16.0 * ch,
+        ],
+        rounding,
+    })
 }
 
 /// The color and alpha a filled box paints with, or an invisible black for an

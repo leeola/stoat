@@ -369,7 +369,16 @@ fn command(shape: SketchShape, roughness: u8) -> SketchCommand {
     }
 }
 
-fn nothing_resolves(_: u32) -> Option<[f32; 4]> {
+/// A rectangular component with square corners, which is what a test that only
+/// cares where a box sits wants.
+fn boxed_at(bounds: [f32; 4]) -> ComponentBox {
+    ComponentBox {
+        bounds,
+        rounding: Rounding::Rect { radius_px: 0.0 },
+    }
+}
+
+fn nothing_resolves(_: u32) -> Option<ComponentBox> {
     None
 }
 
@@ -653,8 +662,8 @@ fn two_components_are_joined_by_an_s_curve() {
         // Two small boxes on one horizontal line, so an auto side has an
         // unambiguous facing edge.
         let resolve = |id: u32| match id {
-            1 => Some([0.0, 0.0, 8.0, 8.0]),
-            _ => Some([100.0, 0.0, 108.0, 8.0]),
+            1 => Some(boxed_at([0.0, 0.0, 8.0, 8.0])),
+            _ => Some(boxed_at([100.0, 0.0, 108.0, 8.0])),
         };
         geometry(&command(shape, 0), metrics(), &resolve)
     };
@@ -765,8 +774,8 @@ fn connector_low(from: [f32; 4], to: [f32; 4]) -> f32 {
         heads: 0,
     };
     let resolve = move |id: u32| match id {
-        1 => Some(from),
-        _ => Some(to),
+        1 => Some(boxed_at(from)),
+        _ => Some(boxed_at(to)),
     };
     geometry(&command(shape, 0), metrics(), &resolve)
         .strokes
