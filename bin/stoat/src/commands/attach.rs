@@ -30,7 +30,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
-    attach::{self, Frame, FrameDecoder, REPLACED_EXIT, REPLACED_MESSAGE},
+    attach::{self, Frame, FrameDecoder, FRAME_HEADER, REPLACED_EXIT, REPLACED_MESSAGE},
     host::{FsHost, LocalFs},
     tty,
 };
@@ -48,10 +48,6 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 
 /// Bytes moved per read in either direction.
 const CHUNK: usize = 64 * 1024;
-
-/// A frame tag plus the big-endian length that follows it, so a wire buffer
-/// sized for one chunk never has to grow.
-const FRAME_HEADER: usize = 5;
 
 /// How long a write to a client may park before it is given up on.
 ///

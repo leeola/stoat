@@ -28,6 +28,12 @@ pub const REPLACED_MESSAGE: &str = "replaced by another client";
 /// Longest session name [`valid_name`] accepts.
 const MAX_NAME: usize = 64;
 
+/// Bytes every frame carries before its payload: the tag, then the payload
+/// length as a big-endian `u32`.
+///
+/// A reader sizing a buffer for one payload adds this to hold the frame whole.
+pub const FRAME_HEADER: usize = 5;
+
 /// Payload length a [`Frame::Winsize`] always carries, four big-endian u16s.
 const WINSIZE_LEN: usize = 8;
 
@@ -99,18 +105,16 @@ impl FrameDecoder {
     /// connection. The buffer is dropped, so a further call reports `None`
     /// rather than the same error forever.
     pub fn next_frame(&mut self) -> Option<Result<Frame, DecodeError>> {
-        const HEADER: usize = 5;
-
-        if self.buf.len() < HEADER {
+        if self.buf.len() < FRAME_HEADER {
             return None;
         }
         let tag = self.buf[0];
         let len = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
-        if self.buf.len() < HEADER + len {
+        if self.buf.len() < FRAME_HEADER + len {
             return None;
         }
 
-        let payload = &self.buf[HEADER..HEADER + len];
+        let payload = &self.buf[FRAME_HEADER..FRAME_HEADER + len];
         let frame = match tag {
             TAG_BYTES => Frame::Bytes(payload.to_vec()),
             TAG_WINSIZE if len == WINSIZE_LEN => Frame::Winsize {
@@ -130,7 +134,7 @@ impl FrameDecoder {
             },
         };
 
-        self.buf.drain(..HEADER + len);
+        self.buf.drain(..FRAME_HEADER + len);
         Some(Ok(frame))
     }
 }

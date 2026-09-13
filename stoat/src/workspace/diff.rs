@@ -989,9 +989,9 @@ pub(crate) fn compute_base_highlights(
     };
 
     // Parsed outside the lock, which a miss holds only long enough to look up.
-    // A changeset warms one diff job per changed file on the blocking pool, and
-    // parsing under the lock queues every one of them behind whichever job got
-    // there first.
+    // A workspace runs one diff job per stale buffer on the blocking pool, all
+    // sharing this memo, and parsing under the lock queues every one of them
+    // behind whichever job got there first.
     //
     // Two jobs missing at once both parse, which is the price. Same content and
     // same language means the same spans, so whichever lands first is kept and

@@ -69,11 +69,11 @@ const FS_WATCH_DRAIN_CAP: usize = 256;
 /// files queues them over several windows rather than in one turn.
 const INDEX_EXTERNAL_DRAIN_CAP: usize = 256;
 
-/// warming them one at a time and defers to the whole-changeset warm.
-///
 /// Directory verdicts [`Stoat::ignored_dir_cache`] holds before dropping the
-/// lot. Far above the directory count of any one build, so the bound is a
-/// backstop against a pathological tree rather than a working limit.
+/// lot.
+///
+/// Far above the directory count of any one build, so the bound is a backstop
+/// against a pathological tree rather than a working limit.
 const IGNORED_DIR_CACHE_MAX: usize = 8192;
 
 /// Quiet window after the last code-search keystroke before the blocking
@@ -578,8 +578,9 @@ mod tests {
     use std::time::Duration;
     // TEST IMPORTS
 
-    /// A repo with `target/` gitignored and precompute on, so a drained event
-    /// reaches both the diff-warm arm and the reindex arm.
+    /// A repo with `target/` gitignored and the background warm enabled, so a
+    /// drained event under that directory meets the filter that decides whether
+    /// it arms anything.
     fn ignored_dir_harness() -> crate::test_harness::TestHarness {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
@@ -751,9 +752,9 @@ mod tests {
         );
     }
 
-    /// A build writing into an ignored directory used to cost a libgit2 query
-    /// per file in the review and diff-warm arms, and the reindex arm checked
-    /// nothing at all, so generated files entered the code graph.
+    /// A build writes into an ignored directory in bursts. Nothing there
+    /// belongs in the code graph, since a rebuild replaces the lot. A source
+    /// file beside that directory still does.
     #[test]
     fn a_burst_under_an_ignored_dir_arms_nothing() {
         let mut h = ignored_dir_harness();

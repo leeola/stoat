@@ -26,10 +26,11 @@ pub struct DiffCacheKey {
 
 struct Entry {
     hunks: Arc<Vec<ReviewHunk>>,
-    /// Whether these hunks came from the whole-changeset pass and so already
-    /// reflect cross-file moves. A single-file warm writes `false`, which lets a
-    /// review open serve the hunks instantly yet still run the changeset pass to
-    /// recover move chips.
+    /// Whether these hunks already reflect cross-file moves, which the
+    /// whole-changeset pass resolves and a single-file diff cannot see.
+    ///
+    /// A reader that wants move chips over hunks stored `false` runs the
+    /// changeset pass itself to recover them.
     move_aware: bool,
     last_used: u64,
 }
@@ -60,8 +61,10 @@ impl DiffCache {
         })
     }
 
-    /// Cache `hunks` under `key`. `move_aware` records whether they came from
-    /// the whole-changeset pass. A single-file warm passes `false`.
+    /// Cache `hunks` under `key`.
+    ///
+    /// `move_aware` records whether they already reflect cross-file moves, which
+    /// only the whole-changeset pass resolves.
     pub fn insert(&mut self, key: DiffCacheKey, hunks: Arc<Vec<ReviewHunk>>, move_aware: bool) {
         let counter = self.tick();
         self.map.insert(

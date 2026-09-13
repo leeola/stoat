@@ -126,11 +126,12 @@ impl TreeMemo {
 /// text with that language.
 ///
 /// The parse runs outside the lock, which a miss holds only long enough to
-/// look up and to store. A changeset warms one diff job per changed file on
-/// the blocking pool, and parsing under the lock would queue every one of them
-/// behind whichever job got there first. Two jobs missing at once both parse,
-/// which is the price. Identical text and language give identical trees, so
-/// whichever lands first is kept.
+/// look up and to store. Callers run several diffs at once on a blocking pool
+/// over one memo, and parsing under the lock queues every one of them behind
+/// whichever got there first.
+///
+/// Two diffs missing at once both parse, which is the price. Identical text and
+/// language give identical trees, so whichever lands first is kept.
 pub fn parse_memoized(
     language: &Arc<Language>,
     text: &str,

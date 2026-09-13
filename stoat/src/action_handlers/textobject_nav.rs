@@ -105,9 +105,10 @@ pub(crate) fn goto_textobject_impl(
     // Every selection reads from its own cursor, so a multi-cursor set walks to
     // one object each rather than sharing whichever cursor happened to be
     // newest.
+
     // One index per layer, shared by every cursor of the press. The query
-    // behind it is milliseconds on a large file, and it used to run once per
-    // cursor per count step.
+    // behind it is milliseconds on a large file, and a press over many cursors
+    // with a count reaches it once rather than once a step.
     let mut indexes: Vec<(*const stoat_language::Tree, ObjectIndex)> = Vec::new();
     let landings: HashMap<usize, std::ops::Range<usize>> = cursors
         .into_iter()

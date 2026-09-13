@@ -1244,9 +1244,11 @@ impl PagePool {
     /// Resize every page to a `rows` by `cols` viewport, dropping all buffered
     /// content.
     ///
-    /// Called when a resize or font-zoom changes the viewport's row count,
-    /// since pages are sized to the live viewport. The window is emptied; the
-    /// app refills it for the new size.
+    /// For a pool region declared at a size the pool does not already hold,
+    /// since a page is sized to the region it serves. The window is emptied and
+    /// the app refills it for the new size.
+    ///
+    /// Use [`Self::invalidate`] where the page size stays as it is.
     pub fn rebuild(&mut self, rows: usize, cols: usize) {
         for page in &mut self.pages {
             page.index = None;
