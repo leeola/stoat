@@ -497,6 +497,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     };
     stoat.refresh_chrome();
 
+    // Every pool's rectangle moves again on the next event of a resize burst,
+    // so the pools render no page for one until the burst's settle deadline
+    // passes. The timer that deadline was armed with brings the frame that
+    // fills them.
+    let unsettled = stoat
+        .pool_settle
+        .as_ref()
+        .is_some_and(|(at, _)| stoat.executor.now() < *at);
+    stoat.smooth_scroll.set_geometry_unsettled(unsettled);
+
     // A full-screen overlay screen hides every editor, so nothing is pooled
     // this frame and any live pools are retired. The diff screen renders in
     // the real editor pool, so it is not an overlay.
@@ -2063,7 +2073,7 @@ pub(crate) fn editor_page_content_version(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action_handlers::movement;
+    use crate::{action_handlers::movement, debounce};
 
     /// The rich review gutter engages only when every color resolves to RGB, so
     /// tests need a hex theme. The default theme uses named colors.
@@ -3261,6 +3271,40 @@ mod tests {
             vec![0, 1, 2, 3, 4],
             "the initial window's pages fill asynchronously, got {filled:?}"
         );
+
+        fn drain_fills(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u64> {
+            let mut filled = Vec::new();
+            while let Ok(batch) = rx.try_recv() {
+                for cmd in command::decode_stream(&batch) {
+                    if let Command::Fill(FillCommand { index, .. }) = cmd {
+                        filled.push(index);
+                    }
+                }
+            }
+            filled.sort_unstable();
+            filled
+        }
+
+        // A resize moves the pane's rectangle, and its next event would drop
+        // whatever page this one rendered, so the pool holds the page back.
+        let size = h.stoat.size();
+        h.resize(size.width, size.height - 2);
+        emit_smooth_scroll(&mut h.stoat);
+        assert_eq!(
+            drain_fills(&mut rx),
+            Vec::<u64>::new(),
+            "the resize frame renders no page"
+        );
+
+        // The settle frame finds the rectangle where the resize left it, and a
+        // resting pool fills the visible page alone.
+        h.advance_clock(debounce::POOL_SETTLE_DEBOUNCE);
+        emit_smooth_scroll(&mut h.stoat);
+        assert_eq!(
+            drain_fills(&mut rx),
+            vec![0],
+            "the settle frame fills the page the resize held back"
+        );
     }
 
     #[test]
@@ -3843,7 +3887,7 @@ mod tests {
 
         h.type_text("needle");
         h.settle();
-        h.advance_clock(crate::debounce::CODE_SEARCH_DEBOUNCE);
+        h.advance_clock(debounce::CODE_SEARCH_DEBOUNCE);
         h.settle();
         let landed = h.stoat.code_search.as_ref().expect("open").matches.len();
         assert!(landed > 100, "the scan landed matches to scroll: {landed}");
@@ -4459,6 +4503,32 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Command::Scroll(_))),
             "the scroll target eases into the region behind it, got {cmds:?}"
+        );
+
+        // A resize hands the pool a rectangle its next event replaces, so a
+        // page rendered into this one is never composited. Changing the height
+        // alone leaves what the pane paints untouched, so nothing but the
+        // geometry moved.
+        while rx.try_recv().is_ok() {}
+        let size = h.stoat.size();
+        h.resize(size.width, size.height - 2);
+        emit_smooth_scroll(&mut h.stoat);
+
+        let mut resized = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            resized.extend(command::decode_stream(&batch));
+        }
+        assert!(
+            resized.iter().any(|c| matches!(c, Command::PoolRegion(_))),
+            "the resize re-declares the region, got {resized:?}"
+        );
+        assert!(
+            !resized.iter().any(|c| matches!(c, Command::Fill(_))),
+            "and ships no page into a rectangle still moving, got {resized:?}"
+        );
+        assert!(
+            h.stoat.pool_settle.is_some(),
+            "with a settle frame armed to fill once it stops"
         );
     }
 

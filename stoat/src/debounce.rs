@@ -86,6 +86,15 @@ pub(crate) const CODE_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration
 pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(300);
 
+/// Quiet window after the last resize event before the scroll pools fill the
+/// pages they held back.
+///
+/// A resize arrives as a burst, and each event hands every pool a rectangle
+/// that invalidates the slots of the one before, so the fills wait the burst
+/// out rather than rendering a page per event. The window outlasts the gap
+/// between a drag's events and still reads as immediate once the drag stops.
+pub(crate) const POOL_SETTLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Drain queued [`crate::host::FsWatchEvent`]s from the active
 /// [`FsWatchHost`], routing each to the debounce its path calls for.
 ///
@@ -415,6 +424,26 @@ pub(crate) fn arm_workspace_autosave(stoat: &mut Stoat) {
     stoat.pending_workspace_autosave = Some(task);
 }
 
+/// Push the geometry's settle deadline out to [`POOL_SETTLE_DEBOUNCE`] from
+/// now, and wake the run loop when it arrives.
+///
+/// Until the deadline, a scroll pool whose rectangle moves renders no page for
+/// it, since the next resize event would drop the page anyway. The settled
+/// geometry raises no event of its own, which is why the wake has to be
+/// scheduled. Replacing the task cancels the prior timer, so a burst of resize
+/// events arms one settle frame after its last event rather than one per event.
+///
+/// The settle frame needs no drain of its own. It finds each rectangle
+/// unchanged and the pool's window unrequested, so the ordinary emit fills it.
+pub(crate) fn arm_pool_settle(stoat: &mut Stoat) {
+    let at = stoat.executor.now() + POOL_SETTLE_DEBOUNCE;
+    let executor = stoat.executor.clone();
+    let task = stoat.spawn_woken(async move {
+        executor.timer(POOL_SETTLE_DEBOUNCE).await;
+    });
+    stoat.pool_settle = Some((at, task));
+}
+
 /// Drain the diff-refresh debounce marker, staling every diff the moved HEAD
 /// left describing a base that no longer exists.
 ///
@@ -636,6 +665,11 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         arm_workspace_autosave(&mut h.stoat);
         assert!(h.stoat.pending_workspace_autosave.is_some());
+
+        // The harness sizes itself through a resize, which arms the pool
+        // settle, and that expiry does ask for a frame. Dropping it leaves the
+        // autosave as the only timer the clock runs out.
+        h.stoat.pool_settle = None;
 
         h.advance_clock(WORKSPACE_AUTOSAVE_THROTTLE + Duration::from_secs(1));
 

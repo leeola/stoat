@@ -1615,6 +1615,14 @@ pub struct Stoat {
     /// [`debounce::arm_workspace_autosave`] reads to leave the window alone
     /// rather than pushing it back.
     pub(crate) pending_workspace_autosave: Option<stoat_scheduler::Task<()>>,
+    /// When the grid's geometry counts as settled after a resize, and the timer
+    /// that wakes the run loop at that moment.
+    ///
+    /// A scroll pool renders no page for a rectangle that moves before the
+    /// deadline, since the next resize event would drop it, and the settled
+    /// geometry raises no event of its own to fill it. Armed by
+    /// [`debounce::arm_pool_settle`], whose replacement cancels the prior timer.
+    pub(crate) pool_settle: Option<(std::time::Instant, stoat_scheduler::Task<()>)>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -2393,6 +2401,7 @@ impl Stoat {
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
             pending_workspace_autosave: None,
+            pool_settle: None,
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -2756,6 +2765,12 @@ impl Stoat {
         // below leaves unreachable for the same reason.
         if let WindowIpcEvent::Chord { ch, .. } = event {
             return self.handle_chord(ch);
+        }
+
+        // An aux window's own resize drag moves its pane's rectangle the way the
+        // terminal's does, and the pools it feeds are the same pools.
+        if let WindowIpcEvent::Resized { .. } = event {
+            debounce::arm_pool_settle(self);
         }
 
         let panes = &mut self.active_workspace_mut().panes;
@@ -4397,6 +4412,10 @@ impl Stoat {
                 self.size = Rect::new(0, 0, w, h);
                 let size = self.size;
                 self.active_workspace_mut().layout(size);
+                // A drag reports a resize per column or row it crosses, and each
+                // one moves every pool's rectangle, so the pools hold their
+                // fills until this window closes.
+                debounce::arm_pool_settle(self);
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -8184,6 +8203,11 @@ mod tests {
         assert_eq!(
             stoat.active_workspace().panes.pane(detached).area,
             Rect::new(0, 0, 50, 20),
+        );
+        assert!(
+            stoat.pool_settle.is_some(),
+            "an aux window's resize moves its pool's rectangle, so it holds the \
+             fills back the way the terminal's does",
         );
     }
 

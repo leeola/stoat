@@ -48,6 +48,9 @@ pub struct SmoothScrollState {
     /// What the most recent [`MinimapViewCommand`] carried per strip id, so an
     /// unmoved viewport neither re-emits a thumb update nor re-derives one.
     minimap_views: HashMap<u32, MinimapView>,
+    /// Whether the grid's geometry is still moving, set through
+    /// [`Self::set_geometry_unsettled`].
+    geometry_unsettled: bool,
 }
 
 /// What a strip's thumb was last placed at, and what placed it there.
@@ -130,6 +133,21 @@ impl SmoothScrollState {
         self.pools
             .get(&pool)
             .is_some_and(|entry| entry.content_version == version)
+    }
+
+    /// Hold back the fill of every pool whose rectangle moves, until the grid's
+    /// geometry settles.
+    ///
+    /// A resize arrives as a burst, and each event hands every pool a rectangle
+    /// that drops the terminal's slots the one before it filled, so a page
+    /// rendered in between is thrown away before it composites. Set this while
+    /// a burst is in flight.
+    ///
+    /// The caller owes the pools one emit once it clears this. A pool that held
+    /// its fill back has no other way to get one, since a settled rectangle
+    /// raises no event of its own.
+    pub fn set_geometry_unsettled(&mut self, unsettled: bool) {
+        self.geometry_unsettled = unsettled;
     }
 
     /// Retire every tracked pool whose id is not in `active`: emit its
@@ -251,6 +269,11 @@ impl SmoothScrollState {
 /// whose content churns while it rests, since a pool composites only while its
 /// eased offset moves.
 ///
+/// A held pool whose rectangle moves renders no page at all while the caller
+/// reports the geometry unsettled through
+/// [`SmoothScrollState::set_geometry_unsettled`], since a resize throws away
+/// every page it is given while it lasts.
+///
 /// Emits, in order: a `pool_region` frame when the rectangle changed; a
 /// `fill`/page-VT/`fill_end` triple for each page newly entering the buffered
 /// window; a `reposition` frame when the new window is disjoint from the old, so
@@ -272,6 +295,7 @@ pub fn emit_into(
     mut render_page: impl FnMut(u64) -> Vec<u8>,
 ) -> Vec<u64> {
     let pool = region.pool;
+    let unsettled = state.geometry_unsettled;
     let entry = state.pools.entry(pool).or_default();
 
     // Pools composite only while the eased offset moves, so a content change seen
@@ -285,7 +309,8 @@ pub fn emit_into(
     let scrolling = entry.last_scroll_offset != Some(scroll_offset);
     let hold = hold_when_idle && !scrolling;
 
-    if entry.region != Some(region) {
+    let region_changed = entry.region != Some(region);
+    if region_changed {
         encode_pool_region_into(out, &region);
         entry.region = Some(region);
         // A fresh region invalidates the pool's slot contents. Force a refill.
@@ -316,7 +341,16 @@ pub fn emit_into(
     let prev = entry.requested.clone();
     let jumped = prev.is_some_and(|p| p.end <= window.start || window.end <= p.start);
 
-    let entered = refill(out, entry, pool, window, &mut render_page);
+    // A page rendered into a rectangle the next resize event replaces is thrown
+    // away, so a resting pool waits the burst out. A rectangle that moves for
+    // any other reason has settled by the time the page draws: a picker's box
+    // grows with its match count, and blanking that list would cost more than
+    // the page it saves.
+    let entered = if hold && region_changed && unsettled {
+        Vec::new()
+    } else {
+        refill(out, entry, pool, window, &mut render_page)
+    };
 
     // A jump whose new window does not overlap the old one is too far to ease
     // across an unbuffered gap. The reposition re-anchors the terminal's offset
@@ -665,8 +699,11 @@ mod tests {
         assert_eq!(entered, (0..WINDOW_PAGES).collect::<Vec<_>>());
     }
 
+    /// A resize hands a pool a new rectangle per event, and each one drops the
+    /// slots the page before it went into. A resting pool therefore renders
+    /// nothing while the burst lasts.
     #[test]
-    fn a_region_change_while_holding_enters_one_page() {
+    fn a_region_change_under_unsettled_geometry_defers_the_fill() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
 
@@ -674,12 +711,64 @@ mod tests {
             Vec::new()
         });
 
-        // The region changed under the resting pool, wiping its slots. Holding
-        // refills only the visible page (offset 40 / height 22 = page 1).
+        state.set_geometry_unsettled(true);
         let entered = emit_into(&mut out, &mut state, region(1, 22), 40.0, 0, true, |_| {
             Vec::new()
         });
-        assert_eq!(entered, vec![1]);
+        assert!(entered.is_empty(), "a moved rectangle enters no page");
+
+        // The burst is still in flight, but this pool's rectangle held still,
+        // so its slots survive and the page it owes goes out (offset 40 /
+        // height 22 = page 1).
+        let entered = emit_into(&mut out, &mut state, region(1, 22), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(
+            entered,
+            vec![1],
+            "a rectangle that held still fills its page"
+        );
+    }
+
+    /// A picker's box grows with its match count, so a keystroke moves its
+    /// rectangle as surely as a resize does. That rectangle has settled by the
+    /// time the page draws, and blanking the list until the settle window
+    /// closes would cost more than the page it saves.
+    #[test]
+    fn a_region_change_under_settled_geometry_fills_at_once() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 7, true, |_| {
+            Vec::new()
+        });
+
+        let entered = emit_into(&mut out, &mut state, region(1, 22), 0.0, 8, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(entered, vec![0], "the moved rectangle fills its page");
+    }
+
+    /// Unsettled geometry holds back the page a moved rectangle would fill, not
+    /// the pages a glide is about to composite.
+    #[test]
+    fn unsettled_geometry_still_refills_a_scrolling_pool() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, true, |_| {
+            Vec::new()
+        });
+
+        state.set_geometry_unsettled(true);
+        let entered = emit_into(&mut out, &mut state, region(1, 22), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(
+            entered,
+            (0..WINDOW_PAGES).collect::<Vec<_>>(),
+            "a moving target refills its whole window"
+        );
     }
 
     /// The never-emitted answer is the one that matters. A caller skipping on
