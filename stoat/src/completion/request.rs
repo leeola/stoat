@@ -1133,19 +1133,40 @@ async fn run_request(
         })
     });
 
-    let ctx = owned.as_borrowed();
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut incomplete: Vec<String> = Vec::new();
     for source in &sources {
         match source {
             CompletionSource::Path => {
-                items.extend(crate::completion::path::fetch(
-                    &ctx,
-                    &buffer,
-                    fs_host.as_ref(),
-                    &base_dir,
-                    home_dir.as_deref(),
-                ));
+                // A `read_dir` and a `file_type` per entry, which is tens of
+                // milliseconds over a directory holding a build's output and
+                // longer against a cold cache or a network mount. The
+                // scheduler pumps this future on the run-loop thread, so the
+                // listing goes to the pool as the word scan does.
+                //
+                // Awaited in place rather than started early, since the items
+                // belong where the source order puts them.
+                items.extend(
+                    executor
+                        .spawn_blocking({
+                            let owned = owned.clone();
+                            let buffer = buffer.clone();
+                            let fs_host = fs_host.clone();
+                            let base_dir = base_dir.clone();
+                            let home_dir = home_dir.clone();
+                            move || {
+                                let ctx = owned.as_borrowed();
+                                crate::completion::path::fetch(
+                                    &ctx,
+                                    &buffer,
+                                    fs_host.as_ref(),
+                                    &base_dir,
+                                    home_dir.as_deref(),
+                                )
+                            }
+                        })
+                        .await,
+                );
             },
             CompletionSource::Lsp => {
                 if let Some(request) = &lsp_request {
@@ -2041,6 +2062,33 @@ mod harness_tests {
         let mut got = shown(popup);
         got.sort();
         assert_eq!(got, ["foobar", "foxtrot"]);
+    }
+
+    /// A path context lists a directory, which is filesystem IO the run loop
+    /// must not do. The listing answers from the pool, and its entries still
+    /// have to reach the popup.
+    #[test]
+    fn a_path_popup_carries_the_directory_listing() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_fs().insert_files([
+            (PathBuf::from("/ws/notes.md"), b"n".as_slice()),
+            (PathBuf::from("/ws/other.rs"), b"o".as_slice()),
+        ]);
+
+        h.type_keys("i");
+        h.type_text("./");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let popup = h.stoat.pending_completion.as_ref().expect("popup armed");
+        let mut got = shown(popup);
+        got.sort();
+        assert_eq!(
+            got,
+            ["buf.rs", "notes.md", "other.rs"],
+            "the directory the prefix names lists into the popup",
+        );
     }
 
     /// A popup over `prefix`, anchored at the start of the line.
