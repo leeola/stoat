@@ -1,8 +1,6 @@
 use crate::{
     buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer},
-    display_map::{
-        BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight, SemanticTokenSpans,
-    },
+    display_map::{BufferSemanticTokens, HighlightStyleInterner, SemanticTokenSpans},
     lsp::LspSymbolKind,
 };
 use lsp_types::SemanticToken;
@@ -34,6 +32,22 @@ pub(crate) struct CachedDiff {
     pub buffer_version: u64,
     pub base_fingerprint: [u8; 32],
     pub result: Arc<DiffResult>,
+}
+
+/// What an LSP semantic-tokens response leaves behind for a buffer.
+///
+/// The highlight channel those tokens built, and the buffer version the server
+/// measured them against. A fresh editor is seeded from the channel, and the
+/// trigger reinstalls it in place of re-requesting, both only while `version`
+/// still matches the buffer.
+///
+/// The channel is retained rather than rebuilt because building one resolves
+/// every token end, which is milliseconds on a large file. It carries the
+/// anchored spans and the style table they name.
+#[derive(Clone)]
+pub(crate) struct RetainedLspTokens {
+    pub version: u64,
+    pub channel: BufferSemanticTokens,
 }
 
 /// One entry surfaced by [`BufferRegistry::dirty_buffers`]. `path` is
@@ -88,11 +102,7 @@ struct BufferEntry {
     /// version they were computed against. A fresh editor is seeded from them,
     /// and the trigger reinstalls them instead of re-requesting, but only while
     /// the version still matches the buffer.
-    lsp_tokens: Option<(
-        u64,
-        Arc<[SemanticTokenHighlight]>,
-        Arc<HighlightStyleInterner>,
-    )>,
+    lsp_tokens: Option<RetainedLspTokens>,
     /// Anchored symbol kinds from the same LSP semantic-tokens response, kept
     /// separate from [`Self::lsp_tokens`] so cursor-aware features can query the
     /// kind under an offset without the highlight styling. Start-anchor sorted.
@@ -104,7 +114,7 @@ struct BufferEntry {
     /// delta reply patches. A delta says which slice of this stream to replace,
     /// so without the stream there is nothing to apply it to and the next pull
     /// has to ask for the whole file again.
-    lsp_token_source: Option<(Option<String>, Vec<SemanticToken>)>,
+    lsp_token_source: Option<(Option<String>, Arc<[SemanticToken]>)>,
     diff: Option<CachedDiff>,
     /// Marks this buffer as a transient preview surface (e.g. the
     /// file finder's preview pane). The parse pipeline pulls these
@@ -501,7 +511,7 @@ impl BufferRegistry {
             .get(&id)?
             .lsp_tokens
             .as_ref()
-            .map(|(version, _, _)| *version)
+            .map(|retained| retained.version)
     }
 
     /// Borrow the stored [`SyntaxState`] (tree plus the rope it parsed) for `id`,
@@ -538,15 +548,9 @@ impl BufferRegistry {
     /// Retain the LSP semantic tokens computed for `id` at buffer `version`, so
     /// a fresh editor can be seeded and the trigger can skip a re-request while
     /// the version still matches.
-    pub(crate) fn store_lsp_tokens(
-        &mut self,
-        id: BufferId,
-        version: u64,
-        tokens: Arc<[SemanticTokenHighlight]>,
-        interner: Arc<HighlightStyleInterner>,
-    ) {
+    pub(crate) fn store_lsp_tokens(&mut self, id: BufferId, retained: RetainedLspTokens) {
         if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.lsp_tokens = Some((version, tokens, interner));
+            entry.lsp_tokens = Some(retained);
         }
     }
 
@@ -556,7 +560,7 @@ impl BufferRegistry {
         &mut self,
         id: BufferId,
         result_id: Option<String>,
-        data: Vec<SemanticToken>,
+        data: Arc<[SemanticToken]>,
     ) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.lsp_token_source = Some((result_id, data));
@@ -568,20 +572,13 @@ impl BufferRegistry {
     pub(crate) fn lsp_token_source_for(
         &self,
         id: BufferId,
-    ) -> Option<(Option<String>, Vec<SemanticToken>)> {
+    ) -> Option<(Option<String>, Arc<[SemanticToken]>)> {
         self.buffers.get(&id)?.lsp_token_source.clone()
     }
 
-    /// The retained `(version, tokens, interner)` triple for `id`, if an LSP
-    /// semantic-tokens response has been applied to it.
-    pub(crate) fn lsp_tokens_for(
-        &self,
-        id: BufferId,
-    ) -> Option<(
-        u64,
-        Arc<[SemanticTokenHighlight]>,
-        Arc<HighlightStyleInterner>,
-    )> {
+    /// What an LSP semantic-tokens response left for `id`, if one has been
+    /// applied to it.
+    pub(crate) fn lsp_tokens_for(&self, id: BufferId) -> Option<RetainedLspTokens> {
         self.buffers.get(&id)?.lsp_tokens.clone()
     }
 
@@ -596,8 +593,8 @@ impl BufferRegistry {
             if let Some(channel) = entry.tokens.as_mut() {
                 *channel = channel.with_interner(interner.clone());
             }
-            if let Some((_, _, cached)) = entry.lsp_tokens.as_mut() {
-                *cached = interner.clone();
+            if let Some(retained) = entry.lsp_tokens.as_mut() {
+                retained.channel = retained.channel.with_interner(interner.clone());
             }
         }
     }

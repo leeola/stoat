@@ -843,12 +843,12 @@ impl Workspace {
                 .display_map
                 .set_semantic_token_channel(buffer_id, channel.clone());
         }
-        if let Some((version, tokens, interner)) = self.buffers.lsp_tokens_for(buffer_id)
-            && version == current_version
+        if let Some(retained) = self.buffers.lsp_tokens_for(buffer_id)
+            && retained.version == current_version
         {
             editor
                 .display_map
-                .set_lsp_token_highlights(buffer_id, tokens, interner);
+                .set_lsp_token_channel(buffer_id, retained.channel);
         }
         editor
     }

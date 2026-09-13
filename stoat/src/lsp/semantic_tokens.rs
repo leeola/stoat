@@ -18,8 +18,10 @@ use crate::{
     action_handlers,
     app::Stoat,
     buffer::{BufferId, TextBufferSnapshot},
-    buffer_registry::LspSymbolKindIndex,
-    display_map::{syntax_theme, HighlightStyleId, SemanticTokenHighlight},
+    buffer_registry::{LspSymbolKindIndex, RetainedLspTokens},
+    display_map::{
+        highlights::BufferSemanticTokens, syntax_theme, HighlightStyleId, SemanticTokenHighlight,
+    },
     host::{LspHost, OffsetEncoding},
     lsp::{self, hosts, util, LspSymbolKind},
 };
@@ -54,24 +56,42 @@ struct DecodedToken {
 /// A completed semantic-tokens request's payload.
 ///
 /// It carries the buffer, the buffer version the request was built against, the
-/// server's own token stream with the result id naming it, and the anchored
-/// spans for the highlight channel and the symbol-kind index.
+/// server's own token stream with the result id naming it, the highlight
+/// channel its spans built, and the symbol-kind index.
 ///
-/// The spans arrive anchored rather than as offsets, because decoding and
-/// anchoring are one stretch of work that runs off the run loop together. The
-/// version says which text those anchors were minted against, which is what the
-/// pump checks before installing them.
+/// The channel holds anchored spans rather than offsets, because decoding,
+/// anchoring and building it are one stretch of work that runs off the run loop
+/// together. The version says which text those anchors were minted against,
+/// which is what the pump checks before installing them. Every editor viewing
+/// the buffer installs that one channel, where building it per editor resolves
+/// every token end again.
 ///
-/// The stream is carried alongside them because the next pull patches it rather
+/// The stream is carried alongside it because the next pull patches it rather
 /// than re-asking for it, and the result id is what names it to the server.
-pub(crate) type SemanticTokensOutcome = (
-    BufferId,
-    u64,
-    Option<String>,
-    Vec<SemanticToken>,
-    Arc<[SemanticTokenHighlight]>,
-    LspSymbolKindIndex,
-);
+pub(crate) struct SemanticTokensOutcome {
+    pub buffer: BufferId,
+    pub version: u64,
+    pub result_id: Option<String>,
+    pub data: Arc<[SemanticToken]>,
+    pub channel: BufferSemanticTokens,
+    pub kinds: LspSymbolKindIndex,
+}
+
+/// A semantic-tokens reply as the server sent it, before anything is applied.
+///
+/// A delta names a slice of the stream the last reply left, and applying it is
+/// a copy of that stream. That belongs where the decode runs, off the run loop,
+/// which is why the edits travel unapplied.
+enum TokenReply {
+    Full {
+        result_id: Option<String>,
+        data: Vec<SemanticToken>,
+    },
+    Delta {
+        result_id: Option<String>,
+        edits: Vec<SemanticTokensEdit>,
+    },
+}
 
 /// Request semantic tokens for the focused editor when the server advertises a
 /// full-document legend and the `(buffer, version)` key changed.
@@ -109,14 +129,13 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
 
     // When the buffer is unchanged since tokens were last computed, reinstall
     // the retained set instead of re-requesting behind the debounce.
-    if let Some((cached_version, tokens, interner)) =
-        stoat.active_workspace().buffers.lsp_tokens_for(buffer_id)
-        && cached_version == version
+    if let Some(retained) = stoat.active_workspace().buffers.lsp_tokens_for(buffer_id)
+        && retained.version == version
     {
         if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
             editor
                 .display_map
-                .set_lsp_token_highlights(buffer_id, tokens, interner);
+                .set_lsp_token_channel(buffer_id, retained.channel);
         }
         return;
     }
@@ -134,21 +153,27 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         .flatten()
         .and_then(|(result_id, data)| result_id.map(|result_id| (result_id, data)));
 
-    let styles = stoat.syntax_styles.clone();
+    let decode = Decode {
+        legend,
+        snapshot,
+        styles: stoat.syntax_styles.clone(),
+        encoding,
+    };
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken({
         let executor = executor.clone();
         async move {
             executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
-            let (result_id, data) = match previous {
-                Some((previous_result_id, previous_data)) => {
-                    pull_token_delta(host.as_ref(), &params, previous_result_id, &previous_data)
-                        .await?
-                },
-                None => pull_tokens_full(host.as_ref(), params).await?,
+            let (previous_result_id, previous_data) = match previous {
+                Some((result_id, data)) => (Some(result_id), Some(data)),
+                None => (None, None),
+            };
+            let reply = match previous_result_id {
+                Some(result_id) => pull_token_delta(host.as_ref(), &params, result_id).await?,
+                None => pull_tokens_full(host.as_ref(), params.clone()).await?,
             };
 
-            // A whole file's tokens, decoded and then anchored, is one
+            // A whole file's tokens, patched, decoded and then anchored, is one
             // non-yielding stretch of CPU, and the scheduler pumps a spawned
             // future on the run-loop thread. It goes to the blocking pool
             // instead, as the parse job next door does.
@@ -157,28 +182,113 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
             // minted against version V keeps naming its text whatever the
             // buffer reads as later. The pump still drops a reply whose version
             // has moved, which is what decides that the offsets meant anything.
-            let (data, tokens, kinds) = executor
-                .spawn_blocking(move || {
-                    let items =
-                        convert_semantic_tokens(&data, &legend, &snapshot.visible_text, encoding);
-                    let (tokens, kinds) = anchor_tokens(&items, &snapshot, &styles);
-                    (data, tokens, kinds)
+            let built = executor
+                .spawn_blocking({
+                    let decode = decode.clone();
+                    move || decode.build(reply, previous_data.as_deref())
                 })
                 .await;
 
-            Some((buffer_id, version, result_id, data, tokens, kinds))
+            let built = match built {
+                Some(built) => built,
+                // The delta named a slice the retained stream does not have, so
+                // the whole set comes back and decodes the same way. A misfit
+                // patch shifts every token after it without failing, which is
+                // why it is refused rather than guessed at.
+                None => {
+                    tracing::warn!(
+                        target: "stoat::lsp",
+                        "semantic tokens delta did not fit the retained stream, pulling in full",
+                    );
+                    let reply = pull_tokens_full(host.as_ref(), params).await?;
+                    executor
+                        .spawn_blocking(move || decode.build(reply, None))
+                        .await?
+                },
+            };
+
+            Some(SemanticTokensOutcome {
+                buffer: buffer_id,
+                version,
+                result_id: built.result_id,
+                data: built.data,
+                channel: built.channel,
+                kinds: built.kinds,
+            })
         }
     });
     stoat.pending_semantic_tokens.arm(task);
 }
 
+/// What one reply needs to become anchored spans, a highlight channel, and a
+/// symbol-kind index.
+///
+/// Held together because the delta recovery runs the same work twice. The
+/// first attempt patches the retained stream, and the second decodes the whole
+/// set the server sends in its place. Cloning this for the second attempt costs
+/// a refcount each for the snapshot and the theme, and a copy of the legend,
+/// which is one short list per language.
+#[derive(Clone)]
+struct Decode {
+    legend: Vec<SemanticTokenType>,
+    snapshot: TextBufferSnapshot,
+    styles: syntax_theme::SyntaxStyles,
+    encoding: OffsetEncoding,
+}
+
+/// One reply, decoded and anchored, as everything the pump installs.
+struct BuiltTokens {
+    result_id: Option<String>,
+    data: Arc<[SemanticToken]>,
+    channel: BufferSemanticTokens,
+    kinds: LspSymbolKindIndex,
+}
+
+impl Decode {
+    /// Patch, decode and anchor `reply`, building the highlight channel over
+    /// the token ends the anchoring pass reads.
+    ///
+    /// `previous` is the retained stream a delta patches. [`None`] where the
+    /// reply carries the whole set. Answers [`None`] where a delta names a
+    /// slice `previous` does not have, which leaves the caller to pull the
+    /// whole set instead.
+    fn build(&self, reply: TokenReply, previous: Option<&[SemanticToken]>) -> Option<BuiltTokens> {
+        let (result_id, data) = match reply {
+            TokenReply::Full { result_id, data } => (result_id, data),
+            TokenReply::Delta { result_id, edits } => {
+                (result_id, apply_token_delta(previous?, &edits)?)
+            },
+        };
+
+        let items = convert_semantic_tokens(
+            &data,
+            &self.legend,
+            &self.snapshot.visible_text,
+            self.encoding,
+        );
+        let (tokens, ends, kinds) = anchor_tokens(&items, &self.snapshot, &self.styles);
+        let channel = BufferSemanticTokens::with_resolved_ends(
+            tokens.clone(),
+            self.styles.interner.clone(),
+            &ends,
+        );
+
+        Some(BuiltTokens {
+            result_id,
+            data: data.into(),
+            channel,
+            kinds,
+        })
+    }
+}
+
 /// The whole token stream and the result id the server named it by.
-async fn pull_tokens_full(
-    host: &dyn LspHost,
-    params: SemanticTokensParams,
-) -> Option<(Option<String>, Vec<SemanticToken>)> {
+async fn pull_tokens_full(host: &dyn LspHost, params: SemanticTokensParams) -> Option<TokenReply> {
     match host.semantic_tokens_full(params).await {
-        Ok(Some(SemanticTokensResult::Tokens(tokens))) => Some((tokens.result_id, tokens.data)),
+        Ok(Some(SemanticTokensResult::Tokens(tokens))) => Some(TokenReply::Full {
+            result_id: tokens.result_id,
+            data: tokens.data,
+        }),
         // A partial result streams its tokens over separate progress
         // notifications, which this path does not collect.
         Ok(Some(SemanticTokensResult::Partial(_))) | Ok(None) => None,
@@ -189,18 +299,17 @@ async fn pull_tokens_full(
     }
 }
 
-/// The token stream after the changes since `previous_result_id`, or the whole
-/// one when the server answers with that instead.
+/// The edits since `previous_result_id`, or the whole stream when the server
+/// answers with that instead.
 ///
-/// Falls back to a full pull whenever the reply cannot be applied to
-/// `previous_data`, so a delta that does not line up costs one extra round trip
-/// rather than a silently wrong highlight.
+/// Falls back to a full pull where the server declines the question, which is a
+/// partial delta it streams elsewhere or no reply at all. A delta that does not
+/// fit the retained stream is caught where it is applied.
 async fn pull_token_delta(
     host: &dyn LspHost,
     params: &SemanticTokensParams,
     previous_result_id: String,
-    previous_data: &[SemanticToken],
-) -> Option<(Option<String>, Vec<SemanticToken>)> {
+) -> Option<TokenReply> {
     let delta_params = SemanticTokensDeltaParams {
         work_done_progress_params: params.work_done_progress_params.clone(),
         partial_result_params: params.partial_result_params.clone(),
@@ -216,21 +325,14 @@ async fn pull_token_delta(
     };
 
     match reply {
-        Some(SemanticTokensFullDeltaResult::Tokens(tokens)) => {
-            Some((tokens.result_id, tokens.data))
-        },
-        Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => {
-            match apply_token_delta(previous_data, &delta.edits) {
-                Some(data) => Some((delta.result_id, data)),
-                None => {
-                    tracing::warn!(
-                        target: "stoat::lsp",
-                        "semantic tokens delta did not fit the retained stream, pulling in full",
-                    );
-                    pull_tokens_full(host, params.clone()).await
-                },
-            }
-        },
+        Some(SemanticTokensFullDeltaResult::Tokens(tokens)) => Some(TokenReply::Full {
+            result_id: tokens.result_id,
+            data: tokens.data,
+        }),
+        Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => Some(TokenReply::Delta {
+            result_id: delta.result_id,
+            edits: delta.edits,
+        }),
         // A partial delta streams its edits elsewhere, and no reply at all means
         // the server declined. Neither leaves anything to patch with.
         Some(SemanticTokensFullDeltaResult::PartialTokensDelta { .. }) | None => {
@@ -451,15 +553,22 @@ pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
     let Some(outcome) = stoat.pending_semantic_tokens.poll() else {
         return false;
     };
-    if let Some((buffer_id, version, result_id, data, tokens, kinds)) = outcome {
+    if let Some(outcome) = outcome {
         // Retained before the install below, which drops the reply when the
         // buffer has moved on. The stream is still what the server holds
         // whatever this buffer now reads as, so the next delta can name it.
-        stoat
-            .active_workspace_mut()
-            .buffers
-            .store_lsp_token_source(buffer_id, result_id, data);
-        apply_semantic_tokens(stoat, buffer_id, version, tokens, kinds);
+        stoat.active_workspace_mut().buffers.store_lsp_token_source(
+            outcome.buffer,
+            outcome.result_id,
+            outcome.data,
+        );
+        apply_semantic_tokens(
+            stoat,
+            outcome.buffer,
+            outcome.version,
+            outcome.channel,
+            outcome.kinds,
+        );
     }
     true
 }
@@ -487,7 +596,11 @@ fn anchor_tokens(
     )],
     snapshot: &TextBufferSnapshot,
     styles: &syntax_theme::SyntaxStyles,
-) -> (Arc<[SemanticTokenHighlight]>, LspSymbolKindIndex) {
+) -> (
+    Arc<[SemanticTokenHighlight]>,
+    Vec<usize>,
+    LspSymbolKindIndex,
+) {
     let mut token_starts: Vec<usize> = Vec::with_capacity(items.len());
     let mut token_ends: Vec<usize> = Vec::with_capacity(items.len());
     let mut token_styles: Vec<HighlightStyleId> = Vec::with_capacity(items.len());
@@ -529,7 +642,10 @@ fn anchor_tokens(
         .map(|((kind, start), end)| (start..end, kind))
         .collect();
 
-    (tokens, kinds)
+    // The ends the highlight channel indexes by, which anchoring just read off
+    // this text. Resolving them again against the same version answers the
+    // same offsets.
+    (tokens, token_ends, kinds)
 }
 
 /// Install an anchored semantic-token reply on `buffer_id`, provided the buffer
@@ -545,7 +661,7 @@ fn apply_semantic_tokens(
     stoat: &mut Stoat,
     buffer_id: BufferId,
     version: u64,
-    tokens: Arc<[SemanticTokenHighlight]>,
+    channel: BufferSemanticTokens,
     kinds: LspSymbolKindIndex,
 ) {
     let live = stoat
@@ -557,19 +673,20 @@ fn apply_semantic_tokens(
         return;
     }
 
-    let interner = stoat.syntax_styles.interner.clone();
-
     let ws = stoat.active_workspace_mut();
-    ws.buffers
-        .store_lsp_tokens(buffer_id, version, tokens.clone(), interner.clone());
+    ws.buffers.store_lsp_tokens(
+        buffer_id,
+        RetainedLspTokens {
+            version,
+            channel: channel.clone(),
+        },
+    );
     ws.buffers.store_lsp_symbol_kinds(buffer_id, kinds);
     for editor in ws.editors.values_mut() {
         if editor.buffer_id == buffer_id {
-            editor.display_map.set_lsp_token_highlights(
-                buffer_id,
-                tokens.clone(),
-                interner.clone(),
-            );
+            editor
+                .display_map
+                .set_lsp_token_channel(buffer_id, channel.clone());
         }
     }
 }
@@ -829,6 +946,58 @@ mod tests {
         );
     }
 
+    /// A delta naming a slice the retained stream does not have is refused, and
+    /// the whole set comes back instead. A patch applied where it does not fit
+    /// shifts every token after it without failing, so the round trip is what
+    /// keeps the highlights honest.
+    #[test]
+    fn a_delta_that_does_not_fit_pulls_the_whole_set() {
+        use lsp_types::{SemanticTokens, SemanticTokensDelta, SemanticTokensResult};
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_token_deltas(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = y\n")]);
+        let path = root.join("main.rs");
+        let uri = path.to_str().unwrap().to_string();
+        open_buffer(&mut h, path.clone());
+
+        h.fake_lsp().set_semantic_tokens_full(
+            &uri,
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: Some("r1".into()),
+                data: vec![tok(1), tok(2)],
+            }),
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 2, "the first pull is a full one");
+
+        // Past the two tokens the stream holds, so the patch has nowhere to go.
+        h.fake_lsp().set_semantic_tokens_full_delta(
+            &uri,
+            SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                result_id: Some("r2".into()),
+                edits: vec![edit(50, 5, Some(vec![3, 4]))],
+            }),
+        );
+        h.fake_lsp().set_semantic_tokens_full(
+            &uri,
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: Some("r3".into()),
+                data: vec![tok(1)],
+            }),
+        );
+
+        h.type_keys("i");
+        h.type_text("z");
+        h.advance_clock(Duration::from_millis(550));
+
+        assert_eq!(
+            lsp_token_count(&mut h),
+            1,
+            "the refused delta leaves the whole set to paint, not the stale one",
+        );
+    }
+
     fn lsp_token_count(h: &mut TestHarness) -> usize {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
@@ -864,6 +1033,73 @@ mod tests {
         h.advance_clock(Duration::from_millis(550));
         assert_eq!(lsp_token_count(&mut h), 1);
         h.assert_snapshot("semantic_tokens_recolor");
+    }
+
+    /// Every editor viewing the buffer installs the one channel the reply
+    /// built. Building a channel resolves every token end, which is the
+    /// largest item in the install and was paid once per editor.
+    #[test]
+    fn a_reply_installs_one_channel_into_every_editor() {
+        let mut h = TestHarness::default();
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let (version, snapshot) = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let read = shared.read().expect("buffer poisoned");
+            (read.snapshot.version, read.snapshot.clone())
+        };
+
+        let second = {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer").clone();
+            ws.seeded_editor(buffer_id, buffer, h.stoat.executor.clone())
+        };
+        let second = h.stoat.active_workspace_mut().editors.insert(second);
+
+        let (tokens, ends, kinds) = anchor_tokens(
+            &[(0..5, Some("function"), None)],
+            &snapshot,
+            &h.stoat.syntax_styles,
+        );
+        let channel = BufferSemanticTokens::with_resolved_ends(
+            tokens,
+            h.stoat.syntax_styles.interner.clone(),
+            &ends,
+        );
+        apply_semantic_tokens(&mut h.stoat, buffer_id, version, channel, kinds);
+
+        let ws = h.stoat.active_workspace_mut();
+        let showing: Vec<_> = ws
+            .editors
+            .iter()
+            .filter(|(_, editor)| editor.buffer_id == buffer_id)
+            .map(|(id, _)| id)
+            .collect();
+        let installed: Vec<BufferSemanticTokens> = showing
+            .iter()
+            .map(|id| {
+                ws.editors[*id]
+                    .display_map
+                    .snapshot()
+                    .lsp_token_highlights()
+                    .get(&buffer_id)
+                    .cloned()
+                    .expect("the reply installed")
+            })
+            .collect();
+
+        assert!(showing.contains(&second), "both editors show the buffer");
+        assert_eq!(installed.len(), 2, "and both took the reply");
+        assert!(
+            installed[0].shares_index(&installed[1]),
+            "both editors hold the one build",
+        );
     }
 
     /// A token can carry a scope, a kind, or both, so the styled and the kinded
@@ -905,7 +1141,7 @@ mod tests {
         // The first token styles without a kind and the second kinds without a
         // style, so the two sequences diverge before the third, which is in
         // both.
-        let (tokens, kinds) = anchor_tokens(
+        let (tokens, ends, kinds) = anchor_tokens(
             &[
                 (0..5, Some("function"), None),
                 (6..10, None, Some(LspSymbolKind::Type)),
@@ -914,10 +1150,14 @@ mod tests {
             &snapshot,
             &h.stoat.syntax_styles,
         );
-        apply_semantic_tokens(&mut h.stoat, buffer_id, version, tokens, kinds);
+        let channel = BufferSemanticTokens::with_resolved_ends(
+            tokens.clone(),
+            h.stoat.syntax_styles.interner.clone(),
+            &ends,
+        );
+        apply_semantic_tokens(&mut h.stoat, buffer_id, version, channel, kinds);
 
         let ws = h.stoat.active_workspace();
-        let (_, tokens, _) = ws.buffers.lsp_tokens_for(buffer_id).expect("tokens stored");
 
         let spans: Vec<(usize, usize)> = tokens
             .iter()

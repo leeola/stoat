@@ -355,6 +355,15 @@ impl BufferSemanticTokens {
         }
     }
 
+    /// Whether `other` is this channel's own index rather than a rebuild of the
+    /// same tokens.
+    ///
+    /// A channel's segments are shared by refcount, so two editors seeded from
+    /// one build answer `true` where each building its own answers `false`.
+    pub fn shares_index(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.segments, &other.segments)
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

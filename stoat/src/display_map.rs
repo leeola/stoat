@@ -549,16 +549,16 @@ impl DisplayMap {
         self.settings_generation += 1;
     }
 
-    /// Install LSP semantic tokens for `buffer_id`. They render on a higher layer
-    /// than the tree-sitter tokens set by [`Self::set_semantic_token_highlights`],
-    /// so their styles merge over the syntactic baseline.
-    pub fn set_lsp_token_highlights(
-        &mut self,
-        buffer_id: BufferId,
-        tokens: Arc<[SemanticTokenHighlight]>,
-        interner: Arc<HighlightStyleInterner>,
-    ) {
-        let channel = self.batched_token_channel(tokens, interner);
+    /// Install LSP semantic tokens for `buffer_id`, as the channel the caller
+    /// already built. They render on a higher layer than the tree-sitter tokens
+    /// set by [`Self::set_semantic_token_highlights`], so their styles merge
+    /// over the syntactic baseline.
+    ///
+    /// The semantic-tokens pump builds one channel per reply and installs that
+    /// same value into every editor viewing the buffer, the way the parse
+    /// pipeline does for its own channel. Building it resolves every token end,
+    /// so a rebuild per editor is milliseconds of the turn that paints.
+    pub fn set_lsp_token_channel(&mut self, buffer_id: BufferId, channel: BufferSemanticTokens) {
         Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
         self.settings_generation += 1;
@@ -1636,8 +1636,8 @@ mod tests {
         dm.set_semantic_token_channel(buffer_id, channel);
         assert_moved_once(&dm, &mut seen, "set_semantic_token_channel");
 
-        dm.set_lsp_token_highlights(buffer_id, tokens, interner);
-        assert_moved_once(&dm, &mut seen, "set_lsp_token_highlights");
+        dm.set_lsp_token_channel(buffer_id, dm.batched_token_channel(tokens, interner));
+        assert_moved_once(&dm, &mut seen, "set_lsp_token_channel");
 
         dm.invalidate_semantic_highlights(buffer_id);
         assert_moved_once(&dm, &mut seen, "invalidate_semantic_highlights");
