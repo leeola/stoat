@@ -344,16 +344,9 @@ enum Refine {
 pub(crate) enum RequestOutcome {
     /// A full fetch, which stands alone and replaces whatever is open.
     Replace(CompletionPopup),
-    /// Answers from the servers that stopped early last time.
-    ///
-    /// `fresh` holds only those servers' items, unranked, since ranking has to
-    /// wait until the popup's surviving items have joined them. `asked` names
-    /// the servers whose earlier items this supersedes, which is every server
-    /// re-asked and not merely the ones that answered.
-    Refill {
-        fresh: CompletionPopup,
-        asked: Vec<String>,
-    },
+    /// Answers from the servers that stopped early last time, already merged
+    /// with what the popup held and ranked.
+    Refill(Refill),
     /// The open popup's own rows, narrowed to a longer prefix.
     ///
     /// Carries no items, because the popup it was computed for still holds
@@ -366,6 +359,25 @@ pub(crate) enum RequestOutcome {
         prefix_range: Range<usize>,
         generation: u64,
     },
+}
+
+/// A landed re-ask, as the whole list the popup takes from it.
+///
+/// The first `survivors` items came off the popup when the ask was armed, and
+/// the rest are what the re-asked servers answered. `matches` ranks the two
+/// together, on the pool, so the run loop installs rows rather than scoring
+/// them.
+///
+/// `generation` names the popup the survivors came from. A popup gone or
+/// replaced since means they describe a list that is no longer there.
+pub(crate) struct Refill {
+    items: Vec<CompletionItem>,
+    matches: Vec<(u32, u32)>,
+    survivors: usize,
+    prefix: String,
+    prefix_range: Range<usize>,
+    incomplete: Vec<String>,
+    generation: u64,
 }
 
 /// A narrow armed onto the blocking pool, as the question that armed it.
@@ -605,12 +617,26 @@ fn ask_again(
         return;
     };
 
+    // Taken here rather than where the answer lands, so the clone covers the
+    // rows the re-ask does not replace instead of every item, and falls outside
+    // the turn that paints them. The items travel owned, leaving the popup the
+    // only holder of its `Arc`, which is what lets a resolve landing inside the
+    // window edit the list in place.
+    let survivors: Vec<CompletionItem> = match &stoat.pending_completion {
+        Some(popup) => surviving(&popup.items, &popup.matches, &servers, &owned.prefix)
+            .into_iter()
+            .map(|(index, _)| popup.items[index as usize].clone())
+            .collect(),
+        None => Vec::new(),
+    };
+    let generation = stoat.completion_generation;
+
     let executor = stoat.executor.clone();
     let buffer = snapshot.buffer.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(COMPLETION_DEBOUNCE).await;
 
-        let mut items: Vec<CompletionItem> = Vec::new();
+        let mut fresh: Vec<CompletionItem> = Vec::new();
         let mut incomplete = Vec::new();
         for (name, host) in &hosts {
             let encoding = host.offset_encoding();
@@ -630,7 +656,7 @@ fn ask_again(
             }
 
             let server: Arc<str> = Arc::from(name.as_str());
-            items.extend(
+            fresh.extend(
                 executor
                     .spawn_blocking({
                         let owned = owned.clone();
@@ -646,18 +672,30 @@ fn ask_again(
             );
         }
 
-        // These go back unranked. The popup's survivors join them at install,
-        // and ranking a partial list only to re-rank the whole one is wasted.
-        RequestOutcome::Refill {
-            fresh: CompletionPopup {
-                anchor_offset: owned.prefix_range.start,
-                prefix_range: owned.prefix_range,
-                prefix: owned.prefix,
-                incomplete,
-                ..CompletionPopup::showing(items)
-            },
-            asked: servers,
-        }
+        // Ranked here, where the first answer ranks too, so what reaches the run
+        // loop is a list and its order rather than a list to score.
+        let survivor_count = survivors.len();
+        let (items, matches) = executor
+            .spawn_blocking({
+                let prefix = owned.prefix.clone();
+                move || {
+                    let mut items = survivors;
+                    items.extend(fresh);
+                    let matches = rank_by_prefix(&items, &prefix);
+                    (items, matches)
+                }
+            })
+            .await;
+
+        RequestOutcome::Refill(Refill {
+            items,
+            matches,
+            survivors: survivor_count,
+            prefix: owned.prefix,
+            prefix_range: owned.prefix_range,
+            incomplete,
+            generation,
+        })
     });
     stoat.pending_completion_request = Some(task);
 }
@@ -678,27 +716,29 @@ fn install_popup(stoat: &mut Stoat, popup: CompletionPopup) {
     crate::action_handlers::completion::arm_completion_resolve(stoat);
 }
 
-/// Merge a re-ask's answer with what the popup it was asked for still holds.
+/// Install a re-ask's answer over the popup it was asked for.
 ///
-/// The popup was left alone for the whole debounce window, so this is where its
-/// items are narrowed to the prefix the ask captured and the re-asked servers'
-/// earlier answers give way to their new ones. Moving them through rather than
-/// copying is the point of deferring the merge to here.
-///
-/// A popup gone by now was accepted or dismissed mid-flight, and reviving what
-/// it held would undo that, so only the fresh items install.
-fn install_refill(stoat: &mut Stoat, fresh: CompletionPopup, asked: Vec<String>) {
-    // The one place a popup's item list is rebuilt, because this is the one
-    // place its membership grows. Everywhere else narrows the index instead.
-    let mut items: Vec<CompletionItem> = match stoat.pending_completion.take() {
-        Some(popup) => surviving(&popup.items, &popup.matches, &asked, &fresh.prefix)
-            .into_iter()
-            .map(|(index, _)| popup.items[index as usize].clone())
-            .collect(),
-        None => Vec::new(),
+/// The answer arrives ranked, so nothing is scored here. A popup gone or
+/// replaced while the ask was in flight leaves its survivors describing a list
+/// that is no longer there, and only the fresh rows install. Reviving the rest
+/// would undo an accept or a dismissal.
+fn install_refill(stoat: &mut Stoat, refill: Refill) {
+    let Refill {
+        items,
+        matches,
+        survivors,
+        prefix,
+        prefix_range,
+        incomplete,
+        generation,
+    } = refill;
+
+    let held =
+        stoat.pending_completion.take().is_some() && stoat.completion_generation == generation;
+    let (items, matches) = match held {
+        true => (items, matches),
+        false => fresh_alone(items, matches, survivors),
     };
-    items.extend(fresh.items.iter().cloned());
-    let matches = rank_by_prefix(&items, &fresh.prefix);
 
     install_popup(
         stoat,
@@ -706,12 +746,29 @@ fn install_refill(stoat: &mut Stoat, fresh: CompletionPopup, asked: Vec<String>)
             items: items.into(),
             matches,
             selected_idx: 0,
-            anchor_offset: fresh.anchor_offset,
-            prefix_range: fresh.prefix_range,
-            prefix: fresh.prefix,
-            incomplete: fresh.incomplete,
+            anchor_offset: prefix_range.start,
+            prefix_range,
+            prefix,
+            incomplete,
         },
     );
+}
+
+/// The fresh half of a ranked refill, with its rows re-based onto it.
+///
+/// A ranking is a total order, so dropping the survivors leaves what is left in
+/// the order the pool put it in and nothing needs scoring again.
+fn fresh_alone(
+    mut items: Vec<CompletionItem>,
+    matches: Vec<(u32, u32)>,
+    survivors: usize,
+) -> (Vec<CompletionItem>, Vec<(u32, u32)>) {
+    let fresh = items.split_off(survivors.min(items.len()));
+    let rows = matches
+        .into_iter()
+        .filter_map(|(index, score)| Some(((index as usize).checked_sub(survivors)? as u32, score)))
+        .collect();
+    (fresh, rows)
 }
 
 /// Show the rows a narrow came back with, provided they still describe the
@@ -798,8 +855,8 @@ fn resolve_outcome(stoat: &mut Stoat, outcome: RequestOutcome) -> bool {
             install_popup(stoat, popup);
             true
         },
-        RequestOutcome::Refill { fresh, asked } => {
-            install_refill(stoat, fresh, asked);
+        RequestOutcome::Refill(refill) => {
+            install_refill(stoat, refill);
             true
         },
         RequestOutcome::Narrow {
@@ -1995,26 +2052,68 @@ mod harness_tests {
         }
     }
 
+    /// A refill as `ask_again` builds one: the survivors it took off the popup,
+    /// then the fresh answer, ranked together.
+    fn refill_of(
+        survivors: Vec<CompletionItem>,
+        fresh: Vec<CompletionItem>,
+        generation: u64,
+    ) -> Refill {
+        let count = survivors.len();
+        let mut items = survivors;
+        items.extend(fresh);
+        let matches = rank_by_prefix(&items, "app");
+        Refill {
+            items,
+            matches,
+            survivors: count,
+            prefix: "app".to_string(),
+            prefix_range: 0..3,
+            incomplete: Vec::new(),
+            generation,
+        }
+    }
+
     /// A re-ask answers for one server, so everything the popup holds from
     /// elsewhere has to come through with it rather than being asked for again.
     /// The re-asked server's own earlier items do not come through however well
     /// they still match, since its new answer supersedes them.
     #[test]
-    fn a_landed_re_ask_merges_what_the_popup_still_holds() {
-        let mut h = TestHarness::default();
-        h.stoat.pending_completion = Some(popup_over(
+    fn a_re_ask_keeps_what_the_popup_holds_from_elsewhere() {
+        let popup = popup_over(
             vec![
                 word("appleseed"),
                 served("apply_theme", None, None),
                 word("zebra"),
             ],
             "app",
-        ));
+        );
+
+        let kept = surviving(&popup.items, &popup.matches, &["test".to_string()], "app");
+
+        assert_eq!(
+            ranked(&popup.items, &kept),
+            ["appleseed"],
+            "the surviving word stays, while the re-asked server's item and the \
+             word the prefix no longer matches both go",
+        );
+    }
+
+    /// The merge and its order come off the pool, so the popup takes the whole
+    /// list as it arrives.
+    #[test]
+    fn a_landed_re_ask_installs_the_list_it_was_given() {
+        let mut h = TestHarness::default();
+        h.stoat.pending_completion = Some(popup_over(vec![word("appleseed")], "app"));
+        let generation = h.stoat.completion_generation;
 
         install_refill(
             &mut h.stoat,
-            popup_over(vec![served("append", None, None)], "app"),
-            vec!["test".to_string()],
+            refill_of(
+                vec![word("appleseed")],
+                vec![served("append", None, None)],
+                generation,
+            ),
         );
 
         let popup = h
@@ -2027,8 +2126,7 @@ mod harness_tests {
         assert_eq!(
             got,
             ["append", "appleseed"],
-            "the fresh answer joins the surviving word, while the re-asked \
-             server's old item and the word the prefix no longer matches both go",
+            "the survivor and the fresh answer both show",
         );
     }
 
@@ -2038,11 +2136,64 @@ mod harness_tests {
     fn a_re_ask_landing_on_a_dismissed_popup_installs_the_fresh_items_alone() {
         let mut h = TestHarness::default();
         assert!(h.stoat.pending_completion.is_none(), "nothing is open");
+        let generation = h.stoat.completion_generation;
 
         install_refill(
             &mut h.stoat,
-            popup_over(vec![served("append", None, None)], "app"),
-            vec!["test".to_string()],
+            refill_of(
+                vec![word("appleseed")],
+                vec![served("append", None, None)],
+                generation,
+            ),
+        );
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .as_ref()
+            .expect("popup installed");
+        assert_eq!(shown(popup), ["append"]);
+    }
+
+    /// The rows a ranking leaves for the fresh half name positions in the whole
+    /// merge, so dropping the survivors moves what every one of them points at.
+    #[test]
+    fn the_fresh_half_of_a_refill_re_bases_its_rows() {
+        let items = vec![word("a"), word("b"), word("c"), word("d")];
+        // Not the order the items sit in, so a row read at the wrong index
+        // names the wrong item rather than the same one.
+        let matches = vec![(3, 90), (1, 80), (2, 70), (0, 60)];
+
+        let (fresh, rows) = fresh_alone(items, matches, 2);
+
+        assert_eq!(
+            (
+                fresh
+                    .iter()
+                    .map(|item| item.label.as_str())
+                    .collect::<Vec<_>>(),
+                rows,
+            ),
+            (vec!["c", "d"], vec![(1, 90), (0, 70)]),
+            "what is left keeps the order it was ranked in, over its own indexes",
+        );
+    }
+
+    /// A popup installed while the re-ask was in flight holds items the
+    /// survivors were never part of, so they go the way a dismissal's do.
+    #[test]
+    fn a_re_ask_landing_on_a_replaced_popup_installs_the_fresh_items_alone() {
+        let mut h = TestHarness::default();
+        h.stoat.pending_completion = Some(popup_over(vec![word("zebra")], "app"));
+        let generation = h.stoat.completion_generation.wrapping_sub(1);
+
+        install_refill(
+            &mut h.stoat,
+            refill_of(
+                vec![word("appleseed")],
+                vec![served("append", None, None)],
+                generation,
+            ),
         );
 
         let popup = h
@@ -2467,6 +2618,39 @@ mod harness_tests {
                 trigger_character: None,
             }),
             "a server narrowing its own unfinished list is told that is what this is",
+        );
+    }
+
+    /// A re-ask asks one server again and leaves every other source alone, so
+    /// what the popup holds from elsewhere lands with the answer. The re-asked
+    /// server's own earlier items give way to its new ones.
+    #[test]
+    fn a_re_ask_lands_with_the_rows_the_popup_held() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "appleseed\n\n");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 1, 3, &["apply_theme"]);
+        h.fake_lsp().set_completions_incomplete("/ws/buf.rs", 1, 3);
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 1, 4, &["apples"]);
+
+        h.type_keys("j");
+        h.type_keys("i");
+        h.type_text("app");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        h.type_text("l");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let popup = h.stoat.pending_completion.clone().expect("popup");
+        let mut got = shown(&popup);
+        got.sort();
+        assert_eq!(
+            got,
+            ["apples", "appleseed"],
+            "the word the buffer offers survives beside the fresh answer, and \
+             the re-asked server's earlier item goes",
         );
     }
 
