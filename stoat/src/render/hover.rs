@@ -291,7 +291,17 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         HoverFrame::Modal => false,
     };
 
-    crate::render::clear_themed(popup_area, buf, &stoat.theme);
+    // A declared card clears the cells it covers once its own box has begun to
+    // draw, so no blank rectangle opens in the code ahead of the pen. Every
+    // other frame clears as it arrives, having nothing to wait for.
+    let started = stoat
+        .active_workspace()
+        .walkthrough
+        .as_ref()
+        .is_some_and(|run| run.card_started);
+    if !declared || started {
+        crate::render::clear_themed(popup_area, buf, &stoat.theme);
+    }
     let inner = match frame_kind {
         HoverFrame::Modal => crate::render::chrome::modal_frame_anchored(
             buf,

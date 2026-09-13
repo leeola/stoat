@@ -3,6 +3,7 @@ use crate::{
     render::walkthrough::SlideParts,
     walkthrough::{Annotation, Stop, Walkthrough},
 };
+use std::{collections::HashMap, time::Instant};
 
 /// A stored walkthrough being played, and where in it the reader is.
 ///
@@ -25,6 +26,18 @@ pub(crate) struct WalkthroughRun {
     /// always names the parts as they were last seen rather than as they were
     /// first drawn.
     pub(crate) last_parts: SlideParts,
+    /// When each part id was first declared, and the delay that declaration
+    /// carried.
+    ///
+    /// The terminal latches a mark's delay when its id first appears, so this
+    /// is the clock the pen runs on. A later frame asks it whether a box has
+    /// begun to draw, which is what gates clearing the cells under it.
+    pub(crate) declared_at: HashMap<u32, (Instant, u16)>,
+    /// Whether the narration card's own box has begun to draw.
+    ///
+    /// The hover render writes the card's body and clears the cells under it,
+    /// and it has neither the slide nor its schedule to ask.
+    pub(crate) card_started: bool,
     /// Where this run's mark ids start.
     ///
     /// The terminal latches a mark's timing when its id first appears, so a
@@ -73,6 +86,8 @@ impl WalkthroughRun {
             stop_idx: 0,
             annotation_idx: None,
             last_parts: SlideParts::default(),
+            declared_at: HashMap::new(),
+            card_started: false,
             id_base: ID_SPACE + (run << 16),
         })
     }
