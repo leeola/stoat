@@ -46,12 +46,20 @@ const ROUGHNESS_UNIT: f64 = 64.0;
 /// 64ths of the chord, which is the unit the protocol states a bend in.
 const BEND_FRACTION: f64 = 64.0;
 
-/// How far an S-curve's control points push out from each end, as a fraction of
-/// the chord.
+/// How far a connector's control point reaches along its side's normal, as a
+/// fraction of the distance the other end lies that way.
 ///
-/// A connector between two components leaves each one facing outward before it
-/// turns, so the curve reads as leaving a box rather than clipping its corner.
-const S_CURVE_REACH: f64 = 0.4;
+/// A half reach leaves each box facing outward for long enough to read as
+/// leaving it, and short enough that the pen is turning by the time it is out.
+const FORWARD_REACH: f64 = 0.5;
+
+/// How far the control point reaches where the other end lies behind the side,
+/// as a multiple of the root of that distance in pixels.
+///
+/// The root is what keeps a target just behind the side from throwing the pen
+/// as far as a distant one does. A reach following the distance signed would
+/// send the pen away from the target and back.
+const HOOK_REACH: f64 = 6.25;
 
 /// How far outside a mark's outline a connector's end sits, in pixels.
 const COMPONENT_GAP: f64 = 4.0;
@@ -483,8 +491,8 @@ where
     let mut ops = match (bend, both_components) {
         (0, false) => double_line(start[0], start[1], end[0], end[1], &mut options, random),
         (0, true) => {
-            let points = s_curve_points(start, end, from_side, to_side, chord);
-            curve(&points, &options, random)
+            let [first, second] = s_curve_controls(start, end, from_side, to_side);
+            cubic(start, first, second, end, &options, random)
         },
         (bend, _) => {
             let bow = f64::from(bend) / BEND_FRACTION * chord;
@@ -512,41 +520,45 @@ where
     }
 }
 
-/// A connector's path when both ends name components.
+/// A connector's two control points when both ends name components.
 ///
-/// Each control point pushes out along the side its end meets, so the curve
-/// leaves one box and arrives at the other head-on.
-fn s_curve_points(
+/// Each pushes out along the side its end meets, by half the distance the other
+/// end lies along that normal, so the curve leaves one box and arrives at the
+/// other head-on.
+///
+/// A target behind the side reaches by the root of that distance instead. A
+/// reach that followed it signed would send the pen away from the target and
+/// back, which is the loop a ring draws around its own label when the label
+/// sits beside it rather than below.
+fn s_curve_controls(
     start: [f64; 2],
     end: [f64; 2],
     from_side: SketchSide,
     to_side: SketchSide,
-    chord: f64,
-) -> Vec<[f64; 2]> {
-    let reach = chord * S_CURVE_REACH;
-    let out = |point: [f64; 2], side: SketchSide, toward: [f64; 2]| {
+) -> [[f64; 2]; 2] {
+    let control = |point: [f64; 2], side: SketchSide, other: [f64; 2]| {
         let normal = match side {
             SketchSide::Left => [-1.0, 0.0],
             SketchSide::Right => [1.0, 0.0],
             SketchSide::Top => [0.0, -1.0],
             SketchSide::Bottom => [0.0, 1.0],
             SketchSide::Auto => {
-                let (dx, dy) = (toward[0] - point[0], toward[1] - point[1]);
+                let (dx, dy) = (other[0] - point[0], other[1] - point[1]);
                 match dx.abs() >= dy.abs() {
                     true => [dx.signum(), 0.0],
                     false => [0.0, dy.signum()],
                 }
             },
         };
+        let along = (other[0] - point[0]) * normal[0] + (other[1] - point[1]) * normal[1];
+        let reach = match along >= 0.0 {
+            true => along * FORWARD_REACH,
+            false => (-along).sqrt() * HOOK_REACH,
+        };
         [point[0] + normal[0] * reach, point[1] + normal[1] * reach]
     };
 
-    vec![
-        start,
-        out(start, from_side, end),
-        out(end, to_side, start),
-        end,
-    ]
+    [control(start, from_side, end), control(end, to_side, start)]
 }
 
 /// Where one end sits before its side is chosen: a fixed point as itself, a
@@ -951,18 +963,39 @@ fn rect(
 /// One rounded corner, stroked twice like a side.
 ///
 /// The quadratic is raised to a cubic so it flattens through the same path as
-/// every other curve, and the two passes take the offsets the reference uses
-/// for a path's `Q` segments.
-///
-/// Those offsets rise with the roughness and not with the rounding, so a
-/// generously rounded box keeps corners as clean as the sides they join.
-///
-/// With vertices preserved the ends are pinned, as a side's are, so the arc
-/// meets the straights it joins instead of starting beside them. Only the
-/// control point moves.
+/// every other curve, and so one transcription serves both a corner and a
+/// connector.
 fn quadratic(
     start: [f64; 2],
     control: [f64; 2],
+    end: [f64; 2],
+    options: &Options,
+    random: &mut Random,
+) -> Vec<Op> {
+    let raise = |from: [f64; 2]| {
+        [
+            from[0] + 2.0 / 3.0 * (control[0] - from[0]),
+            from[1] + 2.0 / 3.0 * (control[1] - from[1]),
+        ]
+    };
+    cubic(start, raise(start), raise(end), end, options, random)
+}
+
+/// One cubic segment, stroked twice.
+///
+/// The two passes take the offsets the reference uses for a path's `C`
+/// segments. Those offsets rise with the roughness and not with the segment's
+/// size, so a generously rounded corner stays as clean as the sides it joins
+/// and a long connector as clean as a short one.
+///
+/// With vertices preserved the ends are pinned, as a side's are, so a corner
+/// meets the straights it joins instead of starting beside them. Only the
+/// control points move, and each moves on its own, which is what gives the
+/// curve its slack rather than sliding it whole.
+fn cubic(
+    start: [f64; 2],
+    first: [f64; 2],
+    second: [f64; 2],
     end: [f64; 2],
     options: &Options,
     random: &mut Random,
@@ -982,8 +1015,10 @@ fn quadratic(
             },
             false => (start[0] + jitter(random), start[1] + jitter(random)),
         };
-        let cx = control[0] + jitter(random);
-        let cy = control[1] + jitter(random);
+        let c1x = first[0] + jitter(random);
+        let c1y = first[1] + jitter(random);
+        let c2x = second[0] + jitter(random);
+        let c2y = second[1] + jitter(random);
         let (ex, ey) = match options.preserve_vertices {
             true => {
                 let _ = jitter(random);
@@ -994,14 +1029,7 @@ fn quadratic(
         };
 
         ops.push(Op::Move([sx, sy]));
-        ops.push(Op::Curve([
-            sx + 2.0 / 3.0 * (cx - sx),
-            sy + 2.0 / 3.0 * (cy - sy),
-            ex + 2.0 / 3.0 * (cx - ex),
-            ey + 2.0 / 3.0 * (cy - ey),
-            ex,
-            ey,
-        ]));
+        ops.push(Op::Curve([c1x, c1y, c2x, c2y, ex, ey]));
     }
     ops
 }

@@ -688,6 +688,91 @@ fn two_components_are_joined_by_an_s_curve() {
         .flat_map(|s| &s.points)
         .fold(0.0_f32, |acc, p| acc.max(p[1].abs()));
     assert!(reach > 1.0, "the curve leaves the chord, reached {reach}");
+
+    // Bottom leaves [4, 12] and Top arrives at [104, -4], each 16 px behind
+    // the other's side, so each control hooks out by 6.25 * sqrt(16) = 25 px.
+    // A cubic stays inside the hull of its four points, so the box those make
+    // bounds the whole curve.
+    let inside = curved
+        .strokes
+        .iter()
+        .flat_map(|s| &s.points)
+        .all(|p| (-0.01..=108.01).contains(&p[0]) && (-29.01..=37.01).contains(&p[1]));
+    assert!(
+        inside,
+        "the curve stays inside the box its controls make: {:?}",
+        curved.strokes.iter().flat_map(|s| &s.points).fold(
+            [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+            |b, p| [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1])
+            ],
+        ),
+    );
+}
+
+/// A ring one row above its label meets Bottom against the label's Left, and
+/// the label lies a few pixels along that side's normal and a long way across
+/// it. The control reaches by the first distance, not by the chord: a reach
+/// following the chord sent the pen most of a screen below the ring and back
+/// up, crossing the label on the way.
+#[test]
+fn a_connector_reaches_along_its_side_not_along_its_chord() {
+    // A ring, and a label one row down and well to the right of it.
+    let lowest = connector_low([0.0, 0.0, 40.0, 20.0], [230.0, 20.0, 400.0, 40.0]);
+
+    // The label's centerline is 30 and a row is 20 px. The label lies 6 px
+    // along the ring's Bottom normal, so the control sits 3 px out and the pen
+    // stays level; 0.4 of the 206 px chord would put it 82 px down.
+    assert!(
+        lowest <= 40.0,
+        "the pen stays within half a row of the label it points at, reached {lowest}",
+    );
+}
+
+/// A label above the ring sits behind the side the ring leaves by. The reach
+/// follows the root of that distance, which leaves the side by enough to read
+/// as leaving it and keeps the hook bounded where the chord is long.
+#[test]
+fn a_target_behind_a_side_gets_a_short_hook() {
+    // The same pair, with the label one row above instead of below.
+    let lowest = connector_low([0.0, 40.0, 40.0, 60.0], [230.0, 0.0, 400.0, 20.0]);
+
+    // The ring's side is at 64 and the label lies 54 px behind it, so the hook
+    // reaches 6.25 * sqrt(54) = 46 px out and the far control pulls the curve
+    // back well inside that. A hook following the distance itself crosses a row
+    // and keeps going.
+    assert!(
+        lowest <= 84.0,
+        "the hook leaves the side by under a row, reached {lowest}",
+    );
+}
+
+/// The lowest point a Bottom-to-Left connector between two boxes reaches.
+fn connector_low(from: [f32; 4], to: [f32; 4]) -> f32 {
+    let shape = SketchShape::Line {
+        from: SketchEnd::Component {
+            id: 1,
+            side: SketchSide::Bottom,
+        },
+        to: SketchEnd::Component {
+            id: 2,
+            side: SketchSide::Left,
+        },
+        bend: 0,
+        heads: 0,
+    };
+    let resolve = move |id: u32| match id {
+        1 => Some(from),
+        _ => Some(to),
+    };
+    geometry(&command(shape, 0), metrics(), &resolve)
+        .strokes
+        .iter()
+        .flat_map(|stroke| &stroke.points)
+        .fold(f32::MIN, |acc, point| acc.max(point[1]))
 }
 
 /// A rounded box strokes its corners as well as its sides, and the corners
