@@ -9,7 +9,7 @@ use crate::{
     completion::{anchor_range, CompletionContext, CompletionItem, CompletionSource},
 };
 use std::collections::BTreeSet;
-use stoat_text::char_is_word;
+use stoat_text::{char_is_word, Point};
 
 /// Unique matches one fetch keeps before it stops walking the buffer.
 ///
@@ -23,11 +23,22 @@ use stoat_text::char_is_word;
 /// alphabetical either way.
 const MAX_MATCHES: usize = 500;
 
-/// Collect every word-shaped token in `buffer` whose label starts
-/// with `ctx.prefix`. Skips the prefix itself (no point suggesting
-/// what is already typed) and dedupes repeats.
+/// Rows either side of the cursor one fetch walks.
+///
+/// The words worth offering are the ones nearby, and a walk over a whole large
+/// buffer is milliseconds on the pool for a prefix that matches nothing, which
+/// is the ordinary case when a reader types a name that is new. This bounds it
+/// at roughly a megabyte of text whatever the buffer holds.
+const WORD_LOOKUP_ROWS: u32 = 5_000;
+
+/// Collect every word-shaped token within [`WORD_LOOKUP_ROWS`] of the cursor
+/// whose label starts with `ctx.prefix`. Skips the prefix itself (no point
+/// suggesting what is already typed) and dedupes repeats.
 ///
 /// Returns at most [`MAX_MATCHES`], stopping the walk once it has them.
+///
+/// A word further from the cursor than the window is not offered, whatever it
+/// matches.
 ///
 /// Returns empty when `ctx.prefix` is empty -- the fallback source
 /// only fires once the user has typed at least one identifier
@@ -37,18 +48,37 @@ pub fn fetch(ctx: &CompletionContext<'_>, buffer: &TextBufferSnapshot) -> Vec<Co
         return Vec::new();
     }
 
+    let rope = &buffer.visible_text;
+    let cursor_row = rope.offset_to_point(ctx.cursor_offset).row;
+    // A row past the last answers the rope's length and a column past a row's
+    // end answers that row's end, so the window needs no clamping of its own.
+    let start = rope.point_to_offset(Point::new(cursor_row.saturating_sub(WORD_LOOKUP_ROWS), 0));
+    let end = rope.point_to_offset(Point::new(
+        cursor_row.saturating_add(WORD_LOOKUP_ROWS),
+        u32::MAX,
+    ));
+
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut current: String = String::new();
 
-    for ch in buffer.visible_text.chars() {
+    let mut walked = start;
+    for ch in rope.chars_at(start) {
+        walked += ch.len_utf8();
         if char_is_word(ch) {
             current.push(ch);
-        } else if !current.is_empty() {
+            continue;
+        }
+        if !current.is_empty() {
             collect(&mut current, ctx.prefix, &mut seen);
             // `collect` left the token empty, so the tail below adds nothing.
             if seen.len() >= MAX_MATCHES {
                 break;
             }
+        }
+        // Tested here rather than at the top, so a word the window ends inside
+        // comes back whole rather than truncated.
+        if walked >= end {
+            break;
         }
     }
     if !current.is_empty() && seen.len() < MAX_MATCHES {
@@ -201,5 +231,42 @@ mod tests {
         let buffer = snapshot("Foo foo FOO");
         let items = fetch(&ctx("Fo"), &buffer);
         assert_eq!(labels(&items), vec!["Foo"]);
+    }
+
+    /// The words worth offering are the ones nearby, and the walk is what a
+    /// prefix matching nothing otherwise pays for over a whole large buffer.
+    #[test]
+    fn a_word_outside_the_window_is_not_offered() {
+        let rows = WORD_LOOKUP_ROWS as usize;
+        let gap = |lines: usize| "\n".repeat(lines);
+        // Every word answers the prefix, so only the distance separates them.
+        let before = format!(
+            "wordfar\n{}wordnear\n{}wo",
+            gap(rows + 1_000),
+            gap(rows - 1_000),
+        );
+        let cursor = before.len();
+        let text = format!(
+            "{before}\n{}wordsoon\n{}wordahead\n",
+            gap(rows - 1_000),
+            gap(rows + 1_000),
+        );
+
+        let buffer = snapshot(&text);
+        let items = fetch(
+            &CompletionContext {
+                cursor_offset: cursor,
+                prefix: "wo",
+                prefix_range: cursor - 2..cursor,
+                text_before_cursor: "wo",
+            },
+            &buffer,
+        );
+
+        assert_eq!(
+            labels(&items),
+            vec!["wordnear", "wordsoon"],
+            "the window reaches both near words and stops short of either far one",
+        );
     }
 }
