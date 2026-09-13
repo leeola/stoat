@@ -116,6 +116,9 @@ pub struct SketchReveal {
     /// Stroke weight in 256ths of a cell, eased toward the declared width.
     pub width: f32,
     /// Stroke opacity from 0 to 1, eased toward the declared alpha.
+    ///
+    /// The runs that follow this mark take it too, so a dimmed callout's label
+    /// recedes with the outline around it.
     pub alpha: f32,
 }
 

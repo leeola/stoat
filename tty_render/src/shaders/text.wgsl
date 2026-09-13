@@ -45,8 +45,9 @@ var<uniform> globals: Globals;
 var<storage, read> occluders: array<Occluder>;
 
 // One alpha per declared hand-drawn mark, rewritten every frame from the reveal
-// fractions. A glyph or rect that follows a mark scales its output by the entry
-// its instance names, so a label fades in as the box around it draws itself.
+// fractions and the marks' own opacities. A glyph or rect that follows a mark
+// scales its output by the entry its instance names, so a label fades in as the
+// box around it draws itself and recedes with it as it dims.
 @group(0) @binding(2)
 var<storage, read> sketch_alpha: array<f32>;
 

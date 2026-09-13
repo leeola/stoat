@@ -112,7 +112,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
         },
     ]);
 
-    let mut frame_at = |progress: f32| {
+    let mut frame_at = |progress: f32, opacity: f32| {
         renderer.render_into(
             &device,
             &queue,
@@ -134,7 +134,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
                 sketch_reveals: &[SketchReveal {
                     revealed: progress,
                     width: 64.0,
-                    alpha: 1.0,
+                    alpha: opacity,
                 }],
             },
         );
@@ -157,7 +157,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
     };
 
     // The mark is a fifth drawn, well short of where the fade starts.
-    let early = frame_at(0.2);
+    let early = frame_at(0.2, 1.0);
     assert_eq!(
         red_count(&early),
         0,
@@ -169,7 +169,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
         "and the background waits with the glyphs rather than arriving whole"
     );
 
-    let full = frame_at(1.0);
+    let full = frame_at(1.0, 1.0);
     let whole = red_count(&full);
     assert!(whole > 0, "and the label paints once the mark is finished");
     assert_eq!(
@@ -178,10 +178,19 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
         "with its background at full strength"
     );
 
-    let midway = red_count(&frame_at(0.8));
+    let midway = red_count(&frame_at(0.8, 1.0));
     assert!(
         midway > 0 && midway <= whole,
         "easing in between, {midway} against {whole}",
+    );
+
+    // A walkthrough dims the callouts the reader has walked past, and the label
+    // recedes with the box around it rather than standing at full strength
+    // inside a faded outline.
+    let dimmed = red_count(&frame_at(1.0, 0.4));
+    assert!(
+        dimmed > 0 && dimmed < whole,
+        "a dimmed mark carries its label dimmed, {dimmed} against {whole}",
     );
 }
 

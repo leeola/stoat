@@ -1178,14 +1178,18 @@ impl TextPass {
         [self.baseline, self.cap_height]
     }
 
-    /// Upload one alpha per declared mark, from this frame's reveal fractions.
+    /// Upload one alpha per declared mark, from this frame's reveals.
     ///
     /// A run fades in over the back half of its mark's reveal, so the label
     /// arrives as the box around it closes rather than before the pen has drawn
     /// anything. The curve is the same smoothstep a filled box fades on.
     ///
-    /// A mark past the end of `reveals` reads as complete, matching the render
-    /// pass, so a caller with no clock draws every label at full alpha.
+    /// The mark's own opacity multiplies that, so a dimmed callout's label
+    /// recedes with the outline around it rather than standing at full strength
+    /// inside a faded box.
+    ///
+    /// A mark past the end of `reveals` reads as complete and opaque, matching
+    /// the render pass, so a caller with no clock draws every label whole.
     fn upload_sketch_alpha(
         &mut self,
         device: &Device,
@@ -1196,8 +1200,10 @@ impl TextPass {
         let mut alphas = mem::take(&mut self.sketch_alpha_scratch);
         alphas.clear();
         alphas.extend((0..grid.sketches().len()).map(|at| {
-            let revealed = reveals.get(at).map_or(1.0, |reveal| reveal.revealed);
-            smoothstep(FOLLOW_FADE_START, 1.0, revealed)
+            let (revealed, alpha) = reveals
+                .get(at)
+                .map_or((1.0, 1.0), |reveal| (reveal.revealed, reveal.alpha));
+            smoothstep(FOLLOW_FADE_START, 1.0, revealed) * alpha
         }));
 
         if crate::render::upload_needed(&alphas, &self.last_sketch_alpha) {
@@ -7256,13 +7262,13 @@ mod tests {
         let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
         grid.set_sketches(vec![test_sketch(5), test_sketch(7)]);
 
-        let alphas_at = |pass: &mut TextPass, progress: &[f32]| {
+        let alphas_at = |pass: &mut TextPass, progress: &[(f32, f32)]| {
             let reveals: Vec<SketchReveal> = progress
                 .iter()
-                .map(|&revealed| SketchReveal {
+                .map(|&(revealed, alpha)| SketchReveal {
                     revealed,
                     width: 64.0,
-                    alpha: 1.0,
+                    alpha,
                 })
                 .collect();
             let frame = Frame {
@@ -7274,22 +7280,28 @@ mod tests {
         };
 
         assert_eq!(
-            alphas_at(&mut pass, &[0.0, 0.5]),
+            alphas_at(&mut pass, &[(0.0, 1.0), (0.5, 1.0)]),
             [0.0, 0.0],
             "nothing shows through the first half of a reveal",
         );
         assert_eq!(
-            alphas_at(&mut pass, &[1.0, 0.55]),
+            alphas_at(&mut pass, &[(1.0, 1.0), (0.55, 1.0)]),
             [1.0, 0.0],
             "a finished mark carries its label whole, and the curve starts at 0.55",
         );
 
-        let [rising, _] = alphas_at(&mut pass, &[0.8, 0.0])
+        let [rising, _] = alphas_at(&mut pass, &[(0.8, 1.0), (0.0, 1.0)])
             .try_into()
             .expect("two marks");
         assert!(
             rising > 0.0 && rising < 1.0,
             "and eases between, got {rising}",
+        );
+
+        assert_eq!(
+            alphas_at(&mut pass, &[(1.0, 0.5), (1.0, 1.0)]),
+            [0.5, 1.0],
+            "a dimmed mark carries its label at the same opacity",
         );
 
         assert_eq!(

@@ -37,8 +37,9 @@ pub struct TextRunCommand<S = String> {
     pub scale: u16,
     pub color: [u8; 3],
     pub bg: Option<[u8; 3]>,
-    /// Sketch whose reveal this run fades in with, so a label appears as the
-    /// box it sits in draws itself. Zero fades the run in on its own.
+    /// Sketch whose reveal and opacity this run takes, so a label appears as
+    /// the box it sits in draws itself and recedes with it as it dims. Zero
+    /// fades the run in on its own and leaves it at full strength.
     pub follow: u32,
     /// Pool this run rides, and the pool's top row, so the run glides with a
     /// scrolling pane the way a panel does. `None` leaves it screen-fixed.
