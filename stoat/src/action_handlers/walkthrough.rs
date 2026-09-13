@@ -20,7 +20,6 @@ use std::{
     time::Duration,
 };
 use stoat_text::Rope;
-use stoatty_protocol::command::SketchTiming;
 
 /// One place a walkthrough sends the reader, being a stop's focus or one of its
 /// annotations.
@@ -443,11 +442,6 @@ const CARD_MAX_WIDTH: u16 = 52;
 /// frames, so the card would draw no border at all.
 const SKETCH_PROTOCOL: u32 = 3;
 
-/// How the card draws itself on.
-fn card_timing() -> SketchTiming {
-    SketchTiming::after(0, 320)
-}
-
 /// Put the narration for where the reader is in the hover popup, anchored at
 /// `offset`.
 ///
@@ -566,7 +560,6 @@ fn card_frame(stoat: &Stoat, id: u32) -> HoverFrame {
         id,
         stroke: crate::render::paint::style_rgb(card.fg).unwrap_or([255, 255, 255]),
         fill: crate::render::paint::style_rgb(card.bg).unwrap_or([0, 0, 0]),
-        timing: card_timing(),
     }
 }
 

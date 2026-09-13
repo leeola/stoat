@@ -12,7 +12,7 @@ use stoat_widgets::{
     ApcScene,
 };
 use stoatty_protocol::command::{
-    SketchBounds, SketchFill, SketchFillStyle, SketchStyle, SketchTiming,
+    self, SketchBounds, SketchFill, SketchFillStyle, SketchStyle, SketchTiming, TextRunCommand,
 };
 
 /// A live text selection over the hover popup body.
@@ -42,7 +42,6 @@ pub(crate) enum HoverFrame {
         id: u32,
         stroke: [u8; 3],
         fill: [u8; 3],
-        timing: SketchTiming,
     },
 }
 
@@ -150,42 +149,61 @@ impl HoverPopup {
 /// declared edge sits under the pen rather than inside it.
 const SKETCH_CARD_INSET: u16 = 1;
 
+/// How long a card draws itself on where no slide scheduled it.
+///
+/// A slide gives its card the schedule the rest of its parts share. This is for
+/// the card no slide placed, which has nothing to wait for and nothing to
+/// arrive with.
+const CARD_DRAW_MS: u16 = 320;
+
+/// One card's identity and look, as the frame that asked for it carries them.
+struct SketchCard {
+    id: u32,
+    stroke: [u8; 3],
+    fill: [u8; 3],
+    /// Whether the slide already declared this card on its own schedule.
+    declared: bool,
+}
+
 /// Emit the card's hand-drawn box and return the interior its body draws in.
 ///
 /// The fill is opaque. A card is read against whatever it floats over, and a
 /// translucent one leaves the code showing through the narration.
-#[allow(clippy::too_many_arguments)]
+///
+/// A card the slide already declared is the slide's to draw, which is the
+/// ordinary case while a walkthrough plays, and this one then only measures the
+/// interior. What is left here is the card a slide could not place: a
+/// non-editor pane focused, or a card that fits nowhere.
 fn sketch_frame(
     area: Rect,
-    stroke: [u8; 3],
-    fill: [u8; 3],
-    timing: SketchTiming,
-    id: u32,
+    card: SketchCard,
     anchor: Option<(u32, f32)>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) -> Rect {
-    SketchRect {
-        id,
-        style: SketchStyle::marker(stroke),
-        timing,
-        // Area-relative, and the widget shifts it by the area it renders into,
-        // so a zero origin here places the box exactly on `area`.
-        bounds: SketchBounds {
-            x: 0,
-            y: 0,
-            w: area.width * 16,
-            h: area.height * 16,
-        },
-        radius: sketch_corner_radius(area.width, area.height),
-        fill: Some(SketchFill {
-            color: fill,
-            alpha: 255,
-            style: SketchFillStyle::Solid,
-        }),
-        anchor,
+    if !card.declared {
+        SketchRect {
+            id: card.id,
+            style: SketchStyle::marker(card.stroke),
+            timing: SketchTiming::after(0, CARD_DRAW_MS),
+            // Area-relative, and the widget shifts it by the area it renders into,
+            // so a zero origin here places the box exactly on `area`.
+            bounds: SketchBounds {
+                x: 0,
+                y: 0,
+                w: area.width * 16,
+                h: area.height * 16,
+            },
+            radius: sketch_corner_radius(area.width, area.height),
+            fill: Some(SketchFill {
+                color: card.fill,
+                alpha: 255,
+                style: SketchFillStyle::Solid,
+            }),
+            anchor,
+        }
+        .render(area, buf, scene);
     }
-    .render(area, buf, scene);
 
     Rect {
         x: area.x + SKETCH_CARD_INSET,
@@ -261,6 +279,18 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         .as_ref()
         .map_or(HoverFrame::Modal, |popup| popup.frame);
 
+    // A slide that placed this card declared it on the slide's own schedule,
+    // and two declarations of one id fight over its clock. It is also what says
+    // the card has an exit to leave by, which its body then joins.
+    let declared = match frame_kind {
+        HoverFrame::Sketch { id, .. } => stoat
+            .active_workspace()
+            .walkthrough
+            .as_ref()
+            .is_some_and(|run| run.last_parts.marks.iter().any(|mark| mark.id == id)),
+        HoverFrame::Modal => false,
+    };
+
     crate::render::clear_themed(popup_area, buf, &stoat.theme);
     let inner = match frame_kind {
         HoverFrame::Modal => crate::render::chrome::modal_frame_anchored(
@@ -272,12 +302,15 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             anchor,
             run_bg,
         ),
-        HoverFrame::Sketch {
-            id,
-            stroke,
-            fill,
-            timing,
-        } => sketch_frame(popup_area, stroke, fill, timing, id, anchor, buf, scene),
+        HoverFrame::Sketch { id, stroke, fill } => {
+            let card = SketchCard {
+                id,
+                stroke,
+                fill,
+                declared,
+            };
+            sketch_frame(popup_area, card, anchor, buf, scene)
+        },
     };
 
     // A card's body fades in with the box that holds it, so the text arrives as
@@ -320,6 +353,11 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     );
     let sel_rgb =
         crate::render::paint::style_rgb(stoat.theme.get(crate::theme::scope::UI_SELECTION).bg);
+
+    // A card's body goes out with the card on a step, the way a label goes with
+    // its box, so the runs of a declared card are kept as they are written. This
+    // render runs after the slide's, so they append to the record it just left.
+    let mut card_runs: Vec<TextRunCommand> = Vec::new();
 
     let end_x = inner.x + inner.width;
     let popup = stoat.pending_hover.as_ref().expect("layout placed a popup");
@@ -388,17 +426,24 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                         } else {
                             run_bg
                         };
-                        TextRun {
-                            col,
-                            row: 0,
+                        // Built here rather than through the widget, so a
+                        // card's body can be recorded as well as emitted. The
+                        // widget resolves an area-relative column against the
+                        // area it renders into, which is this one arithmetic.
+                        let command = TextRunCommand {
+                            col: inner.x as i16 * 16 + col,
+                            row: row as i16 * 16,
                             scale: TEXT_SCALE_POPUP,
                             color,
                             bg: Some(bg),
-                            text: seg_text,
+                            text: seg_text.to_string(),
                             follow,
                             anchor,
+                        };
+                        command::encode_text_run_into(scene.buffer(), &command);
+                        if declared {
+                            card_runs.push(command);
                         }
-                        .render(Rect::new(inner.x, row, 1, 1), buf, scene);
                     }
                     chars_before = span_end;
                 }
@@ -424,6 +469,10 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             }
             highlight_grid_selection(buf, popup, inner, scroll, &stoat.theme);
         },
+    }
+
+    if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
+        run.last_parts.runs.extend(card_runs);
     }
 }
 

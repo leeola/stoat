@@ -124,6 +124,9 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         let mut painter = painter;
         painter.focus(&slide, buf, scene);
         painter.callouts(&slide, buf, scene);
+        // Last, so the card's seq is the highest and it occludes the marks it
+        // covers rather than being drawn through by them.
+        painter.card(&slide, scene);
         painter.declared
     };
 
@@ -206,6 +209,9 @@ struct Colors {
     /// The label box's fill, shared with the narration card so the two read as
     /// one set of chrome.
     fill: [u8; 3],
+    /// The narration card's outline, which is the one part with a color of its
+    /// own rather than its annotation's.
+    card_stroke: [u8; 3],
 }
 
 impl Colors {
@@ -221,6 +227,7 @@ impl Colors {
                 rgb(scope::UI_WALKTHROUGH_MARKERS[at], [97, 175, 239])
             }),
             fill: crate::render::paint::style_rgb(card.bg).unwrap_or([40, 44, 52]),
+            card_stroke: crate::render::paint::style_rgb(card.fg).unwrap_or([255, 255, 255]),
         }
     }
 
@@ -313,6 +320,41 @@ impl Painter<'_> {
             self.ids.focus,
             self.ids.card,
             buf,
+            scene,
+        );
+    }
+
+    /// Emit the narration card's box.
+    ///
+    /// The card is one of the slide's parts, so it draws on the slide's
+    /// schedule and is recorded for the exit with everything else. The body
+    /// text is written by the hover render, which runs after this and appends
+    /// its runs to the same record.
+    fn card(&mut self, slide: &Slide, scene: &mut ApcScene) {
+        let Some(rect) = slide.card else {
+            return;
+        };
+        self.declare(
+            SketchCommand {
+                id: self.ids.card,
+                style: SketchStyle::marker(self.colors.card_stroke),
+                timing: timing_of(slide, Some(slide::Part::Card)),
+                shape: SketchShape::Rect {
+                    bounds: SketchBounds {
+                        x: rect.x as i16 * 16,
+                        y: rect.y as i16 * 16,
+                        w: rect.width * 16,
+                        h: rect.height * 16,
+                    },
+                    radius: sketch_corner_radius(rect.width, rect.height),
+                    fill: Some(SketchFill {
+                        color: self.colors.fill,
+                        alpha: 255,
+                        style: SketchFillStyle::Solid,
+                    }),
+                },
+                anchor: self.anchor,
+            },
             scene,
         );
     }
@@ -729,7 +771,7 @@ mod tests {
         theme::scope,
         walkthrough::{
             run::{part, ID_SPACE, STOP_ID_STRIDE},
-            Location, Point, Range, Walkthrough,
+            slide, Location, Point, Range, Walkthrough,
         },
     };
     use std::path::PathBuf;
@@ -1071,6 +1113,93 @@ mod tests {
             alphas(&mut h),
             [255, 110],
             "the one walked onto stays bright and the other recedes",
+        );
+    }
+
+    /// The card is one of the slide's parts, so it opens when the slide says
+    /// rather than at once. Drawn on its own clock it arrives over the slide
+    /// being retired, and the link that points at it reaches a card that
+    /// finished long before.
+    #[test]
+    fn the_card_draws_on_its_slides_schedule() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+
+        let card_id = part_id(&h, part::CARD);
+        let emitted = sketches(&mut h);
+        let cards: Vec<&SketchCommand> = emitted
+            .iter()
+            .filter(|sketch| sketch.id == card_id)
+            .collect();
+        assert_eq!(
+            cards.len(),
+            1,
+            "the card is declared once, so two clocks do not fight over it",
+        );
+        let card = cards[0];
+
+        let scheduled = slide_timing(&mut h.stoat);
+        assert_eq!(
+            (card.timing.delay_ms, card.timing.duration_ms),
+            scheduled,
+            "the card takes the table's own entry",
+        );
+
+        let focus = emitted
+            .iter()
+            .find(|sketch| sketch.id == part_id(&h, part::FOCUS_MARK))
+            .expect("the focus draws");
+        assert!(
+            card.timing.delay_ms >= focus.timing.delay_ms + focus.timing.duration_ms,
+            "and waits for the focus it is linked from, {} against {}",
+            card.timing.delay_ms,
+            focus.timing.delay_ms + focus.timing.duration_ms,
+        );
+    }
+
+    /// The card's `Part::Card` entry, as the slide's own table holds it.
+    fn slide_timing(stoat: &mut Stoat) -> (u16, u16) {
+        let input = super::measure(stoat).expect("the pane measures");
+        let slide = slide::layout(&input);
+        slide
+            .timing
+            .iter()
+            .find(|(part, ..)| *part == slide::Part::Card)
+            .map(|(_, start, duration)| (*start, *duration))
+            .expect("the card is scheduled")
+    }
+
+    /// A card that vanished on the step frame left the screen while every mark
+    /// around it was still running its stroke back.
+    #[test]
+    fn a_retiring_cards_text_goes_with_it() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+        let leaving = part_id(&h, part::CARD);
+        frame(&mut h);
+
+        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        let emitted = frame(&mut h);
+
+        let card = emitted
+            .iter()
+            .find_map(|command| match command {
+                Command::Sketch(sketch) if sketch.id == leaving => Some(sketch),
+                _ => None,
+            })
+            .expect("the card of the stop being left is re-declared");
+        assert_eq!(
+            card.timing.phase,
+            SketchPhase::Exit,
+            "running its stroke back to nothing",
+        );
+
+        assert!(
+            emitted.iter().any(|command| match command {
+                Command::TextRun(run) => run.follow == leaving,
+                _ => false,
+            }),
+            "and its narration goes with it",
         );
     }
 

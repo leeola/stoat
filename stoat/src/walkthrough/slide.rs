@@ -181,7 +181,13 @@ pub(crate) fn layout(input: &SlideInput) -> Slide {
 
     let callouts = place_callouts(input, card);
     let focus_link = focus.is_some() && card.is_some();
-    let timing = choreograph(input.start_offset_ms, focus, focus_link, &callouts);
+    let timing = choreograph(
+        input.start_offset_ms,
+        focus,
+        focus_link,
+        card.is_some(),
+        &callouts,
+    );
 
     Slide {
         focus,
@@ -552,6 +558,7 @@ fn choreograph(
     start_offset: u16,
     focus: Option<Mark>,
     focus_link: bool,
+    card: bool,
     callouts: &[Callout],
 ) -> Vec<(Part, u16, u16)> {
     use choreography as c;
@@ -573,6 +580,11 @@ fn choreograph(
         let card_at = shift(link_end, c::CARD_DELAY_MS);
         timing.push((Part::Card, card_at, c::CARD_MS));
         after = card_at + c::CARD_MS;
+    } else if card {
+        // A card with no link to wait for opens with the slide. It is still in
+        // the table, so it takes the offset a retiring slide adds rather than
+        // drawing over what is on its way out.
+        timing.push((Part::Card, start_offset, c::CARD_MS));
     }
 
     for (index, callout) in callouts.iter().enumerate() {
@@ -926,6 +938,28 @@ mod tests {
         let shifted: Vec<u16> = starts(&base).iter().map(|at| at + 500).collect();
 
         assert_eq!(starts(&delayed), shifted, "every part moved together");
+    }
+
+    /// A stop with no focus has nothing for its card to be linked from, so the
+    /// card opens with the slide. It is still one of the slide's parts, which
+    /// is what makes it wait out a retiring slide rather than drawing over it.
+    #[test]
+    fn a_card_without_a_link_still_takes_the_slides_offset() {
+        let mut input = input(pane(), None);
+        input.start_offset_ms = 500;
+
+        let slide = layout(&input);
+
+        assert!(!slide.focus_link, "nothing links a card with no focus");
+        assert_eq!(
+            slide
+                .timing
+                .iter()
+                .find(|(part, ..)| *part == Part::Card)
+                .map(|(_, at, duration)| (*at, *duration)),
+            Some((500, choreography::CARD_MS)),
+            "the card is scheduled at the offset the slide starts from",
+        );
     }
 
     /// Until the reader walks into the annotations nothing is singled out. From
