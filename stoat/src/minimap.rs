@@ -11,7 +11,11 @@ use crate::{
     theme::{scope, Theme},
 };
 use ratatui::style::Color;
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    time::{Duration, Instant},
+};
 use stoat_language::HighlightId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -34,13 +38,25 @@ const TAB_WIDTH: u32 = 4;
 /// roughly twice the runs its coloring alone would give.
 const MAX_RUNS: usize = 24;
 
-/// Lines summarized per [`MinimapContent::sync`] during the initial build, so a
-/// large file fills over several frames rather than stalling one.
-const BUILD_CHUNK: u32 = 4096;
+/// Time [`MinimapContent::sync`] spends on chunked work before it leaves the
+/// rest for the next frame.
+///
+/// The build and both sweeps share one budget, since what a frame has to spare
+/// belongs to the frame rather than to the stage.
+///
+/// A row's cost follows its content. A plain line summarizes in well under a
+/// microsecond. A long highlighted line resolves a token set and allocates a
+/// run vector. A fixed row count therefore bounds the frame only for the file
+/// it was tuned on.
+const SYNC_BUDGET: Duration = Duration::from_millis(6);
 
-/// Lines re-summarized per [`MinimapContent::sync`] during a recolor sweep, so a
-/// large file's syntax recolor spreads across frames rather than stalling one.
-pub(crate) const RESYNC_CHUNK: u32 = 4096;
+/// Rows one stage of [`MinimapContent::sync`] covers before it reads the clock
+/// again.
+///
+/// The count is small enough that the slowest rows overrun [`SYNC_BUDGET`] by a
+/// fraction of a frame. It is large enough that a file of plain lines does not
+/// pay a clock read every few rows.
+const SYNC_SLICE: u32 = 512;
 
 /// Changed marks in one window past which they are applied as a batch.
 ///
@@ -301,10 +317,13 @@ impl EdgeSource for ResolvedEdges {
 ///
 /// Mirrors the terminal's content store: one entry per line, spliced as the
 /// buffer changes. Retains the rope it last synced against so an edit's old byte
-/// range resolves to old rows, and a build cursor so a fresh file fills a chunk
-/// at a time.
+/// range resolves to old rows, and a build cursor so a fresh file fills over
+/// several frames.
 pub struct MinimapContent {
     content_id: u32,
+    /// Time one [`Self::sync`] spends on chunked work before it leaves the rest
+    /// for the next one. [`Self::new`] takes [`SYNC_BUDGET`].
+    budget: Duration,
     lines: Vec<LineRuns>,
     /// The built rows carrying a mark and the edge-lane class each carries,
     /// ascending by row. A row absent from it is unmarked.
@@ -331,8 +350,8 @@ pub struct MinimapContent {
     synced_syntax_other: u64,
     /// The next built row a recolor sweep will re-summarize, or `None` when idle.
     /// A syntax version change starts the sweep at
-    /// [`Self::pending_syntax_rows`]' start, and it advances [`RESYNC_CHUNK`]
-    /// rows per sync until it reaches [`Self::resync_end`].
+    /// [`Self::pending_syntax_rows`]' start, and it advances in [`SYNC_SLICE`]
+    /// steps until it reaches [`Self::resync_end`].
     resync_upto: Option<u32>,
     /// The row an active sweep stops at, or `None` to run to
     /// [`Self::built_upto`]. Always clamped to `built_upto` in use.
@@ -347,8 +366,8 @@ pub struct MinimapContent {
     ///
     /// Separate cursor from [`Self::resync_upto`] because the two sweeps answer
     /// to different versions and a bump of one says nothing about the other. It
-    /// advances [`RESYNC_CHUNK`] rows per sync, like the recolor sweep, so a
-    /// branch switch on a large file does not re-mark every row in one frame.
+    /// advances in [`SYNC_SLICE`] steps, like the recolor sweep, so a branch
+    /// switch on a large file does not re-mark every row in one frame.
     edge_resync_upto: Option<u32>,
     /// The decoration version an active edge sweep is bringing the strip to.
     ///
@@ -360,8 +379,15 @@ pub struct MinimapContent {
 
 impl MinimapContent {
     pub fn new(content_id: u32) -> MinimapContent {
+        MinimapContent::with_budget(content_id, SYNC_BUDGET)
+    }
+
+    /// A content that spends `budget` per [`Self::sync`] in place of
+    /// [`SYNC_BUDGET`], so a caller can pin how far one call reaches.
+    fn with_budget(content_id: u32, budget: Duration) -> MinimapContent {
         MinimapContent {
             content_id,
+            budget,
             lines: Vec::new(),
             edges: Vec::new(),
             synced_version: 0,
@@ -406,10 +432,10 @@ impl MinimapContent {
     ///
     /// The caller ticks [`Self::sync`] on idle frames while this holds, so
     /// every cursor runs to completion instead of stalling until the next user
-    /// event. A sweep needs this as much as the build does. It advances one
-    /// [`RESYNC_CHUNK`] per sync on a file that is already fully built, so
-    /// without it every row past the first chunk keeps stale colors or stale
-    /// marks until some unrelated event happens to tick another sync.
+    /// event. A sweep needs this as much as the build does. It spends one
+    /// budget per sync on a file that is already fully built, so without it
+    /// every row past that budget's reach keeps stale colors or stale marks
+    /// until some unrelated event happens to tick another sync.
     pub fn build_pending(&self) -> bool {
         !self.disabled
             && (self.built_upto < line_count(&self.synced_rope)
@@ -431,9 +457,9 @@ impl MinimapContent {
     /// changing re-checks the built lines' edge marks and [`SyncVersions::syntax`]
     /// changing re-summarizes their content, each without a buffer edit.
     ///
-    /// Edits within the already-built prefix queue splices. The unbuilt tail fills
-    /// up to [`BUILD_CHUNK`] lines per call. A buffer over [`MAX_LINES`] disables
-    /// and queues nothing.
+    /// Edits within the already-built prefix queue splices. The unbuilt tail
+    /// fills as far as [`Self::budget`] reaches per call. A buffer over
+    /// [`MAX_LINES`] disables and queues nothing.
     pub fn sync(
         &mut self,
         new_rope: &Rope,
@@ -447,6 +473,7 @@ impl MinimapContent {
             return;
         }
 
+        let started = Instant::now();
         let total = line_count(new_rope);
         if total as usize > MAX_LINES {
             self.disabled = true;
@@ -469,8 +496,11 @@ impl MinimapContent {
             self.synced_rope = new_rope.clone();
         }
 
-        if self.built_upto < total {
-            let end = (self.built_upto + BUILD_CHUNK).min(total);
+        // Every stage below reads the clock after its slice rather than before
+        // it, so a sync that arrives with the budget already spent still
+        // advances its cursor by one slice.
+        while self.built_upto < total {
+            let end = (self.built_upto + SYNC_SLICE).min(total);
             let tokens = tokens_for(self.built_upto..end);
             // Resolved once through the bulk path, since the summary below and
             // the record beside it both want every row's edge.
@@ -484,6 +514,10 @@ impl MinimapContent {
             self.edges.extend(edges.marks);
             self.lines.extend(lines);
             self.built_upto = end;
+
+            if started.elapsed() >= self.budget {
+                break;
+            }
         }
 
         // A change with no row information behind it can have restained any
@@ -493,8 +527,8 @@ impl MinimapContent {
             self.synced_syntax_other = versions.syntax_other;
         }
 
-        // A recolor re-summarizes the built lines' content, swept RESYNC_CHUNK
-        // rows per sync so a large file never recolors in one frame. A syntax
+        // A recolor re-summarizes the built lines' content, swept under the
+        // budget so a large file never recolors in one frame. A syntax
         // version change starts the sweep over the rows reported changed since
         // the last one finished. A fresh bump to a new version mid-sweep
         // restarts it against the new target.
@@ -530,14 +564,23 @@ impl MinimapContent {
                 .resync_end
                 .unwrap_or(self.built_upto)
                 .min(self.built_upto);
-            let from = from.min(end);
-            let to = from.saturating_add(RESYNC_CHUNK).min(end);
-            self.resync_chunk(new_rope, from..to, &tokens_for);
-            if to >= end {
+            let mut from = from.min(end);
+
+            loop {
+                let to = from.saturating_add(SYNC_SLICE).min(end);
+                self.resync_slice(new_rope, from..to, &tokens_for);
+                from = to;
+
+                if from >= end || started.elapsed() >= self.budget {
+                    break;
+                }
+            }
+
+            if from >= end {
                 self.resync_upto = None;
                 self.synced_syntax_version = self.resync_target;
             } else {
-                self.resync_upto = Some(to);
+                self.resync_upto = Some(from);
             }
         }
 
@@ -546,7 +589,7 @@ impl MinimapContent {
         // of the last decoration sync, so a row whose mark this bump moves is
         // re-spliced here even when the sweep just touched it.
         //
-        // Chunked like the recolor sweep, since a branch switch can move a mark
+        // Sliced like the recolor sweep, since a branch switch can move a mark
         // on every row of the file at once.
         if versions.decoration != self.synced_decoration_version
             && (self.edge_resync_upto.is_none() || self.edge_resync_target != versions.decoration)
@@ -556,14 +599,23 @@ impl MinimapContent {
         }
         if let Some(from) = self.edge_resync_upto {
             let end = self.built_upto;
-            let from = from.min(end);
-            let to = from.saturating_add(RESYNC_CHUNK).min(end);
-            self.resync_edges(new_rope, &tokens_for, &marks, from..to);
-            if to >= end {
+            let mut from = from.min(end);
+
+            loop {
+                let to = from.saturating_add(SYNC_SLICE).min(end);
+                self.resync_edges(new_rope, &tokens_for, &marks, from..to);
+                from = to;
+
+                if from >= end || started.elapsed() >= self.budget {
+                    break;
+                }
+            }
+
+            if from >= end {
                 self.edge_resync_upto = None;
                 self.synced_decoration_version = self.edge_resync_target;
             } else {
-                self.edge_resync_upto = Some(to);
+                self.edge_resync_upto = Some(from);
             }
         }
     }
@@ -573,14 +625,14 @@ impl MinimapContent {
     /// completed parse) that leaves the buffer text untouched.
     ///
     /// A recolor can touch any line, so the caller sweeps the whole built range
-    /// one [`RESYNC_CHUNK`] at a time across successive syncs rather than in one.
+    /// one [`SYNC_SLICE`] at a time, over as many syncs as the budget takes.
     ///
     /// Each row keeps the mark it already carries, read from the stored index
     /// rather than resolved again. A recolor cannot move a mark, and asking the
     /// source would cost a seek per line of the file for an answer it already
     /// holds. A decoration bump landing in the same sync makes those marks one
     /// version stale, which [`Self::resync_edges`] corrects immediately after.
-    fn resync_chunk(
+    fn resync_slice(
         &mut self,
         new_rope: &Rope,
         range: Range<u32>,
@@ -1137,9 +1189,9 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 mod tests {
     use super::{
         summarize_line, EdgeSource, LineRuns, LineToken, MinimapContent, Run, Splice, SyncVersions,
-        BUILD_CHUNK, MAX_LINES, MAX_RUNS, RESYNC_CHUNK,
+        MAX_LINES, MAX_RUNS, SYNC_SLICE,
     };
-    use std::{cell::RefCell, collections::HashMap, ops::Range};
+    use std::{cell::RefCell, collections::HashMap, ops::Range, time::Duration};
     use stoat_text::{
         patch::{Edit, Patch},
         Rope,
@@ -1338,16 +1390,17 @@ mod tests {
     }
 
     /// An edit can insert rows past the build cursor, since the cursor sits
-    /// wherever the last chunk stopped. It summarizes those rows itself and the
+    /// wherever the last slice stopped. It summarizes those rows itself and the
     /// cursor advances by the same delta, so the summarized prefix and the
     /// claimed one stay equal and the build resumes at the seam.
     #[test]
     fn an_edit_reaching_past_the_build_cursor_summarizes_what_it_inserts() {
-        let total = BUILD_CHUNK as usize + 904;
+        // Two slices, so the sync that carries the edit also finishes the build.
+        let total = 2 * SYNC_SLICE as usize;
         let before = rope(&vec!["line"; total].join("\n"));
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
 
-        // One chunk, leaving the cursor at BUILD_CHUNK with the tail unbuilt.
+        // One slice, leaving the cursor at SYNC_SLICE with the tail unbuilt.
         content.sync(
             &before,
             1,
@@ -1357,17 +1410,14 @@ mod tests {
             no_edges,
         );
         let _ = content.take_queued();
-        assert_eq!(content.lines.len(), BUILD_CHUNK as usize, "one chunk built");
+        assert_eq!(content.lines.len(), SYNC_SLICE as usize, "one slice built");
 
         // Three lines open on the cursor's last built row, so the rows they
         // occupy run past where the build had reached. Every line is "line\n", so
         // a row starts every five bytes.
-        let seam = 5 * (BUILD_CHUNK as usize - 1);
+        let seam = 5 * (SYNC_SLICE as usize - 1);
         let mut after: Vec<&str> = vec!["line"; total];
-        after.splice(
-            BUILD_CHUNK as usize - 1..BUILD_CHUNK as usize - 1,
-            ["new"; 3],
-        );
+        after.splice(SYNC_SLICE as usize - 1..SYNC_SLICE as usize - 1, ["new"; 3]);
         let after = rope(&after.join("\n"));
         let edit = Patch::new(vec![Edit {
             old: seam..seam,
@@ -1384,8 +1434,8 @@ mod tests {
                 .map(|s| (s.start, s.removed, s.lines.len()))
                 .collect::<Vec<_>>(),
             vec![
-                (BUILD_CHUNK - 1, 1, 4),
-                (BUILD_CHUNK + 3, 0, total - BUILD_CHUNK as usize),
+                (SYNC_SLICE - 1, 1, 4),
+                (SYNC_SLICE + 3, 0, total - SYNC_SLICE as usize),
             ],
             "the edit removes the one row it replaced, and the build resumes at \
              the row after the four it left, with no gap and no overlap",
@@ -1398,7 +1448,7 @@ mod tests {
 
         let inserted = summarize_line("new", &[], None);
         assert_eq!(
-            &content.lines[BUILD_CHUNK as usize - 1..BUILD_CHUNK as usize + 2],
+            &content.lines[SYNC_SLICE as usize - 1..SYNC_SLICE as usize + 2],
             &[inserted, inserted, inserted][..],
             "including the rows that landed past where the build had reached",
         );
@@ -1411,9 +1461,10 @@ mod tests {
     /// never had.
     #[test]
     fn an_edit_replacing_across_the_build_cursor_reports_only_the_built_rows() {
-        let total = BUILD_CHUNK as usize + 904;
+        // Two slices, so the sync that carries the edit also finishes the build.
+        let total = 2 * SYNC_SLICE as usize;
         let before = rope(&vec!["line"; total].join("\n"));
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
 
         content.sync(
             &before,
@@ -1424,12 +1475,12 @@ mod tests {
             no_edges,
         );
         let _ = content.take_queued();
-        assert_eq!(content.lines.len(), BUILD_CHUNK as usize, "one chunk built");
+        assert_eq!(content.lines.len(), SYNC_SLICE as usize, "one slice built");
 
         // Four rows collapse into one, starting two rows below the cursor, so two
         // of the four were built and two were not. Every line is "line\n", so a
         // row starts every five bytes and a row's last byte is its newline.
-        let first = BUILD_CHUNK as usize - 2;
+        let first = SYNC_SLICE as usize - 2;
         let after = rope(
             &[
                 vec!["line"; first],
@@ -1549,7 +1600,7 @@ mod tests {
         let before = rope("a\nb\nc\nd\ne\nf\n");
         let mut content = MinimapContent::new(1);
 
-        // The initial build queries exactly the build chunk it fills.
+        // The initial build queries exactly the rows it fills.
         content.sync(
             &before,
             1,
@@ -1561,7 +1612,7 @@ mod tests {
         assert_eq!(
             *queried.borrow(),
             vec![0..7],
-            "the build queries only the chunk it fills (6 lines and a trailing empty line)"
+            "the build queries only the rows it fills (6 lines and a trailing empty line)"
         );
         queried.borrow_mut().clear();
         content.take_queued();
@@ -1641,13 +1692,13 @@ mod tests {
     }
 
     #[test]
-    fn chunked_build_appends_until_complete() {
-        let total = BUILD_CHUNK + BUILD_CHUNK / 2;
+    fn sliced_build_appends_until_complete() {
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         // Exactly `total` lines, with no trailing newline that would add an empty
         // last line.
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
 
         content.sync(
             &rope,
@@ -1662,12 +1713,12 @@ mod tests {
         assert_eq!(first[0].start, 0);
         assert_eq!(
             first[0].lines.len() as u32,
-            BUILD_CHUNK,
-            "first chunk is full"
+            SYNC_SLICE,
+            "first slice is full"
         );
         assert!(
             content.build_pending(),
-            "the build still has a chunk after the first sync"
+            "the build still has a slice after the first sync"
         );
 
         content.sync(
@@ -1680,15 +1731,15 @@ mod tests {
         );
         let second = content.take_queued();
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].start, BUILD_CHUNK);
+        assert_eq!(second[0].start, SYNC_SLICE);
         assert_eq!(
             second[0].lines.len() as u32,
-            BUILD_CHUNK / 2,
+            SYNC_SLICE / 2,
             "the remainder finishes the build",
         );
         assert!(
             !content.build_pending(),
-            "the build is complete after the last chunk"
+            "the build is complete after the last slice"
         );
 
         content.sync(
@@ -1702,11 +1753,70 @@ mod tests {
         assert!(content.take_queued().is_empty(), "nothing left to build");
     }
 
+    /// Every stage stops on the clock rather than on a row count, so a budget
+    /// wide enough carries a file of several slices in one sync.
+    ///
+    /// A slice is the step between two clock readings, never a cap on what one
+    /// sync covers. A stage that stopped at the first slice would leave a file
+    /// of plain lines waiting a frame per slice for no reason.
+    #[test]
+    fn a_wide_budget_carries_every_stage_past_one_slice() {
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
+        let rope = rope(&vec!["line"; total as usize].join("\n"));
+        let mut content = MinimapContent::with_budget(1, Duration::MAX);
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        content.take_queued();
+        assert_eq!(
+            content.lines.len() as u32,
+            total,
+            "the build covers every row in one sync"
+        );
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        assert_eq!(
+            spliced_rows(&content.take_queued()).len() as u32,
+            total,
+            "and the recolor sweep re-summarizes every row in one sync"
+        );
+
+        let marked = [1u32, SYNC_SLICE + 1];
+        let asked = RefCell::new(Vec::new());
+        let marks = RecordingEdges {
+            marked: &marked,
+            asked: &asked,
+        };
+        content.sync(&rope, 1, &Patch::empty(), versions(1, 1), no_tokens, marks);
+        assert_eq!(
+            spliced_rows(&content.take_queued()),
+            vec![1, SYNC_SLICE + 1],
+            "and the edge sweep reaches a mark in the second slice"
+        );
+
+        assert!(!content.build_pending(), "with no stage left owing rows");
+    }
+
+    /// A monochrome strip of a slice and a half, at a budget too small to reach
+    /// a second slice, so every stage of a later sync covers exactly one.
     fn built_recolor_fixture() -> (Rope, MinimapContent) {
-        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
         // Build the whole file monochrome over two syncs (syntax 0 sweeps nothing).
         content.sync(
             &rope,
@@ -1913,10 +2023,10 @@ mod tests {
 
     #[test]
     fn a_bump_landing_mid_sweep_falls_back_to_everything() {
-        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (rope, mut content) = built_recolor_fixture();
 
-        // Park a full sweep's cursor at RESYNC_CHUNK.
+        // Park a full sweep's cursor at SYNC_SLICE.
         content.note_syntax_rows(None);
         content.sync(
             &rope,
@@ -1973,11 +2083,11 @@ mod tests {
     }
 
     #[test]
-    fn a_recolor_sweeps_in_chunks_across_syncs() {
-        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+    fn a_recolor_sweeps_in_slices_across_syncs() {
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (rope, mut content) = built_recolor_fixture();
 
-        // A syntax bump recolors, one chunk per sync.
+        // A syntax bump recolors, one slice per sync.
         content.sync(
             &rope,
             1,
@@ -1990,13 +2100,13 @@ mod tests {
         assert_eq!(
             first.len(),
             1,
-            "the chunk's changed rows are contiguous, so they ship as one splice"
+            "the slice's changed rows are contiguous, so they ship as one splice"
         );
         assert_eq!(first[0].start, 0);
         assert_eq!(
             (first[0].removed, first[0].lines.len()),
-            (RESYNC_CHUNK, RESYNC_CHUNK as usize),
-            "and that splice still covers the whole chunk"
+            (SYNC_SLICE, SYNC_SLICE as usize),
+            "and that splice still covers the whole slice"
         );
         assert_eq!(
             first[0].lines[0],
@@ -2016,10 +2126,10 @@ mod tests {
         assert_eq!(second.len(), 1, "the remainder ships as one splice too");
         assert_eq!(
             second[0].lines.len(),
-            (total - RESYNC_CHUNK) as usize,
+            (total - SYNC_SLICE) as usize,
             "the remainder finishes the sweep"
         );
-        assert_eq!(second[0].start, RESYNC_CHUNK);
+        assert_eq!(second[0].start, SYNC_SLICE);
 
         // The sweep has reached the version, so a further sync recolors nothing.
         content.sync(
@@ -2040,7 +2150,7 @@ mod tests {
     fn a_fresh_syntax_bump_restarts_the_sweep() {
         let (rope, mut content) = built_recolor_fixture();
 
-        // The first recolor sweeps chunk 0 to class 1, leaving the cursor mid-file.
+        // The first recolor sweeps slice 0 to class 1, leaving the cursor mid-file.
         content.sync(
             &rope,
             1,
@@ -2052,7 +2162,7 @@ mod tests {
         content.take_queued();
 
         // A fresh bump to a new version restarts at row 0 with the new color
-        // instead of continuing to the next chunk.
+        // instead of continuing to the next slice.
         content.sync(
             &rope,
             1,
@@ -2066,8 +2176,8 @@ mod tests {
             restarted[0].start, 0,
             "a fresh bump restarts the sweep at the top"
         );
-        assert_eq!(restarted.len(), 1, "the restarted chunk ships coalesced");
-        assert_eq!(restarted[0].lines.len(), RESYNC_CHUNK as usize);
+        assert_eq!(restarted.len(), 1, "the restarted slice ships coalesced");
+        assert_eq!(restarted[0].lines.len(), SYNC_SLICE as usize);
         assert_eq!(
             restarted[0].lines[0],
             summarize_line("line", &[tok(0..4, 2)], None)
@@ -2142,7 +2252,7 @@ mod tests {
     }
 
     /// The frame loop only ticks more syncs while `build_pending` holds, so a
-    /// sweep that reports false after its first chunk strands every row past it
+    /// sweep that reports false after its first slice strands every row past it
     /// with stale colors.
     #[test]
     fn an_in_flight_sweep_keeps_reporting_pending() {
@@ -2186,10 +2296,10 @@ mod tests {
     /// rows and strands them on their pre-recolor runs.
     #[test]
     fn an_edit_above_the_sweep_cursor_moves_it_with_the_rows() {
-        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (before, mut content) = built_recolor_fixture();
 
-        // Sweep the first chunk, parking the cursor at RESYNC_CHUNK.
+        // Sweep the first slice, parking the cursor at SYNC_SLICE.
         content.sync(
             &before,
             1,
@@ -2246,10 +2356,10 @@ mod tests {
     /// and it jumps forward over rows neither edit re-summarized.
     #[test]
     fn a_later_edit_in_one_patch_leaves_the_sweep_cursor_put() {
-        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (before, mut content) = built_recolor_fixture();
 
-        // Sweep the first chunk, parking the cursor at RESYNC_CHUNK.
+        // Sweep the first slice, parking the cursor at SYNC_SLICE.
         content.sync(
             &before,
             1,
@@ -2260,11 +2370,11 @@ mod tests {
         );
         content.take_queued();
 
-        // Five lines open at the top, sliding the cursor to RESYNC_CHUNK + 5, and
+        // Five lines open at the top, sliding the cursor to SYNC_SLICE + 5, and
         // one more opens two rows below where the cursor lands. Every line is
         // "line\n", so a row starts every five bytes.
         let after = rope(&vec!["line"; total as usize + 6].join("\n"));
-        let second = 5 * (RESYNC_CHUNK as usize + 2);
+        let second = 5 * (SYNC_SLICE as usize + 2);
         let edit = Patch::new(vec![
             Edit {
                 old: 0..0,
@@ -2370,15 +2480,15 @@ mod tests {
     }
 
     /// Switching branches moves a mark on every changed row at once, so the
-    /// edge sweep is chunked the way the recolor sweep is. Each sync looks only
+    /// edge sweep is sliced the way the recolor sweep is. Each sync looks only
     /// at its own window, and the marks past it wait their turn.
     #[test]
-    fn an_edge_sweep_covers_a_chunk_per_sync() {
-        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+    fn an_edge_sweep_covers_a_slice_per_sync() {
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (rope, mut content) = built_recolor_fixture();
 
-        // A mark in each chunk, so a sweep that stopped early is visible.
-        let marked = [1u32, RESYNC_CHUNK + 1];
+        // A mark in each slice, so a sweep that stopped early is visible.
+        let marked = [1u32, SYNC_SLICE + 1];
         let asked = RefCell::new(Vec::new());
         let marks = RecordingEdges {
             marked: &marked,
@@ -2387,22 +2497,22 @@ mod tests {
 
         content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         assert!(
-            asked.borrow().iter().all(|&row| row < RESYNC_CHUNK),
+            asked.borrow().iter().all(|&row| row < SYNC_SLICE),
             "the first sync stays inside its own window",
         );
         let first = content.take_queued();
-        assert_eq!(first.len(), 1, "only the first chunk's mark landed");
+        assert_eq!(first.len(), 1, "only the first slice's mark landed");
         assert_eq!(first[0].start, 1);
 
         asked.borrow_mut().clear();
         content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         assert!(
-            asked.borrow().iter().all(|&row| row >= RESYNC_CHUNK),
+            asked.borrow().iter().all(|&row| row >= SYNC_SLICE),
             "and the second picks up where the first stopped",
         );
         let second = content.take_queued();
-        assert_eq!(second.len(), 1, "the second chunk's mark lands next");
-        assert_eq!(second[0].start, RESYNC_CHUNK + 1);
+        assert_eq!(second.len(), 1, "the second slice's mark lands next");
+        assert_eq!(second[0].start, SYNC_SLICE + 1);
 
         // The sweep has reached the end, so a third sync has nothing left.
         asked.borrow_mut().clear();
@@ -2412,14 +2522,14 @@ mod tests {
             "a settled sweep re-checks nothing",
         );
         assert!(content.take_queued().is_empty());
-        assert_eq!(total, RESYNC_CHUNK + RESYNC_CHUNK / 2, "two chunks of rows");
+        assert_eq!(total, SYNC_SLICE + SYNC_SLICE / 2, "two slices of rows");
     }
 
     /// An edge sweep with rows left keeps the frame loop ticking, the way the
     /// recolor sweep does.
     ///
     /// The caller syncs on an idle frame only while the content says work is
-    /// pending. A sweep that stops saying so covers one chunk per unrelated
+    /// pending. A sweep that stops saying so covers one slice per unrelated
     /// user event, which on a large file leaves most rows carrying the marks
     /// of the branch that was checked out before.
     #[test]
@@ -2430,7 +2540,7 @@ mod tests {
             "the fixture is fully built, so nothing is pending before the bump"
         );
 
-        let marked = [1u32, RESYNC_CHUNK + 1];
+        let marked = [1u32, SYNC_SLICE + 1];
         let asked = RefCell::new(Vec::new());
         let marks = RecordingEdges {
             marked: &marked,

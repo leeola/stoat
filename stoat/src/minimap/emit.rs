@@ -584,23 +584,24 @@ mod tests {
             "toggling syntax highlighting recolors the strip"
         );
     }
+
     /// The rows a parse reports have to reach the strip that paints them.
     ///
     /// Splices cannot show this. A sweep queues nothing for a row whose
     /// summary is unchanged, so a scoped sweep and a full one emit the same
     /// frames and differ only in how many rows they re-summarize. What the
-    /// scope does change is whether the sweep finishes inside one sync. Past
-    /// one chunk's worth of rows a full sweep has to span several, which the
-    /// strip reports as still pending.
+    /// scope does change is whether the sweep finishes inside one sync. A file
+    /// of enough rows outruns one sync's budget, which the strip reports as
+    /// still pending.
     #[test]
     fn an_edit_sweeps_without_spilling_past_one_sync() {
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        // More rows than one recolor chunk, so a full sweep cannot finish in
-        // the single sync that follows the edit.
-        let total = crate::minimap::RESYNC_CHUNK as usize + 500;
+        // Enough rows that a full sweep outruns the sync budget several times
+        // over, which the last leg asserts rather than assumes.
+        let total = 20000usize;
         let body: String = vec!["fn a() {}"; total].join("\n");
         let root = PathBuf::from("/minimap");
         let path = root.join("big.rs");
@@ -612,7 +613,7 @@ mod tests {
 
         let _ = h.stoat.render();
         apc_emit::emit_apc_scene(&mut h.stoat);
-        for _ in 0..100 {
+        for _ in 0..400 {
             emit_minimap(&mut h.stoat);
             if !h.stoat.minimap_build_pending {
                 break;
@@ -665,6 +666,28 @@ mod tests {
             !h.stoat.minimap_build_pending,
             "a one-row recolor must not leave a multi-sync sweep outstanding",
         );
+
+        // The scope is only visible against a full sweep this fixture cannot
+        // finish in one sync. Turning the highlighting off and on again asks
+        // for one, since a change with no rows behind it covers everything.
+        h.stoat.syntax_highlight = false;
+        for _ in 0..400 {
+            emit_minimap(&mut h.stoat);
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+        }
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "the fixture must settle before the full sweep it is measured against",
+        );
+
+        h.stoat.syntax_highlight = true;
+        emit_minimap(&mut h.stoat);
+        assert!(
+            h.stoat.minimap_build_pending,
+            "a full sweep must outrun one sync, or the scoped sweep proves nothing",
+        );
     }
 
     #[test]
@@ -713,15 +736,16 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_chunk_minimap_build_completes_over_idle_emits() {
+    fn a_multi_slice_minimap_build_completes_over_idle_emits() {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        // A file larger than one build chunk fills over several syncs.
-        let total = 6000usize;
+        // Far more rows than one sync's budget reaches, so the build fills over
+        // several.
+        let total = 120_000usize;
         let body: String = vec!["ln"; total].join("\n");
         let root = PathBuf::from("/minimap");
         let path = root.join("big.txt");
@@ -736,13 +760,13 @@ mod tests {
         emit_minimap(&mut h.stoat);
         assert!(
             h.stoat.minimap_build_pending,
-            "a multi-chunk file leaves the build pending after the first emit",
+            "a file this size leaves the build pending after the first emit",
         );
 
         // Drive the build the way an idle frame tick does, gathering the lines
         // every emitted splice covers.
         let mut covered: Vec<u32> = Vec::new();
-        for _ in 0..100 {
+        for _ in 0..400 {
             for cmd in drain_apc(&mut rx) {
                 if let Command::MinimapLines(lines) = cmd {
                     covered.extend(lines.start..lines.start + lines.lines.len() as u32);
