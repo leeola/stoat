@@ -38,12 +38,25 @@ pub(crate) struct Placement {
     pub rows: u16,
 }
 
+/// One file's pixels as the terminal holds them.
+struct SentImage {
+    /// The id the pixels were transmitted under.
+    id: u32,
+    /// The pixel box the transmission was fitted into, which is the pane's box
+    /// rather than the file's whenever the file was the larger of the two.
+    ///
+    /// Holds the box asked for rather than the size the encoder produced, since
+    /// a scaler rounds its own way and a produced size a pixel short would read
+    /// as a pane that grew.
+    px: (u32, u32),
+}
+
 /// An image this session has sent, and the transmissions still in flight.
 #[derive(Default)]
 pub(crate) struct ImageRuntime {
-    /// The id each file was transmitted under. A path present here has had its
+    /// What each file was transmitted as. A path present here has had its
     /// pixels sent and needs only placing.
-    sent: HashMap<PathBuf, u32>,
+    sent: HashMap<PathBuf, SentImage>,
     /// Placements as the terminal last heard them, by image id.
     placed: HashMap<u32, Placement>,
     /// Files being read and converted on the pool, by path, so one file opened
@@ -74,17 +87,27 @@ struct PendingTransmit {
     /// The PNG bytes once ready, or `None` while the pool still has it. An
     /// error resolves to an empty vector, which the drain drops.
     result: Arc<Mutex<Option<Vec<u8>>>>,
+    /// The pixel box the read is fitting into, recorded when the transmission
+    /// lands so a later frame can tell whether the pane has since grown.
+    px: (u32, u32),
     _task: Task<()>,
 }
 
 impl ImageRuntime {
-    /// The id `path` was transmitted under, assigning one if it is new.
-    fn id_for(&mut self, path: &Path) -> u32 {
-        if let Some(id) = self.sent.get(path) {
-            return *id;
-        }
-        self.next_id += 1;
-        self.next_id
+    /// Forget every image whose pixels the placement diff just freed.
+    ///
+    /// A delete of an id no placement wants any more takes the pixels with it,
+    /// so the record has to go too. Left behind, it would place that id again
+    /// when a pane reopens on the path, against pixels the terminal no longer
+    /// holds.
+    fn forget_freed(&mut self, desired: &[Placement]) {
+        let freed: Vec<u32> = self
+            .placed
+            .keys()
+            .copied()
+            .filter(|id| !desired.iter().any(|placement| placement.image == *id))
+            .collect();
+        self.sent.retain(|_, sent| !freed.contains(&sent.id));
     }
 }
 
@@ -103,11 +126,12 @@ pub(crate) fn emit_images(stoat: &mut Stoat) {
     };
 
     let wanted = wanted_images(stoat);
-    start_transmits(stoat, &wanted);
+    start_transmits(stoat, &wanted, cell_px);
 
     let mut batch = drain_transmits(stoat);
     let desired = placements(stoat, &wanted, cell_px);
     batch.extend(placement_batch(&desired, &stoat.images.placed));
+    stoat.images.forget_freed(&desired);
 
     if !batch.is_empty() {
         let _ = apc_tx.send(batch);
@@ -133,8 +157,8 @@ pub(crate) fn emit_drop_all_images(stoat: &Stoat) {
     }
 
     let mut batch = Vec::new();
-    for id in stoat.images.sent.values() {
-        delete_image_into(&mut batch, *id);
+    for sent in stoat.images.sent.values() {
+        delete_image_into(&mut batch, sent.id);
     }
     let _ = apc_tx.send(batch);
 }
@@ -157,10 +181,25 @@ fn wanted_images(stoat: &Stoat) -> Vec<(PathBuf, (u32, u32), Rect)> {
         .collect()
 }
 
-/// Begin reading any wanted image this session has not sent or started.
-fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)]) {
-    for (path, _, _) in wanted {
-        if stoat.images.sent.contains_key(path) || stoat.images.pending.contains_key(path) {
+/// Begin reading any wanted image this session has not sent at the size its
+/// pane can now show.
+///
+/// A pane that grew past what was sent reads again at the larger box, since the
+/// terminal can only scale down what it holds. A pane that shrank keeps the
+/// pixels it has, and a read already in flight is never restarted, so dragging
+/// a split costs one further read rather than one per frame.
+fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)], cell_px: (u16, u16)) {
+    for (path, px, rect) in wanted {
+        let target = fit_pixels(*px, (rect.width, rect.height), cell_px);
+        if target == (0, 0) || stoat.images.pending.contains_key(path) {
+            continue;
+        }
+        let sent_fits = stoat
+            .images
+            .sent
+            .get(path)
+            .is_some_and(|sent| sent.px.0 >= target.0 && sent.px.1 >= target.1);
+        if sent_fits {
             continue;
         }
 
@@ -171,7 +210,7 @@ fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)]) {
             let redraw = stoat.redraw_notify.clone();
             let path = path.clone();
             stoat.executor.spawn_blocking(move || {
-                let png = read_as_png(&*fs_host, &path).unwrap_or_default();
+                let png = read_fitted_png(&*fs_host, &path, target).unwrap_or_default();
                 *result.lock().expect("image transmit mutex") = Some(png);
                 redraw.notify_one();
             })
@@ -180,6 +219,7 @@ fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)]) {
             path.clone(),
             PendingTransmit {
                 result,
+                px: target,
                 _task: task,
             },
         );
@@ -192,7 +232,7 @@ fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)]) {
 /// rather than retried. The pane still shows its name and size, and retrying a
 /// file that cannot be decoded would retry it every frame.
 fn drain_transmits(stoat: &mut Stoat) -> Vec<u8> {
-    let ready: Vec<(PathBuf, Vec<u8>)> = stoat
+    let ready: Vec<(PathBuf, Vec<u8>, (u32, u32))> = stoat
         .images
         .pending
         .iter()
@@ -202,19 +242,24 @@ fn drain_transmits(stoat: &mut Stoat) -> Vec<u8> {
                 .lock()
                 .expect("image transmit mutex")
                 .take()?;
-            Some((path.clone(), png))
+            Some((path.clone(), png, pending.px))
         })
         .collect();
 
     let mut batch = Vec::new();
-    for (path, png) in ready {
+    for (path, png, px) in ready {
         stoat.images.pending.remove(&path);
         if png.is_empty() {
             continue;
         }
 
-        let id = stoat.images.id_for(&path);
-        stoat.images.sent.insert(path, id);
+        // Every transmission is a new image to the terminal, and a re-read
+        // replaces the record, so the same frame's placement diff deletes the
+        // old id with its pixels and places the new one. No frame between the
+        // two shows nothing.
+        stoat.images.next_id += 1;
+        let id = stoat.images.next_id;
+        stoat.images.sent.insert(path, SentImage { id, px });
         transmit_into(&mut batch, id, &png);
     }
     batch
@@ -229,7 +274,7 @@ fn placements(
     wanted
         .iter()
         .filter_map(|(path, px, rect)| {
-            let image = *stoat.images.sent.get(path)?;
+            let image = stoat.images.sent.get(path)?.id;
             let (cols, rows, col_off, row_off) = fit_cells(*px, (rect.width, rect.height), cell_px);
             (cols > 0 && rows > 0).then_some(Placement {
                 image,
@@ -349,40 +394,70 @@ fn delete_image_into(out: &mut Vec<u8>, id: u32) {
     );
 }
 
-/// Read `path` and return it as PNG bytes, or `None` if it is not an image.
+/// Read `path` as PNG bytes no larger than `target`, or `None` if it is not an
+/// image.
 ///
-/// A PNG passes through untouched. Anything else decodes and re-encodes,
-/// because the protocol's other formats are raw pixel buffers and sending one
-/// would put the decoded image on the wire rather than the compressed file.
-fn read_as_png(fs: &dyn crate::host::FsHost, path: &Path) -> Option<Vec<u8>> {
+/// A file larger than the box its pane can show is scaled down before it is
+/// encoded. The terminal would scale it at draw time anyway, so the pixels past
+/// the box cost a decode, an encode, the wire, and a texture, for a picture no
+/// one sees. A 24-megapixel photo in a pane of about one costs seconds of that.
+///
+/// A PNG already inside the box passes through untouched, read from its header
+/// rather than decoded. Anything else decodes and re-encodes, because the
+/// protocol's other formats are raw pixel buffers and sending one would put the
+/// decoded image on the wire rather than the compressed file.
+///
+/// Triangle rather than Lanczos3: a pane asks for a downscale of two or more,
+/// where Triangle costs about a third as much and the difference is not visible
+/// at that ratio.
+fn read_fitted_png(
+    fs: &dyn crate::host::FsHost,
+    path: &Path,
+    target: (u32, u32),
+) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
 
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    let fits = width <= target.0 && height <= target.1;
+
+    if fits && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(bytes);
     }
 
     let decoded = image::load_from_memory(&bytes).ok()?;
+    let fitted = match fits {
+        true => decoded,
+        false => decoded.resize(target.0, target.1, image::imageops::FilterType::Triangle),
+    };
+
     let mut out = std::io::Cursor::new(Vec::new());
-    decoded.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    fitted.write_to(&mut out, image::ImageFormat::Png).ok()?;
     Some(out.into_inner())
 }
 
-/// The cell box an image fills inside `rect`, and where to put it.
+/// The pixel box an image fills inside `rect`.
 ///
-/// Fitted rather than filled, so the picture keeps its shape, and centered in
-/// whichever direction it leaves room. The aspect is a ratio of pixels and a
-/// cell is not square, so both go through pixels rather than cell counts.
+/// Fitted rather than filled, so the picture keeps its shape. The aspect is a
+/// ratio of pixels and a cell is not square, so the fit goes through pixels
+/// rather than cell counts.
 ///
-/// Never scaled up past the picture's own pixels.
+/// Never scaled up past the picture's own pixels. A pane is for looking at the
+/// file, and an image drawn past its own pixels is a blurry version of one that
+/// would have fit.
 ///
-/// Returns zero cells for an image or a rectangle with no extent, which the
-/// caller drops rather than placing something invisible.
-pub(crate) fn fit_cells(
-    px: (u32, u32),
-    rect: (u16, u16),
-    cell_px: (u16, u16),
-) -> (u16, u16, u16, u16) {
+/// This is what the picture is worth transmitting at: the terminal scales what
+/// it holds down to the placement, so pixels past this box are decoded,
+/// encoded, and sent for nothing.
+///
+/// Zero for an image or a rectangle with no extent. A picture flatter than the
+/// box can still round to zero on one axis, which [`fit_cells`] clamps back up
+/// to a cell rather than dropping.
+pub(crate) fn fit_pixels(px: (u32, u32), rect: (u16, u16), cell_px: (u16, u16)) -> (u32, u32) {
     let (image_w, image_h) = px;
     let (rect_cols, rect_rows) = rect;
     let (cell_w, cell_h) = cell_px;
@@ -393,38 +468,56 @@ pub(crate) fn fit_cells(
         || cell_w == 0
         || cell_h == 0
     {
-        return (0, 0, 0, 0);
+        return (0, 0);
     }
 
     // The pane's extent in pixels, which is what the image is fitted into.
     let box_w = u64::from(rect_cols) * u64::from(cell_w);
     let box_h = u64::from(rect_rows) * u64::from(cell_h);
 
-    // Scaled to whichever axis runs out first, then rounded up to whole cells,
-    // since a placement is measured in them.
+    // Scaled to whichever axis runs out first.
     let by_width = u64::from(image_h) * box_w / u64::from(image_w);
     let (draw_w, draw_h) = match by_width <= box_h {
         true => (box_w, by_width),
         false => (u64::from(image_w) * box_h / u64::from(image_h), box_h),
     };
 
-    // Never larger than the picture itself. A pane is for looking at the file,
-    // and an image drawn past its own pixels is a blurry version of one that
-    // would have fit.
     let (draw_w, draw_h) = match draw_w > u64::from(image_w) {
         true => (u64::from(image_w), u64::from(image_h)),
         false => (draw_w, draw_h),
     };
 
-    let cols = (draw_w.div_ceil(u64::from(cell_w)) as u16).clamp(1, rect_cols);
-    let rows = (draw_h.div_ceil(u64::from(cell_h)) as u16).clamp(1, rect_rows);
+    (draw_w as u32, draw_h as u32)
+}
+
+/// The cell box an image fills inside `rect`, and where to put it.
+///
+/// Rounds [`fit_pixels`] up to whole cells, since a placement is measured in
+/// them, and centers the picture in whichever direction it leaves room.
+///
+/// Returns zero cells for an image or a rectangle with no extent, which the
+/// caller drops rather than placing something invisible.
+pub(crate) fn fit_cells(
+    px: (u32, u32),
+    rect: (u16, u16),
+    cell_px: (u16, u16),
+) -> (u16, u16, u16, u16) {
+    let (draw_w, draw_h) = fit_pixels(px, rect, cell_px);
+    if (draw_w, draw_h) == (0, 0) {
+        return (0, 0, 0, 0);
+    }
+
+    let (rect_cols, rect_rows) = rect;
+    let (cell_w, cell_h) = cell_px;
+    let cols = (draw_w.div_ceil(u32::from(cell_w)) as u16).clamp(1, rect_cols);
+    let rows = (draw_h.div_ceil(u32::from(cell_h)) as u16).clamp(1, rect_rows);
     (cols, rows, (rect_cols - cols) / 2, (rect_rows - rows) / 2)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_cells, placement_batch, Placement};
-    use std::collections::HashMap;
+    use super::{fit_cells, fit_pixels, placement_batch, ImageRuntime, Placement, SentImage};
+    use std::{collections::HashMap, path::PathBuf};
     use stoatty_protocol::{
         command::{decode_stream, Command},
         kitty::Action,
@@ -450,6 +543,44 @@ mod tests {
             fit_cells((64, 256), (10, 10), CELL),
             (5, 10, 2, 0),
             "a tall image runs out of height first and centers across the rest",
+        );
+    }
+
+    /// The box a picture is worth sending at, which is what the pane can show
+    /// rather than what the file holds.
+    #[test]
+    fn a_picture_is_fitted_to_the_pane_before_it_is_sent() {
+        // A pane 10x10 cells is 80x160 pixels, so a square source fills the
+        // width and takes half the height, whatever it holds.
+        assert_eq!(fit_pixels((3200, 3200), (10, 10), CELL), (80, 80));
+
+        // Never scaled up: the pane is for looking at the file.
+        assert_eq!(fit_pixels((32, 32), (10, 10), CELL), (32, 32));
+
+        // A tall source runs out of height first.
+        assert_eq!(fit_pixels((64, 256), (10, 10), CELL), (40, 160));
+    }
+
+    /// An image the placement diff just deleted lost its pixels with it, so the
+    /// record of having sent it goes too. Left behind, a pane reopened on the
+    /// path would place an id the terminal freed.
+    #[test]
+    fn an_image_whose_pixels_were_freed_is_forgotten() {
+        let mut images = ImageRuntime::default();
+        images
+            .sent
+            .insert(PathBuf::from("/gone.png"), SentImage { id: 1, px: (8, 8) });
+        images
+            .sent
+            .insert(PathBuf::from("/held.png"), SentImage { id: 2, px: (8, 8) });
+        images.placed = HashMap::from([(1, placement(1, 0, 0)), (2, placement(2, 0, 0))]);
+
+        images.forget_freed(&[placement(2, 0, 0)]);
+
+        assert_eq!(
+            images.sent.keys().cloned().collect::<Vec<_>>(),
+            vec![PathBuf::from("/held.png")],
+            "only the path whose pixels the terminal still holds stays recorded",
         );
     }
 

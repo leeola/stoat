@@ -20837,6 +20837,253 @@ mod tests {
         );
     }
 
+    /// The terminal scales what it holds down to the placement, so a photo
+    /// transmitted at its own size costs a decode, an encode, the wire, and a
+    /// texture for pixels nobody sees. stoatty refuses a decode past 64 MiB
+    /// outright, so a large enough photo would show nothing after all of it.
+    #[test]
+    fn an_image_larger_than_its_pane_transmits_at_the_pane_size() {
+        use std::io::Cursor;
+        use stoat_action::OpenFile;
+
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 2;
+        h.stoat.cell_pixels = Some((8, 16));
+
+        let png = {
+            let buffer = image::RgbaImage::from_pixel(3200, 3200, image::Rgba([1, 2, 3, 255]));
+            let mut out = Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            out.into_inner()
+        };
+        h.fake_fs().insert_file("/repo/big.png", png);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/big.png"),
+            },
+        );
+        h.settle();
+
+        crate::image_emit::emit_images(&mut h.stoat);
+        h.settle();
+        crate::image_emit::emit_images(&mut h.stoat);
+
+        let rect = image_pane_content(&h);
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        assert_eq!(
+            transmitted_size(&sent),
+            Some((u32::from(rect.height) * 16, u32::from(rect.height) * 16)),
+            "a square source is scaled to the shorter side of the pane's box",
+        );
+    }
+
+    /// A pane grown past what was sent has to read again, since the terminal
+    /// can only scale down the pixels it holds. The fresh transmission takes a
+    /// new id, and the batch that places it frees the old one, so no frame in
+    /// between shows nothing.
+    #[test]
+    fn a_grown_image_pane_transmits_again_and_frees_the_old_pixels() {
+        use std::io::Cursor;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::{
+            command::{decode_stream, Command},
+            kitty::Action,
+        };
+
+        let mut h = crate::test_harness::TestHarness::with_size(20, 8);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 2;
+        h.stoat.cell_pixels = Some((8, 16));
+
+        let png = {
+            let buffer = image::RgbaImage::from_pixel(3200, 3200, image::Rgba([1, 2, 3, 255]));
+            let mut out = Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            out.into_inner()
+        };
+        h.fake_fs().insert_file("/repo/big.png", png);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/big.png"),
+            },
+        );
+        h.settle();
+
+        crate::image_emit::emit_images(&mut h.stoat);
+        h.settle();
+        crate::image_emit::emit_images(&mut h.stoat);
+        let small = image_pane_content(&h);
+        while rx.try_recv().is_ok() {}
+
+        h.resize(60, 30);
+        crate::image_emit::emit_images(&mut h.stoat);
+        h.settle();
+        crate::image_emit::emit_images(&mut h.stoat);
+
+        let grown = image_pane_content(&h);
+        assert!(
+            grown.height > small.height,
+            "the pane has to grow for this to measure anything",
+        );
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        // A chunked transmission's continuations carry the payload and no id,
+        // so the frame naming an id is the one that names the action too.
+        let actions: Vec<(Action, u32, bool)> = decode_stream(&sent)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Kitty(frame) if frame.control.id != 0 => Some((
+                    frame.control.action,
+                    frame.control.id,
+                    frame.control.delete.free_data,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                (Action::Transmit, 2, false),
+                (Action::Delete, 1, true),
+                (Action::Delete, 2, false),
+                (Action::Put, 2, false),
+            ],
+            "the larger pixels go out, the old ones are freed, and the new id is placed",
+        );
+        assert_eq!(
+            transmitted_size(&sent),
+            Some((u32::from(grown.height) * 16, u32::from(grown.height) * 16)),
+            "at the grown pane's size",
+        );
+    }
+
+    /// A pane that stops showing an image has its pixels freed along with the
+    /// placement, so reopening the file has to send them again. Placing the id
+    /// the terminal freed would show nothing at all.
+    #[test]
+    fn an_image_reopened_after_its_pane_moved_on_transmits_again() {
+        use std::io::Cursor;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::{
+            command::{decode_stream, Command},
+            kitty::Action,
+        };
+
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 2;
+        h.stoat.cell_pixels = Some((8, 16));
+
+        let png = {
+            let buffer = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
+            let mut out = Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            out.into_inner()
+        };
+        h.fake_fs().insert_file("/repo/pic.png", png);
+        h.fake_fs().insert_file("/repo/a.txt", b"text");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+
+        let open = |h: &mut crate::test_harness::TestHarness, name: &str| {
+            action_handlers::dispatch(
+                &mut h.stoat,
+                &OpenFile {
+                    path: PathBuf::from(format!("/repo/{name}")),
+                },
+            );
+            h.settle();
+            crate::image_emit::emit_images(&mut h.stoat);
+            h.settle();
+            crate::image_emit::emit_images(&mut h.stoat);
+        };
+
+        open(&mut h, "pic.png");
+        open(&mut h, "a.txt");
+        while rx.try_recv().is_ok() {}
+        open(&mut h, "pic.png");
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        let transmits: Vec<u32> = decode_stream(&sent)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Kitty(frame)
+                    if frame.control.id != 0 && frame.control.action == Action::Transmit =>
+                {
+                    Some(frame.control.id)
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            transmits,
+            vec![2],
+            "the reopened file sends its pixels again, under a fresh id",
+        );
+    }
+
+    /// The content rectangle of the one image pane on screen, which is what an
+    /// image is fitted into.
+    fn image_pane_content(h: &crate::test_harness::TestHarness) -> Rect {
+        h.stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .find_map(|(_, pane)| {
+                matches!(pane.view, View::Image { .. })
+                    .then(|| crate::render::layout::split_pane_status(pane.area).0)
+            })
+            .expect("an image pane")
+    }
+
+    /// The pixel size of the image a batch transmitted, read from the PNG the
+    /// graphics frames carry.
+    fn transmitted_size(batch: &[u8]) -> Option<(u32, u32)> {
+        use base64::Engine;
+        use std::io::Cursor;
+        use stoatty_protocol::command::{decode_stream, Command};
+
+        let payload: Vec<u8> = decode_stream(batch)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Kitty(frame) => Some(frame.payload),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()?;
+
+        image::ImageReader::new(Cursor::new(&png))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()
+    }
+
     /// Install a passthrough link on `stoat` and hand back the two ends a test
     /// inspects: the slot the input thread reads, and the control lane the UI
     /// thread drains.
