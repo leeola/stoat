@@ -12,6 +12,7 @@
 //! [`TermScreen::feed`]. The renderer reads the screen back through
 //! [`TermScreen::rows`], [`TermScreen::row`], and [`TermScreen::cursor`].
 
+use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -24,7 +25,11 @@ use alacritty_terminal::{
     Term,
 };
 use ratatui::style::{Color, Modifier};
-use std::sync::{Arc, Mutex};
+use smallvec::SmallVec;
+use std::{
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 
 /// One projected grid cell, carrying a character and the ratatui style the
 /// renderer paints it with.
@@ -106,6 +111,11 @@ impl EventListener for EventProxy {
 pub struct TermScreen {
     term: Term<EventProxy>,
     parser: Processor,
+    /// Keeps an oversized OSC payload out of [`Self::parser`], whose own OSC
+    /// buffer has no bound and keeps its capacity for the pane's life.
+    /// Persisted for the same reason the parser is: an escape that straddles
+    /// two reads is counted on its total.
+    osc: OscCap,
     replies: Arc<Mutex<Vec<u8>>>,
     clipboard_writes: Arc<Mutex<Vec<String>>>,
     generation: u64,
@@ -141,6 +151,7 @@ impl TermScreen {
         TermScreen {
             term: Term::new(config, &dimensions, listener),
             parser: Processor::new(),
+            osc: OscCap::new(MAX_OSC_PLAIN_BYTES, MAX_OSC_CLIPBOARD_BYTES),
             replies,
             clipboard_writes,
             generation: 0,
@@ -171,7 +182,13 @@ impl TermScreen {
     /// empty when the input produced no reply.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.generation += 1;
-        self.parser.advance(&mut self.term, bytes);
+
+        let mut spans = SmallVec::<[Range<usize>; 2]>::new();
+        self.osc.spans(bytes, &mut spans);
+        for span in spans {
+            self.parser.advance(&mut self.term, &bytes[span]);
+        }
+
         self.drain_replies()
     }
 
@@ -439,6 +456,39 @@ mod tests {
         term.feed(b"ab\r\ncd");
         assert_eq!(text_row(&term, 0), "ab");
         assert_eq!(text_row(&term, 1), "cd");
+    }
+
+    /// The parser buffers an OSC payload without bound and keeps the capacity
+    /// for the pane's life, so an oversized one is cut before it arrives. The
+    /// cut ends where the escape does, or the output behind it would go with
+    /// it.
+    #[test]
+    fn an_oversize_osc_leaves_the_output_behind_it_alone() {
+        let mut term = TermScreen::new(4, 10);
+
+        let mut seq = b"\x1b]0;".to_vec();
+        seq.resize(seq.len() + 1024 * 1024, b'a');
+        seq.extend_from_slice(b"\x07after");
+        term.feed(&seq);
+
+        assert_eq!(text_row(&term, 0), "after");
+    }
+
+    /// A clipboard write is the one code with a reason to carry a large
+    /// payload, so the cap that bounds a title lets a whole selection through.
+    #[test]
+    fn a_clipboard_write_past_the_plain_cap_still_stores() {
+        let mut term = TermScreen::new(4, 10);
+
+        let mut seq = b"\x1b]52;c;".to_vec();
+        seq.extend_from_slice("QUFB".repeat(256 * 1024).as_bytes());
+        seq.push(0x07);
+        term.feed(&seq);
+
+        assert_eq!(
+            term.take_clipboard_writes(),
+            vec!["A".repeat(3 * 256 * 1024)],
+        );
     }
 
     /// The buffer arrives holding whatever the previous row left, and past the

@@ -50,6 +50,7 @@ percent-encoding.workspace = true
 portable-pty.workspace = true
 libc.workspace = true
 memchr.workspace = true
+smallvec.workspace = true
 vte.workspace = true
 alacritty_terminal.workspace = true
 globset.workspace = true

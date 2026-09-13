@@ -1,5 +1,7 @@
+use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
+use smallvec::SmallVec;
 use std::{ops::Range, path::PathBuf};
 
 #[derive(Clone)]
@@ -56,6 +58,11 @@ pub struct VtermGrid {
     /// straddle two PTY reads finish parsing on the second call instead
     /// of being dropped at the chunk boundary.
     parser: vte::Parser,
+    /// Keeps an oversized OSC payload out of [`Self::parser`], whose own OSC
+    /// buffer has no bound and keeps its capacity for the block's life.
+    /// Persisted for the same reason the parser is: an escape that straddles
+    /// two reads is counted on its total.
+    osc: OscCap,
     /// OSC 52 ("set clipboard") payloads decoded from the input stream.
     /// Callers drain after [`Self::feed`] and forward to a clipboard
     /// host; the grid does not own clipboard side effects.
@@ -87,6 +94,7 @@ impl VtermGrid {
             pen_modifiers: Modifier::empty(),
             alt_screen_detected: false,
             parser: vte::Parser::new(),
+            osc: OscCap::new(MAX_OSC_PLAIN_BYTES, MAX_OSC_CLIPBOARD_BYTES),
             clipboard_writes: Vec::new(),
             command_marks: Vec::new(),
             cwd_reports: Vec::new(),
@@ -207,8 +215,14 @@ impl VtermGrid {
     pub fn feed(&mut self, bytes: &[u8]) -> usize {
         self.generation += 1;
         self.trimmed_rows = 0;
+
+        let mut spans = SmallVec::<[Range<usize>; 2]>::new();
+        self.osc.spans(bytes, &mut spans);
+
         let mut parser = std::mem::take(&mut self.parser);
-        parser.advance(self, bytes);
+        for span in spans {
+            parser.advance(self, &bytes[span]);
+        }
         self.parser = parser;
         self.trimmed_rows
     }

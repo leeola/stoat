@@ -4090,6 +4090,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slotmap",
+ "smallvec",
  "snafu",
  "stoat_action",
  "stoat_config",

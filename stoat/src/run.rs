@@ -418,6 +418,40 @@ mod tests {
         assert_eq!(grid.clipboard_writes, vec!["hello"]);
     }
 
+    /// The block's parser buffers an OSC payload without bound and keeps the
+    /// capacity for the block's life, so an oversized one is cut before it
+    /// arrives. The cut ends where the escape does, or the marks and the output
+    /// behind it would go with it.
+    #[test]
+    fn an_oversize_osc_leaves_the_mark_behind_it_alone() {
+        let mut grid = VtermGrid::new(20);
+
+        let mut seq = b"\x1b]0;".to_vec();
+        seq.resize(seq.len() + 1024 * 1024, b'a');
+        seq.extend_from_slice(b"\x07\x1b]133;D;0\x07done");
+        grid.feed(&seq);
+
+        assert_eq!(
+            grid.command_marks,
+            vec![CommandMark::Done { exit: Some(0) }],
+        );
+        assert_eq!(grid.text_in(0..4, 0..1), "done");
+    }
+
+    /// A clipboard write is the one code with a reason to carry a large
+    /// payload, so the cap that bounds a title lets a whole selection through.
+    #[test]
+    fn a_clipboard_write_past_the_plain_cap_still_stores() {
+        let mut grid = VtermGrid::new(20);
+
+        let mut seq = b"\x1b]52;c;".to_vec();
+        seq.extend_from_slice("QUFB".repeat(256 * 1024).as_bytes());
+        seq.push(0x07);
+        grid.feed(&seq);
+
+        assert_eq!(grid.clipboard_writes, vec!["A".repeat(3 * 256 * 1024)]);
+    }
+
     #[test]
     fn grid_selection_bounds_normalizes_drag_direction() {
         let forward = GridSelection {

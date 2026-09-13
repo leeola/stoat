@@ -1,0 +1,346 @@
+//! Bounds the OSC payload a terminal pane's vte parser is allowed to buffer.
+//!
+//! A pane advances a vte parser over whatever the child writes. That parser
+//! holds an open OSC's payload in a `Vec<u8>` with no bound, and it keeps the
+//! capacity for the rest of the session. A program that writes a clipboard
+//! escape as large as the buffer it copied therefore costs the pane that many
+//! bytes of doubling memmoves on the run loop, and the memory for as long as
+//! the pane lives.
+//!
+//! [`OscCap`] walks the stream ahead of the parser and reports the stretches to
+//! forward, leaving out the payload of an OSC that outgrew what its code has
+//! any reason to carry. The parser then reads the code and one empty argument,
+//! which sets an empty title, and which OSC 52 ignores outright for want of its
+//! three arguments.
+
+use smallvec::SmallVec;
+use std::ops::Range;
+
+/// Escape, which opens every sequence this recognizes.
+const ESC: u8 = 0x1b;
+
+/// Bell, which ends an OSC in the form most programs write.
+const BEL: u8 = 0x07;
+
+/// Byte after `ESC` that opens an OSC string.
+const OSC_INTRODUCER: u8 = b']';
+
+/// Byte after `ESC` that ends a string (`ESC \`).
+const STRING_TERMINATOR: u8 = b'\\';
+
+/// The OSC code that writes the clipboard.
+const OSC_CLIPBOARD: u32 = 52;
+
+/// Cap on the payload of an ordinary OSC, past which its bytes are cut from
+/// what the parser sees.
+///
+/// A plain OSC carries a title, a working directory, a palette, or a hyperlink.
+/// The largest of those is a single OSC 4 setting all 256 palette entries,
+/// which runs to about 6 KB, so this leaves an order of magnitude of headroom.
+/// The bound matters because the parser's OSC buffer keeps its capacity for the
+/// pane's life, and the pty reader hands over 256 KiB a call.
+pub(crate) const MAX_OSC_PLAIN_BYTES: usize = 64 * 1024;
+
+/// Cap on the payload of an OSC 52.
+///
+/// A clipboard write carries a whole selection, so it is legitimately far
+/// larger than any other code. This bounds a remote copy of an enormous buffer
+/// without refusing an ordinary one.
+pub(crate) const MAX_OSC_CLIPBOARD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Caps the OSC payloads one pane's parser buffers.
+///
+/// One of these sits beside the parser and reads the same bytes first. Hold it
+/// for the life of the pane: an escape split across two reads is counted on its
+/// total, which only a cap outliving the call can do.
+pub(crate) struct OscCap {
+    state: State,
+    /// Code of the open OSC, accumulated digit by digit.
+    code: u32,
+    /// Payload bytes the open OSC has taken, across every call it spans.
+    payload: usize,
+    /// Cap on every code but [`OSC_CLIPBOARD`].
+    plain_cap: usize,
+    /// Cap on [`OSC_CLIPBOARD`], the one code with a reason to be large.
+    clipboard_cap: usize,
+}
+
+/// Where the walk stands between calls, since an escape can span several.
+#[derive(Clone, Copy)]
+enum State {
+    Ground,
+    /// Seen `ESC`.
+    Escape,
+    /// Seen `ESC ]`, reading the numeric code up to its `;`.
+    Prefix,
+    /// Inside the payload, counting it against the code's cap.
+    Payload,
+    /// Seen `ESC` inside a payload, which either terminates the string or ends
+    /// it where the parser ends it.
+    PayloadEscape,
+}
+
+impl OscCap {
+    /// A cap allowing `plain_cap` payload bytes for an ordinary code and
+    /// `clipboard_cap` for OSC 52.
+    pub(crate) fn new(plain_cap: usize, clipboard_cap: usize) -> OscCap {
+        OscCap {
+            state: State::Ground,
+            code: 0,
+            payload: 0,
+            plain_cap,
+            clipboard_cap,
+        }
+    }
+
+    /// Fill `out` with the stretches of `bytes` to hand the parser, in order.
+    ///
+    /// Everything reaches the parser but the payload of an OSC past its cap. A
+    /// stream carrying no oversized OSC yields one stretch covering the whole
+    /// slice, for the cost of one walk for `ESC`.
+    ///
+    /// The cut opens one byte past the code's `;` rather than where the cap
+    /// trips, so a capped OSC 52 leaves an empty argument rather than a
+    /// truncated base64 that would decode to a corrupt clipboard.
+    ///
+    /// An escape spanning several calls is counted on its total, and each call
+    /// cuts its own bytes. What an earlier call forwarded is already gone, so a
+    /// payload crossing the cap mid-stream leaves the parser what arrived
+    /// before it.
+    pub(crate) fn spans(&mut self, bytes: &[u8], out: &mut SmallVec<[Range<usize>; 2]>) {
+        out.clear();
+
+        let mut i = 0;
+        let mut forwarded = 0;
+        // The stretch of this call the open payload has taken. A payload
+        // carried in from an earlier call has taken nothing here yet, so it
+        // starts empty at the front.
+        let mut cut = 0..0;
+
+        while i < bytes.len() {
+            let byte = bytes[i];
+            match self.state {
+                // Nothing is open, so jump to the next ESC rather than stepping
+                // over the plain bytes between.
+                State::Ground => match memchr::memchr(ESC, &bytes[i..]) {
+                    Some(off) => {
+                        self.state = State::Escape;
+                        i += off;
+                    },
+                    None => break,
+                },
+                State::Escape => {
+                    self.state = match byte {
+                        OSC_INTRODUCER => {
+                            self.code = 0;
+                            self.payload = 0;
+                            State::Prefix
+                        },
+                        ESC => State::Escape,
+                        _ => State::Ground,
+                    };
+                },
+                State::Prefix => match byte {
+                    b'0'..=b'9' => {
+                        self.code = self
+                            .code
+                            .saturating_mul(10)
+                            .saturating_add(u32::from(byte - b'0'));
+                    },
+                    b';' => {
+                        cut = i + 1..i + 1;
+                        self.state = State::Payload;
+                    },
+                    BEL => self.state = State::Ground,
+                    ESC => {
+                        cut = i..i;
+                        self.state = State::PayloadEscape;
+                    },
+                    // An OSC with no `;` has no argument to cut at, so the cut
+                    // opens on this byte and takes the rest.
+                    _ => {
+                        cut = i..i;
+                        self.state = State::Payload;
+                    },
+                },
+                State::Payload => match byte {
+                    ESC => self.state = State::PayloadEscape,
+                    BEL => self.finish(&cut, &mut forwarded, out),
+                    _ => {
+                        let run = payload_run(&bytes[i..]);
+                        self.payload = self.payload.saturating_add(run);
+                        i += run;
+                        cut.end = i;
+                        continue;
+                    },
+                },
+                State::PayloadEscape => match byte {
+                    STRING_TERMINATOR => self.finish(&cut, &mut forwarded, out),
+                    ESC => self.state = State::PayloadEscape,
+                    // A lone `ESC` ends an OSC for the parser, which dispatches
+                    // what it holds and reads this byte as an escape's start.
+                    // Ending here too keeps a cut from swallowing what that
+                    // parser goes on to print.
+                    _ => {
+                        self.finish(&cut, &mut forwarded, out);
+                        self.state = State::Escape;
+                        continue;
+                    },
+                },
+            }
+            i += 1;
+        }
+
+        // An open payload past its cap has no terminator to cut at, and the
+        // bytes it took in this call must not reach the parser either.
+        if matches!(self.state, State::Payload | State::PayloadEscape) && self.over() {
+            self.cut_out(&cut, &mut forwarded, out);
+        }
+
+        if forwarded < bytes.len() {
+            out.push(forwarded..bytes.len());
+        }
+    }
+
+    /// Close the open OSC, cutting `cut` from what the parser sees when the
+    /// payload outgrew its cap.
+    ///
+    /// The terminator itself is never cut. It follows the payload, so the
+    /// stretch this leaves open carries it to the parser, which needs it to
+    /// dispatch the code and close the string.
+    fn finish(
+        &mut self,
+        cut: &Range<usize>,
+        forwarded: &mut usize,
+        out: &mut SmallVec<[Range<usize>; 2]>,
+    ) {
+        if self.over() {
+            self.cut_out(cut, forwarded, out);
+        }
+        self.state = State::Ground;
+    }
+
+    /// Leave `cut` out of what the parser sees, closing the stretch before it.
+    fn cut_out(
+        &self,
+        cut: &Range<usize>,
+        forwarded: &mut usize,
+        out: &mut SmallVec<[Range<usize>; 2]>,
+    ) {
+        if cut.is_empty() {
+            return;
+        }
+        if *forwarded < cut.start {
+            out.push(*forwarded..cut.start);
+        }
+        *forwarded = cut.end;
+    }
+
+    /// Whether the open OSC's payload has passed the cap its code allows.
+    fn over(&self) -> bool {
+        let cap = match self.code {
+            OSC_CLIPBOARD => self.clipboard_cap,
+            _ => self.plain_cap,
+        };
+        self.payload > cap
+    }
+}
+
+/// How many leading bytes of `rest` belong to a payload, stopping at the
+/// terminator that ends it or at the end of what has arrived.
+///
+/// Zero exactly when `rest` opens on a terminator, which is why the caller
+/// takes a run only from a byte it has already seen is not one. A zero-length
+/// run would leave the walk where it was.
+fn payload_run(rest: &[u8]) -> usize {
+    memchr::memchr2(ESC, BEL, rest).unwrap_or(rest.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OscCap;
+    use smallvec::SmallVec;
+
+    /// What the parser sees of `bytes`: every stretch the cap forwards, joined
+    /// back together.
+    fn forwarded(cap: &mut OscCap, bytes: &[u8]) -> Vec<u8> {
+        let mut spans = SmallVec::new();
+        cap.spans(bytes, &mut spans);
+        spans
+            .into_iter()
+            .flat_map(|span| bytes[span].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn a_chunk_with_no_escape_forwards_whole() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(forwarded(&mut cap, b"plain output\n"), b"plain output\n");
+    }
+
+    #[test]
+    fn an_osc_under_its_cap_forwards_whole() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(
+            forwarded(&mut cap, b"\x1b]0;title\x07"),
+            b"\x1b]0;title\x07"
+        );
+    }
+
+    /// The parser is left the code and one empty argument, which is an empty
+    /// title for OSC 0 and too few arguments for OSC 52 to act on.
+    #[test]
+    fn an_osc_past_its_cap_keeps_its_frame_and_loses_its_payload() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(
+            forwarded(&mut cap, b"\x1b]0;a much longer title\x07after"),
+            b"\x1b]0;\x07after",
+        );
+    }
+
+    /// A clipboard write is the one code with a reason to be large, so a
+    /// payload well past the plain cap still reaches the parser.
+    #[test]
+    fn an_osc_52_takes_the_clipboard_cap() {
+        let mut cap = OscCap::new(8, 64);
+        let seq = b"\x1b]52;c;QUFBQUFBQUFBQUFB\x1b\\";
+        assert_eq!(forwarded(&mut cap, seq), seq);
+    }
+
+    /// The count carries across calls, or an escape delivered in pieces would
+    /// pass a cap its whole exceeds many times over.
+    #[test]
+    fn a_payload_split_across_calls_is_capped_on_the_total() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(forwarded(&mut cap, b"\x1b]0;abcde"), b"\x1b]0;abcde");
+        assert_eq!(forwarded(&mut cap, b"fghij\x07"), b"\x07");
+    }
+
+    /// A lone `ESC` ends an OSC for the parser too, so a cut that ran past it
+    /// would swallow what the parser goes on to print.
+    #[test]
+    fn a_lone_escape_ends_the_cut_where_the_parser_ends_the_string() {
+        let mut cap = OscCap::new(4, 16);
+        assert_eq!(
+            forwarded(&mut cap, b"\x1b]0;oversized\x1b[31mred"),
+            b"\x1b]0;\x1b[31mred",
+        );
+    }
+
+    /// An OSC carrying no argument separator has nothing to cut at but its
+    /// first payload byte.
+    #[test]
+    fn an_osc_with_no_semicolon_cuts_from_its_first_payload_byte() {
+        let mut cap = OscCap::new(4, 16);
+        assert_eq!(forwarded(&mut cap, b"\x1b]0abcdefghij\x07"), b"\x1b]0\x07");
+    }
+
+    /// An oversized escape that has not ended yet still leaves this call's
+    /// bytes behind. The parser's buffer is what the cap protects, and it fills
+    /// whether or not the escape ever terminates.
+    #[test]
+    fn an_unterminated_oversize_payload_is_cut_in_the_call_that_carries_it() {
+        let mut cap = OscCap::new(4, 16);
+        assert_eq!(forwarded(&mut cap, b"\x1b]0;abcdefghij"), b"\x1b]0;");
+    }
+}

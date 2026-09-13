@@ -56,6 +56,7 @@ pub mod minimap;
 pub(crate) mod mouse;
 pub mod multi_buffer;
 mod nav_list;
+pub(crate) mod osc_cap;
 pub mod pane;
 mod paths;
 #[cfg(feature = "perf")]
