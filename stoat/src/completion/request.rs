@@ -62,11 +62,11 @@ pub(crate) const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Rows a narrow scores where it stands rather than on the blocking pool.
 ///
 /// A narrow off the loop lands a pump later, so the keystroke that asked for it
-/// paints the rows it replaces once first. That is worth paying only where
-/// the scoring is what costs, and a handful of rows costs less to score than
-/// the hop costs to arrange. A server answering a short prefix runs to
-/// thousands of rows and is the case this is sized for.
-const NARROW_INLINE_MAX: usize = 256;
+/// paints the rows it replaces once first. Scoring a few thousand rows costs
+/// less than that frame, which is what sizes this: a server answering a short
+/// prefix runs to a few thousand rows, and the hop is worth arranging only for
+/// a list past anything one sends.
+const NARROW_INLINE_MAX: usize = 4_096;
 
 /// Owned snapshot of [`CompletionContext`] for a spawned task. The
 /// public context borrows from the rope and prefix; this struct
@@ -418,15 +418,26 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
     }
 
     // A server that stopped early is re-asked, and `ask_again` does not replace
-    // the popup until its request lands a debounce later, so the popup stays
-    // where it is and keeps its items. Taking it would blank the popup for that
-    // window, on most keystrokes, since servers mark their lists incomplete
-    // routinely, and copying them out would pay for a filter the landing
-    // request redoes anyway.
+    // the popup until its request lands a debounce later, so the popup keeps its
+    // items through that window. Taking it would blank the popup on most
+    // keystrokes, since servers mark their lists incomplete routinely.
+    //
+    // Its rows narrow to what the reader has typed by now, rather than standing
+    // at the prefix they were fetched for until the answer lands. The items and
+    // the generation are untouched, so the landing refill still recognizes the
+    // popup its survivors came from.
     if !popup.incomplete.is_empty() {
-        return Refine::Ask {
-            servers: popup.incomplete.clone(),
-        };
+        let servers = popup.incomplete.clone();
+        let popup = stoat
+            .pending_completion
+            .as_mut()
+            .expect("borrowed one just above");
+        popup.matches = narrowed(&popup.items, &popup.matches, &owned.prefix);
+        popup.selected_idx = 0;
+        popup.anchor_offset = owned.prefix_range.start;
+        popup.prefix_range = owned.prefix_range.clone();
+        popup.prefix = owned.prefix.clone();
+        return Refine::Ask { servers };
     }
 
     // A large narrow scores every row through nucleo, so it goes to the pool.
@@ -520,16 +531,7 @@ fn surviving(
     stale: &[String],
     prefix: &str,
 ) -> Vec<(u32, u32)> {
-    let fresh: Vec<(u32, u32)> = matches
-        .iter()
-        .copied()
-        .filter(|&(index, _)| {
-            items[index as usize]
-                .server
-                .as_deref()
-                .is_none_or(|name| !stale.iter().any(|s| s == name))
-        })
-        .collect();
+    let fresh = without_stale(items, matches, stale);
 
     let haystacks: Vec<&str> = fresh
         .iter()
@@ -540,6 +542,28 @@ fn surviving(
         .into_iter()
         .zip(&fresh)
         .filter_map(|(score, &(index, _))| Some((index, score?)))
+        .collect()
+}
+
+/// The rows of `matches` whose item names no server in `stale`, in the order
+/// they were given and with the scores they came with.
+///
+/// For a caller whose rows already answer the prefix, where [`surviving`] scores
+/// them against it as it filters.
+fn without_stale(
+    items: &[CompletionItem],
+    matches: &[(u32, u32)],
+    stale: &[String],
+) -> Vec<(u32, u32)> {
+    matches
+        .iter()
+        .copied()
+        .filter(|&(index, _)| {
+            items[index as usize]
+                .server
+                .as_deref()
+                .is_none_or(|name| !stale.iter().any(|s| s == name))
+        })
         .collect()
 }
 
@@ -592,11 +616,10 @@ fn ask_again(
     let Some(request) = (!hosts.is_empty() && snapshot.source_path.is_some()).then_some(request)
     else {
         // The server is no longer there to ask, so the popup's own items are all
-        // of it. Narrowing them to the grown prefix is what the landing request
-        // would otherwise have done, and the items carry over as they are.
+        // of it. Its rows already answer the grown prefix, and what its answer
+        // would have superseded goes with it. The items carry over as they are.
         let narrowed = stoat.pending_completion.take().map(|popup| {
-            let mut matches = surviving(&popup.items, &popup.matches, &servers, &owned.prefix);
-            rank_scored(&popup.items, &mut matches);
+            let matches = without_stale(&popup.items, &popup.matches, &servers);
             (popup.items, matches)
         });
         let (items, matches) = narrowed.unwrap_or_else(|| (Arc::from([]), Vec::new()));
@@ -622,8 +645,11 @@ fn ask_again(
     // the turn that paints them. The items travel owned, leaving the popup the
     // only holder of its `Arc`, which is what lets a resolve landing inside the
     // window edit the list in place.
+    //
+    // The rows already answer this prefix, since `refine_open_popup` narrowed
+    // them to it, so what is left is dropping the servers being asked again.
     let survivors: Vec<CompletionItem> = match &stoat.pending_completion {
-        Some(popup) => surviving(&popup.items, &popup.matches, &servers, &owned.prefix)
+        Some(popup) => without_stale(&popup.items, &popup.matches, &servers)
             .into_iter()
             .map(|(index, _)| popup.items[index as usize].clone())
             .collect(),
@@ -2707,13 +2733,17 @@ mod harness_tests {
     /// than taking it. Taking it blanks the popup for that window, and servers
     /// mark their lists incomplete routinely enough for that to be most
     /// keystrokes.
+    ///
+    /// What it shows through that window is what the reader has typed toward.
+    /// The rows the ask went out on answer a shorter prefix than the cursor
+    /// sits at by the time the answer lands.
     #[test]
-    fn re_asking_a_server_leaves_the_popup_up_while_it_answers() {
+    fn re_asking_a_server_narrows_the_popup_while_it_answers() {
         let mut h = TestHarness::default();
         enable_completion(&h);
         open_scratch(&mut h, "");
         h.fake_lsp()
-            .set_completions("/ws/buf.rs", 0, 3, &["foobar"]);
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar", "foxtrot"]);
         h.fake_lsp().set_completions_incomplete("/ws/buf.rs", 0, 3);
         h.fake_lsp()
             .set_completions("/ws/buf.rs", 0, 4, &["foobarred"]);
@@ -2721,15 +2751,75 @@ mod harness_tests {
         h.type_keys("i");
         h.type_text("foo");
         h.advance_clock(COMPLETION_DEBOUNCE);
-        assert!(
-            h.stoat.pending_completion.is_some(),
-            "the popup is up before the keystroke that re-asks"
+        let popup = h.stoat.pending_completion.as_ref().expect("popup");
+        let mut got = shown(popup);
+        got.sort();
+        assert_eq!(
+            got,
+            ["foobar", "foxtrot"],
+            "both rows answer the prefix the server was asked for",
         );
 
         h.type_text("b");
+        let popup = h
+            .stoat
+            .pending_completion
+            .as_ref()
+            .expect("the popup holds while the re-query is in flight");
+        assert_eq!(
+            (
+                shown(popup),
+                popup.prefix.as_str(),
+                popup.prefix_range.clone()
+            ),
+            (vec!["foobar".to_string()], "foob", 0..4),
+            "and shows the row the grown prefix matches, over the span the reader \
+             typed, rather than the pair fetched for the shorter one",
+        );
+    }
+
+    /// Tab inside a re-ask window accepts against the text the reader has
+    /// typed, not the shorter prefix the ask went out on. The popup's range is
+    /// what acceptance replaces, so a stale one leaves the keystrokes since
+    /// behind the accepted row.
+    #[test]
+    fn accepting_during_a_re_ask_replaces_what_was_typed() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar", "foxtrot"]);
+        h.fake_lsp().set_completions_incomplete("/ws/buf.rs", 0, 3);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        h.type_text("b");
         assert!(
-            h.stoat.pending_completion.is_some(),
-            "and holds while the re-query is in flight, rather than blanking"
+            h.stoat.pending_completion_request.is_some(),
+            "the re-ask is in flight when Tab arrives",
+        );
+
+        crate::completion::accept::execute(&mut h.stoat);
+
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(
+                    h.stoat
+                        .active_workspace()
+                        .buffers
+                        .id_for_path(&PathBuf::from("/ws/buf.rs"))
+                        .expect("the buffer is open")
+                )
+                .expect("buffer")
+                .read()
+                .expect("buffer lock")
+                .rope()
+                .to_string(),
+            "foobar",
+            "the row lands over every character the prefix covers",
         );
     }
 
