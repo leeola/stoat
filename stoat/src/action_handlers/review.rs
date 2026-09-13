@@ -759,11 +759,17 @@ pub(super) fn build_document_from_changes(
 ///
 /// The styles bake against the theme in force here, so whoever switches themes
 /// drops the documents holding them.
+///
+/// The base side reads the tree the changeset diff filed in the document's
+/// memo, so a base parses once per preview. The buffer side parses here. The
+/// diff files left sides only, so the memo answers nothing for a buffer, and a
+/// buffer tree stored there evicts a base that the files behind it read.
 pub(super) fn attach_preview_highlights(
     doc: &mut DiffDocument,
     styles: &SyntaxStyles,
     cache: &BaseHighlightCache,
 ) {
+    let memo = doc.tree_cache.clone();
     for file in &mut doc.files {
         let Some(language) = file.language.clone() else {
             continue;
@@ -773,7 +779,7 @@ pub(super) fn attach_preview_highlights(
             &language,
             styles,
             cache,
-            None,
+            Some(&memo),
         ));
         file.buffer_highlights = Some(compute_base_highlights(
             &file.buffer_text,
@@ -815,8 +821,20 @@ pub(crate) fn populate_diff_cache_from(
 
 #[cfg(test)]
 mod tests {
-    use crate::{badge::BadgeSource, test_harness::TestHarness, workspace::diff::DiffBase};
-    use std::path::{Path, PathBuf};
+    use super::{attach_preview_highlights, build_document_from_changes};
+    use crate::{
+        badge::BadgeSource,
+        display_map::syntax_theme::SyntaxStyles,
+        review_session::DiffDocument,
+        test_harness::TestHarness,
+        theme::Theme,
+        workspace::diff::{BaseHighlightCache, BaseHighlightMemo, DiffBase},
+    };
+    use std::{
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+    };
+    use stoat_language::{structural_diff::TreeCache, LanguageRegistry};
 
     /// The text of the buffer open at `path`, which lets a test read a proposal
     /// that landed in a file the pane no longer shows.
@@ -1786,6 +1804,48 @@ mod tests {
             h.stoat.focused_mode(),
             "normal",
             "the one-shot git mode returns to normal after acting"
+        );
+    }
+
+    /// A preview parses each file's base twice, once for the changeset diff
+    /// and once for the left column's colors, which is 4 ms twice on a large
+    /// file. One memo serves both.
+    ///
+    /// Two things have to hold. The base call must reach the memo, which an
+    /// empty one filling by that call alone shows. The buffer call must not,
+    /// since the diff files left sides only and a buffer tree there evicts a
+    /// base the files behind it read.
+    #[test]
+    fn a_preview_parses_each_base_once() {
+        let langs = LanguageRegistry::standard();
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+        let memo_len =
+            |doc: &DiffDocument| doc.tree_cache.lock().expect("tree memo poisoned").len();
+
+        let changes = vec![
+            (
+                PathBuf::from("a.rs"),
+                "fn a() {}\n".into(),
+                "fn a() { 1 }\n".into(),
+            ),
+            (
+                PathBuf::from("b.rs"),
+                "fn b() {}\n".into(),
+                "fn b() { 2 }\n".into(),
+            ),
+        ];
+        let mut doc = build_document_from_changes(&langs, Path::new("/work"), changes)
+            .expect("two changed files build a document");
+        assert_eq!(memo_len(&doc), 2, "the diff files one base per file");
+
+        // A fresh memo, so what the highlight pass files is what this counts.
+        doc.tree_cache = TreeCache::default();
+        attach_preview_highlights(&mut doc, &styles, &cache);
+        assert_eq!(
+            memo_len(&doc),
+            2,
+            "the base side goes through the memo and the buffer side does not",
         );
     }
 }

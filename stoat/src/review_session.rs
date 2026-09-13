@@ -67,8 +67,8 @@ pub(crate) struct DiffDocument {
     /// Every chunk id in visit order, files in the order they were added.
     pub order: Vec<ReviewChunkId>,
     /// Base-side parse trees retained across the diffs this document builds,
-    /// so a rebuild against an unmoved base reparses neither side.
-    tree_cache: TreeCache,
+    /// so a rebuild against an unmoved base reads its tree back.
+    pub tree_cache: TreeCache,
     next_id: u32,
 }
 
