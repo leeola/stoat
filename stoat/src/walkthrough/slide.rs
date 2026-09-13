@@ -201,43 +201,48 @@ pub(crate) fn layout(input: &SlideInput) -> Slide {
 
 /// The mark around a stop's focus, or `None` when its code is off screen.
 ///
-/// A range on one row is circled and one spanning rows is boxed. Both pad
-/// outward from the cells they cover, the ring more than the box: a ring's
-/// widest point is its middle, so it needs more room beside the word than a box
-/// needs beside a block.
+/// A word is circled and everything else is boxed: a block of rows, and a
+/// single row too long for a ring to clear. Both pad outward from the cells
+/// they cover, the ring more than the box: a ring's widest point is its middle,
+/// so it needs more room beside the word than a box needs beside a block.
 fn focus_mark(range: &CellRange, input: &SlideInput) -> Option<Mark> {
     let (&first, &last) = (range.rows.first()?, range.rows.last()?);
-
-    if first == last {
-        return Some(Mark::Ellipse(pad_cells(
-            input.pane,
-            range.start_x,
-            range.end_x + 1,
-            first,
-            first + 1,
-            ELLIPSE_PAD_X,
-            ELLIPSE_PAD_Y,
-        )));
-    }
+    let one_row = first == last;
+    let cells = range.end_x.saturating_sub(range.start_x) + 1;
+    let circled = one_row && cells <= RING_MAX_CELLS;
 
     // A block's box reaches the longest of the rows it covers, so it encloses
-    // the code rather than cutting through the line that sticks out furthest.
-    let widest = range
-        .rows
-        .iter()
-        .filter_map(|row| line_end(input, *row))
-        .max()
-        .unwrap_or(range.end_x);
+    // the code rather than cutting through the line that sticks out furthest. A
+    // single row is a substring of its own line, so it reaches its own end
+    // rather than boxing code the stop does not name.
+    let right = match one_row {
+        true => range.end_x,
+        false => range
+            .rows
+            .iter()
+            .filter_map(|row| line_end(input, *row))
+            .max()
+            .unwrap_or(range.end_x),
+    };
 
-    Some(Mark::Rect(pad_cells(
+    let (pad_x, pad_y) = match circled {
+        true => (ELLIPSE_PAD_X, ELLIPSE_PAD_Y),
+        false => (RECT_PAD_X, RECT_PAD_Y),
+    };
+    let rect = pad_cells(
         input.pane,
         range.start_x,
-        widest + 1,
+        right + 1,
         first,
         last + 1,
-        RECT_PAD_X,
-        RECT_PAD_Y,
-    )))
+        pad_x,
+        pad_y,
+    );
+
+    Some(match circled {
+        true => Mark::Ellipse(rect),
+        false => Mark::Rect(rect),
+    })
 }
 
 /// Where the text ends on `row`, if the caller measured it.
@@ -248,6 +253,15 @@ fn line_end(input: &SlideInput, row: u16) -> Option<u16> {
         .find(|(at, _)| *at == row)
         .map(|(_, end)| *end)
 }
+
+/// Widest single-row range a ring still clears, in cells.
+///
+/// A ring crosses the glyph band, about 7 px either side of a 20 px row's
+/// center, at 88 percent of its half-width. Past this the stroke runs through
+/// the characters at the range's ends: half a glyph each end at 20 cells, two
+/// glyphs each end at 40. A box clears its contents at every point, so a longer
+/// line takes one.
+const RING_MAX_CELLS: u16 = 12;
 
 /// Sixteenths a circled word is padded by on each axis.
 ///
@@ -705,6 +719,50 @@ mod tests {
                 h: 16 + 8,
             })),
             "four cells wide, padded on both axes",
+        );
+    }
+
+    /// A ring clears a word at the widest point of its own curve, which is what
+    /// bounds how long a range it can circle.
+    #[test]
+    fn a_twelve_cell_range_is_still_circled() {
+        let start = 8;
+        let end = start + RING_MAX_CELLS - 1;
+        let slide = layout(&input(pane(), Some(range(&[4], start, end))));
+
+        let Some(Mark::Ellipse(rect)) = slide.focus else {
+            panic!("a range the ring clears is circled, got {:?}", slide.focus);
+        };
+        assert_eq!(
+            (rect.x, i32::from(rect.x) + i32::from(rect.w)),
+            (
+                start as i16 * 16 - ELLIPSE_PAD_X as i16,
+                i32::from(end + 1) * 16 + ELLIPSE_PAD_X,
+            ),
+            "padded past the word it circles",
+        );
+    }
+
+    /// Past that the ring's stroke crosses the glyph band inside the range, so
+    /// it strikes through the characters at either end. A box clears them.
+    #[test]
+    fn a_wider_single_row_range_is_boxed_to_its_own_end() {
+        let (start, end) = (4, 33);
+        let mut input = input(pane(), Some(range(&[4], start, end)));
+        // A line running well past the range, which a block's box would reach
+        // and a single row's must not.
+        input.line_ends = vec![(4, 60)];
+
+        let Some(Mark::Rect(rect)) = layout(&input).focus else {
+            panic!("a range longer than a ring clears is boxed");
+        };
+        assert_eq!(
+            (rect.x, i32::from(rect.x) + i32::from(rect.w)),
+            (
+                start as i16 * 16 - RECT_PAD_X as i16,
+                i32::from(end + 1) * 16 + RECT_PAD_X,
+            ),
+            "boxed to the range's own end, not the line's",
         );
     }
 
