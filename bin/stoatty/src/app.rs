@@ -1905,8 +1905,17 @@ fn zoom_route(capture: bool, inband: bool, client_connected: bool) -> ZoomRoute 
 /// land the same metrics. The surface itself does not change, only the cell
 /// size, so the grid is re-read and the terminal and pty resized without a
 /// `gpu.resize`.
+///
+/// A step that lands on the size it started from returns before any of it. The
+/// chain below resets the metrics of twelve passes, clears both shape caches so
+/// the next frame reshapes the screen, reflows the terminal, and signals the
+/// child, and a zoom key held at the range's clamp asks for that on every
+/// autorepeat.
 fn apply_font_step(state: &mut State, delta: i32) {
     let font_size = stepped_font_size(state.font_size, delta);
+    if font_size == state.font_size {
+        return;
+    }
     state.font_size = font_size;
     state
         .gpu
@@ -2148,8 +2157,10 @@ fn handle_term_events(
     state: &mut State,
     event_loop: &ActiveEventLoop,
     config: &AuxWindowConfig<'_>,
-    events: Vec<TermEvent>,
+    mut events: Vec<TermEvent>,
 ) {
+    let font_step = net_font_step(&mut events);
+
     for event in events {
         match event {
             TermEvent::Title(title) => {
@@ -2199,7 +2210,9 @@ fn handle_term_events(
                 state.zoom_capture = on;
                 state.zoom_inband = inband;
             },
-            TermEvent::FontStep(delta) => apply_font_step(state, delta),
+            // Taken out of the batch above, the way the reload is taken out
+            // before the fan-out.
+            TermEvent::FontStep(_) => {},
             // The claim belonged to the program that just left, and an inband
             // one has nothing else to notice that. Without this, a stoat that
             // exits or dies leaves every later zoom press typing escape bytes
@@ -2210,6 +2223,32 @@ fn handle_term_events(
             },
         }
     }
+
+    if font_step != 0 {
+        apply_font_step(state, font_step);
+    }
+}
+
+/// Take every font step out of `events` and report their sum.
+///
+/// A batch carries a run of steps whenever a zoom key autorepeats or a program
+/// asks for several at once. Each one resets the metrics of twelve passes,
+/// clears both shape caches, reflows the terminal, and signals the child, and
+/// every size but the last is thrown away by the step behind it. One step of
+/// their sum lands where that chain would have.
+///
+/// The deltas arrive from the wire, so the sum saturates rather than
+/// overflowing, which would panic in debug and wrap in release.
+fn net_font_step(events: &mut Vec<TermEvent>) -> i32 {
+    let mut net: i32 = 0;
+    events.retain(|event| match event {
+        TermEvent::FontStep(delta) => {
+            net = net.saturating_add(*delta);
+            false
+        },
+        _ => true,
+    });
+    net
 }
 
 /// Give `window` the title `title`, skipping the platform write when it already
@@ -3829,9 +3868,10 @@ mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
-        notification_should_show, selection_copy_text, snap_shift_to_pixels, step_popovers,
-        swallow_super_combo, zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize,
-        PoolView, PtyWrite, Visibility, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
+        net_font_step, notification_should_show, selection_copy_text, snap_shift_to_pixels,
+        step_popovers, swallow_super_combo, zoom_route, ActivePool, ForceFull, FrameOutcome, Input,
+        PendingResize, PoolView, PtyWrite, TermEvent, Visibility, WindowOpenVerdict, ZoomRoute,
+        MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -4541,6 +4581,40 @@ mod tests {
     ///
     /// An inband claim is the answer to that same gap, so it turns on the claim
     /// alone: the PTY it writes to is there whenever the child is.
+    /// A zoom key autorepeats into one batch, and each step there resets the
+    /// metrics of twelve passes, clears both shape caches, reflows the
+    /// terminal, and signals the child. Only the last size is ever drawn.
+    #[test]
+    fn a_batch_of_font_steps_applies_once_as_their_sum() {
+        let mut events = vec![
+            TermEvent::FontStep(1),
+            TermEvent::Bell,
+            TermEvent::FontStep(1),
+            TermEvent::FontStep(-3),
+        ];
+
+        assert_eq!(net_font_step(&mut events), -1, "the steps sum");
+        assert_eq!(
+            events,
+            vec![TermEvent::Bell],
+            "and leave the batch, which keeps everything else"
+        );
+
+        assert_eq!(
+            net_font_step(&mut vec![TermEvent::Bell]),
+            0,
+            "a batch carrying no step asks for none"
+        );
+        assert_eq!(
+            net_font_step(&mut vec![
+                TermEvent::FontStep(i32::MAX),
+                TermEvent::FontStep(i32::MAX),
+            ]),
+            i32::MAX,
+            "a sum off the wire saturates rather than overflowing"
+        );
+    }
+
     #[test]
     fn a_zoom_press_takes_the_route_the_claim_asked_for() {
         let routes = |connected| {
