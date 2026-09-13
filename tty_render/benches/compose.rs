@@ -12,7 +12,7 @@
 //! Every case skips with a message when no adapter answers, so a machine
 //! without a GPU still runs the rest of the suite.
 
-use std::cell::Cell;
+use std::{cell::Cell, fmt::Write};
 use stoatty_render::gpu::{
     build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
 };
@@ -26,7 +26,7 @@ use wgpu::{
 };
 
 /// Offscreen target size in physical pixels, which at font size 15 is a grid of
-/// roughly 100 by 33 cells.
+/// 133 by 40 cells.
 const WIDTH: u32 = 1200;
 const HEIGHT: u32 = 720;
 
@@ -282,13 +282,15 @@ fn full_damage_text(bencher: divan::Bencher<'_, '_>) {
 /// The renderer stays warm across iterations and the content does not: every
 /// frame draws lines the shape cache has never seen, spelled from letters the
 /// glyph atlas already holds. That is a fling exactly. The cases above all
-/// redraw text that was already shaped, so this is the only one whose cost
-/// includes shaping at all.
+/// redraw text that was already shaped, so shaping costs them nothing.
 ///
 /// It reports a whole frame's CPU, not the shaping alone, but shaping is part
 /// of that CPU here, so a change that moves shaping cost moves this number.
 /// Counting what gets shaped says how much work a change removed. This says
 /// what the removal is worth against everything else a frame does.
+///
+/// See also:
+/// - [`novel_words`], which misses on every run rather than on one per row.
 #[divan::bench]
 fn fresh_rows(bencher: divan::Bencher<'_, '_>) {
     let Some(bench) = setup() else {
@@ -341,6 +343,105 @@ fn prose_grid(rows: usize, cols: usize, frame: usize) -> Grid {
         for col in 0..cols {
             let cell = grid.get_mut(row, col);
             cell.ch = chars.next().unwrap_or(' ');
+            cell.fg = Rgb::new(200, 200, 180);
+        }
+    }
+    grid
+}
+
+/// A screenful of words no run has been shaped for, which is what a fling
+/// through a hexdump, a log, or a column of hashes costs.
+///
+/// [`fresh_rows`] is novel by the line and familiar by the word: its rows share
+/// every word but the number that leads them, so a frame takes a few dozen
+/// run-cache misses against a few hundred runs. Here no word repeats, so every
+/// run misses.
+///
+/// A miss is where the renderer decides anything about shaping at all, since
+/// the reshape gate runs only inside the cache's miss closure. This is
+/// therefore the case that weighs that gate through the renderer, rather than
+/// beside it the way the shape bench does.
+#[divan::bench]
+fn novel_words(bencher: divan::Bencher<'_, '_>) {
+    let Some(bench) = setup() else {
+        skipped("novel_words");
+        return;
+    };
+    let Bench {
+        device,
+        queue,
+        view,
+        mut renderer,
+        ..
+    } = bench;
+    let (rows, cols) = renderer.grid_size();
+
+    // One frame of the same shape fills the atlas, so the timed frames rasterize
+    // no glyph for the first time.
+    render_frame(
+        &mut renderer,
+        &device,
+        &queue,
+        &view,
+        &novel_grid(rows, cols, 0),
+        &Damage::Full,
+    );
+    let _ = device.poll(PollType::wait_indefinitely());
+
+    let frame = Cell::new(1usize);
+    bencher
+        .with_inputs(|| {
+            let at = frame.get();
+            frame.set(at + 1);
+            novel_grid(rows, cols, at)
+        })
+        .bench_local_refs(|grid| draw(&mut renderer, &device, &queue, &view, grid, &Damage::Full));
+}
+
+/// A screen of hexdump-like tokens, as though `frame` screenfuls of them had
+/// already scrolled past.
+///
+/// Every token differs from every other token on the screen, and from every
+/// token on every other frame, so no run the text pass builds is one the shape
+/// cache holds.
+///
+/// The tokens are hex because sixteen digits fit the glyph atlas after one
+/// frame, which leaves rasterization out of what the case measures. Groups of
+/// two digits were the other candidate and name only 256 tokens, which the
+/// cache holds in full within two frames, so that grid would measure the hit
+/// path instead.
+///
+/// A screen of 40 rows by 133 columns holds 560 tokens, so eight frames fill
+/// the run cache's 4,096 entries. Its steady state therefore pays the eviction
+/// as well as the miss, which is what a real fling through unique words pays.
+fn novel_grid(rows: usize, cols: usize, frame: usize) -> Grid {
+    /// Columns one token takes: eight hex digits and the space after it.
+    const TOKEN_COLUMNS: usize = 9;
+
+    // Whole tokens only, so a row ends on a token boundary and pads with
+    // spaces. A truncated token is novel too, but the count per frame stops
+    // being arithmetic anyone can repeat.
+    let per_row = (cols + 1) / TOKEN_COLUMNS;
+
+    let mut grid = Grid::new(rows, cols);
+    let mut line = String::new();
+
+    for row in 0..rows {
+        line.clear();
+        let first = (frame * rows + row) * per_row;
+        for index in 0..per_row {
+            if index > 0 {
+                line.push(' ');
+            }
+            write!(line, "{:08x}", first + index).expect("writing to a String is infallible");
+        }
+
+        let mut chars = line.chars();
+        for col in 0..cols {
+            let cell = grid.get_mut(row, col);
+            cell.ch = chars.next().unwrap_or(' ');
+            // One color for the whole screen, so a run breaks at a space the
+            // way a hexdump's does rather than at every column.
             cell.fg = Rgb::new(200, 200, 180);
         }
     }
