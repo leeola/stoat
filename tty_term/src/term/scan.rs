@@ -6,7 +6,7 @@
 //! one completes.
 
 use super::TermEvent;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use stoatty_protocol::frame::MAX_APC_PAYLOAD;
 
 pub(super) const ESC: u8 = 0x1b;
@@ -563,6 +563,12 @@ const MAX_OSC_NOTIFY_BYTES: usize = 4096;
 /// carries a payload as large as whatever the user copied.
 const OSC_CLIPBOARD: u32 = 52;
 
+/// The leading field values that make an OSC 9 one of ConEmu's subcommands.
+///
+/// See [`notification_from_osc`], which reads them as anything but a
+/// notification.
+const CONEMU_SUBCOMMANDS: RangeInclusive<u32> = 1..=12;
+
 /// Cap on the payload of a skipped OSC, past which the bytes are cut from what
 /// the vte parser sees.
 ///
@@ -592,12 +598,27 @@ const MAX_OSC_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 /// OSC 9 carries only a body. OSC 777's payload is `kind;title;body`, where only
 /// the `notify` kind yields an event and a `;` inside the body is preserved. A
 /// code or kind that is not a notification yields `None`.
+///
+/// An OSC 9 whose first field is a number from 1 to 12 is one of ConEmu's
+/// subcommands rather than a notification: a progress report, a tab title, a
+/// sleep. A build tool writes the progress report ten to twenty times a second,
+/// and reading it as a notification puts `4;1;50` on the desktop at that rate.
+/// The terminals that implement OSC 9 read the range the same way.
 pub(super) fn notification_from_osc(code: u32, payload: &[u8]) -> Option<TermEvent> {
     match code {
-        9 => Some(TermEvent::Notification {
-            title: None,
-            body: String::from_utf8_lossy(payload).into_owned(),
-        }),
+        9 => {
+            let body = String::from_utf8_lossy(payload);
+            let subcommand = body
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .parse::<u32>()
+                .is_ok_and(|field| CONEMU_SUBCOMMANDS.contains(&field));
+            (!subcommand).then(|| TermEvent::Notification {
+                title: None,
+                body: body.into_owned(),
+            })
+        },
         777 => {
             let text = String::from_utf8_lossy(payload);
             let mut parts = text.splitn(3, ';');

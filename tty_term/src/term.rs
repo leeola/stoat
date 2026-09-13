@@ -4170,6 +4170,40 @@ mod tests {
         );
     }
 
+    /// A build tool writes ConEmu's progress report ten to twenty times a
+    /// second. Read as a notification it would put `4;1;50` on the desktop at
+    /// that rate, each one a forked helper process.
+    #[test]
+    fn an_osc_9_progress_report_is_not_a_notification() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]9;4;1;50\x07");
+        assert_eq!(terminal.take_events(), vec![]);
+    }
+
+    /// ConEmu's subcommands run from one to twelve, so an OSC 9 whose first
+    /// field falls either side of that is a notification like any other.
+    #[test]
+    fn an_osc_9_body_outside_the_subcommand_range_still_notifies() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]9;0;files changed\x07");
+        terminal.advance(b"\x1b]9;13;files changed\x07");
+        assert_eq!(
+            terminal.take_events(),
+            vec![
+                TermEvent::Notification {
+                    title: None,
+                    body: "0;files changed".into()
+                },
+                TermEvent::Notification {
+                    title: None,
+                    body: "13;files changed".into()
+                },
+            ]
+        );
+    }
+
     #[test]
     fn surfaces_osc777_notification_keeping_semicolons_in_body() {
         let mut terminal = Terminal::new(4, 8, Theme::default());

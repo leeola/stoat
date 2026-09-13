@@ -644,6 +644,10 @@ struct State {
     /// binary makes one beep and attention request rather than a storm. `None`
     /// until the first bell.
     last_bell: Option<Instant>,
+    /// Instant and content digest of the last desktop notification shown, so a
+    /// program writing one per tick forks a helper process at a human rate
+    /// rather than at its own. `None` until the first notification.
+    last_notification: Option<(Instant, u64)>,
     /// The cursor's animated position in fractional cell coordinates, eased
     /// toward the terminal's actual cursor cell each frame. Drives the
     /// [`CursorAnimation::Block`] motion.
@@ -1055,6 +1059,7 @@ impl ApplicationHandler<PtyEvent> for App {
             focused: true,
             app_focused: true,
             last_bell: None,
+            last_notification: None,
             cursor_anim: [0.0, 0.0],
             cursor_animation: self.cursor_animation,
             cursor_corner_anim: [[0.0, 0.0]; 4],
@@ -2156,7 +2161,17 @@ fn handle_term_events(
             TermEvent::ClipboardStore(text) => copy_to_clipboard(state, text),
             TermEvent::Bell => ring_bell(state, Instant::now()),
             TermEvent::Notification { title, body } => {
-                deliver_notification(title.as_deref(), &body)
+                let digest = {
+                    let mut hasher = FxHasher::default();
+                    title.hash(&mut hasher);
+                    body.hash(&mut hasher);
+                    hasher.finish()
+                };
+                let now = Instant::now();
+                if notification_should_show(state.last_notification, now, digest) {
+                    state.last_notification = Some((now, digest));
+                    deliver_notification(title.as_deref(), &body);
+                }
             },
             TermEvent::Hello(hello) => tracing::info!(
                 pid = hello.pid,
@@ -3671,6 +3686,35 @@ fn bell_should_ring(last_bell: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Minimum spacing between desktop notifications, so a program writing one per
+/// tick reaches the desktop at a rate a person can read.
+const NOTIFICATION_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long a notification saying the same thing waits before it shows again,
+/// so a status line that repeats its text does not re-notify every second.
+const NOTIFICATION_REPEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Whether a notification should show now, given the instant and content digest
+/// of the last one shown.
+///
+/// Shows when none has shown yet, when [`NOTIFICATION_MIN_INTERVAL`] has passed
+/// and the content differs, or when [`NOTIFICATION_REPEAT_INTERVAL`] has passed
+/// whatever the content says.
+///
+/// Each delivery forks a helper process that links libnotify and round-trips
+/// D-Bus, on top of about 165 us of this thread's own time. A program writing
+/// one per line of output would otherwise stall the window thread for seconds
+/// and leave thousands of processes in flight.
+fn notification_should_show(last: Option<(Instant, u64)>, now: Instant, digest: u64) -> bool {
+    let Some((shown, previous)) = last else {
+        return true;
+    };
+
+    let waited = now.duration_since(shown);
+    waited >= NOTIFICATION_REPEAT_INTERVAL
+        || (waited >= NOTIFICATION_MIN_INTERVAL && previous != digest)
+}
+
 /// Play the system alert sound. macOS runs `osascript -e beep`, honoring the
 /// user's chosen alert sound and volume. Other platforms have no portable beep
 /// without an audio dependency, so this is a no-op there.
@@ -3785,9 +3829,9 @@ mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
-        selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo, zoom_route,
-        ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite, Visibility,
-        WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
+        notification_should_show, selection_copy_text, snap_shift_to_pixels, step_popovers,
+        swallow_super_combo, zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize,
+        PoolView, PtyWrite, Visibility, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -4907,6 +4951,35 @@ mod tests {
         assert!(
             bell_should_ring(Some(t0), t0 + Duration::from_millis(200)),
             "a bell at the interval boundary rings again"
+        );
+    }
+
+    /// Every notification forks a helper process that links libnotify and
+    /// round-trips D-Bus, so a program writing one per line of output has to
+    /// reach the desktop at a rate a person can read.
+    #[test]
+    fn notifications_rate_limit_a_burst_and_hold_back_a_repeat() {
+        let t0 = Instant::now();
+
+        assert!(
+            notification_should_show(None, t0, 1),
+            "the first notification shows"
+        );
+        assert!(
+            !notification_should_show(Some((t0, 1)), t0 + Duration::from_millis(999), 2),
+            "a burst inside the interval shows once, whatever the later ones say"
+        );
+        assert!(
+            notification_should_show(Some((t0, 1)), t0 + Duration::from_secs(1), 2),
+            "something else to say shows at the interval"
+        );
+        assert!(
+            !notification_should_show(Some((t0, 1)), t0 + Duration::from_secs(4), 1),
+            "the same thing said again is held back"
+        );
+        assert!(
+            notification_should_show(Some((t0, 1)), t0 + Duration::from_secs(5), 1),
+            "until the repeat interval, which shows it whatever it says"
         );
     }
 
