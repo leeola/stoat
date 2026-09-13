@@ -1324,8 +1324,11 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
                 picker.requested_preview = None;
             }
 
+            // The class table is rebuilt and the stores are kept: a class is a
+            // theme-key index, so what a store holds means the same under the
+            // new palette. Only the colors move, and they ride the strip
+            // declaration on the next frame.
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
-            stoat.minimap_content.clear();
             stoat.theme_epoch += 1;
             stoat.paint_generation += 1;
             apc_emit::emit_theme_default_colors(stoat);
@@ -1751,6 +1754,109 @@ mod tests {
             keyword_channel_color(&mut h).0,
             dark,
             "switching back restores the original color rather than sticking"
+        );
+    }
+
+    /// A minimap class is a theme-key index, so what a strip holds means the
+    /// same under any palette. Rebuilding it re-resolves every token on the run
+    /// loop and re-sends every line for a change of colors alone.
+    #[test]
+    fn set_theme_keeps_the_minimap_and_re_declares_its_palette() {
+        use crate::{apc_emit, minimap::emit::emit_minimap, test_fixture::drain_apc};
+        use stoatty_protocol::command::Command;
+
+        let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = std::path::PathBuf::from("/theme-minimap");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"fn a() {}\nfn b() {}\nfn c() {}\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        h.open_file(&path);
+        h.settle();
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let built = drain_apc(&mut rx);
+        assert!(
+            built
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "the strip is built before the switch, got {built:?}",
+        );
+
+        let stores: Vec<(u32, u64)> = h
+            .stoat
+            .minimap_content
+            .values()
+            .map(|content| (content.content_id(), content.synced_version()))
+            .collect();
+        assert!(!stores.is_empty(), "a strip is held for the open buffer");
+        let palette = |cmds: &[Command]| {
+            cmds.iter().find_map(|cmd| match cmd {
+                Command::Minimap(strip) => Some(strip.palette.clone()),
+                _ => None,
+            })
+        };
+        let before = palette(&built).expect("the strip was declared");
+
+        dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let after = drain_apc(&mut rx);
+
+        assert_eq!(
+            h.stoat
+                .minimap_content
+                .values()
+                .map(|content| (content.content_id(), content.synced_version()))
+                .collect::<Vec<_>>(),
+            stores,
+            "every strip is kept where it was",
+        );
+        assert!(
+            !after
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "and no line is re-sent, got {after:?}",
+        );
+        assert!(
+            palette(&after).is_some_and(|palette| palette != before),
+            "while the strip is re-declared in the new theme's colors",
+        );
+
+        // A config reload replaces the theme by the other door and keeps the
+        // same invariant.
+        h.stoat
+            .reload_user_config("theme mine { ui.text.fg = \"#123456\"; }");
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let reloaded = drain_apc(&mut rx);
+
+        assert_eq!(
+            h.stoat
+                .minimap_content
+                .values()
+                .map(|content| (content.content_id(), content.synced_version()))
+                .collect::<Vec<_>>(),
+            stores,
+            "a reload keeps them too",
+        );
+        assert!(
+            !reloaded
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "and re-sends no line, got {reloaded:?}",
         );
     }
 

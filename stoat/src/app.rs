@@ -2524,7 +2524,6 @@ impl Stoat {
         self.minimap_class_table = minimap_class_table;
 
         install_highlight_maps(&self.language_registry, &self.syntax_styles);
-        self.minimap_content.clear();
         // The theme, the syntax styles, and the settings the renderer reads
         // directly all just moved, and a parse failure returned above without
         // touching any of them.

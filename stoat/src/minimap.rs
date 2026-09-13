@@ -1035,6 +1035,13 @@ fn glyph_weight(ch: char) -> u8 {
 /// the resolved foreground of the `i`-th syntax scope. The emission layer declares
 /// [`Self::palette`] on the strip, and a token's [`HighlightStyleId`] resolves to
 /// its class via [`Self::class_of`].
+///
+/// A class is therefore a theme-key index, which is the same index under every
+/// theme: the key set is static, and
+/// [`HighlightStyleInterner::push`](crate::display_map::highlights::HighlightStyleInterner::push)
+/// never dedups, so an id recorded under one theme names the same key under the
+/// next. A minimap store built under one theme is valid under every other, and a
+/// switch re-declares the palette rather than rebuilding what the strip holds.
 pub struct ClassTable {
     palette: Vec<[u8; 3]>,
     by_style: HashMap<HighlightStyleId, u8>,
