@@ -31,10 +31,15 @@ use std::{
 };
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::{
-    pool::{self, MinimapWindowInputs},
+    pool::{self, MinimapWindowInputs, PageVersions, Refill},
     ApcScene,
 };
 use stoatty_protocol::command::{PoolAnchorCommand, PoolRegionCommand};
+
+/// The protocol version that reads a decorations-only page fill. An older
+/// terminal ignores the marker and lays the runs after it on the live grid, so
+/// a cursor line change refills its pages whole.
+const FILL_DECORATIONS_PROTOCOL: u32 = 5;
 
 /// Flush the frame's APC decoration scene to the channel, when it changed.
 ///
@@ -785,6 +790,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         Editor {
             snapshot: DisplaySnapshot,
             pages: Vec<u64>,
+            /// Buffered pages whose gutter runs changed while their cells did
+            /// not, sent after the whole pages as decorations-only fills.
+            redecorate: Vec<u64>,
             pool: u32,
             width: u16,
             height: u16,
@@ -835,6 +843,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .chrome
         .as_ref()
         .and_then(|(_, chrome)| chrome.rich_gutter.clone());
+    let decorate_pages = stoat.stoatty_protocol >= FILL_DECORATIONS_PROTOCOL;
     for (_, editor_id, region) in &panes {
         let region = *region;
         let Some(editor) = ws.editors.get_mut(*editor_id) else {
@@ -874,10 +883,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         //
         // Relative numbers reference the cursor's buffer line, which the
         // wheel glide's cursor-follow drags every row. Holding the baked line
-        // steady through the glide keeps the content version stable so the
-        // window does not refill per dragged row. The settle emit recomputes
-        // the live line and refills the window once to match the repainted
-        // grid.
+        // steady through the glide keeps the page versions stable so the
+        // window does not refresh per dragged row. The settle emit recomputes
+        // the live line and refreshes the window once to match the repainted
+        // grid, as whole pages or as gutter runs.
         let current_line = if editor.scroll_glide != ScrollGlide::None {
             editor.pool_current_line
         } else {
@@ -890,6 +899,24 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             line
         };
 
+        // The rich gutter lays its numbers over the page as runs, so a
+        // terminal that reads decorations-only fills takes a cursor line change
+        // as new runs over cells it keeps. The fallback gutter paints numbers
+        // into cells, and diff and conflict pages paint gutters of their own, so
+        // those keep the line in the cell version.
+        let split_gutter = decorate_pages
+            && base_rich.is_some()
+            && !editor.diff_view
+            && editor.conflict_view.is_none();
+        let decoration_version = match split_gutter {
+            true => {
+                let mut hasher = DefaultHasher::new();
+                current_line.hash(&mut hasher);
+                hasher.finish()
+            },
+            false => 0,
+        };
+
         // Version-cached, so the extra query is cheap. The pair carries every
         // edit and every layer reflow into the content hash below.
         let buffer_version = editor.display_map.buffer_snapshot().version();
@@ -898,7 +925,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             editor_syntax(editor.diff_view),
             editor.gutter_width,
             editor.display_map.wrap_width(),
-            current_line,
+            current_line.filter(|_| !split_gutter),
             editor
                 .gutter_severity_cache
                 .as_ref()
@@ -912,12 +939,18 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             paint_version,
             theme_epoch,
         );
-        let entered = pool::emit_into(
+        let Refill {
+            entered,
+            redecorated,
+        } = pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_offset,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: decoration_version,
+            },
             // Editor panes refill constantly at rest for the cursor line,
             // focus dim, and diagnostics, so they hold the window until the
             // glide starts.
@@ -990,7 +1023,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             detached_cursor = Some((region.pool, row as u64, col));
         }
 
-        if !entered.is_empty() {
+        if !entered.is_empty() || !redecorated.is_empty() {
             let snapshot = editor.display_map.snapshot();
             if let Some(state) = editor.conflict_view.as_ref() {
                 // The conflict pane is a View::Editor, so without its own
@@ -1017,6 +1050,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 async_jobs.push(PoolFill::Editor {
                     snapshot,
                     pages: entered,
+                    redecorate: redecorated,
                     pool: region.pool,
                     width: region.width,
                     height: region.height,
@@ -1166,6 +1200,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 async_jobs.push(PoolFill::Editor {
                     snapshot,
                     pages: entered,
+                    redecorate: Vec::new(),
                     pool: region.pool,
                     width: region.width,
                     height: region.height,
@@ -1705,6 +1740,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             PoolFill::Editor {
                 snapshot,
                 pages,
+                redecorate,
                 pool,
                 width,
                 height,
@@ -1760,6 +1796,24 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                                 live.as_ref(),
                             );
                             if apc_tx.send(fill).is_err() {
+                                return;
+                            }
+                        }
+
+                        for index in redecorate {
+                            let decorations = crate::smooth_scroll::render_page_decorations(
+                                &snapshot,
+                                pool,
+                                index,
+                                width,
+                                height,
+                                &gutter,
+                                live.as_ref(),
+                            );
+                            if decorations.is_empty() {
+                                continue;
+                            }
+                            if apc_tx.send(decorations).is_err() {
                                 return;
                             }
                         }
@@ -4916,6 +4970,71 @@ mod tests {
         assert!(
             settled_fills > 1,
             "the settle emit refills the whole window once, got {settled_fills}: {settled:?}"
+        );
+    }
+
+    /// Buffer the pool window of a 400-line file for a terminal at `protocol`,
+    /// with the rich gutter on, then move the cursor and the scroll row one line
+    /// down and report the pages each kind of fill in that move named.
+    fn relative_line_scroll_fills(protocol: u32) -> (Vec<u64>, Vec<u64>) {
+        use stoatty_protocol::command::{Command, FillCommand};
+
+        let mut h = Stoat::test();
+        h.stoat.theme = Arc::new(rgb_diagnostic_theme());
+        h.stoat.stoatty_protocol = protocol;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/relative");
+        let path = root.join("a.txt");
+        let body: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let _ = drain_apc(&mut rx);
+
+        // Moved without a glide, since a glide holds the numbered line still.
+        let line_one = body.find("line 1\n").expect("line 1 exists");
+        h.stoat.collapse_focused_cursor_to(line_one);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = 1;
+            editor.scroll_glide = ScrollGlide::None;
+        }
+        emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+
+        let (mut fills, mut decorations) = (Vec::new(), Vec::new());
+        for command in drain_apc(&mut rx) {
+            match command {
+                Command::Fill(FillCommand { index, .. }) => fills.push(index),
+                Command::FillDecorations(FillCommand { index, .. }) => decorations.push(index),
+                _ => {},
+            }
+        }
+        (fills, decorations)
+    }
+
+    #[test]
+    fn a_relative_line_scroll_redecorates_the_window_instead_of_refilling_it() {
+        assert_eq!(
+            relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION),
+            (Vec::new(), vec![0, 1, 2, 3, 4]),
+            "the buffered pages keep their cells and take the new gutter runs"
+        );
+    }
+
+    #[test]
+    fn an_older_terminal_still_gets_whole_refills() {
+        assert_eq!(
+            relative_line_scroll_fills(4),
+            (vec![0, 1, 2, 3, 4], Vec::new()),
+            "a terminal without decorations-only fills repaints the window"
         );
     }
 

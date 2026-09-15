@@ -115,6 +115,32 @@ struct PoolEmitState {
     /// different value the buffered pages are stale (the surface re-filtered or
     /// regenerated), so the window is refilled rather than composited as-is.
     content_version: u64,
+    /// Decoration version last seen for this pool. See [`PageVersions`].
+    decoration_version: u64,
+}
+
+/// The two versions a pool's buffered pages answer to.
+///
+/// `cells` covers everything a page paints into its cells, and a change refills
+/// every buffered page. `decorations` covers only the text runs, bars, and
+/// polylines laid over those cells. A change of it alone re-sends just those for
+/// the pages the window already buffers, which costs far less than painting
+/// them again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageVersions {
+    pub cells: u64,
+    pub decorations: u64,
+}
+
+/// The pages one [`emit_pages_into`] call leaves for its caller to render.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Refill {
+    /// Pages newly entering the buffered window, ascending, each owed a whole
+    /// fill.
+    pub entered: Vec<u64>,
+    /// Pages the window already buffers whose decorations changed, ascending,
+    /// each owed a decorations-only fill.
+    pub redecorated: Vec<u64>,
 }
 
 impl SmoothScrollState {
@@ -292,8 +318,42 @@ pub fn emit_into(
     scroll_offset: f32,
     content_version: u64,
     hold_when_idle: bool,
-    mut render_page: impl FnMut(u64) -> Vec<u8>,
+    render_page: impl FnMut(u64) -> Vec<u8>,
 ) -> Vec<u64> {
+    let versions = PageVersions {
+        cells: content_version,
+        decorations: 0,
+    };
+    emit_pages_into(
+        out,
+        state,
+        region,
+        scroll_offset,
+        versions,
+        hold_when_idle,
+        render_page,
+    )
+    .entered
+}
+
+/// [`emit_into`] for a pool whose pages version their decorations apart from
+/// their cells.
+///
+/// A change of `versions.cells` refills the window as a content version change
+/// does there. A change of `versions.decorations` alone lists every page the
+/// window already buffers in [`Refill::redecorated`], for the caller to send
+/// as decorations-only fills. A page entering the window this call is never
+/// listed there too, since its whole fill carries the decorations. The hold
+/// rule defers a decoration change the way it defers a cell change.
+pub fn emit_pages_into(
+    out: &mut Vec<u8>,
+    state: &mut SmoothScrollState,
+    region: PoolRegionCommand,
+    scroll_offset: f32,
+    versions: PageVersions,
+    hold_when_idle: bool,
+    mut render_page: impl FnMut(u64) -> Vec<u8>,
+) -> Refill {
     let pool = region.pool;
     let unsettled = state.geometry_unsettled;
     let entry = state.pools.entry(pool).or_default();
@@ -321,7 +381,7 @@ pub fn emit_into(
     let effective_version = if hold {
         entry.content_version
     } else {
-        content_version
+        versions.cells
     };
     if entry.content_version != effective_version {
         // The surface changed under the pool. The buffered pages are stale.
@@ -329,6 +389,11 @@ pub fn emit_into(
         entry.last_scroll_offset = None;
         entry.content_version = effective_version;
     }
+    let effective_decorations = if hold {
+        entry.decoration_version
+    } else {
+        versions.decorations
+    };
 
     let region_height = region.height.max(1) as u64;
     let page = scroll_offset.floor() as u64 / region_height;
@@ -349,8 +414,17 @@ pub fn emit_into(
     let entered = if hold && region_changed && unsettled {
         Vec::new()
     } else {
-        refill(out, entry, pool, window, &mut render_page)
+        refill(out, entry, pool, window.clone(), &mut render_page)
     };
+
+    // A window page that did not enter was requested before, so it keeps its
+    // cells and needs only the new decorations. A cell change emptied the
+    // requested range above, so every page entered and none is listed here.
+    let mut redecorated = Vec::new();
+    if entry.decoration_version != effective_decorations {
+        redecorated = window.filter(|index| !entered.contains(index)).collect();
+        entry.decoration_version = effective_decorations;
+    }
 
     // A jump whose new window does not overlap the old one is too far to ease
     // across an unbuffered gap. The reposition re-anchors the terminal's offset
@@ -366,7 +440,10 @@ pub fn emit_into(
         entry.last_scroll_offset = Some(scroll_offset);
     }
 
-    entered
+    Refill {
+        entered,
+        redecorated,
+    }
 }
 
 /// Request a fill for every page in `window` not already requested, record `window`
@@ -435,8 +512,8 @@ fn scroll_target(pool: u32, scroll_offset: f32, region_height: u16) -> ScrollCom
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_into, scroll_target, window_range, MinimapWindowInputs, SmoothScrollState,
-        WINDOW_PAGES,
+        emit_into, emit_pages_into, scroll_target, window_range, MinimapWindowInputs, PageVersions,
+        Refill, SmoothScrollState, WINDOW_PAGES,
     };
     use stoatty_protocol::command::{
         decode, Command, PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand,
@@ -663,6 +740,45 @@ mod tests {
             Vec::new()
         });
         assert_eq!(moved, (0..WINDOW_PAGES).collect::<Vec<_>>());
+    }
+
+    /// Emit pool 1 at `offset` with decoration version `decorations`, holding at
+    /// rest and filling asynchronously, the way an editor pane emits.
+    fn emit_decorated(state: &mut SmoothScrollState, offset: f32, decorations: u64) -> Refill {
+        let versions = PageVersions {
+            cells: 0,
+            decorations,
+        };
+        emit_pages_into(
+            &mut Vec::new(),
+            state,
+            region(1, 20),
+            offset,
+            versions,
+            true,
+            |_| Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_resting_decoration_change_waits_for_the_target_to_move() {
+        let mut state = SmoothScrollState::default();
+        emit_decorated(&mut state, 40.0, 0);
+
+        assert_eq!(
+            emit_decorated(&mut state, 40.0, 1),
+            Refill::default(),
+            "a resting pool composites nothing, so the new runs can wait"
+        );
+        // The rest narrowed the requested range to the visible page 2, so the
+        // move enters the rest of the window whole and redecorates page 2.
+        assert_eq!(
+            emit_decorated(&mut state, 41.0, 1),
+            Refill {
+                entered: vec![0, 1, 3, 4],
+                redecorated: vec![2],
+            }
+        );
     }
 
     #[test]
@@ -941,6 +1057,104 @@ mod tests {
                 fraction: 0
             })),
             "a content bump re-emits the scroll target"
+        );
+    }
+
+    #[test]
+    fn a_decoration_change_redecorates_the_buffered_window() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        let first = PageVersions {
+            cells: 1,
+            decorations: 1,
+        };
+        emit_pages_into(
+            &mut out,
+            &mut state,
+            region(1, 20),
+            0.0,
+            first,
+            true,
+            |_| b"page".to_vec(),
+        );
+
+        out.clear();
+        let moved = PageVersions {
+            decorations: 2,
+            ..first
+        };
+        let refill = emit_pages_into(
+            &mut out,
+            &mut state,
+            region(1, 20),
+            1.0,
+            moved,
+            true,
+            |_| panic!("a decoration change must not refill a page"),
+        );
+
+        assert_eq!(
+            refill,
+            Refill {
+                entered: Vec::new(),
+                redecorated: (0..WINDOW_PAGES).collect(),
+            }
+        );
+        assert!(
+            !commands(&out).iter().any(|c| matches!(c, Command::Fill(_))),
+            "no fill frame for pages that keep their cells"
+        );
+
+        let again = emit_pages_into(
+            &mut out,
+            &mut state,
+            region(1, 20),
+            2.0,
+            moved,
+            true,
+            |_| panic!("an unchanged version must not refill a page"),
+        );
+        assert_eq!(again, Refill::default(), "the new runs went out once");
+    }
+
+    #[test]
+    fn a_cell_change_refills_and_redecorates_nothing() {
+        let mut state = SmoothScrollState::default();
+        let first = PageVersions {
+            cells: 1,
+            decorations: 1,
+        };
+        emit_pages_into(
+            &mut Vec::new(),
+            &mut state,
+            region(1, 20),
+            0.0,
+            first,
+            true,
+            |_| Vec::new(),
+        );
+
+        let both = PageVersions {
+            cells: 2,
+            decorations: 2,
+        };
+        let refill = emit_pages_into(
+            &mut Vec::new(),
+            &mut state,
+            region(1, 20),
+            1.0,
+            both,
+            true,
+            |_| Vec::new(),
+        );
+
+        assert_eq!(
+            refill,
+            Refill {
+                entered: (0..WINDOW_PAGES).collect(),
+                redecorated: Vec::new(),
+            },
+            "a whole fill carries the new decorations with the new cells"
         );
     }
 

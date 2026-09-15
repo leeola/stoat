@@ -45,7 +45,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
 use stoat_widgets::ApcScene;
-use stoatty_protocol::command::encode_fill_scope;
+use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope};
 
 /// Pool ids for the non-pane smooth-scroll surfaces (overlays and popups).
 ///
@@ -141,6 +141,44 @@ pub(crate) fn render_page_fill(
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
     encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
+    frame
+}
+
+/// Render the rich gutter components of page `index` alone and wrap them in a
+/// decorations-only fill, for a page whose cells the terminal already holds.
+///
+/// A plain editor page lays nothing over its cells but these components, so the
+/// batch replaces everything [`render_page_fill`] put there for the gutter.
+/// Empty when `gutter` has no rich colors, since the fallback gutter paints its
+/// numbers into the cells.
+pub(crate) fn render_page_decorations(
+    snapshot: &DisplaySnapshot,
+    pool: u32,
+    index: u64,
+    region_width: u16,
+    region_height: u16,
+    gutter: &PageGutter,
+    live: Option<&crate::diff_map::LiveHunks<'_>>,
+) -> Vec<u8> {
+    if gutter.rich.is_none() {
+        return Vec::new();
+    }
+
+    let top_row = page_top_row(index, region_height);
+    let end_row = top_row
+        .saturating_add(region_height as u32)
+        .min(snapshot.line_count());
+    let area = Rect::new(0, 0, region_width, region_height);
+    // The rich gutter draws into a scene rather than cells, so nothing writes
+    // this buffer.
+    let mut cells = Buffer::empty(Rect::default());
+    let (_, components) =
+        paint_page_gutter(snapshot, top_row, end_row, &mut cells, area, gutter, live);
+
+    let mut frame = Vec::with_capacity(components.len() + 32);
+    encode_fill_decorations_scope(&mut frame, pool, index, |out| {
+        out.extend_from_slice(&components)
+    });
     frame
 }
 
@@ -1718,6 +1756,76 @@ mod tests {
         assert!(
             cmds.iter().any(|cmd| matches!(cmd, Command::Bar(_))),
             "the rich page fill carries the gutter separator bar, got {cmds:?}"
+        );
+    }
+
+    /// A decorations-only batch stands in for the components a whole fill lays
+    /// over its cells, so for one page and cursor line the two carry the same
+    /// bytes.
+    #[test]
+    fn a_decorations_batch_carries_the_components_a_whole_fill_lays_over_its_cells() {
+        use super::{render_page_decorations, render_page_fill, PageGutter};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::{resolve_rich_gutter, RowSeverity},
+            theme::scope,
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::command::{encode_fill_decorations_into, encode_fill_end};
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/rich-decorations");
+        let path = root.join("doc.txt");
+        let body: String = (0..12).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            Some(rich),
+            Some(6),
+        );
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+
+        let fill = render_page_fill(
+            &snapshot,
+            3,
+            1,
+            fallback,
+            12,
+            4,
+            &gutter,
+            false,
+            0.0,
+            1.0,
+            0.0,
+            page_endpoints(&snapshot, 4, 4),
+            None,
+        );
+        let decorations = render_page_decorations(&snapshot, 3, 1, 12, 4, &gutter, None);
+
+        let mut open = Vec::new();
+        encode_fill_decorations_into(&mut open, 3, 1);
+        let close = encode_fill_end();
+        let components = decorations
+            .strip_prefix(open.as_slice())
+            .and_then(|rest| rest.strip_suffix(close.as_slice()))
+            .expect("the batch is one decorations-only scope for page 1");
+        assert!(!components.is_empty(), "page 1 has numbers to lay out");
+        assert!(
+            fill.ends_with(&[components, close.as_slice()].concat()),
+            "the whole fill of page 1 closes with the same components"
         );
     }
 
