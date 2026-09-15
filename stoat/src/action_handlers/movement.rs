@@ -5038,13 +5038,21 @@ pub(super) fn match_brackets(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
 ///
 /// Three paths answer, narrowing as less is known about the buffer.
 ///
-/// A brackets query captures only structural delimiters, so a bracket inside a
-/// string, char, or comment literal resolves to no pair instead of
-/// false-matching. Where the language ships one it is authoritative.
+/// A layer with a tree reads it first, the way Helix's pair search does. The
+/// walk climbs from the node under the cursor, so it matches from within a
+/// pair and not only on a delimiter. A bracket inside a literal shares a node
+/// with the text around it, so the walk climbs to the literal's quotes. It
+/// costs the nodes around the cursor, where the brackets query walks every
+/// child of an enclosing list.
 ///
-/// A language with a grammar but no query reads the tree directly, which still
-/// names the construct the cursor is in. Both syntax paths therefore match from
-/// within a pair and not only on a delimiter.
+/// Where the walk finds nothing, the layer's brackets query answers. The query
+/// holds pairs the walk refuses, such as markdown's three-byte fence delimiters.
+/// In a few shapes the two answer differently, and the walk's answer wins. The
+/// walk looks ahead to a pair past the cursor, so `m m` on `a` in `a[0]` lands
+/// on `]` where the query answers the pair around the cursor. The walk also
+/// pairs a lone bracket between two escapes in a string, which is a node of its
+/// own, and `|` tokens in a macro's token tree. On the whitespace inside a
+/// `Name { .. }` pattern, it reads from the pattern outward.
 ///
 /// Text with no tree at all falls to the character scan, which matches only a
 /// cursor already on a delimiter. Nothing there says which side of a quote
@@ -5056,14 +5064,15 @@ fn bracket_partner<'a>(
     tree: Option<&'a stoat_language::Tree>,
     scans: &mut surround::PairScans<'a>,
 ) -> Option<usize> {
-    if let (Some(query), Some(tree)) = (query, tree) {
-        return stoat_language::matching_bracket(query, tree.root_node(), rope, cursor);
-    }
-    if let Some(tree) = tree
-        && let Some(found) =
+    if let Some(tree) = tree {
+        if let Some(found) =
             stoat_language::matching_bracket_from_tree(tree.root_node(), rope, cursor)
-    {
-        return Some(found);
+        {
+            return Some(found);
+        }
+        if let Some(query) = query {
+            return stoat_language::matching_bracket(query, tree.root_node(), rope, cursor);
+        }
     }
 
     let ch = rope.chars_at(cursor).next()?;

@@ -8814,6 +8814,42 @@ fn match_brackets_from_inside_jumps_to_enclosing() {
     );
 }
 
+/// `m m` on a name before its own brackets lands on their closer, the way
+/// Helix's pair search looks ahead among the name's siblings.
+///
+/// The brackets query answers the braces around the cursor instead. The tree
+/// walk answers first, so its pair wins.
+#[test]
+fn match_brackets_looks_ahead_to_the_brackets_after_a_name() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn f() { a[0]; }\n");
+    h.open_file(&path);
+    h.type_keys("9 l m m");
+    assert_eq!(
+        h.primary_head_offset(),
+        12,
+        "from `a`, mm lands on the `]` of `a[0]` rather than the block's `}}`"
+    );
+}
+
+/// A markdown fence pairs its three-byte delimiters through the brackets query.
+///
+/// The tree walk counts only one-byte delimiters, so it finds nothing at a
+/// fence and the query answers.
+#[test]
+fn match_brackets_pairs_a_markdown_fence_through_the_query() {
+    let mut h = TestHarness::with_size(30, 8);
+    let path = h.write_file("s.md", "```\ncode\n```\n");
+    h.open_file(&path);
+    h.settle();
+    h.type_keys("m m");
+    assert_eq!(
+        h.primary_head_offset(),
+        9,
+        "the opening fence lands on the closing one"
+    );
+}
+
 #[test]
 fn match_brackets_no_op_unbalanced() {
     let mut h = TestHarness::with_size(20, 5);

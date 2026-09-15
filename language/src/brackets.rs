@@ -123,9 +123,10 @@ const SIBLING_LIMIT: usize = 16;
 /// Byte offset of the bracket matching the cursor at `offset`, read from the
 /// syntax tree without a `brackets.scm` query.
 ///
-/// Backs the languages that ship a grammar but no query, which is most of them.
-/// The tree names the construct the cursor is in, so this matches from inside
-/// one and not only from a delimiter.
+/// Backs every language with a grammar, following Helix's pair search. The
+/// tree names the construct the cursor is in, so this matches from inside one
+/// and not only from a delimiter. A cursor before a pair among its siblings,
+/// such as `a` in `a[0]`, answers that pair's closer.
 ///
 /// Returns `None` when no construct around the cursor is delimited by a pair,
 /// which leaves a caller free to fall back to a character scan.
@@ -135,8 +136,8 @@ const SIBLING_LIMIT: usize = 16;
 /// character is what that restriction avoids.
 ///
 /// See also:
-/// - [`matching_bracket`] for the query path, which a language shipping a `brackets.scm` takes
-///   instead.
+/// - [`matching_bracket`] for the query path, which answers where this finds nothing in a language
+///   shipping a `brackets.scm`.
 pub fn matching_bracket_from_tree(root: Node<'_>, rope: &Rope, offset: usize) -> Option<usize> {
     let mut node = root.descendant_for_byte_range(offset, offset)?;
 
@@ -258,7 +259,7 @@ fn single_char(node: &Node<'_>, rope: &Rope) -> Option<(usize, char)> {
 
 #[cfg(test)]
 mod tests {
-    use super::matching_bracket;
+    use super::{matching_bracket, matching_bracket_from_tree};
     use crate::{Language, LanguageRegistry};
     use std::sync::Arc;
     use stoat_text::Rope;
@@ -344,6 +345,48 @@ mod tests {
             answered > 100,
             "the fixture has to put the cursor inside plenty of pairs rather than on them, \
              or nothing here tested the case that could break: {answered}"
+        );
+    }
+
+    /// The tree walk answers what the query answers at every offset, apart from
+    /// the pairs it looks ahead to.
+    ///
+    /// `m m` takes the walk first. A cursor on a name before its own brackets,
+    /// such as `a` in `a[0]`, reads the walk's answer, which closes that pair,
+    /// where the query answers the pair around the cursor.
+    #[test]
+    fn the_walk_answers_the_query_short_of_a_pair_ahead() {
+        let lang = lang("rust");
+        let src = nested_source();
+        let tree = parse(&lang, &src);
+        let rope = Rope::from(src.as_str());
+        let query = lang.bracket_query().expect("bracket query");
+        let root = tree.root_node();
+
+        let mut agreed = 0;
+        let mut ahead = 0;
+        for offset in (0..src.len()).filter(|&offset| src.is_char_boundary(offset)) {
+            let walked = matching_bracket_from_tree(root, &rope, offset);
+            let queried = matching_bracket(query, root, &rope, offset);
+            if walked == queried {
+                agreed += usize::from(walked.is_some());
+                continue;
+            }
+
+            let close = walked.unwrap_or_else(|| {
+                panic!("the walk finds nothing at {offset}, where the query answers {queried:?}")
+            });
+            let open = matching_bracket_from_tree(root, &rope, close).expect("the pair's opener");
+            assert!(
+                offset < open && open < close,
+                "at {offset} the walk answers {close}, which closes no pair ahead of the cursor",
+            );
+            ahead += 1;
+        }
+
+        assert!(
+            agreed > 500 && ahead > 0,
+            "the fixture has to hold both kinds of offset: {agreed} agreeing, {ahead} ahead",
         );
     }
 
