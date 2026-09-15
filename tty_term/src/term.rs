@@ -1051,6 +1051,13 @@ impl Terminal {
     /// XTVERSION queries (`CSI > Ps q`) are answered here too. The vte parser
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
+    ///
+    /// An OSC that trips its cap after earlier chunks gave the parser part of it
+    /// replaces the parser that holds it, since every way out of the string
+    /// dispatches the truncated part. A fresh parser also ends a DEC 2026 update
+    /// in flight. The bytes that update buffered are lost until the program's
+    /// next redraw, and the decorations it deferred commit once no update
+    /// buffers.
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
         let was_alt_screen = self.is_alt_screen();
         let redraw = self.advance_inner(bytes);
@@ -1108,6 +1115,7 @@ impl Terminal {
         let responses = &self.responses;
         let events = &mut self.pending_events;
         let mut reset = false;
+        let mut reset_parser = false;
         self.esc.scan(scan, &mut |event| match event {
             EscEvent::Apc {
                 payload,
@@ -1130,7 +1138,14 @@ impl Terminal {
             },
             // Cut like a refused image payload, and for the same reason. Nothing
             // is read from these bytes, so no command travels with the range.
-            EscEvent::OscOverrun { interior, end } => frames.push((None, interior, end)),
+            EscEvent::OscOverrun {
+                interior,
+                end,
+                reset: replace,
+            } => {
+                reset_parser |= replace;
+                frames.push((None, interior, end));
+            },
             EscEvent::XtVersion => responses.push(XTVERSION_REPLY.as_bytes()),
             EscEvent::OscNotify { code, payload } => {
                 if let Some(event) = notification_from_osc(code, payload) {
@@ -1145,6 +1160,12 @@ impl Terminal {
         if reset {
             self.images.reset();
             self.damage_pending = true;
+        }
+        // The string the reset drops opened in an earlier chunk, so it starts
+        // this chunk and no frame comes before it. A parser replaced here is
+        // replaced before the cut, on either path below.
+        if reset_parser {
+            self.reset_target_parser();
         }
 
         // Without a redirect every byte targets the live screen, so apply the
@@ -2511,6 +2532,22 @@ impl Terminal {
             fill.parser.advance(&mut fill.term, segment);
         } else {
             self.parser.advance(&mut self.term, segment);
+        }
+    }
+
+    /// Replace the parser [`Self::feed_segment`] routes to, dropping the string
+    /// it holds part of.
+    ///
+    /// A capture holds bytes rather than parsing them, so it has no parser to
+    /// replace. A skipped OSC swallows the frames that open and close a fill,
+    /// so the target stays the same while the string is open.
+    fn reset_target_parser(&mut self) {
+        if self.capture.is_some() {
+            return;
+        }
+        match &mut self.fill {
+            Some(fill) => fill.parser = Processor::new(),
+            None => self.parser = Processor::new(),
         }
     }
 
@@ -4010,6 +4047,44 @@ mod tests {
             terminal.take_events(),
             vec![TermEvent::ClipboardStore("A".repeat(3 * 256 * 1024))],
         );
+    }
+
+    /// A clipboard write that trips its cap a read after it started leaves the
+    /// parser holding the base64 of the reads before. Any terminator makes the
+    /// parser dispatch that, and a length in fours decodes to a cut clipboard.
+    #[test]
+    fn a_clipboard_write_split_past_its_cap_stores_nothing() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.esc.set_osc_caps(16, 64);
+
+        terminal.advance(format!("\x1b]52;c;{}", "QUFB".repeat(8)).as_bytes());
+        terminal.advance(format!("{}\x07", "QUFB".repeat(10)).as_bytes());
+        terminal.advance(b"after");
+
+        assert_eq!(terminal.take_events(), Vec::new());
+        let mut grid = Grid::new(4, 8);
+        terminal.project(&mut grid);
+        let row: String = grid.row(0).iter().map(|cell| cell.ch).collect();
+        assert_eq!(row.trim_end(), "after", "the text after the write prints");
+    }
+
+    /// A page's parser holds what earlier reads gave it of a string, as the live
+    /// one does. The reset has to reach the parser holding the string, or that
+    /// parser stays inside it and takes the page's text as payload.
+    #[test]
+    fn a_carried_overrun_inside_a_fill_resets_the_page_parser() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.esc.set_osc_caps(8, 64);
+        declare_pool(&mut terminal, 0, 2, 8);
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 0, index: 0 }));
+        terminal.advance(b"\x1b]0;abcde");
+        terminal.advance(b"fghij\x07page");
+        terminal.advance(&encode_fill_end());
+
+        let page = pool_page(&terminal, 0, 0);
+        let row: String = page.row(0).iter().map(|cell| cell.ch).collect();
+        assert_eq!(row.trim_end(), "page");
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //! one completes.
 
 use super::TermEvent;
-use std::ops::{Range, RangeInclusive};
+use std::{
+    mem,
+    ops::{Range, RangeInclusive},
+};
 use stoatty_protocol::frame::MAX_APC_PAYLOAD;
 
 pub(super) const ESC: u8 = 0x1b;
@@ -72,7 +75,20 @@ pub(super) enum EscEvent<'a> {
     /// `end` is one past whichever byte ended the escape, and the interior's own
     /// end when none has yet. An escape spanning several calls is reported once
     /// per call, since each call's bytes have to be cut on their own.
-    OscOverrun { interior: Range<usize>, end: usize },
+    ///
+    /// `reset` is set on the call where the cap trips for a string the parser
+    /// already holds part of, from the calls before. The parser must be replaced
+    /// before the stretch after the cut, since every way out of its open string
+    /// dispatches what it holds. From that call on, the string's interiors also
+    /// cover its terminator, which the fresh parser has no string to close with.
+    /// A lone `ESC` that ends the string stays out, because the fresh parser
+    /// reads it as the next sequence's start. A trailing `ESC` at the end of a
+    /// call is cut, so a lone `ESC` split from the byte after it is lost.
+    OscOverrun {
+        interior: Range<usize>,
+        end: usize,
+        reset: bool,
+    },
     /// A full reset (`ESC c`).
     ///
     /// The parser resets the screen itself, so this reports it only for the
@@ -104,7 +120,6 @@ pub(super) enum EscEvent<'a> {
 ///
 /// Recognizing a stoatty frame among the APC payloads is the decoder's job, not this
 /// scanner's. Mapping a notification to an event is [`notification_from_osc`]'s.
-#[derive(Default)]
 pub(super) struct EscScanner {
     state: EscState,
     /// The payload of whichever sequence is open, shared because the APC and OSC
@@ -118,6 +133,17 @@ pub(super) struct EscScanner {
     /// Payload bytes the open skipped OSC has taken, across every call it spans,
     /// measured against [`EscScanner::skip_cap`].
     skipped: usize,
+    /// Set when the open skipped OSC tripped its cap while the parser held part
+    /// of it.
+    ///
+    /// The driver replaced that parser, so the rest of the string, terminator
+    /// included, stays out of the fresh one.
+    dropped: bool,
+    /// Cap on a skipped OSC's payload, [`MAX_OSC_PLAIN_BYTES`] outside tests.
+    plain_cap: usize,
+    /// Cap on a skipped OSC 52's payload, [`MAX_OSC_CLIPBOARD_BYTES`] outside
+    /// tests.
+    clipboard_cap: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -163,6 +189,14 @@ impl EscScanner {
         matches!(self.state, EscState::Ground)
     }
 
+    /// Cap a skipped OSC at `plain` payload bytes and an OSC 52 at `clipboard`,
+    /// so a test crosses a cap without a fixture the size of the real one.
+    #[cfg(test)]
+    pub(super) fn set_osc_caps(&mut self, plain: usize, clipboard: usize) {
+        self.plain_cap = plain;
+        self.clipboard_cap = clipboard;
+    }
+
     /// Feed `bytes`, invoking `emit` for each sequence that completes within them.
     pub(super) fn scan(&mut self, bytes: &[u8], emit: &mut impl FnMut(EscEvent<'_>)) {
         let mut i = 0;
@@ -177,6 +211,14 @@ impl EscScanner {
         // the vte parser, which would otherwise buffer a whole image without
         // bound.
         let mut osc = 0..0;
+        // Whether the parser holds part of the open skipped OSC, still under its
+        // cap. Only that string asks for a reset, so a new OSC clears this.
+        let mut carried = matches!(self.state, EscState::OscSkip | EscState::OscSkipEscape)
+            && self.skipped > 0
+            && !self.overflow;
+        // Set on the call that drops a carried string, and taken by the one
+        // overrun event that reports it.
+        let mut announce = false;
 
         while i < bytes.len() {
             let byte = bytes[i];
@@ -203,6 +245,7 @@ impl EscScanner {
                             self.payload.clear();
                             self.overflow = false;
                             self.skipped = 0;
+                            carried = false;
                             EscState::OscPrefix
                         },
                         ESC => EscState::Escape,
@@ -335,24 +378,39 @@ impl EscScanner {
                 },
                 EscState::OscSkip => match byte {
                     ESC => self.state = EscState::OscSkipEscape,
-                    BEL => self.finish_osc_skip(osc.clone(), i + 1, emit),
+                    BEL => {
+                        let reset = mem::take(&mut announce);
+                        self.finish_osc_skip(osc.clone(), i + 1, i + 1, reset, emit);
+                    },
                     _ => {
                         let run = payload_run(&bytes[i..]).len();
                         self.count_skipped(run);
+                        // The parser holds what earlier calls passed on of this
+                        // string, and only a fresh parser drops it.
+                        if carried && self.overflow && !self.dropped {
+                            self.dropped = true;
+                            announce = true;
+                        }
                         i += run;
                         osc.end = i;
                         continue;
                     },
                 },
                 EscState::OscSkipEscape => match byte {
-                    STRING_TERMINATOR => self.finish_osc_skip(osc.clone(), i + 1, emit),
+                    STRING_TERMINATOR => {
+                        let reset = mem::take(&mut announce);
+                        self.finish_osc_skip(osc.clone(), i + 1, i + 1, reset, emit);
+                    },
                     ESC => self.state = EscState::OscSkipEscape,
                     // A lone `ESC` ends an OSC for the vte parser, which
                     // dispatches what it holds and reads this byte as the start
                     // of an escape. Ending here too keeps a cut from swallowing
-                    // what that parser goes on to print.
+                    // what that parser goes on to print. The cut stops short of
+                    // the `ESC` even for a dropped string, since a fresh parser
+                    // reads it as that start too.
                     _ => {
-                        self.finish_osc_skip(osc.clone(), i, emit);
+                        let reset = mem::take(&mut announce);
+                        self.finish_osc_skip(osc.clone(), osc.end, i, reset, emit);
                         self.state = EscState::Escape;
                         continue;
                     },
@@ -363,15 +421,21 @@ impl EscScanner {
 
         // An open overrun has no terminator to report at, and the bytes it took
         // in this call must not reach the parser either. Each call reports its
-        // own part, since the caller only ever sees offsets into one call.
-        if self.overflow
-            && matches!(self.state, EscState::OscSkip | EscState::OscSkipEscape)
-            && !osc.is_empty()
-        {
-            emit(EscEvent::OscOverrun {
-                interior: osc.clone(),
-                end: osc.end,
-            });
+        // own part, since the caller only ever sees offsets into one call. A
+        // dropped string's trailing `ESC` goes as well. A fresh parser handed it
+        // pairs it with whatever byte the next call starts with.
+        if self.overflow && matches!(self.state, EscState::OscSkip | EscState::OscSkipEscape) {
+            let end = match (self.dropped, self.state) {
+                (true, EscState::OscSkipEscape) => bytes.len(),
+                _ => osc.end,
+            };
+            if end > osc.start {
+                emit(EscEvent::OscOverrun {
+                    interior: osc.start..end,
+                    end,
+                    reset: announce,
+                });
+            }
         }
     }
 
@@ -490,8 +554,8 @@ impl EscScanner {
     /// title, a path, a palette, or a hyperlink.
     fn skip_cap(&self) -> usize {
         match self.code {
-            OSC_CLIPBOARD => MAX_OSC_CLIPBOARD_BYTES,
-            _ => MAX_OSC_PLAIN_BYTES,
+            OSC_CLIPBOARD => self.clipboard_cap,
+            _ => self.plain_cap,
         }
     }
 
@@ -502,17 +566,31 @@ impl EscScanner {
     /// parser is left the code and the `;` that follows it, which it reads as
     /// one empty argument. That sets an empty title for OSC 0 and 2, and OSC 52
     /// wants three arguments so it is ignored outright.
+    ///
+    /// A dropped string's interior runs on to `through`, past what of the
+    /// terminator the fresh parser must not read. `reset` goes out on the event.
     fn finish_osc_skip(
         &mut self,
         interior: Range<usize>,
+        through: usize,
         end: usize,
+        reset: bool,
         emit: &mut impl FnMut(EscEvent<'_>),
     ) {
         if self.overflow {
-            emit(EscEvent::OscOverrun { interior, end });
+            let interior = match self.dropped {
+                true => interior.start..through,
+                false => interior,
+            };
+            emit(EscEvent::OscOverrun {
+                interior,
+                end,
+                reset,
+            });
         }
         self.skipped = 0;
         self.overflow = false;
+        self.dropped = false;
         self.state = EscState::Ground;
     }
 
@@ -527,6 +605,21 @@ impl EscScanner {
         self.payload.clear();
         self.overflow = false;
         self.state = EscState::Ground;
+    }
+}
+
+impl Default for EscScanner {
+    fn default() -> EscScanner {
+        EscScanner {
+            state: EscState::Ground,
+            payload: Vec::new(),
+            code: 0,
+            overflow: false,
+            skipped: 0,
+            dropped: false,
+            plain_cap: MAX_OSC_PLAIN_BYTES,
+            clipboard_cap: MAX_OSC_CLIPBOARD_BYTES,
+        }
     }
 }
 
@@ -727,7 +820,7 @@ mod tests {
 
         assert_eq!(
             scan_overruns(&mut scanner, &seq),
-            vec![(4, 4 + payload, 5 + payload)],
+            vec![(4, 4 + payload, 5 + payload, false)],
             "the whole payload is cut, so the parser reads one empty argument",
         );
     }
@@ -779,13 +872,63 @@ mod tests {
 
         assert_eq!(
             scan_overruns(&mut scanner, &first),
-            vec![(4, 4 + head, 4 + head)],
+            vec![(4, 4 + head, 4 + head, false)],
             "no terminator arrived, so the end stops at the interior",
         );
         assert_eq!(
             scan_overruns(&mut scanner, b"more\x07"),
-            vec![(0, 4, 5)],
+            vec![(0, 4, 5, false)],
             "the next call cuts its own bytes",
+        );
+    }
+
+    /// The parser holds what the first call passed on, and every way out of its
+    /// string dispatches that. The call that trips the cap asks once for a fresh
+    /// parser, and cuts the terminator the fresh parser has no string to close.
+    #[test]
+    fn a_carried_overrun_asks_once_for_a_fresh_parser() {
+        let mut scanner = EscScanner::default();
+        scanner.set_osc_caps(8, 16);
+
+        assert_eq!(scan_overruns(&mut scanner, b"\x1b]0;abcde"), Vec::new());
+        assert_eq!(
+            scan_overruns(&mut scanner, b"fghij\x07after\x1b]0;also\x07"),
+            vec![(0, 6, 6, true)],
+            "the cut reaches through the BEL, and the next title is its own",
+        );
+    }
+
+    /// A dropped string's `ESC` and `\` stay out of the fresh parser even when
+    /// they arrive in different calls. A fresh parser handed the `ESC` alone
+    /// pairs it with the next call's first byte.
+    #[test]
+    fn a_dropped_strings_split_terminator_is_cut_whole() {
+        let mut scanner = EscScanner::default();
+        scanner.set_osc_caps(8, 16);
+
+        assert_eq!(scan_overruns(&mut scanner, b"\x1b]0;abcde"), Vec::new());
+        assert_eq!(
+            scan_overruns(&mut scanner, b"fghij\x1b"),
+            vec![(0, 6, 6, true)],
+        );
+        assert_eq!(
+            scan_overruns(&mut scanner, b"\\after"),
+            vec![(0, 1, 1, false)],
+        );
+    }
+
+    /// Only the string the parser holds part of asks for a reset. One that opens
+    /// and trips its cap within a call leaves the parser a string of its own to
+    /// close, even when a carried string ended earlier in that call.
+    #[test]
+    fn an_osc_that_opens_and_trips_in_one_call_asks_for_no_reset() {
+        let mut scanner = EscScanner::default();
+        scanner.set_osc_caps(8, 16);
+
+        assert_eq!(scan_overruns(&mut scanner, b"\x1b]0;abc"), Vec::new());
+        assert_eq!(
+            scan_overruns(&mut scanner, b"de\x07\x1b]0;far too long\x07"),
+            vec![(7, 19, 20, false)],
         );
     }
 
@@ -802,7 +945,7 @@ mod tests {
 
         assert_eq!(
             scan_overruns(&mut scanner, &seq),
-            vec![(4, 4 + payload, 5 + payload)],
+            vec![(4, 4 + payload, 5 + payload, false)],
             "the escape closes the sequence and the text after it stays",
         );
     }
@@ -927,19 +1070,24 @@ mod tests {
         hits
     }
 
-    /// The OSC notifications one scan of `bytes` completes, as `(code, payload)`.
     /// Each cut this call reports, as `(interior start, interior end, sequence
-    /// end)`.
-    fn scan_overruns(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(usize, usize, usize)> {
+    /// end, reset)`.
+    fn scan_overruns(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(usize, usize, usize, bool)> {
         let mut out = Vec::new();
         scanner.scan(bytes, &mut |event| {
-            if let EscEvent::OscOverrun { interior, end } = event {
-                out.push((interior.start, interior.end, end));
+            if let EscEvent::OscOverrun {
+                interior,
+                end,
+                reset,
+            } = event
+            {
+                out.push((interior.start, interior.end, end, reset));
             }
         });
         out
     }
 
+    /// The OSC notifications one scan of `bytes` completes, as `(code, payload)`.
     fn scan_osc(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
         let mut out = Vec::new();
         scanner.scan(bytes, &mut |event| {
