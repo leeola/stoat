@@ -16,7 +16,83 @@
 
 use crate::highlight::{QueryCursorHandle, RopeTextProvider};
 use stoat_text::{Point, Rope};
-use tree_sitter::{Node, Query, StreamingIterator};
+use tree_sitter::{CaptureQuantifier, Language as TsLanguage, Node, Query, StreamingIterator};
+
+/// A language's indent query, split by where a new line's indent starts walking
+/// the tree.
+///
+/// The decision reads regions whose `@indent` node opens on the cursor's row and
+/// holds the cursor. A walk from the root visits every node around that row, and
+/// a pattern such as `(_ "{" "}" @end) @indent` starts at the `{` of each
+/// enclosing list and walks the list's children up to its `}`. Inside a long
+/// list, that costs a keypress far more than the row it asks about.
+///
+/// A pattern that captures `@indent` on its own outermost node keeps its whole
+/// match inside that node, so it walks from the highest node that starts on the
+/// row. Every other pattern walks from the root. Markdown's
+/// `(list (list_item) @indent)` and rust's `((where_clause) _ @end)` sequence are
+/// two of them, because their matches reach above or beside the captured node.
+///
+/// See also:
+/// - [`newline_indent`], which reads both parts.
+pub struct IndentQueries {
+    /// Patterns that walk from the highest node starting on the cursor's row.
+    from_row: Option<Query>,
+    /// Patterns that walk from the root.
+    from_root: Option<Query>,
+}
+
+impl IndentQueries {
+    /// Splits `query`, compiled from `src`, between the row's node and the root.
+    ///
+    /// A query that captures `@start` or `@outdent` walks whole from the root. A
+    /// `@start` capture moves a region's start off its node, and an `@outdent`
+    /// truncates regions that the row's node does not hold. Markdown's
+    /// `@start.list_item` is a capture of another name and changes nothing here.
+    ///
+    /// A part that fails to compile is left out, on the best-effort contract of
+    /// the query it came from.
+    pub(crate) fn split(grammar: &TsLanguage, query: &Query, src: &str) -> IndentQueries {
+        let Some(indent_ix) = query.capture_index_for_name("indent") else {
+            return IndentQueries {
+                from_row: None,
+                from_root: None,
+            };
+        };
+        if query.capture_index_for_name("start").is_some()
+            || query.capture_index_for_name("outdent").is_some()
+        {
+            return IndentQueries {
+                from_row: None,
+                from_root: compile(grammar, src),
+            };
+        }
+
+        let mut from_row = String::new();
+        let mut from_root = String::new();
+        for pattern in 0..query.pattern_count() {
+            // A match with no `@indent` capture has no start, so it forms no
+            // region for either part to find.
+            if query.capture_quantifiers(pattern)[indent_ix as usize] == CaptureQuantifier::Zero {
+                continue;
+            }
+            let text =
+                &src[query.start_byte_for_pattern(pattern)..query.end_byte_for_pattern(pattern)];
+            let part = if indent_on_outer_node(text) {
+                &mut from_row
+            } else {
+                &mut from_root
+            };
+            part.push_str(text);
+            part.push('\n');
+        }
+
+        IndentQueries {
+            from_row: compile(grammar, &from_row),
+            from_root: compile(grammar, &from_root),
+        }
+    }
+}
 
 /// One indent region resolved from the query, in byte offsets plus the rows its
 /// endpoints land on.
@@ -38,15 +114,52 @@ struct IndentRange {
 /// A region opening later on the row does not count. Its delimiter goes down
 /// with the new line rather than staying above it, so the line it lands on is
 /// still outside the region and belongs at the enclosing level.
+///
+/// A call costs the row's highest node rather than the nodes around it, apart
+/// from the patterns [`IndentQueries`] keeps on the root. A row that holds the
+/// whole document, such as a JSON array written on one line, still costs the
+/// whole document.
 pub fn newline_indent(
-    query: &Query,
+    queries: &IndentQueries,
     root: Node<'_>,
     rope: &Rope,
     cursor_offset: usize,
     indent_unit: &str,
 ) -> String {
-    let ranges = collect_indent_ranges(query, root, rope, newline_window(rope, cursor_offset));
+    let window = newline_window(rope, cursor_offset);
+    let mut ranges = Vec::new();
+    if let (Some(query), Some(anchor)) = (
+        &queries.from_row,
+        row_anchor(root, window.start, cursor_offset),
+    ) {
+        ranges.extend(collect_indent_ranges(query, anchor, rope, window.clone()));
+    }
+    if let Some(query) = &queries.from_root {
+        ranges.extend(collect_indent_ranges(query, root, rope, window));
+    }
     newline_indent_from(&ranges, rope, cursor_offset, indent_unit)
+}
+
+/// The highest node holding `cursor_offset` that starts at or after
+/// `row_start`, or `None` when no node holding it starts there.
+///
+/// A region that answers [`newline_indent`] opens on the row before the cursor
+/// and ends past it, so its `@indent` node holds the cursor's leaf and starts at
+/// or after the row start. Every node between that leaf and the region's node
+/// starts no earlier, so the node this returns holds the region's node too.
+///
+/// With no such node, no region from the row's patterns answers. That is the
+/// cursor between two elements of a list that opened on an earlier row, where
+/// the smallest node holding the cursor is the list itself.
+fn row_anchor(root: Node<'_>, row_start: usize, cursor_offset: usize) -> Option<Node<'_>> {
+    let leaf = root.descendant_for_byte_range(cursor_offset, cursor_offset)?;
+    let mut node = root;
+    while node.start_byte() < row_start {
+        node = node
+            .child_with_descendant(leaf)
+            .filter(|child| *child != node)?;
+    }
+    Some(node)
 }
 
 /// Bytes the query has to visit for [`newline_indent`] to answer.
@@ -288,11 +401,40 @@ fn collect_indent_ranges(
     ranges
 }
 
+/// Whether a pattern's text puts its only `@indent` capture on its outermost
+/// node.
+///
+/// The text has to be one node pattern, `(name ...)`, closed right before the
+/// capture. A grouping, an alternation, a quantifier, or a second `@indent`
+/// fails the test. Such a pattern walks from the root, which costs time and
+/// never loses a match that reaches outside the captured node.
+fn indent_on_outer_node(text: &str) -> bool {
+    let Some(node) = text.trim_end().strip_suffix("@indent") else {
+        return false;
+    };
+    let node = node.trim();
+    let opens_a_node = node
+        .strip_prefix('(')
+        .and_then(|inner| inner.trim_start().chars().next())
+        .is_some_and(|first| first.is_alphabetic() || first == '_');
+    opens_a_node && node.ends_with(')') && text.matches("@indent").count() == 1
+}
+
+/// The query `src` compiles to, or `None` when it holds no pattern or fails to
+/// compile.
+fn compile(grammar: &TsLanguage, src: &str) -> Option<Query> {
+    if src.trim().is_empty() {
+        return None;
+    }
+    Query::new(grammar, src).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_indent_ranges, newline_indent, newline_indent_from, newline_window,
+        collect_indent_ranges, indent_on_outer_node, newline_indent, newline_indent_from,
         suggested_indent, suggested_indent_from, suggested_indent_scanning, suggested_window,
+        IndentQueries,
     };
     use crate::{Language, LanguageRegistry};
     use std::sync::Arc;
@@ -323,7 +465,7 @@ mod tests {
         let tree = parse(&lang, src);
         let rope = Rope::from(src);
         newline_indent(
-            lang.indent_query().expect("indent query"),
+            lang.newline_indent_queries().expect("indent queries"),
             tree.root_node(),
             &rope,
             cursor,
@@ -416,36 +558,64 @@ mod tests {
         assert_eq!(suggested_unit("json", src, 3, "  ").as_deref(), Some("  "));
     }
 
-    /// A window that is too wide costs time and answers correctly, so only
-    /// comparing it against the whole file can say it is not too narrow.
+    /// A window that is too wide costs time and answers correctly, so only a
+    /// comparison against the whole file shows that it is not too narrow.
     ///
     /// What this catches is a window that misses the decision point, which is
-    /// the mistake available to a reader shortening one. It cannot speak to how
-    /// much further each window reaches. The regions a decision reads all span
-    /// the byte it asks about, so they come back however tight the window is,
-    /// and the one thing that would not is an `@outdent`, which no
+    /// the mistake available to a reader shortening one. It says nothing about
+    /// how much further each window reaches. The regions a decision reads all
+    /// span the byte it asks about, so they come back however tight the window
+    /// is, and the one thing that does not come back is an `@outdent`, which no
     /// `indents.scm` in the tree captures. The reach is what keeps the answer
     /// right if one ever does.
+    ///
+    /// A new line also starts most patterns at the row's highest node rather
+    /// than the root. The rows that go on past their opener put the cursor in a
+    /// node below the region it asks about. The `where` clause on its own row
+    /// and the markdown list item that runs onto a second row are the shapes
+    /// whose patterns reach outside that node, and the long json array is the
+    /// list that walking from the root pays for.
     #[test]
     fn every_window_answers_what_the_whole_file_answers() {
         let src = "fn a() {\n\tif b {\n\t\twhile c {\n\t\t\tx;\n\t\t}\n\t\tif d { y; }\n\t\tz;\n\t}\n\tw;\n}\n";
+        let json_array = format!(
+            "[\n{}\n]\n",
+            (0..1000)
+                .map(|i| format!("\t{i}"))
+                .collect::<Vec<_>>()
+                .join(",\n")
+        );
+        let newline_fixtures = [
+            ("rust", src.to_owned()),
+            ("rust", "fn a() { let x = 1;\n\tlet y = 2;\n}\n".to_owned()),
+            ("json", "[ 1, [ 2,\n\t3 ],\n\t4\n]\n".to_owned()),
+            ("rust", "fn f<T>()\nwhere\n    T: Clone,\n{\n}\n".to_owned()),
+            ("markdown", "- one\n- two\n  more\n- three\n".to_owned()),
+            ("json", json_array),
+        ];
+        for (name, text) in &newline_fixtures {
+            let lang = lang(name);
+            let tree = parse(&lang, text);
+            let rope = Rope::from(text.as_str());
+            let root = tree.root_node();
+            let query = lang.indent_query().expect("indent query");
+            let full = collect_indent_ranges(query, root, &rope, 0..text.len());
+            let queries = lang.newline_indent_queries().expect("indent queries");
+            for offset in 0..=text.len() {
+                assert_eq!(
+                    newline_indent(queries, root, &rope, offset, "\t"),
+                    newline_indent_from(&full, &rope, offset, "\t"),
+                    "{name} newline_indent disagrees at offset {offset}"
+                );
+            }
+        }
+
         let lang = lang("rust");
         let tree = parse(&lang, src);
         let rope = Rope::from(src);
         let query = lang.indent_query().expect("indent query");
         let root = tree.root_node();
         let whole = 0..src.len();
-
-        for offset in 0..=src.len() {
-            let windowed = collect_indent_ranges(query, root, &rope, newline_window(&rope, offset));
-            let full = collect_indent_ranges(query, root, &rope, whole.clone());
-            assert_eq!(
-                newline_indent_from(&windowed, &rope, offset, "\t"),
-                newline_indent_from(&full, &rope, offset, "\t"),
-                "newline_indent disagrees at offset {offset}"
-            );
-        }
-
         for row in 0..=rope.max_point().row {
             let windowed =
                 collect_indent_ranges(query, root, &rope, suggested_window(query, &rope, row));
@@ -541,14 +711,16 @@ mod tests {
         ];
 
         let lang = lang("rust");
-        let query = Query::new(
-            &lang.grammar,
-            "(_ \"{\" \"}\" @end) @indent\n(line_comment) @outdent\n",
-        )
-        .expect("the synthetic query builds");
+        let source = "(_ \"{\" \"}\" @end) @indent\n(line_comment) @outdent\n";
+        let query = Query::new(&lang.grammar, source).expect("the synthetic query builds");
         assert!(
             query.capture_index_for_name("outdent").is_some(),
             "the fixtures only reach the branch if the query carries an outdent",
+        );
+        let queries = IndentQueries::split(&lang.grammar, &query, source);
+        assert!(
+            queries.from_row.is_none(),
+            "an outdent keeps every pattern on the root"
         );
 
         for src in outdent_fixtures {
@@ -570,16 +742,65 @@ mod tests {
                 );
             }
 
+            let full = collect_indent_ranges(&query, root, &rope, whole.clone());
             for offset in 0..=src.len() {
-                let windowed =
-                    collect_indent_ranges(&query, root, &rope, newline_window(&rope, offset));
-                let full = collect_indent_ranges(&query, root, &rope, whole.clone());
                 assert_eq!(
-                    newline_indent_from(&windowed, &rope, offset, "\t"),
+                    newline_indent(&queries, root, &rope, offset, "\t"),
                     newline_indent_from(&full, &rope, offset, "\t"),
                     "newline_indent offset {offset} of {src:?}",
                 );
             }
         }
+    }
+
+    /// A pattern walks from the row's highest node only when its match stays
+    /// inside the node it captures, and from the root otherwise.
+    ///
+    /// Rust's bracket patterns and json's two capture their outermost node.
+    /// Rust's alternation holds the `where` sequence, which reaches a sibling,
+    /// and markdown's list pattern captures a child of its root. A shape the
+    /// test does not recognize stays on the root.
+    #[test]
+    fn the_split_sends_each_pattern_where_its_match_lies() {
+        let pattern_counts = |name: &str| {
+            let language = lang(name);
+            let queries = language.newline_indent_queries().expect("indent queries");
+            (
+                queries.from_row.as_ref().map(Query::pattern_count),
+                queries.from_root.as_ref().map(Query::pattern_count),
+            )
+        };
+        assert_eq!(
+            [
+                pattern_counts("rust"),
+                pattern_counts("json"),
+                pattern_counts("markdown")
+            ],
+            [(Some(4), Some(1)), (Some(2), None), (None, Some(1))],
+        );
+
+        let shapes = [
+            "(_ \"{\" \"}\" @end) @indent",
+            "(array\n  \"]\" @end) @indent",
+            "(list\n  (list_item) @indent)",
+            "[(a) (b)] @indent",
+            "((where_clause) _ @end) @indent",
+            "(a)* @indent",
+            "(a (#eq? @indent \"x\")) @indent",
+            "\"{\" @indent",
+        ];
+        assert_eq!(
+            shapes.map(indent_on_outer_node),
+            [true, true, false, false, false, false, false, false],
+        );
+
+        let rust = lang("rust");
+        let source = "(_ \"{\" @start \"}\" @end) @indent\n";
+        let query = Query::new(&rust.grammar, source).expect("the query builds");
+        let queries = IndentQueries::split(&rust.grammar, &query, source);
+        assert!(
+            queries.from_row.is_none() && queries.from_root.is_some(),
+            "a @start capture keeps the whole query on the root",
+        );
     }
 }

@@ -6672,13 +6672,14 @@ impl Stoat {
 
         let fresh_tree = buffers
             .language_for(buffer_id)
-            .and_then(|lang| lang.indent_query().is_some().then_some(lang))
+            .and_then(|lang| lang.newline_indent_queries().is_some().then_some(lang))
             .zip(buffers.syntax(buffer_id))
             .filter(|(_, syntax)| syntax.version == guard.version());
 
         match fresh_tree {
             Some((lang, syntax)) => language::newline_indent(
-                lang.indent_query().expect("indent query present"),
+                lang.newline_indent_queries()
+                    .expect("indent queries present"),
                 syntax.tree.root_node(),
                 &syntax.rope_snapshot,
                 cursor_offset,

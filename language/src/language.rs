@@ -1,4 +1,4 @@
-use crate::{grammar, highlight_map::HighlightMap};
+use crate::{grammar, highlight_map::HighlightMap, indent::IndentQueries};
 use std::{
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -84,6 +84,9 @@ pub struct Language {
 struct AuxQueries {
     brackets: LazyQuery,
     indents: LazyQuery,
+    /// The indents query split by where a new line's indent starts walking the
+    /// tree, built the first time a new line asks.
+    indent_split: OnceLock<Option<IndentQueries>>,
     textobjects: LazyQuery,
     /// The textobjects query split into one query per kind of object, each
     /// with the kind's name, built the first time a kind is asked for.
@@ -137,6 +140,24 @@ impl Language {
     /// markers for grammar-driven auto-indentation. Compiled on the first call.
     pub fn indent_query(&self) -> Option<&Query> {
         self.aux.indents.get(&self.grammar)
+    }
+
+    /// [`Self::indent_query`] split by where a new line's indent starts walking
+    /// the tree, which [`crate::newline_indent`] reads. Built on the first call.
+    ///
+    /// `None` for grammars that ship no `indents.scm`.
+    pub fn newline_indent_queries(&self) -> Option<&IndentQueries> {
+        self.aux
+            .indent_split
+            .get_or_init(|| {
+                let query = self.indent_query()?;
+                Some(IndentQueries::split(
+                    &self.grammar,
+                    query,
+                    self.aux.indents.src?,
+                ))
+            })
+            .as_ref()
     }
 
     /// Textobjects query loaded from `textobjects.scm`. Captures
@@ -482,6 +503,7 @@ fn make_language_with_injections(
         aux: AuxQueries {
             brackets: LazyQuery::new(brackets),
             indents: LazyQuery::new(indents),
+            indent_split: OnceLock::new(),
             textobjects: LazyQuery::new(textobjects),
             textobject_kinds: OnceLock::new(),
             outline: LazyQuery::new(outline),
