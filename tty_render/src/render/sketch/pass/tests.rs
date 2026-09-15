@@ -222,11 +222,20 @@ fn a_filled_box_puts_its_corners_in_the_shared_points() {
     )];
     let (points, geometry) = marks(&list);
 
-    let (offset, _) = geometry[0].fill.expect("a filled box carries a quad");
+    let (offset, _, _) = geometry[0].fill.expect("a filled box carries a quad");
     assert_eq!(
         points.len() - offset as usize,
         4,
         "the quad is four points at the end of the arena",
+    );
+
+    let fill = instances(&list, &[1.0])
+        .into_iter()
+        .find(|instance| instance.kind == KIND_FILL)
+        .expect("the fill draws");
+    assert_eq!(
+        fill.half_width, 0.0,
+        "a square box grows its quad by no radius"
     );
 }
 
@@ -772,6 +781,57 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
     assert_eq!(
         differs, None,
         "the ridden mark is the resting one moved down, first differing (x, y)",
+    );
+}
+
+/// A rounded box's fill leaves its corners clear, so no opaque square pokes out
+/// past the arc its outline strokes, and it still reaches its straight edges.
+#[test]
+fn a_rounded_fill_leaves_its_corners_clear() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("sketch rounded fill test: no wgpu adapter, skipping");
+        return;
+    };
+    let filled = |id: u32, x: i16, radius: u8| {
+        let mut mark = sketch(
+            id,
+            SketchShape::Rect {
+                bounds: boxed(x, 8, 64, 64),
+                radius,
+                fill: Some(SketchFill {
+                    color: [255, 0, 0],
+                    alpha: 255,
+                    style: SketchFillStyle::Solid,
+                }),
+            },
+        );
+        // No nudge and an invisible stroke, so every red texel is fill.
+        mark.command.style.roughness = 0;
+        mark.command.style.alpha = 0;
+        mark
+    };
+    // Four cells square is 32 by 64 pixels at the test metrics, so 32
+    // sixteenths of radius is half the shorter side, the most the clamp admits.
+    // The square box spans x 8 to 40 and the rounded one x 64 to 96, both y 8
+    // to 72.
+    let list = [filled(1, 16, 0), filled(2, 128, 32)];
+    let red = render_red(&device, &queue, &list, &[1.0, 1.0], &[]).expect("readback");
+    let at = |x: usize, y: usize| red[y * TARGET as usize + x];
+
+    assert_eq!(
+        (at(24, 40), at(80, 40)),
+        (255, 255),
+        "both fill their middles"
+    );
+    assert_eq!(
+        (at(9, 9), at(65, 9)),
+        (255, 0),
+        "the square box fills its corner and the rounded one leaves it clear",
+    );
+    assert_eq!(
+        at(80, 9),
+        255,
+        "the rounded one still fills the straight run of its top edge",
     );
 }
 

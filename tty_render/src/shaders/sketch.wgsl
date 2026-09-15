@@ -75,9 +75,11 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) color: vec4<f32>,
     @location(1) @interpolate(flat) seq: u32,
+    // Half a stroke's width, or the corner radius a fill grows its inset quad
+    // back out by.
     @location(2) @interpolate(flat) half_width: f32,
     // This mark's run of spans. A fill carries a span_count of zero and names
-    // the first of its four corners in the point buffer with span_first.
+    // the first of its four inset corners in the point buffer with span_first.
     @location(3) @interpolate(flat) span_first: u32,
     @location(4) @interpolate(flat) span_count: u32,
     @location(5) @interpolate(flat) kind: u32,
@@ -149,13 +151,24 @@ fn capsule_sdf(q: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     return distance(q, a + span * t) - r;
 }
 
-// Signed distance from `q` to the convex quad `a`,`b`,`c`,`d`, wound in order.
-// Each edge's outward half-plane distance is taken, and the largest of the four
-// is the distance to the shape: negative inside every edge, positive outside
-// any one of them.
-fn quad_sdf(q: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, d: vec2<f32>) -> f32 {
+// Signed distance from `q` to the convex quad `a`,`b`,`c`,`d`, wound in order
+// and grown by `r`, which rounds its corners with that radius.
+//
+// The quad is a fill's inset body, so the rounded shape reaches `r` past it,
+// which is what subtracting `r` states. The distance to the nearest edge
+// segment is exact outside a corner, where the largest half-plane distance
+// falls short, and the half-plane test decides the sign.
+fn rounded_quad_sdf(
+    q: vec2<f32>,
+    a: vec2<f32>,
+    b: vec2<f32>,
+    c: vec2<f32>,
+    d: vec2<f32>,
+    r: f32,
+) -> f32 {
     var corners = array<vec2<f32>, 4>(a, b, c, d);
-    var worst = -1.0e9;
+    var inside = -1.0e9;
+    var nearest = 1.0e9;
     for (var i = 0u; i < 4u; i = i + 1u) {
         let a0 = corners[i];
         let a1 = corners[(i + 1u) % 4u];
@@ -164,9 +177,11 @@ fn quad_sdf(q: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, d: vec2<f32>
         // The outward normal of a clockwise-wound quad in screen space, where y
         // grows downward.
         let normal = vec2<f32>(edge.y, -edge.x) / len;
-        worst = max(worst, dot(q - a0, normal));
+        inside = max(inside, dot(q - a0, normal));
+        let t = clamp(dot(q - a0, edge) / max(dot(edge, edge), 0.0001), 0.0, 1.0);
+        nearest = min(nearest, distance(q, a0 + edge * t));
     }
-    return worst;
+    return select(nearest, -nearest, inside <= 0.0) - r;
 }
 
 @fragment
@@ -232,12 +247,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     } else {
         let base = in.span_first;
-        sdf = quad_sdf(
+        sdf = rounded_quad_sdf(
             at,
             points[base],
             points[base + 1u],
             points[base + 2u],
-            points[base + 3u]
+            points[base + 3u],
+            in.half_width
         );
     }
 

@@ -405,7 +405,10 @@ fn a_declared_box_lands_where_the_metrics_put_it() {
 
     assert_eq!(
         geometry.fill,
-        Some([[10.0, 20.0], [30.0, 20.0], [30.0, 60.0], [10.0, 60.0]]),
+        Some(Fill {
+            corners: [[10.0, 20.0], [30.0, 20.0], [30.0, 60.0], [10.0, 60.0]],
+            radius: 0.0,
+        }),
         "one cell across is a cell width, one cell down is a cell height",
     );
 }
@@ -913,6 +916,7 @@ fn a_fill_quad_is_nudged_and_stays_convex() {
         geometry(&command, metrics(), &nothing_resolves)
             .fill
             .expect("a filled box carries a quad")
+            .corners
     };
     let filled = |w: u16, h: u16| seeded(w, h, 7);
 
@@ -949,6 +953,57 @@ fn a_fill_quad_is_nudged_and_stays_convex() {
             );
         }
     }
+}
+
+/// A rounded box's fill rounds with it, or its opaque corners paint past the
+/// arc the outline strokes.
+///
+/// The shader grows the inset quad back out by the radius, so the inset has to
+/// sit exactly that far inside every edge of the nudged box.
+#[test]
+fn a_rounded_boxs_fill_carries_its_radius_and_insets_by_it() {
+    let shape = SketchShape::Rect {
+        bounds: SketchBounds {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 64,
+        },
+        radius: 16,
+        fill: Some(SketchFill {
+            color: [0, 0, 255],
+            alpha: 255,
+            style: SketchFillStyle::Solid,
+        }),
+    };
+    let fill = geometry(&command(shape, 64), metrics(), &nothing_resolves)
+        .fill
+        .expect("a filled box carries a fill");
+    assert_eq!(
+        fill.radius,
+        metrics().width,
+        "a cell of radius is a cell width, on a box too large for either cap to bite",
+    );
+
+    let inset = inset_quad(fill.corners, fill.radius);
+    for at in 0..4 {
+        let (a, b) = (fill.corners[at], fill.corners[(at + 1) % 4]);
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let inward = [-(b[1] - a[1]) / length, (b[0] - a[0]) / length];
+        for point in [inset[at], inset[(at + 1) % 4]] {
+            let depth = (point[0] - a[0]) * inward[0] + (point[1] - a[1]) * inward[1];
+            assert!(
+                (depth - fill.radius).abs() < 0.01,
+                "{point:?} sits {depth} inside edge {at}, not {}",
+                fill.radius,
+            );
+        }
+    }
+    assert_eq!(
+        inset_quad(fill.corners, 0.0),
+        fill.corners,
+        "no radius, no inset"
+    );
 }
 
 /// The ceiling widens a gap only when the declared one asks for more scanlines

@@ -38,7 +38,7 @@ const INITIAL_POINTS: usize = 4096;
 /// The instance kind that strokes a revealed span of a path.
 const KIND_STROKE: u32 = 0;
 
-/// The instance kind that fills a convex quad.
+/// The instance kind that fills a convex quad with rounded corners.
 const KIND_FILL: u32 = 1;
 
 /// The per-mark instance data.
@@ -66,6 +66,10 @@ struct SketchInstance {
     bounds: [f32; 4],
     /// Straight color and alpha, the alpha already carrying a fill's fade.
     color: [f32; 4],
+    /// Half a stroke's width in pixels, or a fill's corner radius.
+    ///
+    /// A fill's point buffer holds its inset quad, and the shader grows that
+    /// quad back out by this radius to round its corners.
     half_width: f32,
     _pad0: f32,
     /// Pixels this mark is shifted down by, for one riding a gliding pane.
@@ -73,9 +77,9 @@ struct SketchInstance {
     _pad1: f32,
     /// The first of this mark's entries in the span buffer.
     ///
-    /// A fill has no span. It names the first of its four corners in the point
-    /// buffer here instead, which is what its zero [`Self::span_count`] tells
-    /// the fragment stage to read.
+    /// A fill has no span. It names the first of its four inset corners in the
+    /// point buffer here instead, which is what its zero [`Self::span_count`]
+    /// tells the fragment stage to read.
     span_first: u32,
     seq: u32,
     /// Revealed strokes this mark carries, or 0 for a fill.
@@ -146,9 +150,9 @@ struct StrokeSpan {
 /// One sketch's generated geometry, as the frame reads it.
 struct MarkGeometry {
     strokes: Vec<StrokeSpan>,
-    /// The four corners of a filled box, already in the point buffer, and the
-    /// span they occupy.
-    fill: Option<(u32, [f32; 4])>,
+    /// Where a filled box's inset quad starts in the point buffer, the box's
+    /// outer bounds, and the corner radius that grows the quad back out.
+    fill: Option<(u32, [f32; 4], f32)>,
 }
 
 /// The instanced hand-drawn mark pipeline and its per-frame buffers.
@@ -557,7 +561,7 @@ fn build_instances(
             built.push(instance);
         };
 
-        if let Some((offset, quad_bounds)) = mark.fill {
+        if let Some((offset, quad_bounds, radius)) = mark.fill {
             let (color, alpha) = fill_style(&sketch.command.shape);
             // The fill eases in over the back half of the reveal, so the box
             // fills behind the stroke rather than ahead of it.
@@ -565,7 +569,7 @@ fn build_instances(
             push(SketchInstance {
                 bounds: quad_bounds,
                 color: rgba(color, f32::from(alpha) / 255.0 * faded),
-                half_width: 0.0,
+                half_width: radius,
                 _pad0: 0.0,
                 dy,
                 _pad1: 0.0,
@@ -717,10 +721,12 @@ fn generate_marks(
             });
         }
 
-        let fill = generated.fill.map(|corners| {
+        let fill = generated.fill.map(|fill| {
             let at = points.len() as u32;
-            points.extend_from_slice(&corners);
-            (at, points_bounds(&corners))
+            points.extend_from_slice(&rough::inset_quad(fill.corners, fill.radius));
+            // The rounded shape reaches back out to the outer corners, so they
+            // bound it rather than the inset quad the buffer holds.
+            (at, points_bounds(&fill.corners), fill.radius)
         });
 
         out.push(MarkGeometry { strokes, fill });

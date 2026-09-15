@@ -21,7 +21,7 @@
 //! the order that reads most naturally.
 
 use crate::render::CellMetrics;
-use std::f64::consts::PI;
+use std::{array, f64::consts::PI};
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEnd, SketchFill, SketchFillStyle, SketchShape, SketchSide,
 };
@@ -113,9 +113,20 @@ pub(crate) struct Geometry {
     /// Base and overlay strokes, adjacent in pairs, so a reveal that advances
     /// stroke `i` advances the overlay that doubles it in the same step.
     pub(crate) strokes: Vec<Stroke>,
-    /// The quadrilateral a filled box paints under its stroke, or `None` for an
-    /// open shape.
-    pub(crate) fill: Option<[[f32; 2]; 4]>,
+    /// What a filled box paints under its stroke, or `None` for an open shape.
+    pub(crate) fill: Option<Fill>,
+}
+
+/// A filled box's solid paint, in physical pixels.
+///
+/// A rounded box strokes rounded corners, so a fill with square ones paints
+/// past the outline. The shader rounds the fill: it shrinks `corners` with
+/// [`inset_quad`] and grows the result back out by `radius`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Fill {
+    /// The box's outer corners, each nudged like the stroke around it.
+    pub(crate) corners: [[f32; 2]; 4],
+    pub(crate) radius: f32,
 }
 
 /// One continuous pen-down path, in physical pixels.
@@ -352,6 +363,10 @@ where
         } => {
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
+            let radius_px = (f64::from(radius) / CELL_FRACTION * cw)
+                .min(w / 2.0)
+                .min(h / 2.0)
+                .max(0.0);
 
             let mut strokes = hatch_strokes(
                 &[[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
@@ -361,15 +376,7 @@ where
                 &mut options,
                 &mut random,
             );
-            let ops = rect(
-                x,
-                y,
-                w,
-                h,
-                f64::from(radius) / CELL_FRACTION * cw,
-                &mut options,
-                &mut random,
-            );
+            let ops = rect(x, y, w, h, radius_px, &mut options, &mut random);
             strokes.extend(flatten(&ops, scale));
 
             Geometry {
@@ -380,8 +387,13 @@ where
                 fill: fill
                     .filter(|fill| fill.style == SketchFillStyle::Solid)
                     .map(|_| {
-                        jittered_quad(x, y, w, h, &options, &mut random)
-                            .map(|corner| corner.map(|edge| edge * metrics.scale_factor))
+                        let Fill { corners, radius } =
+                            jittered_quad(x, y, w, h, radius_px, &options, &mut random);
+                        Fill {
+                            corners: corners
+                                .map(|corner| corner.map(|edge| edge * metrics.scale_factor)),
+                            radius: radius * metrics.scale_factor,
+                        }
                     }),
             }
         },
@@ -402,7 +414,8 @@ where
     }
 }
 
-/// The four corners of a filled box, each nudged like the stroke around it.
+/// The four corners of a filled box, each nudged like the stroke around it,
+/// and the radius the fill's corners round by.
 ///
 /// A crisp rectangle behind a wobbling outline reads machine-cut, which is the
 /// one place a fill gives the drawing away.
@@ -410,14 +423,20 @@ where
 /// The nudge is capped at a quarter of the shorter side, because the shader
 /// resolves the fill as a convex quad and a corner that crossed its neighbour
 /// turns the shape inside out.
+///
+/// The radius is capped below the outline's by that nudge. The nudge moves
+/// each corner by up to its reach, so two opposite corners come as much as
+/// twice the reach closer. An inset deeper than half the gap left between
+/// them turns the inset quad inside out.
 fn jittered_quad(
     x: f64,
     y: f64,
     w: f64,
     h: f64,
+    radius: f64,
     options: &Options,
     random: &mut Random,
-) -> [[f32; 2]; 4] {
+) -> Fill {
     let reach = options
         .max_randomness_offset
         .min(w.abs().min(h.abs()) / 4.0);
@@ -428,12 +447,50 @@ fn jittered_quad(
         ]
     };
 
-    [
-        corner(x, y),
-        corner(x + w, y),
-        corner(x + w, y + h),
-        corner(x, y + h),
-    ]
+    Fill {
+        corners: [
+            corner(x, y),
+            corner(x + w, y),
+            corner(x + w, y + h),
+            corner(x, y + h),
+        ],
+        radius: radius.min(w.abs().min(h.abs()) / 2.0 - reach).max(0.0) as f32,
+    }
+}
+
+/// Shrink a convex quad by moving each of its edges `radius` inward.
+///
+/// A fill's rounded shape is this quad grown back out by `radius`, which is
+/// the shape the shader resolves. The corners must wind clockwise in screen
+/// space, as [`jittered_quad`] lays them, so each edge's inward side lies a
+/// quarter turn clockwise from its direction.
+pub(crate) fn inset_quad(corners: [[f32; 2]; 4], radius: f32) -> [[f32; 2]; 4] {
+    if radius <= 0.0 {
+        return corners;
+    }
+
+    let shifted = |from: usize| {
+        let (a, b) = (corners[from], corners[(from + 1) % 4]);
+        let direction = [b[0] - a[0], b[1] - a[1]];
+        let shift = radius / direction[0].hypot(direction[1]).max(f32::EPSILON);
+        let start = [a[0] - direction[1] * shift, a[1] + direction[0] * shift];
+        (start, direction)
+    };
+
+    array::from_fn(|at| {
+        let (before, into) = shifted((at + 3) % 4);
+        let (after, out_of) = shifted(at);
+        let cross = into[0] * out_of[1] - into[1] * out_of[0];
+        // Adjacent edges of a convex quad are never parallel, so only a
+        // degenerate box lands here, and its shifted corner is as good as any.
+        if cross.abs() <= f32::EPSILON {
+            return after;
+        }
+
+        let gap = [after[0] - before[0], after[1] - before[1]];
+        let along = (gap[0] * out_of[1] - gap[1] * out_of[0]) / cross;
+        [before[0] + into[0] * along, before[1] + into[1] * along]
+    })
 }
 
 /// Turn a mark's declared box into a pixel rectangle.

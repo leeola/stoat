@@ -619,6 +619,7 @@ impl Renderer {
             grid.panels(),
             grid.sketches(),
             &self.riding,
+            self.metrics.width,
             &mut self.occluders,
         );
 

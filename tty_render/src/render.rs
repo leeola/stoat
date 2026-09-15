@@ -619,10 +619,14 @@ pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
 /// drawn by hand, so both go in the list. An open sketch does not: its stroke
 /// leaves the cells inside it showing, which is the point of drawing a circle
 /// around code rather than a box over it.
+///
+/// `cell_width` is the live cell width in physical pixels, which a sketch box's
+/// corner radius is stated against.
 pub(crate) fn build_occluders_into(
     panels: &[Panel],
     sketches: &[Sketch],
     riding: &[u32],
+    cell_width: f32,
     out: &mut Vec<Occluder>,
 ) {
     out.clear();
@@ -636,7 +640,7 @@ pub(crate) fn build_occluders_into(
         sketches
             .iter()
             .filter(|sketch| !sketch_rides(sketch, riding))
-            .filter_map(sketch_occluder),
+            .filter_map(|sketch| sketch_occluder(sketch, cell_width)),
     );
 }
 
@@ -656,14 +660,17 @@ fn sketch_rides(sketch: &Sketch, riding: &[u32]) -> bool {
 /// them showing.
 ///
 /// The box is rounded outward to whole cells, because an occluder is stated in
-/// cells and a mark that covers part of one covers what that cell draws. That
-/// is also why no cell size is needed here: a sketch already states its box in
-/// cell fractions.
-fn sketch_occluder(sketch: &Sketch) -> Option<Occluder> {
+/// cells and a mark that covers part of one covers what that cell draws.
+///
+/// The corners round by the radius the box strokes with, so a lower mark under
+/// a corner is not notched square. A box off the cell grid therefore occludes a
+/// slightly larger rounded rect than it draws, the same over-cover a square
+/// occluder has.
+fn sketch_occluder(sketch: &Sketch, cell_width: f32) -> Option<Occluder> {
     let SketchShape::Rect {
         bounds,
+        radius,
         fill: Some(_),
-        ..
     } = sketch.command.shape
     else {
         return None;
@@ -679,7 +686,7 @@ fn sketch_occluder(sketch: &Sketch) -> Option<Occluder> {
         cell: [left, top],
         size: [right.ceil() - left, bottom.ceil() - top],
         seq: sketch.seq,
-        corner_radius: 0.0,
+        corner_radius: f32::from(radius) / SKETCH_CELL_FRACTION * cell_width,
         inset_x: 0.0,
         _pad: 0,
     })
@@ -1203,6 +1210,15 @@ mod tests {
         }
     }
 
+    fn metrics() -> CellMetrics {
+        CellMetrics {
+            font_size: 16.0,
+            width: 8.0,
+            height: 16.0,
+            scale_factor: 1.0,
+        }
+    }
+
     /// Two pools of a frame read one list, so what separates them is how much of
     /// it each reads. Putting the above-pools panels first is what makes the
     /// shorter read a prefix of the longer.
@@ -1267,7 +1283,7 @@ mod tests {
         pool_occluders_into(&panels, &[7], &mut occluders);
         let pool = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
-        build_occluders_into(&panels, &[], &[7], &mut occluders);
+        build_occluders_into(&panels, &[], &[7], metrics().width, &mut occluders);
         let base = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
         assert_eq!(
@@ -1297,17 +1313,35 @@ mod tests {
     #[test]
     fn an_occluder_list_compares_equal_only_while_the_panels_hold() {
         let mut held = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &[], &mut held);
+        build_occluders_into(
+            &[panel(1, false), panel(2, true)],
+            &[],
+            &[],
+            metrics().width,
+            &mut held,
+        );
 
         let mut again = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &[], &mut again);
+        build_occluders_into(
+            &[panel(1, false), panel(2, true)],
+            &[],
+            &[],
+            metrics().width,
+            &mut again,
+        );
         assert!(
             !upload_needed(&again, &held),
             "an unchanged frame's panels build a list equal to the one held"
         );
 
         let mut moved = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &[], &mut moved);
+        build_occluders_into(
+            &[panel(1, false), panel(2, true)],
+            &[],
+            &[],
+            metrics().width,
+            &mut moved,
+        );
         moved[1].cell[0] += 1.0;
         assert!(
             upload_needed(&moved, &held),
@@ -1319,6 +1353,7 @@ mod tests {
             &[panel(1, false), panel(9, true)],
             &[],
             &[],
+            metrics().width,
             &mut resequenced,
         );
         assert!(
@@ -1327,7 +1362,7 @@ mod tests {
         );
 
         let mut fewer = Vec::new();
-        build_occluders_into(&[panel(1, false)], &[], &[], &mut fewer);
+        build_occluders_into(&[panel(1, false)], &[], &[], metrics().width, &mut fewer);
         assert!(
             upload_needed(&fewer, &held),
             "a closed box leaves a shorter list"
@@ -1386,12 +1421,24 @@ mod tests {
     #[test]
     fn a_filled_mark_occludes_and_an_open_one_does_not() {
         let mut filled = Vec::new();
-        build_occluders_into(&[], &[sketch_box(3, solid(), None)], &[], &mut filled);
+        build_occluders_into(
+            &[],
+            &[sketch_box(3, solid(), None)],
+            &[],
+            metrics().width,
+            &mut filled,
+        );
         assert_eq!(filled.len(), 1, "a filled box joins the list");
         assert_eq!(filled[0].seq, 3, "carrying the seq that orders it");
 
         let mut open = Vec::new();
-        build_occluders_into(&[], &[sketch_box(3, None, None)], &[], &mut open);
+        build_occluders_into(
+            &[],
+            &[sketch_box(3, None, None)],
+            &[],
+            metrics().width,
+            &mut open,
+        );
         assert_eq!(open, Vec::new(), "an open one hides nothing");
     }
 
@@ -1401,13 +1448,38 @@ mod tests {
     #[test]
     fn a_filled_mark_rounds_outward_to_whole_cells() {
         let mut occluders = Vec::new();
-        build_occluders_into(&[], &[sketch_box(1, solid(), None)], &[], &mut occluders);
+        build_occluders_into(
+            &[],
+            &[sketch_box(1, solid(), None)],
+            &[],
+            metrics().width,
+            &mut occluders,
+        );
 
         assert_eq!(occluders[0].cell, [0.0, 0.0], "half a cell in starts at 0");
         assert_eq!(
             occluders[0].size,
             [3.0, 3.0],
             "half through two and three quarters, rounded out, covers three",
+        );
+    }
+
+    /// A box that strokes rounded corners hides what it covers by the same
+    /// rounding. A square occluder notches a lower mark under each corner.
+    #[test]
+    fn a_filled_mark_occludes_with_its_corner_radius() {
+        let mut rounded = sketch_box(1, solid(), None);
+        if let SketchShape::Rect { radius, .. } = &mut rounded.command.shape {
+            *radius = 8;
+        }
+
+        let mut occluders = Vec::new();
+        build_occluders_into(&[], &[rounded], &[], metrics().width, &mut occluders);
+
+        assert_eq!(
+            occluders[0].corner_radius,
+            metrics().width / 2.0,
+            "half a cell of radius is half a cell width in pixels",
         );
     }
 
@@ -1421,6 +1493,7 @@ mod tests {
             &[],
             &[sketch_box(1, solid(), Some((7, 0.0)))],
             &[7],
+            metrics().width,
             &mut riding,
         );
         assert_eq!(riding, Vec::new(), "its host is gliding, so it is dropped");
@@ -1430,6 +1503,7 @@ mod tests {
             &[],
             &[sketch_box(1, solid(), Some((7, 0.0)))],
             &[],
+            metrics().width,
             &mut still,
         );
         assert_eq!(still.len(), 1, "a host that is not gliding keeps it");
