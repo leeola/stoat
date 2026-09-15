@@ -701,9 +701,11 @@ fn two_components_are_joined_by_an_s_curve() {
         .fold(0.0_f32, |acc, p| acc.max(p[1].abs()));
     assert!(reach > 1.0, "the curve leaves the chord, reached {reach}");
 
-    // Bottom leaves [4, 12] and Top arrives at [104, -4], each 16 px behind
-    // the other's side, so each control hooks out by 6.25 * sqrt(16) = 25 px.
-    // A cubic stays inside the hull of its four points, so the box those make
+    // Each end slides along its side toward the other box, and stops a fifth of
+    // the side short of the corner. Bottom therefore leaves [6.4, 12], and Top
+    // arrives at [101.6, -4]. Each lies 16 px behind the other's side, so each
+    // control hooks out by 6.25 * sqrt(16) = 25 px. A cubic stays inside the
+    // hull of its four points, so the box those make, from y -29 to y 37,
     // bounds the whole curve.
     let inside = curved
         .strokes
@@ -735,9 +737,10 @@ fn a_connector_reaches_along_its_side_not_along_its_chord() {
     // A ring, and a label one row down and well to the right of it.
     let lowest = connector_low([0.0, 0.0, 40.0, 20.0], [230.0, 20.0, 400.0, 40.0]);
 
-    // The label's centerline is 30 and a row is 20 px. The label lies 6 px
-    // along the ring's Bottom normal, so the control sits 3 px out and the pen
-    // stays level; 0.4 of the 206 px chord would put it 82 px down.
+    // The label's centerline is 30 and a row is 20 px. Its Left side is met at
+    // y 24, level with where the ring's Bottom leaves, so the label lies 0 px
+    // along that normal. The control sits on the start and the pen stays level.
+    // A reach of 0.4 of the 194 px chord puts the control 78 px down.
     assert!(
         lowest <= 40.0,
         "the pen stays within half a row of the label it points at, reached {lowest}",
@@ -752,10 +755,10 @@ fn a_target_behind_a_side_gets_a_short_hook() {
     // The same pair, with the label one row above instead of below.
     let lowest = connector_low([0.0, 40.0, 40.0, 60.0], [230.0, 0.0, 400.0, 20.0]);
 
-    // The ring's side is at 64 and the label lies 54 px behind it, so the hook
-    // reaches 6.25 * sqrt(54) = 46 px out and the far control pulls the curve
-    // back well inside that. A hook following the distance itself crosses a row
-    // and keeps going.
+    // The ring's side is at 64, and the label is met at y 16, 48 px behind it.
+    // The hook reaches 6.25 * sqrt(48) = 43 px out, and the far control pulls
+    // the curve back well inside that. A hook following the distance itself
+    // crosses a row and keeps going.
     assert!(
         lowest <= 84.0,
         "the hook leaves the side by under a row, reached {lowest}",
