@@ -14,7 +14,7 @@ use crate::{
     buffer::BufferId,
     display_map::{DisplayPoint, DisplaySnapshot, InlayKind},
     editor_state::ScrollGlide,
-    host::{LanguageServerFeature, LspHost, OffsetEncoding},
+    host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
     input_view::{InputView, SubmitTarget},
     location_picker::{location_haystack, LocationEntry, LocationPicker},
     lsp::stamp::DocumentStamp,
@@ -242,6 +242,7 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let fs = stoat.fs_host.clone();
+    let executor = stoat.executor.clone();
     let LspRequestSite {
         buffer_id,
         path: source_path,
@@ -276,16 +277,12 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
         });
         let responses = futures::future::join_all(requests).await;
 
-        let mut entries = Vec::new();
+        let mut answers = Vec::new();
         for (encoding, result) in responses {
             match result {
-                Ok(Some(locations)) => entries.extend(resolve_goto_targets(
-                    GotoDefinitionResponse::Array(locations),
-                    &source_path,
-                    &source_rope,
-                    encoding,
-                    &*fs,
-                )),
+                Ok(Some(locations)) => {
+                    answers.push((encoding, GotoDefinitionResponse::Array(locations)))
+                },
                 Ok(None) => {},
                 Err(err) => tracing::warn!(
                     target: "stoat::lsp",
@@ -294,7 +291,9 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
                 ),
             }
         }
-        dedup_locations(entries)
+        executor
+            .spawn_blocking(move || resolve_goto_targets(answers, &source_path, &source_rope, &*fs))
+            .await
     });
     stoat.pending_lsp_jump = Some(("references", task));
     UpdateEffect::None
@@ -369,6 +368,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     };
 
     let fs = stoat.fs_host.clone();
+    let executor = stoat.executor.clone();
     let LspRequestSite {
         buffer_id,
         path: source_path,
@@ -408,16 +408,10 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         });
         let responses = futures::future::join_all(requests).await;
 
-        let mut entries = Vec::new();
+        let mut answers = Vec::new();
         for (encoding, result) in responses {
             match result {
-                Ok(Some(response)) => entries.extend(resolve_goto_targets(
-                    response,
-                    &source_path,
-                    &source_rope,
-                    encoding,
-                    &*fs,
-                )),
+                Ok(Some(response)) => answers.push((encoding, response)),
                 Ok(None) => {},
                 Err(err) => tracing::warn!(
                     target: "stoat::lsp",
@@ -427,33 +421,99 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
                 ),
             }
         }
-        dedup_locations(entries)
+        executor
+            .spawn_blocking(move || resolve_goto_targets(answers, &source_path, &source_rope, &*fs))
+            .await
     });
     stoat.pending_lsp_jump = Some((kind.status_label(), task));
     UpdateEffect::None
 }
 
-/// Resolve every candidate in a `GotoDefinitionResponse` into a
-/// [`LocationEntry`]. A single-target response yields one entry (the
-/// caller jumps directly); a multi-target response yields several (the
-/// caller opens a picker). Candidates whose URI is not a `file:` path,
-/// or whose target file cannot be read, are dropped rather than
-/// aborting the whole batch, so one bad location does not sink the rest.
+/// Resolve every server's goto answer into [`LocationEntry`] values.
 ///
-/// Same-file targets reuse the supplied source rope. Cross-file targets
-/// read the destination through the supplied [`crate::host::FsHost`] so
-/// a closed buffer still resolves without round-tripping through
-/// `Stoat`. Each entry carries the byte offset after applying the
-/// host's negotiated [`OffsetEncoding`], the 1-based line and column,
-/// and the trimmed text of the target line for display.
+/// The entries keep the order of `answers` and of the candidates inside each
+/// one. One entry lets the caller jump directly, and several open a picker.
+/// The resolve drops a candidate whose URI is not a `file:` path, or whose
+/// file fails to read. The other candidates still resolve.
+///
+/// A goto request goes to every capable server, and two servers that index
+/// one crate often answer with the same target. Only the first candidate for
+/// each `(path, offset)` stays. The callers pass the answers in server
+/// priority order, so the higher-priority server's copy is the one kept. A
+/// redundant answer then does not open a picker over one target.
+///
+/// Each entry carries the byte offset under its server's [`OffsetEncoding`],
+/// the 1-based line and column, and the trimmed text of the target line.
+/// Targets in the source file reuse `source_rope`. The resolve reads each
+/// other file through `fs` and builds its rope once for all the candidates in
+/// it, so a file with no open buffer resolves too. The reads and the rope
+/// builds block, so both callers run this on the pool.
 fn resolve_goto_targets(
-    response: GotoDefinitionResponse,
+    answers: Vec<(OffsetEncoding, GotoDefinitionResponse)>,
     source_path: &Path,
     source_rope: &Rope,
-    encoding: OffsetEncoding,
-    fs: &dyn crate::host::FsHost,
+    fs: &dyn FsHost,
 ) -> Vec<LocationEntry> {
-    let candidates: Vec<(Uri, Position)> = match response {
+    let candidates = answers.into_iter().flat_map(|(encoding, response)| {
+        goto_candidates(response)
+            .into_iter()
+            .map(move |(uri, position)| (uri, position, encoding))
+    });
+    let mut by_path: HashMap<PathBuf, Vec<(usize, Position, OffsetEncoding)>> = HashMap::new();
+    for (index, (uri, position, encoding)) in candidates.enumerate() {
+        if let Some(path) = crate::lsp::util::lsp_uri_to_path(&uri) {
+            by_path
+                .entry(path)
+                .or_default()
+                .push((index, position, encoding));
+        }
+    }
+
+    let mut entries = Vec::new();
+    for (path, targets) in by_path {
+        let file_rope;
+        let rope = if path == source_path {
+            source_rope
+        } else {
+            match super::read_string_via_host(fs, &path) {
+                Ok(text) => file_rope = Rope::from(text.as_str()),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat::lsp",
+                        path = %path.display(),
+                        ?err,
+                        "goto target file unreadable",
+                    );
+                    continue;
+                },
+            }
+            &file_rope
+        };
+
+        let mut seen = HashSet::new();
+        for (index, position, encoding) in targets {
+            let offset = crate::lsp::util::lsp_pos_to_byte_offset(rope, position, encoding);
+            if !seen.insert(offset) {
+                continue;
+            }
+            let entry = LocationEntry {
+                path: path.clone(),
+                offset,
+                line: position.line + 1,
+                column: position.character + 1,
+                text: line_text(rope, position.line),
+            };
+            entries.push((index, entry));
+        }
+    }
+
+    entries.sort_unstable_by_key(|(index, _)| *index);
+    entries.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// The target URI and start position of each candidate in `response`.
+fn goto_candidates(response: GotoDefinitionResponse) -> Vec<(Uri, Position)> {
+    match response {
         GotoDefinitionResponse::Scalar(loc) => vec![(loc.uri, loc.range.start)],
         GotoDefinitionResponse::Array(locs) => locs
             .into_iter()
@@ -463,72 +523,7 @@ fn resolve_goto_targets(
             .into_iter()
             .map(|link| (link.target_uri, link.target_range.start))
             .collect(),
-    };
-
-    candidates
-        .into_iter()
-        .filter_map(|(uri, position)| {
-            resolve_one_target(uri, position, source_path, source_rope, encoding, fs)
-        })
-        .collect()
-}
-
-fn resolve_one_target(
-    uri: Uri,
-    position: Position,
-    source_path: &Path,
-    source_rope: &Rope,
-    encoding: OffsetEncoding,
-    fs: &dyn crate::host::FsHost,
-) -> Option<LocationEntry> {
-    let target_path = crate::lsp::util::lsp_uri_to_path(&uri)?;
-
-    let (offset, text) = if target_path == source_path {
-        (
-            crate::lsp::util::lsp_pos_to_byte_offset(source_rope, position, encoding),
-            line_text(source_rope, position.line),
-        )
-    } else {
-        let file_text = match super::read_string_via_host(fs, &target_path) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(
-                    target: "stoat::lsp",
-                    path = %target_path.display(),
-                    ?err,
-                    "goto target file unreadable",
-                );
-                return None;
-            },
-        };
-        let target_rope = Rope::from(file_text.as_str());
-        let offset = crate::lsp::util::lsp_pos_to_byte_offset(&target_rope, position, encoding);
-        (offset, line_text(&target_rope, position.line))
-    };
-
-    Some(LocationEntry {
-        path: target_path,
-        offset,
-        line: position.line + 1,
-        column: position.character + 1,
-        text,
-    })
-}
-
-/// Drop duplicate goto targets, keeping the first occurrence of each
-/// `(path, offset)` in order.
-///
-/// Fanning a goto request out to every capable server routinely surfaces the
-/// same definition twice (two servers indexing one crate answer identically).
-/// Deduplicating keeps a redundant answer from opening a multi-location picker
-/// over what is really one target. Order is preserved, so the highest-priority
-/// server's copy of a shared target is the one kept.
-fn dedup_locations(entries: Vec<LocationEntry>) -> Vec<LocationEntry> {
-    let mut seen = HashSet::new();
-    entries
-        .into_iter()
-        .filter(|entry| seen.insert((entry.path.clone(), entry.offset)))
-        .collect()
+    }
 }
 
 /// The trimmed text of `line` (0-based) in `rope`, for display in the
@@ -3195,6 +3190,82 @@ mod tests {
 
         assert!(h.stoat.location_picker.is_none());
         assert_eq!(cursor_offset(&mut h), 4);
+    }
+
+    /// The test counts reads before the pumps run, because the picker's preview
+    /// reads a closed file of its own.
+    #[test]
+    fn references_from_two_servers_read_a_closed_file_once_on_the_pool() {
+        use crate::host::FakeFsOp;
+        use lsp_types::{OneOf, ServerCapabilities};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary) = install_two_servers(
+            &mut h,
+            ServerCapabilities {
+                references_provider: Some(OneOf::Left(true)),
+                ..ServerCapabilities::default()
+            },
+        );
+        let root = seed(
+            &mut h,
+            &[
+                ("main.rs", "abc\ndef\nghi\n"),
+                ("lib.rs", "fn one() {}\nfn two() {}\nfn three() {}\n"),
+            ],
+        );
+        let (main_path, lib_path) = (root.join("main.rs"), root.join("lib.rs"));
+        open_buffer(&mut h, main_path.clone());
+        let (main, lib) = (main_path.to_str().unwrap(), lib_path.to_str().unwrap());
+        primary.set_references(
+            main,
+            0,
+            0,
+            &[(lib, 1, 3), (main, 2, 0), (lib, 0, 3), (lib, 2, 3)],
+        );
+        secondary.set_references(
+            main,
+            0,
+            0,
+            &[(lib, 2, 3), (main, 1, 0), (lib, 0, 3), (lib, 1, 0)],
+        );
+
+        let lib_reads = |h: &TestHarness| {
+            h.fake_fs()
+                .ops()
+                .iter()
+                .filter(|op| matches!(op, FakeFsOp::Read { path } if *path == lib_path))
+                .count()
+        };
+        let (reads, hops) = (lib_reads(&h), h.blocking_calls());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoReferences);
+        h.run_until_parked();
+        assert_eq!(
+            lib_reads(&h) - reads,
+            1,
+            "one read of lib.rs for six locations"
+        );
+        assert_eq!(h.blocking_calls() - hops, 1, "the resolve ran on the pool");
+
+        h.settle();
+        let picker = h.stoat.location_picker.as_ref().expect("picker open");
+        let targets: Vec<(&Path, usize)> = picker
+            .entries()
+            .iter()
+            .map(|entry| (entry.path.as_path(), entry.offset))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (lib_path.as_path(), 15),
+                (main_path.as_path(), 8),
+                (lib_path.as_path(), 3),
+                (lib_path.as_path(), 27),
+                (main_path.as_path(), 4),
+                (lib_path.as_path(), 12),
+            ],
+            "the primary's targets in its order, then the secondary's unseen ones"
+        );
     }
 
     #[test]
