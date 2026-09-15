@@ -5,16 +5,10 @@
 //! screen. The keys that cross that line are the same `s` and `u` that drive
 //! the git index elsewhere, so this is where they go instead.
 
-use super::review::HunkStage;
+use super::review::{HunkStage, StageOutcome};
 use crate::{
-    app::{Stoat, UpdateEffect},
-    buffer::BufferId,
-    diff_map::line_starts,
-    host::GitRepo,
-    rebase::RebasePause,
-    review_apply::base_line_range,
-    review_walk::ReturnRef,
-    workspace::diff::DiffBase,
+    app::Stoat, diff_map::line_starts, host::GitRepo, rebase::RebasePause,
+    review_apply::base_line_range, review_walk::ReturnRef, workspace::diff::DiffBase,
 };
 use std::{ops::Range, path::Path};
 
@@ -102,18 +96,8 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
     }
 }
 
-/// The hunk to move, named by where the cursor sits rather than by an index.
-///
-/// The buffer text travels with it because the hunk is resolved against the
-/// live buffer, which is not what the file on disk holds once the user edits.
-pub(super) struct HunkSite<'a> {
-    pub(super) buffer_id: BufferId,
-    pub(super) path: &'a Path,
-    pub(super) cursor_row: u32,
-    pub(super) buffer_text: &'a str,
-}
-
-/// Fold the hunk under the cursor into the commit, or take it back out.
+/// The text `path` holds in the commit once the hunk or line under the cursor
+/// crosses the line the commit draws, with the status that names the move.
 ///
 /// Staging amends in. The hunk is a worktree-only edit sitting between the
 /// commit and the buffer, and folding it in makes the commit say what the file
@@ -129,23 +113,16 @@ pub(super) struct HunkSite<'a> {
 /// Neither direction writes the working tree, which is what makes an
 /// amended-out hunk read as unstaged rather than disappear.
 ///
-/// A walk that stands on a branch carries that branch onto the rewritten
-/// commit. The walk reached the commit by detaching HEAD, so the amend writes
-/// HEAD alone, and `:done` returns by name.
-pub(super) fn amend_hunk(
-    stoat: &mut Stoat,
+/// A cursor on no change returns `Err` with the status that says so.
+pub(super) fn amended_file(
     repo: &dyn GitRepo,
     target: &AmendTarget,
+    path: &Path,
+    buffer_text: &str,
+    cursor_row: u32,
     mode: HunkStage,
     unit: AmendUnit,
-    site: HunkSite<'_>,
-) -> UpdateEffect {
-    let HunkSite {
-        buffer_id,
-        path,
-        cursor_row,
-        buffer_text,
-    } = site;
+) -> Result<(String, &'static str), &'static str> {
     // Read from the commit rather than from HEAD. They name the same content
     // while the tree stands here, but the amend rewrites one particular commit,
     // and reading it by sha is what keeps those two from drifting apart.
@@ -158,53 +135,57 @@ pub(super) fn amend_hunk(
     let amend_in = || amended_content(&head, buffer_text, &head, cursor_row, true, unit);
     let amend_out = || amended_content(&parent, &head, &head, cursor_row, false, unit);
     let (into, out_of, nothing) = unit.messages();
-    let amended_and_message = match mode {
+    let amended = match mode {
         HunkStage::Stage => amend_in().map(|text| (text, into)),
         HunkStage::Unstage => amend_out().map(|text| (text, out_of)),
         HunkStage::Toggle => amend_in()
             .map(|text| (text, into))
             .or_else(|| amend_out().map(|text| (text, out_of))),
     };
+    amended.ok_or(nothing)
+}
 
-    let Some((amended, message)) = amended_and_message else {
-        stoat.set_status(nothing);
-        return UpdateEffect::Redraw;
-    };
-
-    let git_root = stoat.active_workspace().git_root.clone();
-    let rel = path.strip_prefix(&git_root).unwrap_or(path).to_path_buf();
+/// Write `amended` into the commit at `rel`, rewrite the commit, and carry the
+/// walk's branch onto the result.
+///
+/// A walk that stands on a branch carries that branch onto the rewritten
+/// commit. The walk reached the commit by detaching HEAD, so the amend writes
+/// HEAD alone, and `:done` returns by name.
+///
+/// The commit is rewritten even when the branch move fails. The status then
+/// names the stale branch, not an amend that never happened.
+pub(super) fn write_amend(
+    repo: &dyn GitRepo,
+    target: &AmendTarget,
+    rel: &Path,
+    amended: String,
+    message: &'static str,
+) -> StageOutcome {
     // One path, so every other blob in the commit keeps the entry it had.
-    let tree = match repo.tree_with_updates(&target.head_sha, &[(rel, Some(amended))]) {
+    let updates = [(rel.to_path_buf(), Some(amended))];
+    let tree = match repo.tree_with_updates(&target.head_sha, &updates) {
         Ok(tree) => tree,
         Err(err) => {
-            stoat.set_status(format!("could not build the amended tree: {err}"));
-            return UpdateEffect::Redraw;
+            return StageOutcome::Unchanged(format!("could not build the amended tree: {err}"));
         },
     };
-
     let new_sha = match repo.amend_head(&tree, None) {
         Ok(new_sha) => new_sha,
-        Err(err) => {
-            stoat.set_status(format!("could not amend: {err}"));
-            return UpdateEffect::Redraw;
-        },
+        Err(err) => return StageOutcome::Unchanged(format!("could not amend: {err}")),
     };
 
-    anchor_walk_to(stoat, &target.head_sha, &new_sha);
-    stoat
-        .active_workspace_mut()
-        .invalidate_diff(buffer_id, path);
-
-    // Set first so a failed branch move overwrites it. The commit is rewritten
-    // either way, so the badge has to name a stale branch rather than an amend
-    // that never happened.
-    stoat.set_status(message);
-    if let Some(branch) = &target.branch
-        && let Err(err) = repo.set_branch_target(branch, &new_sha)
-    {
-        stoat.set_status(format!("amended, but {branch} stayed behind: {err}"));
+    let status = match &target.branch {
+        Some(branch) => match repo.set_branch_target(branch, &new_sha) {
+            Ok(()) => message.to_string(),
+            Err(err) => format!("amended, but {branch} stayed behind: {err}"),
+        },
+        None => message.to_string(),
+    };
+    StageOutcome::Amended {
+        old_sha: target.head_sha.clone(),
+        new_sha,
+        status,
     }
-    UpdateEffect::Redraw
 }
 
 /// The content `commit` holds once the hunk at `cursor_row` in the diff from
@@ -359,17 +340,19 @@ fn splice(target: &str, span: Range<usize>, source: &str, source_span: Range<usi
 /// Move the walk off `old_sha` and onto `new_sha`, so stepping on and returning
 /// stay anchored to the commit the amend just replaced.
 ///
+/// This finds the commit by `old_sha`, not at the cursor. A step pressed while
+/// the amend waits in the git queue moves the cursor before the amend lands.
+///
 /// A detached return ref names the commit by sha, so it moves too when it named
 /// the rewritten one. Left alone it reports a tip the amended commit no longer
 /// sits on, which reads as a walk standing below the tip and refuses every hunk
 /// after the first. A branch return ref needs nothing: the amend writes the ref
 /// HEAD is on, so the branch already names the new commit.
-fn anchor_walk_to(stoat: &mut Stoat, old_sha: &str, new_sha: &str) {
+pub(super) fn anchor_walk_to(stoat: &mut Stoat, old_sha: &str, new_sha: &str) {
     let Some(walk) = stoat.active_workspace_mut().review_walk.as_mut() else {
         return;
     };
-    let cursor = walk.cursor;
-    if let Some(commit) = walk.commits.get_mut(cursor) {
+    if let Some(commit) = walk.commits.iter_mut().find(|commit| commit.sha == old_sha) {
         commit.sha = new_sha.to_string();
         commit.short_sha = new_sha.chars().take(7).collect();
     }
@@ -382,6 +365,8 @@ fn anchor_walk_to(stoat: &mut Stoat, old_sha: &str, new_sha: &str) {
 mod tests {
     use super::{DiffBase, ReturnRef};
     use crate::{
+        action_handlers::review::BASE_MOVED,
+        git_jobs,
         rebase::{ActiveRebase, RebasePause},
         test_harness::{CommitSpec, TestHarness},
     };
@@ -521,6 +506,57 @@ mod tests {
             ),
             (head.as_str(), &head[..7]),
             "the walk names the commit the amend left behind, badge included",
+        );
+    }
+
+    /// A step pressed while an amend waits its turn moves the cursor before the
+    /// amend lands. The landing still re-anchors the commit it rewrote, not the
+    /// one the reader stepped to.
+    #[test]
+    fn an_amend_re_anchors_its_commit_after_the_cursor_steps_off() {
+        let mut h = walking_the_tip();
+        {
+            let repo = h
+                .stoat
+                .git_host
+                .discover(&PathBuf::from("/repo"))
+                .expect("repo");
+            let root = repo.log_from("c1", 1).into_iter().next().expect("c1");
+            let walk = h
+                .stoat
+                .active_workspace_mut()
+                .review_walk
+                .as_mut()
+                .expect("walk");
+            walk.commits.insert(0, root);
+            walk.cursor = 1;
+        }
+        cursor_to(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewPrevCommit);
+        h.settle();
+
+        let main = h
+            .stoat
+            .git_host
+            .discover(&PathBuf::from("/repo"))
+            .and_then(|repo| repo.resolve_rev("main"))
+            .expect("main");
+        let walked: Vec<String> = h
+            .stoat
+            .active_workspace()
+            .review_walk
+            .as_ref()
+            .expect("walk")
+            .commits
+            .iter()
+            .map(|commit| commit.sha.clone())
+            .collect();
+        assert_eq!(
+            (walked, main == "c2"),
+            (vec!["c1".to_string(), main.clone()], false),
+            "the amended sha replaced c2, and c1 kept its own",
         );
     }
 
@@ -728,6 +764,30 @@ mod tests {
         );
     }
 
+    /// A press waits its turn in the git queue. A base that moves before that
+    /// turn leaves the captured text and row describing another checkout, so
+    /// the press refuses rather than amend the wrong commit.
+    #[test]
+    fn a_press_whose_review_base_moved_before_its_turn_refuses() {
+        let mut h = walking_the_tip();
+        cursor_to(&mut h, 2);
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Rev {
+                sha: Some("c2".to_string()),
+            }));
+        h.settle();
+
+        assert_eq!(
+            (committed(&h).as_deref(), h.stoat.pending_message.as_deref()),
+            (Some("a\nb\nX\n"), Some(BASE_MOVED)),
+            "the commit was left alone and the badge asked for another press",
+        );
+    }
+
     /// Toggle has no staged-state signal to read, so it takes whichever side
     /// holds a hunk. A worktree-only edit is the amend-in side, and it wins the
     /// tie the same way the index path prefers staging.
@@ -832,6 +892,7 @@ mod tests {
         );
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        h.settle();
 
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),

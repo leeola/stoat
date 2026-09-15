@@ -1,10 +1,14 @@
-use super::{amend::AmendRoute, movement::ChangeDir};
+use super::{
+    amend::{self, AmendRoute, AmendUnit},
+    movement::ChangeDir,
+};
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     diff_cache::{DiffCache, DiffCacheKey},
     display_map::syntax_theme::SyntaxStyles,
     editor_state::EditorId,
+    git_jobs::{self, GitJob, GitLanding, GitWork},
     host::GitRepo,
     review::{line_count, ReviewFileInput, ReviewHunk},
     review_apply::{
@@ -12,7 +16,10 @@ use crate::{
         HUNK_CONTEXT,
     },
     review_session::DiffDocument,
-    workspace::diff::{compute_base_highlights, BaseHighlightCache, DiffBase},
+    workspace::{
+        diff::{compute_base_highlights, BaseHighlightCache, DiffBase},
+        Workspace,
+    },
 };
 use std::{
     path::Path,
@@ -373,6 +380,30 @@ pub(super) enum HunkStage {
     Toggle,
 }
 
+/// What a staging press reports when the review base moved between the press
+/// and its turn in the git queue.
+///
+/// The press captured its text and cursor row against the checkout that base
+/// named, so neither describes the tree the job writes against.
+pub(super) const BASE_MOVED: &str = "review base moved; press again";
+
+/// What the git work of a staging press did, for its landing to report.
+pub(super) enum StageOutcome {
+    /// The job wrote nothing, for the reason the status gives.
+    Unchanged(String),
+    /// The index took the patch.
+    Staged(&'static str),
+    /// The commit `old_sha` was rewritten as `new_sha`.
+    ///
+    /// The status names the move, or the branch left behind, since the commit
+    /// is rewritten either way.
+    Amended {
+        old_sha: String,
+        new_sha: String,
+        status: String,
+    },
+}
+
 /// Stage, unstage, or toggle the git-index state of the diff hunk under the
 /// cursor in the focused editor.
 ///
@@ -383,120 +414,15 @@ pub(super) enum HunkStage {
 /// untracked file, or a cursor on a row no hunk covers sets a status message
 /// and changes nothing.
 ///
+/// The press captures the cursor row, the text, and the review base. The diff
+/// and the write run as a queued git job, and the status and the gutter follow
+/// when the job lands.
+///
 /// [`HunkStage::Toggle`] has no staged-state signal to read yet, so it stages
 /// by applying the forward patch and, only when that fails because the hunk is
 /// already staged, unstages by applying the reverse patch.
 pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
-    let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
-        return UpdateEffect::None;
-    };
-
-    let (cursor_row, buffer_text) = {
-        let Some(editor) = super::focused_editor_mut(stoat) else {
-            return UpdateEffect::None;
-        };
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let head = buffer_snapshot.resolve_anchor(&sel.head());
-        let cursor_row = buffer_snapshot.rope().offset_to_point(head).row;
-        (cursor_row, buffer_snapshot.rope().to_string())
-    };
-
-    let Some(path) = stoat
-        .active_workspace()
-        .buffers
-        .path_for(buffer_id)
-        .map(Path::to_path_buf)
-    else {
-        return UpdateEffect::None;
-    };
-    let git_root = stoat.active_workspace().git_root.clone();
-
-    let Some(repo) = stoat.git_host.discover(&git_root) else {
-        stoat.set_status("not in a git repository");
-        return UpdateEffect::Redraw;
-    };
-
-    // Decided before the hunk is resolved, so a refusal says why the transport
-    // is unavailable rather than reporting whatever sits under the cursor.
-    match super::amend::amend_route(stoat, &*repo) {
-        AmendRoute::Index => {},
-        AmendRoute::Commit(target) => {
-            let site = super::amend::HunkSite {
-                buffer_id,
-                path: &path,
-                cursor_row,
-                buffer_text: &buffer_text,
-            };
-            return super::amend::amend_hunk(
-                stoat,
-                &*repo,
-                &target,
-                mode,
-                super::amend::AmendUnit::Hunk,
-                site,
-            );
-        },
-        AmendRoute::Refused => {
-            stoat.set_status(super::amend::REFUSED_BADGE);
-            return UpdateEffect::Redraw;
-        },
-    }
-
-    let Some(base_text) = repo.head_content(&path) else {
-        stoat.set_status("no hunk under the cursor");
-        return UpdateEffect::Redraw;
-    };
-
-    let rel = path.strip_prefix(&git_root).unwrap_or(&path).to_path_buf();
-    let hunks = {
-        let result = stoat_language::structural_diff::diff(&base_text, &buffer_text);
-        crate::diff_map::changes_to_hunks(&result.changes, &base_text, &buffer_text)
-    };
-
-    // Resolved by the gutter's own rule, so the staged unit is the one drawn
-    // under the cursor. A zero-width range is a deletion or a move, which the
-    // gutter marks at its anchor row.
-    let Some(k) = hunks.iter().position(|hunk| {
-        let rows = &hunk.buffer_line_range;
-        match rows.is_empty() {
-            true => rows.start == cursor_row,
-            false => rows.contains(&cursor_row),
-        }
-    }) else {
-        stoat.set_status("no hunk under the cursor");
-        return UpdateEffect::Redraw;
-    };
-
-    let (Some(forward), Some(reverse)) = (
-        hunk_to_patch(&rel, &base_text, &buffer_text, &hunks, k, false),
-        hunk_to_patch(&rel, &base_text, &buffer_text, &hunks, k, true),
-    ) else {
-        stoat.set_status("no hunk under the cursor");
-        return UpdateEffect::Redraw;
-    };
-
-    let result = match mode {
-        HunkStage::Stage => repo.apply_to_index(&forward).map(|()| "staged hunk"),
-        HunkStage::Unstage => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
-        HunkStage::Toggle => match repo.apply_to_index(&forward) {
-            Ok(()) => Ok("staged hunk"),
-            Err(_) => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
-        },
-    };
-
-    match result {
-        Ok(message) => {
-            stoat
-                .active_workspace_mut()
-                .invalidate_diff(buffer_id, &path);
-            stoat.set_status(message);
-        },
-        Err(err) => stoat.set_status(format!("could not update staging: {err}")),
-    }
-
-    UpdateEffect::Redraw
+    queue_stage(stoat, mode, AmendUnit::Hunk)
 }
 
 /// Stage, unstage, or toggle the git-index state of only the cursor line's
@@ -510,14 +436,27 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 ///
 /// The index is not the only target. Under a review base the staged side is the
 /// checked-out commit, so the keys amend the cursor's line into or out of it
-/// through [`amend::amend_hunk`], leaving the rest of the hunk where it was.
+/// through [`amend::amended_file`], leaving the rest of the hunk where it was.
 /// [`stage_hunk`] moves the whole hunk the same way.
+///
+/// The press captures the cursor row, the text, and the review base. The status
+/// and the gutter follow when the queued git job lands.
 pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
+    queue_stage(stoat, mode, AmendUnit::Line)
+}
+
+/// Capture a staging press and queue its git work.
+///
+/// The text is a rope handle, so the press copies nothing that grows with the
+/// file. The review base is read now and again at the job's turn. A walk step
+/// or a `:review-done` checkout that lands ahead of the job moves the tree the
+/// captured text and row describe.
+fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEffect {
     let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
 
-    let (cursor_row, buffer_text) = {
+    let (cursor_row, text) = {
         let Some(editor) = super::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -526,7 +465,7 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
         let sel = editor.selections.newest_anchor().clone();
         let head = buffer_snapshot.resolve_anchor(&sel.head());
         let cursor_row = buffer_snapshot.rope().offset_to_point(head).row;
-        (cursor_row, buffer_snapshot.rope().to_string())
+        (cursor_row, buffer_snapshot.rope().clone())
     };
 
     let Some(path) = stoat
@@ -538,54 +477,178 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
         return UpdateEffect::None;
     };
     let git_root = stoat.active_workspace().git_root.clone();
+    let pressed_rev = review_rev(stoat.active_workspace());
 
-    let Some(repo) = stoat.git_host.discover(&git_root) else {
-        stoat.set_status("not in a git repository");
-        return UpdateEffect::Redraw;
+    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+        // The index route diffs against HEAD and the amend route writes into
+        // the commit, so after a base move both act on a checkout the captured
+        // text and row do not describe.
+        if review_rev(stoat.active_workspace()) != pressed_rev {
+            stoat.set_status(BASE_MOVED);
+            return None;
+        }
+        let Some(repo) = stoat.git_host.discover(&git_root) else {
+            stoat.set_status("not in a git repository");
+            return None;
+        };
+
+        // Decided before the hunk is resolved, so a refusal says why the
+        // transport is unavailable rather than reporting whatever sits under
+        // the cursor.
+        let target = match amend::amend_route(stoat, &*repo) {
+            AmendRoute::Index => None,
+            AmendRoute::Commit(target) => Some(target),
+            AmendRoute::Refused => {
+                stoat.set_status(amend::REFUSED_BADGE);
+                return None;
+            },
+        };
+
+        Some(Box::new(move || {
+            let buffer_text = text.to_string();
+            let rel = path.strip_prefix(&git_root).unwrap_or(&path);
+            let outcome = match (target, unit) {
+                (None, AmendUnit::Hunk) => {
+                    index_hunk(&*repo, &path, rel, &buffer_text, cursor_row, mode)
+                },
+                (None, AmendUnit::Line) => {
+                    index_line(&*repo, &path, rel, &buffer_text, cursor_row, mode)
+                },
+                (Some(target), unit) => match amend::amended_file(
+                    &*repo,
+                    &target,
+                    &path,
+                    &buffer_text,
+                    cursor_row,
+                    mode,
+                    unit,
+                ) {
+                    Ok((amended, message)) => {
+                        amend::write_amend(&*repo, &target, rel, amended, message)
+                    },
+                    Err(nothing) => StageOutcome::Unchanged(nothing.to_string()),
+                },
+            };
+            Box::new(move |stoat: &mut Stoat| land_stage(stoat, buffer_id, &path, outcome))
+                as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// The commit `ws` reviews against, or `None` when no commit is the base.
+///
+/// A root commit's base is `Some(None)`, the empty tree. A `Memory` base names
+/// no commit, so it reads as no base.
+fn review_rev(ws: &Workspace) -> Option<Option<String>> {
+    match ws.diff_base() {
+        Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+        None | Some(DiffBase::Memory { .. }) => None,
+    }
+}
+
+/// Report a landed staging press, and stale the gutter's map when git moved.
+///
+/// An amend also moves the walk onto the commit it rewrote.
+fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: StageOutcome) {
+    let status = match outcome {
+        StageOutcome::Unchanged(status) => status,
+        StageOutcome::Staged(message) => {
+            stoat
+                .active_workspace_mut()
+                .invalidate_diff(buffer_id, path);
+            message.to_string()
+        },
+        StageOutcome::Amended {
+            old_sha,
+            new_sha,
+            status,
+        } => {
+            amend::anchor_walk_to(stoat, &old_sha, &new_sha);
+            stoat
+                .active_workspace_mut()
+                .invalidate_diff(buffer_id, path);
+            status
+        },
+    };
+    stoat.set_status(status);
+}
+
+/// Apply the hunk under `cursor_row` to the index, on whatever thread calls.
+///
+/// The hunk comes from the file's HEAD content diffed against `buffer_text`.
+fn index_hunk(
+    repo: &dyn GitRepo,
+    path: &Path,
+    rel: &Path,
+    buffer_text: &str,
+    cursor_row: u32,
+    mode: HunkStage,
+) -> StageOutcome {
+    let nothing = || StageOutcome::Unchanged("no hunk under the cursor".to_string());
+    let Some(base_text) = repo.head_content(path) else {
+        return nothing();
+    };
+    let hunks = line_hunks(&base_text, buffer_text);
+
+    // Resolved by the gutter's own rule, so the staged unit is the one drawn
+    // under the cursor. A zero-width range is a deletion or a move, which the
+    // gutter marks at its anchor row.
+    let Some(k) = hunks.iter().position(|hunk| {
+        let rows = &hunk.buffer_line_range;
+        match rows.is_empty() {
+            true => rows.start == cursor_row,
+            false => rows.contains(&cursor_row),
+        }
+    }) else {
+        return nothing();
     };
 
-    // Read before the line is resolved, so a refusal names the missing
-    // transport rather than whatever sits under the cursor.
-    match super::amend::amend_route(stoat, &*repo) {
-        AmendRoute::Index => {},
-        AmendRoute::Commit(target) => {
-            let site = super::amend::HunkSite {
-                buffer_id,
-                path: &path,
-                cursor_row,
-                buffer_text: &buffer_text,
-            };
-            return super::amend::amend_hunk(
-                stoat,
-                &*repo,
-                &target,
-                mode,
-                super::amend::AmendUnit::Line,
-                site,
-            );
-        },
-        AmendRoute::Refused => {
-            stoat.set_status(super::amend::REFUSED_BADGE);
-            return UpdateEffect::Redraw;
-        },
-    }
+    let (Some(forward), Some(reverse)) = (
+        hunk_to_patch(rel, &base_text, buffer_text, &hunks, k, false),
+        hunk_to_patch(rel, &base_text, buffer_text, &hunks, k, true),
+    ) else {
+        return nothing();
+    };
 
-    let Some(head_text) = repo.head_content(&path) else {
-        stoat.set_status("no line change under the cursor");
-        return UpdateEffect::Redraw;
+    let result = match mode {
+        HunkStage::Stage => repo.apply_to_index(&forward).map(|()| "staged hunk"),
+        HunkStage::Unstage => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
+        HunkStage::Toggle => match repo.apply_to_index(&forward) {
+            Ok(()) => Ok("staged hunk"),
+            Err(_) => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
+        },
+    };
+    match result {
+        Ok(message) => StageOutcome::Staged(message),
+        Err(err) => StageOutcome::Unchanged(format!("could not update staging: {err}")),
+    }
+}
+
+/// Apply the cursor line's change to the index, on whatever thread calls.
+///
+/// The line is staged against the index rather than HEAD, so single-line
+/// stages inside one hunk compose. See [`stage_line`].
+fn index_line(
+    repo: &dyn GitRepo,
+    path: &Path,
+    rel: &Path,
+    buffer_text: &str,
+    cursor_row: u32,
+    mode: HunkStage,
+) -> StageOutcome {
+    let nothing = || StageOutcome::Unchanged("no line change under the cursor".to_string());
+    let Some(head_text) = repo.head_content(path) else {
+        return nothing();
     };
     let index_text = repo
-        .index_content(&path)
+        .index_content(path)
         .unwrap_or_else(|| head_text.clone());
+    let rel = rel.to_string_lossy();
 
-    let rel = path
-        .strip_prefix(&git_root)
-        .unwrap_or(&path)
-        .to_string_lossy()
-        .into_owned();
-
-    let stage = || stage_line_patch(&rel, &index_text, &buffer_text, cursor_row);
-    let unstage = || unstage_line_patch(&rel, &index_text, &head_text, &buffer_text, cursor_row);
+    let stage = || stage_line_patch(&rel, &index_text, buffer_text, cursor_row);
+    let unstage = || unstage_line_patch(&rel, &index_text, &head_text, buffer_text, cursor_row);
     let patch_and_message = match mode {
         HunkStage::Stage => stage().map(|patch| (patch, "staged line")),
         HunkStage::Unstage => unstage().map(|patch| (patch, "unstaged line")),
@@ -595,21 +658,12 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     };
 
     let Some((patch, message)) = patch_and_message else {
-        stoat.set_status("no line change under the cursor");
-        return UpdateEffect::Redraw;
+        return nothing();
     };
-
     match repo.apply_to_index(&patch) {
-        Ok(()) => {
-            stoat
-                .active_workspace_mut()
-                .invalidate_diff(buffer_id, &path);
-            stoat.set_status(message);
-        },
-        Err(err) => stoat.set_status(format!("could not update staging: {err}")),
+        Ok(()) => StageOutcome::Staged(message),
+        Err(err) => StageOutcome::Unchanged(format!("could not update staging: {err}")),
     }
-
-    UpdateEffect::Redraw
 }
 
 /// Line hunks between `base` and `buffer`, the extents every staging path
@@ -1290,6 +1344,7 @@ mod tests {
         let workdir = open_two_hunk_file_at(&mut h, 3);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        h.settle();
 
         assert_eq!(
             h.fake_git().applied_patches(&workdir),
@@ -1373,6 +1428,30 @@ mod tests {
         assert!(patch.contains("+X\n"), "adds the buffer line: {patch}");
     }
 
+    /// A press hands the diff and the index write to the git queue. The test
+    /// scheduler runs that work inline, so the patch is in at the press, and
+    /// the status waits for the landing.
+    #[test]
+    fn a_stage_press_hands_the_index_write_to_a_worker() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 2);
+        let before = h.blocking_calls();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        assert_eq!(
+            (
+                h.blocking_calls() - before,
+                h.fake_git().applied_patches(&workdir).len(),
+                h.stoat.pending_message.as_deref()
+            ),
+            (1, 1, None),
+            "the write ran as one blocking job, and nothing landed yet",
+        );
+
+        h.settle();
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("staged hunk"));
+    }
+
     #[test]
     fn unstage_hunk_applies_the_reverse_patch() {
         let mut h = TestHarness::with_size(80, 14);
@@ -1415,6 +1494,7 @@ mod tests {
         let workdir = open_git_file_at_cursor(&mut h, 0);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        h.settle();
 
         assert!(
             h.fake_git().applied_patches(&workdir).is_empty(),
@@ -1474,6 +1554,7 @@ mod tests {
         );
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        h.settle();
 
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),
@@ -1501,6 +1582,7 @@ mod tests {
         );
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
 
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),
@@ -1516,6 +1598,7 @@ mod tests {
         let mut h = reviewing_a_commit("a\nP\nQ\nd\n");
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
 
         assert_eq!(
             (
@@ -1535,6 +1618,7 @@ mod tests {
         let mut h = reviewing_a_commit("a\nX\nY\nd\n");
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        h.settle();
 
         assert_eq!(
             (
@@ -1592,6 +1676,7 @@ mod tests {
         crate::action_handlers::movement::set_cursor_row(editor, 1);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
 
         assert_eq!(
             (
@@ -1779,6 +1864,7 @@ mod tests {
         let workdir = open_git_file_at_cursor(&mut h, 0);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
 
         assert!(
             h.fake_git().applied_patches(&workdir).is_empty(),
