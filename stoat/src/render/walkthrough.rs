@@ -856,6 +856,7 @@ mod tests {
     use crate::{
         action_handlers::walkthrough::open,
         app::Stoat,
+        render::paint,
         test_harness::TestHarness,
         theme::scope,
         walkthrough::{
@@ -1149,7 +1150,7 @@ mod tests {
         let expected: Vec<[u8; 3]> = (0..2)
             .map(|at| {
                 let style = h.stoat.theme.get(scope::UI_WALKTHROUGH_MARKERS[at]);
-                crate::render::paint::style_rgb(style.fg).expect("the theme names a color")
+                paint::style_rgb(style.fg).expect("the theme names a color")
             })
             .collect();
         assert_ne!(expected[0], expected[1], "the theme gives them apart");
@@ -1299,6 +1300,34 @@ mod tests {
                 _ => false,
             }),
             "and its narration goes with it",
+        );
+    }
+
+    /// A run paints its backing one cell tall and as wide as its text, above the
+    /// card's fill. A backing in any other color bands every line of the
+    /// narration.
+    #[test]
+    fn the_cards_body_sits_on_the_cards_fill() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+        let card = part_id(&h, part::CARD);
+
+        let fill = paint::style_rgb(h.stoat.theme.get(scope::UI_WALKTHROUGH_CARD).bg);
+        let background = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg);
+        assert_ne!(fill, background, "the theme sets the card apart");
+
+        let backings: Vec<Option<[u8; 3]>> = frame(&mut h)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.follow == card => Some(run.bg),
+                _ => None,
+            })
+            .collect();
+        assert!(!backings.is_empty(), "the card has a body");
+        assert_eq!(
+            backings,
+            vec![fill; backings.len()],
+            "every run backs onto the card's fill",
         );
     }
 

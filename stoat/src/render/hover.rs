@@ -355,12 +355,13 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     // one TextRun per span at the popover text scale. Without them it paints
     // cells.
     let modal_fg = crate::render::paint::style_rgb(modal_style.fg);
-    let run_bg = crate::render::paint::style_rgb(
-        stoat
-            .theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
-            .and_then(|s| s.bg),
-    );
+    // A run paints its backing above the frame's fill, so the backing must match
+    // that fill. A modal's panel fills with `run_bg`, and a card fills with its
+    // own color. Any other color shows as a band behind each line.
+    let run_bg = match frame_kind {
+        HoverFrame::Sketch { fill, .. } => Some(fill),
+        HoverFrame::Modal => run_bg,
+    };
     let sel_rgb =
         crate::render::paint::style_rgb(stoat.theme.get(crate::theme::scope::UI_SELECTION).bg);
 
