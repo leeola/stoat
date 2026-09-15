@@ -11,9 +11,9 @@
 //! are handled in the `stoat` crate alongside the action handler.
 
 use crate::highlight::{QueryCursorHandle, RopeTextProvider};
-use std::ops::Range;
+use std::{cmp::Reverse, ops::Range};
 use stoat_text::Rope;
-use tree_sitter::{Node, Query, StreamingIterator};
+use tree_sitter::{Node, Query, QueryCursorOptions, QueryMatch, StreamingIterator};
 
 /// Sorted, deduplicated byte ranges of every match's `capture_name` union
 /// range, over the matches within `bytes`.
@@ -180,13 +180,115 @@ fn find_smallest_capture_scanning(
     best.filter(|u| u.start < rope.len() && u.end < rope.len())
 }
 
+/// Byte range of the `capture_name` object that starts nearest past `after`,
+/// or `None` when no object starts past it.
+///
+/// A tie on the start goes to the longer object, which is the outer one of a
+/// nested pair. That is the object a forward goto step (`] f`) lands on.
+///
+/// A step costs the part of the tree between `after` and that object rather
+/// than the rest of the file. A pattern that walks its enclosing list whatever
+/// the range, such as rust's `#[test]` sequence, still costs that list.
+///
+/// See also:
+/// - [`collect_capture_ranges`] for every object in a range at once, which a backward step and a
+///   press over many cursors read.
+pub fn find_next_capture_after(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    capture_name: &str,
+    after: usize,
+) -> Option<Range<usize>> {
+    find_next_capture_with_options(
+        query,
+        root,
+        rope,
+        capture_name,
+        after,
+        QueryCursorOptions::new(),
+    )
+}
+
+/// [`find_next_capture_after`], with `options` on both of its walks, which
+/// lets a test count how far they went.
+fn find_next_capture_with_options(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    capture_name: &str,
+    after: usize,
+    mut options: QueryCursorOptions<'_>,
+) -> Option<Range<usize>> {
+    let cap_idx = query.capture_index_for_name(capture_name)?;
+
+    // Matches arrive in the order they finish, not in the order they start. In
+    // rust's query a parameter waits for its optional trailing comma, so a
+    // parameter list inside its type finishes first. The first object past
+    // `after` therefore only bounds the answer.
+    let first = {
+        let mut cursor_h = QueryCursorHandle::new();
+        cursor_h.set_byte_range(after..rope.len());
+        let mut matches = cursor_h.matches_with_options(
+            query,
+            root,
+            RopeTextProvider { rope },
+            options.reborrow(),
+        );
+        loop {
+            let m = matches.next()?;
+            if let Some(union) = capture_union(m, cap_idx).filter(|u| u.start > after) {
+                break union;
+            }
+        }
+    };
+
+    // A match whose union starts past `after` and at or before the bound has a
+    // root that overlaps this range, or a first node whose parent overlaps it,
+    // so the second walk meets every such match. Past the bound the walk starts
+    // no rooted pattern and enters a subtree only where an unfinished match or
+    // a rootless pattern needs it.
+    let mut cursor_h = QueryCursorHandle::new();
+    cursor_h.set_byte_range(after..first.start + 1);
+    let mut matches =
+        cursor_h.matches_with_options(query, root, RopeTextProvider { rope }, options);
+    let mut best = first;
+    while let Some(m) = matches.next() {
+        let Some(union) = capture_union(m, cap_idx).filter(|u| u.start > after) else {
+            continue;
+        };
+        if (union.start, Reverse(union.end)) < (best.start, Reverse(best.end)) {
+            best = union;
+        }
+    }
+    Some(best)
+}
+
+/// Byte span covering every capture of `cap_idx` in `m`, or `None` when the
+/// match holds no such capture.
+fn capture_union(m: &QueryMatch<'_, '_>, cap_idx: u32) -> Option<Range<usize>> {
+    m.captures
+        .iter()
+        .filter(|cap| cap.index == cap_idx)
+        .map(|cap| cap.node.byte_range())
+        .reduce(|union, r| union.start.min(r.start)..union.end.max(r.end))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_capture_starts, find_smallest_capture_at, find_smallest_capture_scanning};
+    use super::{
+        collect_capture_ranges, collect_capture_starts, find_next_capture_after,
+        find_next_capture_with_options, find_smallest_capture_at, find_smallest_capture_scanning,
+    };
     use crate::{Language, LanguageRegistry};
-    use std::{collections::HashMap, sync::Arc};
+    use std::{
+        cmp::Reverse,
+        collections::HashMap,
+        ops::{ControlFlow, Range},
+        sync::Arc,
+    };
     use stoat_text::Rope;
-    use tree_sitter::{Parser, Tree};
+    use tree_sitter::{Parser, QueryCursorOptions, QueryCursorState, Tree};
 
     fn lang(name: &str) -> Arc<Language> {
         LanguageRegistry::standard()
@@ -209,6 +311,13 @@ mod tests {
     ///
     /// The tail adds a comment run, a test function, entries, arguments, and
     /// fields, so every kind of capture answers somewhere.
+    ///
+    /// The parameter of `apply` holds a parameter list in its type. Every
+    /// nested parameter finishes before the parameter around it, so a forward
+    /// walk that stops at the first object to finish lands inside it. The list
+    /// runs long, so the parameter around it finishes more than a hundred
+    /// cursor steps later. A stop that reads the cursor's position from the
+    /// progress callback therefore lands inside it too.
     fn nested_source() -> String {
         let mut src = String::from("struct A;\n\n");
         for block in 0..4 {
@@ -221,16 +330,20 @@ mod tests {
             src.push_str("}\n\n");
             src.push_str(&format!("fn free{block}() -> u32 {{\n    {block}\n}}\n\n"));
         }
+        src.push_str(&format!(
+            "fn apply(f: fn({}), x: u32) {{}}\n\n",
+            vec!["u8"; 30].join(", ")
+        ));
         src.push_str(
             "// one\n// two\n#[test]\nfn checks() {\n    let v = vec![1, 2];\n    call(v, [3, 4]);\n}\n\nstruct B {\n    a: u32,\n    b: u32,\n}\n",
         );
         src
     }
 
-    /// Both entry points ask the query about a slice rather than the file, which
-    /// is sound only if every match that answers still turns up. A press also
-    /// asks only its kind's query, which is sound only if that query answers as
-    /// the whole one does.
+    /// Every entry point asks the query about a slice rather than the file,
+    /// which is sound only if every match that answers still turns up. A press
+    /// also asks only its kind's query, which is sound only if that query
+    /// answers as the whole one does.
     #[test]
     fn restricting_the_query_finds_what_scanning_the_file_found() {
         let lang = lang("rust");
@@ -245,6 +358,17 @@ mod tests {
             .iter()
             .copied()
             .filter(|name| !name.starts_with('_'))
+            .collect();
+
+        // Each name's objects over the whole file, sorted so that the first one
+        // past a cursor has the nearest start and is the longer object of a tie.
+        let ordered: Vec<Vec<Range<usize>>> = names
+            .iter()
+            .map(|name| {
+                let mut ranges = collect_capture_ranges(query, root, &rope, name, whole.clone());
+                ranges.sort_unstable_by_key(|r| (r.start, Reverse(r.end)));
+                ranges
+            })
             .collect();
 
         let mut answered = 0;
@@ -264,7 +388,7 @@ mod tests {
                 answered += usize::from(whole_file.is_some());
             }
 
-            for name in &names {
+            for (name, ranges) in names.iter().zip(&ordered) {
                 let kind = lang
                     .textobject_query_for(name)
                     .unwrap_or_else(|| panic!("{name} has a kind query"));
@@ -272,6 +396,12 @@ mod tests {
                 let by_whole = find_smallest_capture_at(query, root, &rope, name, cursor);
                 assert_eq!(by_kind, by_whole, "{name} by its kind at offset {cursor}");
                 *answered_by_kind.entry(name).or_default() += usize::from(by_whole.is_some());
+
+                assert_eq!(
+                    find_next_capture_after(kind, root, &rope, name, cursor),
+                    ranges.iter().find(|r| r.start > cursor).cloned(),
+                    "next {name} from offset {cursor}"
+                );
             }
 
             // What the caller keeps out of each direction's window, against what
@@ -311,6 +441,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             Vec::<&&str>::new(),
             "every capture answers somewhere, or its kind comparison was None against None",
+        );
+    }
+
+    /// A forward step walks the tree only as far as the object it lands on,
+    /// not over the functions past it.
+    ///
+    /// The query cursor runs its progress callback once per hundred steps, so
+    /// the count of runs measures how much of the tree a walk visited. The
+    /// fixture holds no class, so the class walk visits the whole tree.
+    #[test]
+    fn a_forward_step_walks_only_to_the_object_it_lands_on() {
+        let lang = lang("rust");
+        let body = "    let a = 1;\n".repeat(60);
+        let src: String = (0..1000)
+            .map(|i| format!("fn f{i}() {{\n{body}}}\n"))
+            .collect();
+        let tree = parse(&lang, &src);
+        let rope = Rope::from(src.as_str());
+        let walk = |name: &str| {
+            let query = lang.textobject_query_for(name).expect("kind query");
+            let mut runs = 0;
+            let mut count = |_: &QueryCursorState| {
+                runs += 1;
+                ControlFlow::Continue(())
+            };
+            let options = QueryCursorOptions::new().progress_callback(&mut count);
+            let found =
+                find_next_capture_with_options(query, tree.root_node(), &rope, name, 0, options);
+            (found, runs)
+        };
+
+        let (found, step_runs) = walk("function.around");
+        let (no_class, whole_runs) = walk("class.around");
+        let second = src.find("fn f1(").expect("second function");
+        let third = src.find("fn f2(").expect("third function");
+        assert_eq!(
+            found,
+            Some(second..third - 1),
+            "the step lands on the second function"
+        );
+        assert_eq!(no_class, None, "the class walk finds nothing");
+        assert!(
+            step_runs < whole_runs * 3 / 1000,
+            "the step ran the callback {step_runs} times, where three of the thousand \
+             functions take {} of the {whole_runs} runs",
+            whole_runs * 3 / 1000
         );
     }
 }

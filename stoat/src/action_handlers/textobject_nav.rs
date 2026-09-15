@@ -106,14 +106,14 @@ pub(crate) fn goto_textobject_impl(
     // one object each rather than sharing whichever cursor happened to be
     // newest.
 
-    // One index per layer, shared by every cursor of the press. The query
-    // behind it is milliseconds on a large file, and a press over many cursors
-    // with a count reaches it once rather than once a step.
-    let mut indexes: Vec<(*const stoat_language::Tree, ObjectIndex)> = Vec::new();
+    let mut objects = PressObjects {
+        walk_forward: cursors.len() == 1 && count == 1,
+        indexes: Vec::new(),
+    };
     let landings: HashMap<usize, std::ops::Range<usize>> = cursors
         .into_iter()
         .filter_map(|(id, cursor)| {
-            let target = object_range(ws, buffer_id, &mut indexes, cursor, kind, direction, count)?;
+            let target = object_range(ws, buffer_id, &mut objects, cursor, kind, direction, count)?;
             Some((id, target))
         })
         .collect();
@@ -158,6 +158,45 @@ pub(crate) fn goto_textobject_impl(
             }
         });
     UpdateEffect::Redraw
+}
+
+/// Where one press reads the objects it steps between.
+///
+/// A press of one forward step from one cursor walks from that cursor and
+/// stops at the object it lands on, so it costs the stretch of tree it
+/// travels. A larger press, and every backward step, reads one index per
+/// layer, shared by every cursor and step. Separate walks pay for the same
+/// stretch of tree again, and a pattern that walks its enclosing list, such as
+/// rust's `#[test]` sequence, pays that whole list on every walk. A press over
+/// many cursors or steps therefore costs less through the index.
+struct PressObjects {
+    /// Forward steps walk from their cursor rather than reading an index.
+    walk_forward: bool,
+    /// One index per layer, keyed on the layer's tree and filled as the press
+    /// meets layers. Two cursors in different layers read different objects,
+    /// so one index for the buffer does not serve them both.
+    indexes: Vec<(*const stoat_language::Tree, ObjectIndex)>,
+}
+
+impl PressObjects {
+    /// The index of `layer`, built the first time the press reads it.
+    fn index(
+        &mut self,
+        layer: &stoat_language::SyntaxLayer,
+        rope: &stoat_text::Rope,
+        capture_name: &str,
+    ) -> &ObjectIndex {
+        let key = &layer.tree as *const _;
+        let idx = match self.indexes.iter().position(|(seen, _)| *seen == key) {
+            Some(idx) => idx,
+            None => {
+                self.indexes
+                    .push((key, ObjectIndex::build(layer, rope, capture_name)));
+                self.indexes.len() - 1
+            },
+        };
+        &self.indexes[idx].1
+    }
 }
 
 /// Every object of one capture in one layer, ordered for both directions of
@@ -237,9 +276,8 @@ impl ObjectIndex {
 /// Byte range of the object `count` steps away from `cursor`, or `None` when
 /// the walk runs out of objects before its first step.
 ///
-/// `indexes` is filled as layers are met and shared across every cursor of the
-/// press, keyed on the layer's tree. Cursors can sit in different layers, so
-/// the index cannot simply be built once for the buffer.
+/// `objects` decides whether a forward step walks from its position or reads
+/// the layer's index, and keeps the indexes the press has built.
 ///
 /// The backward walk compares each object's end against the cursor rather than
 /// its start, which is what steps past the object the cursor is already inside
@@ -247,7 +285,7 @@ impl ObjectIndex {
 fn object_range(
     ws: &crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
-    indexes: &mut Vec<(*const stoat_language::Tree, ObjectIndex)>,
+    objects: &mut PressObjects,
     cursor: usize,
     kind: NavKind,
     direction: NavDirection,
@@ -268,20 +306,30 @@ fn object_range(
         let Some(layer) = super::surround::deepest_layer_at(Some(snapshot), at) else {
             break;
         };
-        let key = &layer.tree as *const _;
-        let idx = match indexes.iter().position(|(seen, _)| *seen == key) {
-            Some(idx) => idx,
-            None => {
-                indexes.push((key, ObjectIndex::build(layer, rope, kind.capture_name())));
-                indexes.len() - 1
-            },
-        };
+        let capture_name = kind.capture_name();
 
         let next = match direction {
-            NavDirection::Next => indexes[idx].1.next_after(at),
-            NavDirection::Prev => indexes[idx].1.prev_before(at),
-        }
-        .cloned();
+            NavDirection::Next if objects.walk_forward => layer
+                .language
+                .textobject_query_for(capture_name)
+                .and_then(|query| {
+                    stoat_language::find_next_capture_after(
+                        query,
+                        layer.tree.root_node(),
+                        rope,
+                        capture_name,
+                        at,
+                    )
+                }),
+            NavDirection::Next => objects
+                .index(layer, rope, capture_name)
+                .next_after(at)
+                .cloned(),
+            NavDirection::Prev => objects
+                .index(layer, rope, capture_name)
+                .prev_before(at)
+                .cloned(),
+        };
         // A count reaching past the last object walks as far as it goes. Giving
         // up on the step that runs out throws away the ground already covered,
         // where the press asked to go as far as the objects allow.
