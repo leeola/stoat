@@ -2,6 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
+    git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
     review_walk::{ReturnRef, ReviewWalk},
     workspace::diff::DiffBase,
@@ -9,7 +10,7 @@ use crate::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc},
+    sync::Arc,
 };
 use stoat_scheduler::Task;
 
@@ -410,18 +411,18 @@ pub(super) fn walk_one_commit(
 /// files, which is what lets the user look around a commit and then step on
 /// without a screen of its own to leave first.
 ///
-/// The git work runs off the loop, so this only arms it. A step taken while a
-/// job is out moves the cursor and nothing else, and the pump spawns again for
-/// the final cursor when the job lands.
+/// The git work runs on the git queue, so this only queues it. A step taken
+/// while a checkout is out moves the cursor, and the landing queues again for
+/// where the cursor stands.
 fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
     let Some((workdir, sha, standing)) = walk_position(stoat) else {
         return UpdateEffect::None;
     };
-    if stoat.pending_walk_landing.is_some() {
+    if stoat.git_jobs.holds(GitJobKey::WalkLanding) {
         return UpdateEffect::Redraw;
     }
 
-    spawn_walk_landing(stoat, WalkLandingKind::Walk, workdir, sha, standing);
+    queue_walk_landing(stoat, WalkLandingKind::Walk, workdir, sha, standing);
     UpdateEffect::Redraw
 }
 
@@ -725,28 +726,8 @@ fn spawn_preview_load(
     })
 }
 
-/// A walk step whose git work has not landed yet.
-///
-/// Held on [`Stoat`] between the keypress that armed it and the
-/// [`pump_walk_landing`] that applies it, the same shape every other
-/// background request in the editor takes.
-pub(crate) struct PendingWalkLanding {
-    rx: mpsc::Receiver<Result<WalkLanding, WalkFailure>>,
-    _task: Task<()>,
-    /// Where the landing opens its file, held rather than re-read because a
-    /// rebase pause has no walk to read it from.
-    workdir: PathBuf,
-    /// The badge text for the commit this step is landing on. The caller knows
-    /// where the cursor went. The job does not.
-    standing: String,
-    /// Which commit the job was spawned for, so the pump can tell a landing
-    /// that still describes the cursor from one the reader has stepped past.
-    sha: String,
-    kind: WalkLandingKind,
-}
-
-/// Which caller armed a landing, which decides both what the job guards
-/// against and who reports a failure.
+/// Which caller queued a landing, which decides what the job guards against,
+/// who reports a failure, and whether the landing follows the walk cursor.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WalkLandingKind {
     /// A review-walk step. Refuses to check out over tracked changes, since the
@@ -776,46 +757,40 @@ enum WalkFailure {
     Checkout(String),
 }
 
-/// Run a step's git work off the run loop and hold the result for the pump.
+/// Queue a checkout of `sha`, which lands on the loop when the git work is
+/// done.
 ///
 /// The checkout walks the tree and writes files, and the dirty guard before it
-/// walks the whole status. On a large repository that is most of a second, and
-/// it used to run where the key was pressed.
+/// walks the whole status. On a large repository that is most of a second, so
+/// the work runs on the pool, behind every git write queued before it.
 ///
-/// Re-entering a commit the tree already sits on has nothing to check out, so
-/// the dirty guard is skipped there: it would only reject a tree the walk
-/// itself is fine with.
-pub(super) fn spawn_walk_landing(
+/// If the tree already sits on `sha`, the job has nothing to check out and
+/// skips the dirty guard. There, the guard only rejects a tree the walk itself
+/// accepts.
+///
+/// `standing` is the badge text for the commit, which the caller knows and the
+/// work does not. The job holds `workdir` and does not read it back at the
+/// landing, because a rebase pause has no walk to read it from.
+pub(super) fn queue_walk_landing(
     stoat: &mut Stoat,
     kind: WalkLandingKind,
     workdir: PathBuf,
     sha: String,
     standing: String,
 ) {
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        report_failure(stoat, kind, WalkFailure::NoRepository);
-        return;
-    };
-    let redraw = stoat.redraw_notify.clone();
-    let (tx, rx) = mpsc::channel();
-
-    let task = {
-        let sha = sha.clone();
-        stoat.executor.spawn_blocking(move || {
+    let job = GitJob::new(Some(GitJobKey::WalkLanding), move |stoat: &mut Stoat| {
+        let Some(repo) = stoat.git_host.discover(&workdir) else {
+            report_failure(stoat, kind, WalkFailure::NoRepository);
+            return None;
+        };
+        Some(Box::new(move || {
             let landed = walk_landing(&*repo, kind, &sha);
-            let _ = tx.send(landed);
-            redraw.notify_one();
-        })
-    };
-
-    stoat.pending_walk_landing = Some(PendingWalkLanding {
-        rx,
-        _task: task,
-        workdir,
-        standing,
-        sha,
-        kind,
+            Box::new(move |stoat: &mut Stoat| {
+                land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed);
+            }) as GitLanding
+        }) as GitWork)
     });
+    git_jobs::enqueue(stoat, job);
 }
 
 /// Check `sha` out and read what the landing needs, on whatever thread calls.
@@ -839,37 +814,36 @@ fn walk_landing(
     })
 }
 
-/// Apply a landed step, or report why it did not land.
+/// Apply a landed checkout of `sha`, or report why it did not land.
 ///
-/// Returns whether anything moved, which is what [`Stoat::drive_pumps`] reads
-/// to decide whether another pass is worth making.
-pub(crate) fn pump_walk_landing(stoat: &mut Stoat) -> bool {
-    let Some(pending) = stoat.pending_walk_landing.take() else {
-        return false;
-    };
-    let landed = match pending.rx.try_recv() {
-        Ok(landed) => landed,
-        Err(mpsc::TryRecvError::Empty) => {
-            stoat.pending_walk_landing = Some(pending);
-            return false;
-        },
-        Err(mpsc::TryRecvError::Disconnected) => return false,
-    };
+/// A walk checkout that lands after the walk ended applies nothing and reports
+/// nothing, since the reader left the walk that asked for it.
+fn land_walk_checkout(
+    stoat: &mut Stoat,
+    kind: WalkLandingKind,
+    workdir: &Path,
+    standing: &str,
+    sha: &str,
+    landed: Result<WalkLanding, WalkFailure>,
+) {
+    if kind == WalkLandingKind::Walk && stoat.active_workspace().review_walk.is_none() {
+        return;
+    }
 
     match landed {
-        Ok(landing) => land_walk(stoat, &pending.workdir, &pending.standing, landing),
-        Err(failure) => report_failure(stoat, pending.kind, failure),
+        Ok(landing) => land_walk(stoat, workdir, standing, landing),
+        Err(failure) => report_failure(stoat, kind, failure),
     }
 
-    // The reader keeps stepping while a job is out, so the cursor may have
-    // moved past the commit this landing describes. Spawning again for where it
-    // now stands is what converges, the same way the preview pump does.
-    if let Some((workdir, sha, standing)) = walk_position(stoat)
-        && sha != pending.sha
+    // The reader steps on while a checkout is out, so the cursor is sometimes
+    // past the commit this landing describes. A checkout queued for where the
+    // cursor stands now converges on it. An edit pause has no cursor to follow.
+    if kind == WalkLandingKind::Walk
+        && let Some((workdir, cursor_sha, standing)) = walk_position(stoat)
+        && cursor_sha != sha
     {
-        spawn_walk_landing(stoat, WalkLandingKind::Walk, workdir, sha, standing);
+        queue_walk_landing(stoat, WalkLandingKind::Walk, workdir, cursor_sha, standing);
     }
-    true
 }
 
 /// Show a landed commit: its parent becomes the diff base, and its first
@@ -934,10 +908,10 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{walk_navigate, ReturnRef, ReviewWalk};
+    use super::{queue_walk_landing, walk_navigate, ReturnRef, ReviewWalk, WalkLandingKind};
     use crate::{
         app::Stoat, badge::BadgeSource, commit_list::Preview, commit_picker::CommitPickerRole,
-        test_harness::TestHarness, workspace::diff::DiffBase,
+        git_jobs::GitJobKey, test_harness::TestHarness, workspace::diff::DiffBase,
     };
     use std::path::{Path, PathBuf};
 
@@ -1892,6 +1866,25 @@ mod tests {
         );
     }
 
+    /// A step's checkout is sometimes still out when the walk ends. Its landing
+    /// then describes a walk that is gone, so it leaves the base and the latch
+    /// where the return put them.
+    #[test]
+    fn a_step_landing_after_the_walk_ends_applies_nothing() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert_eq!(
+            (diff_base(&h), latched(&h)),
+            (None, false),
+            "the late landing moved neither",
+        );
+    }
+
     /// A return that fails leaves the tree at the commit, so the base has to
     /// keep naming that commit's parent. Dropping it would leave the statusline
     /// claiming a base the files on disk are not measured against.
@@ -1975,18 +1968,54 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
 
         assert_eq!(
-            (h.stoat.pending_walk_landing.is_some(), diff_base_sha(&h)),
+            (
+                h.stoat.git_jobs.holds(GitJobKey::WalkLanding),
+                diff_base_sha(&h)
+            ),
             (true, before.clone()),
             "the press armed the landing and applied none of it",
         );
 
         h.settle();
         assert_eq!(
-            (h.stoat.pending_walk_landing.is_some(), diff_base_sha(&h)),
+            (
+                h.stoat.git_jobs.holds(GitJobKey::WalkLanding),
+                diff_base_sha(&h)
+            ),
             (false, Some("a1b2c3d4".to_string())),
             "and the pump applied it once the job landed",
         );
         assert_ne!(diff_base_sha(&h), before, "the base moved with the step");
+    }
+
+    /// An edit pause checks out the commit the rebase stopped on, which the
+    /// walk cursor does not name. Its landing leaves the tree there and does
+    /// not check the cursor's commit out.
+    #[test]
+    fn an_edit_pause_landing_starts_no_walk_checkout() {
+        let mut h = harness();
+        seed_walk(&mut h, &["a1b2c3d4", "b2c3d4e5"]);
+
+        queue_walk_landing(
+            &mut h.stoat,
+            WalkLandingKind::EditPause,
+            PathBuf::from("/repo"),
+            "c3d4e5f6".to_string(),
+            "editing c3d4e5f, C continues".to_string(),
+        );
+        h.settle();
+
+        assert_eq!(
+            (checkouts(&h), diff_base(&h)),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_string(),
+                    "detached:c3d4e5f6".to_string()
+                ],
+                Some(Some("b2c3d4e5".to_string()))
+            ),
+            "the tree and the base stay on the paused commit"
+        );
     }
 
     /// The sha the workspace diffs against, which a landed step moves.

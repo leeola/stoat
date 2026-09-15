@@ -15,6 +15,7 @@ use crate::{
     editor_state::{EditorId, ScrollGlide},
     emoji_expand,
     file_finder::{FileFinder, FinderPathCache},
+    git_jobs::{self, GitJobs},
     help::Help,
     host::{
         ClipboardKind, EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost,
@@ -1024,12 +1025,11 @@ pub struct Stoat {
     /// view used to pay on the press that opened it and again on every step
     /// between files.
     pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
-    /// A review-walk step whose checkout is still running.
+    /// The git writes the loop started, run one at a time in press order.
     ///
-    /// The checkout walks the tree and writes files, and the dirty guard ahead
-    /// of it walks the whole status, so a step used to hold the loop for as
-    /// long as the repository is large.
-    pub(crate) pending_walk_landing: Option<action_handlers::review_walk::PendingWalkLanding>,
+    /// Two writes on the pool race, so every write the loop starts waits here
+    /// for the one before it to land. See [`git_jobs`].
+    pub(crate) git_jobs: GitJobs,
     /// A diff-filtered call-graph hop whose working-tree scan runs off the UI
     /// thread, applied by [`crate::code_index::nav::pump_diff_nav_jump`] when it
     /// lands.
@@ -2274,7 +2274,7 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_changed_file_jump: None,
             pending_conflict_file: None,
-            pending_walk_landing: None,
+            git_jobs: GitJobs::default(),
             pending_diff_nav_jump: None,
             pending_code_search: None,
             code_search_debounce: None,
@@ -7683,7 +7683,7 @@ impl Stoat {
         let code_search = action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
 
-        let walk_landing = action_handlers::review_walk::pump_walk_landing(self);
+        let git_jobs = git_jobs::pump(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let conflict_file = action_handlers::conflict_view::pump_conflict_file(self);
@@ -7705,7 +7705,7 @@ impl Stoat {
         external
             || commits
             || commit_picker
-            || walk_landing
+            || git_jobs
             || code_search
             || changed_file_jump
             || conflict_file

@@ -38,6 +38,7 @@ pub(crate) mod code_search;
 #[allow(clippy::disallowed_methods)]
 pub mod fixture;
 pub mod fuzzy;
+mod git_jobs;
 pub(crate) mod goto_word;
 pub mod help;
 pub mod host;

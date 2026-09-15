@@ -155,7 +155,7 @@ pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
 /// tree that is not there.
 fn install_edit_pause(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     let short = &sha[..sha.len().min(7)];
-    super::review_walk::spawn_walk_landing(
+    super::review_walk::queue_walk_landing(
         stoat,
         super::review_walk::WalkLandingKind::EditPause,
         workdir.to_path_buf(),
