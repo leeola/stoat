@@ -42,7 +42,7 @@ use lsp_types::{
 use serde_json::Value as JsonValue;
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    io, iter,
     sync::{Arc, LazyLock, Mutex},
 };
 use stoat_config::{
@@ -196,7 +196,7 @@ impl LspHost for StcfgLsp {
             let Some(text) = docs.get(&text_document.uri) else {
                 return Ok(None);
             };
-            hover(text, position_to_offset(text, position))
+            hover(text, LineIndex::new(text).offset(position))
         };
         Ok(result)
     }
@@ -250,7 +250,7 @@ impl LspHost for StcfgLsp {
             let Some(text) = docs.get(&text_document.uri) else {
                 return Ok(None);
             };
-            complete(text, position_to_offset(text, position))
+            complete(text, LineIndex::new(text).offset(position))
         };
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -547,12 +547,13 @@ fn complete(text: &str, offset: usize) -> Vec<CompletionItem> {
 /// setting" warning spanning its path.
 fn diagnose(text: &str) -> Vec<Diagnostic> {
     let (config, errors) = stoat_config::parse(text);
+    let lines = LineIndex::new(text);
 
     let mut diagnostics: Vec<Diagnostic> = errors
         .iter()
         .map(|error| {
             diagnostic(
-                range_from_span(text, error.span.clone()),
+                lines.range(error.span.clone()),
                 DiagnosticSeverity::ERROR,
                 error.message.clone(),
             )
@@ -574,7 +575,7 @@ fn diagnose(text: &str) -> Vec<Diagnostic> {
             let segments: Vec<&str> = setting.path.iter().map(|seg| seg.node.as_str()).collect();
             if def_for_path(&segments).is_none() {
                 diagnostics.push(diagnostic(
-                    range_from_span(text, path_span(&setting.path)),
+                    lines.range(path_span(&setting.path)),
                     DiagnosticSeverity::WARNING,
                     format!("unknown setting `{}`", segments.join(".")),
                 ));
@@ -753,34 +754,51 @@ fn statement_bounds(text: &str, offset: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn range_from_span(text: &str, span: Span) -> Range {
-    Range::new(
-        offset_to_position(text, span.start),
-        offset_to_position(text, span.end),
-    )
+/// The line start offsets of one document, for mapping between byte offsets
+/// and LSP positions.
+///
+/// One scan of the text builds it, so a reply that maps thousands of offsets
+/// pays for that scan once rather than once per offset. The server advertises
+/// UTF-8 positions, so a column is a byte count.
+struct LineIndex {
+    /// The byte offset each line starts at, the first at 0.
+    starts: Vec<usize>,
+    len: usize,
 }
 
-/// Byte offset to a UTF-8 [`Position`] (line and byte column, both 0-based).
-fn offset_to_position(text: &str, offset: usize) -> Position {
-    let offset = offset.min(text.len());
-    let line = text[..offset].bytes().filter(|&b| b == b'\n').count() as u32;
-    let line_start = text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    Position::new(line, (offset - line_start) as u32)
-}
-
-/// UTF-8 [`Position`] (line and byte column) to a byte offset, clamping a
-/// column past the line's end to the line's end and a line past the document
-/// to its end.
-fn position_to_offset(text: &str, position: Position) -> usize {
-    let mut offset = 0;
-    for (n, line) in text.split_inclusive('\n').enumerate() {
-        if n as u32 == position.line {
-            let max_col = line.strip_suffix('\n').unwrap_or(line).len();
-            return offset + (position.character as usize).min(max_col);
+impl LineIndex {
+    fn new(text: &str) -> LineIndex {
+        let starts = iter::once(0)
+            .chain(memchr::memchr_iter(b'\n', text.as_bytes()).map(|at| at + 1))
+            .collect();
+        LineIndex {
+            starts,
+            len: text.len(),
         }
-        offset += line.len();
     }
-    text.len()
+
+    /// The UTF-8 [`Position`] of `offset`, 0-based, with an offset past the end
+    /// read as the end.
+    fn position(&self, offset: usize) -> Position {
+        let offset = offset.min(self.len);
+        let line = self.starts.partition_point(|&start| start <= offset) - 1;
+        Position::new(line as u32, (offset - self.starts[line]) as u32)
+    }
+
+    /// The byte offset of `position`, clamping a column past its line's end to
+    /// the line's end and a line past the document to its end.
+    fn offset(&self, position: Position) -> usize {
+        let line = position.line as usize;
+        let Some(&start) = self.starts.get(line) else {
+            return self.len;
+        };
+        let end = self.starts.get(line + 1).map_or(self.len, |next| next - 1);
+        start + (position.character as usize).min(end - start)
+    }
+
+    fn range(&self, span: Span) -> Range {
+        Range::new(self.position(span.start), self.position(span.end))
+    }
 }
 
 const TK_KEYWORD: u32 = 0;
@@ -1049,16 +1067,23 @@ fn collect_comment_spans(text: &str, out: &mut Vec<(Span, u32)>) {
 /// single-line. Pairs need not arrive sorted: the split pieces are ordered by
 /// line then column before the relative deltas are computed.
 fn encode_tokens(text: &str, spans: &[(Span, u32)]) -> Vec<SemanticToken> {
+    let lines = LineIndex::new(text);
     let mut pieces: Vec<(u32, u32, u32, u32)> = Vec::new();
     for (span, token_type) in spans {
         let mut line_start = span.start;
         for (rel, byte) in text[span.clone()].bytes().enumerate() {
             if byte == b'\n' {
-                push_piece(text, line_start, span.start + rel, *token_type, &mut pieces);
+                push_piece(
+                    &lines,
+                    line_start,
+                    span.start + rel,
+                    *token_type,
+                    &mut pieces,
+                );
                 line_start = span.start + rel + 1;
             }
         }
-        push_piece(text, line_start, span.end, *token_type, &mut pieces);
+        push_piece(&lines, line_start, span.end, *token_type, &mut pieces);
     }
     pieces.sort_by_key(|&(line, column, ..)| (line, column));
 
@@ -1086,7 +1111,7 @@ fn encode_tokens(text: &str, spans: &[(Span, u32)]) -> Vec<SemanticToken> {
 }
 
 fn push_piece(
-    text: &str,
+    lines: &LineIndex,
     start: usize,
     end: usize,
     token_type: u32,
@@ -1095,7 +1120,7 @@ fn push_piece(
     if end <= start {
         return;
     }
-    let position = offset_to_position(text, start);
+    let position = lines.position(start);
     pieces.push((
         position.line,
         position.character,
@@ -1206,8 +1231,9 @@ mod tests {
 
         let path_start = text.find("editor.scrollofff").expect("path present");
         let path_end = path_start + "editor.scrollofff".len();
-        assert_eq!(warning.range.start, offset_to_position(text, path_start));
-        assert_eq!(warning.range.end, offset_to_position(text, path_end));
+        let lines = LineIndex::new(text);
+        assert_eq!(warning.range.start, lines.position(path_start));
+        assert_eq!(warning.range.end, lines.position(path_end));
     }
 
     #[test]
@@ -1359,7 +1385,7 @@ mod tests {
     /// `(line, column, length, token type)` shape [`decode`] produces.
     fn tok(text: &str, needle: &str, token_type: u32) -> (u32, u32, u32, u32) {
         let at = text.find(needle).expect("needle present");
-        let position = offset_to_position(text, at);
+        let position = LineIndex::new(text).position(at);
         (
             position.line,
             position.character,
@@ -1411,6 +1437,78 @@ mod tests {
                 tok(&text, "7", TK_NUMBER),
             ],
         );
+    }
+
+    /// A token on the row after a newline starts line 1 at column 0.
+    #[test]
+    fn a_token_past_a_newline_starts_line_one() {
+        let tokens = encode_tokens("a\nb", &[(2..3, TK_KEYWORD)]);
+        assert_eq!(decode(&tokens), vec![(1, 0, 1, TK_KEYWORD)]);
+    }
+
+    /// Line and byte column of `offset`, counted by scanning the text before it.
+    fn scanned_position(text: &str, offset: usize) -> Position {
+        let offset = offset.min(text.len());
+        let line = text[..offset].bytes().filter(|&b| b == b'\n').count() as u32;
+        let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
+        Position::new(line, (offset - line_start) as u32)
+    }
+
+    /// Byte offset of `position`, found by walking the text line by line.
+    fn scanned_offset(text: &str, position: Position) -> usize {
+        let mut offset = 0;
+        for (n, line) in text.split_inclusive('\n').enumerate() {
+            if n as u32 == position.line {
+                let max_col = line.strip_suffix('\n').unwrap_or(line).len();
+                return offset + (position.character as usize).min(max_col);
+            }
+            offset += line.len();
+        }
+        text.len()
+    }
+
+    /// The line index maps offsets and positions the way scanning the text does,
+    /// so token streams and diagnostic ranges come out the same.
+    ///
+    /// The fixtures hold an empty text, a text with no newline, empty lines, a
+    /// carriage return, a multi-byte character, and a final newline. Offsets and
+    /// positions reach past each line's end and past the last line.
+    #[test]
+    fn the_line_index_answers_what_scanning_the_text_answers() {
+        for text in ["", "no newline", "on init {\n\n  a = \"\u{e9}\";\r\n}\n"] {
+            let lines = LineIndex::new(text);
+            for offset in (0..=text.len() + 1)
+                .filter(|&offset| offset > text.len() || text.is_char_boundary(offset))
+            {
+                assert_eq!(
+                    lines.position(offset),
+                    scanned_position(text, offset),
+                    "offset {offset} of {text:?}"
+                );
+            }
+
+            let rows = text.split_inclusive('\n').count() as u32 + 2;
+            for line in 0..rows {
+                for character in 0..16 {
+                    let position = Position::new(line, character);
+                    assert_eq!(
+                        lines.offset(position),
+                        scanned_offset(text, position),
+                        "{position:?} of {text:?}"
+                    );
+                }
+            }
+        }
+
+        let shipped = crate::app::DEFAULT_KEYMAP;
+        let lines = LineIndex::new(shipped);
+        for offset in (0..shipped.len()).step_by(97) {
+            assert_eq!(
+                lines.position(offset),
+                scanned_position(shipped, offset),
+                "offset {offset} of config.stcfg"
+            );
+        }
     }
 
     #[test]
