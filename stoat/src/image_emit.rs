@@ -16,7 +16,7 @@
 use crate::{app::Stoat, pane::View, render::layout::split_pane_status};
 use ratatui::layout::Rect;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -62,6 +62,14 @@ pub(crate) struct ImageRuntime {
     /// Files being read and converted on the pool, by path, so one file opened
     /// in two panes is read once.
     pending: HashMap<PathBuf, PendingTransmit>,
+    /// Files whose read or decode came back empty, which are not read again
+    /// while a pane still shows them.
+    ///
+    /// A failed read wakes the loop as it finishes, and a retry on that frame
+    /// fails the same way, which reads the file at the frame rate. A path no
+    /// pane wants any more leaves this set, so a pane opened on it later reads
+    /// it once more.
+    failed: HashSet<PathBuf>,
     /// Ids handed out to files, counting up from one. Zero means unset on the
     /// wire, so it is never assigned.
     next_id: u32,
@@ -75,10 +83,12 @@ impl ImageRuntime {
     /// alike, so every image has to be transmitted and placed again.
     ///
     /// In-flight reads keep going. Their pixels have not reached the terminal
-    /// yet, so they transmit against the fresh state like any first display.
+    /// yet, so they transmit against the fresh state like any first display. A
+    /// file whose read failed is read once more, the same way.
     pub(crate) fn forget(&mut self) {
         self.sent.clear();
         self.placed.clear();
+        self.failed.clear();
     }
 }
 
@@ -126,6 +136,10 @@ pub(crate) fn emit_images(stoat: &mut Stoat) {
     };
 
     let wanted = wanted_images(stoat);
+    stoat
+        .images
+        .failed
+        .retain(|path| wanted.iter().any(|(wanted, ..)| wanted == path));
     start_transmits(stoat, &wanted, cell_px);
 
     let mut batch = drain_transmits(stoat);
@@ -191,7 +205,10 @@ fn wanted_images(stoat: &Stoat) -> Vec<(PathBuf, (u32, u32), Rect)> {
 fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)], cell_px: (u16, u16)) {
     for (path, px, rect) in wanted {
         let target = fit_pixels(*px, (rect.width, rect.height), cell_px);
-        if target == (0, 0) || stoat.images.pending.contains_key(path) {
+        if target == (0, 0)
+            || stoat.images.pending.contains_key(path)
+            || stoat.images.failed.contains(path)
+        {
             continue;
         }
         let sent_fits = stoat
@@ -228,9 +245,11 @@ fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)], ce
 
 /// Collect every finished transmission into a batch, recording the ids.
 ///
-/// A file that failed to read or decode resolves to no bytes and is dropped
-/// rather than retried. The pane still shows its name and size, and retrying a
-/// file that cannot be decoded would retry it every frame.
+/// A file that failed to read or decode resolves to no bytes. Its path is
+/// recorded as failed, and [`start_transmits`] does not read it again while a
+/// pane shows it. The pane still shows the file's name and size. A later pane
+/// on the path reads it once more, since [`emit_images`] forgets a failure
+/// once no pane wants the path.
 fn drain_transmits(stoat: &mut Stoat) -> Vec<u8> {
     let ready: Vec<(PathBuf, Vec<u8>, (u32, u32))> = stoat
         .images
@@ -250,6 +269,7 @@ fn drain_transmits(stoat: &mut Stoat) -> Vec<u8> {
     for (path, png, px) in ready {
         stoat.images.pending.remove(&path);
         if png.is_empty() {
+            stoat.images.failed.insert(path);
             continue;
         }
 
@@ -454,9 +474,10 @@ fn read_fitted_png(
 /// it holds down to the placement, so pixels past this box are decoded,
 /// encoded, and sent for nothing.
 ///
-/// Zero for an image or a rectangle with no extent. A picture flatter than the
-/// box can still round to zero on one axis, which [`fit_cells`] clamps back up
-/// to a cell rather than dropping.
+/// Zero for an image or a rectangle with no extent, and at least a pixel on
+/// each axis otherwise. A picture flatter than the box rounds to none on its
+/// short axis, and the read's resize makes that axis a pixel anyway, so the
+/// box states the size the read sends.
 pub(crate) fn fit_pixels(px: (u32, u32), rect: (u16, u16), cell_px: (u16, u16)) -> (u32, u32) {
     let (image_w, image_h) = px;
     let (rect_cols, rect_rows) = rect;
@@ -487,7 +508,7 @@ pub(crate) fn fit_pixels(px: (u32, u32), rect: (u16, u16), cell_px: (u16, u16)) 
         false => (draw_w, draw_h),
     };
 
-    (draw_w as u32, draw_h as u32)
+    (draw_w.max(1) as u32, draw_h.max(1) as u32)
 }
 
 /// The cell box an image fills inside `rect`, and where to put it.
@@ -516,8 +537,16 @@ pub(crate) fn fit_cells(
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_cells, fit_pixels, placement_batch, ImageRuntime, Placement, SentImage};
-    use std::{collections::HashMap, path::PathBuf};
+    use super::{
+        emit_images, fit_cells, fit_pixels, placement_batch, ImageRuntime, Placement, SentImage,
+    };
+    use crate::{action_handlers, host::FakeFsOp, pane::View, test_harness::TestHarness};
+    use std::{
+        collections::{HashMap, HashSet},
+        io::Cursor,
+        path::{Path, PathBuf},
+    };
+    use stoat_action::OpenFile;
     use stoatty_protocol::{
         command::{decode_stream, Command},
         kitty::Action,
@@ -559,6 +588,96 @@ mod tests {
 
         // A tall source runs out of height first.
         assert_eq!(fit_pixels((64, 256), (10, 10), CELL), (40, 160));
+
+        // A source flatter than the box keeps a pixel on its short axis, where
+        // the scale rounds to none.
+        assert_eq!(fit_pixels((6400, 1), (10, 10), CELL), (80, 1));
+    }
+
+    /// A file that fails to read resolves to no bytes, and the finished read
+    /// wakes the loop for the next frame. Read again there, a deleted or corrupt
+    /// file is read at the frame rate. The failure lasts while a pane shows the
+    /// file, and goes with the pane.
+    #[test]
+    fn a_file_that_fails_to_read_is_read_once_while_its_pane_shows_it() {
+        let mut h = TestHarness::with_size(40, 12);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 2;
+        h.stoat.cell_pixels = Some(CELL);
+
+        // A header that sizes the pane, over image data cut short. The picture
+        // is larger than the pane, so the read decodes it rather than passing
+        // the file through.
+        let cut = {
+            let buffer = image::RgbaImage::from_pixel(400, 400, image::Rgba([1, 2, 3, 255]));
+            let mut out = Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            let png = out.into_inner();
+            let idat = png
+                .windows(4)
+                .position(|window| window == b"IDAT")
+                .expect("an IDAT chunk");
+            png[..idat + 8].to_vec()
+        };
+        h.fake_fs().insert_file("/repo/cut.png", cut);
+        h.fake_fs().insert_file("/repo/a.txt", b"text");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+
+        let open = |h: &mut TestHarness, name: &str| {
+            action_handlers::dispatch(
+                &mut h.stoat,
+                &OpenFile {
+                    path: PathBuf::from(format!("/repo/{name}")),
+                },
+            );
+            h.settle();
+        };
+        let showing_an_image = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            matches!(ws.panes.pane(ws.panes.focus()).view, View::Image { .. })
+        };
+        let reads = |h: &TestHarness| {
+            let file = Path::new("/repo/cut.png");
+            h.fake_fs()
+                .ops()
+                .into_iter()
+                .filter(|op| matches!(op, FakeFsOp::Read { path } if path == file))
+                .count()
+        };
+
+        open(&mut h, "cut.png");
+        assert!(showing_an_image(&h), "the header opens an image pane");
+        let opened = reads(&h);
+        for _ in 0..3 {
+            emit_images(&mut h.stoat);
+            h.settle();
+        }
+        assert_eq!(
+            reads(&h) - opened,
+            1,
+            "the file is read once, however many frames draw",
+        );
+        assert_eq!(
+            h.stoat.images.pending.keys().collect::<Vec<_>>(),
+            Vec::<&PathBuf>::new(),
+            "no read is in flight once the first has landed",
+        );
+        assert_eq!(
+            h.stoat.images.failed,
+            HashSet::from([PathBuf::from("/repo/cut.png")]),
+        );
+
+        open(&mut h, "a.txt");
+        emit_images(&mut h.stoat);
+        assert_eq!(
+            h.stoat.images.failed,
+            HashSet::new(),
+            "the failure goes with the pane"
+        );
     }
 
     /// An image the placement diff just deleted lost its pixels with it, so the
