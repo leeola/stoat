@@ -217,8 +217,12 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
 /// The order is taken from each range's end rather than its start. For
 /// non-overlapping edits the two agree, and where an insert shares a start with
 /// a replace, ending order applies the replace first and leaves the insertion
-/// standing. Ordering by start there would apply the insert into the span the
-/// replace is about to consume, swallowing it.
+/// standing. Ordering by start there puts the insert into the span the replace
+/// then consumes, which swallows it.
+///
+/// A tie on the end goes to the later start. The tie is an insert at the end of
+/// a replace, and applying the insert first keeps its offset on text the
+/// replace has not yet moved.
 ///
 /// The whole set lands as one undo step. A server operation is one thing the
 /// reader asked for, and undoing part of it would leave a state neither they nor
@@ -261,7 +265,7 @@ pub(crate) fn apply_text_edits_to_buffer(
             (index, byte_range, edit.new_text)
         })
         .collect();
-    converted.sort_by_key(|(index, range, _)| Reverse((range.end, *index)));
+    converted.sort_by_key(|(index, range, _)| Reverse((range.end, range.start, *index)));
 
     for (_, range, new_text) in converted {
         guard.edit(range, &new_text);
@@ -607,6 +611,29 @@ mod tests {
             "XYdef\n",
             "the insert landed inside the span the replace then consumed"
         );
+    }
+
+    /// An insert at the end of a replace lands after the replacement, even when
+    /// the server lists the insert first.
+    ///
+    /// Both edits end at the insert's offset. Applied first, the replace
+    /// shortens the text before that offset and puts the insert a byte too far
+    /// on.
+    #[test]
+    fn an_insert_listed_before_the_replace_ending_at_it_lands_after_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abcdef\n");
+
+        apply_edits(
+            &mut h,
+            &path,
+            vec![text_edit(0, 3, 3, "X"), text_edit(0, 1, 3, "Y")],
+        );
+        assert_eq!(buffer_text(&h, &path), "aYXdef\n");
+
+        undo(&mut h, &path);
+        assert_eq!(buffer_text(&h, &path), "abcdef\n", "one undo step");
     }
 
     #[test]
