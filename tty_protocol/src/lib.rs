@@ -61,9 +61,14 @@
 /// beside the palette class. An emitter talking to an older terminal sends
 /// `minimap_lines` instead, whose runs are the flat blocks that terminal draws.
 ///
+/// Version 5 reads `fill_decorations`, which replaces a buffered page's text
+/// runs, bars, and polylines while its cells stay. An emitter talking to an
+/// older terminal sends a whole `fill` instead. That terminal ignores a
+/// `fill_decorations` marker and applies the runs after it to the live grid.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub mod command;
 pub mod detect;

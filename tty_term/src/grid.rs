@@ -1178,6 +1178,26 @@ impl PagePool {
         page.decorations_changed = changed;
     }
 
+    /// Replace the decorations on document page `index`'s slot while its cells
+    /// stay, and report whether what the slot draws changed.
+    ///
+    /// The terminal writes this when a `fill_decorations` scope commits. A page
+    /// not in the pool's window has no cells to draw the runs over, so this
+    /// drops them and reports no change.
+    pub fn redecorate(
+        &mut self,
+        index: u64,
+        text_runs: Vec<TextRunCommand>,
+        bars: Vec<BarCommand>,
+        polylines: Vec<PolylineCommand>,
+    ) -> bool {
+        if self.page(index).is_none() {
+            return false;
+        }
+        self.set_decorations(index, text_runs, bars, polylines);
+        self.pages[self.slot(index)].decorations_changed
+    }
+
     /// The page-targeted decorations buffered for document page `index`, or
     /// `None` when that page is not currently in the pool's window.
     pub fn page_decorations(&self, index: u64) -> Option<(&[TextRun], &[Bar], &[Polyline])> {

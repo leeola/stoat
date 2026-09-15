@@ -206,6 +206,39 @@ pub fn encode_fill_scope(
     encode_fill_end_into(out);
 }
 
+/// Append a `Gstoatty;fill_decorations` open-marker frame for page `index` of
+/// pool `pool` to `out`.
+///
+/// The argument is a fill's. The terminal keeps the cells the page's slot
+/// holds and replaces only its text runs, bars, and polylines with the ones the
+/// scope carries.
+pub fn encode_fill_decorations_into(out: &mut Vec<u8>, pool: u32, index: u64) {
+    frame::begin(out, "fill_decorations");
+    frame::push_arg(out, |w| {
+        w.write_all(&pool.to_be_bytes())?;
+        w.write_all(&index.to_be_bytes())
+    });
+    frame::end(out);
+}
+
+/// Append a whole decorations-only batch for page `index` of pool `pool` to
+/// `out`, being the open marker, whatever `decorations` writes, then the close
+/// marker.
+///
+/// `decorations` writes the page's text run, bar, and polyline frames. The
+/// close marker is the one a fill takes, and the scope keeps it from being left
+/// out for the reason [`encode_fill_scope`] gives.
+pub fn encode_fill_decorations_scope(
+    out: &mut Vec<u8>,
+    pool: u32,
+    index: u64,
+    decorations: impl FnOnce(&mut Vec<u8>),
+) {
+    encode_fill_decorations_into(out, pool, index);
+    decorations(out);
+    encode_fill_end_into(out);
+}
+
 /// The `(pool, index)` a batch of bytes fills, or `None` when it is not a fill.
 ///
 /// A fill batch is self-contained, holding the open marker, the page's VT
@@ -217,6 +250,10 @@ pub fn encode_fill_scope(
 /// again later is work nobody will ever see. A sender with a backlog can drop
 /// the earlier one. `None` covers everything that has no such guarantee, from
 /// a different command to bytes that do not open with a frame at all.
+///
+/// A decorations-only batch is never keyed. It changes only the runs on top of
+/// cells an earlier fill painted, so no sender drops it, and none drops a whole
+/// fill on its account.
 pub fn fill_batch_key(batch: &[u8]) -> Option<(u32, u64)> {
     let end = frame::first_frame_end(batch)?;
     let frame = frame::decode(&batch[..end])?;
@@ -423,7 +460,7 @@ pub(super) fn decode_pool_drop(args: &[Vec<u8>]) -> Option<PoolDropCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{decode, decode_stream, Command};
+    use crate::command::{decode, decode_stream, encode_bar, BarCommand, Command};
 
     #[test]
     fn pool_region_round_trips() {
@@ -456,6 +493,18 @@ mod tests {
         };
 
         assert_eq!(decode(&encode_fill(&command)), Some(Command::Fill(command)));
+    }
+
+    #[test]
+    fn fill_decorations_round_trips() {
+        let command = FillCommand {
+            pool: 9,
+            index: 4_000_000_000,
+        };
+        let mut out = Vec::new();
+        encode_fill_decorations_into(&mut out, command.pool, command.index);
+
+        assert_eq!(decode(&out), Some(Command::FillDecorations(command)));
     }
 
     #[test]
@@ -518,6 +567,25 @@ mod tests {
             None,
             "an unterminated marker is not a page this can name",
         );
+    }
+
+    /// A sender drops a queued batch when a later one carries the same key. A
+    /// decorations-only batch with a fill's key makes it drop the fill for the
+    /// runs alone, and the page loses its cells.
+    #[test]
+    fn a_decorations_only_batch_is_not_keyed() {
+        let mut batch = Vec::new();
+        encode_fill_decorations_scope(&mut batch, 3, 41, |out| {
+            out.extend(encode_bar(&BarCommand {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 16,
+                color: [1, 2, 3],
+            }))
+        });
+
+        assert_eq!(fill_batch_key(&batch), None);
     }
 
     #[test]

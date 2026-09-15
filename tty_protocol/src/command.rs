@@ -72,12 +72,13 @@ pub use minimap::{
 pub use panel::{encode_panel, encode_panel_into, PanelCommand, PanelShadow};
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
 pub use pool::{
-    encode_fill, encode_fill_end, encode_fill_end_into, encode_fill_into, encode_fill_scope,
-    encode_pool_anchor, encode_pool_anchor_into, encode_pool_cursor, encode_pool_cursor_into,
-    encode_pool_drop, encode_pool_drop_into, encode_pool_region, encode_pool_region_into,
-    encode_reposition, encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key,
-    FillCommand, PoolAnchorCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
-    RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
+    encode_fill, encode_fill_decorations_into, encode_fill_decorations_scope, encode_fill_end,
+    encode_fill_end_into, encode_fill_into, encode_fill_scope, encode_pool_anchor,
+    encode_pool_anchor_into, encode_pool_cursor, encode_pool_cursor_into, encode_pool_drop,
+    encode_pool_drop_into, encode_pool_region, encode_pool_region_into, encode_reposition,
+    encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key, FillCommand,
+    PoolAnchorCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, RepositionCommand,
+    ScrollCommand, NON_PANE_POOL_BASE,
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,
@@ -148,6 +149,14 @@ pub enum Command {
     /// [`FillCommand::index`] instead of the live grid, until [`Command::FillEnd`]
     /// (or the next `fill`/`reset`) commits the slot and restores the live grid.
     Fill(FillCommand),
+    /// Open a page redirect that replaces only the decorations of a buffered
+    /// page.
+    ///
+    /// The scope carries the page's text runs, bars, and polylines, and the slot
+    /// keeps the cells an earlier [`Command::Fill`] painted. VT bytes inside the
+    /// scope paint nothing. [`Command::FillEnd`] closes it the way it closes a
+    /// fill.
+    FillDecorations(FillCommand),
     /// Close the page-fill redirect opened by [`Command::Fill`].
     ///
     /// Commits the page painted since the open marker onto its pool slot and
@@ -386,6 +395,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Sketch(c) => encode_sketch_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
         Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
+        Command::FillDecorations(c) => encode_fill_decorations_into(out, c.pool, c.index),
         Command::FillEnd => encode_fill_end_into(out),
         Command::Scroll(c) => encode_scroll_into(out, c),
         Command::PoolCursor(c) => encode_pool_cursor_into(out, c),
@@ -437,6 +447,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         },
         "line_layout" => decode_line_layout(args).map(Command::LineLayout),
         "fill" => decode_fill(args).map(Command::Fill),
+        "fill_decorations" => decode_fill(args).map(Command::FillDecorations),
         "fill_end" => Some(Command::FillEnd),
         "scroll" => decode_scroll(args).map(Command::Scroll),
         "pool_cursor" => decode_pool_cursor(args).map(Command::PoolCursor),
@@ -1038,6 +1049,7 @@ mod tests {
                 heights: vec![1, 2, 3, 1],
             }),
             Command::Fill(FillCommand { pool: 1, index: 7 }),
+            Command::FillDecorations(FillCommand { pool: 1, index: 7 }),
             Command::FillEnd,
             Command::Scroll(ScrollCommand {
                 pool: 2,

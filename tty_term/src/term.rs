@@ -850,6 +850,11 @@ impl Pool {
 struct FillTarget {
     pool: u32,
     index: u64,
+    /// Whether the page's cells are painted, or only its decorations replaced.
+    ///
+    /// A `fill_decorations` scope keeps the cells its slot already holds, so
+    /// the VT inside it reaches no parser and the commit projects nothing.
+    cells: bool,
     /// Whether the painted page is thrown away rather than committed.
     ///
     /// A viewport resize empties every pool's pages, so the page in flight has
@@ -896,6 +901,7 @@ impl FillTarget {
         FillTarget {
             pool,
             index,
+            cells: true,
             discard: false,
             term,
             parser: Processor::new(),
@@ -1176,7 +1182,10 @@ impl Terminal {
             || frames.iter().any(|(command, _, _)| {
                 matches!(
                     command,
-                    Some(Command::Fill(_)) | Some(Command::Popover(_)) | Some(Command::TextRun(_))
+                    Some(Command::Fill(_))
+                        | Some(Command::FillDecorations(_))
+                        | Some(Command::Popover(_))
+                        | Some(Command::TextRun(_))
                 )
             });
         let prefix = bytes.len() - scan.len();
@@ -1229,6 +1238,7 @@ impl Terminal {
                 let routed = matches!(
                     command,
                     Command::Fill(_)
+                        | Command::FillDecorations(_)
                         | Command::FillEnd
                         | Command::Reset
                         | Command::Popover(_)
@@ -1564,7 +1574,8 @@ impl Terminal {
                 }
                 self.mark_window_dirty(window);
             },
-            Command::Fill(fill) => self.begin_fill(fill.pool, fill.index),
+            Command::Fill(fill) => self.begin_fill(fill.pool, fill.index, true),
+            Command::FillDecorations(fill) => self.begin_fill(fill.pool, fill.index, false),
             Command::FillEnd => self.commit_fill(),
             Command::Scroll(scroll) => {
                 let window = self.pools.get_mut(&scroll.pool).map(|pool| {
@@ -1985,6 +1996,7 @@ impl Terminal {
             // the stream and pool controls, and the immediate minimap content,
             // view, and drop commands.
             Command::Fill(_)
+            | Command::FillDecorations(_)
             | Command::FillEnd
             | Command::PopoverEnd
             | Command::TextRunEnd
@@ -2338,7 +2350,10 @@ impl Terminal {
     ///
     /// The context parked by the last page serves this one when their sizes match,
     /// so only a differently shaped region builds a new one.
-    fn begin_fill(&mut self, pool: u32, index: u64) {
+    ///
+    /// `cells` is false for a `fill_decorations` scope, which keeps the cells
+    /// the slot holds and replaces only its decorations.
+    fn begin_fill(&mut self, pool: u32, index: u64, cells: bool) {
         self.commit_fill();
         // A pool's region is already clamped, so this only bounds the fallback
         // and any pool declared before a resize shrank the viewport under it.
@@ -2358,14 +2373,16 @@ impl Terminal {
             .fill_scratch
             .take_if(|fill| fill.term.screen_lines() == rows && fill.term.columns() == cols);
 
-        self.fill = Some(match recycled {
+        let mut fill = match recycled {
             Some(mut fill) => {
                 fill.pool = pool;
                 fill.index = index;
                 fill
             },
             None => FillTarget::new(pool, index, rows, cols),
-        });
+        };
+        fill.cells = cells;
+        self.fill = Some(fill);
     }
 
     /// Commit the open page fill onto its pool's slot and restore the live grid.
@@ -2379,6 +2396,10 @@ impl Terminal {
     ///
     /// The fill context itself is reset and parked in [`Self::fill_scratch`] for
     /// the next page to paint through.
+    ///
+    /// A `fill_decorations` scope projects no cells. Its decorations replace the
+    /// ones on the slot only while that slot still buffers the page, since the
+    /// runs mean nothing without the cells under them.
     fn commit_fill(&mut self) {
         let Some(mut fill) = self.fill.take() else {
             return;
@@ -2393,21 +2414,31 @@ impl Terminal {
         if !fill.discard
             && let Some(pool) = self.pools.get_mut(&fill.pool)
         {
-            // The box project_term_cells writes, so the slot clears only what
-            // the paint below will not reach.
-            let grid =
-                pool.page_pool
-                    .fill(fill.index, fill.term.screen_lines(), fill.term.columns());
-            let cells_changed = project_term_cells(grid, &fill.term, &self.theme, &self.palette);
-            pool.page_pool
-                .set_decorations(fill.index, text_runs, bars, polylines);
-
             // A caller watching this version refills every page it buffers
             // whenever the version moves, so most fills repaint bytes that did
             // not change. Reporting one of those costs a recompose of
             // everything the pool feeds, which is why the version moves only
             // when the page does.
-            if pool.page_pool.content_changed(fill.index, cells_changed) {
+            let changed = match fill.cells {
+                true => {
+                    // The box project_term_cells writes, so the slot clears only
+                    // what the paint below will not reach.
+                    let grid = pool.page_pool.fill(
+                        fill.index,
+                        fill.term.screen_lines(),
+                        fill.term.columns(),
+                    );
+                    let cells_changed =
+                        project_term_cells(grid, &fill.term, &self.theme, &self.palette);
+                    pool.page_pool
+                        .set_decorations(fill.index, text_runs, bars, polylines);
+                    pool.page_pool.content_changed(fill.index, cells_changed)
+                },
+                false => pool
+                    .page_pool
+                    .redecorate(fill.index, text_runs, bars, polylines),
+            };
+            if changed {
                 pool.content_version = pool.content_version.wrapping_add(1);
                 let window = pool.region.window;
                 self.mark_window_dirty(window);
@@ -2415,8 +2446,13 @@ impl Terminal {
         }
 
         // Parked whether or not the page landed, since a pool dropped mid-fill
-        // leaves the context just as reusable as a committed one.
-        fill.recycle();
+        // leaves the context just as reusable as a committed one. A
+        // decorations-only scope fed its parser nothing, so there is nothing to
+        // reset.
+        match fill.cells {
+            true => fill.recycle(),
+            false => fill.discard = false,
+        }
         self.fill_scratch = Some(fill);
     }
 
@@ -2517,7 +2553,8 @@ impl Terminal {
     /// A content capture takes precedence over an open fill, so a text run
     /// nested inside a page captures its text rather than painting it into the
     /// page cells. An open fill with no capture takes the bytes, and with
-    /// neither open the live parser does.
+    /// neither open the live parser does. A decorations-only fill drops them,
+    /// since it paints no cells.
     ///
     /// A capture that reaches [`MAX_CAPTURE_BYTES`] is committed with the text
     /// it has, which restores live routing for everything after it.
@@ -2529,7 +2566,9 @@ impl Terminal {
                 self.commit_capture();
             }
         } else if let Some(fill) = &mut self.fill {
-            fill.parser.advance(&mut fill.term, segment);
+            if fill.cells {
+                fill.parser.advance(&mut fill.term, segment);
+            }
         } else {
             self.parser.advance(&mut self.term, segment);
         }
@@ -3344,12 +3383,13 @@ mod tests {
         index::{Column, Line, Point},
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
-        encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_line_layout,
-        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor, encode_pool_drop,
-        encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
-        encode_scroll, encode_scroll_region, encode_sketch, encode_text_run, encode_window_open,
+        encode_bar, encode_border, encode_config_reload, encode_fill,
+        encode_fill_decorations_scope, encode_fill_end, encode_font_step, encode_hello,
+        encode_icon, encode_ident_reply, encode_line_layout, encode_minimap, encode_minimap_drop,
+        encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline,
+        encode_pool_anchor, encode_pool_cursor, encode_pool_drop, encode_pool_region,
+        encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_sketch, encode_text_run, encode_window_open,
         encode_zoom_capture, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle,
         FillCommand, HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply,
         LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
@@ -6440,6 +6480,131 @@ mod tests {
         let (again, quiet) = refill(&mut terminal, 0, b"hi");
         assert_eq!(again, first, "the same bytes are not a new version of them");
         assert_eq!(quiet, Vec::new(), "and nothing needs repainting");
+    }
+
+    /// A text run reading `text` at the top-left of its page.
+    fn page_run(text: &str) -> TextRunCommand {
+        TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: None,
+            follow: 0,
+            anchor: None,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Replace the runs of page `index` of pool 2 with `runs` through a
+    /// decorations-only scope that also streams `vt`, and report the pool
+    /// version and window events it produced.
+    fn redecorate(
+        terminal: &mut Terminal,
+        index: u64,
+        runs: &[&str],
+        vt: &[u8],
+    ) -> (u64, Vec<TermEvent>) {
+        terminal.take_events();
+        let mut stream = Vec::new();
+        encode_fill_decorations_scope(&mut stream, 2, index, |out| {
+            out.extend_from_slice(vt);
+            for text in runs {
+                out.extend(encode_text_run(&page_run(text)));
+            }
+        });
+        terminal.advance(&stream);
+        (
+            terminal.pool_content_version(2).expect("pool declared"),
+            terminal.take_events(),
+        )
+    }
+
+    /// The texts of the runs buffered on page `index` of pool 2.
+    fn page_run_texts(terminal: &Terminal, index: u64) -> Vec<String> {
+        let (runs, _, _) = terminal.pools[&2]
+            .page_pool
+            .page_decorations(index)
+            .expect("page buffered");
+        runs.iter().map(|run| run.text.to_string()).collect()
+    }
+
+    #[test]
+    fn a_decorations_only_fill_keeps_the_cells_and_replaces_the_runs() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+        let mut stream = encode_fill(&FillCommand { pool: 2, index: 0 });
+        stream.extend_from_slice(b"hi");
+        stream.extend(encode_text_run(&page_run("1")));
+        stream.extend(encode_fill_end());
+        terminal.advance(&stream);
+        let filled = terminal.pool_content_version(2).expect("pool declared");
+
+        let (version, dirtied) = redecorate(&mut terminal, 0, &["2"], b"");
+
+        let page = pool_page(&terminal, 2, 0);
+        assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('h', 'i'));
+        assert_eq!(page_run_texts(&terminal, 0), ["2"], "only the new run");
+        assert_ne!(version, filled, "the slot draws something else");
+        assert_eq!(dirtied, vec![TermEvent::WindowDirty(3)]);
+    }
+
+    #[test]
+    fn an_identical_decorations_only_fill_moves_neither_the_version_nor_the_window() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+        refill(&mut terminal, 0, b"hi");
+
+        let (first, _) = redecorate(&mut terminal, 0, &["2"], b"");
+        let (again, quiet) = redecorate(&mut terminal, 0, &["2"], b"");
+
+        assert_eq!(
+            (again, quiet),
+            (first, Vec::new()),
+            "the same runs are not a new version of them"
+        );
+    }
+
+    #[test]
+    fn a_decorations_only_fill_for_an_unbuffered_page_is_dropped() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+        let (filled, _) = refill(&mut terminal, 0, b"hi");
+
+        let (version, events) = redecorate(&mut terminal, 3, &["2"], b"");
+
+        assert_eq!(
+            (version, events),
+            (filled, Vec::new()),
+            "no cells to draw over, so nothing moved"
+        );
+        assert!(terminal.pools[&2].page_pool.page_decorations(3).is_none());
+    }
+
+    /// The scope parks the context it borrowed without resetting it, so a byte
+    /// that reached its parser shows up in the next page painted through it.
+    #[test]
+    fn vt_inside_a_decorations_only_fill_paints_nothing() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+        declare_window_pool(&mut terminal, 2, 3);
+        refill(&mut terminal, 0, b"hi");
+
+        redecorate(&mut terminal, 0, &[], b"xy");
+        refill(&mut terminal, 1, b"");
+
+        let cells = |index| {
+            let page = pool_page(&terminal, 2, index);
+            (page.get(0, 0).ch, page.get(0, 1).ch)
+        };
+        assert_eq!(cells(0), ('h', 'i'), "the page keeps its cells");
+        assert_eq!(cells(1), (' ', ' '), "the next page starts blank");
+        terminal.project(&mut grid);
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(0, 1).ch),
+            (' ', ' '),
+            "and the live grid never sees the bytes"
+        );
     }
 
     #[test]
