@@ -22,7 +22,6 @@ pub use syntax_map::{
     LayerKey, LayerSummary, SyntaxLayer, SyntaxMap, SyntaxMapCapture, SyntaxSnapshot,
 };
 pub use textobject::{
-    collect_capture_ranges, collect_capture_starts, find_next_capture_after,
-    find_smallest_capture_at,
+    collect_capture_ranges, collect_capture_starts, find_smallest_capture_at, ObjectWindow,
 };
 pub use tree_sitter::{Node, Query, Tree};
