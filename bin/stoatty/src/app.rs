@@ -20,8 +20,8 @@ use crate::{
     config::{self, Config, CursorAnimation},
     input::{
         alternate_scroll_bytes, cell_at, chord_char, chord_csi_u, encode_key, font_step,
-        ipc_button, modifier_bits, paste_bytes, sgr_button_bytes, sgr_modifier_bits,
-        sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size, swallow_super_combo, wheel_lines,
+        font_step_target, ipc_button, modifier_bits, paste_bytes, sgr_button_bytes,
+        sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes, swallow_super_combo, wheel_lines,
         wheel_travel, zoom_csi_u,
     },
     pty::{self, Pty, PtyOutput},
@@ -1912,10 +1912,9 @@ fn zoom_route(capture: bool, inband: bool, client_connected: bool) -> ZoomRoute 
 /// child, and a zoom key held at the range's clamp asks for that on every
 /// autorepeat.
 fn apply_font_step(state: &mut State, delta: i32) {
-    let font_size = stepped_font_size(state.font_size, delta);
-    if font_size == state.font_size {
+    let Some(font_size) = font_step_target(state.font_size, delta) else {
         return;
-    }
+    };
     state.font_size = font_size;
     state
         .gpu
@@ -4572,15 +4571,6 @@ mod tests {
         assert!(!swallow_super_combo(ModifiersState::empty()));
     }
 
-    /// A socket claim with nowhere to send it must not vanish, so a connected
-    /// reader is as much a precondition as the claim itself.
-    ///
-    /// A connected client rather than a bound socket, because those come apart
-    /// exactly where the combo goes dead. A child reached over ssh never sees
-    /// the socket path, and one that exits leaves the socket bound behind it.
-    ///
-    /// An inband claim is the answer to that same gap, so it turns on the claim
-    /// alone: the PTY it writes to is there whenever the child is.
     /// A zoom key autorepeats into one batch, and each step there resets the
     /// metrics of twelve passes, clears both shape caches, reflows the
     /// terminal, and signals the child. Only the last size is ever drawn.
@@ -4615,6 +4605,15 @@ mod tests {
         );
     }
 
+    /// A socket claim with nowhere to send it must not vanish, so a connected
+    /// reader is as much a precondition as the claim itself.
+    ///
+    /// A connected client rather than a bound socket, because those come apart
+    /// exactly where the combo goes dead. A child reached over ssh never sees
+    /// the socket path, and one that exits leaves the socket bound behind it.
+    ///
+    /// An inband claim is the answer to that same gap, so it turns on the claim
+    /// alone: the PTY it writes to is there whenever the child is.
     #[test]
     fn a_zoom_press_takes_the_route_the_claim_asked_for() {
         let routes = |connected| {

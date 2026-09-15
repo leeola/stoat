@@ -106,6 +106,17 @@ pub(crate) fn stepped_font_size(current: u32, delta: i32) -> u32 {
         .clamp(FONT_SIZE_FLOOR, FONT_SIZE_CEIL)
 }
 
+/// The size a step of `delta` moves `current` to, or `None` when the step
+/// changes nothing.
+///
+/// Applying a step resets the metrics of every pass and reflows the terminal,
+/// and a zoom key held at the range's clamp repeats its step on every
+/// autorepeat. A step that lands on `current` therefore asks for no work.
+pub(crate) fn font_step_target(current: u32, delta: i32) -> Option<u32> {
+    let target = stepped_font_size(current, delta);
+    (target != current).then_some(target)
+}
+
 /// Whether an unhandled key press is a macOS Cmd-combo that should be swallowed
 /// rather than forwarded to the child.
 ///
@@ -379,6 +390,17 @@ mod tests {
             stepped_font_size(u32::MAX, 0),
             FONT_SIZE_CEIL,
             "a size set from outside the zoom is pulled back into range"
+        );
+    }
+
+    /// A step that changes nothing still resets every pass's metrics once
+    /// applied, and a zoom key held at the clamp repeats it on every autorepeat.
+    #[test]
+    fn a_step_at_the_clamp_asks_for_nothing() {
+        assert_eq!(
+            [(FONT_SIZE_CEIL, 1), (FONT_SIZE_FLOOR, -1), (20, 0), (20, 1)]
+                .map(|(size, delta)| font_step_target(size, delta)),
+            [None, None, None, Some(21)],
         );
     }
 
