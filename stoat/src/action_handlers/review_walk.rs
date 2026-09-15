@@ -444,36 +444,63 @@ fn walk_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     walk_navigate(stoat)
 }
 
-/// End the walk, putting the working tree back where it started.
+/// End the walk and queue the checkout that puts the working tree back where it
+/// started.
 ///
-/// A failed checkout back keeps the walk, so the user can fix whatever blocked
-/// it and retry rather than being stranded detached with no record of where
-/// they came from.
+/// The walk ends at the press, so a step checkout still out applies nothing
+/// when it lands. The return runs on the git queue behind that checkout. The
+/// press drops a step that still waits its turn, so no step checkout follows
+/// the return.
+///
+/// A failed return puts the walk back. The user then fixes whatever blocked it
+/// and tries again, and does not stay detached with no record of where they
+/// came from.
 pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
     let Some(walk) = stoat.active_workspace_mut().review_walk.take() else {
         return UpdateEffect::None;
     };
-    let Some(repo) = stoat.git_host.discover(&walk.workdir) else {
-        stoat.active_workspace_mut().review_walk = Some(walk);
-        return review_error(stoat, "not in a git repository", None);
-    };
+    stoat.git_jobs.drop_queued(GitJobKey::WalkLanding);
 
-    let restored = match &walk.return_ref {
-        ReturnRef::Branch(name) => repo.checkout_ref(name),
-        ReturnRef::Detached(sha) => repo.checkout_detached(sha),
-    };
+    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+        let Some(repo) = stoat.git_host.discover(&walk.workdir) else {
+            restore_walk(stoat, walk);
+            review_error(stoat, "not in a git repository", None);
+            return None;
+        };
+        Some(Box::new(move || {
+            let restored = match &walk.return_ref {
+                ReturnRef::Branch(name) => repo.checkout_ref(name),
+                ReturnRef::Detached(sha) => repo.checkout_detached(sha),
+            }
+            .map_err(|err| err.to_string());
+            Box::new(move |stoat: &mut Stoat| land_return(stoat, walk, restored)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Leave the diff view once a walk's return lands, or put the walk back if the
+/// return failed.
+fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>) {
     if let Err(err) = restored {
-        stoat.active_workspace_mut().review_walk = Some(walk);
-        return review_error(stoat, "could not return", Some(err.to_string()));
+        restore_walk(stoat, walk);
+        review_error(stoat, "could not return", Some(err));
+        return;
     }
 
-    // Cleared only once the tree is back. A failed return leaves the tree at the
-    // commit, and a base dropped beforehand would name a base the tree is not
-    // at, which is exactly the state the retry has to read correctly.
+    // Only a return that landed clears the base. A failed one leaves the tree at
+    // the commit, and the base must still name that commit's parent.
     stoat.active_workspace_mut().set_diff_base(None);
     super::review::exit_diff_view(stoat);
+}
 
-    UpdateEffect::Redraw
+/// Put back a walk whose return did not happen.
+///
+/// A walk started after the press keeps its place, since the reader went on to
+/// that walk.
+fn restore_walk(stoat: &mut Stoat, walk: ReviewWalk) {
+    stoat.active_workspace_mut().review_walk.get_or_insert(walk);
 }
 
 fn dirty_tree_error(stoat: &mut Stoat) -> UpdateEffect {
@@ -910,8 +937,13 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 mod tests {
     use super::{queue_walk_landing, walk_navigate, ReturnRef, ReviewWalk, WalkLandingKind};
     use crate::{
-        app::Stoat, badge::BadgeSource, commit_list::Preview, commit_picker::CommitPickerRole,
-        git_jobs::GitJobKey, test_harness::TestHarness, workspace::diff::DiffBase,
+        app::Stoat,
+        badge::BadgeSource,
+        commit_list::Preview,
+        commit_picker::CommitPickerRole,
+        git_jobs::{self, GitJobKey},
+        test_harness::TestHarness,
+        workspace::diff::DiffBase,
     };
     use std::path::{Path, PathBuf};
 
@@ -1866,22 +1898,67 @@ mod tests {
         );
     }
 
-    /// A step's checkout is sometimes still out when the walk ends. Its landing
-    /// then describes a walk that is gone, so it leaves the base and the latch
-    /// where the return put them.
+    /// A step's checkout is sometimes still out when the walk ends. The return
+    /// waits behind it, and the step's landing finds no walk, so it moves
+    /// neither the base nor the latch the return clears.
     #[test]
-    fn a_step_landing_after_the_walk_ends_applies_nothing() {
+    fn review_done_during_a_step_checkout_leaves_no_base_behind() {
         let mut h = harness();
         start_walk(&mut h);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        let at_press = checkouts(&h);
         h.settle();
 
         assert_eq!(
-            (diff_base(&h), latched(&h)),
-            (None, false),
-            "the late landing moved neither",
+            (
+                at_press,
+                checkouts(&h),
+                diff_base(&h),
+                latched(&h),
+                h.stoat.active_workspace().review_walk.is_none()
+            ),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_string(),
+                    "detached:b2c3d4e5".to_string()
+                ],
+                vec![
+                    "detached:a1b2c3d4".to_string(),
+                    "detached:b2c3d4e5".to_string(),
+                    "ref:main".to_string()
+                ],
+                None,
+                false,
+                true
+            ),
+            "the return waits for the step, whose landing moves nothing",
+        );
+    }
+
+    /// A step that waits behind another git job when the walk ends never runs.
+    /// No checkout after the return then leaves the tree on the walked commit.
+    #[test]
+    fn review_done_drops_a_step_still_waiting_its_turn() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert_eq!(
+            (
+                checkouts(&h),
+                h.stoat.active_workspace().review_walk.is_none()
+            ),
+            (
+                vec!["detached:a1b2c3d4".to_string(), "ref:main".to_string()],
+                true
+            ),
+            "the tree ends where the walk started",
         );
     }
 
@@ -2124,5 +2201,44 @@ mod tests {
             "the walk survives so :review-done can be retried"
         );
         assert_eq!(review_badge(&h).as_deref(), Some("could not return"));
+    }
+
+    /// A failed return puts its walk back only into a workspace with no walk.
+    /// A walk started while the return waited keeps its place.
+    #[test]
+    fn a_failed_return_keeps_a_walk_started_after_the_press() {
+        let mut h = harness();
+        h.fake_git().add_repo("/repo").set_head_branch("gone");
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        seed_walk(&mut h, &["b2c3d4e5"]);
+
+        assert_eq!(walk_shas(&h), ["b2c3d4e5"], "the later walk stands");
+    }
+
+    /// A walk over a workdir outside every repository has no checkout to return
+    /// to, so it stays for another try.
+    #[test]
+    fn review_done_outside_a_repository_keeps_the_walk() {
+        let mut h = harness();
+        seed_walk(&mut h, &["a1b2c3d4"]);
+        h.stoat
+            .active_workspace_mut()
+            .review_walk
+            .as_mut()
+            .expect("a walk")
+            .workdir = PathBuf::from("/elsewhere");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert_eq!(
+            (walk_shas(&h), review_badge(&h)),
+            (
+                vec!["a1b2c3d4".to_string()],
+                Some("not in a git repository".to_string())
+            ),
+        );
     }
 }

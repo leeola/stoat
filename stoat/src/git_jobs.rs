@@ -81,10 +81,6 @@ impl GitJobs {
     }
 
     /// Drop every queued job with `key`. A running one still lands.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reserved for the rebase stepper's queued steps")
-    )]
     pub(crate) fn drop_queued(&mut self, key: GitJobKey) {
         self.queue.retain(|job| job.key != Some(key));
     }
