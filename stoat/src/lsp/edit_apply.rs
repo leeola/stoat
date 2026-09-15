@@ -205,16 +205,24 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
 /// if needed.
 ///
 /// Every range converts to bytes against the text as it stands before any of
-/// them run, and they apply from the end of the buffer backwards, so nothing is
-/// ever measured against text an earlier edit has already moved. The spec
-/// guarantees the edits do not overlap, which is what makes converting them all
-/// up front well defined.
+/// them run. The spec guarantees the edits do not overlap, which is what makes
+/// converting them all up front well defined.
 ///
-/// Edits sharing a position apply later-in-the-array first, which leaves the
-/// earlier one ahead of it in the text. That is what the spec's array order for
-/// same-position inserts amounts to once the edits run backwards.
+/// The edits land in one pass through
+/// [`TextBuffer::edit_batch`](crate::buffer::TextBuffer::edit_batch), which
+/// rebuilds the buffer once rather than once per edit. A rename that touches a
+/// name five hundred times in one file is one rebuild. Edits sharing a position
+/// apply later-in-the-array first, which leaves the earlier one ahead of it in
+/// the text. That is what the spec's array order for same-position inserts
+/// amounts to.
 ///
-/// The order is taken from each range's end rather than its start. For
+/// Two shapes lie outside that pass. One is ranges that overlap, which the spec
+/// forbids. The other is an insert that shares its start with an edit that
+/// deletes. A set holding either applies one edit at a time from the end of the
+/// buffer backwards, so nothing is ever measured against text an earlier edit
+/// has already moved.
+///
+/// That order is taken from each range's end rather than its start. For
 /// non-overlapping edits the two agree, and where an insert shares a start with
 /// a replace, ending order applies the replace first and leaves the insertion
 /// standing. Ordering by start there puts the insert into the span the replace
@@ -265,16 +273,42 @@ pub(crate) fn apply_text_edits_to_buffer(
             (index, byte_range, edit.new_text)
         })
         .collect();
-    converted.sort_by_key(|(index, range, _)| Reverse((range.end, range.start, *index)));
+    converted.sort_by_key(|(index, range, _)| Reverse((range.start, *index)));
 
-    for (_, range, new_text) in converted {
-        guard.edit(range, &new_text);
+    if fits_one_batch(&converted) {
+        let batch: Vec<(std::ops::Range<usize>, &str)> = converted
+            .iter()
+            .map(|(_, range, new_text)| (range.clone(), new_text.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
+    } else {
+        // Only the shapes the batch refuses reach this loop, and each edit here
+        // rebuilds the buffer on its own.
+        converted.sort_by_key(|(index, range, _)| Reverse((range.end, range.start, *index)));
+        for (_, range, new_text) in converted {
+            guard.edit(range, &new_text);
+        }
     }
     guard.seal_group(selections.clone());
     if was_open {
         guard.begin_group(selections);
     }
     Ok(buffer_id)
+}
+
+/// Whether `edits`, sorted descending by start, fit the contract of
+/// [`TextBuffer::edit_batch`](crate::buffer::TextBuffer::edit_batch).
+///
+/// Each range has to end at or before the start of the one after it in the
+/// document, and no insert shares its start with an edit that deletes. The
+/// batch refuses both. The first breaks the spec, and for the second a single
+/// forward pass has no way to choose which of the two lands first.
+fn fits_one_batch(edits: &[(usize, std::ops::Range<usize>, String)]) -> bool {
+    edits.windows(2).all(|pair| {
+        let (later, earlier) = (&pair[0].1, &pair[1].1);
+        earlier.end <= later.start
+            && (earlier.start != later.start || earlier.is_empty() == later.is_empty())
+    })
 }
 
 /// Whether `version` still names the document the buffer holds.
@@ -631,6 +665,58 @@ mod tests {
             vec![text_edit(0, 3, 3, "X"), text_edit(0, 1, 3, "Y")],
         );
         assert_eq!(buffer_text(&h, &path), "aYXdef\n");
+
+        undo(&mut h, &path);
+        assert_eq!(buffer_text(&h, &path), "abcdef\n", "one undo step");
+    }
+
+    /// Replaces and an insert touching one of them land as the server listed
+    /// them, in one undo step.
+    #[test]
+    fn replaces_and_an_insert_at_a_replace_end_land_in_one_step() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abcdefghij\n");
+
+        apply_edits(
+            &mut h,
+            &path,
+            vec![
+                text_edit(0, 5, 5, "X"),
+                text_edit(0, 0, 2, "A"),
+                text_edit(0, 3, 5, "B"),
+                text_edit(0, 6, 8, "C"),
+            ],
+        );
+        assert_eq!(buffer_text(&h, &path), "AcBXfCij\n");
+
+        undo(&mut h, &path);
+        assert_eq!(buffer_text(&h, &path), "abcdefghij\n", "one undo step");
+    }
+
+    /// A set holding an insert at a replace's start still lands whole, in one
+    /// undo step.
+    ///
+    /// That shape is one a single pass over the buffer refuses, so this set
+    /// also covers the insert at the other replace's end on the edit-by-edit
+    /// path.
+    #[test]
+    fn an_insert_at_a_replace_start_keeps_every_edit_in_one_step() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abcdef\n");
+
+        apply_edits(
+            &mut h,
+            &path,
+            vec![
+                text_edit(0, 0, 0, "X"),
+                text_edit(0, 0, 2, "Y"),
+                text_edit(0, 4, 4, "Z"),
+                text_edit(0, 2, 4, "W"),
+            ],
+        );
+        assert_eq!(buffer_text(&h, &path), "XYWZef\n");
 
         undo(&mut h, &path);
         assert_eq!(buffer_text(&h, &path), "abcdef\n", "one undo step");
