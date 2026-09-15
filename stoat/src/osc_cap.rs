@@ -23,6 +23,11 @@ const ESC: u8 = 0x1b;
 /// Bell, which ends an OSC in the form most programs write.
 const BEL: u8 = 0x07;
 
+/// Cancel and substitute, which end an OSC anywhere in it and then run as
+/// controls of their own.
+const CAN: u8 = 0x18;
+const SUB: u8 = 0x1a;
+
 /// Byte after `ESC` that opens an OSC string.
 const OSC_INTRODUCER: u8 = b']';
 
@@ -31,6 +36,13 @@ const STRING_TERMINATOR: u8 = b'\\';
 
 /// The OSC code that writes the clipboard.
 const OSC_CLIPBOARD: u32 = 52;
+
+/// How many digits of an OSC code are read as the code.
+///
+/// No real code has more than a few. The parser keeps every digit in its OSC
+/// buffer with no bound, so the digits past this count as payload, and an
+/// endless digit run meets the plain cap like any oversized payload.
+const MAX_OSC_CODE_DIGITS: usize = 10;
 
 /// Cap on the payload of an ordinary OSC, past which its bytes are cut from
 /// what the parser sees.
@@ -58,6 +70,9 @@ pub(crate) struct OscCap {
     state: State,
     /// Code of the open OSC, accumulated digit by digit.
     code: u32,
+    /// Digits of the open OSC's code read so far, up to
+    /// [`MAX_OSC_CODE_DIGITS`].
+    digits: u8,
     /// Payload bytes the open OSC has taken, across every call it spans.
     payload: usize,
     /// Whether the open OSC tripped its cap while the parser held part of it.
@@ -93,6 +108,7 @@ impl OscCap {
         OscCap {
             state: State::Ground,
             code: 0,
+            digits: 0,
             payload: 0,
             dropped: false,
             plain_cap,
@@ -157,6 +173,7 @@ impl OscCap {
                     self.state = match byte {
                         OSC_INTRODUCER => {
                             self.code = 0;
+                            self.digits = 0;
                             self.payload = 0;
                             State::Prefix
                         },
@@ -165,7 +182,14 @@ impl OscCap {
                     };
                 },
                 State::Prefix => match byte {
+                    // A code past its digit bound goes on as payload, so the
+                    // cap bounds what the parser keeps of the rest.
+                    b'0'..=b'9' if usize::from(self.digits) >= MAX_OSC_CODE_DIGITS => {
+                        cut = i..i;
+                        self.state = State::Payload;
+                    },
                     b'0'..=b'9' => {
+                        self.digits += 1;
                         self.code = self
                             .code
                             .saturating_mul(10)
@@ -175,7 +199,7 @@ impl OscCap {
                         cut = i + 1..i + 1;
                         self.state = State::Payload;
                     },
-                    BEL => self.state = State::Ground,
+                    BEL | CAN | SUB => self.state = State::Ground,
                     ESC => {
                         cut = i..i;
                         self.state = State::PayloadEscape;
@@ -191,6 +215,14 @@ impl OscCap {
                     ESC => self.state = State::PayloadEscape,
                     BEL => {
                         reset |= self.finish(&cut, i + 1, carried, &mut forwarded, out);
+                        carried = false;
+                    },
+                    // The parser ends the string here too, then runs the byte as
+                    // a control and prints what follows. The byte stays in the
+                    // stream even for a dropped string, since a fresh parser runs
+                    // it the same way.
+                    CAN | SUB => {
+                        reset |= self.finish(&cut, cut.end, carried, &mut forwarded, out);
                         carried = false;
                     },
                     _ => {
@@ -311,13 +343,14 @@ impl OscCap {
 }
 
 /// How many leading bytes of `rest` belong to a payload, stopping at the
-/// terminator that ends it or at the end of what has arrived.
+/// byte that ends it (ESC, BEL, CAN, or SUB) or at the end of what has arrived.
 ///
-/// Zero exactly when `rest` opens on a terminator, which is why the caller
+/// Zero exactly when `rest` opens on such a byte, which is why the caller
 /// takes a run only from a byte it has already seen is not one. A zero-length
-/// run would leave the walk where it was.
+/// run leaves the walk where it is.
 fn payload_run(rest: &[u8]) -> usize {
-    memchr::memchr2(ESC, BEL, rest).unwrap_or(rest.len())
+    let end = memchr::memchr3(ESC, BEL, CAN, rest).unwrap_or(rest.len());
+    memchr::memchr(SUB, &rest[..end]).unwrap_or(end)
 }
 
 #[cfg(test)]
@@ -431,6 +464,53 @@ mod tests {
         assert_eq!(
             forwarded(&mut cap, b"\x1b]0;oversized\x1b[31mred"),
             b"\x1b]0;\x1b[31mred",
+        );
+    }
+
+    /// The parser ends an OSC on a cancel or a substitute as well, then runs the
+    /// byte as a control and prints what follows. A cut past one swallows that
+    /// output.
+    #[test]
+    fn a_cancel_or_substitute_ends_the_cut_where_the_parser_ends_the_string() {
+        assert_eq!(
+            forwarded(&mut OscCap::new(4, 16), b"\x1b]0;oversized\x18printed"),
+            b"\x1b]0;\x18printed",
+        );
+        assert_eq!(
+            forwarded(&mut OscCap::new(4, 16), b"\x1b]0;oversized\x1aprinted"),
+            b"\x1b]0;\x1aprinted",
+        );
+        assert_eq!(
+            forwarded(&mut OscCap::new(4, 16), b"\x1b]0\x18printed text"),
+            b"\x1b]0\x18printed text",
+            "a cancel in the code ends the string before any cut opens",
+        );
+    }
+
+    /// A cancel runs as a control of its own once the string it ends is gone,
+    /// for a fresh parser as for the one that held the string, so a dropped
+    /// string passes it on.
+    #[test]
+    fn a_dropped_string_passes_its_cancel_on() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(
+            walk(&mut cap, b"\x1b]0;abcde"),
+            (false, b"\x1b]0;abcde".to_vec()),
+        );
+        assert_eq!(
+            walk(&mut cap, b"fghij\x18after"),
+            (true, b"\x18after".to_vec()),
+        );
+    }
+
+    /// The parser keeps every digit of a code, so a code past ten digits goes on
+    /// as payload and meets the plain cap like any other.
+    #[test]
+    fn a_code_longer_than_ten_digits_is_cut_as_payload() {
+        let seq = format!("\x1b]{}\x07after", "1".repeat(16));
+        assert_eq!(
+            forwarded(&mut OscCap::new(4, 16), seq.as_bytes()),
+            format!("\x1b]{}\x07after", "1".repeat(10)).into_bytes(),
         );
     }
 
