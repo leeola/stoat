@@ -190,7 +190,7 @@ impl ObjectIndex {
         rope: &stoat_text::Rope,
         capture_name: &str,
     ) -> ObjectIndex {
-        let Some(query) = layer.language.textobjects_query() else {
+        let Some(query) = layer.language.textobject_query_for(capture_name) else {
             return ObjectIndex {
                 by_start: Vec::new(),
                 by_end: Vec::new(),

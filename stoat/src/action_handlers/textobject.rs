@@ -342,8 +342,9 @@ fn pair_to_range(
     }
 }
 
-/// Run the focused buffer's [`textobjects_query`](stoat_language::Language::textobjects_query)
-/// over the deepest syntax layer covering `cursor`, looking for the
+/// Run the focused buffer's
+/// [`textobject_query_for`](stoat_language::Language::textobject_query_for)
+/// `<kind>` over the deepest syntax layer covering `cursor`, looking for the
 /// smallest capture named `<kind>.{around|inside}`. Returns the
 /// matching byte range or `None` when the language has no textobjects
 /// query, the cursor is outside any capture, or the capture name is
@@ -373,10 +374,10 @@ fn find_textobject_treesitter(
                     acc
                 }
             })?;
-    let query = layer.language.textobjects_query()?;
+    let capture_name = format!("{kind}.{}", mode.capture_suffix());
+    let query = layer.language.textobject_query_for(&capture_name)?;
     let buffer = ws.buffers.get(buffer_id)?;
     let guard = buffer.read().ok()?;
-    let capture_name = format!("{kind}.{}", mode.capture_suffix());
     stoat_language::find_smallest_capture_at(
         query,
         layer.tree.root_node(),

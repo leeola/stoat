@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 use stoat_text::auto_pairs::DEFAULT_PAIRS;
-use tree_sitter::{Language as TsLanguage, Query};
+use tree_sitter::{CaptureQuantifier, Language as TsLanguage, Query};
 
 pub struct Language {
     pub name: &'static str,
@@ -85,6 +85,9 @@ struct AuxQueries {
     brackets: LazyQuery,
     indents: LazyQuery,
     textobjects: LazyQuery,
+    /// The textobjects query split into one query per kind of object, each
+    /// with the kind's name, built the first time a kind is asked for.
+    textobject_kinds: OnceLock<Vec<(String, Query)>>,
     outline: LazyQuery,
     tags: LazyQuery,
 }
@@ -147,6 +150,37 @@ impl Language {
     /// Compiled on the first call.
     pub fn textobjects_query(&self) -> Option<&Query> {
         self.aux.textobjects.get(&self.grammar)
+    }
+
+    /// The part of [`Self::textobjects_query`] whose patterns capture the kind
+    /// of object `capture_name` names, compiled on the first call.
+    ///
+    /// A press asks for one kind of object. The whole query also runs every
+    /// other kind's patterns, and a pattern not rooted at one node, such as
+    /// rust's `#[test]` sequence, walks the enclosing list whatever byte
+    /// window the cursor sets. In a large test module that costs a press tens
+    /// of milliseconds.
+    ///
+    /// The kind is the capture name up to its first `.`, and a capture that
+    /// starts with `_` is a pattern's helper rather than a kind. The split is
+    /// into queries of their own because the full query is shared by every
+    /// reader, and disabling its patterns changes what the others see.
+    ///
+    /// `None` when the language has no textobjects query or no pattern
+    /// captures `capture_name`.
+    pub fn textobject_query_for(&self, capture_name: &str) -> Option<&Query> {
+        let kinds = self.aux.textobject_kinds.get_or_init(|| {
+            match (self.textobjects_query(), self.aux.textobjects.src) {
+                (Some(query), Some(src)) => split_by_kind(&self.grammar, query, src),
+                _ => Vec::new(),
+            }
+        });
+        let kind = capture_kind(capture_name);
+        kinds
+            .iter()
+            .find(|(name, _)| name == kind)
+            .map(|(_, query)| query)
+            .filter(|query| query.capture_index_for_name(capture_name).is_some())
     }
 
     /// Outline query loaded from `outline.scm`. Captures `@item` (a
@@ -449,6 +483,7 @@ fn make_language_with_injections(
             brackets: LazyQuery::new(brackets),
             indents: LazyQuery::new(indents),
             textobjects: LazyQuery::new(textobjects),
+            textobject_kinds: OnceLock::new(),
             outline: LazyQuery::new(outline),
             tags: LazyQuery::new(tags),
         },
@@ -491,6 +526,64 @@ fn build_injection_query(
     let query = Query::new(grammar, &source)
         .unwrap_or_else(|e| panic!("injection query for {name} failed to compile: {e}"));
     Some(query)
+}
+
+/// `query`'s patterns grouped into one query per kind of object they capture,
+/// in the order each kind first appears.
+///
+/// Each pattern is sliced out of `src`, the source `query` compiled from, so it
+/// keeps its predicates. Which captures a pattern uses comes from the compiled
+/// query rather than from the text, since a comment or a string in a pattern
+/// holds an `@` at times. A pattern capturing several kinds joins each of their
+/// queries, so a kind's query never misses one of its patterns.
+///
+/// A group that fails to compile is left out, on the best-effort contract of
+/// the query it came from.
+fn split_by_kind(grammar: &TsLanguage, query: &Query, src: &str) -> Vec<(String, Query)> {
+    let mut groups: Vec<(&str, String)> = Vec::new();
+    for pattern in 0..query.pattern_count() {
+        let text = &src[query.start_byte_for_pattern(pattern)..query.end_byte_for_pattern(pattern)];
+        let mut kinds: Vec<&str> = Vec::new();
+        for (quantifier, name) in query
+            .capture_quantifiers(pattern)
+            .iter()
+            .zip(query.capture_names())
+        {
+            let kind = capture_kind(name);
+            if *quantifier != CaptureQuantifier::Zero
+                && !name.starts_with('_')
+                && !kinds.contains(&kind)
+            {
+                kinds.push(kind);
+            }
+        }
+
+        for kind in kinds {
+            match groups.iter_mut().find(|(name, _)| *name == kind) {
+                Some((_, group)) => {
+                    group.push('\n');
+                    group.push_str(text);
+                },
+                None => groups.push((kind, text.to_owned())),
+            }
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|(kind, group)| {
+            let query = Query::new(grammar, &group).ok()?;
+            Some((kind.to_owned(), query))
+        })
+        .collect()
+}
+
+/// The kind of object a textobject capture names, the part before its first
+/// `.`.
+fn capture_kind(capture_name: &str) -> &str {
+    capture_name
+        .split_once('.')
+        .map_or(capture_name, |(kind, _)| kind)
 }
 
 fn make_rust() -> Language {
@@ -641,6 +734,7 @@ fn make_markdown_inline() -> Language {
 mod tests {
     use super::{LanguageRegistry, LazyQuery};
     use std::path::Path;
+    use tree_sitter::Query;
 
     /// Nothing action-driven is compiled until something asks for it, which is
     /// what keeps it off the path to the first frame. Each costs tens of
@@ -836,6 +930,48 @@ mod tests {
         assert!(
             json.textobjects_query().is_none(),
             "json has no textobjects.scm; query should be None"
+        );
+    }
+
+    /// A press asks for one kind of object, so the textobjects query splits by
+    /// kind. Every pattern lands in its kind's query, and a capture name that no
+    /// pattern of its kind uses answers nothing.
+    #[test]
+    fn textobject_kinds_split_the_whole_query() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let full = rust.textobjects_query().expect("rust textobjects.scm");
+
+        assert_eq!(
+            [
+                "test.around",
+                "comment.around",
+                "comment.nowhere",
+                "xml-element.around"
+            ]
+            .map(|name| rust.textobject_query_for(name).map(Query::pattern_count)),
+            [Some(1), Some(3), None, None],
+        );
+
+        let kinds = rust
+            .aux
+            .textobject_kinds
+            .get()
+            .expect("built by the first ask");
+        assert_eq!(
+            kinds
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            ["function", "class", "parameter", "comment", "test", "entry"],
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .map(|(_, query)| query.pattern_count())
+                .sum::<usize>(),
+            full.pattern_count(),
+            "every pattern lands in one kind",
         );
     }
 

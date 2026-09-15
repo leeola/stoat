@@ -182,9 +182,9 @@ fn find_smallest_capture_scanning(
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_capture_starts, find_smallest_capture_scanning};
+    use super::{collect_capture_starts, find_smallest_capture_at, find_smallest_capture_scanning};
     use crate::{Language, LanguageRegistry};
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     use stoat_text::Rope;
     use tree_sitter::{Parser, Tree};
 
@@ -206,6 +206,9 @@ mod tests {
     /// Functions inside impl blocks and beside them, so a cursor in any one of
     /// them has matches above it, below it, and enclosing it. The restriction
     /// has to keep the last kind while skipping the others.
+    ///
+    /// The tail adds a comment run, a test function, entries, arguments, and
+    /// fields, so every kind of capture answers somewhere.
     fn nested_source() -> String {
         let mut src = String::from("struct A;\n\n");
         for block in 0..4 {
@@ -218,11 +221,16 @@ mod tests {
             src.push_str("}\n\n");
             src.push_str(&format!("fn free{block}() -> u32 {{\n    {block}\n}}\n\n"));
         }
+        src.push_str(
+            "// one\n// two\n#[test]\nfn checks() {\n    let v = vec![1, 2];\n    call(v, [3, 4]);\n}\n\nstruct B {\n    a: u32,\n    b: u32,\n}\n",
+        );
         src
     }
 
-    /// Both entry points now ask the query about a slice rather than the file,
-    /// which is only sound if every match that can answer still turns up.
+    /// Both entry points ask the query about a slice rather than the file, which
+    /// is sound only if every match that answers still turns up. A press also
+    /// asks only its kind's query, which is sound only if that query answers as
+    /// the whole one does.
     #[test]
     fn restricting_the_query_finds_what_scanning_the_file_found() {
         let lang = lang("rust");
@@ -232,9 +240,16 @@ mod tests {
         let query = lang.textobjects_query().expect("textobjects query");
         let root = tree.root_node();
         let whole = 0..src.len();
+        let names: Vec<&str> = query
+            .capture_names()
+            .iter()
+            .copied()
+            .filter(|name| !name.starts_with('_'))
+            .collect();
 
         let mut answered = 0;
         let mut pruned = 0;
+        let mut answered_by_kind: HashMap<&str, usize> = HashMap::new();
         for cursor in 0..src.len() {
             if !src.is_char_boundary(cursor) {
                 continue;
@@ -247,6 +262,16 @@ mod tests {
                     find_smallest_capture_scanning(query, root, &rope, name, cursor, false);
                 assert_eq!(restricted, whole_file, "{name} at offset {cursor}");
                 answered += usize::from(whole_file.is_some());
+            }
+
+            for name in &names {
+                let kind = lang
+                    .textobject_query_for(name)
+                    .unwrap_or_else(|| panic!("{name} has a kind query"));
+                let by_kind = find_smallest_capture_at(kind, root, &rope, name, cursor);
+                let by_whole = find_smallest_capture_at(query, root, &rope, name, cursor);
+                assert_eq!(by_kind, by_whole, "{name} by its kind at offset {cursor}");
+                *answered_by_kind.entry(name).or_default() += usize::from(by_whole.is_some());
             }
 
             // What the caller keeps out of each direction's window, against what
@@ -278,6 +303,14 @@ mod tests {
             pruned > 100,
             "and the windows have to actually drop matches, or they were the whole \
              file and nothing was restricted: {pruned}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| answered_by_kind.get(*name).copied().unwrap_or(0) == 0)
+                .collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "every capture answers somewhere, or its kind comparison was None against None",
         );
     }
 }
