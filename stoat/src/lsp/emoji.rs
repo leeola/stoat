@@ -13,10 +13,18 @@
 //! offer nothing while a colon at the start of a line or after a space offers
 //! everything. That rule lives in [`crate::emoji_expand`], shared with the
 //! typed-colon swap so the two never disagree about what opens a shortcode.
+//!
+//! A bare colon after punctuation waits for a letter. `"key":` in JSON and `(:`
+//! pass the boundary rule, and the whole table there costs each such keystroke
+//! a popup nobody asked for.
 
 use crate::{
     emoji_expand::{is_shortcode_char, opens_a_shortcode},
-    host::lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError},
+    host::{
+        lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError},
+        OffsetEncoding,
+    },
+    lsp::util,
 };
 use async_trait::async_trait;
 use lsp_types::{
@@ -48,14 +56,17 @@ use std::{
     io,
     sync::{Arc, LazyLock, Mutex},
 };
+use stoat_text::Rope;
 
 /// In-process shortcode server backing every buffer.
 ///
 /// Holds the latest text of each open document so a completion is answered
-/// against it without a round trip. Documents arrive via `did_open` /
-/// `did_change` and are dropped on `did_close`.
+/// against it without a round trip. Documents arrive via `did_open` and are
+/// dropped on `did_close`. A `did_change` carries only the edited ranges, and
+/// each one splices into the kept rope. A settled edit then costs the edit
+/// rather than a copy of the document.
 pub struct EmojiLsp {
-    docs: Mutex<HashMap<Uri, String>>,
+    docs: Mutex<HashMap<Uri, Rope>>,
 }
 
 impl EmojiLsp {
@@ -75,7 +86,9 @@ impl Default for EmojiLsp {
 static EMOJI_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> = LazyLock::new(|| {
     Arc::new(ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF8),
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![":".to_string()]),
             ..CompletionOptions::default()
@@ -106,17 +119,28 @@ impl LspHost for EmojiLsp {
         self.docs
             .lock()
             .expect("emoji docs poisoned")
-            .insert(doc.uri, doc.text);
+            .insert(doc.uri, Rope::from(doc.text.as_str()));
         Ok(())
     }
 
+    /// Apply each change in order, each against the text the one before it
+    /// left.
+    ///
+    /// The server drops a change for a document it never opened, since it
+    /// holds no text for the range to name.
     async fn did_change(&self, params: DidChangeTextDocumentParams) -> io::Result<()> {
-        let uri = params.text_document.uri;
-        if let Some(change) = params.content_changes.into_iter().next_back() {
-            self.docs
-                .lock()
-                .expect("emoji docs poisoned")
-                .insert(uri, change.text);
+        let mut docs = self.docs.lock().expect("emoji docs poisoned");
+        let Some(rope) = docs.get_mut(&params.text_document.uri) else {
+            return Ok(());
+        };
+        for change in params.content_changes {
+            match change.range {
+                Some(range) => {
+                    let bytes = util::lsp_range_to_byte_range(rope, range, OffsetEncoding::Utf8);
+                    rope.replace(bytes, &change.text);
+                },
+                None => *rope = Rope::from(change.text.as_str()),
+            }
         }
         Ok(())
     }
@@ -173,10 +197,10 @@ impl LspHost for EmojiLsp {
         } = params.text_document_position;
         let items = {
             let docs = self.docs.lock().expect("emoji docs poisoned");
-            let Some(text) = docs.get(&text_document.uri) else {
+            let Some(rope) = docs.get(&text_document.uri) else {
                 return Ok(None);
             };
-            complete(text, position)
+            complete(rope, position)
         };
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -442,18 +466,17 @@ impl LspHost for EmojiLsp {
 }
 
 /// The shortcode being typed at `position`, as the column the opening `:` sits
-/// at and the letters typed since.
+/// at, the character before that colon, and the letters typed since.
 ///
 /// `None` unless the cursor sits inside text that still reads as a shortcode
 /// in progress. The opening colon must follow a word boundary, which leaves
 /// `std::` and a `x: T` annotation alone, and everything after it must be a
-/// character a shortcode is spelled with.
-fn typing_shortcode(text: &str, position: Position) -> Option<(u32, &str)> {
-    let line = text
-        .split_inclusive('\n')
-        .nth(position.line as usize)
-        .map(|line| line.strip_suffix('\n').unwrap_or(line))
-        .unwrap_or("");
+/// character a shortcode is spelled with. The character before the colon is
+/// `None` at the start of the line.
+///
+/// It reads only the cursor's row out of `rope`.
+fn typing_shortcode(rope: &Rope, position: Position) -> Option<(u32, Option<char>, String)> {
+    let line: String = rope.chunks_in_line(position.line).collect();
     let cursor = (position.character as usize).min(line.len());
     if !line.is_char_boundary(cursor) {
         return None;
@@ -465,7 +488,8 @@ fn typing_shortcode(text: &str, position: Position) -> Option<(u32, &str)> {
     if !typed.chars().all(is_shortcode_char) {
         return None;
     }
-    opens_a_shortcode(before_cursor[..colon].chars().next_back()).then_some((colon as u32, typed))
+    let before = before_cursor[..colon].chars().next_back();
+    opens_a_shortcode(before).then(|| (colon as u32, before, typed.to_owned()))
 }
 
 /// Every shortcode that starts with what has been typed at `position`.
@@ -473,10 +497,17 @@ fn typing_shortcode(text: &str, position: Position) -> Option<(u32, &str)> {
 /// Empty unless a shortcode is in progress. Each item replaces the colon and
 /// the letters after it with the emoji itself, so accepting one leaves the
 /// glyph rather than the name.
-fn complete(text: &str, position: Position) -> Vec<CompletionItem> {
-    let Some((colon, typed)) = typing_shortcode(text, position) else {
+///
+/// A colon with nothing typed after it offers the table only at the start of a
+/// line or after whitespace. After a quote or a bracket it is a JSON key or a
+/// call far more often, and the first letter typed asks again.
+fn complete(rope: &Rope, position: Position) -> Vec<CompletionItem> {
+    let Some((colon, before, typed)) = typing_shortcode(rope, position) else {
         return Vec::new();
     };
+    if typed.is_empty() && !before.is_none_or(char::is_whitespace) {
+        return Vec::new();
+    }
     let replacing = lsp_types::Range {
         start: Position::new(position.line, colon),
         end: position,
@@ -486,7 +517,7 @@ fn complete(text: &str, position: Position) -> Vec<CompletionItem> {
         .flat_map(|emoji| {
             emoji
                 .shortcodes()
-                .filter(|shortcode| shortcode.starts_with(typed))
+                .filter(|shortcode| shortcode.starts_with(typed.as_str()))
                 .map(move |shortcode| item(emoji.as_str(), shortcode, replacing))
         })
         .collect()
@@ -511,10 +542,19 @@ fn item(glyph: &str, shortcode: &str, replacing: lsp_types::Range) -> Completion
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::{
+        TextDocumentContentChangeEvent, TextDocumentItem, VersionedTextDocumentIdentifier,
+    };
+    use std::str::FromStr;
+    use stoat_scheduler::TestScheduler;
 
     fn at(text: &str, line: u32, character: u32) -> Option<(u32, String)> {
-        typing_shortcode(text, Position::new(line, character))
-            .map(|(colon, typed)| (colon, typed.to_string()))
+        typing_shortcode(&Rope::from(text), Position::new(line, character))
+            .map(|(colon, _, typed)| (colon, typed))
+    }
+
+    fn offered(text: &str, line: u32, character: u32) -> Vec<CompletionItem> {
+        complete(&Rope::from(text), Position::new(line, character))
     }
 
     #[test]
@@ -545,18 +585,30 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_colon_is_the_whole_table() {
-        assert_eq!(at(":", 0, 1), Some((0, String::new())));
+    fn a_bare_colon_after_a_space_is_the_whole_table() {
+        assert_eq!(at("hi :", 0, 4), Some((3, String::new())));
         assert!(
-            complete(":", Position::new(0, 1)).len() > 1000,
+            offered("hi :", 0, 4).len() > 1000,
             "every shortcode is offered, and the client narrows from there",
         );
     }
 
     #[test]
+    fn a_bare_colon_after_punctuation_waits_for_a_letter() {
+        assert!(offered("{\"key\":", 0, 7).is_empty(), "a JSON key");
+        assert!(offered("f(:", 0, 3).is_empty(), "a colon after a paren");
+        assert!(
+            offered("f(:smil", 0, 7)
+                .iter()
+                .any(|item| item.label == ":smile:"),
+            "a letter after the colon offers what it starts",
+        );
+    }
+
+    #[test]
     fn the_typed_letters_narrow_what_is_offered() {
-        let whole_table = complete(":", Position::new(0, 1)).len();
-        let narrowed = complete(":smil", Position::new(0, 5));
+        let whole_table = offered(":", 0, 1).len();
+        let narrowed = offered(":smil", 0, 5);
 
         assert!(
             narrowed.len() < whole_table,
@@ -578,7 +630,7 @@ mod tests {
 
     #[test]
     fn an_item_replaces_the_typed_shortcode_with_its_emoji() {
-        let items = complete("hi :smil", Position::new(0, 8));
+        let items = offered("hi :smil", 0, 8);
         let smile = items
             .iter()
             .find(|item| item.label == ":smile:")
@@ -599,7 +651,64 @@ mod tests {
 
     #[test]
     fn code_that_only_looks_like_a_shortcode_is_left_alone() {
-        assert!(complete("use std::", Position::new(0, 9)).is_empty());
-        assert!(complete("let x: T", Position::new(0, 6)).is_empty());
+        assert!(offered("use std::", 0, 9).is_empty());
+        assert!(offered("let x: T", 0, 6).is_empty());
+    }
+
+    /// The second range names text that only the first change creates. The `é`
+    /// is two bytes but one UTF-16 unit. A change applied out of order, or
+    /// measured in the wrong unit, leaves other text.
+    #[test]
+    fn a_ranged_change_edits_the_kept_rope() {
+        let change =
+            |range: Option<(u32, u32, u32, u32)>, text: &str| TextDocumentContentChangeEvent {
+                range: range.map(|(line, column, end_line, end_column)| {
+                    lsp_types::Range::new(
+                        Position::new(line, column),
+                        Position::new(end_line, end_column),
+                    )
+                }),
+                range_length: None,
+                text: text.to_string(),
+            };
+        TestScheduler::new().block_on(async {
+            let server = EmojiLsp::new();
+            let uri = Uri::from_str("file:///notes.md").expect("valid uri");
+            let kept = || server.docs.lock().expect("emoji docs poisoned")[&uri].to_string();
+            let changed = |version, content_changes| DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier::new(uri.clone(), version),
+                content_changes,
+            };
+
+            let text = "h\u{e9}llo\nworld\n".to_string();
+            let open = TextDocumentItem::new(uri.clone(), "markdown".to_string(), 0, text);
+            server
+                .did_open(DidOpenTextDocumentParams {
+                    text_document: open,
+                })
+                .await
+                .expect("did_open");
+
+            let edits = vec![
+                change(Some((1, 0, 1, 0)), "big "),
+                change(Some((1, 4, 1, 9)), "there"),
+                change(Some((0, 1, 0, 3)), "e"),
+            ];
+            server
+                .did_change(changed(1, edits))
+                .await
+                .expect("did_change");
+            assert_eq!(
+                kept(),
+                "hello\nbig there\n",
+                "each change lands in order, at UTF-8 columns"
+            );
+
+            server
+                .did_change(changed(2, vec![change(None, ":sm\n")]))
+                .await
+                .expect("did_change");
+            assert_eq!(kept(), ":sm\n", "a change with no range replaces it all");
+        });
     }
 }
