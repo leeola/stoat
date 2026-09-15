@@ -1375,8 +1375,10 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
 #[cfg(test)]
 mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
-    use crate::host::git::{CherryPickOutcome, CommitFileChangeKind, GitHost, GitRepo};
-    use git2::{Oid, Repository, RepositoryInitOptions, Signature};
+    use crate::host::git::{
+        CherryPickOutcome, CommitFileChangeKind, GitHost, GitRepo, RebaseTodo, RebaseTodoOp,
+    };
+    use git2::{Commit, Oid, Repository, RepositoryInitOptions, Signature};
     use std::{
         collections::BTreeMap,
         path::{Path, PathBuf},
@@ -1697,6 +1699,141 @@ mod tests {
             repo.find_blob(entry.id()).unwrap().content().to_vec()
         };
         assert_eq!(picked, binary, "and holds it byte for byte");
+    }
+
+    /// Commit a tree holding exactly `files` over `parents`, whatever the
+    /// parents hold.
+    fn commit_shape(repo: &Repository, parents: &[&Commit<'_>], files: &[(&str, &str)]) -> Oid {
+        let map: BTreeMap<PathBuf, String> = files
+            .iter()
+            .map(|(path, text)| (PathBuf::from(path), text.to_string()))
+            .collect();
+        let tree = repo
+            .find_tree(super::tree::build_tree_from_map(repo, &map).unwrap())
+            .unwrap();
+        let sig = Signature::now("test", "t@t").unwrap();
+        repo.commit(None, &sig, &sig, "shape", &tree, parents)
+            .unwrap()
+    }
+
+    /// The tree libgit2's three-way merge writes for a pick of `source` onto
+    /// `onto`.
+    fn merged_tree(repo: &Repository, source: Oid, onto: Oid) -> Oid {
+        let source = repo.find_commit(source).unwrap();
+        let onto = repo.find_commit(onto).unwrap();
+        repo.cherrypick_commit(&source, &onto, 0, None)
+            .unwrap()
+            .write_tree_to(repo)
+            .unwrap()
+    }
+
+    /// A pick whose changed paths `onto` still holds as the parent had them
+    /// skips the merge, and so does a modification `onto` already carries. The
+    /// tree it builds is the tree the merge writes, from both pick entry
+    /// points.
+    #[test]
+    fn a_pick_onto_paths_it_can_settle_builds_the_merges_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let parent = {
+            let files = [
+                ("src/a.rs", "a\n"),
+                ("src/deep/b.rs", "b\n"),
+                ("c.txt", "c\n"),
+                ("d.txt", "d\n"),
+            ];
+            repo.find_commit(commit_shape(&repo, &[], &files)).unwrap()
+        };
+        let source = commit_shape(
+            &repo,
+            &[&parent],
+            &[
+                ("src/a.rs", "a\n"),
+                ("src/deep/b.rs", "B\n"),
+                ("src/new.rs", "new\n"),
+                ("d.txt", "d\n"),
+            ],
+        );
+        let onto = commit_shape(
+            &repo,
+            &[&parent],
+            &[
+                ("src/a.rs", "A\n"),
+                ("src/deep/b.rs", "B\n"),
+                ("c.txt", "c\n"),
+                ("d.txt", "D\n"),
+            ],
+        );
+        let merged = merged_tree(&repo, source, onto);
+        let git = discover(&dir);
+
+        let built = super::rebase::changed_path_tree(
+            &repo,
+            &repo.find_commit(source).unwrap(),
+            &repo.find_commit(onto).unwrap(),
+        );
+        let picked = match git.cherry_pick_tree(&source.to_string(), &onto.to_string()) {
+            Ok(CherryPickOutcome::Clean { tree, .. }) => Some(tree),
+            _ => None,
+        };
+        let todo = [RebaseTodo {
+            op: RebaseTodoOp::Pick,
+            sha: source.to_string(),
+            message: String::new(),
+        }];
+        let rebased = git
+            .run_rebase(&onto.to_string(), &todo)
+            .ok()
+            .and_then(|head| git.tree_oid(&head));
+
+        assert_eq!(
+            (built, picked, rebased),
+            (
+                Some(merged),
+                Some(merged.to_string()),
+                Some(merged.to_string())
+            ),
+        );
+    }
+
+    /// Every change `onto` does not hold as the parent had it takes the merge:
+    /// a third text for a modified file, a file turned into a directory, a
+    /// rename whose source `onto` deleted, and an addition under a name `onto`
+    /// holds as a file. A root commit has no parent to diff against.
+    #[test]
+    fn a_pick_its_changed_paths_cannot_settle_takes_the_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let shapes: [[&[(&str, &str)]; 3]; 4] = [
+            [&[("a.rs", "a\n")], &[("a.rs", "b\n")], &[("a.rs", "c\n")]],
+            [
+                &[("x", "x\n")],
+                &[("x/y", "y\n")],
+                &[("x", "x\n"), ("z", "z\n")],
+            ],
+            [&[("a.rs", "a\n")], &[("b.rs", "a\n")], &[("c.rs", "c\n")]],
+            [
+                &[("d/x.rs", "x\n")],
+                &[("d/x.rs", "x\n"), ("d/y.rs", "y\n")],
+                &[("d", "d\n")],
+            ],
+        ];
+
+        let mut answers: Vec<Option<Oid>> = shapes
+            .iter()
+            .map(|[parent, source, onto]| {
+                let parent = repo.find_commit(commit_shape(&repo, &[], parent)).unwrap();
+                let source = repo.find_commit(commit_shape(&repo, &[&parent], source));
+                let onto = repo.find_commit(commit_shape(&repo, &[&parent], onto));
+                super::rebase::changed_path_tree(&repo, &source.unwrap(), &onto.unwrap())
+            })
+            .collect();
+        let root = repo
+            .find_commit(commit_shape(&repo, &[], &[("a.rs", "a\n")]))
+            .unwrap();
+        answers.push(super::rebase::changed_path_tree(&repo, &root, &root));
+
+        assert_eq!(answers, vec![None; 5]);
     }
 
     /// The amend walk used to read the whole HEAD tree as text before it could
