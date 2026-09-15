@@ -4032,6 +4032,25 @@ mod tests {
         );
     }
 
+    /// The parser ends an OSC on a cancel as well, then prints what follows. A
+    /// cut past the cancel takes that text with it.
+    #[test]
+    fn a_cancel_ends_an_oversize_titles_cut_and_the_text_after_prints() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.esc.set_osc_caps(4, 64);
+
+        terminal.advance(b"\x1b]0;oversized\x18printed");
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::Title(String::new())]
+        );
+        let mut grid = Grid::new(4, 8);
+        terminal.project(&mut grid);
+        let row: String = grid.row(0).iter().map(|cell| cell.ch).collect();
+        assert_eq!(row.trim_end(), "printed");
+    }
+
     /// A clipboard write is the one skipped code with a reason to be large, so
     /// its cap is far above the cap a title gets.
     #[test]
