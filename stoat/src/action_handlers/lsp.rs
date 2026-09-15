@@ -2175,6 +2175,7 @@ pub(crate) fn open_location_picker(
 ) -> LocationPicker {
     let haystacks = entries.iter().map(location_haystack).collect();
     let executor = stoat.executor.clone();
+    let redraw = stoat.redraw_notify.clone();
     stoat.set_focused_mode("insert".into());
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(
@@ -2185,8 +2186,8 @@ pub(crate) fn open_location_picker(
         "insert",
         1,
     );
-    let preview = crate::picker::Preview::new(ws, executor);
-    LocationPicker::new(entries, haystacks, input, preview)
+    let preview = crate::picker::Preview::new(ws, executor.clone());
+    LocationPicker::new(entries, haystacks, input, preview, executor, redraw)
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
@@ -2799,6 +2800,23 @@ mod tests {
     }
 
     #[test]
+    fn a_diagnostics_select_takes_the_row_its_query_names() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
+
+        type_and_enter_in_one_burst(&mut h, "second");
+        assert_eq!(
+            cursor_offset(&mut h),
+            8,
+            "the jump lands on the one diagnostic the query matches"
+        );
+    }
+
+    #[test]
     fn goto_diagnostic_no_op_with_empty_diagnostics() {
         let mut h = TestHarness::with_size(80, 24);
         let root = seed(&mut h, &[("a.rs", "abc\n")]);
@@ -2949,6 +2967,16 @@ mod tests {
             .to_path_buf()
     }
 
+    /// Type `text` and press Enter as one burst of input, which the run loop
+    /// handles before the frame that refilters an open picker.
+    fn type_and_enter_in_one_burst(h: &mut TestHarness, text: &str) {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        for code in text.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
+            h.stoat.update(Event::Key(keys::key(code)));
+        }
+    }
+
     #[test]
     fn goto_definition_jumps_within_same_file() {
         let mut h = TestHarness::with_size(80, 24);
@@ -3061,6 +3089,38 @@ mod tests {
         assert!(h.stoat.location_picker.is_none());
         assert_eq!(focused_buffer_path(&h), lib_path);
         assert_eq!(cursor_offset(&mut h), 15);
+    }
+
+    #[test]
+    fn a_location_select_takes_the_row_its_query_names() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        let root = seed(
+            &mut h,
+            &[
+                ("main.rs", "abc\n"),
+                ("lib.rs", "fn one() {}\nfn two() {}\nfn three() {}\n"),
+            ],
+        );
+        let (main_path, lib_path) = (root.join("main.rs"), root.join("lib.rs"));
+        open_buffer(&mut h, main_path.clone());
+        let lib = lib_path.to_str().unwrap();
+        h.fake_lsp().set_definitions(
+            main_path.to_str().unwrap(),
+            0,
+            0,
+            &[(lib, 0, 3), (lib, 1, 3), (lib, 2, 3)],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        type_and_enter_in_one_burst(&mut h, "three");
+        h.settle();
+        assert_eq!(
+            (focused_buffer_path(&h), cursor_offset(&mut h)),
+            (lib_path, 27),
+            "the jump lands on the one target the query matches"
+        );
     }
 
     #[test]

@@ -4,8 +4,13 @@ use crate::{
     jumplist::{JumpEntry, JumpList},
     picker::{Preview, PreviewSource, TargetPicker},
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use stoat_scheduler::Executor;
 use stoat_text::{Anchor, BufferId, Selection};
+use tokio::sync::Notify;
 
 /// Modal listing every entry in the focused pane's [`JumpList`].
 ///
@@ -50,10 +55,12 @@ impl JumplistPicker {
         cursor_idx: usize,
         input: InputView,
         preview: Preview,
+        executor: Executor,
+        redraw: Arc<Notify>,
     ) -> Self {
         let haystacks = entries.iter().map(jumplist_haystack).collect();
         let selected = cursor_idx.min(entries.len().saturating_sub(1));
-        let mut picker = TargetPicker::new(entries, haystacks, input, preview);
+        let mut picker = TargetPicker::new(entries, haystacks, input, preview, executor, redraw);
         picker.move_selection(selected as i32);
         Self { picker, cursor_idx }
     }

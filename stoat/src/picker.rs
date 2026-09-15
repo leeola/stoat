@@ -20,7 +20,10 @@ use std::{
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender},
+    Notify,
+};
 
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
@@ -39,6 +42,13 @@ pub(crate) const INDEXED_ROWS: usize = 512;
 /// the scoring it saves is smaller than that. A repository large enough for a
 /// keystroke to be felt is far past it.
 const PARALLEL_SCAN_MIN: usize = 4_096;
+
+/// How many entries a [`TargetPicker`] ranks inside the update path before a
+/// query goes to the pool.
+///
+/// A rank of this many rows takes under 3 ms, which a frame absorbs. A rank on
+/// the pool paints its rows a frame later, so a shorter list stays inline.
+const INLINE_RANK_MAX: usize = 2_000;
 
 /// Source of process-unique content-version stamps, shared by every pool that
 /// versions its content by a monotonic generation instead of a content hash.
@@ -128,6 +138,17 @@ pub(crate) fn rank_into<'a>(
         return None;
     };
 
+    fill_ranked(ranked, filtered, match_indices);
+    fuzzy::parse_query(query)
+}
+
+/// Spill `ranked` into the parallel `filtered` and `match_indices` vectors
+/// [`rank_into`] fills, which are empty on entry.
+fn fill_ranked(
+    ranked: fuzzy::Ranked<'_, usize>,
+    filtered: &mut Vec<usize>,
+    match_indices: &mut Vec<Vec<u32>>,
+) {
     filtered.reserve(ranked.matches.len());
     match_indices.reserve(ranked.indexed);
     for (row, m) in ranked.matches.into_iter().enumerate() {
@@ -136,7 +157,6 @@ pub(crate) fn rank_into<'a>(
             match_indices.push(m.matched_indices);
         }
     }
-    fuzzy::parse_query(query)
 }
 
 /// Matched offsets for filtered `row`, stored when [`rank_into`] indexed it and
@@ -1182,7 +1202,7 @@ impl PathPicker {
     pub(crate) fn spawn_scan(
         &mut self,
         executor: &Executor,
-        redraw: Arc<tokio::sync::Notify>,
+        redraw: Arc<Notify>,
         generation: u64,
         scan: Scan,
     ) {
@@ -1722,7 +1742,9 @@ pub(crate) struct TargetPicker<E> {
     pub(crate) input: InputView,
     entries: Vec<E>,
     /// What a query matches against, one per entry and parallel to them.
-    haystacks: Vec<String>,
+    ///
+    /// Shared so a rank on the pool reads the strings without a copy of them.
+    haystacks: Arc<[String]>,
     /// Indices into `entries` in display order after filtering. An empty query
     /// lists every entry in its original order.
     filtered: Vec<usize>,
@@ -1746,6 +1768,28 @@ pub(crate) struct TargetPicker<E> {
     /// The entry the preview currently shows, so an unchanged selection costs
     /// no reload.
     previewed: Option<usize>,
+    /// Runs the rank of a list longer than [`INLINE_RANK_MAX`].
+    executor: Executor,
+    /// Woken when a rank on the pool lands, since the pumps poll with a noop
+    /// waker and nothing else repaints an idle prompt.
+    redraw: Arc<Notify>,
+    /// Ranks from the pool, each tagged with the generation it started at.
+    rank_rx: UnboundedReceiver<(u64, RankOutcome)>,
+    rank_tx: UnboundedSender<(u64, RankOutcome)>,
+    /// The generation of the newest rank, inline or on the pool.
+    ///
+    /// A result under any other generation answers a query the prompt has
+    /// moved past, so [`Self::pump_rank`] drops it rather than painting it.
+    rank_generation: u64,
+    /// Whether a rank is out on the pool and has not landed yet.
+    rank_pending: bool,
+    /// The flag the rank at [`Self::rank_generation`] reads.
+    ///
+    /// A later query sets it, so a burst of keystrokes stops scoring the
+    /// queries nobody waits on.
+    rank_cancel: Arc<AtomicBool>,
+    /// Held so dropping the picker drops the wake of a rank still out.
+    _rank_task: Option<Task<()>>,
 }
 
 impl<E> TargetPicker<E> {
@@ -1758,16 +1802,19 @@ impl<E> TargetPicker<E> {
         haystacks: Vec<String>,
         input: InputView,
         preview: Preview,
+        executor: Executor,
+        redraw: Arc<Notify>,
     ) -> Self {
         assert_eq!(
             entries.len(),
             haystacks.len(),
             "every entry needs one haystack"
         );
+        let (rank_tx, rank_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut picker = Self {
             input,
             entries,
-            haystacks,
+            haystacks: haystacks.into(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
             last_pattern: None,
@@ -1777,6 +1824,14 @@ impl<E> TargetPicker<E> {
             preview,
             preview_rows: None,
             previewed: None,
+            executor,
+            redraw,
+            rank_rx,
+            rank_tx,
+            rank_generation: 0,
+            rank_pending: false,
+            rank_cancel: Arc::new(AtomicBool::new(false)),
+            _rank_task: None,
         };
         picker.refilter("");
         picker
@@ -1805,11 +1860,71 @@ impl<E> TargetPicker<E> {
     ///
     /// A repeat of the query the current ranking came from returns without
     /// work, so a per-frame drive costs nothing while the prompt sits still.
+    ///
+    /// A list longer than [`INLINE_RANK_MAX`] ranks a query on the pool. The
+    /// rows on display stay as they are until [`Self::pump_rank`] takes the
+    /// result. A query with nothing to match lists every entry in order, which
+    /// scores nothing, so it ranks inline at any length.
     pub(crate) fn refilter(&mut self, query: &str) {
         if self.last_filter_query.as_deref() == Some(query) {
             return;
         }
         self.last_filter_query = Some(query.to_owned());
+
+        if self.haystacks.len() > INLINE_RANK_MAX
+            && let Some(pattern) = fuzzy::parse_query(query)
+        {
+            self.spawn_rank(pattern);
+            return;
+        }
+        self.rank_inline(query);
+    }
+
+    /// Take the newest rank from the pool that answers the current query, and
+    /// report whether the rows moved.
+    ///
+    /// Ranks for superseded generations drain and drop, so a burst of
+    /// keystrokes paints once, for the last of them.
+    pub(crate) fn pump_rank(&mut self) -> bool {
+        let mut current = None;
+        while let Ok((generation, outcome)) = self.rank_rx.try_recv() {
+            if generation == self.rank_generation {
+                current = Some(outcome);
+            }
+        }
+        let Some(outcome) = current else {
+            return false;
+        };
+
+        self.filtered = outcome.filtered;
+        self.match_indices = outcome.match_indices;
+        self.last_pattern = Some(outcome.pattern);
+        self.rank_pending = false;
+        self.rows_moved();
+        true
+    }
+
+    /// Bring the rows up to date with `query` here and now.
+    ///
+    /// This is for a caller about to act on the selection rather than paint
+    /// it. A rank on the pool answers the query that started it. A select
+    /// sometimes arrives before the rank lands, or before a frame refilters a
+    /// query typed in the same burst. The rows then name a different entry.
+    ///
+    /// A long list pays one inline rank at the select rather than one per
+    /// keystroke.
+    pub(crate) fn settle_rank(&mut self, query: &str) {
+        self.pump_rank();
+        if !self.rank_pending && self.last_filter_query.as_deref() == Some(query) {
+            return;
+        }
+        self.last_filter_query = Some(query.to_owned());
+        self.rank_inline(query);
+    }
+
+    /// Rank `query` on this thread, superseding any rank still on the pool.
+    fn rank_inline(&mut self, query: &str) {
+        self.supersede_rank();
 
         let items = self
             .haystacks
@@ -1824,7 +1939,65 @@ impl<E> TargetPicker<E> {
             &mut self.filtered,
             &mut self.match_indices,
         );
+        self.rows_moved();
+    }
 
+    /// Score and rank `pattern` on the pool, reporting through
+    /// [`Self::rank_tx`] under a fresh generation.
+    fn spawn_rank(&mut self, pattern: fuzzy::Pattern) {
+        let generation = self.supersede_rank();
+        self.rank_pending = true;
+
+        let haystacks = Arc::clone(&self.haystacks);
+        let cancel = Arc::clone(&self.rank_cancel);
+        let sink = self.rank_tx.clone();
+        let redraw = Arc::clone(&self.redraw);
+        let task = self.executor.spawn_blocking(move || {
+            let items = haystacks
+                .iter()
+                .enumerate()
+                .map(|(idx, haystack)| (idx, haystack.as_str()));
+            // A cancelled rank reports nothing. Its rows answer a query the
+            // prompt has moved past, and the rank that superseded it is the one
+            // whose arrival wakes the paint.
+            let Some(scored) = fuzzy::score_candidates(&pattern, items, Some(&cancel)) else {
+                return;
+            };
+
+            let mut filtered = Vec::new();
+            let mut match_indices = Vec::new();
+            fill_ranked(
+                fuzzy::rank_scored(&pattern, scored, INDEXED_ROWS),
+                &mut filtered,
+                &mut match_indices,
+            );
+            let outcome = RankOutcome {
+                filtered,
+                match_indices,
+                pattern,
+            };
+            if sink.send((generation, outcome)).is_ok() {
+                redraw.notify_one();
+            }
+        });
+        self._rank_task = Some(task);
+    }
+
+    /// Stop the rank on the pool, if one is out, and stamp a fresh generation.
+    ///
+    /// The flag the running rank holds is set rather than replaced in place,
+    /// because it is what that rank reads. A fresh one takes its place for the
+    /// rank starting now.
+    fn supersede_rank(&mut self) -> u64 {
+        self.rank_cancel.store(true, Ordering::Relaxed);
+        self.rank_cancel = Arc::new(AtomicBool::new(false));
+        self.rank_generation = next_generation();
+        self.rank_pending = false;
+        self.rank_generation
+    }
+
+    /// Pull the cursor back inside rows that just changed.
+    fn rows_moved(&mut self) {
         nav_clamp(self.filtered.len(), &mut self.selected);
         // The rows moved under the cursor, so whatever the preview shows is
         // no longer what the selection names.
@@ -1904,6 +2077,16 @@ impl<E> TargetPicker<E> {
         self.input.dispose(ws);
         self.preview.dispose(ws);
     }
+}
+
+/// What a rank on the pool produced, in the shape [`TargetPicker`] keeps it.
+///
+/// Only a query with something to match goes to the pool, so the parse is
+/// always there.
+struct RankOutcome {
+    filtered: Vec<usize>,
+    match_indices: Vec<Vec<u32>>,
+    pattern: fuzzy::Pattern,
 }
 
 #[cfg(test)]
@@ -3001,18 +3184,97 @@ mod tests {
     /// Every target list shares one selection cursor, so the bounds it holds
     /// are worth pinning once here rather than per picker.
     mod target_picker {
-        use super::super::{Preview, TargetPicker};
+        use super::super::{rank_into, Preview, TargetPicker, INLINE_RANK_MAX};
         use crate::input_view::InputView;
+        use std::sync::Arc;
+        use stoat_scheduler::{Executor, TestScheduler};
 
         fn picker(rows: &[&str]) -> TargetPicker<String> {
-            let entries: Vec<String> = rows.iter().map(|s| s.to_string()).collect();
-            let haystacks = entries.clone();
+            let rows = rows.iter().map(|s| s.to_string()).collect();
+            picker_on(rows, &Arc::new(TestScheduler::new()))
+        }
+
+        /// A picker whose pool is `scheduler`, which runs each job inline and
+        /// counts it.
+        fn picker_on(rows: Vec<String>, scheduler: &Arc<TestScheduler>) -> TargetPicker<String> {
             TargetPicker::new(
-                entries,
-                haystacks,
+                rows.clone(),
+                rows,
                 InputView::test_dummy(),
                 Preview::test_dummy(),
+                Executor::new(scheduler.clone()),
+                crate::test_notify(),
             )
+        }
+
+        /// One row more than a picker ranks inline.
+        fn long_rows() -> Vec<String> {
+            (0..=INLINE_RANK_MAX)
+                .map(|i| format!("crate{}/src/module_{i}.rs:{i} fn item_{i}()", i % 37))
+                .collect()
+        }
+
+        /// The rows and highlights an inline rank of `rows` gives for `query`.
+        fn ranked_inline(rows: &[String], query: &str) -> (Vec<usize>, Vec<Vec<u32>>) {
+            let (mut filtered, mut match_indices) = (Vec::new(), Vec::new());
+            rank_into(
+                query,
+                rows.iter()
+                    .enumerate()
+                    .map(|(idx, row)| (idx, row.as_str())),
+                rows.len(),
+                &mut filtered,
+                &mut match_indices,
+            );
+            (filtered, match_indices)
+        }
+
+        /// A rank that a later query superseded arrives after that query's
+        /// rows, so only its generation keeps it off the screen.
+        #[test]
+        fn a_long_list_paints_the_pool_rank_of_the_current_query_only() {
+            let scheduler = Arc::new(TestScheduler::new());
+            let rows = long_rows();
+            let mut picker = picker_on(rows.clone(), &scheduler);
+            let every_row: Vec<usize> = (0..rows.len()).collect();
+
+            picker.refilter("mod");
+            picker.refilter("");
+            assert_eq!(
+                (picker.pump_rank(), picker.filtered()),
+                (false, &every_row[..]),
+                "clearing the prompt drops the rank of the text it cleared"
+            );
+
+            let hops = scheduler.blocking_calls();
+            picker.refilter("mod_12");
+            assert_eq!(
+                (scheduler.blocking_calls() - hops, picker.filtered()),
+                (1, &every_row[..]),
+                "the rank goes to the pool, and the rows wait for it"
+            );
+            assert!(picker.pump_rank(), "the rank of the prompt lands");
+            assert_eq!(
+                (picker.filtered().to_vec(), picker.match_indices.clone()),
+                ranked_inline(&rows, "mod_12"),
+                "with the rows and highlights an inline rank gives"
+            );
+        }
+
+        /// A select reads the rows at once, before the rank of the prompt
+        /// lands or before any frame refilters text typed in the same burst.
+        #[test]
+        fn a_settle_ranks_the_prompt_before_a_select_reads_the_rows() {
+            let rows = long_rows();
+            let mut picker = picker_on(rows.clone(), &Arc::new(TestScheduler::new()));
+
+            picker.refilter("mod_1");
+            picker.settle_rank("mod_12");
+            assert_eq!(
+                (picker.filtered().to_vec(), picker.match_indices.clone()),
+                ranked_inline(&rows, "mod_12"),
+                "the settle ranks the text no refilter saw"
+            );
         }
 
         #[test]

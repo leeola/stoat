@@ -6,7 +6,9 @@ use crate::{
     picker::{Preview, PreviewSource, TargetPicker},
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use stoat_scheduler::Executor;
+use tokio::sync::Notify;
 
 /// Whether the picker lists the focused buffer's diagnostics
 /// only (`Local`) or every workspace path (`Workspace`). The
@@ -68,15 +70,20 @@ const MESSAGE_MAX_CHARS: usize = 80;
 
 impl DiagnosticsPicker {
     /// Wrap `entries` with the prompt and preview, tagged with `scope`.
+    ///
+    /// `executor` ranks a workspace list too long to rank inside the update
+    /// path, and `redraw` wakes the paint when that rank lands.
     pub(crate) fn from_entries(
         entries: Vec<DiagnosticsEntry>,
         scope: PickerScope,
         input: InputView,
         preview: Preview,
+        executor: Executor,
+        redraw: Arc<Notify>,
     ) -> Self {
         let haystacks = entries.iter().map(diagnostic_haystack).collect();
         Self {
-            picker: TargetPicker::new(entries, haystacks, input, preview),
+            picker: TargetPicker::new(entries, haystacks, input, preview, executor, redraw),
             scope,
         }
     }
@@ -381,7 +388,7 @@ mod tests {
     /// preview still has to find one, so it falls back on the scope's path.
     #[test]
     fn a_local_target_reads_the_file_the_scope_names() {
-        let executor = Executor::new(std::sync::Arc::new(TestScheduler::new()));
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
         let ws =
             crate::workspace::Workspace::new(PathBuf::from("/ws"), &executor, crate::test_notify());
         let entry = DiagnosticsEntry {

@@ -211,9 +211,11 @@ pub(super) fn diagnostics_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// offset, so the file is opened first and the byte offset recomputed
 /// from the entry's `(line, column)`. An empty picker just closes.
 pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(picker) = stoat.diagnostics_picker.take() else {
+    let Some(mut picker) = stoat.diagnostics_picker.take() else {
         return UpdateEffect::None;
     };
+    let query = picker.picker.input.text(stoat.active_workspace());
+    picker.picker.settle_rank(&query);
     let target = picker.selected_entry().map(|entry| {
         (
             entry.path.clone(),
@@ -277,6 +279,7 @@ pub(crate) fn sync_diagnostics_picker(stoat: &mut Stoat) {
         return;
     };
     picker.picker.refilter(&query);
+    picker.picker.pump_rank();
     if picker.picker.preview_current() {
         return;
     }
@@ -318,6 +321,7 @@ pub(crate) fn sync_location_picker(stoat: &mut Stoat) {
         return;
     };
     picker.refilter(&query);
+    picker.pump_rank();
     if picker.preview_current() {
         return;
     }
@@ -341,9 +345,11 @@ pub(super) fn location_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// selection, reusing the same apply path a single-location goto takes.
 /// An empty picker just closes.
 pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(picker) = stoat.location_picker.take() else {
+    let Some(mut picker) = stoat.location_picker.take() else {
         return UpdateEffect::None;
     };
+    let query = picker.input.text(stoat.active_workspace());
+    picker.settle_rank(&query);
     let entry = picker.selected_entry().cloned();
     picker.dispose(stoat.active_workspace_mut());
     let Some(entry) = entry else {
@@ -370,6 +376,7 @@ pub(super) fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
     );
 
     let executor = stoat.executor.clone();
+    let redraw = stoat.redraw_notify.clone();
     stoat.set_focused_mode("insert".into());
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
@@ -380,12 +387,14 @@ pub(super) fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
         "insert",
         1,
     );
-    let preview = crate::picker::Preview::new(ws, executor);
+    let preview = crate::picker::Preview::new(ws, executor.clone());
     stoat.jumplist_picker = Some(crate::jumplist_picker::JumplistPicker::from_entries(
         entries,
         jumplist.cursor(),
         input,
         preview,
+        executor,
+        redraw,
     ));
     UpdateEffect::Redraw
 }
@@ -467,6 +476,7 @@ fn build_diagnostics_picker(
     scope: crate::diagnostics_picker::PickerScope,
 ) -> crate::diagnostics_picker::DiagnosticsPicker {
     let executor = stoat.executor.clone();
+    let redraw = stoat.redraw_notify.clone();
     stoat.set_focused_mode("insert".into());
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
@@ -477,8 +487,10 @@ fn build_diagnostics_picker(
         "insert",
         1,
     );
-    let preview = crate::picker::Preview::new(ws, executor);
-    crate::diagnostics_picker::DiagnosticsPicker::from_entries(entries, scope, input, preview)
+    let preview = crate::picker::Preview::new(ws, executor.clone());
+    crate::diagnostics_picker::DiagnosticsPicker::from_entries(
+        entries, scope, input, preview, executor, redraw,
+    )
 }
 
 /// Drive [`ActionKind::OpenDiagnosticsPicker`]. Snapshots the
