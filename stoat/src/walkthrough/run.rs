@@ -3,6 +3,7 @@ use crate::{
     render::walkthrough::SlideParts,
     walkthrough::{Annotation, Stop, Walkthrough},
 };
+use std::{collections::HashMap, time::Instant};
 
 /// A stored walkthrough being played, and where in it the reader is.
 ///
@@ -25,6 +26,12 @@ pub(crate) struct WalkthroughRun {
     /// always names the parts as they were last seen rather than as they were
     /// first drawn.
     pub(crate) last_parts: SlideParts,
+    /// When each part id of the stop the reader is on last went out in a frame.
+    ///
+    /// The terminal forgets the clock of a mark it has not seen for a moment,
+    /// and a mark that comes back after that draws on the next timing it is
+    /// sent. This record is what tells a returning part from one on screen.
+    pub(crate) last_declared: HashMap<u32, Instant>,
     /// Where this run's mark ids start.
     ///
     /// The terminal latches a mark's timing when its id first appears, so a
@@ -73,6 +80,7 @@ impl WalkthroughRun {
             stop_idx: 0,
             annotation_idx: None,
             last_parts: SlideParts::default(),
+            last_declared: HashMap::new(),
             id_base: ID_SPACE + (run << 16),
         })
     }

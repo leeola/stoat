@@ -168,7 +168,12 @@ fn refresh_narration(stoat: &mut Stoat) -> bool {
 /// un-drawing them only to draw them again reads as a flicker.
 fn retire_slide(stoat: &mut Stoat) {
     let parts = match stoat.active_workspace_mut().walkthrough.as_mut() {
-        Some(run) => std::mem::take(&mut run.last_parts),
+        Some(run) => {
+            // The arriving slide opens on its own schedule. When the parts of
+            // the slide being left last went out says nothing about it.
+            run.last_declared.clear();
+            std::mem::take(&mut run.last_parts)
+        },
         None => return,
     };
     if parts.marks.is_empty() && parts.runs.is_empty() {

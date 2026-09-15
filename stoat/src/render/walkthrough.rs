@@ -27,7 +27,10 @@ use crate::{
     },
 };
 use ratatui::{buffer::Buffer, layout::Rect};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{
     self, SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchFillStyle,
@@ -70,6 +73,12 @@ const CORNER_RADIUS_CAP: u16 = 56;
 /// enough that the marks read as being taken back rather than cut.
 pub(crate) const EXIT_MS: u16 = 140;
 
+/// How long a part stays out of the frames before the terminal forgets it.
+///
+/// The mirror of stoatty's `SKETCH_GRACE`. A mark the terminal has not seen for
+/// that long has lost its clock, and it draws on the next timing it is sent.
+const REDECLARE_GRACE: Duration = Duration::from_millis(250);
+
 /// Emit the current stop's marks, connectors, and label boxes.
 ///
 /// A no-op with no walkthrough playing, under a terminal that draws no marks,
@@ -102,6 +111,13 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         popup.placement = Some(card);
     }
 
+    // Taken rather than read, so the painter owns the record while it schedules
+    // and hands it back below.
+    let last_declared = match stoat.active_workspace_mut().walkthrough.as_mut() {
+        Some(run) => std::mem::take(&mut run.last_declared),
+        None => return,
+    };
+    let now = stoat.executor.now();
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return;
     };
@@ -114,21 +130,25 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|annotation| (annotation.key, annotation.label_lines.clone()))
             .collect(),
         anchor: pool_anchor(stoat),
+        now,
+        opening: last_declared.is_empty(),
+        last_declared,
         declared: SlideParts::default(),
     };
 
-    let declared = {
+    let (declared, last_declared) = {
         let mut painter = painter;
         painter.focus(&slide, buf, scene);
         painter.callouts(&slide, buf, scene);
         // Last, so the card's seq is the highest and it occludes the marks it
         // covers rather than being drawn through by them.
         painter.card(&slide, scene);
-        painter.declared
+        (painter.declared, painter.last_declared)
     };
 
     if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
         run.last_parts = declared;
+        run.last_declared = last_declared;
     }
 }
 
@@ -247,6 +267,15 @@ struct Painter {
     /// The pool the marks ride, so they glide with the pane rather than
     /// staying pinned to the screen.
     anchor: Option<(u32, f32)>,
+    /// The scheduler clock this frame reads, so every part measures its absence
+    /// against the same instant.
+    now: Instant,
+    /// Whether this frame opens the slide, where every part takes the slide's
+    /// own schedule.
+    opening: bool,
+    /// When each part id last went out in a frame. Taken from the run and
+    /// handed back with the rest.
+    last_declared: HashMap<u32, Instant>,
     /// What this frame declared, kept so a step can send it back with the exit
     /// phase.
     ///
@@ -290,6 +319,27 @@ impl Painter {
         self.declared.runs.push(command);
     }
 
+    /// The timing that part `id` goes out with on this frame.
+    ///
+    /// The slide's own schedule, unless the part comes back after at least
+    /// [`REDECLARE_GRACE`] out of the frames. The terminal has dropped that
+    /// part's clock and latches the next timing it is sent. On the schedule the
+    /// part waits out the stagger again, so it draws at once instead.
+    ///
+    /// The gap runs from the last frame this side put the part in, and the
+    /// terminal holds the scene between frames. A part that stays on screen
+    /// through an idle spell as long as the grace therefore also goes out with
+    /// no delay. The terminal still holds that part's clock and ignores the
+    /// timing, so the screen does not change.
+    fn schedule(&mut self, id: u32, scheduled: SketchTiming) -> SketchTiming {
+        let last = self.last_declared.insert(id, self.now);
+        let seen = last.is_some_and(|at| self.now.saturating_duration_since(at) < REDECLARE_GRACE);
+        if self.opening || seen {
+            return scheduled;
+        }
+        SketchTiming::after(0, scheduled.duration_ms)
+    }
+
     /// Emit the focus mark and the connector to the card.
     fn focus(&mut self, slide: &Slide, buf: &mut Buffer, scene: &mut ApcScene) {
         let Some(mark) = slide.focus else {
@@ -299,7 +349,7 @@ impl Painter {
             id: self.ids.focus,
             color: self.colors.focus,
             emphasis: Emphasis::Plain,
-            timing: timing_of(slide, Some(slide::Part::Focus)),
+            timing: self.schedule(self.ids.focus, timing_of(slide, Some(slide::Part::Focus))),
             fill: None,
         };
         self.mark(mark, stroke, buf, scene);
@@ -307,10 +357,14 @@ impl Painter {
         if !slide.focus_link {
             return;
         }
+        let timing = self.schedule(
+            self.ids.focus_link,
+            timing_of(slide, Some(slide::Part::FocusLink)),
+        );
         self.link(
             Stroke {
                 id: self.ids.focus_link,
-                timing: timing_of(slide, Some(slide::Part::FocusLink)),
+                timing,
                 ..stroke
             },
             self.ids.focus,
@@ -330,7 +384,7 @@ impl Painter {
         let Some(rect) = slide.card else {
             return;
         };
-        let timing = timing_of(slide, Some(slide::Part::Card));
+        let timing = self.schedule(self.ids.card, timing_of(slide, Some(slide::Part::Card)));
         self.declare(
             SketchCommand {
                 id: self.ids.card,
@@ -366,7 +420,10 @@ impl Painter {
                 id: mark_id,
                 color: self.colors.marker(callout.key),
                 emphasis: slide.emphasis(callout.key),
-                timing: timing_of(slide, Some(slide::Part::Mark(callout.key))),
+                timing: self.schedule(
+                    mark_id,
+                    timing_of(slide, Some(slide::Part::Mark(callout.key))),
+                ),
                 fill: None,
             };
             self.mark(callout.mark, stroke, buf, scene);
@@ -374,11 +431,15 @@ impl Painter {
             // The box before its connector, so the line has something to
             // arrive at by the time it is drawn.
             let lines = self.labels.get(&callout.key).cloned().unwrap_or_default();
+            let timing = self.schedule(
+                label_id,
+                timing_of(slide, Some(slide::Part::Label(callout.key))),
+            );
             self.label(
                 callout.label,
                 Stroke {
                     id: label_id,
-                    timing: timing_of(slide, Some(slide::Part::Label(callout.key))),
+                    timing,
                     fill: Some(self.colors.fill),
                     ..stroke
                 },
@@ -388,10 +449,14 @@ impl Painter {
             );
 
             if callout.link {
+                let timing = self.schedule(
+                    link_id,
+                    timing_of(slide, Some(slide::Part::Link(callout.key))),
+                );
                 self.link(
                     Stroke {
                         id: link_id,
-                        timing: timing_of(slide, Some(slide::Part::Link(callout.key))),
+                        timing,
                         ..stroke
                     },
                     mark_id,
@@ -771,7 +836,9 @@ mod tests {
         },
     };
     use std::{path::PathBuf, time::Duration};
-    use stoatty_protocol::command::{self, Command, SketchCommand, SketchPhase, SketchShape};
+    use stoatty_protocol::command::{
+        self, Command, SketchCommand, SketchPhase, SketchShape, SketchTiming,
+    };
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
 
@@ -1169,6 +1236,57 @@ mod tests {
             .find(|(part, ..)| *part == slide::Part::Card)
             .map(|(_, start, duration)| (*start, *duration))
             .expect("the card is scheduled")
+    }
+
+    /// The terminal drops the clock of a mark it has not seen for a quarter
+    /// second, then latches the next timing it is sent. On the slide's
+    /// schedule, a part scrolled back into view waits out the whole stagger
+    /// again.
+    #[test]
+    fn a_part_scrolled_back_into_view_draws_at_once() {
+        let (opening, returned) = mark_timing_around(Duration::from_millis(300));
+        assert_eq!(returned, SketchTiming::after(0, opening.duration_ms));
+    }
+
+    /// The terminal still holds the clock of a part gone for less than that, so
+    /// the part keeps the timing it opened with.
+    #[test]
+    fn a_short_absence_keeps_the_schedule() {
+        let (opening, returned) = mark_timing_around(Duration::from_millis(100));
+        assert_eq!(returned, opening);
+    }
+
+    /// An annotation mark's timing on the slide's opening frame, and on the
+    /// frame it comes back on after `absence` out of view.
+    fn mark_timing_around(absence: Duration) -> (SketchTiming, SketchTiming) {
+        let filler: String = (4..=60).map(|n| format!("fn line_{n}() {{}}\n")).collect();
+        let mut h = harness_over(&[(1, "one")], &format!("{CODE}{filler}"));
+        open(&mut h.stoat, "tour");
+
+        let mark = part_id(&h, part::ANNOTATION_BASE);
+        let timing = |h: &mut TestHarness| {
+            sketches(h)
+                .into_iter()
+                .find(|sketch| sketch.id == mark)
+                .map(|sketch| sketch.timing)
+        };
+        let scroll_to = |h: &mut TestHarness, row: u32| {
+            let (editor, _) = h.stoat.focused_editor_ids().expect("an editor has focus");
+            h.stoat.active_workspace_mut().editors[editor].scroll_row = row;
+        };
+
+        let opening = timing(&mut h).expect("the mark draws");
+        assert_ne!(
+            opening.delay_ms, 0,
+            "the mark waits its turn in the stagger"
+        );
+
+        scroll_to(&mut h, 30);
+        assert_eq!(timing(&mut h), None, "the mark is out of view");
+
+        h.advance_clock(absence);
+        scroll_to(&mut h, 0);
+        (opening, timing(&mut h).expect("the mark is back in view"))
     }
 
     /// A card that vanished on the step frame left the screen while every mark
