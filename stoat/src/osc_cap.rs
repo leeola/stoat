@@ -11,7 +11,8 @@
 //! forward, leaving out the payload of an OSC that outgrew what its code has
 //! any reason to carry. The parser then reads the code and one empty argument,
 //! which sets an empty title, and which OSC 52 ignores outright for want of its
-//! three arguments.
+//! three arguments. When an earlier read already gave the parser part of that
+//! payload, the walk asks for a fresh parser instead, which reads none of it.
 
 use smallvec::SmallVec;
 use std::ops::Range;
@@ -38,7 +39,7 @@ const OSC_CLIPBOARD: u32 = 52;
 /// The largest of those is a single OSC 4 setting all 256 palette entries,
 /// which runs to about 6 KB, so this leaves an order of magnitude of headroom.
 /// The bound matters because the parser's OSC buffer keeps its capacity for the
-/// pane's life, and the pty reader hands over 256 KiB a call.
+/// pane's life, and the pty reader hands over 64 KiB a call.
 pub(crate) const MAX_OSC_PLAIN_BYTES: usize = 64 * 1024;
 
 /// Cap on the payload of an OSC 52.
@@ -59,6 +60,11 @@ pub(crate) struct OscCap {
     code: u32,
     /// Payload bytes the open OSC has taken, across every call it spans.
     payload: usize,
+    /// Whether the open OSC tripped its cap while the parser held part of it.
+    ///
+    /// The caller replaced its parser for that string, so the rest of the
+    /// string, terminator included, stays out of the fresh one.
+    dropped: bool,
     /// Cap on every code but [`OSC_CLIPBOARD`].
     plain_cap: usize,
     /// Cap on [`OSC_CLIPBOARD`], the one code with a reason to be large.
@@ -88,12 +94,14 @@ impl OscCap {
             state: State::Ground,
             code: 0,
             payload: 0,
+            dropped: false,
             plain_cap,
             clipboard_cap,
         }
     }
 
-    /// Fill `out` with the stretches of `bytes` to hand the parser, in order.
+    /// Fill `out` with the stretches of `bytes` to hand the parser, in order,
+    /// and report whether the parser must be replaced before it reads them.
     ///
     /// Everything reaches the parser but the payload of an OSC past its cap. A
     /// stream carrying no oversized OSC yields one stretch covering the whole
@@ -101,13 +109,23 @@ impl OscCap {
     ///
     /// The cut opens one byte past the code's `;` rather than where the cap
     /// trips, so a capped OSC 52 leaves an empty argument rather than a
-    /// truncated base64 that would decode to a corrupt clipboard.
+    /// truncated base64 that decodes to a corrupt clipboard.
     ///
-    /// An escape spanning several calls is counted on its total, and each call
-    /// cuts its own bytes. What an earlier call forwarded is already gone, so a
-    /// payload crossing the cap mid-stream leaves the parser what arrived
-    /// before it.
-    pub(crate) fn spans(&mut self, bytes: &[u8], out: &mut SmallVec<[Range<usize>; 2]>) {
+    /// An escape spanning several calls is counted on its total. If it trips its
+    /// cap after an earlier call forwarded part of its payload, the parser holds
+    /// that part, and every way out of the parser's open string dispatches what
+    /// it holds. This therefore returns `true` on the call that trips the cap,
+    /// and the caller replaces its parser before it reads the stretches. No
+    /// stretch comes before the cut on that call, since the carried payload
+    /// starts it. The rest of the string, its terminator too, stays out of the
+    /// fresh parser, which has no string for it to close.
+    ///
+    /// The reset has two edges. A fresh `Processor` also drops a DEC 2026
+    /// synchronized update in flight, so a capped OSC 52 inside one costs one
+    /// partial frame until the program's next redraw. A dropped string ended by
+    /// a lone `ESC` as the last byte of a call loses that `ESC` as well, and the
+    /// sequence it opens reaches the parser without it.
+    pub(crate) fn spans(&mut self, bytes: &[u8], out: &mut SmallVec<[Range<usize>; 2]>) -> bool {
         out.clear();
 
         let mut i = 0;
@@ -116,6 +134,12 @@ impl OscCap {
         // carried in from an earlier call has taken nothing here yet, so it
         // starts empty at the front.
         let mut cut = 0..0;
+        // Whether the parser holds part of the open payload, still under its
+        // cap. Only that string asks for a reset, so this clears when it ends.
+        let mut carried = matches!(self.state, State::Payload | State::PayloadEscape)
+            && self.payload > 0
+            && !self.over();
+        let mut reset = false;
 
         while i < bytes.len() {
             let byte = bytes[i];
@@ -165,7 +189,10 @@ impl OscCap {
                 },
                 State::Payload => match byte {
                     ESC => self.state = State::PayloadEscape,
-                    BEL => self.finish(&cut, &mut forwarded, out),
+                    BEL => {
+                        reset |= self.finish(&cut, i + 1, carried, &mut forwarded, out);
+                        carried = false;
+                    },
                     _ => {
                         let run = payload_run(&bytes[i..]);
                         self.payload = self.payload.saturating_add(run);
@@ -175,14 +202,20 @@ impl OscCap {
                     },
                 },
                 State::PayloadEscape => match byte {
-                    STRING_TERMINATOR => self.finish(&cut, &mut forwarded, out),
+                    STRING_TERMINATOR => {
+                        reset |= self.finish(&cut, i + 1, carried, &mut forwarded, out);
+                        carried = false;
+                    },
                     ESC => self.state = State::PayloadEscape,
                     // A lone `ESC` ends an OSC for the parser, which dispatches
                     // what it holds and reads this byte as an escape's start.
                     // Ending here too keeps a cut from swallowing what that
-                    // parser goes on to print.
+                    // parser goes on to print. The cut stops short of the `ESC`
+                    // even for a dropped string, since a fresh parser reads it
+                    // as that start too.
                     _ => {
-                        self.finish(&cut, &mut forwarded, out);
+                        reset |= self.finish(&cut, cut.end, carried, &mut forwarded, out);
+                        carried = false;
                         self.state = State::Escape;
                         continue;
                     },
@@ -194,30 +227,61 @@ impl OscCap {
         // An open payload past its cap has no terminator to cut at, and the
         // bytes it took in this call must not reach the parser either.
         if matches!(self.state, State::Payload | State::PayloadEscape) && self.over() {
-            self.cut_out(&cut, &mut forwarded, out);
+            reset |= self.announce(carried);
+            // A dropped string's trailing `ESC` goes as well. A fresh parser
+            // handed it pairs it with whatever byte the next call starts with.
+            let end = match (self.dropped, self.state) {
+                (true, State::PayloadEscape) => bytes.len(),
+                _ => cut.end,
+            };
+            self.cut_out(&(cut.start..end), &mut forwarded, out);
         }
 
         if forwarded < bytes.len() {
             out.push(forwarded..bytes.len());
         }
+        reset
     }
 
-    /// Close the open OSC, cutting `cut` from what the parser sees when the
-    /// payload outgrew its cap.
+    /// Close the open OSC, cutting from the parser what its cap keeps out, and
+    /// report whether this call dropped the string.
     ///
-    /// The terminator itself is never cut. It follows the payload, so the
-    /// stretch this leaves open carries it to the parser, which needs it to
-    /// dispatch the code and close the string.
+    /// A payload past its cap loses `cut`. Its terminator follows the payload
+    /// and reaches the parser, which needs it to dispatch the code and close
+    /// the string. For a dropped string the fresh parser has no string open, so
+    /// the cut runs on to `through`, past what of the terminator it must not
+    /// read.
     fn finish(
         &mut self,
         cut: &Range<usize>,
+        through: usize,
+        carried: bool,
         forwarded: &mut usize,
         out: &mut SmallVec<[Range<usize>; 2]>,
-    ) {
+    ) -> bool {
+        let mut reset = false;
         if self.over() {
-            self.cut_out(cut, forwarded, out);
+            reset = self.announce(carried);
+            let end = match self.dropped {
+                true => through,
+                false => cut.end,
+            };
+            self.cut_out(&(cut.start..end), forwarded, out);
         }
+        self.dropped = false;
         self.state = State::Ground;
+        reset
+    }
+
+    /// Drop the open OSC when the parser holds part of it, and report whether
+    /// this call is the one that dropped it.
+    ///
+    /// `carried` says the parser holds part of the payload, which is true only
+    /// of a string open and under its cap when the call started.
+    fn announce(&mut self, carried: bool) -> bool {
+        let announced = carried && !self.dropped;
+        self.dropped |= announced;
+        announced
     }
 
     /// Leave `cut` out of what the parser sees, closing the stretch before it.
@@ -261,15 +325,21 @@ mod tests {
     use super::OscCap;
     use smallvec::SmallVec;
 
-    /// What the parser sees of `bytes`: every stretch the cap forwards, joined
-    /// back together.
-    fn forwarded(cap: &mut OscCap, bytes: &[u8]) -> Vec<u8> {
+    /// Whether the call asks for a fresh parser, and what the parser sees of
+    /// `bytes`: every stretch the cap forwards, joined back together.
+    fn walk(cap: &mut OscCap, bytes: &[u8]) -> (bool, Vec<u8>) {
         let mut spans = SmallVec::new();
-        cap.spans(bytes, &mut spans);
-        spans
+        let reset = cap.spans(bytes, &mut spans);
+        let seen = spans
             .into_iter()
             .flat_map(|span| bytes[span].to_vec())
-            .collect()
+            .collect();
+        (reset, seen)
+    }
+
+    /// What the parser sees of `bytes`, for a call that stays with one parser.
+    fn forwarded(cap: &mut OscCap, bytes: &[u8]) -> Vec<u8> {
+        walk(cap, bytes).1
     }
 
     #[test]
@@ -307,13 +377,50 @@ mod tests {
         assert_eq!(forwarded(&mut cap, seq), seq);
     }
 
-    /// The count carries across calls, or an escape delivered in pieces would
-    /// pass a cap its whole exceeds many times over.
+    /// The count carries across calls, or an escape delivered in pieces passes a
+    /// cap its whole exceeds many times over. The parser holds what the first
+    /// call forwarded, and every way out of its string dispatches that, so the
+    /// call that trips the cap asks for a fresh parser and forwards nothing of
+    /// the string, not even its terminator.
     #[test]
-    fn a_payload_split_across_calls_is_capped_on_the_total() {
+    fn a_payload_the_parser_already_holds_asks_for_a_reset() {
         let mut cap = OscCap::new(8, 16);
-        assert_eq!(forwarded(&mut cap, b"\x1b]0;abcde"), b"\x1b]0;abcde");
-        assert_eq!(forwarded(&mut cap, b"fghij\x07"), b"\x07");
+        assert_eq!(
+            walk(&mut cap, b"\x1b]0;abcde"),
+            (false, b"\x1b]0;abcde".to_vec()),
+        );
+        assert_eq!(walk(&mut cap, b"fghij\x07"), (true, Vec::new()));
+    }
+
+    /// A fresh parser has no string open, so a dropped string's terminator stays
+    /// out of it even when its `ESC` and its `\` arrive in different calls. A
+    /// fresh parser handed the `ESC` alone pairs it with the next call's first
+    /// byte.
+    #[test]
+    fn a_reset_string_keeps_its_terminator_from_the_parser() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(
+            walk(&mut cap, b"\x1b]0;abcde"),
+            (false, b"\x1b]0;abcde".to_vec()),
+        );
+        assert_eq!(walk(&mut cap, b"fghij\x1b"), (true, Vec::new()));
+        assert_eq!(walk(&mut cap, b"\\after"), (false, b"after".to_vec()));
+    }
+
+    /// Only the string the parser holds part of asks for a reset. One that
+    /// opens and trips its cap within a call leaves the parser a string of its
+    /// own to close, even when a carried string ended earlier in that call.
+    #[test]
+    fn a_string_that_opens_and_trips_in_one_call_asks_for_no_reset() {
+        let mut cap = OscCap::new(8, 16);
+        assert_eq!(
+            walk(&mut cap, b"\x1b]0;abc"),
+            (false, b"\x1b]0;abc".to_vec()),
+        );
+        assert_eq!(
+            walk(&mut cap, b"de\x07\x1b]0;far too long\x07"),
+            (false, b"de\x07\x1b]0;\x07".to_vec()),
+        );
     }
 
     /// A lone `ESC` ends an OSC for the parser too, so a cut that ran past it

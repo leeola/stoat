@@ -103,6 +103,16 @@ impl VtermGrid {
         }
     }
 
+    /// A grid whose OSC caps are `plain_cap` and `clipboard_cap`, so a test
+    /// crosses a cap without a fixture the size of the real one.
+    #[cfg(test)]
+    pub(super) fn with_osc_caps(width: u16, plain_cap: usize, clipboard_cap: usize) -> Self {
+        Self {
+            osc: OscCap::new(plain_cap, clipboard_cap),
+            ..Self::new(width)
+        }
+    }
+
     /// Counter advanced by every [`Self::feed`], the only call that can change
     /// what the grid holds.
     ///
@@ -217,9 +227,13 @@ impl VtermGrid {
         self.trimmed_rows = 0;
 
         let mut spans = SmallVec::<[Range<usize>; 2]>::new();
-        self.osc.spans(bytes, &mut spans);
+        let reset = self.osc.spans(bytes, &mut spans);
 
-        let mut parser = std::mem::take(&mut self.parser);
+        let mut parser = if reset {
+            vte::Parser::new()
+        } else {
+            std::mem::take(&mut self.parser)
+        };
         for span in spans {
             parser.advance(self, &bytes[span]);
         }

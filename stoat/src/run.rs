@@ -452,6 +452,33 @@ mod tests {
         assert_eq!(grid.clipboard_writes, vec!["A".repeat(3 * 256 * 1024)]);
     }
 
+    /// A clipboard write that trips its cap a read after it started leaves the
+    /// parser holding the base64 of the reads before. Any terminator makes the
+    /// parser dispatch that, and a length in fours decodes to a cut clipboard.
+    #[test]
+    fn a_clipboard_write_split_past_its_cap_stores_nothing() {
+        let mut grid = VtermGrid::with_osc_caps(20, 16, 64);
+
+        grid.feed(format!("\x1b]52;c;{}", "QUFB".repeat(8)).as_bytes());
+        grid.feed(format!("{}\x07", "QUFB".repeat(10)).as_bytes());
+        grid.feed(b"after");
+
+        assert_eq!(grid.clipboard_writes, Vec::<String>::new());
+        assert_eq!(grid.text_in(0..5, 0..1), "after");
+    }
+
+    /// A clipboard write past its cap within one read leaves the parser too
+    /// few arguments to store.
+    #[test]
+    fn a_clipboard_write_past_its_cap_stores_nothing() {
+        let mut grid = VtermGrid::with_osc_caps(20, 16, 64);
+
+        grid.feed(format!("\x1b]52;c;{}\x07after", "QUFB".repeat(20)).as_bytes());
+
+        assert_eq!(grid.clipboard_writes, Vec::<String>::new());
+        assert_eq!(grid.text_in(0..5, 0..1), "after");
+    }
+
     #[test]
     fn grid_selection_bounds_normalizes_drag_direction() {
         let forward = GridSelection {

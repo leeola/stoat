@@ -158,6 +158,16 @@ impl TermScreen {
         }
     }
 
+    /// A screen whose OSC caps are `plain_cap` and `clipboard_cap`, so a test
+    /// crosses a cap without a fixture the size of the real one.
+    #[cfg(test)]
+    fn with_osc_caps(rows: u16, cols: u16, plain_cap: usize, clipboard_cap: usize) -> TermScreen {
+        TermScreen {
+            osc: OscCap::new(plain_cap, clipboard_cap),
+            ..TermScreen::new(rows, cols)
+        }
+    }
+
     /// Counter advanced by every call that can change what the screen shows.
     ///
     /// A caller that caches a rendering of this screen compares the counter to
@@ -184,7 +194,9 @@ impl TermScreen {
         self.generation += 1;
 
         let mut spans = SmallVec::<[Range<usize>; 2]>::new();
-        self.osc.spans(bytes, &mut spans);
+        if self.osc.spans(bytes, &mut spans) {
+            self.parser = Processor::new();
+        }
         for span in spans {
             self.parser.advance(&mut self.term, &bytes[span]);
         }
@@ -489,6 +501,33 @@ mod tests {
             term.take_clipboard_writes(),
             vec!["A".repeat(3 * 256 * 1024)],
         );
+    }
+
+    /// A clipboard write that trips its cap a read after it started leaves the
+    /// parser holding the base64 of the reads before. Any terminator makes the
+    /// parser dispatch that, and a length in fours decodes to a cut clipboard.
+    #[test]
+    fn a_clipboard_write_split_past_its_cap_stores_nothing() {
+        let mut term = TermScreen::with_osc_caps(4, 10, 16, 64);
+
+        term.feed(format!("\x1b]52;c;{}", "QUFB".repeat(8)).as_bytes());
+        term.feed(format!("{}\x07", "QUFB".repeat(10)).as_bytes());
+        term.feed(b"after");
+
+        assert_eq!(term.take_clipboard_writes(), Vec::<String>::new());
+        assert_eq!(text_row(&term, 0), "after");
+    }
+
+    /// A clipboard write past its cap within one read leaves the parser too
+    /// few arguments to store.
+    #[test]
+    fn a_clipboard_write_past_its_cap_stores_nothing() {
+        let mut term = TermScreen::with_osc_caps(4, 10, 16, 64);
+
+        term.feed(format!("\x1b]52;c;{}\x07after", "QUFB".repeat(20)).as_bytes());
+
+        assert_eq!(term.take_clipboard_writes(), Vec::<String>::new());
+        assert_eq!(text_row(&term, 0), "after");
     }
 
     /// The buffer arrives holding whatever the previous row left, and past the
