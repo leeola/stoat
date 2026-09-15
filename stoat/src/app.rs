@@ -1153,13 +1153,6 @@ pub struct Stoat {
     /// finished un-drawing itself, so an idle screen drops it without a key
     /// press. Replacing it cancels the prior timer.
     pub(crate) walkthrough_exit_timer: Option<stoat_scheduler::Task<()>>,
-    /// When the next box under a walkthrough slide clears the cells it covers,
-    /// and the timer that wakes the run loop for it.
-    ///
-    /// A clear that waits for its box to begin drawing has nothing else to ask
-    /// for a frame, so an idle screen would hold the code under a box the pen
-    /// has already reached. Replacing it cancels the prior timer.
-    pub(crate) walkthrough_wake: Option<(std::time::Instant, stoat_scheduler::Task<()>)>,
     /// When a modified wheel notch last ran a keymap binding, on the
     /// scheduler clock.
     ///
@@ -2316,7 +2309,6 @@ impl Stoat {
             pending_message_deadline: None,
             pending_message_expiry: None,
             walkthrough_exit_timer: None,
-            walkthrough_wake: None,
             wheel_binding_last: None,
             wheel_line_remainder: 0.0,
             pending_count: None,

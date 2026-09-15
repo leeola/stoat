@@ -27,10 +27,7 @@ use crate::{
     },
 };
 use ratatui::{buffer::Buffer, layout::Rect};
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Duration};
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{
     self, SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchFillStyle,
@@ -105,13 +102,6 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         popup.placement = Some(card);
     }
 
-    // Taken rather than read, so the painter owns the record while it gates and
-    // hands it back below.
-    let declared_at = match stoat.active_workspace_mut().walkthrough.as_mut() {
-        Some(run) => std::mem::take(&mut run.declared_at),
-        None => return,
-    };
-    let now = stoat.executor.now();
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return;
     };
@@ -124,63 +114,22 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|annotation| (annotation.key, annotation.label_lines.clone()))
             .collect(),
         anchor: pool_anchor(stoat),
-        theme: &stoat.theme,
-        now,
-        declared_at,
-        next_clear: None,
-        card_started: false,
         declared: SlideParts::default(),
     };
 
-    // The painter borrows the theme, so it is scoped to the emit and hands back
-    // only what the run has to keep.
-    let (declared, declared_at, next_clear, card_started) = {
+    let declared = {
         let mut painter = painter;
         painter.focus(&slide, buf, scene);
         painter.callouts(&slide, buf, scene);
         // Last, so the card's seq is the highest and it occludes the marks it
         // covers rather than being drawn through by them.
         painter.card(&slide, scene);
-        (
-            painter.declared,
-            painter.declared_at,
-            painter.next_clear,
-            painter.card_started,
-        )
+        painter.declared
     };
 
     if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
         run.last_parts = declared;
-        run.declared_at = declared_at;
-        run.card_started = card_started;
     }
-    arm_clear_wake(stoat, next_clear);
-}
-
-/// Wake the run loop when the next gated clear comes due.
-///
-/// A clear held until its box begins to draw asks for no frame of its own, so
-/// an idle screen would keep the code under a box the pen has already reached.
-/// A timer already armed for that moment or sooner is left alone, and replacing
-/// one cancels it.
-fn arm_clear_wake(stoat: &mut Stoat, next: Option<Instant>) {
-    let Some(at) = next else {
-        stoat.walkthrough_wake = None;
-        return;
-    };
-
-    let now = stoat.executor.now();
-    if let Some((armed, _)) = &stoat.walkthrough_wake
-        && (now..=at).contains(armed)
-    {
-        return;
-    }
-
-    let timer = stoat.executor.timer(at.saturating_duration_since(now));
-    let task = stoat.spawn_woken(async move {
-        timer.await;
-    });
-    stoat.walkthrough_wake = Some((at, task));
 }
 
 /// Re-declare the retiring slide with the exit phase, and report whether one is
@@ -290,7 +239,7 @@ impl Colors {
 /// Bundled rather than threaded through every emit, because the ids, the
 /// colors, the labels, the pool anchor, and the pane never change within a
 /// frame and passing all five to every function makes each one unreadable.
-struct Painter<'a> {
+struct Painter {
     ids: SlideIds,
     colors: Colors,
     /// Each annotation's wrapped label lines, by key.
@@ -298,19 +247,6 @@ struct Painter<'a> {
     /// The pool the marks ride, so they glide with the pane rather than
     /// staying pinned to the screen.
     anchor: Option<(u32, f32)>,
-    theme: &'a crate::theme::Theme,
-    /// The scheduler clock this frame reads, so every gate in it answers the
-    /// same question.
-    now: Instant,
-    /// When each part id was first declared, and the delay it carried. Taken
-    /// from the run and handed back with the rest.
-    declared_at: HashMap<u32, (Instant, u16)>,
-    /// The earliest gated clear still ahead of `now`, so the loop can be woken
-    /// for it.
-    next_clear: Option<Instant>,
-    /// Whether the card's box has begun to draw, for the hover render that
-    /// writes its body.
-    card_started: bool,
     /// What this frame declared, kept so a step can send it back with the exit
     /// phase.
     ///
@@ -341,7 +277,7 @@ struct Stroke {
     fill: Option<[u8; 3]>,
 }
 
-impl Painter<'_> {
+impl Painter {
     /// Record and encode one mark.
     fn declare(&mut self, command: SketchCommand, scene: &mut ApcScene) {
         command::encode_sketch_into(scene.buffer(), &command);
@@ -352,25 +288,6 @@ impl Painter<'_> {
     fn declare_run(&mut self, command: TextRunCommand, scene: &mut ApcScene) {
         command::encode_text_run_into(scene.buffer(), &command);
         self.declared.runs.push(command);
-    }
-
-    /// Whether the pen has reached `id` by now, recording the first sight of it.
-    ///
-    /// The terminal latches a mark's delay when its id first appears, so the
-    /// clock this measures against is the frame that declared it rather than
-    /// the frame asking. An answer of `false` is also what the loop is woken
-    /// for, since a gated clear asks for no frame of its own.
-    fn started(&mut self, id: u32, timing: SketchTiming) -> bool {
-        let (first, delay) = *self
-            .declared_at
-            .entry(id)
-            .or_insert((self.now, timing.delay_ms));
-        let at = first + Duration::from_millis(u64::from(delay));
-        if at > self.now {
-            self.next_clear = Some(self.next_clear.map_or(at, |soonest| soonest.min(at)));
-            return false;
-        }
-        true
     }
 
     /// Emit the focus mark and the connector to the card.
@@ -414,9 +331,6 @@ impl Painter<'_> {
             return;
         };
         let timing = timing_of(slide, Some(slide::Part::Card));
-        // The hover render writes the body and clears the cells, and has
-        // neither the slide nor its schedule to ask.
-        self.card_started = self.started(self.ids.card, timing);
         self.declare(
             SketchCommand {
                 id: self.ids.card,
@@ -555,23 +469,17 @@ impl Painter<'_> {
 
     /// Emit one label box and the text inside it.
     ///
-    /// The cells under the box are cleared first. A hand-drawn box is stroke
-    /// and fill, both drawn by the terminal. Without the clear the code beneath
-    /// shows through wherever the fill is not opaque.
+    /// The cells under the box keep their code. The terminal draws the opaque
+    /// fill over the grid, so the fill hides that code. A clear blanks whole
+    /// cells, and so also blanks the code outside the rounded corners.
     fn label(
         &mut self,
         box_: Rect,
         stroke: Stroke,
         lines: &[String],
-        buf: &mut Buffer,
+        _buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
-        // Held until the box has begun to draw, so no blank rectangle opens in
-        // the code ahead of the pen.
-        if self.started(stroke.id, stroke.timing) {
-            crate::render::clear_themed(box_, buf, self.theme);
-        }
-
         self.declare(
             SketchCommand {
                 id: stroke.id,
@@ -850,9 +758,7 @@ fn line_ends(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        sketch_corner_radius, Colors, Emphasis, Painter, SlideIds, SlideParts, Stroke, EXIT_MS,
-    };
+    use super::{sketch_corner_radius, EXIT_MS};
     use crate::{
         action_handlers::walkthrough::open,
         app::Stoat,
@@ -864,12 +770,8 @@ mod tests {
             slide, Location, Point, Range, Walkthrough,
         },
     };
-    use ratatui::buffer::Buffer;
-    use std::{collections::HashMap, path::PathBuf, time::Duration};
-    use stoat_widgets::ApcScene;
-    use stoatty_protocol::command::{
-        self, Command, SketchCommand, SketchPhase, SketchShape, SketchTiming,
-    };
+    use std::{path::PathBuf, time::Duration};
+    use stoatty_protocol::command::{self, Command, SketchCommand, SketchPhase, SketchShape};
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
 
@@ -1570,70 +1472,12 @@ mod tests {
         assert_eq!(sketches(&mut h), Vec::new());
     }
 
-    /// A label box clears the cells it covers, so the code beneath does not
-    /// show through its fill. Cleared before the box begins to draw, that
-    /// leaves a blank rectangle in the code for as long as the schedule holds
-    /// the pen back.
+    /// The terminal draws a box's opaque fill over the code, so the fill hides
+    /// what it covers. A clear blanks whole cells, and so also blanks the code
+    /// outside the rounded corners. The cells under the card keep their code
+    /// before the pen reaches the card and after.
     #[test]
-    fn a_labels_cells_stay_until_its_box_starts() {
-        let mut h = harness(&[]);
-        open(&mut h.stoat, "tour");
-        let now = h.stoat.executor.now();
-
-        let box_ = ratatui::layout::Rect::new(2, 1, 8, 4);
-        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 20, 6));
-        for (x, y) in [(3, 2), (8, 3)] {
-            buf[(x, y)].set_symbol("x");
-        }
-        let mut scene = ApcScene::new();
-        let stroke = Stroke {
-            id: 7,
-            color: [1, 2, 3],
-            emphasis: Emphasis::Plain,
-            timing: SketchTiming::after(500, 200),
-            fill: Some([4, 5, 6]),
-        };
-
-        let run = h
-            .stoat
-            .active_workspace()
-            .walkthrough
-            .as_ref()
-            .expect("a tour is playing");
-        let mut painter = Painter {
-            ids: SlideIds::of(run),
-            colors: Colors::of(&h.stoat),
-            labels: HashMap::new(),
-            anchor: None,
-            theme: &h.stoat.theme,
-            now,
-            declared_at: HashMap::new(),
-            next_clear: None,
-            card_started: false,
-            declared: SlideParts::default(),
-        };
-
-        painter.label(box_, stroke, &[], &mut buf, &mut scene);
-        assert_eq!(
-            (buf[(3, 2)].symbol(), buf[(8, 3)].symbol()),
-            ("x", "x"),
-            "the code under the box is left where it is",
-        );
-
-        painter.now = now + Duration::from_millis(600);
-        painter.label(box_, stroke, &[], &mut buf, &mut scene);
-        assert_eq!(
-            (buf[(3, 2)].symbol(), buf[(8, 3)].symbol()),
-            (" ", " "),
-            "and goes once the pen has reached the box",
-        );
-    }
-
-    /// The card covers code the same way a label does, and clears it the same
-    /// way. Its own body is drawn either way, so what this reads is the
-    /// clearing rather than the drawing.
-    #[test]
-    fn the_cards_cells_stay_until_its_frame_starts() {
+    fn the_code_under_a_box_is_never_cleared() {
         let long: String = (0..12)
             .map(|n| format!("fn name_{n}(value: u32) -> u32 {{ value + {n} }} // padding\n"))
             .collect();
@@ -1657,84 +1501,15 @@ mod tests {
         };
 
         h.snapshot();
-        assert!(
-            !under(&h).trim().is_empty(),
-            "the code under the card is left where it is: {:?}",
-            under(&h),
-        );
+        let code = under(&h);
+        assert!(!code.trim().is_empty(), "the card sits over code: {code:?}");
 
         h.advance_clock(Duration::from_millis(600));
         h.snapshot();
-        assert!(
-            under(&h).trim().is_empty(),
-            "and goes once the pen has reached the card: {:?}",
-            under(&h),
-        );
-    }
-
-    /// A stop walked back to declares its ids afresh, and the terminal latches
-    /// their delays again. A record kept from the first visit would answer that
-    /// the pen had long since arrived, and clear the code on the frame the
-    /// slide returns.
-    #[test]
-    fn a_revisited_stop_holds_its_cells_again() {
-        let long: String = (0..12)
-            .map(|n| format!("fn name_{n}(value: u32) -> u32 {{ value + {n} }} // padding\n"))
-            .collect();
-        let mut h = harness_over(&[], &long);
-        open(&mut h.stoat, "tour");
-
-        let card = card_rect(&mut h);
-        let row = card.y + card.height - 1;
-        let under = |h: &TestHarness| -> String {
-            (card.x + 4..card.x + card.width)
-                .map(|col| {
-                    h.rendered_buffer()[(col, row)]
-                        .symbol()
-                        .chars()
-                        .next()
-                        .unwrap_or(' ')
-                })
-                .collect()
-        };
-
-        h.advance_clock(Duration::from_millis(600));
-        h.snapshot();
-        assert!(under(&h).trim().is_empty(), "the first visit clears");
-
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
-        crate::action_handlers::walkthrough::prev(&mut h.stoat);
-        h.snapshot();
-
-        assert!(
-            !under(&h).trim().is_empty(),
-            "and the return holds the code again: {:?}",
-            under(&h),
-        );
-    }
-
-    /// A clear held for its box asks for no frame of its own, so an idle screen
-    /// would hold the code under a box the pen has already reached.
-    #[test]
-    fn a_gated_clear_wakes_the_loop() {
-        let mut h = harness(&[]);
-        open(&mut h.stoat, "tour");
-        let now = h.stoat.executor.now();
-
-        let card = sketches(&mut h)
-            .into_iter()
-            .find(|sketch| sketch.id == part_id(&h, part::CARD))
-            .expect("the card draws");
-
-        let (at, _) = h
-            .stoat
-            .walkthrough_wake
-            .as_ref()
-            .expect("the card's clear is pending");
         assert_eq!(
-            *at,
-            now + Duration::from_millis(u64::from(card.timing.delay_ms)),
-            "the loop wakes when the card begins to draw",
+            under(&h),
+            code,
+            "the code stays once the pen has reached the card"
         );
     }
 }
