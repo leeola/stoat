@@ -116,11 +116,18 @@ pub(crate) struct DiffState {
     /// are not retried every frame, and drives re-population when a buffer is
     /// edited past the recorded version.
     pub(super) versions: HashMap<BufferId, u64>,
+    /// The buffer version each buffer's last diff job ran against.
+    ///
+    /// Kept through [`Self::invalidate`] and [`Self::invalidate_all`]. A git
+    /// write moves the blobs without moving the buffer, so a buffer still at
+    /// this version has no typing burst to wait out.
+    diffed: HashMap<BufferId, u64>,
     /// Each diffed file's HEAD and index blobs, keyed by path.
     ///
     /// Saves the repo mutex and a blob decompression on every recompute, which
-    /// is otherwise paid per keystroke. Cleared by [`Self::invalidate_all`],
-    /// which the `.git` watcher drives, so an entry cannot outlive the git
+    /// is otherwise paid per keystroke. [`Self::invalidate`] drops one path's
+    /// entry after a stage or an amend, and [`Self::invalidate_all`], which the
+    /// `.git` watcher drives, drops every entry, so no entry outlives the git
     /// state it was read from.
     ///
     /// A `None` entry records a miss. The file has no HEAD blob and no move
@@ -172,16 +179,21 @@ pub(crate) struct DiffState {
 }
 
 impl DiffState {
-    /// Force the next drive to recompute `id`'s diff map by dropping its
-    /// recorded version and any in-flight job.
+    /// Force the next drive to recompute `id`'s diff map against fresh blobs,
+    /// by dropping its recorded version, any in-flight job, and `path`'s cached
+    /// blobs.
     ///
-    /// Used after a git-index mutation so the buffer re-diffs. The recompute
-    /// stays HEAD-relative, so the hunks are unchanged until the base becomes
-    /// index-aware.
-    pub(super) fn invalidate(&mut self, id: BufferId) {
+    /// A stage or an amend moves one of the two blobs, and the cached pair
+    /// marks the hunks staged as they were before the write. The text did not
+    /// move, so the recompute skips the settle window. `path` is `None` for a
+    /// buffer with no file.
+    pub(super) fn invalidate(&mut self, id: BufferId, path: Option<&Path>) {
         self.jobs.remove(&id);
         self.versions.remove(&id);
         self.tally_current = false;
+        if let Some(path) = path {
+            self.base_text.remove(path);
+        }
     }
 
     /// Stale every buffer's diff map by dropping all recorded versions and
@@ -193,7 +205,8 @@ impl DiffState {
     ///
     /// In-flight jobs are dropped as [`Self::invalidate`] drops them, since
     /// their results would carry the same stale base. The next drive recomputes
-    /// only visible buffers, so hidden ones re-diff lazily when next shown.
+    /// only visible buffers, so hidden ones re-diff lazily when next shown. An
+    /// unedited buffer recomputes without the settle window.
     pub(super) fn invalidate_all(&mut self) {
         self.jobs.clear();
         self.versions.clear();
@@ -220,12 +233,11 @@ impl DiffState {
     /// Drop everything held for a closing buffer, and `path`'s blobs with it.
     ///
     /// Two of the collections hold a `Task`, and dropping one cancels work
-    /// whose result nothing reads any more. [`Self::invalidate`] keeps the
-    /// blobs on purpose, since an edit does not move the base, where a close
-    /// leaves nothing to reuse them.
+    /// whose result nothing reads any more.
     pub(super) fn release(&mut self, id: BufferId, path: Option<&Path>) {
         self.jobs.remove(&id);
         self.versions.remove(&id);
+        self.diffed.remove(&id);
         self.settle.remove(&id);
         self.settle_timers.remove(&id);
         if let Some(path) = path {
@@ -240,6 +252,7 @@ impl DiffState {
     pub(super) fn holds(&self, id: BufferId, path: Option<&Path>) -> bool {
         self.jobs.contains_key(&id)
             || self.versions.contains_key(&id)
+            || self.diffed.contains_key(&id)
             || self.settle.contains_key(&id)
             || self.settle_timers.contains_key(&id)
             || path.is_some_and(|path| self.base_text.contains_key(path))
@@ -443,6 +456,7 @@ impl DiffState {
             // Recorded either way, so an unchanged result still counts as
             // diffed and the buffer is not tried again next frame.
             self.versions.insert(out.buffer_id, out.target_version);
+            self.diffed.insert(out.buffer_id, out.target_version);
         }
 
         if let Some(job) = &mut self.tally_job {
@@ -489,7 +503,11 @@ impl DiffState {
             {
                 continue;
             }
-            if !self.settled(executor, redraw_notify, buffer_id, cur_version) {
+            // The buffer is still at the version its last diff read, so only its
+            // blobs moved. There is no typing burst to wait out.
+            if self.diffed.get(&buffer_id) != Some(&cur_version)
+                && !self.settled(executor, redraw_notify, buffer_id, cur_version)
+            {
                 continue;
             }
 
@@ -1899,6 +1917,47 @@ mod tests {
             base_text_of(&h, buffer_id),
             "a\nZ\n",
             "the redrive diffs the buffer against the moved HEAD",
+        );
+    }
+
+    /// A stage moves the index blob and leaves the buffer where it was, so the
+    /// mark has to flip on the next drive, with no clock advance and no `.git`
+    /// event behind it.
+    #[test]
+    fn a_git_write_restages_an_unedited_buffer_on_the_next_drive() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let staged = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard
+                .diff_map
+                .as_ref()
+                .expect("diff map")
+                .staged_for_line(1)
+        };
+        assert_eq!(staged(&h), Some(false), "the change starts unstaged");
+
+        // The fake's patch apply records the patch and writes no index blob, so
+        // the test writes the blob a real stage leaves.
+        h.fake_git().add_repo("/repo").index_file("a.txt", "a\nc\n");
+        h.stoat
+            .active_workspace_mut()
+            .invalidate_diff(buffer_id, Path::new("/repo/a.txt"));
+        h.stoat.drive_background();
+        h.settle();
+        h.stoat.drive_background();
+
+        assert_eq!(
+            staged(&h),
+            Some(true),
+            "the next drive reads the staged blob"
         );
     }
 

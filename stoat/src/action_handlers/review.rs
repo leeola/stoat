@@ -488,7 +488,9 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 
     match result {
         Ok(message) => {
-            stoat.active_workspace_mut().invalidate_diff(buffer_id);
+            stoat
+                .active_workspace_mut()
+                .invalidate_diff(buffer_id, &path);
             stoat.set_status(message);
         },
         Err(err) => stoat.set_status(format!("could not update staging: {err}")),
@@ -599,7 +601,9 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 
     match repo.apply_to_index(&patch) {
         Ok(()) => {
-            stoat.active_workspace_mut().invalidate_diff(buffer_id);
+            stoat
+                .active_workspace_mut()
+                .invalidate_diff(buffer_id, &path);
             stoat.set_status(message);
         },
         Err(err) => stoat.set_status(format!("could not update staging: {err}")),

@@ -635,7 +635,7 @@ impl Workspace {
     pub(crate) fn reset_preview_syntax(&mut self, id: BufferId) {
         self.buffers.clear_syntax(id);
         self.cancel_parse_job(id);
-        self.diff.invalidate(id);
+        self.diff.invalidate(id, None);
     }
 
     /// Stop `id`'s parse and forget the job.
@@ -660,9 +660,7 @@ impl Workspace {
     /// dropping it cancels work whose result nothing reads any more.
     ///
     /// `path` releases the file's cached HEAD and index blobs, which are the
-    /// bulk of what a long browsing session accumulates. [`Self::invalidate_diff`]
-    /// keeps them on purpose, since an edit does not move the base, but a close
-    /// leaves nothing to reuse them.
+    /// bulk of what a long browsing session accumulates.
     pub(crate) fn release_buffer(&mut self, id: BufferId, path: Option<&Path>) {
         self.cancel_parse_job(id);
         self.partial_token_buffers.remove(&id);
@@ -687,9 +685,9 @@ impl Workspace {
     }
 
     /// Force the next [`Self::drive_diff_jobs`] pass to recompute `id`'s diff
-    /// map. See [`DiffState::invalidate`].
-    pub(crate) fn invalidate_diff(&mut self, id: BufferId) {
-        self.diff.invalidate(id);
+    /// map against `path`'s fresh blobs. See [`DiffState::invalidate`].
+    pub(crate) fn invalidate_diff(&mut self, id: BufferId, path: &Path) {
+        self.diff.invalidate(id, Some(path));
     }
 
     /// Mark the repo-wide hunk tally as owed. See [`DiffState::stale_tally`].

@@ -191,7 +191,9 @@ pub(super) fn amend_hunk(
     };
 
     anchor_walk_to(stoat, &target.head_sha, &new_sha);
-    stoat.active_workspace_mut().invalidate_diff(buffer_id);
+    stoat
+        .active_workspace_mut()
+        .invalidate_diff(buffer_id, path);
 
     // Set first so a failed branch move overwrites it. The commit is rewritten
     // either way, so the badge has to name a stale branch rather than an amend
