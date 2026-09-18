@@ -1,4 +1,4 @@
-use crate::{Bias, ContextLessSummary, Item, KeyedItem, SumTree};
+use crate::{Bias, ContextLessSummary, Edit, Item, KeyedItem, SumTree};
 use serde::{Deserialize, Serialize};
 use std::cmp;
 
@@ -49,19 +49,27 @@ impl UndoMap {
         Self::default()
     }
 
+    /// Record `undo`'s count for every edit it names, in one pass over the map.
+    ///
+    /// An undo of an insert session names one edit per typed character, and a
+    /// separate insert per entry costs a slice and an append of the whole map
+    /// each time. `counts` names each edit once, so no two entries of the batch
+    /// share a key.
     pub fn insert(&mut self, undo: &UndoOperation) {
-        for (&edit_id, &count) in &undo.counts {
-            self.0.insert_or_replace(
-                UndoMapEntry {
+        let edits = undo
+            .counts
+            .iter()
+            .map(|(&edit_id, &undo_count)| {
+                Edit::Insert(UndoMapEntry {
                     key: UndoMapKey {
                         edit_id,
                         undo_id: undo.timestamp,
                     },
-                    undo_count: count,
-                },
-                (),
-            );
-        }
+                    undo_count,
+                })
+            })
+            .collect();
+        self.0.edit(edits, ());
     }
 
     pub fn is_undone(&self, edit_id: u64) -> bool {
@@ -189,5 +197,26 @@ mod tests {
         });
         assert!(!map.is_undone(2));
         assert!(!map.is_undone(99));
+    }
+
+    #[test]
+    fn one_operation_records_the_count_of_every_edit_it_names() {
+        let mut map = UndoMap::new();
+        map.insert(&UndoOperation {
+            timestamp: 10,
+            counts: HashMap::from([(1, 1), (2, 1), (5, 1)]),
+        });
+        map.insert(&UndoOperation {
+            timestamp: 11,
+            counts: HashMap::from([(2, 2), (7, 1)]),
+        });
+
+        assert_eq!(
+            (
+                [1, 2, 3, 5, 7].map(|edit| map.undo_count(edit)),
+                [1, 2, 5, 7].map(|edit| map.is_undone(edit)),
+            ),
+            ([1, 2, 0, 1, 1], [true, false, true, true]),
+        );
     }
 }
