@@ -1,6 +1,9 @@
 use crate::{
     action_handlers::rebase::{drive_rebase, emit_rebase_error},
     app::{Stoat, UpdateEffect},
+    git_jobs::{self, GitJob, GitLanding, GitWork},
+    host::{GitApplyError, GitRepo},
+    rebase::{ConflictResolution, RebasePause},
 };
 use std::path::PathBuf;
 
@@ -50,7 +53,6 @@ fn fill_slot(
 /// A press selects and nothing more. Taking a side stays on its own key, so a
 /// misclick picks a different file rather than resolving one.
 pub(crate) fn conflict_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
-    use crate::rebase::RebasePause;
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return UpdateEffect::None;
     };
@@ -72,7 +74,6 @@ pub(crate) fn conflict_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
 }
 
 pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
-    use crate::rebase::RebasePause;
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return UpdateEffect::None;
     };
@@ -104,7 +105,6 @@ pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
 }
 
 pub(super) fn conflict_set(stoat: &mut Stoat, choice: ConflictChoice) -> UpdateEffect {
-    use crate::rebase::{ConflictResolution, RebasePause};
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return UpdateEffect::None;
     };
@@ -129,7 +129,6 @@ pub(super) fn conflict_set(stoat: &mut Stoat, choice: ConflictChoice) -> UpdateE
 }
 
 pub(super) fn conflict_skip_entry(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::rebase::RebasePause;
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return UpdateEffect::None;
     };
@@ -146,13 +145,13 @@ pub(super) fn conflict_abort(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Commit the chosen side of each conflicted file and resume the plan.
+///
+/// The press reads the choices, and the commit waits its turn in the git
+/// queue. The conflict screen stays up until the commit lands. A failed commit
+/// keeps the screen, so the reader chooses again, skips, or aborts.
 pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::{
-        host::GitApplyError,
-        rebase::{ConflictResolution, RebasePause},
-    };
-
-    let (workdir, updates, author_name, author_email, message, parent) = {
+    let (source_sha, workdir, updates, author_name, author_email, message, parent) = {
         let Some(active) = stoat.active_workspace().rebase_active.as_ref() else {
             return UpdateEffect::None;
         };
@@ -186,6 +185,7 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
             .collect();
         let message = format!("conflict-resolved {source_sha}");
         (
+            source_sha.clone(),
             active.workdir.clone(),
             updates,
             "stoat".to_string(),
@@ -195,31 +195,97 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
         )
     };
 
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        emit_rebase_error(stoat, "git repo not found", None);
-        return UpdateEffect::Redraw;
-    };
-    let tree = match repo.tree_with_updates(&parent, &updates) {
+    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+        if !conflict_paused_on(stoat, &source_sha) {
+            return None;
+        }
+        let Some(repo) = stoat.git_host.discover(&workdir) else {
+            emit_rebase_error(stoat, "git repo not found", None);
+            return None;
+        };
+        Some(Box::new(move || {
+            let committed = resolved_commit(
+                &*repo,
+                &parent,
+                &updates,
+                &message,
+                &author_name,
+                &author_email,
+            );
+            Box::new(move |stoat: &mut Stoat| {
+                land_conflict_apply(stoat, &source_sha, message, committed);
+            }) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Write the chosen sides onto the tree of `parent` and commit the result, on
+/// whatever thread calls.
+///
+/// A failure answers the badge label and what the backend said.
+fn resolved_commit(
+    repo: &dyn GitRepo,
+    parent: &str,
+    updates: &[(PathBuf, Option<String>)],
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+) -> Result<String, (String, Option<String>)> {
+    let tree = match repo.tree_with_updates(parent, updates) {
         Ok(tree) => tree,
-        Err(err) => {
-            emit_rebase_error(stoat, &format!("conflict apply failed: {err}"), None);
-            return UpdateEffect::Redraw;
-        },
+        Err(err) => return Err((format!("conflict apply failed: {err}"), None)),
     };
-    match repo.create_commit(Some(&parent), &tree, &message, &author_name, &author_email) {
-        Ok(new_sha) => {
-            let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
-                return UpdateEffect::None;
-            };
-            active.current_head = new_sha.clone();
-            active.last_pick_sha = Some(new_sha.clone());
-            active.last_message = Some(message);
-            active.pause = None;
-            drive_rebase(stoat)
-        },
+    match repo.create_commit(Some(parent), &tree, message, author_name, author_email) {
+        Ok(new_sha) => Ok(new_sha),
         Err(GitApplyError::Backend { reason, .. }) => {
-            emit_rebase_error(stoat, "conflict commit failed", Some(reason));
-            UpdateEffect::Redraw
+            Err(("conflict commit failed".to_string(), Some(reason)))
         },
     }
+}
+
+/// Apply a landed conflict commit and resume the plan, unless the conflict
+/// stop ended before the commit landed.
+///
+/// A failure badges and leaves the pause in place.
+fn land_conflict_apply(
+    stoat: &mut Stoat,
+    source_sha: &str,
+    message: String,
+    committed: Result<String, (String, Option<String>)>,
+) {
+    if !conflict_paused_on(stoat, source_sha) {
+        return;
+    }
+    let new_sha = match committed {
+        Ok(new_sha) => new_sha,
+        Err((label, detail)) => {
+            emit_rebase_error(stoat, &label, detail);
+            return;
+        },
+    };
+
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return;
+    };
+    active.current_head = new_sha.clone();
+    active.last_pick_sha = Some(new_sha);
+    active.last_message = Some(message);
+    active.pause = None;
+    drive_rebase(stoat);
+}
+
+/// Whether the rebase stands at the conflict stop over `source_sha`.
+fn conflict_paused_on(stoat: &Stoat, source_sha: &str) -> bool {
+    stoat
+        .active_workspace()
+        .rebase_active
+        .as_ref()
+        .is_some_and(|active| {
+            matches!(
+                &active.pause,
+                Some(RebasePause::Conflict { source_sha: paused, .. }) if paused == source_sha
+            )
+        })
 }

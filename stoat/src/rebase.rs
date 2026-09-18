@@ -221,16 +221,16 @@ impl ActiveRebase {
 mod tests {
     use super::RebasePause;
     use crate::{
-        action_handlers::dispatch,
+        action_handlers::{dispatch, focused_editor_mut, movement},
         app::Stoat,
         badge::BadgeSource,
-        git_jobs::GitJobKey,
+        git_jobs::{self, GitJobKey},
         host::GitHost,
         test_harness::{CommitSpec, TestHarness},
         workspace::diff::DiffBase,
     };
     use std::path::Path;
-    use stoat_action::{EnterRebase, ExecuteRebase};
+    use stoat_action::{EnterRebase, ExecuteRebase, RebaseContinue, UnstageHunk};
 
     const THREE_COMMITS: &[CommitSpec<'static>] = &[
         ("c1", "c1: root", &[("a.rs", "line1\n")]),
@@ -828,6 +828,39 @@ mod tests {
         assert!(
             messages.iter().any(|m| m.contains("amended while stopped")),
             "the rebase continued from {amended}, so the amend is in the chain: {messages:?}"
+        );
+    }
+
+    /// A continue pressed right after an amend waits for that amend to land,
+    /// so the rest of the plan stacks onto the amended commit.
+    ///
+    /// The idle job keeps the amend waiting in the queue at the `C` press.
+    /// Without it, the test scheduler runs the amend's work inline at the
+    /// unstage press, before `C` reads anything.
+    #[test]
+    fn continue_waits_for_an_amend_queued_before_it() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+        movement::set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+
+        dispatch(&mut h.stoat, &UnstageHunk);
+        dispatch(&mut h.stoat, &RebaseContinue);
+        h.settle();
+
+        let amends = h.fake_git().amend_history(Path::new("/repo"));
+        let shas: Vec<String> = h
+            .fake_git
+            .discover(Path::new("/repo"))
+            .unwrap()
+            .log_commits(None, 10)
+            .into_iter()
+            .map(|commit| commit.sha)
+            .collect();
+        assert_eq!(
+            (amends.len(), shas.get(1)),
+            (1, amends.first().map(|amend| &amend.new_head)),
+            "the plan resumed from the amended commit: {shas:?}"
         );
     }
 

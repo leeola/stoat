@@ -122,25 +122,43 @@ pub(super) fn rebase_set_op(stoat: &mut Stoat, op: RebaseTodoOp) -> UpdateEffect
     }
 }
 
+/// Resume the rebase plan from an Edit stop.
+///
+/// The press queues a job that reads HEAD after every git write queued before
+/// it lands. So an amend pressed just before `C` is in the commit that the
+/// plan resumes from.
 pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::rebase::RebasePause;
-
-    // Read from HEAD rather than from what the stepper last recorded. The pause
-    // checked the commit out, so HEAD is where an amend made while stopped would
-    // have left it, and resuming from the recorded sha would drop that amend.
-    let head = {
-        let workdir = stoat.active_workspace().git_root.clone();
-        stoat
-            .git_host
-            .discover(&workdir)
-            .and_then(|repo| repo.resolve_rev("HEAD"))
-    };
-
-    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+    if !edit_paused(stoat) {
         return UpdateEffect::None;
+    }
+
+    let job = GitJob::new(None, |stoat: &mut Stoat| {
+        // The job of an earlier press already resumed the plan.
+        if !edit_paused(stoat) {
+            return None;
+        }
+        let repo = stoat.git_host.discover(&stoat.active_workspace().git_root);
+        Some(Box::new(move || {
+            // Read HEAD, not the sha the stepper last recorded. The pause
+            // checked the commit out, so an amend made while stopped moves HEAD
+            // onto its replacement. A resume from the recorded sha drops that
+            // amend.
+            let head = repo.and_then(|repo| repo.resolve_rev("HEAD"));
+            Box::new(move |stoat: &mut Stoat| land_continue(stoat, head)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Resume the plan from the `head` a continue read, unless the stop ended
+/// before that read landed.
+fn land_continue(stoat: &mut Stoat, head: Option<String>) {
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return;
     };
     if !matches!(active.pause, Some(RebasePause::Edit { .. })) {
-        return UpdateEffect::None;
+        return;
     }
     if let Some(head) = head {
         active.current_head = head.clone();
@@ -150,7 +168,16 @@ pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
 
     stoat.active_workspace_mut().set_diff_base(None);
     super::review::exit_diff_view(stoat);
-    drive_rebase(stoat)
+    drive_rebase(stoat);
+}
+
+/// Whether the rebase stands at an Edit stop.
+fn edit_paused(stoat: &Stoat) -> bool {
+    stoat
+        .active_workspace()
+        .rebase_active
+        .as_ref()
+        .is_some_and(|active| matches!(active.pause, Some(RebasePause::Edit { .. })))
 }
 
 /// Check the just-picked commit out and point `:diff` at what it changed.
