@@ -1,4 +1,4 @@
-use crate::language::Language;
+use crate::{language::Language, syntax_map::SyntaxMap};
 use std::{
     cell::Cell,
     ops::{ControlFlow, Deref, DerefMut, Range},
@@ -29,24 +29,32 @@ pub struct SyntaxState {
     pub rope_snapshot: Rope,
 }
 
-/// Send `state` to a background drainer thread for destruction. Dropping a
-/// large [`tree_sitter::Tree`] (deeply nested with many cached nodes) can
-/// take milliseconds; the drainer keeps that cost off whichever thread
-/// happens to be replacing the displaced state. The drainer thread is
-/// spawned lazily on first use.
-pub fn drop_syntax_in_background(state: SyntaxState) {
-    static DROP_TX: LazyLock<Sender<SyntaxState>> = LazyLock::new(|| {
-        let (tx, rx) = channel::<SyntaxState>();
-        let _ = thread::Builder::new()
-            .name("stoat-syntax-drop".into())
-            .spawn(move || {
-                while let Ok(state) = rx.recv() {
-                    drop(state);
-                }
-            });
-        tx
-    });
-    let _ = DROP_TX.send(state);
+/// Send a displaced parse to a background drainer thread for destruction.
+///
+/// A large [`tree_sitter::Tree`] (deeply nested, with many cached nodes) takes
+/// milliseconds to drop, and the drainer keeps that cost off the thread that
+/// replaces the parse. The map's root layer shares the state's tree, so both
+/// halves travel in one message and the drainer holds the last reference to
+/// each. A pair with neither half sends nothing.
+///
+/// The drainer thread starts on first use.
+pub fn drop_syntax_in_background(state: Option<SyntaxState>, map: Option<SyntaxMap>) {
+    static DROP_TX: LazyLock<Sender<(Option<SyntaxState>, Option<SyntaxMap>)>> =
+        LazyLock::new(|| {
+            let (tx, rx) = channel();
+            let _ = thread::Builder::new()
+                .name("stoat-syntax-drop".into())
+                .spawn(move || {
+                    while let Ok(parse) = rx.recv() {
+                        drop(parse);
+                    }
+                });
+            tx
+        });
+    if state.is_none() && map.is_none() {
+        return;
+    }
+    let _ = DROP_TX.send((state, map));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

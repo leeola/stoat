@@ -1076,8 +1076,8 @@ impl Workspace {
         installed: &mut Vec<(BufferId, Option<Range<u32>>)>,
     ) {
         installed.push((out.buffer_id, out.changed_token_rows.clone()));
-        self.buffers.store_syntax(out.buffer_id, out.syntax);
-        self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+        self.buffers
+            .store_parse(out.buffer_id, out.syntax, out.syntax_map);
 
         // A viewport-only walk paints what is on screen but describes
         // nothing beyond it, so its spans are not kept. The next parse

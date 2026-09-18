@@ -307,7 +307,8 @@ impl BufferRegistry {
     /// caller can build an LSP URI for `did_close`. Returns `None`
     /// when the buffer was scratch (or unknown).
     pub(crate) fn remove(&mut self, id: BufferId) -> Option<PathBuf> {
-        let entry = self.buffers.remove(&id)?;
+        let mut entry = self.buffers.remove(&id)?;
+        drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
         let path = entry.path?;
         self.path_to_id.remove(&path);
         Some(path)
@@ -433,8 +434,7 @@ impl BufferRegistry {
     pub(crate) fn set_language(&mut self, id: BufferId, lang: Arc<Language>) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.language = Some(lang);
-            entry.syntax = None;
-            entry.syntax_map = None;
+            drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
             entry.tokens = None;
             entry.lsp_tokens = None;
             entry.lsp_token_source = None;
@@ -483,10 +483,7 @@ impl BufferRegistry {
     /// state.
     pub(crate) fn clear_syntax(&mut self, id: BufferId) {
         if let Some(entry) = self.buffers.get_mut(&id) {
-            if let Some(state) = entry.syntax.take() {
-                drop_syntax_in_background(state);
-            }
-            entry.syntax_map = None;
+            drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
             entry.tokens = None;
             entry.lsp_tokens = None;
             entry.lsp_token_source = None;
@@ -521,13 +518,16 @@ impl BufferRegistry {
         self.buffers.get(&id)?.syntax.as_ref()
     }
 
-    pub(crate) fn store_syntax(&mut self, id: BufferId, state: SyntaxState) {
+    /// Replace the tree and the multi-layer [`SyntaxMap`] that one parse built
+    /// for `id`.
+    ///
+    /// Called by `parse_buffer_step` after each successful reparse so the
+    /// capture-merging consumers always see the latest layer set.
+    pub(crate) fn store_parse(&mut self, id: BufferId, state: SyntaxState, map: SyntaxMap) {
         if let Some(entry) = self.buffers.get_mut(&id) {
-            // Send the displaced state to a background drainer so its
-            // potentially-large tree-sitter tree drops off the main thread.
-            if let Some(prev) = entry.syntax.replace(state) {
-                drop_syntax_in_background(prev);
-            }
+            // Send the displaced parse to a background drainer so its
+            // potentially-large tree-sitter trees drop off the main thread.
+            drop_syntax_in_background(entry.syntax.replace(state), entry.syntax_map.replace(map));
         }
     }
 
@@ -657,7 +657,8 @@ impl BufferRegistry {
     /// A buffer is a candidate when it holds any highlight state (syntax tree,
     /// syntax map, tree-sitter or LSP tokens) and is not in `visible`. The
     /// oldest candidates past `cap` have that state dropped, with the syntax
-    /// tree draining on a background thread as in [`Self::clear_syntax`].
+    /// tree and its layer map draining on a background thread as in
+    /// [`Self::clear_syntax`].
     pub(crate) fn evict_hidden_highlights(
         &mut self,
         visible: &[BufferId],
@@ -690,10 +691,7 @@ impl BufferRegistry {
 
         for id in &evicted {
             if let Some(entry) = self.buffers.get_mut(id) {
-                if let Some(state) = entry.syntax.take() {
-                    drop_syntax_in_background(state);
-                }
-                entry.syntax_map = None;
+                drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
                 entry.tokens = None;
                 entry.lsp_tokens = None;
                 entry.lsp_symbol_kinds = None;
@@ -707,15 +705,6 @@ impl BufferRegistry {
     /// path, textobject selection, and sibling navigation.
     pub(crate) fn syntax_map(&self, id: BufferId) -> Option<&SyntaxMap> {
         self.buffers.get(&id)?.syntax_map.as_ref()
-    }
-
-    /// Replace the multi-layer [`SyntaxMap`] for `id`. Called by
-    /// `parse_buffer_step` after each successful reparse so the
-    /// capture-merging consumers always see the latest layer set.
-    pub(crate) fn store_syntax_map(&mut self, id: BufferId, map: SyntaxMap) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.syntax_map = Some(map);
-        }
     }
 
     /// Retain a parse's raw token spans for `id`, so the next parse can report
@@ -909,6 +898,27 @@ pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stoat_language::LanguageRegistry;
+
+    /// The rust language, from the registry the editor loads.
+    fn rust() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(Path::new("/a.rs"))
+            .expect("rust language")
+    }
+
+    /// The tree and the layer map that a parse of `rope` at `version` builds.
+    fn parse_at(lang: &Arc<Language>, rope: &Rope, version: u64) -> (SyntaxState, SyntaxMap) {
+        let tree = stoat_language::parse_rope(lang, rope, None).expect("a rust parse");
+        let mut map = SyntaxMap::new();
+        map.reparse(rope, lang.clone(), version, Some(&tree), None);
+        let state = SyntaxState {
+            tree,
+            version,
+            rope_snapshot: rope.clone(),
+        };
+        (state, map)
+    }
 
     #[test]
     fn scratch_generates_unique_ids() {
@@ -948,18 +958,44 @@ mod tests {
         assert_eq!(reg.syntax_version(id), None);
     }
 
+    /// A stored parse replaces both halves of the last one, so the tree and the
+    /// layer map describe the same version.
+    #[test]
+    fn storing_a_parse_replaces_its_state_and_its_layer_map() {
+        let mut reg = BufferRegistry::new();
+        let (id, buffer) = reg.open(Path::new("/a.rs"), "fn a() { b!(c); }\n");
+        let rope = buffer.read().unwrap().rope().clone();
+        let lang = rust();
+
+        let (state, map) = parse_at(&lang, &rope, 1);
+        reg.store_parse(id, state, map);
+        let (state, map) = parse_at(&lang, &rope, 2);
+        let layers = map.snapshot().layer_count();
+        reg.store_parse(id, state, map);
+
+        assert_eq!(
+            (
+                reg.syntax_version(id),
+                reg.syntax_map(id).map(|map| map.snapshot().layer_count()),
+            ),
+            (Some(2), Some(layers)),
+        );
+    }
+
     #[test]
     fn clear_syntax_and_set_language_drop_retained_tokens() {
-        use stoat_language::LanguageRegistry;
-
         let mut reg = BufferRegistry::new();
-        let (id, _) = reg.open(Path::new("/a.rs"), "fn a() {}\n");
+        let (id, buffer) = reg.open(Path::new("/a.rs"), "fn a() {}\n");
+        let rope = buffer.read().unwrap().rope().clone();
+        let lang = rust();
         let channel = BufferSemanticTokens::new(
             Arc::from(Vec::new()),
             Arc::new(HighlightStyleInterner::default()),
             |_| 0,
         );
 
+        let (state, map) = parse_at(&lang, &rope, 1);
+        reg.store_parse(id, state, map);
         reg.store_tokens(id, channel.clone());
         assert!(reg.tokens_for(id).is_some(), "stored tokens are retained");
 
@@ -968,15 +1004,24 @@ mod tests {
             reg.tokens_for(id).is_none(),
             "clear_syntax drops retained tokens"
         );
+        assert_eq!(
+            (reg.syntax_version(id), reg.syntax_map(id).is_none()),
+            (None, true),
+            "clear_syntax drops the parse",
+        );
 
+        let (state, map) = parse_at(&lang, &rope, 2);
+        reg.store_parse(id, state, map);
         reg.store_tokens(id, channel.clone());
-        let lang = LanguageRegistry::standard()
-            .for_path(Path::new("/a.rs"))
-            .expect("rust language");
         reg.set_language(id, lang);
         assert!(
             reg.tokens_for(id).is_none(),
             "set_language drops retained tokens"
+        );
+        assert_eq!(
+            (reg.syntax_version(id), reg.syntax_map(id).is_none()),
+            (None, true),
+            "set_language drops the parse",
         );
     }
 
