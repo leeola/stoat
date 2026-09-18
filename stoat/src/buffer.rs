@@ -1,6 +1,12 @@
 use crate::diff_map::DiffMap;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    borrow::Cow,
+    cmp::{Ordering, Reverse},
+    collections::HashMap,
+    ops::Range,
+    sync::Arc,
+};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -120,6 +126,18 @@ pub struct TextBuffer {
     /// Named markers on the op log placed by `commit_undo_checkpoint`. Read by
     /// checkpoint-navigation actions; never mutated by `edit` / `undo` / `redo`.
     checkpoints: Vec<Checkpoint>,
+    /// Every stretch of text each edit inserted or deleted, sorted by the
+    /// edit's timestamp.
+    ///
+    /// An undo finds the fragments its edits touched through these, so it
+    /// rebuilds only those and not every fragment changed since its oldest
+    /// edit. Edit timestamps only grow, so an appended slice keeps the order,
+    /// and one `partition_point` finds an edit's slices.
+    ///
+    /// Held here and not on [`TextBufferSnapshot`], which each frame clones,
+    /// because only [`Self::apply_undo_toggles`] reads it. It grows by 24 bytes
+    /// per inserted or deleted piece.
+    insertion_slices: Vec<InsertionSlice>,
     /// Indentation unit this buffer uses, detected from its content at load and
     /// falling back to [`IndentStyle::default`] when the content carries no
     /// evidence. Cached rather than re-detected per edit.
@@ -335,6 +353,7 @@ impl TextBuffer {
             seed_text: None,
             next_checkpoint_id: 0,
             checkpoints: Vec::new(),
+            insertion_slices: Vec::new(),
             indent_style: IndentStyle::default(),
         }
     }
@@ -468,6 +487,7 @@ impl TextBuffer {
 
         let cx = &None;
         let mut new_insertions = Vec::new();
+        let mut slices = Vec::new();
 
         let boundaries = {
             let mut all: Vec<usize> = ascending
@@ -506,9 +526,15 @@ impl TextBuffer {
                     new_fragments: &mut new_fragments,
                     new_insertions: &mut new_insertions,
                     deleted_rope: &mut deleted_rope,
+                    slices: &mut slices,
                 },
             );
         }
+
+        // The walk visits the batch's timestamps in descending order. Every one
+        // exceeds each stored edit, so sorted they extend the log in order.
+        slices.sort_by_key(|slice| slice.edit);
+        self.insertion_slices.extend(slices);
 
         let suffix = cursor.suffix();
         deleted_rope.carry(suffix.summary().text.deleted);
@@ -621,6 +647,7 @@ impl TextBuffer {
                 new_fragments: &mut new_fragments,
                 new_insertions: &mut new_insertions,
                 deleted_rope: &mut deleted_rope,
+                slices: &mut self.insertion_slices,
             },
         );
 
@@ -694,6 +721,21 @@ struct SpliceState<'a, 'b, 'c, 'd> {
     new_fragments: &'a mut SumTree<Fragment>,
     new_insertions: &'a mut Vec<InsertionFragment>,
     deleted_rope: &'a mut DeletedRebuild<'d>,
+    slices: &'a mut Vec<InsertionSlice>,
+}
+
+/// One stretch of one insertion that one edit inserted or deleted, in that
+/// insertion's own offsets.
+///
+/// Later edits split fragments but never merge them, so the pieces covering the
+/// stretch always start at its `start` and end at its `end`. An undo reaches
+/// them through the insertions tree, however many splits came after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InsertionSlice {
+    edit: u64,
+    insertion: u64,
+    start: u32,
+    end: u32,
 }
 
 /// Splice one range's replacement into the fragment tree being built, advancing
@@ -717,6 +759,7 @@ fn splice_one_range(edit: SpliceRange, state: &mut SpliceState<'_, '_, '_, '_>) 
         new_fragments,
         new_insertions,
         deleted_rope,
+        slices,
     } = state;
 
     // Copy all fragments before the edit start
@@ -763,6 +806,7 @@ fn splice_one_range(edit: SpliceRange, state: &mut SpliceState<'_, '_, '_, '_>) 
             split_offset: 0,
             fragment_id: new_frag_id,
         });
+        push_slice(slices, timestamp, &new_frag);
         new_fragments.push(new_frag, cx);
     }
 
@@ -790,6 +834,7 @@ fn splice_one_range(edit: SpliceRange, state: &mut SpliceState<'_, '_, '_, '_>) 
                 deleted.visible = false;
                 deleted.deletions.push(timestamp);
                 push_insertion(new_insertions, &deleted);
+                push_slice(slices, timestamp, &deleted);
                 new_fragments.push(deleted, cx);
                 deleted_rope.take(to_delete_here);
                 delete_remaining -= to_delete_here;
@@ -838,6 +883,7 @@ fn splice_one_range(edit: SpliceRange, state: &mut SpliceState<'_, '_, '_, '_>) 
                     let mut deleted = fragment.clone();
                     deleted.visible = false;
                     deleted.deletions.push(timestamp);
+                    push_slice(slices, timestamp, &deleted);
                     new_fragments.push(deleted, cx);
                     deleted_rope.take(frag_len);
                     delete_remaining -= frag_len;
@@ -849,6 +895,7 @@ fn splice_one_range(edit: SpliceRange, state: &mut SpliceState<'_, '_, '_, '_>) 
                     deleted_part.visible = false;
                     deleted_part.deletions.push(timestamp);
                     push_insertion(new_insertions, &deleted_part);
+                    push_slice(slices, timestamp, &deleted_part);
                     new_fragments.push(deleted_part, cx);
                     deleted_rope.take(delete_remaining);
 
@@ -1483,16 +1530,14 @@ impl TextBuffer {
     /// the finished undo map instead of once per edit, so undoing a typing run
     /// is one pass over the buffer rather than one per typed character.
     ///
-    /// That pass then only visits what the batch can reach. A fragment's
-    /// visibility turns on whether its own insertion or one of its deletions was
-    /// toggled, and a subtree's `max_version` is the newest of exactly those
-    /// timestamps, so a subtree older than everything the batch touched holds
-    /// nothing that can change and is copied through whole. The runs between
-    /// what does change keep their `visible` flags, so their bytes stay in the
-    /// rope already holding them and move across as one slice per side rather
-    /// than a fragment at a time. Undoing recent edits therefore costs the spans
-    /// they cover. Undoing the oldest edit in the buffer still costs the whole
-    /// buffer, which is the honest bound on the pruning.
+    /// That pass rebuilds exactly the fragments the toggled edits inserted or
+    /// deleted. A fragment's visibility turns on whether its own insertion or
+    /// one of its deletions was toggled, and the insertion slices each edit
+    /// recorded name those fragments through the insertions tree, however later
+    /// edits split them. The runs between keep their `visible` flags, so their
+    /// bytes stay in the rope already holding them and move across as one slice
+    /// per side rather than a fragment at a time. An undo therefore costs the
+    /// pieces of its own edits, wherever its group sits in the history.
     ///
     /// A fragment the batch toggled is stamped with the batch's last undo
     /// timestamp rather than the one that flipped it. The stamp only has to
@@ -1504,9 +1549,9 @@ impl TextBuffer {
     fn apply_undo_toggles(&mut self, timestamps: Vec<u64>) {
         // An empty group never materialized, so there is nothing to rebuild and
         // no timestamp to stamp the result with.
-        let Some(oldest_toggled) = timestamps.iter().copied().min() else {
+        if timestamps.is_empty() {
             return;
-        };
+        }
 
         let undo_timestamp = self.next_timestamp;
         self.next_timestamp += 1;
@@ -1519,6 +1564,11 @@ impl TextBuffer {
             timestamp: undo_timestamp,
             counts,
         });
+        let touched = fragment_ids_for_edits(
+            &self.snapshot.insertions,
+            &self.insertion_slices,
+            &timestamps,
+        );
         self.ops.push(BufferOp::UndoGroup { edits: timestamps });
 
         let cx = &None;
@@ -1536,12 +1586,12 @@ impl TextBuffer {
         let mut old_deleted = RopeCursor::new(&self.snapshot.deleted_text, 0);
 
         let mut untouched = old_fragments.cursor::<Option<&Locator>>(cx);
-        let mut reachable =
-            old_fragments.filter::<_, ()>(cx, |summary| summary.max_version >= oldest_toggled);
-        reachable.next();
 
-        while let Some(fragment) = reachable.item() {
-            let run = untouched.slice(&Some(&fragment.id), Bias::Left);
+        for id in touched {
+            let run = untouched.slice(&Some(id), Bias::Left);
+            let Some(fragment) = untouched.item() else {
+                break;
+            };
             let run_visible = run.summary().text.visible;
             let run_deleted = run.summary().text.deleted;
 
@@ -1577,7 +1627,6 @@ impl TextBuffer {
             new_fragments.push(new_frag, cx);
 
             untouched.next();
-            reachable.next();
         }
 
         // Consuming both readers here is also what ends their borrows, which
@@ -1820,11 +1869,72 @@ fn insertion_edits(mut records: Vec<InsertionFragment>) -> Vec<TreeEdit<Insertio
     edits
 }
 
+/// The ids of every fragment the `edits` inserted or deleted, ascending and
+/// each once, which is the order and the uniqueness a fragment walk takes.
+///
+/// Each edit's slices name stretches of insertions, and the insertions tree
+/// names the pieces those stretches split into since. The slices are sorted by
+/// insertion, start, and longest first, so one cursor walks the tree forward. A
+/// slice inside a stretch already walked finds its pieces taken and seeks
+/// nowhere, since a seek back behind the cursor is not allowed.
+fn fragment_ids_for_edits<'a>(
+    insertions: &'a SumTree<InsertionFragment>,
+    slices: &[InsertionSlice],
+    edits: &[u64],
+) -> Vec<&'a Locator> {
+    let mut touched: Vec<&InsertionSlice> = Vec::new();
+    for &edit in edits {
+        let first = slices.partition_point(|slice| slice.edit < edit);
+        touched.extend(
+            slices[first..]
+                .iter()
+                .take_while(|slice| slice.edit == edit),
+        );
+    }
+    touched.sort_unstable_by_key(|slice| (slice.insertion, slice.start, Reverse(slice.end)));
+
+    let mut ids = Vec::new();
+    let mut cursor = insertions.cursor::<InsertionFragmentKey>(());
+    for slice in touched {
+        if slice.insertion != cursor.start().timestamp || slice.start > cursor.start().split_offset
+        {
+            cursor.seek_forward(
+                &InsertionFragmentKey {
+                    timestamp: slice.insertion,
+                    split_offset: slice.start,
+                },
+                Bias::Left,
+            );
+        }
+        while let Some(item) = cursor.item() {
+            if item.timestamp != slice.insertion || item.split_offset >= slice.end {
+                break;
+            }
+            ids.push(&item.fragment_id);
+            cursor.next();
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 fn push_insertion(insertions: &mut Vec<InsertionFragment>, fragment: &Fragment) {
     insertions.push(InsertionFragment {
         timestamp: fragment.timestamp,
         split_offset: fragment.insertion_offset,
         fragment_id: fragment.id.clone(),
+    });
+}
+
+/// Record that edit `edit` inserted or deleted `fragment`, so an undo of the
+/// edit finds its pieces through [`fragment_ids_for_edits`].
+fn push_slice(slices: &mut Vec<InsertionSlice>, edit: u64, fragment: &Fragment) {
+    slices.push(InsertionSlice {
+        edit,
+        insertion: fragment.timestamp,
+        start: fragment.insertion_offset,
+        end: fragment.insertion_offset + fragment.len,
     });
 }
 
@@ -2276,8 +2386,8 @@ mod tests {
     };
     use std::{cmp::Ordering, mem, ops::Range, sync::Arc};
     use stoat_text::{
-        Anchor, Bias, BufferId, IndentStyle, InsertionFragment, Locator, Point, Selection,
-        SelectionGoal,
+        patch::Edit, Anchor, Bias, BufferId, IndentStyle, InsertionFragment, Locator, Point,
+        Selection, SelectionGoal,
     };
 
     fn buf(content: &str) -> TextBuffer {
@@ -4220,6 +4330,78 @@ mod tests {
                 check_invariants(&b, "after a random operation");
             }
         }
+    }
+
+    /// Undoing a group rebuilds every piece its edits inserted or deleted,
+    /// however a later group split them, and a redo puts back exactly what the
+    /// undo took.
+    #[test]
+    fn undoing_a_group_restores_every_piece_later_edits_split() {
+        let mut b = buf("abcdefghij");
+        b.begin_group(Arc::from([]));
+        b.edit(5..5, "0123456789");
+        b.seal_group(Arc::from([]));
+        b.begin_group(Arc::from([]));
+        b.edit(10..10, "XY");
+        b.edit(14..16, "");
+        b.edit(1..3, "");
+        b.seal_group(Arc::from([]));
+        assert_eq!(b.snapshot.visible_text.to_string(), "ade01234XY569fghij");
+
+        let texts: Vec<String> = [
+            TextBuffer::undo,
+            TextBuffer::undo,
+            TextBuffer::redo,
+            TextBuffer::redo,
+        ]
+        .into_iter()
+        .map(|step| {
+            step(&mut b);
+            check_invariants(&b, "after an undo or a redo");
+            b.snapshot.visible_text.to_string()
+        })
+        .collect();
+        assert_eq!(
+            texts,
+            [
+                "abcde0123456789fghij",
+                "abcdefghij",
+                "abcde0123456789fghij",
+                "ade01234XY569fghij",
+            ],
+        );
+    }
+
+    /// An undo after a round trip of undos and redos changes only the text of
+    /// its own group, which is all a caller reading the edits since sees.
+    #[test]
+    fn an_undo_after_a_round_trip_changes_only_its_own_groups_text() {
+        let mut b = buf("aaaa bbbb cccc");
+        b.edit(0..0, "X");
+        b.edit(6..6, "Y");
+        b.edit(12..12, "Z");
+        for _ in 0..3 {
+            b.undo();
+        }
+        for _ in 0..3 {
+            b.redo();
+        }
+        let version = b.snapshot.version;
+
+        b.undo();
+        assert_eq!(
+            (
+                b.snapshot.visible_text.to_string(),
+                b.snapshot.edits_since(version).edits().to_vec(),
+            ),
+            (
+                "Xaaaa Ybbbb cccc".to_string(),
+                vec![Edit {
+                    old: 12..13,
+                    new: 12..12
+                }],
+            ),
+        );
     }
 
     /// The text a buffer should be showing, modeled as a string and two stacks
