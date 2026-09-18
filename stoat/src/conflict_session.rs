@@ -446,6 +446,36 @@ mod tests {
         );
     }
 
+    /// Discovering the repository and listing its conflicts loads the whole
+    /// index, so the press leaves both to the worker. A repository with no
+    /// conflicts reports that when the read lands, not at the press.
+    #[test]
+    fn an_open_reads_the_repository_on_a_worker() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                h.stoat.pending_conflict_file.is_some(),
+            ),
+            (None, true),
+            "the press armed a read and reported nothing yet",
+        );
+
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                h.stoat.pending_conflict_file.is_some(),
+            ),
+            (Some("no merge conflicts"), false),
+            "the landed read reported the empty listing",
+        );
+    }
+
     #[test]
     fn pick_ours_replaces_the_chunk_with_the_ours_side() {
         let mut h = Stoat::test();

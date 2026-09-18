@@ -1017,13 +1017,12 @@ pub struct Stoat {
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
     pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
-    /// A conflicted file whose three-way alignment runs off the UI thread,
-    /// applied by [`action_handlers::conflict_view::pump_conflict_file`] when
-    /// it lands.
+    /// A conflicted file read and aligned off the UI thread, applied by
+    /// [`action_handlers::conflict_view::pump_conflict_file`] when it lands.
     ///
-    /// The alignment runs two structural diffs against the ancestor, which the
-    /// view used to pay on the press that opened it and again on every step
-    /// between files.
+    /// An open discovers the repository and lists its conflicts, which loads
+    /// the whole index. Each file then reads its three stages, and the
+    /// alignment runs two structural diffs against the ancestor.
     pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
     /// The git writes the loop started, run one at a time in press order.
     ///
@@ -3369,8 +3368,8 @@ impl Stoat {
     /// point.
     ///
     /// `Conflict` opens the repository's conflicted files in the ours / result /
-    /// theirs view. With no index conflicts it sets the "no merge conflicts"
-    /// status and stays on the startup files view.
+    /// theirs view. With no index conflicts, the "no merge conflicts" status
+    /// shows when the worker's read lands, and the startup files view stays.
     pub fn open_conflict_view(&mut self) {
         action_handlers::dispatch(self, &Conflict);
     }
