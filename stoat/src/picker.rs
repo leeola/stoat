@@ -607,6 +607,7 @@ impl PickList {
             let covered = self.base.len();
             self.remember_filter(query.to_string(), covered);
             self.clamp_selected();
+            self.filter_generation = next_generation();
             return None;
         }
 
@@ -2389,6 +2390,23 @@ mod tests {
             PickList::default().filter_generation,
             list.filter_generation,
             "a freshly constructed list gets a distinct generation",
+        );
+    }
+
+    #[test]
+    fn returning_to_the_empty_query_stamps_a_fresh_generation() {
+        let git_root = p("/r");
+        let mut list = PickList {
+            base: vec![p("/r/a.rs"), p("/r/b.rs")],
+            ..PickList::default()
+        };
+        list.refilter("a", &git_root);
+        let filtered = list.filter_generation;
+
+        list.refilter("", &git_root);
+        assert_ne!(
+            list.filter_generation, filtered,
+            "the listing stamps a generation of its own",
         );
     }
 
