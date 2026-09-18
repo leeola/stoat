@@ -4846,6 +4846,27 @@ mod tests {
         );
     }
 
+    /// Retyping one character replaces the fragment the previous retype
+    /// inserted, so each new id lands between the same left neighbour and a
+    /// newer right one. That is the pattern a repeated case swap over the same
+    /// selections makes.
+    #[test]
+    fn replacing_one_character_repeatedly_keeps_fragment_ids_shallow() {
+        let mut b = buf("abc");
+        for round in 0..500 {
+            b.edit(1..2, if round % 2 == 0 { "B" } else { "b" });
+        }
+
+        assert_eq!(b.snapshot.visible_text.to_string(), "abc");
+        let ids: Vec<&Locator> = b.snapshot.fragments.iter().map(|f| &f.id).collect();
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "fragment ids ascend strictly"
+        );
+        let deepest = ids.iter().map(|id| id.len()).max().unwrap_or(0);
+        assert!(deepest <= 32, "the deepest id holds {deepest} components");
+    }
+
     /// A move that swaps two lines keeps every count the summary carries, so it
     /// is the shape the cheap guard cannot answer and the span comparison has to.
     #[test]

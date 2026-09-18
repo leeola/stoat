@@ -48,14 +48,25 @@ impl Locator {
 
     /// Produces a locator strictly between `lhs` and `rhs`.
     ///
-    /// The right-shift by 48 optimizes for sequential forward typing: appending
-    /// characters at a cursor produces depth-1 locators instead of growing deeper.
+    /// On a level where `lhs` has a component, the step is 1/65536 of the gap,
+    /// which leaves room to the right for the next id. Forward typing uses that
+    /// room one character at a time, so the ids of text typed at a cursor stay
+    /// at one depth.
+    ///
+    /// On a level past the end of `lhs`, the step is half the gap. A
+    /// replacement of the span the previous edit inserted lands there each
+    /// time, between the same left neighbour and a newer right one. Halving
+    /// descends one level per 63 such replacements, where the small step
+    /// descends one level per replacement.
     pub fn between(lhs: &Self, rhs: &Self) -> Self {
+        let lhs_len = lhs.0.len();
         let lhs = lhs.0.iter().copied().chain(iter::repeat(u64::MIN));
         let rhs = rhs.0.iter().copied().chain(iter::repeat(u64::MAX));
         let mut location = SmallVec::new();
-        for (lhs, rhs) in lhs.zip(rhs) {
-            let mid = lhs + ((rhs.saturating_sub(lhs)) >> 48);
+        for (level, (lhs, rhs)) in lhs.zip(rhs).enumerate() {
+            let gap = rhs.saturating_sub(lhs);
+            let step = if level < lhs_len { gap >> 48 } else { gap / 2 };
+            let mid = lhs + step;
             location.push(mid);
             if mid > lhs {
                 break;
@@ -138,6 +149,27 @@ mod tests {
             assert_eq!(loc.len(), 2, "forward typing after split grew past depth 2");
             prev = loc;
         }
+    }
+
+    /// Each replacement of the span the previous one inserted sits between the
+    /// same left neighbour and that newer id.
+    #[test]
+    fn replacing_one_span_repeatedly_stays_shallow() {
+        let left = Locator::between(&Locator::min(), &Locator::max());
+        let mut right = Locator::between(&left, &Locator::max());
+        for round in 0..1_000 {
+            let next = Locator::between(&left, &right);
+            assert!(
+                left < next && next < right,
+                "round {round}: the id lands between its neighbours"
+            );
+            right = next;
+        }
+        assert_eq!(
+            right.len(),
+            17,
+            "one level per 63 replacements past the first, not one per replacement"
+        );
     }
 
     #[test]
