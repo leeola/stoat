@@ -17,7 +17,8 @@ use crate::{
     host::{FsEventKind, FsMetadata, GitRepo},
 };
 use std::{
-    ffi::OsStr,
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -61,6 +62,14 @@ pub(crate) const WORKSPACE_AUTOSAVE_THROTTLE: std::time::Duration =
 /// stops here, so the pacing costs latency and never progress.
 const FS_WATCH_DRAIN_CAP: usize = 256;
 
+/// Buckets of the path-length bitmaps a drain turn's edit of the finder cache
+/// keeps.
+///
+/// A listed path whose byte length lands in no marked bucket names no change,
+/// so the one pass over the list skips hashing it. A turn marks only the
+/// lengths its own changes have, so the check rules out almost every path.
+const PATH_LENGTH_BUCKETS: usize = 512;
+
 /// External-change paths [`drain_pending_index_edits`] hands to the
 /// blocking pool in one pass.
 ///
@@ -94,6 +103,29 @@ pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
 /// out rather than rendering a page per event. The window outlasts the gap
 /// between a drag's events and still reads as immediate once the drag stops.
 pub(crate) const POOL_SETTLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// One drain turn's edit of the cached finder paths.
+struct PathEdit {
+    /// Listed paths whose last event this turn took them away.
+    departing: HashSet<OsString>,
+    /// The length buckets of the departing paths, which let the removal skip
+    /// hashing almost every path it keeps.
+    departing_lengths: [bool; PATH_LENGTH_BUCKETS],
+    /// Paths whose last event this turn added them and that the list does not
+    /// hold, in the order they first appeared.
+    arriving: Vec<PathBuf>,
+}
+
+impl PathEdit {
+    fn is_empty(&self) -> bool {
+        self.departing.is_empty() && self.arriving.is_empty()
+    }
+
+    fn departs(&self, held: &Path) -> bool {
+        let bytes = held.as_os_str();
+        self.departing_lengths[bytes.len() % PATH_LENGTH_BUCKETS] && self.departing.contains(bytes)
+    }
+}
 
 /// Drain queued [`crate::host::FsWatchEvent`]s from the active
 /// [`FsWatchHost`], routing each to the debounce its path calls for.
@@ -135,6 +167,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let git_dir = git_root.join(".git");
     // Opened at most once for the batch, and only where a verdict is needed.
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
+    let mut finder_changes = Vec::new();
     for (path, kind) in events {
         let in_git_dir = path.starts_with(&git_dir);
         let is_gitignore = path.file_name() == Some(OsStr::new(".gitignore"));
@@ -187,7 +220,14 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
                 let _ = stoat.fs_watch_host.watch(&path);
             }
 
-            if !absorb_into_finder_cache(stoat, &path, &git_root, arrived, &mut repo) {
+            if !note_finder_change(
+                stoat,
+                &path,
+                &git_root,
+                arrived.as_ref(),
+                &mut repo,
+                &mut finder_changes,
+            ) {
                 stoat.finder_path_epoch += 1;
             }
         }
@@ -203,15 +243,18 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             arm_index_external_edit_debounce(stoat, path);
         }
     }
+
+    apply_finder_changes(stoat, &git_root, finder_changes);
 }
 
-/// Apply a source-tree change to the cached finder paths, reporting whether it
-/// landed.
+/// Record a source-tree change for the turn's one edit of the cached finder
+/// paths, reporting whether the cache takes it.
 ///
 /// The cache is one root's own walk output, so a change to that root's tree
-/// edits it in place instead of retiring it. A caller that gets `false` bumps
-/// [`Stoat::finder_path_epoch`], which retires the list on the next open and
-/// costs a full ignore-aware walk of the tree.
+/// edits it in place instead of retiring it. The drain collects its turn's
+/// changes and [`apply_finder_changes`] lands them in one pass over the list. A
+/// caller that gets `false` bumps [`Stoat::finder_path_epoch`], which retires
+/// the list on the next open and costs a full ignore-aware walk of the tree.
 ///
 /// `arrived` is the stat of `path`, or `None` when nothing is there. A rename
 /// carries one path and no direction, so the stat is what says whether it is
@@ -219,14 +262,15 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
 ///
 /// A created directory reports `false`. What a walk finds inside it is exactly
 /// the question this cache exists to avoid asking.
-fn absorb_into_finder_cache(
-    stoat: &mut Stoat,
+fn note_finder_change(
+    stoat: &Stoat,
     path: &Path,
     git_root: &Path,
-    arrived: Option<FsMetadata>,
+    arrived: Option<&FsMetadata>,
     repo: &mut Option<Option<Arc<dyn GitRepo>>>,
+    changes: &mut Vec<(PathBuf, bool)>,
 ) -> bool {
-    if arrived.as_ref().is_some_and(|meta| meta.is_dir) {
+    if arrived.is_some_and(|meta| meta.is_dir) {
         return false;
     }
     if stoat
@@ -248,27 +292,98 @@ fn absorb_into_finder_cache(
         }
     }
 
-    let cache = stoat
+    changes.push((path.to_path_buf(), arrived.is_some()));
+    true
+}
+
+/// Land a drain turn's changes on the cached finder paths in one pass over the
+/// list, reporting whether any path left it.
+///
+/// A turn that changes nothing the list shows copies and writes nothing, which
+/// is what a save through a temp name comes to.
+fn apply_finder_changes(stoat: &mut Stoat, git_root: &Path, changes: Vec<(PathBuf, bool)>) -> bool {
+    if changes.is_empty() {
+        return false;
+    }
+    let Some(cache) = stoat
         .finder_path_cache
         .as_mut()
-        .expect("checked above and not taken since");
+        .filter(|cache| cache.root == git_root)
+    else {
+        return false;
+    };
+    let edit = plan_path_edit(&cache.paths, changes);
+    if edit.is_empty() {
+        return false;
+    }
 
     // A code-search modal reading the same list gets its own copy here rather
     // than the tree moving under the scan it started.
     let paths = Arc::make_mut(&mut cache.paths);
+    let departed = !edit.departing.is_empty();
+    if departed {
+        paths.retain(|held| !edit.departs(held));
+    }
+    paths.extend(edit.arriving);
+    departed
+}
 
-    match arrived {
-        // A burst names one create twice often enough, and a path listed
-        // twice is a row the finder shows twice.
-        Some(_) => {
-            if !paths.iter().any(|held| held == path) {
-                paths.push(path.to_path_buf());
-            }
-        },
-        None => paths.retain(|held| held != path),
+/// Fold a drain turn's changes into one edit of `paths`, reading the list once.
+///
+/// A path's last event in the turn decides whether it arrives or departs, so a
+/// create that a later remove undoes changes nothing. A burst naming one create
+/// twice adds it once, since a path listed twice is a row the finder shows
+/// twice. A save writes a temp name and renames it over the target, which comes
+/// out as a departure of a name the list never held and an arrival of one it
+/// already holds, so it plans no edit at all.
+fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit {
+    // Keyed by bytes, not by `Path` components. The watcher names a file as its
+    // watched directory joined with the entry name, and the walk names it as
+    // the root joined with each name, so a listed file and its event carry
+    // identical bytes. A byte comparison then skips the component parse that
+    // `Path` equality runs for every unequal pair.
+    let mut last: HashMap<OsString, bool> = HashMap::with_capacity(changes.len());
+    let mut order: Vec<OsString> = Vec::with_capacity(changes.len());
+    let mut lengths = [false; PATH_LENGTH_BUCKETS];
+    for (path, arrived) in changes {
+        let key = path.into_os_string();
+        lengths[key.len() % PATH_LENGTH_BUCKETS] = true;
+        if last.insert(key.clone(), arrived).is_none() {
+            order.push(key);
+        }
     }
 
-    true
+    let mut departing = HashSet::new();
+    let mut departing_lengths = [false; PATH_LENGTH_BUCKETS];
+    let mut listed = HashSet::new();
+    for held in paths {
+        let bytes = held.as_os_str();
+        let bucket = bytes.len() % PATH_LENGTH_BUCKETS;
+        if !lengths[bucket] {
+            continue;
+        }
+        match last.get(bytes) {
+            Some(false) => {
+                departing_lengths[bucket] = true;
+                departing.insert(bytes.to_os_string());
+            },
+            Some(true) => {
+                listed.insert(bytes);
+            },
+            None => {},
+        }
+    }
+
+    let arriving = order
+        .into_iter()
+        .filter(|key| last[key] && !listed.contains(key.as_os_str()))
+        .map(PathBuf::from)
+        .collect();
+    PathEdit {
+        departing,
+        departing_lengths,
+        arriving,
+    }
 }
 
 /// Whether `path` sits in a gitignored directory, answering from
@@ -734,6 +849,46 @@ mod tests {
             h.stoat.index_pending_external_edits.len(),
             1,
             "and that one event arms one debounce",
+        );
+    }
+
+    /// A path's last event in a turn decides it, whatever came before.
+    #[test]
+    fn a_turns_changes_plan_one_edit_with_the_last_event_winning() {
+        let paths = ["a", "b", "c"].map(PathBuf::from);
+        let changes = [
+            ("d", true),
+            ("b", false),
+            ("a", true),
+            ("e", true),
+            ("e", false),
+            ("c", false),
+            ("c", true),
+        ]
+        .map(|(path, arrived)| (PathBuf::from(path), arrived))
+        .to_vec();
+
+        let edit = plan_path_edit(&paths, changes);
+        assert_eq!(
+            (edit.departing, edit.arriving),
+            (
+                HashSet::from([OsString::from("b")]),
+                vec![PathBuf::from("d")]
+            ),
+        );
+    }
+
+    /// A save writes a temp name and renames it over the target. The list never
+    /// held the temp name and already holds the target, so nothing changes.
+    #[test]
+    fn a_save_through_a_temp_name_plans_no_edit() {
+        let paths = ["a", "b"].map(PathBuf::from);
+        let changes = vec![(PathBuf::from("tmp"), false), (PathBuf::from("b"), true)];
+
+        let edit = plan_path_edit(&paths, changes);
+        assert_eq!(
+            (edit.departing, edit.arriving),
+            (HashSet::new(), Vec::new())
         );
     }
 

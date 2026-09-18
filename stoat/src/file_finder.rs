@@ -1470,6 +1470,40 @@ mod tests {
         );
     }
 
+    /// A save writes a temp name and renames it over the target, which reaches
+    /// the drain as two renames. Neither changes what the list holds, so the
+    /// list stands as it was.
+    #[test]
+    fn a_save_through_a_temp_name_leaves_the_cached_list_unchanged() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
+        let walked = walked_dirs(&h);
+        let epoch = h.stoat.finder_path_epoch;
+
+        h.fake_fs_watcher()
+            .inject(root.join(".tmpAb12"), crate::host::FsEventKind::Renamed);
+        h.fake_fs_watcher()
+            .inject(root.join("b.rs"), crate::host::FsEventKind::Renamed);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+
+        assert_eq!(
+            h.stoat.finder_path_epoch, epoch,
+            "the cached list stands rather than being retired",
+        );
+        h.type_keys("space p");
+        assert_eq!(walked_dirs(&h), walked, "the save listed no directories");
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs", "b.rs"],
+            "and the list is as it was"
+        );
+    }
+
     /// What a walk finds inside a new directory is the question the cache
     /// exists to avoid asking, so the directory retires it.
     #[test]
