@@ -841,13 +841,24 @@ impl DiffMap {
     /// Base lines `hunk` removed, which is how many of its live rows have a
     /// base row to pair with.
     ///
-    /// Zero without base text, since nothing can be paired against text the map
-    /// does not hold.
+    /// Zero without base text, since no row pairs against text the map does not
+    /// hold.
+    ///
+    /// The count comes from the base line-start table in two binary searches, so
+    /// a paint that asks it for each row costs nothing that grows with the
+    /// hunk's base text. It counts lines as `str::lines` does, one per `\n` plus
+    /// one for a non-empty tail with no `\n`.
     pub(crate) fn base_line_count(&self, hunk: &DiffHunk) -> u32 {
         let Some(text) = self.base_text.as_ref() else {
             return 0;
         };
-        text[hunk.base_byte_range.clone()].lines().count() as u32
+        let range = &hunk.base_byte_range;
+        if range.is_empty() {
+            return 0;
+        }
+        let newlines = line_of(&self.base_line_starts, range.end)
+            - line_of(&self.base_line_starts, range.start);
+        newlines + u32::from(text.as_bytes()[range.end - 1] != b'\n')
     }
 
     /// What [`Self::deleted_blocks`] would produce, reduced to what tells one
@@ -1075,6 +1086,7 @@ impl DiffMap {
 
     #[cfg(test)]
     pub fn set_base_text(&mut self, text: Arc<String>) {
+        self.base_line_starts = Arc::new(line_starts(&text));
         self.base_text = Some(text);
         self.base_changes = Arc::new(compute_base_change_spans(
             &self.hunks,
@@ -2602,6 +2614,31 @@ mod tests {
             "and the modified hunk's second row, its first being paired",
         );
         assert_eq!(dm.rows_without_base_before(9, true), 4, "and its third");
+    }
+
+    /// The count read from the line-start table agrees with a walk of the
+    /// range's lines, for an empty range, a blank line, a CRLF ending, and a
+    /// tail with no newline.
+    #[test]
+    fn base_line_count_matches_the_line_walk() {
+        let base = "a\nbb\n\nccc\r\nd";
+        let dm = DiffMap::from_hunks(
+            [modified_hunk(0..1, 0..2)],
+            Some(Arc::new(base.to_string())),
+        );
+        let counts: Vec<u32> = [0..0, 0..2, 0..5, 5..6, 6..11, 2..11, 11..12, 0..12]
+            .into_iter()
+            .map(|range| dm.base_line_count(&modified_hunk(0..1, range)))
+            .collect();
+        assert_eq!(counts, [0, 1, 2, 1, 1, 3, 1, 5]);
+
+        let mut set = DiffMap::from_hunks([modified_hunk(0..1, 0..2)], None);
+        set.set_base_text(Arc::new(base.to_string()));
+        assert_eq!(
+            set.base_line_count(&modified_hunk(0..1, 0..5)),
+            2,
+            "a base set after construction carries its line table",
+        );
     }
 
     #[test]
