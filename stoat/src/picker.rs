@@ -472,6 +472,10 @@ pub(crate) struct DisplayCache {
     rows: Arc<Vec<Arc<str>>>,
     /// Indices into [`Self::rows`], ordered by the string each names, which is
     /// the order an empty query lists them in.
+    ///
+    /// It orders a prefix of the rows. The rows that a walk appended past its
+    /// length stay unordered until a listing orders them through
+    /// [`PickList::order_display`].
     sorted: Vec<usize>,
     /// Bumped on each rebuild, so a test can tell a reuse from a rebuild.
     pub(crate) generation: u64,
@@ -582,12 +586,13 @@ impl PickList {
             false => None,
         };
 
-        let cache = self.display.as_ref().expect("ensure_display builds one");
         let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
 
         if fuzzy::parse_query(pattern).is_none() {
-            // Pre-sorted at cache build, so an unfiltered list is a walk rather
-            // than a sort over freshly derived strings.
+            // The rows ordered at cache build and by earlier listings stay
+            // ordered, so this sorts only what a walk appended since.
+            self.order_display();
+            let cache = self.display.as_ref().expect("ensure_display builds one");
             let listed: Vec<usize> = cache
                 .sorted
                 .iter()
@@ -605,6 +610,7 @@ impl PickList {
             return None;
         }
 
+        let cache = self.display.as_ref().expect("ensure_display builds one");
         let candidates = match arrived {
             Some(covered) => Candidates::Narrowed {
                 previous: self.filtered.clone(),
@@ -733,9 +739,9 @@ impl PickList {
     /// describes it.
     ///
     /// A walk that only appended leaves every row it already built valid, so
-    /// the tail is derived and merged into the order rather than the whole set
-    /// being rebuilt. Anything [`row_display`] reads moving, or the base being
-    /// replaced outright, still rebuilds.
+    /// only the tail is derived, and it joins the order when a listing reads
+    /// it. Anything [`row_display`] reads moving, or the base being replaced
+    /// outright, still rebuilds and orders every row.
     fn ensure_display(&mut self, git_root: &Path) {
         // Resolved once for the whole list rather than per path, since
         // `row_display`'s git-root-relative branch would otherwise hit the env
@@ -792,11 +798,11 @@ impl PickList {
         });
     }
 
-    /// Derive display strings for `base[from..]` and fold them into the order.
+    /// Derive display strings for `base[from..]`, leaving them out of the order.
     ///
-    /// The tail is sorted on its own and merged against the rows already there.
-    /// Ties take from the existing side, and every tail index is the larger, so
-    /// the result is the order a full stable sort would have produced.
+    /// A walk appends a batch per turn, and only a listing reads the order. A
+    /// merge per batch is a pass over every row for each turn, and a pattern
+    /// query reads none of it, so [`Self::order_display`] merges on read.
     fn extend_display(&mut self, from: usize, git_root: &Path, home: Option<&Path>) {
         let display_roots = self.display_roots.as_deref();
         let tail: Vec<Arc<str>> = self.base[from..]
@@ -804,19 +810,35 @@ impl PickList {
             .map(|path| Arc::from(row_display(path, git_root, display_roots, home)))
             .collect();
 
-        let mut tail_order: Vec<usize> = (from..from + tail.len()).collect();
-        tail_order.sort_by(|&a, &b| tail[a - from].cmp(&tail[b - from]));
-
         let cache = self.display.as_mut().expect("the caller found a cache");
         Arc::make_mut(&mut cache.rows).extend(tail);
+    }
 
-        let mut merged = Vec::with_capacity(cache.sorted.len() + tail_order.len());
+    /// Fold the rows past the end of [`DisplayCache::sorted`] into the order.
+    ///
+    /// The unordered tail is sorted on its own and merged against the rows
+    /// already ordered. Ties take from the ordered side, and every tail index is
+    /// the larger, so the result is the order a full stable sort produces.
+    fn order_display(&mut self) {
+        let Some(cache) = self.display.as_mut() else {
+            return;
+        };
+        let from = cache.sorted.len();
+        if from == cache.rows.len() {
+            return;
+        }
+
+        let rows = &cache.rows;
+        let mut tail_order: Vec<usize> = (from..rows.len()).collect();
+        tail_order.sort_by(|&a, &b| rows[a].cmp(&rows[b]));
+
+        let mut merged = Vec::with_capacity(rows.len());
         let mut order = cache.sorted.iter().copied().peekable();
         let mut arriving = tail_order.into_iter().peekable();
         loop {
             match (order.peek(), arriving.peek()) {
                 (Some(&held), Some(&new)) => {
-                    if cache.rows[held] <= cache.rows[new] {
+                    if rows[held] <= rows[new] {
                         merged.push(held);
                         order.next();
                     } else {
@@ -1165,8 +1187,15 @@ impl PathPicker {
     /// The rows on display are untouched until a result lands, so a picker with
     /// a scan in flight keeps painting the query before it. A query answered
     /// inline retires the scan still out, whose rows answer an older query.
+    ///
+    /// A walk batch under the same query waits for that query's scan still
+    /// out, and the call answers `None`. A restart per batch cancels the scan
+    /// and scores its rows again, so a long walk lands few results. The base
+    /// stays as the scan saw it. The first call after the scan lands starts the
+    /// next scan over its matches and every batch since. So the base trails the
+    /// walk by up to one scan, and so does a box height taken from the base.
     pub(crate) fn begin_scan(&mut self, query: &str) -> Option<(u64, Scan)> {
-        if query == self.last_filter_text && self.filter_valid {
+        if query == self.last_filter_text && (self.filter_valid || self.scan_pending) {
             return None;
         }
         self.sync_base();
@@ -1252,13 +1281,17 @@ impl PathPicker {
     /// to [`Self::refilter_with_base`] as [`Self::begin_scan`] does to a plain
     /// refilter. The identity rules are that method's, so a base whose `id` has
     /// not moved keeps the rows already derived from it.
+    ///
+    /// A base that grew under the same query waits for that query's scan still
+    /// out, as a walk batch does in [`Self::begin_scan`]. The pick list keeps
+    /// the base that the scan saw until the next scan starts.
     pub(crate) fn begin_scan_with_base(
         &mut self,
         query: &str,
         base: &[PathBuf],
         id: BaseId,
     ) -> Option<(u64, Scan)> {
-        if query == self.last_filter_text && self.filter_valid {
+        if query == self.last_filter_text && (self.filter_valid || self.scan_pending) {
             return None;
         }
 
@@ -2686,7 +2719,10 @@ mod tests {
         (one_shot, streamed)
     }
 
-    fn assert_indistinguishable(one_shot: &PickList, streamed: &PickList, what: &str) {
+    fn assert_indistinguishable(one_shot: &mut PickList, streamed: &mut PickList, what: &str) {
+        one_shot.order_display();
+        streamed.order_display();
+
         let whole = one_shot.display.as_ref().expect("a cache");
         let grown = streamed.display.as_ref().expect("a cache");
 
@@ -2711,10 +2747,10 @@ mod tests {
 
         for query in ["", "main", "ma rs", "./src", "./src ma", "!main"] {
             for chunks in [2, 3, 7] {
-                let (one_shot, streamed) = one_shot_and_streamed(&base, chunks, query);
+                let (mut one_shot, mut streamed) = one_shot_and_streamed(&base, chunks, query);
                 assert_indistinguishable(
-                    &one_shot,
-                    &streamed,
+                    &mut one_shot,
+                    &mut streamed,
                     &format!("for {query:?} across {chunks} batches"),
                 );
             }
@@ -2728,8 +2764,8 @@ mod tests {
         let mut base = narrowing_base();
         base.extend(base.clone());
 
-        let (one_shot, streamed) = one_shot_and_streamed(&base, 4, "");
-        assert_indistinguishable(&one_shot, &streamed, "across rows that tie");
+        let (mut one_shot, mut streamed) = one_shot_and_streamed(&base, 4, "");
+        assert_indistinguishable(&mut one_shot, &mut streamed, "across rows that tie");
     }
 
     #[test]
@@ -2805,6 +2841,30 @@ mod tests {
         assert!(
             matched < walked,
             "the fixture has to drop rows for that to mean anything"
+        );
+    }
+
+    #[test]
+    fn a_walk_batch_orders_nothing_until_a_listing_reads_it() {
+        let base = narrowing_base();
+        let walked = base.len() / 2;
+
+        let mut list = list_over(&base[..walked]);
+        list.refilter("ma", &p("/repo"));
+        list.extend_base(base[walked..].iter().cloned());
+        list.refilter("ma", &p("/repo"));
+
+        assert_eq!(
+            list.display.as_ref().expect("a cache").sorted.len(),
+            walked,
+            "a pattern query leaves the batch out of the order",
+        );
+
+        list.refilter("", &p("/repo"));
+        assert_eq!(
+            list.filtered,
+            from_scratch(&base, "").0,
+            "a listing orders every row",
         );
     }
 
@@ -3091,6 +3151,51 @@ mod tests {
             "the late result changes nothing rather than reverting the list"
         );
         assert_eq!(answered_query(&picker), Some("ma"));
+    }
+
+    #[test]
+    fn a_walk_batch_leaves_the_same_querys_scan_running() {
+        type Start = fn(&mut PathPicker) -> Option<(u64, Scan)>;
+
+        let mut h = crate::Stoat::test();
+        let starts: [(&str, Start); 2] = [
+            ("the walk", |picker| picker.begin_scan("m")),
+            ("a caller's base", |picker| {
+                let base = picker.all_paths.clone();
+                let id = BaseId {
+                    identity: 4,
+                    len: base.len(),
+                };
+                picker.begin_scan_with_base("m", &base, id)
+            }),
+        ];
+
+        for (source, start) in starts {
+            let mut picker = walked_picker(&mut h);
+            let (generation, kept) = start(&mut picker).expect("a scan");
+
+            // What `pump_walk` does with a batch.
+            picker.all_paths.push(p("/repo/src/more_main.rs"));
+            picker.filter_valid = false;
+            assert!(
+                start(&mut picker).is_none(),
+                "{source}: the batch waits for the scan out"
+            );
+
+            let finished = kept.run().expect("the kept scan runs to the end");
+            assert!(
+                lands(&mut picker, (generation, finished)),
+                "{source}: the kept scan lands"
+            );
+            let landed = picker.picklist.filtered.len();
+
+            let (_, next) = start(&mut picker).expect("the batch still needs a scan");
+            assert_eq!(
+                next.run().expect("a current scan reports").scored,
+                landed + 1,
+                "{source}: the next scan scores the landed rows and the arrival",
+            );
+        }
     }
 
     /// A scan for `query` that finished on its worker and has not reported yet.
