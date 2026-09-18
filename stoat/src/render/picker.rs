@@ -339,6 +339,7 @@ pub(crate) fn split_list_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::picker::INDEXED_ROWS;
     use ratatui::style::Color;
     use std::path::PathBuf;
 
@@ -568,6 +569,48 @@ mod tests {
         assert_eq!(
             highlighted, 5,
             "the query's five characters highlight on a row whose offsets were derived at paint"
+        );
+    }
+
+    #[test]
+    fn an_anchored_listing_highlights_a_row_past_the_stored_block() {
+        let git_root = Path::new("/r");
+        let base: Vec<PathBuf> = (0..600)
+            .map(|i| PathBuf::from(format!("/r/docs/page_{i:04}.md")))
+            .collect();
+
+        let mut list = PickList {
+            base,
+            ..PickList::default()
+        };
+        list.refilter("./docs", git_root);
+        assert_eq!(
+            list.match_indices.len(),
+            INDEXED_ROWS,
+            "the listing stores highlights for the leading block only"
+        );
+
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        paint_path_rows(
+            &list,
+            git_root,
+            None,
+            "",
+            area,
+            550,
+            &match_theme(),
+            &mut buf,
+        );
+
+        let match_fg = Color::Rgb(255, 0, 0);
+        let highlighted: Vec<u16> = (area.x..area.x + area.width)
+            .filter(|&c| buf[(c, 0)].fg == match_fg)
+            .collect();
+        assert_eq!(
+            highlighted,
+            vec![1, 2, 3, 4],
+            "the anchor's four characters highlight on a row past the block"
         );
     }
 

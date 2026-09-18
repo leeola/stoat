@@ -208,9 +208,10 @@ pub(crate) struct PickList {
     /// Indices into `base`, after filtering, in display order.
     pub(crate) filtered: Vec<usize>,
     /// Per-row matched character offsets into the row's display string, for the
-    /// leading [`Self::indexed`] rows of `filtered`. A row is empty when no
-    /// pattern is active. The offsets are sorted and deduplicated so the
-    /// renderer can `contains`-test without further work.
+    /// leading [`Self::indexed`] rows of `filtered`. A listing's row holds only
+    /// the offsets of its `./` anchor, and is empty with no anchor. The offsets
+    /// are sorted and deduplicated, so the renderer searches them with no
+    /// further work.
     ///
     /// Read it through [`Self::row_indices`], which covers the rows past the
     /// end of this.
@@ -222,10 +223,13 @@ pub(crate) struct PickList {
     /// longer than any viewport derives them only as deep as something
     /// plausibly paints. Rows below derive theirs on demand.
     ///
-    /// Those rows are also in no particular order. Finding this many best rows
-    /// is a partition, which leaves the rest where it happens to leave them,
-    /// and ordering tens of thousands of matches nothing paints is what that
-    /// spares. A row past here is a match, not a rank.
+    /// After a scan, those rows are also in no particular order. Finding this
+    /// many best rows is a partition, which leaves the rest where it happens to
+    /// leave them, and ordering tens of thousands of matches nothing paints is
+    /// what that spares. A row past here is a match, not a rank.
+    ///
+    /// A listing ranks nothing, so its rows past here keep listing order, and
+    /// each derives the offsets of its `./` anchor on demand.
     pub(crate) indexed: usize,
     pub(crate) selected: usize,
     /// Rendered list height in rows, refreshed each frame by the owner's render
@@ -586,22 +590,29 @@ impl PickList {
             false => None,
         };
 
-        let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
-
         if fuzzy::parse_query(pattern).is_none() {
             // The rows ordered at cache build and by earlier listings stay
             // ordered, so this sorts only what a walk appended since.
             self.order_display();
             let cache = self.display.as_ref().expect("ensure_display builds one");
-            let listed: Vec<usize> = cache
-                .sorted
-                .iter()
-                .copied()
-                .filter(|&idx| keeps(&cache.rows[idx]))
-                .collect();
 
-            self.match_indices = vec![(0..anchor_len).collect(); listed.len()];
-            self.indexed = listed.len();
+            // Byte-lexicographic order keeps every row that shares a prefix
+            // contiguous, so the anchor's rows are one range of the order.
+            let (start, end) = match anchor {
+                None => (0, cache.sorted.len()),
+                Some(prefix) => {
+                    let start = cache
+                        .sorted
+                        .partition_point(|&idx| &*cache.rows[idx] < prefix);
+                    let len = cache.sorted[start..]
+                        .partition_point(|&idx| cache.rows[idx].starts_with(prefix));
+                    (start, start + len)
+                },
+            };
+            let listed = cache.sorted[start..end].to_vec();
+
+            self.match_indices = vec![(0..anchor_len).collect(); listed.len().min(INDEXED_ROWS)];
+            self.indexed = self.match_indices.len();
             self.scored = 0;
             self.filtered = listed;
             let covered = self.base.len();
@@ -2447,6 +2458,25 @@ mod tests {
             names("./do", base, &git_root),
             vec!["docs/a.md", "docs/b.md"]
         );
+    }
+
+    #[test]
+    fn an_anchor_lists_the_rows_a_prefix_filter_keeps() {
+        let base = narrowing_base();
+        let order = from_scratch(&base, "").0;
+
+        for anchor in ["s", "src", "S", "docs/deep", "zz", ""] {
+            let mut list = list_over(&base);
+            list.refilter(&format!("./{anchor}"), &p("/repo"));
+
+            let rows = &list.display.as_ref().expect("a cache").rows;
+            let kept: Vec<usize> = order
+                .iter()
+                .copied()
+                .filter(|&idx| rows[idx].starts_with(anchor))
+                .collect();
+            assert_eq!(list.filtered, kept, "the rows of ./{anchor}");
+        }
     }
 
     #[test]
