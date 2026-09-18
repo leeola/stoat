@@ -221,12 +221,16 @@ impl ActiveRebase {
 mod tests {
     use super::RebasePause;
     use crate::{
+        action_handlers::dispatch,
         app::Stoat,
         badge::BadgeSource,
+        git_jobs::GitJobKey,
         host::GitHost,
         test_harness::{CommitSpec, TestHarness},
         workspace::diff::DiffBase,
     };
+    use std::path::Path;
+    use stoat_action::{EnterRebase, ExecuteRebase};
 
     const THREE_COMMITS: &[CommitSpec<'static>] = &[
         ("c1", "c1: root", &[("a.rs", "line1\n")]),
@@ -377,16 +381,80 @@ mod tests {
         // Todo is [c2, c3] (oldest first). Drop the first entry (c2).
         h.type_keys("d");
         h.type_keys("Enter");
+        h.settle();
 
-        // The stepper completes synchronously for all-pick/drop plans.
+        // The dirty check, the pick of c3, and the move of HEAD land in the settle.
         assert!(h.stoat.active_workspace().rebase.is_none());
         assert!(h.stoat.active_workspace().rebase_active.is_none());
 
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         // Expected: c1 root + one rebased descendant from c3; c2 dropped.
         assert_eq!(log.len(), 2, "c2 dropped, c3 rebased: {log:#?}");
         assert_eq!(log.last().unwrap().sha, "c1", "root unchanged");
+    }
+
+    /// The press runs no git work of its own. It queues the dirty check, and
+    /// each pick and the move of HEAD wait their turn behind it.
+    #[test]
+    fn a_rebase_leaves_each_pick_to_the_git_queue() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
+
+        dispatch(&mut h.stoat, &ExecuteRebase);
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_some(),
+                h.stoat.git_jobs.holds(GitJobKey::RebaseStep),
+                repo.resolve_rev("HEAD"),
+            ),
+            (false, false, Some("c3".to_string())),
+            "the dirty check is out, and no step waits until it lands"
+        );
+
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_some(),
+                h.stoat.git_jobs.holds(GitJobKey::RebaseStep),
+                repo.resolve_rev("HEAD") != Some("c3".to_string()),
+            ),
+            (false, false, true),
+            "the queued picks ran and HEAD moved off c3"
+        );
+    }
+
+    /// A second plan run before the first plan's dirty check lands waits behind
+    /// that check. It finds the first rebase running when it lands, and refuses.
+    #[test]
+    fn a_plan_run_while_a_rebase_is_out_is_refused() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("d");
+
+        dispatch(&mut h.stoat, &ExecuteRebase);
+        dispatch(&mut h.stoat, &EnterRebase);
+        dispatch(&mut h.stoat, &ExecuteRebase);
+        h.settle();
+
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_none(),
+                repo.log_commits(None, 10).len(),
+            ),
+            (true, 2),
+            "only the first plan ran: c3 rebased onto c1 and c2 dropped"
+        );
     }
 
     #[test]
@@ -399,6 +467,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        h.settle();
         // The stepper paused on conflict and entered conflict mode.
         assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
         let ws = h.stoat.active_workspace();
@@ -431,6 +500,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        h.settle();
 
         let rows_ptr = |h: &Stoat| -> *const crate::merge_view::MergeRow {
             let ws = h.active_workspace();
@@ -447,7 +517,7 @@ mod tests {
 
         let first = rows_ptr(&h.stoat);
 
-        let _ = h.stoat.render();
+        h.snapshot();
         let painted = h.rendered_text();
         assert!(
             painted.contains("ours") && painted.contains("line1"),
@@ -475,6 +545,7 @@ mod tests {
         // Todo = [c2, c3]. Mark c2 as Reword (first entry, cursor at 0).
         h.type_keys("r");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(
             h.stoat.current_view(),
             Some("reword"),
@@ -492,10 +563,11 @@ mod tests {
         h.type_keys("Escape");
         assert_eq!(h.stoat.current_view(), Some("reword"));
         h.type_keys("ctrl-s");
+        h.settle();
 
         // Stepper resumes and completes.
         assert_ne!(h.stoat.current_view(), Some("reword"));
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         let msgs: Vec<_> = log.iter().map(|c| c.summary.clone()).collect();
         assert!(
@@ -514,6 +586,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("reword"));
         h.type_keys("i");
         assert_eq!(h.stoat.focused_mode(), "insert");
@@ -533,6 +606,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("reword"));
 
         h.type_keys("i");
@@ -545,7 +619,7 @@ mod tests {
         // Auto-abort path: rebase dropped, no reword-rewritten commit
         // landed, and the pre-existing c2 summary is still present.
         assert!(h.stoat.active_workspace().rebase_active.is_none());
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         let msgs: Vec<_> = log.iter().map(|c| c.summary.clone()).collect();
         assert!(
@@ -564,6 +638,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("reword"));
 
         // Abort without entering insert sub-mode.
@@ -584,6 +659,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("reword"));
 
         h.type_keys("i");
@@ -595,16 +671,14 @@ mod tests {
         h.type_text("line two");
         h.type_keys("Escape");
         h.type_keys("ctrl-s");
+        h.settle();
         assert_ne!(h.stoat.current_view(), Some("reword"));
 
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         let messages: Vec<String> = log
             .iter()
-            .filter_map(|c| {
-                h.fake_git
-                    .commit_message(std::path::Path::new("/repo"), &c.sha)
-            })
+            .filter_map(|c| h.fake_git.commit_message(Path::new("/repo"), &c.sha))
             .collect();
         assert!(
             messages
@@ -638,10 +712,11 @@ mod tests {
         // Mark c2 as Edit (first entry).
         h.type_keys("e");
         h.type_keys("Enter");
+        h.settle();
     }
 
     fn checkouts(h: &TestHarness) -> Vec<String> {
-        h.fake_git.checkouts(std::path::Path::new("/repo"))
+        h.fake_git.checkouts(Path::new("/repo"))
     }
 
     fn diff_base(h: &TestHarness) -> Option<Option<String>> {
@@ -673,10 +748,7 @@ mod tests {
             .strip_prefix("detached:")
             .expect("detached checkout")
             .to_string();
-        let repo = h
-            .fake_git()
-            .discover(std::path::Path::new("/repo"))
-            .unwrap();
+        let repo = h.fake_git().discover(Path::new("/repo")).unwrap();
         assert_eq!(
             (repo.resolve_rev("HEAD"), diff_base(&h)),
             (Some(sha.clone()), Some(repo.parent_sha(&sha))),
@@ -720,6 +792,7 @@ mod tests {
         assert_eq!(h.stoat.current_view(), Some("diff"), "the pause names it");
 
         h.type_keys("C");
+        h.settle();
         assert!(
             h.stoat.active_workspace().rebase_active.is_none(),
             "C resumed the rebase from the empty stop"
@@ -737,7 +810,7 @@ mod tests {
         let mut h = Stoat::test();
         pause_on_edit(&mut h);
 
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let amended = {
             let head = repo.resolve_rev("HEAD").expect("HEAD");
             let tree = repo.tree_oid(&head).expect("the picked commit's tree");
@@ -746,13 +819,11 @@ mod tests {
         };
 
         h.type_keys("C");
+        h.settle();
         let messages: Vec<String> = repo
             .log_commits(None, 10)
             .iter()
-            .filter_map(|c| {
-                h.fake_git
-                    .commit_message(std::path::Path::new("/repo"), &c.sha)
-            })
+            .filter_map(|c| h.fake_git.commit_message(Path::new("/repo"), &c.sha))
             .collect();
         assert!(
             messages.iter().any(|m| m.contains("amended while stopped")),
@@ -768,6 +839,7 @@ mod tests {
         pause_on_edit(&mut h);
 
         h.type_keys("C");
+        h.settle();
         assert!(
             h.stoat.active_workspace().rebase_active.is_none(),
             "rebase execution complete after continue"
@@ -780,10 +852,7 @@ mod tests {
             "the base and the latch went with the pause"
         );
 
-        let repo = h
-            .fake_git()
-            .discover(std::path::Path::new("/repo"))
-            .unwrap();
+        let repo = h.fake_git().discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         // Two rebased commits (from c2 and c3) plus root c1.
         assert_eq!(log.len(), 3, "full chain rebased: {log:#?}");
@@ -801,17 +870,19 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
 
         // Take theirs on the selected file, then apply.
         h.type_keys("t");
         h.type_keys("Enter");
+        h.settle();
 
         // Stepper resumed past the conflict; rebase_active dropped.
         assert!(h.stoat.active_workspace().rebase_active.is_none());
         assert_ne!(h.stoat.current_view(), Some("rebase_conflict"));
 
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         assert!(!log.is_empty(), "history remains readable after resolve");
     }
@@ -828,12 +899,14 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
 
         h.type_keys("s"); // skip the conflicted entry
+        h.settle();
         assert!(h.stoat.active_workspace().rebase_active.is_none());
 
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         // c3 was skipped; we should have c1 root + rebased c2.
         assert_eq!(log.len(), 2, "skipped entry absent from log: {log:#?}");
@@ -849,6 +922,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
         h.type_keys("a");
         assert!(h.stoat.active_workspace().rebase_active.is_none());
@@ -865,6 +939,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("reword"));
         h.assert_snapshot("rebase_reword_mode");
     }
@@ -879,6 +954,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
         h.assert_snapshot("rebase_conflict_mode");
     }
@@ -895,10 +971,7 @@ mod tests {
         h.type_keys("q");
         assert_eq!(h.stoat.current_view(), Some("commits"));
         assert!(h.stoat.active_workspace().rebase.is_none());
-        assert!(h
-            .fake_git
-            .applied_rebases(std::path::Path::new("/repo"))
-            .is_empty());
+        assert!(h.fake_git.applied_rebases(Path::new("/repo")).is_empty());
     }
 
     fn dirty_badge(h: &TestHarness) -> Option<String> {
@@ -923,12 +996,13 @@ mod tests {
         h.type_keys("i");
         h.type_keys("d");
         h.type_keys("Enter");
+        h.settle();
         assert_ne!(
             dirty_badge(&h).as_deref(),
             Some("working tree dirty: commit or stash first"),
             "untracked-only tree is not blocked"
         );
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         assert_eq!(
             repo.log_commits(None, 10).len(),
             2,
@@ -951,11 +1025,12 @@ mod tests {
         h.type_keys("i");
         h.type_keys("d");
         h.type_keys("Enter");
+        h.settle();
         assert_eq!(
             dirty_badge(&h).as_deref(),
             Some("working tree dirty: commit or stash first")
         );
-        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
         assert_eq!(
             repo.log_commits(None, 10).len(),
             3,

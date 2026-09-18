@@ -57,10 +57,6 @@ pub(crate) enum GitJobKey {
     /// where the reader stands now.
     WalkLanding,
     /// A rebase step. The later one reads the state every earlier step left.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reserved for the rebase stepper's queued steps")
-    )]
     RebaseStep,
 }
 
