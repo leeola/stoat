@@ -261,6 +261,12 @@ pub struct Workspace {
     /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
     pub(crate) review_walk: Option<crate::review_walk::ReviewWalk>,
+    /// The walk whose return checkout waits in the git queue.
+    ///
+    /// It leaves [`Self::review_walk`] at the press, so steps and step landings
+    /// find no walk. It stays here until the return's start takes it, so an
+    /// amend that lands before then still moves its return ref.
+    pub(crate) ending_walk: Option<crate::review_walk::ReviewWalk>,
     /// Walkthrough being played (if any). Opened by `WalkthroughOpen` and
     /// dropped only by `WalkthroughDone`, so moving away from a stop's file
     /// leaves the tour where it was.
@@ -414,6 +420,7 @@ impl Workspace {
             conflict: None,
             commits: None,
             review_walk: None,
+            ending_walk: None,
             walkthrough: None,
             rebase: None,
             rebase_active: None,

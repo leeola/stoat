@@ -72,7 +72,13 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
         .as_ref()
         .and_then(|active| active.pause.as_ref())
         .is_some_and(|pause| matches!(pause, RebasePause::Edit { .. }));
-    let walk_ref = ws.review_walk.as_ref().map(|walk| &walk.return_ref);
+    // An amend pressed before `:review-done` starts after that press ends the
+    // walk. The walk whose return is still out then answers for it.
+    let walk_ref = ws
+        .review_walk
+        .as_ref()
+        .or(ws.ending_walk.as_ref())
+        .map(|walk| &walk.return_ref);
     let at_tip = match walk_ref {
         Some(ReturnRef::Detached(sha)) => sha == &head_sha,
         Some(ReturnRef::Branch(name)) => repo
@@ -348,16 +354,23 @@ fn splice(target: &str, span: Range<usize>, source: &str, source_span: Range<usi
 /// sits on, which reads as a walk standing below the tip and refuses every hunk
 /// after the first. A branch return ref needs nothing: the amend writes the ref
 /// HEAD is on, so the branch already names the new commit.
+///
+/// An ended walk whose return still waits in the git queue moves too. That
+/// return checks out what its ref names at its turn, which is then the amended
+/// commit.
 pub(super) fn anchor_walk_to(stoat: &mut Stoat, old_sha: &str, new_sha: &str) {
-    let Some(walk) = stoat.active_workspace_mut().review_walk.as_mut() else {
-        return;
-    };
-    if let Some(commit) = walk.commits.iter_mut().find(|commit| commit.sha == old_sha) {
-        commit.sha = new_sha.to_string();
-        commit.short_sha = new_sha.chars().take(7).collect();
-    }
-    if matches!(&walk.return_ref, ReturnRef::Detached(sha) if sha == old_sha) {
-        walk.return_ref = ReturnRef::Detached(new_sha.to_string());
+    let ws = stoat.active_workspace_mut();
+    for walk in [ws.review_walk.as_mut(), ws.ending_walk.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(commit) = walk.commits.iter_mut().find(|commit| commit.sha == old_sha) {
+            commit.sha = new_sha.to_string();
+            commit.short_sha = new_sha.chars().take(7).collect();
+        }
+        if matches!(&walk.return_ref, ReturnRef::Detached(sha) if sha == old_sha) {
+            walk.return_ref = ReturnRef::Detached(new_sha.to_string());
+        }
     }
 }
 
@@ -372,7 +385,7 @@ mod tests {
     };
     use std::{
         collections::{HashMap, VecDeque},
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::Arc,
     };
 
@@ -712,6 +725,43 @@ mod tests {
             committed(&h).as_deref(),
             Some("a\nb\nc\nd\ne\n"),
             "the return ref followed the amend, so the tip check kept passing",
+        );
+    }
+
+    /// A `:review-done` pressed while an amend waits in the git queue returns
+    /// to the commit the amend wrote, not to the one it replaced.
+    ///
+    /// The idle job holds the amend in the queue until after the press. Without
+    /// it, the test scheduler runs the amend's work inline at the unstage press.
+    #[test]
+    fn a_return_behind_an_amend_lands_on_the_amended_commit() {
+        let mut h = walking_the_tip();
+        h.stoat
+            .active_workspace_mut()
+            .review_walk
+            .as_mut()
+            .expect("walk")
+            .return_ref = ReturnRef::Detached("c2".to_string());
+        cursor_to(&mut h, 2);
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        let amends = h.fake_git().amend_history(Path::new("/repo"));
+        assert_eq!(
+            (
+                amends.len(),
+                h.fake_git().checkouts(Path::new("/repo")).last().cloned()
+            ),
+            (
+                1,
+                amends
+                    .first()
+                    .map(|amend| format!("detached:{}", amend.new_head))
+            ),
+            "the return checked out the commit the amend wrote",
         );
     }
 

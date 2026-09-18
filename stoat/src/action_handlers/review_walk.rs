@@ -452,6 +452,12 @@ fn walk_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
 /// press drops a step that still waits its turn, so no step checkout follows
 /// the return.
 ///
+/// The ended walk waits in
+/// [`Workspace::ending_walk`](crate::workspace::Workspace::ending_walk) until
+/// the return's turn. An amend queued before the press lands first and moves
+/// the return ref onto the commit it wrote. One return waits at a time, so a
+/// press while one is out keeps its walk and reports why.
+///
 /// A failed return puts the walk back. The user then fixes whatever blocked it
 /// and tries again, and does not stay detached with no record of where they
 /// came from.
@@ -459,9 +465,15 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
     let Some(walk) = stoat.active_workspace_mut().review_walk.take() else {
         return UpdateEffect::None;
     };
+    if stoat.active_workspace().ending_walk.is_some() {
+        restore_walk(stoat, walk);
+        return review_error(stoat, "the last walk is still returning", None);
+    }
     stoat.git_jobs.drop_queued(GitJobKey::WalkLanding);
+    stoat.active_workspace_mut().ending_walk = Some(walk);
 
     let job = GitJob::new(None, move |stoat: &mut Stoat| {
+        let walk = stoat.active_workspace_mut().ending_walk.take()?;
         let Some(repo) = stoat.git_host.discover(&walk.workdir) else {
             restore_walk(stoat, walk);
             review_error(stoat, "not in a git repository", None);
@@ -1800,6 +1812,15 @@ mod tests {
     /// picker over a history holding one never settles. That is a defect in the
     /// picker rather than in the walk, and the walk is what this covers.
     fn seed_walk(h: &mut TestHarness, shas: &[&str]) {
+        let walk = walk_over(h, shas);
+        h.stoat.active_workspace_mut().review_walk = Some(walk);
+        walk_navigate(&mut h.stoat);
+        h.settle();
+    }
+
+    /// A walk over `shas` in `/repo` that returns to `main`, built but not yet
+    /// installed.
+    fn walk_over(h: &TestHarness, shas: &[&str]) -> ReviewWalk {
         let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
         let commits = shas
             .iter()
@@ -1810,14 +1831,12 @@ mod tests {
                     .unwrap_or_else(|| panic!("no commit {sha}"))
             })
             .collect();
-        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+        ReviewWalk {
             workdir: PathBuf::from("/repo"),
             commits,
             cursor: 0,
             return_ref: ReturnRef::Branch("main".to_string()),
-        });
-        walk_navigate(&mut h.stoat);
-        h.settle();
+        }
     }
 
     /// A commit that changed nothing has no file to land on. The base still
@@ -2215,6 +2234,31 @@ mod tests {
         seed_walk(&mut h, &["b2c3d4e5"]);
 
         assert_eq!(walk_shas(&h), ["b2c3d4e5"], "the later walk stands");
+    }
+
+    /// One return waits in the git queue at a time. A walk ended while an
+    /// earlier walk's return is still out stays in place and says why.
+    ///
+    /// The second walk goes in without a settle. A settle there lands the first
+    /// return before the second press.
+    #[test]
+    fn review_done_refuses_while_a_return_is_out() {
+        let mut h = harness();
+        start_walk(&mut h);
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        let second = walk_over(&h, &["b2c3d4e5"]);
+        h.stoat.active_workspace_mut().review_walk = Some(second);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+
+        assert_eq!(
+            (walk_shas(&h), review_badge(&h).as_deref()),
+            (
+                vec!["b2c3d4e5".to_string()],
+                Some("the last walk is still returning")
+            ),
+        );
     }
 
     /// A walk over a workdir outside every repository has no checkout to return
