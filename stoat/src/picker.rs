@@ -10,6 +10,7 @@ use crate::{
 };
 use std::{
     collections::{HashMap, VecDeque},
+    mem,
     ops::Range,
     path::{Path, PathBuf},
     sync::{
@@ -485,6 +486,38 @@ pub(crate) struct DisplayCache {
     pub(crate) generation: u64,
 }
 
+impl DisplayCache {
+    /// Derive and order the display string of every path in `base`.
+    ///
+    /// `base_generation` and `generation` come back at 0. The list that
+    /// installs the cache stamps them, since only it knows which base the rows
+    /// describe.
+    fn derive(
+        base: &[PathBuf],
+        git_root: &Path,
+        display_roots: Option<&[PathBuf]>,
+        home: Option<PathBuf>,
+    ) -> DisplayCache {
+        let rows: Vec<Arc<str>> = base
+            .iter()
+            .map(|path| Arc::from(row_display(path, git_root, display_roots, home.as_deref())))
+            .collect();
+
+        let mut sorted: Vec<usize> = (0..rows.len()).collect();
+        sorted.sort_by(|&a, &b| rows[a].cmp(&rows[b]));
+
+        DisplayCache {
+            base_generation: 0,
+            git_root: git_root.to_path_buf(),
+            display_roots: display_roots.map(<[PathBuf]>::to_vec),
+            home,
+            rows: Arc::new(rows),
+            sorted,
+            generation: 0,
+        }
+    }
+}
+
 /// Which caller-owned candidate set a [`PathPicker::refilter_with_base`] is over.
 ///
 /// `identity` names the set. Two calls carrying the same one are over a base
@@ -699,7 +732,7 @@ impl PickList {
             fuzzy::indices_of_parsed(pattern, &cache.rows[idx], scratch, matching);
         }
 
-        *scratch = prepend_anchor(anchor_len, std::mem::take(scratch));
+        *scratch = prepend_anchor(anchor_len, mem::take(scratch));
         scratch
     }
 
@@ -736,6 +769,31 @@ impl PickList {
     pub(crate) fn set_base(&mut self, base: Vec<PathBuf>) {
         self.base = base;
         self.base_generation = next_generation();
+    }
+
+    /// Take the display rows out of the list, for a caller that switches to
+    /// another base and returns to this one later.
+    ///
+    /// The results go with them, since they index the rows being taken.
+    fn take_display(&mut self) -> Option<DisplayCache> {
+        self.clear_results();
+        self.display.take()
+    }
+
+    /// [`Self::set_base`], with `display` as the rows already derived for a
+    /// prefix of `base`.
+    ///
+    /// A display with more rows than `base` describes some other list, so it
+    /// is dropped. The next [`Self::refilter`] still checks the root, the
+    /// display roots, and the home against it, and derives only the tail it
+    /// does not cover.
+    fn set_base_with_display(&mut self, base: Vec<PathBuf>, display: Option<DisplayCache>) {
+        self.set_base(base);
+        self.clear_results();
+        if let Some(mut display) = display.filter(|display| display.rows.len() <= self.base.len()) {
+            display.base_generation = self.base_generation;
+            self.display = Some(display);
+        }
     }
 
     /// Append candidates, leaving the ones already there in place.
@@ -785,29 +843,15 @@ impl PickList {
         // name different paths on the other side of this rebuild.
         self.forget_filter();
 
-        let display_roots = self.display_roots.as_deref();
-        let rows: Vec<Arc<str>> = self
-            .base
-            .iter()
-            .map(|path| Arc::from(row_display(path, git_root, display_roots, home.as_deref())))
-            .collect();
-
-        let mut sorted: Vec<usize> = (0..rows.len()).collect();
-        sorted.sort_by(|&a, &b| rows[a].cmp(&rows[b]));
-
         let generation = self
             .display
             .as_ref()
             .map_or(0, |cache| cache.generation + 1);
-        self.display = Some(DisplayCache {
-            base_generation: self.base_generation,
-            git_root: git_root.to_path_buf(),
-            display_roots: self.display_roots.clone(),
-            home,
-            rows: Arc::new(rows),
-            sorted,
-            generation,
-        });
+        let mut cache =
+            DisplayCache::derive(&self.base, git_root, self.display_roots.as_deref(), home);
+        cache.base_generation = self.base_generation;
+        cache.generation = generation;
+        self.display = Some(cache);
     }
 
     /// Derive display strings for `base[from..]`, leaving them out of the order.
@@ -1040,6 +1084,17 @@ pub(crate) struct PathPicker {
     /// every other real base change already go through, so a base swapped
     /// underneath a stable identity cannot read as unchanged.
     last_base: Option<BaseId>,
+    /// The display rows derived for [`Self::all_paths`], held while the pick
+    /// list shows a caller's base instead.
+    ///
+    /// A scope flip away from the walk and back again otherwise derives and
+    /// sorts a row per walked path on the return. The rows cover a prefix of
+    /// the walk, because the walk only appends, and [`Self::reset_walk`], which
+    /// starts a different list, drops them.
+    walk_display: Option<DisplayCache>,
+    /// Whether the pick list's base is [`Self::all_paths`], so a caller's base
+    /// that replaces it knows the display it takes belongs to the walk.
+    on_walk_base: bool,
     pub(crate) preview: Preview,
 }
 
@@ -1074,6 +1129,8 @@ impl PathPicker {
             _scan_task: None,
             synced_paths: None,
             last_base: None,
+            walk_display: None,
+            on_walk_base: false,
             preview,
         }
     }
@@ -1144,6 +1201,8 @@ impl PathPicker {
         self.all_paths.clear();
         self.walk_rx = Some(rx);
         self._walk_task = Some(task);
+        self.walk_display = None;
+        self.on_walk_base = false;
         self.invalidate();
     }
 
@@ -1176,6 +1235,10 @@ impl PathPicker {
     /// arrived since it last looked rather than a fresh copy of all of them.
     /// Copying every path per keystroke would also discard its display strings,
     /// which is the expensive half.
+    ///
+    /// A base handed over whole takes back the rows [`Self::walk_display`]
+    /// holds for the walk, so a return from a caller's base derives only what
+    /// the walk added since.
     fn sync_base(&mut self) {
         match self.synced_paths {
             Some(synced) if synced == self.all_paths.len() => {},
@@ -1183,9 +1246,12 @@ impl PathPicker {
                 self.picklist
                     .extend_base(self.all_paths[synced..].iter().cloned());
             },
-            _ => self.picklist.set_base(self.all_paths.clone()),
+            _ => self
+                .picklist
+                .set_base_with_display(self.all_paths.clone(), self.walk_display.take()),
         }
         self.synced_paths = Some(self.all_paths.len());
+        self.on_walk_base = true;
     }
 
     /// Prepare the scan for `query`, for a caller that will run it elsewhere.
@@ -1434,6 +1500,9 @@ impl PathPicker {
     /// re-sorted per row, and the rows the previous query matched are forgotten,
     /// so the next one rescores the whole set. An identity that has not moved
     /// says none of that is needed.
+    ///
+    /// Replacing the walk's base keeps its rows in [`Self::walk_display`] for
+    /// the return to the walk.
     fn adopt_base(&mut self, base: &[PathBuf], id: BaseId) {
         let appended = self
             .last_base
@@ -1446,7 +1515,12 @@ impl PathPicker {
                     self.picklist.extend_base(base[held..].iter().cloned());
                 }
             },
-            false => self.picklist.set_base(base.to_vec()),
+            false => {
+                if mem::take(&mut self.on_walk_base) {
+                    self.walk_display = self.picklist.take_display();
+                }
+                self.picklist.set_base(base.to_vec());
+            },
         }
 
         self.last_base = Some(id);
@@ -3021,6 +3095,90 @@ mod tests {
                 .generation,
             built,
             "a base that is not the one held has to be rebuilt"
+        );
+    }
+
+    /// A picker over two walked paths, refiltered and then flipped to a scope's
+    /// base of one path, as a Shift-Tab away from All leaves it.
+    ///
+    /// Returns the rows the walk derived before the flip.
+    fn flipped_to_a_scope(picker: &mut PathPicker) -> Arc<Vec<Arc<str>>> {
+        picker.all_paths = vec![p("/repo/one.rs"), p("/repo/two.rs")];
+        picker.refilter("r");
+        let walked = Arc::clone(&picker.picklist.display.as_ref().expect("a cache").rows);
+
+        picker.invalidate();
+        let scoped = [p("/repo/scoped.rs")];
+        picker.refilter_with_base(
+            "r",
+            &scoped,
+            BaseId {
+                identity: 3,
+                len: 1,
+            },
+        );
+        walked
+    }
+
+    #[test]
+    fn returning_from_a_scope_base_keeps_the_walk_rows() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor, p("/repo"), None);
+        let walked = flipped_to_a_scope(&mut picker);
+
+        picker.invalidate();
+        picker.refilter("r");
+
+        let returned = &picker.picklist.display.as_ref().expect("a cache").rows;
+        assert!(
+            Arc::ptr_eq(&walked, returned),
+            "the return takes back the walk's rows rather than deriving them again"
+        );
+    }
+
+    #[test]
+    fn a_rerooted_walk_derives_its_rows_afresh() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor.clone(), p("/repo"), None);
+        flipped_to_a_scope(&mut picker);
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        picker.reset_walk(rx, executor.spawn(async {}));
+        picker.all_paths = vec![p("/repo/three.rs"), p("/repo/four.rs")];
+        picker.refilter("r");
+
+        let rows: Vec<&str> = picker
+            .picklist
+            .display
+            .as_ref()
+            .expect("a cache")
+            .rows
+            .iter()
+            .map(|row| &**row)
+            .collect();
+        assert_eq!(
+            rows,
+            ["three.rs", "four.rs"],
+            "a re-rooted walk is a different list, so the held rows do not apply"
+        );
+    }
+
+    #[test]
+    fn a_derived_display_matches_the_rebuild() {
+        let base = narrowing_base();
+        let mut list = list_over(&base);
+        list.refilter("", &p("/repo"));
+        let rebuilt = list.display.as_ref().expect("a cache");
+
+        let derived = DisplayCache::derive(&base, &p("/repo"), None, rebuilt.home.clone());
+        assert_eq!(
+            (&derived.rows, &derived.sorted),
+            (&rebuilt.rows, &rebuilt.sorted),
+            "deriving on its own lands the rows and order a list rebuilds"
         );
     }
 
