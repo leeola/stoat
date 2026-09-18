@@ -7,8 +7,13 @@ use std::iter;
 /// Allows inserting between existing positions without renumbering via
 /// [`Locator::between`]. Initial positions should use
 /// `Locator::between(Locator::min(), Locator::max())`.
+///
+/// Up to four components live inline. An id in an edited buffer typically
+/// carries three, and the fourth covers a replaced span. So a typical id
+/// never allocates, and neither does a clone of a fragment or a summary that
+/// holds one.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Locator(SmallVec<[u64; 2]>);
+pub struct Locator(SmallVec<[u64; 4]>);
 
 impl Clone for Locator {
     fn clone(&self) -> Self {
@@ -22,11 +27,11 @@ impl Clone for Locator {
 
 impl Locator {
     pub fn min() -> Self {
-        Self(SmallVec::from_buf_and_len([u64::MIN; 2], 1))
+        Self(SmallVec::from_buf_and_len([u64::MIN; 4], 1))
     }
 
     pub fn max() -> Self {
-        Self(SmallVec::from_buf_and_len([u64::MAX; 2], 1))
+        Self(SmallVec::from_buf_and_len([u64::MAX; 4], 1))
     }
 
     pub fn min_ref() -> &'static Self {
