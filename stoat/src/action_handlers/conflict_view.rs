@@ -4,6 +4,7 @@ use crate::{
     conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
     editor_state::{EditorId, EditorState},
+    git_jobs::{self, GitJob, GitLanding, GitWork},
     host::{
         git::{GitHost, GitRepo},
         ConflictedFile,
@@ -668,8 +669,12 @@ pub(crate) fn pump_conflict_file(stoat: &mut Stoat) -> bool {
 /// The center is always written, so a half-resolved file lands its honest
 /// marker blocks and quitting mid-resolve loses nothing. A file with any chunk
 /// still on its markers is written but not marked resolved, and stays open.
+///
+/// The index write waits its turn in the git queue, and the view advances when
+/// it lands. It goes through the repository the session holds, so no press
+/// discovers a fresh repository and parses the whole index again.
 pub(super) fn conflict_apply(stoat: &mut Stoat) {
-    let (current, path, buffer_id, git_root) = {
+    let (current, path, buffer_id) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
         };
@@ -677,7 +682,6 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) {
             session.current,
             session.file.path.clone(),
             session.file.buffer_id,
-            session.workdir.clone(),
         )
     };
 
@@ -704,11 +708,41 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) {
         return;
     }
 
-    let Some(repo) = stoat.git_host.discover(&git_root) else {
+    let Some(repo) = stoat
+        .active_workspace()
+        .conflict
+        .as_ref()
+        .map(|session| session.repo.clone())
+    else {
         return;
     };
-    if let Err(err) = repo.mark_resolved(&path) {
+    let job = GitJob::new(None, move |_: &mut Stoat| {
+        Some(Box::new(move || {
+            let marked = repo.mark_resolved(&path).map_err(|err| err.to_string());
+            Box::new(move |stoat: &mut Stoat| land_resolved(stoat, current, &path, marked))
+                as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+}
+
+/// Advance past file `current` once its resolution lands in the index, or
+/// close the view when every file is applied.
+///
+/// A landing after the view closed, or after it reopened on another list,
+/// reports the resolution and moves nothing.
+fn land_resolved(stoat: &mut Stoat, current: usize, path: &Path, marked: Result<(), String>) {
+    if let Err(err) = marked {
         stoat.set_status(format!("mark resolved failed: {err}"));
+        return;
+    }
+    let still_open = stoat
+        .active_workspace()
+        .conflict
+        .as_ref()
+        .is_some_and(|session| session.files.get(current).is_some_and(|file| file == path));
+    if !still_open {
+        stoat.set_status("conflict resolved");
         return;
     }
 

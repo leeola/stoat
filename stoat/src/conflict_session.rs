@@ -789,6 +789,35 @@ mod tests {
         assert_eq!(h.fake_git().resolved_paths(&git_root), vec![path]);
     }
 
+    /// The index write waits its turn in the git queue, so the view stays on
+    /// the file until the resolution lands.
+    #[test]
+    fn apply_lands_the_resolution_from_the_git_queue() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        seed_conflict(&mut h);
+        dispatch_conflict(&mut h);
+        let path = git_root.join("f.txt");
+        pick(&mut h, &ConflictPickOurs);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictApply);
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("conflict"),
+            "the press leaves the view on the file",
+        );
+
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.fake_git().resolved_paths(&git_root)
+            ),
+            (Some("file"), vec![path]),
+            "the landed resolution closed the view",
+        );
+    }
+
     #[test]
     fn apply_writes_a_crlf_conflict_back_as_crlf() {
         // The center buffer is built out of the index stages rather than read

@@ -332,6 +332,10 @@ impl GitRepo for LocalGitRepo {
             .and_then(|wd| path.strip_prefix(wd).ok())
             .unwrap_or(path);
         let mut index = repo.index().map_err(err_msg)?;
+        // A held handle keeps the index it loaded first. Without this reload,
+        // the write puts stale entries back over any index change made since
+        // that load.
+        index.read(false).map_err(err_msg)?;
         index.add_path(rel).map_err(err_msg)?;
         index.write().map_err(err_msg)?;
         Ok(())
@@ -2121,6 +2125,33 @@ mod tests {
         assert!(git.checkout_ref("nope").is_err());
         assert_eq!(git.head_branch().as_deref(), Some("main"));
         assert_eq!(git.resolve_rev("HEAD").as_deref(), Some(shas[2].as_str()));
+    }
+
+    /// A held handle caches the index it loaded first. A resolve through it
+    /// keeps the entry another handle wrote after that load.
+    #[test]
+    fn mark_resolved_keeps_an_entry_another_handle_wrote() {
+        let (dir, repo, _shas) = seeded_repo();
+        let git = discover(&dir);
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "c").unwrap();
+
+        git.mark_resolved(Path::new("a.txt")).unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("b.txt")).unwrap();
+            index.write().unwrap();
+        }
+        git.mark_resolved(Path::new("c.txt")).unwrap();
+
+        let paths: Vec<String> = Repository::open(dir.path())
+            .unwrap()
+            .index()
+            .unwrap()
+            .iter()
+            .map(|entry| String::from_utf8(entry.path).unwrap())
+            .collect();
+        assert_eq!(paths, ["a.txt", "b.txt", "c.txt"]);
     }
 
     /// Commit a move of `from` to `to`, with `content` on the destination.
