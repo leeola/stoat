@@ -323,6 +323,9 @@ fn apply_finder_changes(stoat: &mut Stoat, git_root: &Path, changes: Vec<(PathBu
     let departed = !edit.departing.is_empty();
     if departed {
         paths.retain(|held| !edit.departs(held));
+        // The rows past a departed path no longer line up with their paths. An
+        // arrival appends past the rows, so it leaves them standing.
+        cache.display = None;
     }
     paths.extend(edit.arriving);
     departed

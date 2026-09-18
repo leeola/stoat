@@ -492,7 +492,10 @@ impl DisplayCache {
     /// `base_generation` and `generation` come back at 0. The list that
     /// installs the cache stamps them, since only it knows which base the rows
     /// describe.
-    fn derive(
+    ///
+    /// Costs a string per path and a sort, so a caller off the loop derives
+    /// ahead for a list the loop is about to show.
+    pub(crate) fn derive(
         base: &[PathBuf],
         git_root: &Path,
         display_roots: Option<&[PathBuf]>,
@@ -515,6 +518,13 @@ impl DisplayCache {
             sorted,
             generation: 0,
         }
+    }
+
+    /// The rows, for a test outside this module that tells a reuse from a
+    /// rebuild by their allocation.
+    #[cfg(test)]
+    pub(crate) fn rows(&self) -> &Arc<Vec<Arc<str>>> {
+        &self.rows
     }
 }
 
@@ -1085,13 +1095,14 @@ pub(crate) struct PathPicker {
     /// underneath a stable identity cannot read as unchanged.
     last_base: Option<BaseId>,
     /// The display rows derived for [`Self::all_paths`], held while the pick
-    /// list shows a caller's base instead.
+    /// list shows a caller's base instead, or handed in with a seeded list.
     ///
     /// A scope flip away from the walk and back again otherwise derives and
-    /// sorts a row per walked path on the return. The rows cover a prefix of
-    /// the walk, because the walk only appends, and [`Self::reset_walk`], which
-    /// starts a different list, drops them.
-    walk_display: Option<DisplayCache>,
+    /// sorts a row per walked path on the return, and so does every open over
+    /// a cached list. The rows cover a prefix of the walk, because the walk
+    /// only appends, and [`Self::reset_walk`], which starts a different list,
+    /// drops them.
+    pub(crate) walk_display: Option<DisplayCache>,
     /// Whether the pick list's base is [`Self::all_paths`], so a caller's base
     /// that replaces it knows the display it takes belongs to the walk.
     on_walk_base: bool,
@@ -1212,6 +1223,20 @@ impl PathPicker {
     pub(crate) fn stop_walk(&mut self) {
         self.walk_rx = None;
         self._walk_task = None;
+    }
+
+    /// Take the display rows derived for [`Self::all_paths`], for a caller
+    /// that files the list away with them.
+    ///
+    /// `None` when nothing derived rows for the walk, or when the rows found
+    /// outnumber the paths and so describe some other list. Leaves the picker
+    /// with no rows for the walk, so it suits a picker about to close.
+    pub(crate) fn take_walk_display(&mut self) -> Option<DisplayCache> {
+        let display = match self.on_walk_base {
+            true => self.picklist.take_display(),
+            false => self.walk_display.take(),
+        };
+        display.filter(|display| display.rows.len() <= self.all_paths.len())
     }
 
     /// Refilter over this picker's own walk-fed [`Self::all_paths`], skipping

@@ -621,10 +621,12 @@ fn publish_walk_to_finder_cache(stoat: &mut Stoat) {
         return;
     };
 
+    // The modal derives no finder rows, so the first finder open derives them.
     stoat.finder_path_cache = Some(FinderPathCache {
         root: stoat.active_workspace().git_root.clone(),
         paths: Arc::clone(paths),
         epoch: finder.walk_epoch,
+        display: None,
     });
 }
 

@@ -2,7 +2,7 @@ use crate::{
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::{BaseId, PathPicker, PreviewPolicy, Scan},
+    picker::{BaseId, DisplayCache, PathPicker, PreviewPolicy, Scan},
     workspace::Workspace,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -138,6 +138,12 @@ pub(crate) struct FinderPathCache {
     /// The [`crate::app::Stoat::finder_path_epoch`] the walk that produced
     /// `paths` began under, which is what the next open compares against.
     pub(crate) epoch: u64,
+    /// The display rows and order derived for a prefix of `paths`, so the
+    /// next open lists them rather than deriving a row per path on the loop.
+    ///
+    /// A path that leaves the list shifts every row past it, so a departure
+    /// drops these. An arrival appends past them and leaves them standing.
+    pub(crate) display: Option<DisplayCache>,
 }
 
 pub struct FileFinder {
@@ -251,7 +257,7 @@ pub(crate) struct NamedCache {
 
 impl FileFinder {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         ws: &mut Workspace,
         executor: Executor,
         open_intent: OpenIntent,
@@ -259,6 +265,7 @@ impl FileFinder {
         git_root: PathBuf,
         walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
         seed_paths: Vec<PathBuf>,
+        seed_display: Option<DisplayCache>,
         walk_epoch: u64,
         modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
         buffer_paths: Vec<PathBuf>,
@@ -274,6 +281,7 @@ impl FileFinder {
         );
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = seed_paths;
+        core.walk_display = seed_display;
 
         let mut finder = Self {
             input,
@@ -1410,6 +1418,98 @@ mod tests {
             base_paths(&h),
             ["a.rs", "b.rs", "src/c.rs"],
             "and still lists every file",
+        );
+    }
+
+    /// The display rows the open finder's list holds.
+    fn finder_display_rows(h: &TestHarness) -> Arc<Vec<Arc<str>>> {
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        let display = finder.core.picklist.display.as_ref().expect("a display");
+        Arc::clone(display.rows())
+    }
+
+    /// The display rows the cached path list holds while no finder is open.
+    fn cached_display(h: &TestHarness) -> Option<&DisplayCache> {
+        let cache = h.stoat.finder_path_cache.as_ref().expect("a cached list");
+        cache.display.as_ref()
+    }
+
+    /// Deriving a row per path and sorting them is the cost of an open over a
+    /// large list, so the rows a close filed come back with the paths.
+    #[test]
+    fn reopening_the_finder_reuses_the_rows_it_closed_with() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("src/c.rs", "")]);
+
+        h.type_keys("space p");
+        let _ = h.snapshot();
+        let closed_with = finder_display_rows(&h);
+        h.type_keys("escape");
+        h.stoat.drain_index_updates();
+
+        h.type_keys("space p");
+        let _ = h.snapshot();
+
+        assert!(
+            Arc::ptr_eq(&finder_display_rows(&h), &closed_with),
+            "the reopen lists the rows the close filed rather than deriving them again"
+        );
+    }
+
+    #[test]
+    fn a_removed_file_retires_the_cached_rows() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        h.stoat.drain_index_updates();
+        assert!(cached_display(&h).is_some(), "the close filed the rows");
+
+        h.fake_fs_watcher()
+            .inject(root.join("b.rs"), crate::host::FsEventKind::Removed);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+
+        assert!(
+            cached_display(&h).is_none(),
+            "a departure shifts the rows past it, so they go"
+        );
+        h.type_keys("space p");
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs"],
+            "and the reopen lists what remains"
+        );
+    }
+
+    #[test]
+    fn a_created_file_keeps_the_cached_rows() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        h.stoat.drain_index_updates();
+        let filed = Arc::clone(cached_display(&h).expect("the close filed the rows").rows());
+
+        h.fake_fs()
+            .insert_files([(root.join("b.rs"), "".as_bytes())]);
+        h.fake_fs_watcher()
+            .inject(root.join("b.rs"), crate::host::FsEventKind::Created);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+
+        let kept = cached_display(&h)
+            .expect("an arrival keeps the rows")
+            .rows();
+        assert!(
+            Arc::ptr_eq(kept, &filed),
+            "an arrival appends past the rows, so they stand as filed"
+        );
+        h.type_keys("space p");
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs", "b.rs"],
+            "and the reopen lists both files"
         );
     }
 
@@ -2707,6 +2807,27 @@ mod tests {
             base_paths(&h),
             ["a.rs", "src/b.rs"],
             "and lists every file the build found",
+        );
+    }
+
+    /// The build derives the display rows on the pool with the paths, so the
+    /// first open derives none on the loop either.
+    #[test]
+    fn the_index_build_seeds_the_rows_the_first_open_lists() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}"), ("src/b.rs", "")]);
+        h.fake_git.add_repo(root.clone());
+
+        h.stoat.start_index_build();
+        h.settle();
+        h.stoat.drain_index_updates();
+        let seeded = Arc::clone(cached_display(&h).expect("the build seeded rows").rows());
+
+        h.type_keys("space p");
+
+        assert!(
+            Arc::ptr_eq(&finder_display_rows(&h), &seeded),
+            "the open lists the rows the build derived"
         );
     }
 }

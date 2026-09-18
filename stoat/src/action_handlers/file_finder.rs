@@ -180,16 +180,19 @@ pub(super) fn open_file_finder(
         (initial_scope == FinderScope::AllWorkspaces).then(|| collect_workspace_roots(stoat));
 
     // A cache built under this root and still current stands in for the walk
-    // entirely. Taking it hands the paths over without a copy, and close puts
-    // them back. Anything else walks the tree as before.
-    let seed_paths = match &all_workspaces_roots {
-        Some(_) => Vec::new(),
+    // entirely. Taking it hands the paths and their rows over without a copy,
+    // and close puts them back. Anything else walks the tree as before.
+    let (seed_paths, seed_display) = match &all_workspaces_roots {
+        Some(_) => (Vec::new(), None),
         None => stoat
             .finder_path_cache
             .take_if(|cache| cache.root == git_root && cache.epoch == stoat.finder_path_epoch)
-            // A code-search modal reading the same list leaves a second
-            // reference behind, and the picker owns what it filters.
-            .map(|cache| Arc::try_unwrap(cache.paths).unwrap_or_else(|held| (*held).clone()))
+            .map(|cache| {
+                // A code-search modal reading the same list leaves a second
+                // reference behind, and the picker owns what it filters.
+                let paths = Arc::try_unwrap(cache.paths).unwrap_or_else(|held| (*held).clone());
+                (paths, cache.display)
+            })
             .unwrap_or_default(),
     };
     let walk_epoch = stoat.finder_path_epoch;
@@ -212,6 +215,7 @@ pub(super) fn open_file_finder(
         git_root,
         walk,
         seed_paths,
+        seed_display,
         walk_epoch,
         modified,
         buffer_paths,
@@ -636,10 +640,13 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
     // the one this finder was rooted at. `display_roots` is set exactly while
     // that walk is the source.
     if finder.core.picklist.display_roots.is_none() {
+        // Taken before the paths, which it checks its rows against.
+        let display = finder.core.take_walk_display();
         stoat.finder_path_cache = Some(FinderPathCache {
             root: mem::take(&mut finder.core.git_root),
             paths: Arc::new(mem::take(&mut finder.core.all_paths)),
             epoch: finder.walk_epoch,
+            display,
         });
     }
 }

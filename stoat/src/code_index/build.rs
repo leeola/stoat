@@ -10,7 +10,8 @@
 //! merge happens on the main thread, off the paint path.
 
 use crate::{
-    buffer_registry::fingerprint_bytes, code_index::store, host::FsHost, workspace::WorkspaceId,
+    buffer_registry::fingerprint_bytes, code_index::store, host::FsHost, paths,
+    picker::DisplayCache, workspace::WorkspaceId,
 };
 use codegraph::{
     build_shard, decode_shard, FileEntry, FileId, FileShard, Manifest, SCHEMA_VERSION,
@@ -58,6 +59,9 @@ pub(crate) enum IndexUpdate {
         /// cache `walked` becomes. A tree that moved while the build ran leaves
         /// the stamp behind the epoch, and the next finder open walks instead.
         walk_epoch: u64,
+        /// The finder's display rows and order for `walked`, derived with the
+        /// build on the pool, so the first finder open derives none on the loop.
+        display: Option<DisplayCache>,
     },
     /// One file's freshly re-extracted shard. The drain evicts the file's
     /// prior symbols, inserts these, and re-resolves so callers of the
@@ -248,11 +252,14 @@ pub(crate) fn build_index(
             files: entries,
         };
         let file_count = manifest.files.len();
+        let walked = walked.into_inner().expect("walked paths poisoned");
+        let display = DisplayCache::derive(&walked, &git_root, None, paths::home_dir());
         let _ = tx.send(IndexUpdate::Complete {
             workspace,
             manifest,
-            walked: walked.into_inner().expect("walked paths poisoned"),
+            walked,
             walk_epoch,
+            display: Some(display),
         });
         redraw.notify_one();
         tracing::info!(

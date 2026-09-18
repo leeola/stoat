@@ -30,6 +30,7 @@ use crate::{
     minimap::emit::{self},
     mouse::{self, mouse_event_kind},
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
+    picker::DisplayCache,
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
@@ -3921,7 +3922,16 @@ impl Stoat {
     /// Takes only what nothing else holds. A cache already filed stands, a
     /// finder open has the paths in hand, and an epoch the tree moved past
     /// since the build spawned names a list the events already overtook.
-    fn seed_finder_paths(&mut self, workspace: WorkspaceId, walked: Vec<PathBuf>, epoch: u64) {
+    ///
+    /// `display` holds the rows the build derived for `walked`, which spares
+    /// the first open a row per path on the loop.
+    fn seed_finder_paths(
+        &mut self,
+        workspace: WorkspaceId,
+        walked: Vec<PathBuf>,
+        epoch: u64,
+        display: Option<DisplayCache>,
+    ) {
         if self.finder_path_cache.is_some()
             || self.file_finder.is_some()
             || epoch != self.finder_path_epoch
@@ -3936,6 +3946,7 @@ impl Stoat {
             root: ws.git_root.clone(),
             paths: Arc::new(walked),
             epoch,
+            display,
         });
     }
 
@@ -4024,10 +4035,11 @@ impl Stoat {
                     manifest,
                     walked,
                     walk_epoch,
+                    display,
                 } => {
                     resolve_pending.insert(workspace);
                     completed.insert(workspace);
-                    self.seed_finder_paths(workspace, walked, walk_epoch);
+                    self.seed_finder_paths(workspace, walked, walk_epoch, display);
                     if let Some(dir) = self.index_dir_for_workspace(workspace, &mut dirs) {
                         writes.entry(dir).or_default().completed = Some(manifest);
                     }
