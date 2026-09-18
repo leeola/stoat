@@ -3441,6 +3441,48 @@ mod tests {
         assert_eq!(b.snapshot.visible_text.to_string(), "abc");
     }
 
+    /// A long group undone and redone many times flips between exactly its
+    /// before and after texts, and the edits since each flip rebuild the change.
+    ///
+    /// Every toggle adds an undo-map entry per edit of the group, so by the last
+    /// flip each edit holds 120 entries. The lookups read the newest one, and a
+    /// wrong read shows as a wrong text or a wrong patch.
+    #[test]
+    fn a_long_group_toggled_many_times_keeps_both_texts() {
+        let mut b = buf("seed\n");
+        let before = b.snapshot.visible_text.to_string();
+        b.begin_group(Arc::from([]));
+        for typed in 0..500 {
+            let end = b.snapshot.visible_text.len();
+            b.edit(end..end, if typed % 50 == 49 { "\n" } else { "x" });
+        }
+        b.seal_group(Arc::from([]));
+        let after = b.snapshot.visible_text.to_string();
+
+        let mut wrong = Vec::new();
+        for toggle in 0..120 {
+            let (from, to) = match toggle % 2 {
+                0 => (&after, &before),
+                _ => (&before, &after),
+            };
+            let version = b.snapshot.version;
+            match toggle % 2 {
+                0 => b.undo(),
+                _ => b.redo(),
+            };
+
+            let text = b.snapshot.visible_text.to_string();
+            let mut rebuilt = from.clone();
+            for edit in b.snapshot.edits_since(version).edits().iter().rev() {
+                rebuilt.replace_range(edit.old.clone(), &text[edit.new.clone()]);
+            }
+            if &text != to || &rebuilt != to {
+                wrong.push(toggle);
+            }
+        }
+        assert_eq!(wrong, [0_u32; 0], "toggles with a wrong text or patch");
+    }
+
     /// An edit made after an undo is its own step, not an addition to whatever
     /// group the undo exposed.
     ///
