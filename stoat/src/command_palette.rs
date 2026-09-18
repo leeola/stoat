@@ -961,8 +961,8 @@ pub(crate) fn refilter(
 mod tests {
     use super::*;
     use crate::{
-        buffer_registry::AutoReloadMode, input_history::InputHistory, picker::PREVIEW_DIR_LIMIT,
-        test_harness::TestHarness,
+        buffer_registry::AutoReloadMode, host::FakeFsOp, input_history::InputHistory,
+        picker::PREVIEW_DIR_LIMIT, test_harness::TestHarness,
     };
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
@@ -2049,6 +2049,97 @@ mod tests {
                 .sync_arg_picker("wsdir/al", ws, &*fs_host, &language_registry)
                 .is_some(),
             "the ranking is handed back for a worker to run",
+        );
+    }
+
+    /// How many times the fake fs listed `root`.
+    ///
+    /// Every walk of the workspace starts with that listing. A directory
+    /// preview lists only the selected directory, which lies below the root,
+    /// so this counts walks and nothing else.
+    fn root_listings(h: &TestHarness, root: &Path) -> usize {
+        h.fake_fs()
+            .ops()
+            .iter()
+            .filter(|op| matches!(op, FakeFsOp::ListDir { path } if path == root))
+            .count()
+    }
+
+    /// Open and close the file finder, which files the paths it walked as the
+    /// cached list.
+    fn file_the_finder_cache(h: &mut TestHarness) {
+        h.type_keys("space p");
+        h.type_keys("escape");
+        h.stoat.drain_index_updates();
+    }
+
+    #[test]
+    fn a_file_argument_lists_the_finders_cached_paths_without_a_walk() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("wsdir/alpha.rs", ""), ("wsdir/beta.rs", "")]);
+        file_the_finder_cache(&mut h);
+        let walks = root_listings(&h, &root);
+
+        h.type_text(":OpenFile wsdir/al");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        assert_eq!(
+            root_listings(&h, &root),
+            walks,
+            "the argument walked nothing"
+        );
+        assert_eq!(
+            arg_rows(&h),
+            [root.join("wsdir/alpha.rs").display().to_string()],
+            "and the cached list answers the tail",
+        );
+    }
+
+    #[test]
+    fn a_directory_argument_derives_from_the_cached_paths() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(
+            &mut h,
+            &[("top.rs", ""), ("src/main.rs", ""), ("docs/readme.md", "")],
+        );
+        file_the_finder_cache(&mut h);
+        let walks = root_listings(&h, &root);
+
+        h.type_text(":cd ");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            root_listings(&h, &root),
+            walks,
+            "the argument walked nothing"
+        );
+        assert_eq!(
+            arg_rows(&h),
+            [
+                root.join("docs").display().to_string(),
+                root.join("src").display().to_string(),
+            ],
+            "src and docs; a root-level file contributes no directory",
+        );
+    }
+
+    #[test]
+    fn a_stale_cache_still_walks_for_an_argument() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("wsdir/alpha.rs", ""), ("wsdir/beta.rs", "")]);
+        file_the_finder_cache(&mut h);
+        let walks = root_listings(&h, &root);
+        h.stoat.finder_path_epoch += 1;
+
+        h.type_text(":OpenFile wsdir/al");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            root_listings(&h, &root),
+            walks + 1,
+            "a retired cache leaves the argument to walk the tree",
         );
     }
 

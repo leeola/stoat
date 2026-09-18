@@ -6,7 +6,10 @@ use crate::{
     picker::{PathPicker, Scan},
     walkthrough,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_action::ValueSource;
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -14,8 +17,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// Candidates feeding a palette argument's inline value-picker, resolved from a
 /// [`ValueSource`] by [`arg_candidates`].
 pub(super) enum ArgCandidates {
-    /// Streaming workspace file walk. Paths arrive in batches on `rx` while
-    /// `task` runs the blocking walk. The task must be held to keep it alive.
+    /// Workspace paths that arrive in batches on `rx`, from a streaming walk or
+    /// as one batch read from the finder's cached list. `task` runs the
+    /// blocking work, and must be held to keep it alive.
     Walk {
         rx: UnboundedReceiver<Vec<PathBuf>>,
         task: Task<()>,
@@ -28,10 +32,12 @@ pub(super) enum ArgCandidates {
 /// Resolve an argument's [`ValueSource`] into the candidates its inline picker
 /// lists.
 ///
-/// `Files` streams workspace paths via the same background walk the file finder
-/// uses. `Directories` streams the workspace's directories derived from that
-/// walk. `Buffers` returns the currently-open buffer paths. `Values` returns the
-/// argument's accepted spellings. `None` yields no picker.
+/// `Files` lists the file finder's cached path list while it is current for
+/// the workspace, and otherwise streams workspace paths via the same
+/// background walk the file finder uses. `Directories` derives the workspace's
+/// directories from that same list or walk. `Buffers` returns the
+/// currently-open buffer paths. `Values` returns the argument's accepted
+/// spellings. `None` yields no picker.
 ///
 /// The non-path sources still ride [`ArgCandidates::Paths`]: the picker filters
 /// and displays a relative path by its text, so a bare name passes through it
@@ -41,12 +47,18 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
         ValueSource::None => None,
         ValueSource::Files => {
             let git_root = stoat.active_workspace().git_root.clone();
-            let (rx, task) = super::file_finder::spawn_workspace_walk(stoat, git_root);
+            let (rx, task) = match cached_workspace_paths(stoat, &git_root) {
+                Some(paths) => super::file_finder::spawn_cached_paths(stoat, paths),
+                None => super::file_finder::spawn_workspace_walk(stoat, git_root),
+            };
             Some(ArgCandidates::Walk { rx, task })
         },
         ValueSource::Directories => {
             let git_root = stoat.active_workspace().git_root.clone();
-            let (rx, task) = super::file_finder::spawn_workspace_dir_walk(stoat, git_root);
+            let (rx, task) = match cached_workspace_paths(stoat, &git_root) {
+                Some(paths) => super::file_finder::spawn_cached_dirs(stoat, git_root, paths),
+                None => super::file_finder::spawn_workspace_dir_walk(stoat, git_root),
+            };
             Some(ArgCandidates::Walk { rx, task })
         },
         ValueSource::Buffers => Some(ArgCandidates::Paths(
@@ -75,6 +87,19 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
             values.iter().map(PathBuf::from).collect(),
         )),
     }
+}
+
+/// The file finder's cached path list, when a walk under `git_root` produced
+/// it and no file event has retired it since.
+///
+/// Code search reads the list under the same test. A copy of the `Arc` is all
+/// it costs, and the walk it replaces takes seconds on a large tree.
+fn cached_workspace_paths(stoat: &Stoat, git_root: &Path) -> Option<Arc<Vec<PathBuf>>> {
+    stoat
+        .finder_path_cache
+        .as_ref()
+        .filter(|cache| cache.root == git_root && cache.epoch == stoat.finder_path_epoch)
+        .map(|cache| Arc::clone(&cache.paths))
 }
 
 /// Sync the palette's inline file picker once per frame, before the palette is

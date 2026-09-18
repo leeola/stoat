@@ -3,7 +3,13 @@ use crate::{
     file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent},
     picker::{PathPicker, Scan},
 };
-use std::{collections::HashSet, mem, ops::ControlFlow, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    mem,
+    ops::ControlFlow,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -270,6 +276,26 @@ pub(super) fn spawn_workspace_walk(
     (walk_rx, task)
 }
 
+/// Hand `paths` to a picker as one batch, in the shape [`spawn_workspace_walk`]
+/// returns.
+///
+/// The copy runs on the blocking pool, because a large list costs
+/// milliseconds to clone. The receiver disconnects after the batch, as it does
+/// after a finished walk, so a picker fed this way needs no case of its own.
+pub(super) fn spawn_cached_paths(
+    stoat: &Stoat,
+    paths: Arc<Vec<PathBuf>>,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        if tx.send(paths.as_ref().clone()).is_ok() {
+            redraw_notify.notify_one();
+        }
+    });
+    (rx, task)
+}
+
 /// Spawn the git status pass backing [`FinderScope::Modified`].
 ///
 /// Returns the receiver the single result arrives on and the task running it.
@@ -369,18 +395,7 @@ pub(super) fn spawn_workspace_dir_walk(
         let mut seen: HashSet<PathBuf> = HashSet::new();
         fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
             let mut dirs = Vec::new();
-            for path in batch {
-                let mut ancestor = path.parent();
-                while let Some(dir) = ancestor {
-                    if dir == git_root || !dir.starts_with(&git_root) {
-                        break;
-                    }
-                    if seen.insert(dir.to_path_buf()) {
-                        dirs.push(dir.to_path_buf());
-                    }
-                    ancestor = dir.parent();
-                }
-            }
+            push_ancestor_dirs(&batch, &git_root, &mut seen, &mut dirs);
             if !dirs.is_empty() {
                 if walk_tx.send(dirs).is_err() {
                     return ControlFlow::Break(());
@@ -391,6 +406,51 @@ pub(super) fn spawn_workspace_dir_walk(
         });
     });
     (walk_rx, task)
+}
+
+/// The directories [`spawn_workspace_dir_walk`] yields, derived from `paths`
+/// and handed over as one batch.
+///
+/// The derivation runs on the blocking pool, because it visits every ancestor
+/// of every path. The receiver disconnects after the batch, as it does after a
+/// finished walk.
+pub(super) fn spawn_cached_dirs(
+    stoat: &Stoat,
+    git_root: PathBuf,
+    paths: Arc<Vec<PathBuf>>,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        let mut dirs = Vec::new();
+        push_ancestor_dirs(&paths, &git_root, &mut HashSet::new(), &mut dirs);
+        if !dirs.is_empty() && tx.send(dirs).is_ok() {
+            redraw_notify.notify_one();
+        }
+    });
+    (rx, task)
+}
+
+/// Append to `dirs` each ancestor directory of `batch` that lies strictly
+/// below `git_root` and is not yet in `seen`.
+fn push_ancestor_dirs(
+    batch: &[PathBuf],
+    git_root: &Path,
+    seen: &mut HashSet<PathBuf>,
+    dirs: &mut Vec<PathBuf>,
+) {
+    for path in batch {
+        let mut ancestor = path.parent();
+        while let Some(dir) = ancestor {
+            if dir == git_root || !dir.starts_with(git_root) {
+                break;
+            }
+            if seen.insert(dir.to_path_buf()) {
+                dirs.push(dir.to_path_buf());
+            }
+            ancestor = dir.parent();
+        }
+    }
 }
 
 /// Handle a submit keypress while the finder is open. Returns `Some(effect)`
