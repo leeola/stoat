@@ -337,32 +337,57 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
     let mut commits = picker.commits[..=base_idx].to_vec();
     commits.reverse();
 
-    let return_ref = match walk_return_ref(stoat, &workdir) {
-        Ok(return_ref) => return_ref,
-        Err(refused) => return refused,
-    };
+    queue_walk_start(stoat, workdir, commits);
+    UpdateEffect::Redraw
+}
 
-    // Closed only now. A refusal above leaves the picker up, so the base the
-    // user picked is still selected when they come back to it.
-    commit_picker_close(stoat);
-    stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
-        workdir,
-        commits,
-        cursor: 0,
-        return_ref,
+/// Queue the start of a walk over `commits`, which records where HEAD goes
+/// back to and checks the first commit out.
+///
+/// The start reads HEAD at the job's turn, after every git write queued before
+/// the press landed. So a walk started while an ended walk's return waits in
+/// the queue records the ref that return restores, not the ended walk's commit.
+///
+/// A refused start badges and leaves a base picker up, so the base the user
+/// picked is still selected when they come back to it. A walk started while
+/// this one waited keeps its place.
+fn queue_walk_start(stoat: &mut Stoat, workdir: PathBuf, commits: Vec<CommitInfo>) {
+    let job = GitJob::new(Some(GitJobKey::WalkLanding), move |stoat: &mut Stoat| {
+        if stoat.active_workspace().review_walk.is_some() {
+            return None;
+        }
+        let return_ref = walk_return_ref(stoat, &workdir).ok()?;
+
+        if stoat
+            .commit_picker
+            .as_ref()
+            .is_some_and(|picker| picker.role == CommitPickerRole::PickBase)
+        {
+            commit_picker_close(stoat);
+        }
+        stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+            workdir,
+            commits,
+            cursor: 0,
+            return_ref,
+        });
+
+        let (workdir, sha, standing) = walk_position(stoat)?;
+        walk_checkout_work(stoat, WalkLandingKind::Walk, workdir, sha, standing)
     });
-    walk_navigate(stoat)
+    git_jobs::enqueue(stoat, job);
 }
 
 /// Where a walk over `workdir` must put HEAD back, or the effect that refuses
 /// to start one.
 ///
-/// Captured before anything detaches, because afterwards there is no way to
-/// tell whether the user was on a branch or already detached, and reattaching
-/// someone who was detached would move a branch they never asked to move.
+/// Read at the start job's turn, after every git write queued before the press
+/// landed, and before anything detaches. Afterwards there is no way to tell
+/// whether the user was on a branch or already detached, and reattaching
+/// someone who was detached moves a branch they never asked to move.
 ///
 /// A tree with tracked changes refuses. A walk checks commits out, so starting
-/// one over uncommitted work would either lose it or leave the checkout half
+/// one over uncommitted work either loses it or leaves the checkout half
 /// applied.
 fn walk_return_ref(stoat: &mut Stoat, workdir: &Path) -> Result<ReturnRef, UpdateEffect> {
     let Some(repo) = stoat.git_host.discover(workdir) else {
@@ -385,23 +410,16 @@ fn walk_return_ref(stoat: &mut Stoat, workdir: &Path) -> Result<ReturnRef, Updat
 /// The commits view opens a commit this way. A walk of one steps nowhere, but
 /// it carries the same checkout and the same return ref, so `:done` puts the
 /// tree back exactly as it does for a walk over many.
+///
+/// The walk starts at its queued job's turn, as [`queue_walk_start`]
+/// describes, so the walk does not exist yet when this returns.
 pub(super) fn walk_one_commit(
     stoat: &mut Stoat,
     workdir: PathBuf,
     commit: CommitInfo,
 ) -> UpdateEffect {
-    let return_ref = match walk_return_ref(stoat, &workdir) {
-        Ok(return_ref) => return_ref,
-        Err(refused) => return refused,
-    };
-
-    stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
-        workdir,
-        commits: vec![commit],
-        cursor: 0,
-        return_ref,
-    });
-    walk_navigate(stoat)
+    queue_walk_start(stoat, workdir, vec![commit]);
+    UpdateEffect::Redraw
 }
 
 /// Check the walk's current commit out and point `:diff` at what it changed.
@@ -818,18 +836,33 @@ pub(super) fn queue_walk_landing(
     standing: String,
 ) {
     let job = GitJob::new(Some(GitJobKey::WalkLanding), move |stoat: &mut Stoat| {
-        let Some(repo) = stoat.git_host.discover(&workdir) else {
-            report_failure(stoat, kind, WalkFailure::NoRepository);
-            return None;
-        };
-        Some(Box::new(move || {
-            let landed = walk_landing(&*repo, kind, &sha);
-            Box::new(move |stoat: &mut Stoat| {
-                land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed);
-            }) as GitLanding
-        }) as GitWork)
+        walk_checkout_work(stoat, kind, workdir, sha, standing)
     });
     git_jobs::enqueue(stoat, job);
+}
+
+/// The git work that checks `sha` out for a walk or an edit pause, from a job's
+/// start.
+///
+/// Returns `None`, with the failure reported, when `workdir` holds no
+/// repository.
+fn walk_checkout_work(
+    stoat: &mut Stoat,
+    kind: WalkLandingKind,
+    workdir: PathBuf,
+    sha: String,
+    standing: String,
+) -> Option<GitWork> {
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        report_failure(stoat, kind, WalkFailure::NoRepository);
+        return None;
+    };
+    Some(Box::new(move || {
+        let landed = walk_landing(&*repo, kind, &sha);
+        Box::new(move |stoat: &mut Stoat| {
+            land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed);
+        }) as GitLanding
+    }) as GitWork)
 }
 
 /// Check `sha` out and read what the landing needs, on whatever thread calls.
@@ -947,7 +980,9 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{queue_walk_landing, walk_navigate, ReturnRef, ReviewWalk, WalkLandingKind};
+    use super::{
+        queue_walk_landing, walk_navigate, walk_one_commit, ReturnRef, ReviewWalk, WalkLandingKind,
+    };
     use crate::{
         app::Stoat,
         badge::BadgeSource,
@@ -2171,6 +2206,71 @@ mod tests {
             checkouts(&h).last().map(String::as_str),
             Some("ref:main"),
             "the branch HEAD was attached to is restored"
+        );
+    }
+
+    /// A walk started while an ended walk's return waits in the git queue
+    /// reads HEAD after that return lands. It records the branch the return
+    /// restores, so ending it goes back to that branch and not to the ended
+    /// walk's commit.
+    #[test]
+    fn a_walk_started_behind_a_return_records_the_restored_branch() {
+        let mut h = harness();
+        start_walk(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+
+        let commit = {
+            let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+            repo.log_from("c3d4e5f6", 1)
+                .into_iter()
+                .next()
+                .expect("the tip commit")
+        };
+        walk_one_commit(&mut h.stoat, PathBuf::from("/repo"), commit);
+        assert_eq!(
+            (
+                h.stoat.active_workspace().review_walk.is_none(),
+                h.stoat.git_jobs.holds(GitJobKey::WalkLanding),
+            ),
+            (true, true),
+            "the start waits its turn behind the return",
+        );
+
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat
+                    .active_workspace()
+                    .review_walk
+                    .as_ref()
+                    .map(|walk| walk.return_ref.clone()),
+                checkouts(&h),
+            ),
+            (
+                Some(ReturnRef::Branch("main".to_string())),
+                vec![
+                    "detached:a1b2c3d4".to_string(),
+                    "detached:b2c3d4e5".to_string(),
+                    "ref:main".to_string()
+                ],
+            ),
+            "the start read HEAD after the return put it back on main",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(
+            checkouts(&h),
+            [
+                "detached:a1b2c3d4",
+                "detached:b2c3d4e5",
+                "ref:main",
+                "ref:main"
+            ],
+            "ending the new walk goes back to main",
         );
     }
 
