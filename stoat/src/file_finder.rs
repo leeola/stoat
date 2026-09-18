@@ -1921,6 +1921,25 @@ mod tests {
     }
 
     #[test]
+    fn tab_lists_the_rows_of_the_completed_query() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/alpha.rs", ""), ("src/alpine.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_text("alp");
+        let _ = h.snapshot();
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            finder_rows(&h),
+            vec!["src/alpha.rs".to_string()],
+            "the completed query drops the row whose name has no h"
+        );
+    }
+
+    #[test]
     fn tab_completes_a_browse_row_under_the_typed_prefix() {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(&mut h, &[("f.rs", "")]);

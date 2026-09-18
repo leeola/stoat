@@ -975,7 +975,7 @@ pub(crate) struct PathPicker {
     /// was started at.
     scan_rx: UnboundedReceiver<(u64, ScanOutcome)>,
     scan_tx: UnboundedSender<(u64, ScanOutcome)>,
-    /// The generation of the most recently started scan.
+    /// The generation that a scan result must carry to land.
     ///
     /// A result arriving under any other generation answers a query the user
     /// has since typed past, so it is dropped rather than painted. That is what
@@ -1089,7 +1089,11 @@ impl PathPicker {
     /// Force the next refilter to re-run the matcher, even under an unchanged
     /// query. Callers whose base set changed (a walk batch, a scope flip) call
     /// this so the stale filtered rows do not survive.
+    ///
+    /// A scan still out is retired too, because its rows index the base that
+    /// changed.
     pub(crate) fn invalidate(&mut self) {
+        self.retire_scan();
         self.last_filter_text.clear();
         self.filter_valid = false;
         self.synced_paths = None;
@@ -1119,11 +1123,15 @@ impl PathPicker {
 
     /// Refilter over this picker's own walk-fed [`Self::all_paths`], skipping
     /// the work when the query is unchanged and the filter is still valid.
+    ///
+    /// A refilter that runs retires the scan still out, because the rows it
+    /// puts on display replace the ones that scan answers.
     pub(crate) fn refilter(&mut self, query: &str) {
         if query == self.last_filter_text && self.filter_valid {
             return;
         }
 
+        self.retire_scan();
         self.sync_base();
         self.run_refilter(query);
     }
@@ -1155,7 +1163,8 @@ impl PathPicker {
     /// current, which an empty query is.
     ///
     /// The rows on display are untouched until a result lands, so a picker with
-    /// a scan in flight keeps painting the query before it.
+    /// a scan in flight keeps painting the query before it. A query answered
+    /// inline retires the scan still out, whose rows answer an older query.
     pub(crate) fn begin_scan(&mut self, query: &str) -> Option<(u64, Scan)> {
         if query == self.last_filter_text && self.filter_valid {
             return None;
@@ -1167,7 +1176,10 @@ impl PathPicker {
         self.last_filter_text = query.to_string();
         self.filter_valid = true;
 
-        let scan = self.picklist.begin_refilter(query, &self.git_root)?;
+        let Some(scan) = self.picklist.begin_refilter(query, &self.git_root) else {
+            self.retire_scan();
+            return None;
+        };
         Some(self.supersede(scan))
     }
 
@@ -1184,6 +1196,19 @@ impl PathPicker {
         self.scan_generation = next_generation();
         self.scan_pending = true;
         (self.scan_generation, scan)
+    }
+
+    /// Retire the scan still out, so that its result never lands.
+    ///
+    /// An inline answer, a replaced base, and a re-root each change what the
+    /// rows index with no scan of their own to supersede the one out. That scan
+    /// answers a query or a base the rows have left. Its result paints the
+    /// wrong rows, or indexes past the end of a smaller base.
+    fn retire_scan(&mut self) {
+        self.scan_cancel.store(true, Ordering::Relaxed);
+        self.scan_cancel = Arc::new(AtomicBool::new(false));
+        self.scan_generation = next_generation();
+        self.scan_pending = false;
     }
 
     /// The sender a scan's runner reports back through, and the task slot that
@@ -1245,7 +1270,10 @@ impl PathPicker {
         self.last_filter_text = query.to_string();
         self.filter_valid = true;
 
-        let scan = self.picklist.begin_refilter(query, &self.git_root)?;
+        let Some(scan) = self.picklist.begin_refilter(query, &self.git_root) else {
+            self.retire_scan();
+            return None;
+        };
         Some(self.supersede(scan))
     }
 
@@ -1338,11 +1366,15 @@ impl PathPicker {
     /// The query cache still applies, so a caller that changes `base` under a
     /// stable query must [`Self::invalidate`] first (the finder does this on a
     /// scope flip).
+    ///
+    /// A refilter that runs retires the scan still out, as
+    /// [`Self::refilter`] does.
     pub(crate) fn refilter_with_base(&mut self, query: &str, base: &[PathBuf], id: BaseId) {
         if query == self.last_filter_text && self.filter_valid {
             return;
         }
 
+        self.retire_scan();
         self.adopt_base(base, id);
         // The pick list now holds a caller's set rather than a prefix of the
         // walk, so the next walk-fed refilter starts over.
@@ -3059,6 +3091,114 @@ mod tests {
             "the late result changes nothing rather than reverting the list"
         );
         assert_eq!(answered_query(&picker), Some("ma"));
+    }
+
+    /// A scan for `query` that finished on its worker and has not reported yet.
+    fn finished_scan(picker: &mut PathPicker, query: &str) -> (u64, ScanOutcome) {
+        let (generation, scan) = picker.begin_scan(query).expect("a scan");
+        (
+            generation,
+            scan.run().expect("the query it answers is current"),
+        )
+    }
+
+    /// Report a finished scan back to `picker`, and say whether it landed.
+    fn lands(picker: &mut PathPicker, finished: (u64, ScanOutcome)) -> bool {
+        picker.scan_sink().send(finished).expect("listening");
+        picker.pump_scan()
+    }
+
+    #[test]
+    fn an_erased_query_retires_the_scan_it_started() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+        let late = finished_scan(&mut picker, "m");
+
+        assert!(
+            picker.begin_scan("").is_none(),
+            "an empty query lists inline"
+        );
+        assert!(
+            !lands(&mut picker, late),
+            "the erased query's rows stay out"
+        );
+        assert_eq!(
+            picker.picklist.filtered.len(),
+            narrowing_base().len(),
+            "the empty query lists every row",
+        );
+    }
+
+    #[test]
+    fn a_scope_base_retires_the_walks_scan() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+        let late = finished_scan(&mut picker, "m");
+
+        let base = [p("/repo/src/main.rs"), p("/repo/lib.rs")];
+        picker.invalidate();
+        picker.refilter_with_base(
+            "m",
+            &base,
+            BaseId {
+                identity: 3,
+                len: 2,
+            },
+        );
+
+        assert!(!lands(&mut picker, late), "the walk's rows stay out");
+        let rows: Vec<Option<&PathBuf>> = picker
+            .picklist
+            .filtered
+            .iter()
+            .map(|&i| picker.picklist.base.get(i))
+            .collect();
+        assert_eq!(rows, [Some(&base[0])], "every row indexes the scope's base");
+    }
+
+    #[test]
+    fn a_rerooted_walk_retires_its_scan() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+        let late = finished_scan(&mut picker, "m");
+
+        picker.all_paths.clear();
+        picker.invalidate();
+
+        assert!(!lands(&mut picker, late), "the old root's rows stay out");
+        assert_eq!(
+            picker.picklist.filtered,
+            Vec::<usize>::new(),
+            "the emptied base lists no rows",
+        );
+    }
+
+    #[test]
+    fn an_inline_answer_retires_the_scan_still_out() {
+        type Answer = fn(&mut PathPicker, &[PathBuf], BaseId);
+
+        let mut h = crate::Stoat::test();
+        let base = narrowing_base();
+        let id = BaseId {
+            identity: 5,
+            len: base.len(),
+        };
+        let answers: [(&str, Answer); 3] = [
+            ("an erased query over a base", |picker, base, id| {
+                assert!(picker.begin_scan_with_base("", base, id).is_none());
+            }),
+            ("a walk refilter", |picker, _, _| picker.refilter("ma")),
+            ("a base refilter", |picker, base, id| {
+                picker.refilter_with_base("ma", base, id);
+            }),
+        ];
+
+        for (answer, run) in answers {
+            let mut picker = walked_picker(&mut h);
+            let late = finished_scan(&mut picker, "m");
+            run(&mut picker, &base, id);
+            assert!(!lands(&mut picker, late), "{answer} retires the scan");
+        }
     }
 
     /// Deferring the matching over a caller's base has to reach the same rows

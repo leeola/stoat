@@ -430,10 +430,10 @@ pub(super) fn file_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
 /// the completed name selected and a following Enter opens that entry.
 /// Otherwise the query becomes the selected path relative to the workspace root.
 ///
-/// No-op when the finder is closed or its list is empty. The picker is
-/// refiltered synchronously against the completed query and its selection reset
-/// to the top row, so an Enter arriving before the next render opens the
-/// completed row rather than whatever the stale selection pointed at.
+/// No-op when the finder is closed or its list is empty. The completed query's
+/// scan goes to a worker, and the selection resets to the top row. An Enter
+/// that arrives before that scan lands settles it first, so Enter opens the
+/// completed row and not the row of the stale selection.
 pub(super) fn file_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
     settle_finder_scan(stoat);
     let active_idx = stoat.active_workspace;
@@ -468,10 +468,16 @@ pub(super) fn file_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
 
     sync_file_finder_browse(stoat);
 
-    let ws = &stoat.workspaces[active_idx];
-    if let Some(finder) = stoat.file_finder.as_mut() {
-        finder.refilter_from_input(ws);
+    let pending = {
+        let ws = &stoat.workspaces[active_idx];
+        let finder = stoat.file_finder.as_mut().expect("file_finder present");
+        let pending = finder.refilter_from_input(ws);
         finder.active_core().picklist.selected = 0;
+        pending
+    };
+
+    if let Some((generation, scan)) = pending {
+        spawn_finder_scan(stoat, generation, scan);
     }
     UpdateEffect::Redraw
 }
