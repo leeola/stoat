@@ -1,6 +1,6 @@
 use crate::{
     render::text::write_str,
-    run::{GridSelection, OutputBlock, RunState},
+    run::{GridSelection, OutputBlock, RunState, StyledCell, VtermGrid},
 };
 use ratatui::{
     buffer::Buffer,
@@ -61,35 +61,7 @@ pub(crate) fn render_run_pane(
                     write_str(buf, area.x + pw, y, &display, Style::default());
                 },
                 OutputLine::GridRow(grid, row_idx, selection) => {
-                    let row = grid.row(*row_idx);
-                    let w = (area.width as usize).min(grid.width() as usize);
-                    let row_u16 = u16::try_from(*row_idx).unwrap_or(u16::MAX);
-                    for (col, cell) in row.iter().enumerate().take(w) {
-                        let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
-                        let selected = selection.is_some_and(|sel| sel.contains(col_u16, row_u16));
-                        let blank = cell.ch == ' '
-                            && cell.fg.is_none()
-                            && cell.bg.is_none()
-                            && cell.modifiers.is_empty();
-                        if blank && !selected {
-                            continue;
-                        }
-                        let mut style = Style::default();
-                        if let Some(fg) = cell.fg {
-                            style = style.fg(fg);
-                        }
-                        if let Some(bg) = cell.bg {
-                            style = style.bg(bg);
-                        }
-                        style = style.add_modifier(cell.modifiers);
-                        if selected {
-                            style = style.add_modifier(Modifier::REVERSED);
-                        }
-                        let x = area.x + col as u16;
-                        if x < area.x + area.width {
-                            buf[(x, y)].set_char(cell.ch).set_style(style);
-                        }
-                    }
+                    paint_grid_row(buf, area, y, grid, *row_idx, *selection);
                 },
                 OutputLine::Error(msg) => {
                     let max_w = area.width as usize;
@@ -133,6 +105,56 @@ pub(crate) fn render_run_pane(
         &std::collections::BTreeMap::new(),
         buf,
     );
+}
+
+/// Paint row `row_idx` of `grid` at `y`, from `area.x` across as much of the
+/// grid's width as `area` holds.
+///
+/// A row holds only the cells written to it. A selection also covers the
+/// columns past them, so a row of a selected block paints full width. Those
+/// columns show as reversed blanks.
+fn paint_grid_row(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    grid: &VtermGrid,
+    row_idx: usize,
+    selection: Option<&GridSelection>,
+) {
+    let row = grid.row(row_idx);
+    let w = (area.width as usize).min(grid.width() as usize);
+    let cols = match selection {
+        Some(_) => w,
+        None => row.len().min(w),
+    };
+    let unwritten = StyledCell::default();
+    let row_u16 = u16::try_from(row_idx).unwrap_or(u16::MAX);
+
+    for col in 0..cols {
+        let cell = row.get(col).unwrap_or(&unwritten);
+        let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
+        let selected = selection.is_some_and(|sel| sel.contains(col_u16, row_u16));
+        let blank =
+            cell.ch == ' ' && cell.fg.is_none() && cell.bg.is_none() && cell.modifiers.is_empty();
+        if blank && !selected {
+            continue;
+        }
+        let mut style = Style::default();
+        if let Some(fg) = cell.fg {
+            style = style.fg(fg);
+        }
+        if let Some(bg) = cell.bg {
+            style = style.bg(bg);
+        }
+        style = style.add_modifier(cell.modifiers);
+        if selected {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        let x = area.x + col as u16;
+        if x < area.x + area.width {
+            buf[(x, y)].set_char(cell.ch).set_style(style);
+        }
+    }
 }
 
 /// The block-local row offsets that fall inside `window`, for a block occupying
@@ -180,7 +202,7 @@ enum OutputLine<'a> {
         prev_exit: Option<i32>,
         command: &'a str,
     },
-    GridRow(&'a crate::run::VtermGrid, usize, Option<&'a GridSelection>),
+    GridRow(&'a VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
 }
 
@@ -314,7 +336,10 @@ pub(crate) fn render_modal_run(
 
 #[cfg(test)]
 mod tests {
-    use super::{block_line, window_offsets, OutputBlock, OutputLine};
+    use super::{
+        block_line, paint_grid_row, window_offsets, Buffer, GridSelection, Modifier, OutputBlock,
+        OutputLine, Rect,
+    };
     use std::path::PathBuf;
 
     /// The `(block, offset)` pairs the pane draws, built the obvious way: lay
@@ -405,6 +430,27 @@ mod tests {
             lines,
             ["prompt", "grid0", "grid1"],
             "the span stops at the grid when there is no error line to follow it"
+        );
+    }
+
+    #[test]
+    fn a_selection_past_a_rows_content_paints_reversed_blanks() {
+        let block = block_with("ab", None);
+        let selection = GridSelection {
+            anchor: (0, 0),
+            head: (5, 0),
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        paint_grid_row(&mut buf, area, 0, &block.grid, 0, Some(&selection));
+
+        let reversed: Vec<u16> = (0..20)
+            .filter(|&x| buf[(x, 0)].modifier.contains(Modifier::REVERSED))
+            .collect();
+        assert_eq!(
+            reversed,
+            [0, 1, 2, 3, 4, 5],
+            "the selection reaches past the two written cells"
         );
     }
 

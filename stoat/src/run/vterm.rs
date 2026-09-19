@@ -12,6 +12,16 @@ pub struct StyledCell {
     pub modifiers: Modifier,
 }
 
+impl StyledCell {
+    /// Whether the cell is the default one.
+    ///
+    /// A default cell paints nothing, so a row drops the default cells past its
+    /// last written one.
+    fn is_blank(&self) -> bool {
+        self.ch == ' ' && self.fg.is_none() && self.bg.is_none() && self.modifiers.is_empty()
+    }
+}
+
 impl Default for StyledCell {
     fn default() -> Self {
         Self {
@@ -85,7 +95,7 @@ pub struct VtermGrid {
 impl VtermGrid {
     pub fn new(width: u16) -> Self {
         Self {
-            cells: vec![vec![StyledCell::default(); width as usize]],
+            cells: vec![Vec::with_capacity(width as usize)],
             cursor_row: 0,
             cursor_col: 0,
             width,
@@ -144,13 +154,40 @@ impl VtermGrid {
     }
 
     fn row_is_blank(&self, idx: usize) -> bool {
-        self.cells[idx]
+        self.cells[idx].iter().all(StyledCell::is_blank)
+    }
+
+    /// Drop the cursor row's cells past its last written one, and give back
+    /// the width it reserved.
+    ///
+    /// A line feed and a cursor down call this before they move the cursor
+    /// off the row. A finished line then holds its own cells rather than the
+    /// pane's width. That width is most of what a flood of short lines into a
+    /// wide pane costs.
+    ///
+    /// A cursor up leaves the row as it is, because a redraw that moves up
+    /// comes back to that row.
+    fn leave_row(&mut self) {
+        let Some(row) = self.cells.get_mut(self.cursor_row) else {
+            return;
+        };
+        let written = row
             .iter()
-            .all(|c| c.ch == ' ' && c.fg.is_none() && c.bg.is_none() && c.modifiers.is_empty())
+            .rposition(|cell| !cell.is_blank())
+            .map_or(0, |last| last + 1);
+        row.truncate(written);
+        row.shrink_to_fit();
     }
 
     pub fn row(&self, idx: usize) -> &[StyledCell] {
         &self.cells[idx]
+    }
+
+    /// The cells row `idx` has room for, so a test sees a finished row give
+    /// back the width it reserved.
+    #[cfg(test)]
+    pub(super) fn row_capacity(&self, idx: usize) -> usize {
+        self.cells[idx].capacity()
     }
 
     pub fn width(&self) -> u16 {
@@ -243,8 +280,14 @@ impl VtermGrid {
 
     fn ensure_row(&mut self, row: usize) {
         while self.cells.len() <= row {
-            self.cells
-                .push(vec![StyledCell::default(); self.width as usize]);
+            // Only the row the cursor lands on takes writes, so only it
+            // reserves the width. A row the cursor jumps past stays empty.
+            let reserve = if self.cells.len() == row {
+                self.width as usize
+            } else {
+                0
+            };
+            self.cells.push(Vec::with_capacity(reserve));
         }
         self.trim_scrollback();
     }
@@ -272,7 +315,11 @@ impl VtermGrid {
         let w = self.width as usize;
         self.ensure_row(self.cursor_row);
         if self.cursor_col < w {
-            self.cells[self.cursor_row][self.cursor_col] = StyledCell {
+            let row = &mut self.cells[self.cursor_row];
+            if row.len() <= self.cursor_col {
+                row.resize(self.cursor_col + 1, StyledCell::default());
+            }
+            row[self.cursor_col] = StyledCell {
                 ch,
                 fg: self.pen_fg,
                 bg: self.pen_bg,
@@ -297,6 +344,7 @@ impl vte::Perform for VtermGrid {
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' => {
+                self.leave_row();
                 self.cursor_col = 0;
                 self.cursor_row += 1;
                 self.ensure_row(self.cursor_row);
@@ -501,6 +549,7 @@ impl vte::Perform for VtermGrid {
             },
             'B' => {
                 let n = first_param(&params_vec, 1) as usize;
+                self.leave_row();
                 self.cursor_row += n;
                 self.ensure_row(self.cursor_row);
             },
@@ -517,22 +566,17 @@ impl vte::Perform for VtermGrid {
                 self.ensure_row(self.cursor_row);
                 let w = self.width as usize;
                 let row = &mut self.cells[self.cursor_row];
+                // A row holds only the cells written to it. An erase to the end
+                // drops those cells, and the prefix erase of mode 1 stops at
+                // the row's end.
                 match mode {
-                    0 => {
-                        for cell in row.iter_mut().take(w).skip(self.cursor_col) {
-                            *cell = StyledCell::default();
-                        }
-                    },
+                    0 => row.truncate(self.cursor_col),
                     1 => {
                         for cell in row.iter_mut().take(self.cursor_col.min(w - 1) + 1) {
                             *cell = StyledCell::default();
                         }
                     },
-                    2 => {
-                        for cell in row.iter_mut() {
-                            *cell = StyledCell::default();
-                        }
-                    },
+                    2 => row.clear(),
                     _ => {},
                 }
             },
@@ -540,32 +584,28 @@ impl vte::Perform for VtermGrid {
                 let mode = first_param(&params_vec, 0);
                 self.ensure_row(self.cursor_row);
                 let w = self.width as usize;
+                let (cursor_row, cursor_col) = (self.cursor_row, self.cursor_col);
                 match mode {
                     0 => {
-                        for col in self.cursor_col..w {
-                            self.cells[self.cursor_row][col] = StyledCell::default();
-                        }
-                        for row in (self.cursor_row + 1)..self.cells.len() {
-                            for cell in &mut self.cells[row] {
-                                *cell = StyledCell::default();
-                            }
+                        self.cells[cursor_row].truncate(cursor_col);
+                        for row in &mut self.cells[cursor_row + 1..] {
+                            row.clear();
                         }
                     },
                     1 => {
-                        for row in 0..self.cursor_row {
-                            for cell in &mut self.cells[row] {
-                                *cell = StyledCell::default();
-                            }
+                        for row in &mut self.cells[..cursor_row] {
+                            row.clear();
                         }
-                        for col in 0..=self.cursor_col.min(w - 1) {
-                            self.cells[self.cursor_row][col] = StyledCell::default();
+                        for cell in self.cells[cursor_row]
+                            .iter_mut()
+                            .take(cursor_col.min(w - 1) + 1)
+                        {
+                            *cell = StyledCell::default();
                         }
                     },
                     2 => {
                         for row in &mut self.cells {
-                            for cell in row.iter_mut() {
-                                *cell = StyledCell::default();
-                            }
+                            row.clear();
                         }
                     },
                     _ => {},

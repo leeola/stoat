@@ -267,6 +267,64 @@ mod tests {
         assert_eq!(prefix, "hello");
     }
 
+    /// Every cell `row` holds, untrimmed, so a row padded past its content
+    /// reads longer than the content.
+    fn row_text(grid: &VtermGrid, row: usize) -> String {
+        grid.row(row).iter().map(|cell| cell.ch).collect()
+    }
+
+    #[test]
+    fn a_finished_row_holds_only_its_cells() {
+        let mut grid = VtermGrid::new(200);
+        assert_eq!(grid.row(0).len(), 0, "a fresh grid's row");
+
+        grid.feed(b"hello   \r\nhi  \x1b[2B");
+        let held: Vec<(usize, usize)> = (0..3)
+            .map(|row| (grid.row(row).len(), grid.row_capacity(row)))
+            .collect();
+        assert_eq!(
+            (held, grid.row(3).len()),
+            (vec![(5, 5), (2, 2), (0, 0)], 0),
+            "rows the cursor leaves or skips hold their written cells and no room past them"
+        );
+    }
+
+    #[test]
+    fn a_cursor_up_rewrites_a_shrunk_row() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"abc\r\n\x1b[Awxyz");
+        assert_eq!(
+            row_text(&grid, 0),
+            "wxyz",
+            "the rewrite runs past where the finished row was cut"
+        );
+    }
+
+    #[test]
+    fn erasing_to_the_line_end_cuts_the_row_at_the_cursor() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"abcdef\r\x1b[3C\x1b[K");
+        assert_eq!(row_text(&grid, 0), "abc");
+    }
+
+    #[test]
+    fn erasing_below_the_cursor_cuts_its_row_and_clears_the_rest() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"ab\r\ncd\r\nef\x1b[2A\r\x1b[1C\x1b[J");
+        let rows: Vec<String> = (0..3).map(|row| row_text(&grid, row)).collect();
+        assert_eq!(rows, ["a", "", ""]);
+    }
+
+    #[test]
+    fn erasing_before_a_cursor_past_the_rows_end_blanks_its_cells() {
+        for (erase, expected) in [("1K", ["ab", "  "]), ("1J", ["", "  "])] {
+            let mut grid = VtermGrid::new(10);
+            grid.feed(format!("ab\r\ncd\x1b[5C\x1b[{erase}").as_bytes());
+            let rows: Vec<String> = (0..2).map(|row| row_text(&grid, row)).collect();
+            assert_eq!(rows, expected, "CSI {erase}");
+        }
+    }
+
     #[test]
     fn grid_newline_advances_row() {
         let mut grid = VtermGrid::new(10);
