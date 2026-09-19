@@ -1,86 +1,106 @@
 use super::{
-    bundle, dumps_dir,
+    bundle,
     meta::DumpMeta,
     snapshot::{ActiveRebaseSnap, WorkspaceSnapshot},
     walker, CreateDirSnafu, DumpError, DumpId, RonSnafu, WriteDumpSnafu,
 };
-use crate::{app::Stoat, host::FsHost, workspace::Workspace};
+use crate::{host::FsHost, workspace::Workspace};
 use snafu::ResultExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
-/// Write a dump bundle to `<XDG_DATA_HOME>/stoat/dumps/<id>.dump`.
+/// A dump whose workspace snapshot is taken and whose tree is not yet read.
 ///
-/// Captures the working tree (respecting `.gitignore`), the `.git/`
-/// directory, the `.stoat/` directory (if present), and a
-/// `.stoat/dump.ron` file with metadata plus the serializable subset of
-/// the active workspace (rebase plan + active rebase).
-pub fn save_at(
-    stoat: &Stoat,
-    name: &str,
-    at: OffsetDateTime,
-    fs: &dyn FsHost,
-) -> Result<DumpId, DumpError> {
-    let id = DumpId::new(name, at)?;
-    let dumps = dumps_dir()?;
-    fs.create_dir_all(&dumps).with_context(|_| CreateDirSnafu {
-        path: dumps.clone(),
-    })?;
-    let archive_path = dumps.join(id.filename());
-    write_archive(
-        stoat.active_workspace(),
-        stoat.focused_mode(),
-        &id,
-        at,
-        &archive_path,
-        fs,
-    )?;
-    Ok(id)
+/// The snapshot reads editor state, so it is taken on the run loop when the
+/// command runs. The write reads the whole tree, so the caller sends it off the
+/// run loop, and the bundle still holds the workspace as it stood at the
+/// command.
+pub(crate) struct PendingDump {
+    id: DumpId,
+    meta: DumpMeta,
+    dumps: PathBuf,
 }
 
-/// Low-level writer: produce a dump bundle at the exact path
-/// `archive_path` from `workspace` plus the current UI `mode`. Splits
-/// the IO-bound work out of [`save_at`] so callers that already know
-/// where the bundle should go (tests, internal replay tooling) can
-/// bypass [`dumps_dir`].
-pub(crate) fn write_archive(
+impl PendingDump {
+    /// Write the bundle to `<dumps>/<id>.dump`, creating the directory, and
+    /// return the dump's id.
+    ///
+    /// The bundle holds the working tree (respecting `.gitignore`), the
+    /// `.git/` directory, the `.stoat/` directory (if present), and the
+    /// metadata, which the load path extracts to `.stoat/dump.ron`. Every file
+    /// under the git root is read, which takes seconds on a large repository.
+    pub(crate) fn write(self, fs: &dyn FsHost) -> Result<DumpId, DumpError> {
+        fs.create_dir_all(&self.dumps)
+            .with_context(|_| CreateDirSnafu {
+                path: self.dumps.clone(),
+            })?;
+        let meta_ron = self.meta.to_ron().map_err(|e| {
+            RonSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
+
+        let archive_path = self.dumps.join(self.id.filename());
+        write_bundle(&meta_ron, &self.meta.git_root, &archive_path, fs)?;
+        Ok(self.id)
+    }
+}
+
+/// Snapshot `workspace` in UI `mode` for a dump named `name` at `at`, bound
+/// for the directory `dumps`.
+///
+/// Reads no file. The run loop pays for clones of the rebase state and the
+/// mode, and [`PendingDump::write`] does the rest.
+pub(crate) fn capture(
     workspace: &Workspace,
     mode: &str,
-    id: &DumpId,
+    name: &str,
     at: OffsetDateTime,
-    archive_path: &Path,
-    fs: &dyn FsHost,
-) -> Result<(), DumpError> {
-    let sanitized_name = id.name().unwrap_or("").to_string();
-    let git_root = workspace.git_root.clone();
+    dumps: &Path,
+) -> Result<PendingDump, DumpError> {
+    let id = DumpId::new(name, at)?;
+    let meta = capture_meta(workspace, mode, &id, at);
+    Ok(PendingDump {
+        id,
+        meta,
+        dumps: dumps.to_path_buf(),
+    })
+}
 
+/// The metadata of the dump `id`, taken at `at`, of `workspace` in UI `mode`.
+///
+/// Holds the serializable subset of the workspace (the rebase plan and the
+/// active rebase) and names the fields a dump drops.
+fn capture_meta(workspace: &Workspace, mode: &str, id: &DumpId, at: OffsetDateTime) -> DumpMeta {
     let (snapshot, snapshot_dropped) = build_snapshot(workspace, mode);
     let mut dropped_fields = dropped_fields_for(workspace);
     dropped_fields.extend(snapshot_dropped);
 
-    let meta = DumpMeta {
+    DumpMeta {
         created_at: at,
-        name: sanitized_name,
+        name: id.name().unwrap_or("").to_string(),
         stoat_version: env!("CARGO_PKG_VERSION").to_string(),
-        git_root: git_root.clone(),
+        git_root: workspace.git_root.clone(),
         dropped_fields,
         workspace: snapshot,
-    };
-    let meta_ron = meta.to_ron().map_err(|e| {
-        RonSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })?;
+    }
+}
 
-    let entries = walker::gather_workspace_files(fs, &git_root)?;
-
-    let bundle_bytes = bundle::serialize(&meta_ron, &entries)?;
+/// Write a bundle of `meta_ron` and the tree under `git_root` to
+/// `archive_path`.
+fn write_bundle(
+    meta_ron: &str,
+    git_root: &Path,
+    archive_path: &Path,
+    fs: &dyn FsHost,
+) -> Result<(), DumpError> {
+    let paths = walker::gather_workspace_files(fs, git_root)?;
+    let bundle_bytes = bundle::serialize(meta_ron, git_root, &paths, fs)?;
     fs.write(archive_path, &bundle_bytes)
         .with_context(|_| WriteDumpSnafu {
             path: archive_path.to_path_buf(),
-        })?;
-    Ok(())
+        })
 }
 
 fn dropped_fields_for(workspace: &Workspace) -> Vec<String> {

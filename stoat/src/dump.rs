@@ -23,7 +23,7 @@ const FORCE_INCLUDE_DIRS: &[&str] = &[".git", ".stoat"];
 
 use crate::host::FsHost;
 pub use meta::DumpMeta;
-pub use save::save_at;
+pub(crate) use save::capture;
 use snafu::{ResultExt, Snafu};
 use std::{
     io,
@@ -444,11 +444,6 @@ pub(crate) fn read_archive(
     Ok(())
 }
 
-/// Thin wrapper around [`save_at`] using the current UTC time.
-pub fn save(stoat: &crate::app::Stoat, name: &str, fs: &dyn FsHost) -> Result<DumpId, DumpError> {
-    save_at(stoat, name, OffsetDateTime::now_utc(), fs)
-}
-
 /// Load the metadata at `meta_path` (typically
 /// `<extracted-dir>/.stoat/dump.ron`) and apply the captured workspace
 /// snapshot to `stoat`'s active workspace.
@@ -678,13 +673,15 @@ mod tests {
         let executor = scheduler.executor();
         let workspace = Workspace::new(root.clone(), &executor, crate::test_notify());
 
-        let archive_path = PathBuf::from("/dumps/test.dump");
         let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
-        let id = DumpId::new("roundtrip-test", at).unwrap();
-        save::write_archive(&workspace, "normal", &id, at, &archive_path, &fake).unwrap();
+        let dumps = PathBuf::from("/dumps");
+        let id = capture(&workspace, "normal", "roundtrip-test", at, &dumps)
+            .unwrap()
+            .write(&fake)
+            .unwrap();
 
         let dest = PathBuf::from("/extracted");
-        read_archive(&archive_path, &dest, &fake).unwrap();
+        read_archive(&dumps.join(id.filename()), &dest, &fake).unwrap();
 
         let mut buf = Vec::new();
         fake.read(&dest.join("README.md"), &mut buf).unwrap();

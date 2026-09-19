@@ -6,6 +6,7 @@ use crate::{
     workspace_picker::WorkspacePicker,
 };
 use std::path::{Path, PathBuf};
+use time::OffsetDateTime;
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
@@ -303,10 +304,38 @@ fn activate_inactive_workspace(
 }
 
 pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
-    match crate::dump::save(stoat, name, &*stoat.fs_host) {
-        Ok(id) => tracing::info!(id = %id, "dump captured"),
+    match crate::dump::dumps_dir() {
+        Ok(dumps) => dump_into(stoat, name, OffsetDateTime::now_utc(), &dumps),
         Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
     }
+}
+
+/// Snapshot the active workspace for the dump `name` and write its bundle into
+/// `dumps` on the blocking pool.
+///
+/// The snapshot is cheap and taken here, so the bundle holds the workspace as it
+/// stood at the command. The write reads every file under the git root, which
+/// takes seconds on a large repository, so it runs off the run loop and logs
+/// its own outcome.
+fn dump_into(stoat: &Stoat, name: &str, at: OffsetDateTime, dumps: &Path) {
+    let workspace = stoat.active_workspace();
+    let pending = match crate::dump::capture(workspace, stoat.focused_mode(), name, at, dumps) {
+        Ok(pending) => pending,
+        Err(e) => {
+            tracing::error!(error = %e, name = %name, "dump failed");
+            return;
+        },
+    };
+
+    let fs = stoat.fs_host.clone();
+    let name = name.to_owned();
+    stoat
+        .executor
+        .spawn_blocking(move || match pending.write(fs.as_ref()) {
+            Ok(id) => tracing::info!(id = %id, "dump captured"),
+            Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
+        })
+        .detach();
 }
 
 pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
@@ -396,11 +425,13 @@ mod tests {
     use super::*;
     use crate::{
         badge::BadgeSource,
+        dump::{self, DumpId},
         input_view::{InputView, SubmitTarget},
         workspace::registry::{RegistryEntry, WorkspaceMeta},
         workspace_picker::WorkspacePicker,
     };
     use std::time::UNIX_EPOCH;
+    use time::macros::datetime;
 
     fn picker_input(stoat: &mut Stoat) -> InputView {
         let executor = stoat.executor.clone();
@@ -611,6 +642,35 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("deleted session beta"),
             "the status names the deleted session"
+        );
+    }
+
+    /// The test scheduler runs blocking work inline and counts it, so the one
+    /// call below is the tree walk, and the bundle it wrote extracts whole.
+    #[test]
+    fn a_dump_reads_the_tree_on_the_blocking_pool() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
+        harness.fake_fs().insert_file("/ws/a.rs", "alpha");
+        let before = harness.blocking_calls();
+
+        let at = datetime!(2026-04-19 14:23:11 UTC);
+        dump_into(&harness.stoat, "t", at, Path::new("/dumps"));
+
+        let id = DumpId::new("t", at).expect("valid name");
+        let archive = Path::new("/dumps").join(id.filename());
+        dump::read_archive(&archive, Path::new("/out"), harness.fake_fs().as_ref())
+            .expect("the bundle extracts");
+        let mut extracted = Vec::new();
+        harness
+            .fake_fs()
+            .read(Path::new("/out/a.rs"), &mut extracted)
+            .expect("the file came along");
+
+        assert_eq!(
+            (harness.blocking_calls() - before, extracted.as_slice()),
+            (1, b"alpha".as_slice()),
+            "one blocking call wrote a bundle holding the tree"
         );
     }
 }

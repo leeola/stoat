@@ -1,15 +1,26 @@
-use super::{BundleFormatSnafu, DumpError};
-use std::{collections::BTreeMap, path::PathBuf};
+use super::{BundleFormatSnafu, DumpError, ReadDumpSnafu};
+use crate::host::FsHost;
+use snafu::ResultExt;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 const MAGIC: &[u8; 4] = b"SDMP";
 const VERSION: u8 = 1;
 
-/// Serialize a dump bundle: framed header, RON metadata, then per-file
-/// path/content entries. Sorted iteration of `entries` keeps the output
-/// reproducible byte-for-byte across runs.
+/// Serialize a dump bundle of the files in `paths`, read from under `root`
+/// through `fs`.
+///
+/// The bundle is a framed header, the RON metadata, then a path and content
+/// entry per file. Each file is read into one scratch buffer and appended, so
+/// the peak is the bundle plus one file rather than two copies of the tree.
+/// Sorted `paths` keep the output reproducible byte for byte across runs.
 pub(crate) fn serialize(
     meta_ron: &str,
-    entries: &BTreeMap<PathBuf, Vec<u8>>,
+    root: &Path,
+    paths: &[PathBuf],
+    fs: &dyn FsHost,
 ) -> Result<Vec<u8>, DumpError> {
     let meta_bytes = meta_ron.as_bytes();
     if meta_bytes.len() > u32::MAX as usize {
@@ -18,24 +29,25 @@ pub(crate) fn serialize(
         }
         .fail();
     }
-    if entries.len() > u32::MAX as usize {
+    if paths.len() > u32::MAX as usize {
         return BundleFormatSnafu {
             reason: "dump contains too many entries".to_string(),
         }
         .fail();
     }
 
-    let mut out = Vec::with_capacity(estimate_size(meta_bytes.len(), entries));
+    let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(meta_bytes);
-    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(paths.len() as u32).to_le_bytes());
 
-    for (path, content) in entries {
-        let path_str = path.to_str().ok_or_else(|| {
+    let mut content = Vec::new();
+    for rel in paths {
+        let path_str = rel.to_str().ok_or_else(|| {
             BundleFormatSnafu {
-                reason: format!("non-UTF-8 path in dump: {}", path.display()),
+                reason: format!("non-UTF-8 path in dump: {}", rel.display()),
             }
             .build()
         })?;
@@ -46,10 +58,15 @@ pub(crate) fn serialize(
             }
             .fail();
         }
+
+        let path = root.join(rel);
+        fs.read(&path, &mut content)
+            .with_context(|_| ReadDumpSnafu { path: path.clone() })?;
+
         out.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
         out.extend_from_slice(path_bytes);
         out.extend_from_slice(&(content.len() as u64).to_le_bytes());
-        out.extend_from_slice(content);
+        out.extend_from_slice(&content);
     }
 
     Ok(out)
@@ -115,15 +132,6 @@ pub(crate) fn deserialize(bytes: &[u8]) -> Result<(String, BTreeMap<PathBuf, Vec
     Ok((meta_ron, entries))
 }
 
-fn estimate_size(meta_len: usize, entries: &BTreeMap<PathBuf, Vec<u8>>) -> usize {
-    let header = 4 + 1 + 4 + meta_len + 4;
-    let bodies: usize = entries
-        .iter()
-        .map(|(p, c)| 2 + p.as_os_str().len() + 8 + c.len())
-        .sum();
-    header + bodies
-}
-
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -177,29 +185,44 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::FakeFs;
+
+    /// A bundle of `files`, each a relative path and its content, read from a
+    /// fake tree rooted at `/ws`.
+    fn bundle(meta: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let fs = FakeFs::new();
+        for (path, content) in files {
+            fs.insert_file(Path::new("/ws").join(path), content);
+        }
+        let paths: Vec<PathBuf> = files.iter().map(|(path, _)| PathBuf::from(path)).collect();
+        serialize(meta, Path::new("/ws"), &paths, &fs).unwrap()
+    }
 
     #[test]
     fn roundtrip_empty_entries() {
-        let bytes = serialize("meta", &BTreeMap::new()).unwrap();
-        let (meta, entries) = deserialize(&bytes).unwrap();
+        let (meta, entries) = deserialize(&bundle("meta", &[])).unwrap();
         assert_eq!(meta, "meta");
         assert!(entries.is_empty());
     }
 
+    /// Both files go through one scratch buffer, so bytes the first read left
+    /// behind show up in the second file's content.
     #[test]
     fn roundtrip_with_entries() {
-        let mut input = BTreeMap::new();
-        input.insert(PathBuf::from("a.rs"), b"alpha".to_vec());
-        input.insert(PathBuf::from("sub/b.rs"), b"beta\n\x00\xff".to_vec());
-        let bytes = serialize("(name: \"x\")", &input).unwrap();
-        let (meta, entries) = deserialize(&bytes).unwrap();
+        let files: [(&str, &[u8]); 2] = [("a.rs", b"alpha"), ("sub/b.rs", b"beta\n\x00\xff")];
+        let (meta, entries) = deserialize(&bundle("(name: \"x\")", &files)).unwrap();
         assert_eq!(meta, "(name: \"x\")");
-        assert_eq!(entries, input);
+
+        let expected: BTreeMap<PathBuf, Vec<u8>> = files
+            .iter()
+            .map(|(path, content)| (PathBuf::from(path), content.to_vec()))
+            .collect();
+        assert_eq!(entries, expected);
     }
 
     #[test]
     fn deserialize_rejects_bad_magic() {
-        let mut bytes = serialize("m", &BTreeMap::new()).unwrap();
+        let mut bytes = bundle("m", &[]);
         bytes[0] = b'X';
         let err = deserialize(&bytes).unwrap_err();
         assert!(format!("{err}").contains("bad dump magic"));
@@ -207,7 +230,7 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_unknown_version() {
-        let mut bytes = serialize("m", &BTreeMap::new()).unwrap();
+        let mut bytes = bundle("m", &[]);
         bytes[4] = 99;
         let err = deserialize(&bytes).unwrap_err();
         assert!(format!("{err}").contains("unsupported dump version"));
@@ -215,14 +238,14 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_truncated() {
-        let bytes = serialize("m", &BTreeMap::new()).unwrap();
+        let bytes = bundle("m", &[]);
         let err = deserialize(&bytes[..bytes.len() - 1]).unwrap_err();
         assert!(format!("{err}").contains("truncated"));
     }
 
     #[test]
     fn deserialize_rejects_trailing_bytes() {
-        let mut bytes = serialize("m", &BTreeMap::new()).unwrap();
+        let mut bytes = bundle("m", &[]);
         bytes.push(0);
         let err = deserialize(&bytes).unwrap_err();
         assert!(format!("{err}").contains("trailing bytes"));

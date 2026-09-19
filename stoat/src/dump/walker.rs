@@ -5,37 +5,43 @@ use ignore::{
     Match,
 };
 use snafu::ResultExt;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 const GITIGNORE_FILE: &str = ".gitignore";
 
-/// Walk the workspace tree at `root` through `fs`, returning a map from
-/// workspace-relative path to file contents. Honors per-directory
+/// Walk the workspace tree at `root` through `fs`, returning every file's
+/// workspace-relative path in sorted order. Honors per-directory
 /// `.gitignore` files (read through `fs`); skips ignored files /
 /// directories. Top-level `.git/` and `.stoat/` directories bypass
 /// gitignore checks so dump replay always has the repo metadata.
+///
+/// Reads no file but the `.gitignore` files. A caller reads each file as it
+/// writes it, so it never holds the whole tree at once.
 ///
 /// Out of scope: `.git/info/exclude` and the global gitignore. Adding
 /// either requires reading state outside the workspace tree.
 pub(crate) fn gather_workspace_files(
     fs: &dyn FsHost,
     root: &Path,
-) -> Result<BTreeMap<PathBuf, Vec<u8>>, DumpError> {
-    let mut out = BTreeMap::new();
+) -> Result<Vec<PathBuf>, DumpError> {
+    let mut out = Vec::new();
     let mut chain = GitignoreChain::new();
     walk(fs, root, root, &mut chain, &mut out)?;
     Ok(out)
 }
 
+/// Push the files under `dir` onto `out`, each directory's entries sorted by
+/// name.
+///
+/// Sorting by name within each directory and descending in that order yields
+/// the order paths sort in, component by component, so `out` comes out sorted
+/// without a sort of its own.
 fn walk(
     fs: &dyn FsHost,
     root: &Path,
     dir: &Path,
     chain: &mut GitignoreChain,
-    out: &mut BTreeMap<PathBuf, Vec<u8>>,
+    out: &mut Vec<PathBuf>,
 ) -> Result<(), DumpError> {
     let pushed = read_gitignore(fs, dir, chain)?;
 
@@ -65,10 +71,7 @@ fn walk(
         if entry.is_dir {
             walk(fs, root, &path, chain, out)?;
         } else {
-            let mut buf = Vec::new();
-            fs.read(&path, &mut buf)
-                .with_context(|_| ReadDumpSnafu { path: path.clone() })?;
-            out.insert(rel, buf);
+            out.push(rel);
         }
     }
 
@@ -164,8 +167,9 @@ mod tests {
     use super::*;
     use crate::host::FakeFs;
 
-    fn read_keys(map: &BTreeMap<PathBuf, Vec<u8>>) -> Vec<String> {
-        map.keys()
+    fn read_keys(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect()
     }
@@ -177,8 +181,23 @@ mod tests {
         fs.insert_file("/ws/sub/b.txt", "beta");
         let out = gather_workspace_files(&fs, Path::new("/ws")).unwrap();
         assert_eq!(read_keys(&out), ["a.txt", "sub/b.txt"]);
-        assert_eq!(out[Path::new("a.txt")], b"alpha");
-        assert_eq!(out[Path::new("sub/b.txt")], b"beta");
+    }
+
+    /// A directory whose name is a prefix of a file's name, as `a` is of
+    /// `a.txt`, still yields the order a path sort gives, since the bundle is
+    /// only reproducible when the walk order is.
+    #[test]
+    fn the_walk_yields_paths_in_sorted_order() {
+        let fs = FakeFs::new();
+        for path in ["/ws/a.txt", "/ws/a/z.txt", "/ws/a-b/c.txt", "/ws/B.txt"] {
+            fs.insert_file(path, "");
+        }
+        let out = gather_workspace_files(&fs, Path::new("/ws")).unwrap();
+        assert_eq!(
+            read_keys(&out),
+            ["B.txt", "a/z.txt", "a-b/c.txt", "a.txt"],
+            "a path sort puts a/z.txt first, where a string sort puts a-b/c.txt"
+        );
     }
 
     #[test]
