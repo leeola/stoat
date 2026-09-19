@@ -468,7 +468,11 @@ pub fn extract_highlights(language: &Language, tree: &Tree, text: &str) -> Vec<H
     let highlight_map = language.highlight_map();
     let mut raw: Vec<RawSpan> = Vec::new();
     let mut cursor = QueryCursorHandle::new();
-    let mut matches = cursor.matches(&language.highlight_query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(
+        language.highlight_query(),
+        tree.root_node(),
+        text.as_bytes(),
+    );
 
     while let Some(m) = matches.next() {
         let pattern = m.pattern_index;

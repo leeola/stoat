@@ -10,7 +10,9 @@ pub struct Language {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
     pub grammar: TsLanguage,
-    pub highlight_query: Query,
+    /// The query every paint reads, compiled on first use through
+    /// [`Self::highlight_query`].
+    highlight: HighlightQuery,
     /// Theme-resolved capture index -> [`HighlightId`] table. Mutable
     /// so the host can rebuild it when the active theme changes via
     /// [`Language::set_highlight_map`]. Defaults to an empty map
@@ -24,11 +26,9 @@ pub struct Language {
     /// resolves fenced code blocks to their info-string language. Rust injects
     /// markdown inside `doc_comment` nodes.
     pub injections: Vec<LanguageInjection>,
-    /// Compiled query that captures injection host nodes by kind. Built
-    /// from [`Language::injections`] when the language is constructed; the
-    /// capture names match the host node kinds. `None` when there are no
-    /// injections configured.
-    pub injection_query: Option<Query>,
+    /// The query that captures injection host nodes by kind, built from
+    /// [`Self::injections`] on first use through [`Self::injection_query`].
+    injection: OnceLock<Option<Query>>,
     /// The action-driven queries, compiled the first time one is asked for.
     ///
     /// None of these is read to paint a frame, and each costs tens of
@@ -122,6 +122,33 @@ impl LazyQuery {
         self.compiled
             .get_or_init(|| self.src.and_then(|src| Query::new(grammar, src).ok()))
             .as_ref()
+    }
+}
+
+/// The highlight query, compiled from its source the first time it is read.
+///
+/// Unlike a [`LazyQuery`], every language ships one and every paint reads it.
+/// A source that fails against the bundled grammar is a build defect, so it
+/// panics rather than compiling to nothing.
+struct HighlightQuery {
+    src: &'static str,
+    compiled: OnceLock<Query>,
+}
+
+impl HighlightQuery {
+    fn new(src: &'static str) -> HighlightQuery {
+        HighlightQuery {
+            src,
+            compiled: OnceLock::new(),
+        }
+    }
+
+    /// The compiled query, compiling it on the first call.
+    fn get(&self, name: &str, grammar: &TsLanguage) -> &Query {
+        self.compiled.get_or_init(|| {
+            Query::new(grammar, self.src)
+                .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"))
+        })
     }
 }
 
@@ -225,11 +252,38 @@ impl Language {
         self.aux.tags.get(&self.grammar)
     }
 
+    /// The highlight query, compiled on the first call.
+    ///
+    /// Every paint reads it. The first call on a language from
+    /// [`LanguageRegistry::deferred`] blocks for the compile, which takes tens
+    /// of milliseconds against the rust grammar. [`LanguageRegistry::standard`]
+    /// compiles it up front.
+    ///
+    /// Panics when the bundled source fails to compile against the grammar.
+    pub fn highlight_query(&self) -> &Query {
+        self.highlight.get(self.name, &self.grammar)
+    }
+
+    /// The query that captures injection host nodes by kind, built from
+    /// [`Self::injections`] on the first call.
+    ///
+    /// The pattern at each index matches the host nodes of the injection at the
+    /// same index of [`Self::injections`]. `None` for a language with no
+    /// injections.
+    pub fn injection_query(&self) -> Option<&Query> {
+        self.injection
+            .get_or_init(|| build_injection_query(self.name, &self.grammar, &self.injections))
+            .as_ref()
+    }
+
     /// Capture names from the highlight query, in capture-index order.
     /// Used by callers that want to build a [`HighlightMap`] against a
     /// host theme without having to crack open `highlight_query`.
+    ///
+    /// Compiles the highlight query on the first call, as
+    /// [`Self::highlight_query`] does.
     pub fn highlight_capture_names(&self) -> &[&str] {
-        self.highlight_query.capture_names()
+        self.highlight_query().capture_names()
     }
 
     /// Replace the cached theme-resolved [`HighlightMap`]. Call this
@@ -334,35 +388,42 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
+    /// The bundled languages, with the queries a paint reads compiled up front.
+    ///
+    /// Each language compiles on its own thread, so the wall clock is the
+    /// slowest language rather than the sum. An editor reads every language's
+    /// highlight capture names as soon as it builds the registry, and a registry
+    /// from [`Self::deferred`] compiles them there one after another.
     pub fn standard() -> Self {
-        // No language waits on another. An injection names the language it
-        // hosts rather than holding it, so each of these is its own highlight
-        // query and nothing else, and the wall clock is the slowest one rather
-        // than the sum.
-        let (rust, json, toml, markdown, markdown_inline) = std::thread::scope(|s| {
-            let rust = s.spawn(make_rust);
-            let json = s.spawn(make_json);
-            let toml = s.spawn(make_toml);
-            let markdown_inline = s.spawn(make_markdown_inline);
-            let markdown = make_markdown();
-            (
-                rust.join().expect("rust language thread panicked"),
-                json.join().expect("json language thread panicked"),
-                toml.join().expect("toml language thread panicked"),
-                markdown,
-                markdown_inline
-                    .join()
-                    .expect("markdown-inline language thread panicked"),
-            )
-        });
+        let registry = Self::deferred();
 
+        // No language waits on another. An injection query is built from host
+        // node kinds alone, so each thread compiles its own language's two
+        // queries and nothing else.
+        std::thread::scope(|s| {
+            for language in &registry.languages {
+                s.spawn(|| {
+                    language.highlight_query();
+                    language.injection_query();
+                });
+            }
+        });
+        registry
+    }
+
+    /// The bundled languages, with every query left to compile on first use.
+    ///
+    /// A short-lived caller pays only for the queries it reads. A command-line
+    /// diff runs once per changed file and parses with the grammar alone, so it
+    /// reads none.
+    pub fn deferred() -> Self {
         let registry = Self {
             languages: vec![
-                Arc::new(rust),
-                Arc::new(json),
-                Arc::new(toml),
-                Arc::new(markdown),
-                Arc::new(markdown_inline),
+                Arc::new(make_rust()),
+                Arc::new(make_json()),
+                Arc::new(make_toml()),
+                Arc::new(make_markdown()),
+                Arc::new(make_markdown_inline()),
             ],
         };
 
@@ -460,7 +521,7 @@ fn make_language(
     name: &'static str,
     extensions: &'static [&'static str],
     grammar: TsLanguage,
-    highlight_src: &str,
+    highlight_src: &'static str,
     aux: AuxQuerySources,
 ) -> Language {
     make_language_with_injections(name, extensions, grammar, highlight_src, Vec::new(), aux)
@@ -470,7 +531,7 @@ fn make_language_with_injections(
     name: &'static str,
     extensions: &'static [&'static str],
     grammar: TsLanguage,
-    highlight_src: &str,
+    highlight_src: &'static str,
     injections: Vec<LanguageInjection>,
     aux: AuxQuerySources,
 ) -> Language {
@@ -485,21 +546,14 @@ fn make_language_with_injections(
         pairs,
     } = aux;
 
-    // Only these two are read to paint, so only these two are compiled here.
-    // Each Query::new is tens of milliseconds against the rust grammar, and the
-    // action-driven five wait until something asks for them.
-    let highlight_query = Query::new(&grammar, highlight_src)
-        .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"));
-    let injection_query = build_injection_query(name, &grammar, &injections);
-
     Language {
         name,
         extensions,
         grammar,
-        highlight_query,
+        highlight: HighlightQuery::new(highlight_src),
         highlight_map: Mutex::new(HighlightMap::default()),
         injections,
-        injection_query,
+        injection: OnceLock::new(),
         aux: AuxQueries {
             brackets: LazyQuery::new(brackets),
             indents: LazyQuery::new(indents),
@@ -792,6 +846,53 @@ mod tests {
             absent.compiled.get(),
             Some(&None),
             "the answer is recorded, so a second ask is not another attempt",
+        );
+    }
+
+    const NAMES: [&str; 5] = ["rust", "json", "toml", "markdown", "markdown-inline"];
+
+    /// Each language's name, and whether its highlight and injection queries
+    /// are compiled.
+    fn compiled(reg: &LanguageRegistry) -> Vec<(&str, bool, bool)> {
+        reg.languages()
+            .iter()
+            .map(|lang| {
+                let highlight = lang.highlight.compiled.get().is_some();
+                (lang.name, highlight, lang.injection.get().is_some())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_language_compiles_its_highlight_query_once() {
+        let reg = LanguageRegistry::deferred();
+        let rust = reg.for_path(Path::new("a.rs")).expect("rust");
+
+        let first = rust.highlight_query() as *const Query;
+        assert_eq!(
+            rust.highlight_query() as *const Query,
+            first,
+            "the second call hands back the query the first compiled",
+        );
+    }
+
+    /// A command that parses one file pays for no query until it reads one.
+    #[test]
+    fn a_deferred_registry_compiles_nothing() {
+        assert_eq!(
+            compiled(&LanguageRegistry::deferred()),
+            NAMES.map(|name| (name, false, false)),
+        );
+    }
+
+    /// The editor reads every capture name right after it builds the registry,
+    /// so the build compiles them in parallel rather than leaving them to that
+    /// read one by one.
+    #[test]
+    fn a_standard_registry_compiles_what_paints() {
+        assert_eq!(
+            compiled(&LanguageRegistry::standard()),
+            NAMES.map(|name| (name, true, true)),
         );
     }
 

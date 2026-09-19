@@ -261,7 +261,7 @@ pub(crate) fn parse_buffer_step(
             syntax_map.snapshot().captures(
                 captured.clone().unwrap_or(0..new_rope.len()),
                 &new_rope,
-                |l| Some(&l.highlight_query),
+                |l| Some(l.highlight_query()),
             ),
             styles,
         )),
@@ -638,7 +638,7 @@ fn recapture_edited_ranges(
         for (cover, spans) in covers.iter().zip(fresh.iter_mut()) {
             if spans.is_none() {
                 *spans = Some(styled_capture_spans(
-                    snapshot.captures(cover.clone(), rope, |l| Some(&l.highlight_query)),
+                    snapshot.captures(cover.clone(), rope, |l| Some(l.highlight_query())),
                     styles,
                 ));
             }
@@ -1746,7 +1746,7 @@ mod tests {
             recaptured.spans,
             styled_capture_spans(
                 map.snapshot()
-                    .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query)),
+                    .captures(0..rope.len(), &rope, |l| Some(l.highlight_query())),
                 &styles,
             ),
             "recaptured spans must equal the full capture walk",

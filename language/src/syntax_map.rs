@@ -616,7 +616,7 @@ impl SyntaxMap {
             let parent_tree = parent.tree.clone();
             let parent_depth = parent.depth;
 
-            let Some(injection_query) = parent_lang.injection_query.as_ref() else {
+            let Some(injection_query) = parent_lang.injection_query() else {
                 continue;
             };
 
@@ -2017,7 +2017,7 @@ mod tests {
         let bold_end = bold_start + "**bold**".len();
         let captures = map
             .snapshot()
-            .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query));
+            .captures(0..rope.len(), &rope, |l| Some(l.highlight_query()));
         assert!(
             captures.iter().any(|c| {
                 let r = c.node.byte_range();
@@ -2055,7 +2055,7 @@ mod tests {
         let fn_start = source.find("fn").unwrap();
         let captures = map
             .snapshot()
-            .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query));
+            .captures(0..rope.len(), &rope, |l| Some(l.highlight_query()));
         assert!(
             captures.iter().any(|c| {
                 c.language.name == "rust"
@@ -2138,7 +2138,7 @@ mod tests {
 
         let captures = map
             .snapshot()
-            .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query));
+            .captures(0..rope.len(), &rope, |l| Some(l.highlight_query()));
 
         assert!(
             !captures.is_empty(),
@@ -2193,7 +2193,7 @@ mod tests {
         let half = source.len() / 2;
         let captures = map
             .snapshot()
-            .captures(0..half, &rope, |l| Some(&l.highlight_query));
+            .captures(0..half, &rope, |l| Some(l.highlight_query()));
 
         // Every capture must overlap [0..half).
         for c in &captures {
@@ -2237,7 +2237,7 @@ mod tests {
         let first = source.find("one").expect("fixture")..source.find("\nfn a").expect("fixture");
         let captures = map
             .snapshot()
-            .captures(first.clone(), &rope, |l| Some(&l.highlight_query));
+            .captures(first.clone(), &rope, |l| Some(l.highlight_query()));
 
         assert!(
             captures.iter().any(|c| c.depth == 1),
@@ -3345,7 +3345,7 @@ mod tests {
         );
 
         let tail = source.rfind("fn f15").expect("fixture")..source.len();
-        let captures = snapshot.captures(tail, &rope, |l| Some(&l.highlight_query));
+        let captures = snapshot.captures(tail, &rope, |l| Some(l.highlight_query()));
         assert!(
             captures.iter().any(|c| c.depth == 0),
             "the root layer must answer a range that starts past every \

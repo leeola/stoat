@@ -136,7 +136,7 @@ pub fn run_with_io<W: Write>(
     opts: &CliRenderOptions,
     out: &mut W,
 ) -> Result<(), WriteError> {
-    let langs = LanguageRegistry::standard();
+    let langs = LanguageRegistry::deferred();
 
     let inputs = if args.git {
         match read_git_external_inputs(fs, &langs, &args.git_args) {
