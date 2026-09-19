@@ -276,6 +276,31 @@ fn full_damage_text(bencher: divan::Bencher<'_, '_>) {
     bencher.bench_local(|| draw(&mut renderer, &device, &queue, &view, &grid, &Damage::Full));
 }
 
+/// Every row changed, the way a flood frame arrives.
+///
+/// A flood reaches the renderer as partial damage that names each row, because
+/// full damage comes only from a resize or a forced repaint. The background pass
+/// writes these rows in one run rather than a write per row, so this case shows
+/// what a flood costs through the whole renderer.
+#[divan::bench]
+fn partial_every_row(bencher: divan::Bencher<'_, '_>) {
+    let Some(bench) = setup() else {
+        skipped("partial_every_row");
+        return;
+    };
+    let cols = bench.grid.cols() as u16;
+    let damage = Damage::Partial(vec![Some((0, cols.saturating_sub(1))); bench.grid.rows()]);
+    let Bench {
+        device,
+        queue,
+        view,
+        mut renderer,
+        grid,
+    } = bench;
+
+    bencher.bench_local(|| draw(&mut renderer, &device, &queue, &view, &grid, &damage));
+}
+
 /// A screenful of prose no run has been shaped for, which is what a fling
 /// through scrollback costs.
 ///

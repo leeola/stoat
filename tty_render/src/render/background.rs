@@ -15,7 +15,10 @@ use crate::render::{
     GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
-use std::ops::RangeInclusive;
+use std::{
+    iter,
+    ops::{Range, RangeInclusive},
+};
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
@@ -326,6 +329,7 @@ impl BackgroundPass {
     ///
     /// Reallocates the instance buffer only when the grid outgrows the current
     /// capacity. With partial `damage`, only the damaged rows' cells are rewritten.
+    /// Adjacent damaged rows share a write.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
@@ -415,27 +419,29 @@ impl BackgroundPass {
         // The rows a scroll kept already sit where the advanced offset points,
         // which is the whole of what it costs. The ones it uncovered have no
         // content behind them, and damage names those.
-        let mut row = 0;
-        while row < rows {
-            let Some((left, right)) = damage.columns(row, cols) else {
-                row += 1;
-                continue;
-            };
-
-            // Written one row at a time rather than in runs. A run of rows is
-            // contiguous on screen but wraps in the buffer, so the slice it
-            // would write is not one range once the rotation is past the end.
-            //
-            // Within a row the write is bounded by the damaged columns. The
-            // instance is fixed size, so the column's byte offset into the
+        let Some(last_col) = cols.checked_sub(1) else {
+            return;
+        };
+        for (slot, run) in damaged_row_runs(damage, rows, self.row_offset) {
+            // Each write stages its bytes in a buffer of its own, which costs
+            // more than a whole row of instances, so a run of rows goes up in
+            // one write. A lone row is bounded by its damaged columns instead.
+            // The instance is fixed size, so the column's byte offset into the
             // row's slice is exact, and a cell blinking in place costs one
             // instance rather than the row holding it.
             self.scratch.clear();
-            build_row_instances(grid, row, left..=right, &mut self.scratch);
-            let slot = row_slot(row, self.row_offset, rows);
-            let offset = ((slot * cols + left) * size_of::<BgInstance>()) as u64;
+            let first = if run.len() == 1 {
+                let (left, right) = damage.columns(run.start, cols).unwrap_or((0, last_col));
+                build_row_instances(grid, run.start, left..=right, &mut self.scratch);
+                slot * cols + left
+            } else {
+                for row in run {
+                    build_row_instances(grid, row, 0..=last_col, &mut self.scratch);
+                }
+                slot * cols
+            };
+            let offset = (first * size_of::<BgInstance>()) as u64;
             queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&self.scratch));
-            row += 1;
         }
     }
 
@@ -632,10 +638,14 @@ fn new_slot(device: &Device) -> CompositeSlot {
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
+    let usage = BufferUsages::VERTEX | BufferUsages::COPY_DST;
+    // A test reads the instances back, which only a copy source allows.
+    #[cfg(test)]
+    let usage = usage | BufferUsages::COPY_SRC;
     device.create_buffer(&BufferDescriptor {
         label: Some("background instances"),
         size: (capacity * size_of::<BgInstance>()) as u64,
-        usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        usage,
         mapped_at_creation: false,
     })
 }
@@ -734,6 +744,39 @@ fn row_slot(row: usize, row_offset: u32, rows: usize) -> usize {
     (row + row_offset as usize) % rows
 }
 
+/// The runs of damaged rows that fill consecutive buffer slots, each as its
+/// first slot and the display rows it covers.
+///
+/// A run ends at a clean row, and where the rotation wraps the next row's slot
+/// back to the start of the buffer. Each run is then one range of the buffer,
+/// which one write covers.
+fn damaged_row_runs(
+    damage: &Damage,
+    rows: usize,
+    row_offset: u32,
+) -> impl Iterator<Item = (usize, Range<usize>)> {
+    let mut row = 0;
+    iter::from_fn(move || {
+        while row < rows && !damage.is_dirty(row) {
+            row += 1;
+        }
+        if row == rows {
+            return None;
+        }
+
+        let start = row;
+        let slot = row_slot(start, row_offset, rows);
+        row += 1;
+        while row < rows
+            && damage.is_dirty(row)
+            && row_slot(row, row_offset, rows) == slot + (row - start)
+        {
+            row += 1;
+        }
+        Some((slot, start..row))
+    })
+}
+
 fn build_instances(grid: &Grid, out: &mut Vec<BgInstance>) {
     let Some(last_col) = grid.cols().checked_sub(1) else {
         return;
@@ -759,14 +802,22 @@ fn build_row_instances(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_instances, build_row_instances, row_slot, BackgroundPass, BgInstance};
+    use super::{
+        build_instances, build_row_instances, damaged_row_runs, row_slot, BackgroundPass,
+        BgInstance, CursorState,
+    };
     use crate::{gpu::headless_device, render::CellMetrics};
-    use stoatty_term::grid::{Flags, Grid, Rgb};
+    use std::ops::Range;
+    use stoatty_term::{
+        grid::{Flags, Grid, Rgb},
+        term::Damage,
+    };
     use wgpu::{
         naga::{
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
+        BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, MapMode, PollType, Queue,
         TextureFormat,
     };
 
@@ -964,5 +1015,128 @@ mod tests {
             13 * bytes,
             "written at the cell's own offset, not its row's start",
         );
+    }
+
+    /// Damage over `rows` rows, naming the rows in `damaged` across a width of
+    /// three.
+    fn partial(rows: usize, damaged: &[usize]) -> Damage {
+        Damage::Partial(
+            (0..rows)
+                .map(|row| damaged.contains(&row).then_some((0, 2)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn contiguous_damaged_rows_share_one_write() {
+        let damage = partial(10, &[3, 4, 5, 6, 8]);
+        let runs: Vec<(usize, Range<usize>)> = damaged_row_runs(&damage, 10, 0).collect();
+        assert_eq!(runs, [(3, 3..7), (8, 8..9)], "a clean row ends a run");
+    }
+
+    #[test]
+    fn a_run_splits_where_the_rotation_wraps() {
+        let damage = partial(5, &[0, 1, 2, 3, 4]);
+        let runs: Vec<(usize, Range<usize>)> = damaged_row_runs(&damage, 5, 3).collect();
+        assert_eq!(
+            runs,
+            [(3, 0..2), (0, 2..5)],
+            "row 2 wraps from slot 4 back to slot 0"
+        );
+    }
+
+    /// A flood frame names every row, and after a scroll its rows wrap in the
+    /// buffer, so it goes up as two runs. A later one-cell change goes up alone.
+    /// Every slot has to hold the row the shader reads there, both sides of the
+    /// wrap included.
+    #[test]
+    fn a_rotated_flood_lands_every_row_where_the_shader_reads_it() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let (rows, cols) = (5, 3);
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 6.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        let cursor = CursorState {
+            corners: None,
+            color: Rgb::new(0, 0, 0),
+        };
+        let mut prepare = |grid: &Grid, damage: &Damage, scrolled_rows: isize| {
+            pass.prepare(
+                &device,
+                &queue,
+                grid,
+                [64.0, 64.0],
+                cursor,
+                0.0,
+                damage,
+                scrolled_rows,
+            );
+        };
+
+        let mut grid = Grid::new(rows, cols);
+        let paint = |grid: &mut Grid, base: u8| {
+            for row in 0..rows {
+                for col in 0..cols {
+                    grid.get_mut(row, col).bg = Rgb::new(base + row as u8, col as u8, 0);
+                }
+            }
+        };
+        paint(&mut grid, 0);
+        prepare(&grid, &Damage::Full, 0);
+        paint(&mut grid, 10);
+        prepare(&grid, &partial(rows, &[0, 1, 2, 3, 4]), 2);
+        grid.get_mut(4, 1).bg = Rgb::new(99, 99, 99);
+        prepare(
+            &grid,
+            &Damage::Partial(vec![None, None, None, None, Some((1, 1))]),
+            0,
+        );
+
+        let expected: Vec<[u8; 4]> = (0..rows * cols)
+            .map(|index| {
+                let (row, col) = (shader_row(index / cols, 2, rows), index % cols);
+                match (row, col) {
+                    (4, 1) => [99, 99, 99, 255],
+                    _ => [10 + row as u8, col as u8, 0, 255],
+                }
+            })
+            .collect();
+        assert_eq!(
+            read_instances(&device, &queue, &pass, rows * cols),
+            expected
+        );
+    }
+
+    /// The first `count` instances `pass` holds, read back from the GPU.
+    fn read_instances(
+        device: &Device,
+        queue: &Queue,
+        pass: &BackgroundPass,
+        count: usize,
+    ) -> Vec<[u8; 4]> {
+        let size = (count * size_of::<BgInstance>()) as u64;
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("background readback"),
+            size,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(&pass.instances, 0, &readback, 0, size);
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        let bytes = readback.slice(..).get_mapped_range().to_vec();
+        bytes.as_chunks::<4>().0.to_vec()
     }
 }
