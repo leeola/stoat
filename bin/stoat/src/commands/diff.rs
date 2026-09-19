@@ -2,7 +2,7 @@ use clap::Args;
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::{whatever, FromString, ResultExt, Whatever};
 use std::{
-    io::{self, IsTerminal, Write},
+    io::{self, BufWriter, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -97,7 +97,9 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
                 .stdin(Stdio::piped())
                 .spawn()
                 .whatever_context(format!("spawn pager `{}`", argv.join(" ")))?;
-            let mut stdin = child.stdin.take().expect("stdin set to piped above");
+            // A child's stdin is unbuffered, and the painter writes a character
+            // at a time, so without this every character is its own syscall.
+            let mut stdin = BufWriter::new(child.stdin.take().expect("stdin set to piped above"));
             let render_result = run_with_io(
                 &args,
                 &*fs,
@@ -106,7 +108,8 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
                 Some(&socket_dir),
                 &opts,
                 &mut stdin,
-            );
+            )
+            .and_then(|()| stdin.flush().map_err(WriteError::from_io));
             drop(stdin);
             let _ = child.wait();
             match render_result {
@@ -159,13 +162,7 @@ pub fn run_with_io<W: Write>(
     let per_file = cached_hunks_via_socket(socket_dir, &inputs)
         .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3, None));
 
-    render_all(out, &inputs, &per_file, opts).map_err(|e| {
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            WriteError::BrokenPipe
-        } else {
-            WriteError::Other(FromString::without_source(format!("write diff: {e}")))
-        }
-    })
+    render_all(out, &inputs, &per_file, opts).map_err(WriteError::from_io)
 }
 
 /// Distinguishes a benign broken-pipe write (pager quit early)
@@ -177,6 +174,16 @@ pub enum WriteError {
 }
 
 impl WriteError {
+    /// Classify a failed write of the diff, where a broken pipe means the
+    /// reader quit before the end.
+    fn from_io(e: io::Error) -> WriteError {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            WriteError::BrokenPipe
+        } else {
+            WriteError::Other(FromString::without_source(format!("write diff: {e}")))
+        }
+    }
+
     fn into_whatever(self) -> Whatever {
         match self {
             WriteError::BrokenPipe => FromString::without_source(
