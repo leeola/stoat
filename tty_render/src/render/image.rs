@@ -25,17 +25,24 @@ use stoatty_term::grid::{Grid, PlacedImage};
 use wgpu::{
     vertex_attr_array, AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry,
     BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-    BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState,
-    ColorWrites, Device, Extent3d, FilterMode, FragmentState, MipmapFilterMode, Origin3d,
-    PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor,
-    SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor,
+    BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState,
+    ColorWrites, CommandEncoder, CommandEncoderDescriptor, Device, Extent3d, FilterMode,
+    FragmentState, LoadOp, MipmapFilterMode, Operations, PipelineLayoutDescriptor, Queue,
+    RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, StoreOp, TexelCopyBufferLayout, Texture, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
     TextureViewDescriptor, TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in quads, allocated up front. Grows by doubling.
 const INITIAL_CAPACITY: usize = 64;
+
+/// The format of every image texture and of the mip blits that fill it.
+///
+/// The two have to match, because a blit pipeline fails validation against a
+/// level of any other format.
+const IMAGE_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 /// Which image a cached texture holds, and which transmission of it.
 ///
@@ -89,6 +96,10 @@ struct CachedTexture {
 /// The instanced image pipeline, its per-frame buffers, and its texture cache.
 pub struct ImagePass {
     pipeline: RenderPipeline,
+    /// Fills an image's base level from its raw texels, premultiplied.
+    premultiply_blit: RenderPipeline,
+    /// Fills each later mip level from the level above it.
+    copy_blit: RenderPipeline,
     globals: Buffer,
     globals_bind_group: BindGroup,
     texture_layout: BindGroupLayout,
@@ -189,6 +200,45 @@ impl ImagePass {
             cache: None,
         });
 
+        let blit_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("image blit"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/image_blit.wgsl").into()),
+        });
+        let blit_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("image blit"),
+            bind_group_layouts: &[Some(&texture_layout)],
+            immediate_size: 0,
+        });
+        let blit_pipeline = |fragment_entry: &str| {
+            device.create_render_pipeline(&RenderPipelineDescriptor {
+                label: Some("image blit"),
+                layout: Some(&blit_layout),
+                vertex: VertexState {
+                    module: &blit_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(FragmentState {
+                    module: &blit_shader,
+                    entry_point: Some(fragment_entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(ColorTargetState {
+                        format: IMAGE_FORMAT,
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let premultiply_blit = blit_pipeline("fs_premultiply");
+        let copy_blit = blit_pipeline("fs_copy");
+
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("image globals"),
             size: size_of::<Globals>() as u64,
@@ -223,6 +273,8 @@ impl ImagePass {
 
         ImagePass {
             pipeline,
+            premultiply_blit,
+            copy_blit,
             globals,
             globals_bind_group,
             texture_layout,
@@ -336,15 +388,14 @@ impl ImagePass {
 
     /// Upload `placed`'s pixels unless the cache already holds that generation.
     ///
-    /// The texels are premultiplied on the way in, because the sampler filters
-    /// linearly and a filter averages color and alpha on their own. A sample
-    /// between an opaque texel and a transparent one carries half of each, and
-    /// multiplying afterward halves the color again, so a scaled image's
-    /// transparent edge arrives darker than the ground it covers.
+    /// The raw texels go up in one copy. The GPU then premultiplies them into
+    /// the base level and averages each mip level from the one above it. Work
+    /// per texel on this thread blocks input and frames while it runs, which
+    /// reaches tens of milliseconds at the largest image the terminal accepts.
     ///
-    /// Every mip level goes up with the base one, so a placement that scales
-    /// the image down reads a level near the size it draws rather than every
-    /// eighth texel of the full-size one.
+    /// The upload fills every mip level along with the base one, so a
+    /// placement that scales the image down reads a level near the size it
+    /// draws rather than every eighth texel of the full-size one.
     fn ensure_texture(
         &mut self,
         device: &Device,
@@ -357,45 +408,69 @@ impl ImagePass {
             return;
         }
 
-        let levels = mip_chain(premultiplied(&placed.rgba), placed.width, placed.height);
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("image"),
-            size: Extent3d {
-                width: placed.width,
-                height: placed.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: levels.len() as u32,
+        let size = Extent3d {
+            width: placed.width,
+            height: placed.height,
+            depth_or_array_layers: 1,
+        };
+        let source = device.create_texture(&TextureDescriptor {
+            label: Some("image source"),
+            size,
+            mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8Unorm,
+            format: IMAGE_FORMAT,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        queue.write_texture(
+            source.as_image_copy(),
+            &placed.rgba,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(placed.width * 4),
+                rows_per_image: Some(placed.height),
+            },
+            size,
+        );
 
-        let (mut width, mut height) = (placed.width.max(1), placed.height.max(1));
-        for (level, texels) in levels.iter().enumerate() {
-            queue.write_texture(
-                TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: level as u32,
-                    origin: Origin3d::ZERO,
-                    aspect: TextureAspect::All,
-                },
-                texels,
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(width * 4),
-                    rows_per_image: Some(height),
-                },
-                Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
+        let levels = u32::BITS - placed.width.max(placed.height).max(1).leading_zeros();
+        let usage = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
+        // A test reads mip levels back, which only a copy source allows.
+        #[cfg(test)]
+        let usage = usage | TextureUsages::COPY_SRC;
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("image"),
+            size,
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: IMAGE_FORMAT,
+            usage,
+            view_formats: &[],
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("image mips"),
+        });
+        let source_view = source.create_view(&TextureViewDescriptor::default());
+        self.blit(
+            device,
+            &mut encoder,
+            &self.premultiply_blit,
+            &source_view,
+            &level_view(&texture, 0),
+        );
+        for level in 1..levels {
+            self.blit(
+                device,
+                &mut encoder,
+                &self.copy_blit,
+                &level_view(&texture, level - 1),
+                &level_view(&texture, level),
             );
-            (width, height) = ((width / 2).max(1), (height / 2).max(1));
         }
+        queue.submit([encoder.finish()]);
 
         let view = texture.create_view(&TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -422,6 +497,52 @@ impl ImagePass {
                 _view: view,
             },
         );
+    }
+
+    /// Record a pass that draws `source` over all of `target` through
+    /// `pipeline`.
+    fn blit(
+        &self,
+        device: &Device,
+        encoder: &mut CommandEncoder,
+        pipeline: &RenderPipeline,
+        source: &TextureView,
+        target: &TextureView,
+    ) {
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("image blit"),
+            layout: &self.texture_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(source),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("image blit"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color::TRANSPARENT),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Record the placements that sit behind the grid text.
@@ -474,70 +595,20 @@ fn crop_uv(placed: &PlacedImage) -> ([f32; 2], [f32; 2]) {
     ([x0 / width, y0 / height], [x1 / width, y1 / height])
 }
 
-/// `rgba` with each texel's color scaled by its own alpha.
+/// A view of mip `level` of `texture` alone.
 ///
-/// A linear filter is only meaningful over premultiplied texels, because the
-/// color a transparent texel carries is arbitrary and averaging it in ahead of
-/// the multiply pulls the result toward that arbitrary color. Rounds rather than
-/// truncates, so an opaque texel comes back unchanged.
-fn premultiplied(rgba: &[u8]) -> Vec<u8> {
-    let scale =
-        |channel: u8, alpha: u8| ((u32::from(channel) * u32::from(alpha) + 127) / 255) as u8;
-    rgba.as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|&[r, g, b, a]| [scale(r, a), scale(g, a), scale(b, a), a])
-        .collect()
-}
-
-/// `base` and every mip level under it, down to a single texel.
-///
-/// A placement often draws an image at a fraction of its size, and a sampler
-/// reading one texel in eight of the full-size level takes whichever texel the
-/// step lands on: a fine pattern aliases into noise, and the noise crawls as the
-/// image moves. Each level averages the one above it, so a level near the drawn
-/// size exists to read.
-///
-/// The average is a 2 by 2 box over premultiplied texels, which is the form an
-/// average of color and alpha is meaningful in. An odd row or column has no
-/// partner to average with, so its last texel stands in for the one past the
-/// edge rather than the level's edge fading toward nothing.
-fn mip_chain(base: Vec<u8>, width: u32, height: u32) -> Vec<Vec<u8>> {
-    let mut levels = vec![base];
-    let (mut width, mut height) = (width.max(1), height.max(1));
-
-    while width > 1 || height > 1 {
-        let above = levels.last().expect("the level to halve");
-        let (half_w, half_h) = ((width / 2).max(1), (height / 2).max(1));
-        let mut level = Vec::with_capacity((half_w * half_h * 4) as usize);
-
-        for y in 0..half_h {
-            for x in 0..half_w {
-                let right = (x * 2 + 1).min(width - 1);
-                let below = (y * 2 + 1).min(height - 1);
-                let corners = [
-                    (x * 2, y * 2),
-                    (right, y * 2),
-                    (x * 2, below),
-                    (right, below),
-                ];
-                for channel in 0..4 {
-                    let sum: u32 = corners
-                        .iter()
-                        .map(|&(cx, cy)| {
-                            u32::from(above[((cy * width + cx) * 4) as usize + channel])
-                        })
-                        .sum();
-                    level.push(((sum + 2) / 4) as u8);
-                }
-            }
-        }
-
-        levels.push(level);
-        (width, height) = (half_w, half_h);
-    }
-
-    levels
+/// A blit samples one level while it draws into the next, and each view covers
+/// a single level for two reasons. A pass rejects a texture level bound as both
+/// its source and its target. A source view over the whole chain also lets the
+/// sampler choose a level from the draw's scale, and a draw half the size of
+/// its source picks the level of its own size, which is the target.
+fn level_view(texture: &Texture, level: u32) -> TextureView {
+    texture.create_view(&TextureViewDescriptor {
+        label: Some("image level"),
+        base_mip_level: level,
+        mip_level_count: Some(1),
+        ..Default::default()
+    })
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
@@ -551,9 +622,19 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 
 #[cfg(test)]
 mod tests {
-    use super::crop_uv;
+    use super::{crop_uv, ImagePass, TextureKey};
+    use crate::{gpu::headless_device, render::CellMetrics};
     use std::sync::Arc;
     use stoatty_term::grid::{ImageCrop, PlacedImage};
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode,
+        Origin3d, PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, Texture, TextureAspect, TextureFormat, COPY_BYTES_PER_ROW_ALIGNMENT,
+    };
 
     fn placed(width: u32, height: u32, crop: ImageCrop) -> PlacedImage {
         PlacedImage {
@@ -623,5 +704,145 @@ mod tests {
 
         let (min, max) = crop_uv(&placed(10, 10, crop));
         assert_eq!((min, max), ([1.0, 1.0], [1.0, 1.0]));
+    }
+
+    #[test]
+    fn blit_shader_is_valid_wgsl() {
+        let module =
+            wgsl::parse_str(include_str!("../shaders/image_blit.wgsl")).expect("parse image blit");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("validate image blit");
+    }
+
+    /// A 4 by 4 image is opaque red, except for its fourth column and its
+    /// fourth row, which are transparent white.
+    ///
+    /// The base level holds the image premultiplied, so its transparent texels
+    /// read as zero. Level 1 averages each 2 by 2 block of it. A block with
+    /// half its texels transparent reads half-covered red, and the corner block
+    /// reads quarter-covered red. An average taken ahead of the premultiply
+    /// reads about `[255, 128, 128, 128]` for a half-covered block instead,
+    /// pulled toward the white that the transparent texels carry.
+    ///
+    /// The transparent texels sit on one side of each axis, so a flip on either
+    /// axis moves them. The base level is part of the check, because a flip in
+    /// the blit flips level 1 back.
+    #[test]
+    fn mip_levels_average_the_premultiplied_image() {
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const HALF_RED: [u8; 4] = [128, 0, 0, 128];
+        const QUARTER_RED: [u8; 4] = [64, 0, 0, 64];
+
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 6.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let mut pass = ImagePass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+
+        let covered = |texel: usize| texel % 4 != 3 && texel / 4 != 3;
+        let rgba: Vec<u8> = (0..16)
+            .flat_map(|texel| {
+                if covered(texel) {
+                    RED
+                } else {
+                    [255, 255, 255, 0]
+                }
+            })
+            .collect();
+        let image = PlacedImage {
+            rgba: Arc::from(rgba),
+            ..placed(4, 4, ImageCrop::default())
+        };
+        let key = TextureKey {
+            image: image.image,
+            generation: image.generation,
+        };
+        pass.ensure_texture(&device, &queue, key, &image);
+
+        let texture = &pass.textures[&key]._texture;
+        let levels = [(0, 4), (1, 2), (2, 1)]
+            .map(|(level, side)| read_level(&device, &queue, texture, level, side));
+        let base: Vec<[u8; 4]> = (0..16)
+            .map(|texel| if covered(texel) { RED } else { [0; 4] })
+            .collect();
+        let expected = [
+            base,
+            vec![RED, HALF_RED, HALF_RED, QUARTER_RED],
+            vec![[144, 0, 0, 144]],
+        ];
+        assert!(
+            levels
+                .iter()
+                .zip(&expected)
+                .all(|(got, want)| within_one(got, want)),
+            "the levels read {levels:?}"
+        );
+    }
+
+    /// The texels of mip `level` of `texture`, row by row, for a level `side`
+    /// texels square.
+    fn read_level(
+        device: &Device,
+        queue: &Queue,
+        texture: &Texture,
+        level: u32,
+        side: u32,
+    ) -> Vec<[u8; 4]> {
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("image level readback"),
+            size: u64::from(COPY_BYTES_PER_ROW_ALIGNMENT * side),
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture,
+                mip_level: level,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: None,
+                },
+            },
+            Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        let bytes = readback.slice(..).get_mapped_range().to_vec();
+        bytes
+            .chunks(COPY_BYTES_PER_ROW_ALIGNMENT as usize)
+            .flat_map(|row| row.as_chunks::<4>().0[..side as usize].iter().copied())
+            .collect()
+    }
+
+    /// Whether `got` holds as many texels as `want`, each channel within one of
+    /// its counterpart, the rounding a GPU filter takes either way.
+    fn within_one(got: &[[u8; 4]], want: &[[u8; 4]]) -> bool {
+        got.len() == want.len()
+            && got
+                .iter()
+                .zip(want)
+                .all(|(got, want)| got.iter().zip(want).all(|(g, w)| g.abs_diff(*w) <= 1))
     }
 }
