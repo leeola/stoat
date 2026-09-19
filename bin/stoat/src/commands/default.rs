@@ -82,6 +82,24 @@ pub struct Args {
     _version: Option<bool>,
 }
 
+impl Args {
+    /// Whether this invocation runs an editor session, which keeps a log file
+    /// of its own.
+    ///
+    /// Every other invocation is a client that runs briefly on behalf of
+    /// something else, and all clients share one log file. A hook or an
+    /// external diff runs once per event, and a file per run fills the log
+    /// directory. The `--attachable` client only pipes a terminal to its
+    /// session, and `dump open` starts a child that logs itself.
+    pub fn session_log(&self) -> bool {
+        self.attachable.is_none()
+            && matches!(
+                self.command,
+                None | Some(Command::Review | Command::Conflict | Command::Fixture(_))
+            )
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Open the first changed file with a diff against HEAD
@@ -670,6 +688,35 @@ mod tests {
             timeout: None,
             fixture: None,
         }
+    }
+
+    #[test]
+    fn only_an_editor_session_keeps_a_log_of_its_own() {
+        let cases: [(&[&str], bool); 14] = [
+            (&[], true),
+            (&["a.rs"], true),
+            (&["review"], true),
+            (&["conflict"], true),
+            (&["fixture", "ls"], true),
+            (&["--attach-serve", "main"], true),
+            (&["--attachable", "main"], false),
+            (&["diff"], false),
+            (&["query", "lsp-status"], false),
+            (&["agent-api", "hook", "start"], false),
+            (&["editor", "a.rs"], false),
+            (&["walkthrough", "list"], false),
+            (&["completions", "fish"], false),
+            (&["dump", "open", "id"], false),
+        ];
+        let sessions: Vec<(&[&str], bool)> = cases
+            .iter()
+            .map(|&(argv, _)| {
+                let args = Args::try_parse_from(["stoat"].into_iter().chain(argv.iter().copied()))
+                    .unwrap_or_else(|e| panic!("stoat {argv:?}: {e}"));
+                (argv, args.session_log())
+            })
+            .collect();
+        assert_eq!(sessions, cases);
     }
 
     #[test]
