@@ -22,12 +22,8 @@ pub fn trimmed_range(rope: &Rope, range: Range<usize>) -> Option<Range<usize>> {
     }
 
     let mut end = range.end;
-    while end > start {
-        let text = rope.slice(start..end).to_string();
-        let Some(ch) = text.chars().next_back() else {
-            break;
-        };
-        if !ch.is_whitespace() {
+    for ch in rope.reversed_chars_at(range.end) {
+        if end <= start || !ch.is_whitespace() {
             break;
         }
         end -= ch.len_utf8();
@@ -48,8 +44,23 @@ pub fn is_block_commented(rope: &Rope, range: Range<usize>, tokens: (&str, &str)
         return false;
     }
 
-    let text = rope.slice(inner).to_string();
-    text.starts_with(start_token) && text.ends_with(end_token)
+    spells_at(rope, inner.start, start_token)
+        && spells_at(rope, inner.end - end_token.len(), end_token)
+}
+
+/// Whether the text of `rope` at `offset` spells `token`.
+///
+/// Compares chunk by chunk, so a long row is never copied to check a few bytes
+/// at one end of it. A token that runs past the end of the rope does not match.
+fn spells_at(rope: &Rope, offset: usize, token: &str) -> bool {
+    let mut rest = token.as_bytes();
+    for chunk in rope.chunks_in_range(offset..offset + token.len()) {
+        let Some(tail) = rest.strip_prefix(chunk.as_bytes()) else {
+            return false;
+        };
+        rest = tail;
+    }
+    rest.is_empty()
 }
 
 /// The edits that wrap `range`'s text in `tokens`, or unwrap it when it is
@@ -78,13 +89,14 @@ pub fn toggle_block_comment(
         ];
     }
 
-    let text = rope.slice(inner.clone()).to_string();
-    let opened = start_token.len() + usize::from(text[start_token.len()..].starts_with(' '));
+    let len = inner.end - inner.start;
+    let after_open = rope.chars_at(inner.start + start_token.len()).next();
+    let before_close = rope.reversed_chars_at(inner.end - end_token.len()).next();
+    let opened = start_token.len() + usize::from(after_open == Some(' '));
 
     // A comment holding nothing but its tokens has one space between them, so
     // both ends claim it and the second runs off the front of the range.
-    let closing_space = text[..text.len() - end_token.len()].ends_with(' ')
-        && text.len() > opened + end_token.len();
+    let closing_space = before_close == Some(' ') && len > opened + end_token.len();
     let closed = end_token.len() + usize::from(closing_space);
 
     vec![
@@ -188,6 +200,38 @@ mod tests {
             toggle_block_comment(&r, 0..r.len(), ("/*", "*/")),
             Vec::new()
         );
+    }
+
+    /// A row many rope chunks long, with its trailing whitespace running across
+    /// chunks too, toggles the way a short one does. The whitespace stays
+    /// outside the comment in both directions.
+    #[test]
+    fn a_long_row_with_trailing_spaces_toggles_like_a_short_one() {
+        let tokens = ("/*", "*/");
+        let code = "let x = 1;".repeat(1_000);
+        let padding = " ".repeat(1_000);
+        let plain = format!("{code}{padding}");
+        let wrapped = format!("/* {code} */{padding}");
+
+        assert_eq!(
+            [toggled(&plain, tokens), toggled(&wrapped, tokens)],
+            [wrapped, plain],
+        );
+    }
+
+    /// At some offsets a token sits across the boundary between two rope
+    /// chunks. Moving a comment right one column at a time takes each token
+    /// across every position relative to a boundary.
+    #[test]
+    fn a_token_across_a_chunk_boundary_still_matches() {
+        let tokens = ("/*", "*/");
+        let unwrapped: Vec<String> = (0..300)
+            .map(|indent| toggled(&format!("{}/* x */", " ".repeat(indent)), tokens))
+            .collect();
+        let expected: Vec<String> = (0..300)
+            .map(|indent| format!("{}x", " ".repeat(indent)))
+            .collect();
+        assert_eq!(unwrapped, expected);
     }
 
     /// A different pair works the same way, since nothing about the algorithm
