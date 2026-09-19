@@ -7357,6 +7357,7 @@ impl Stoat {
                 if let Some(cwd) = reported_cwd {
                     run_state.cwd = cwd;
                 }
+                run_state.trim_blocks();
                 if visible {
                     self.pty_dirty = true;
                 }
@@ -15571,6 +15572,49 @@ mod tests {
                 .scroll_offset,
             0,
             "submitting snaps the output back to the prompt",
+        );
+    }
+
+    /// Three 4,000-line commands pass the 10,512-row cap on the third output.
+    /// Output that fills the pane to the cap exactly drops nothing, and the
+    /// next submit passes the cap by the new block's own row.
+    #[test]
+    fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        let lines = |count: usize| "x\r\n".repeat(count).into_bytes();
+        let commands = |stoat: &Stoat| -> Vec<String> {
+            stoat.active_workspace().runs[run_id]
+                .blocks
+                .iter()
+                .map(|block| block.command.clone())
+                .collect()
+        };
+
+        for command in ["a", "b", "c"] {
+            h.type_text(command);
+            h.type_keys("enter");
+            h.inject_run_output(run_id, &lines(4_000));
+        }
+        assert_eq!(
+            commands(&h.stoat),
+            ["b", "c"],
+            "the third output passes the cap"
+        );
+
+        h.inject_run_output(run_id, &lines(2_510));
+        assert_eq!(
+            commands(&h.stoat),
+            ["b", "c"],
+            "output up to the cap exactly drops nothing"
+        );
+
+        h.type_text("d");
+        h.type_keys("enter");
+        assert_eq!(
+            commands(&h.stoat),
+            ["c", "d"],
+            "the new block's row passes the cap"
         );
     }
 

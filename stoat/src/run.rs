@@ -24,6 +24,13 @@ new_key_type! {
 /// Output rows one wheel notch moves the run pane's scrollback.
 const WHEEL_STEP_ROWS: usize = 3;
 
+/// Rows of output a run pane keeps across all its blocks before it drops the
+/// oldest block.
+///
+/// It equals one block's scrollback. A pane that runs many commands then holds
+/// about what a terminal emulator retains, not every row of every run.
+const MAX_RUN_ROWS: usize = vterm::MAX_SCROLLBACK_ROWS;
+
 pub struct RunState {
     pub(crate) input: InputView,
     pub blocks: Vec<OutputBlock>,
@@ -67,6 +74,27 @@ impl RunState {
 
     pub fn is_running(&self) -> bool {
         self.blocks.last().is_some_and(|b| !b.finished)
+    }
+
+    /// Drop the oldest blocks while the pane holds more than one scrollback
+    /// of rows.
+    ///
+    /// Each block caps its own scrollback. The block count has no cap, so a
+    /// pane that runs a flooding command many times keeps every row of every
+    /// run until this drops them.
+    ///
+    /// The threshold is [`MAX_RUN_ROWS`] plus [`vterm::SCROLLBACK_SLACK`], the
+    /// most rows one block holds. The active block always stays, because
+    /// output arrives into it.
+    pub(crate) fn trim_blocks(&mut self) {
+        let mut rows: usize = self
+            .blocks
+            .iter()
+            .map(|block| block.grid.line_count())
+            .sum();
+        while self.blocks.len() > 1 && rows > MAX_RUN_ROWS + vterm::SCROLLBACK_SLACK {
+            rows -= self.blocks.remove(0).grid.line_count();
+        }
     }
 
     /// Recall the previous command against the needle `current`, or [`None`] to
@@ -808,6 +836,47 @@ mod tests {
         assert_eq!(
             block.selection, None,
             "a selection on rows long since scrolled off is dropped"
+        );
+    }
+
+    /// The command of each block `run` holds, oldest first.
+    fn commands(run: &RunState) -> Vec<&str> {
+        run.blocks
+            .iter()
+            .map(|block| block.command.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_flood_across_blocks_drops_the_oldest_block() {
+        let mut run = scrollable(3, 0);
+        for block in &mut run.blocks {
+            block.feed("x\r\n".repeat(4_000).as_bytes());
+        }
+
+        run.trim_blocks();
+        assert_eq!(
+            commands(&run),
+            ["cmd1", "cmd2"],
+            "one drop brings three 4,001-row blocks back under the cap"
+        );
+    }
+
+    /// The older blocks each hold one row past the slack, so the pane passes
+    /// the cap at any row count the flooded active block settles at.
+    #[test]
+    fn the_active_block_survives_any_flood() {
+        let mut run = scrollable(3, 0);
+        let slack = "x\r\n".repeat(vterm::SCROLLBACK_SLACK);
+        run.blocks[0].feed(slack.as_bytes());
+        run.blocks[1].feed(slack.as_bytes());
+        run.blocks[2].feed(flood().as_bytes());
+
+        run.trim_blocks();
+        assert_eq!(
+            commands(&run),
+            ["cmd2"],
+            "both older blocks drop and the flooded active block stays"
         );
     }
 }
