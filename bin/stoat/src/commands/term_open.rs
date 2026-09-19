@@ -16,46 +16,57 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Open `files` in the instance hosting this shell, reporting whether it took
-/// them.
+/// The result of a request to open files in the instance that hosts this shell.
+#[derive(Debug, PartialEq)]
+pub enum Forward {
+    /// The files are on screen in the parent, and this process has nothing
+    /// left to do.
+    Opened,
+    /// This shell is not a stoat terminal pane, so there was no parent to try.
+    NoParent,
+    /// A parent was named but did not take the files, for the reason held
+    /// here.
+    ///
+    /// The caller starts its own editor. It logs the reason once its log is
+    /// open, because the forward runs before logging starts.
+    Failed(String),
+}
+
+/// Open `files` in the instance hosting this shell.
 ///
-/// `false` means this shell has no parent instance to reach, or reaching it
-/// failed, and the caller starts its own editor as usual. `true` means the
-/// files are on screen in the parent and this process has nothing left to do.
+/// Logs nothing, so a caller that tries this before its log exists leaves no
+/// log file behind when the parent takes the files.
 // The env reads are the blessed boundary. They hand their values straight to
 // parent_target, which is pure and unit-tested.
 #[allow(clippy::disallowed_methods)]
-pub fn try_forward(files: &[PathBuf]) -> bool {
+pub fn try_forward(files: &[PathBuf]) -> Forward {
     let Some((socket, token)) = parent_target(
         std::env::var("STOAT_AGENT_SOCK").ok(),
         std::env::var("STOAT_TERM_ID").ok(),
     ) else {
-        return false;
+        return Forward::NoParent;
     };
-    let Ok(cwd) = std::env::current_dir() else {
-        return false;
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => return Forward::Failed(format!("could not read the working directory: {err}")),
     };
 
     let paths: Vec<PathBuf> = files.iter().map(|file| absolutize(&cwd, file)).collect();
-    match send(&socket, &request_line(token, &paths)) {
-        Ok(true) => true,
-        Ok(false) => {
-            tracing::warn!(
-                target: "stoat::bin",
-                ?socket,
-                "parent instance closed without opening the files; starting a nested session",
-            );
-            false
-        },
-        Err(err) => {
-            tracing::warn!(
-                target: "stoat::bin",
-                %err,
-                ?socket,
-                "could not reach the parent instance; starting a nested session",
-            );
-            false
-        },
+    forward_to(&socket, token, &paths)
+}
+
+/// Ask the instance at `socket` to open `paths` in the terminal `token` names.
+fn forward_to(socket: &Path, token: u64, paths: &[PathBuf]) -> Forward {
+    match send(socket, &request_line(token, paths)) {
+        Ok(true) => Forward::Opened,
+        Ok(false) => Forward::Failed(format!(
+            "the parent instance at {} closed without opening the files",
+            socket.display()
+        )),
+        Err(err) => Forward::Failed(format!(
+            "could not reach the parent instance at {}: {err}",
+            socket.display()
+        )),
     }
 }
 
@@ -224,6 +235,41 @@ mod tests {
         assert!(
             send(&dir.path().join("absent.sock"), "the-request").is_err(),
             "an unbound socket is no instance to reach",
+        );
+    }
+
+    /// A failure carries its reason out, because the caller has no log open
+    /// yet and writes the reason into the session it starts.
+    #[test]
+    fn a_forward_that_does_not_open_names_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [PathBuf::from("/work/a.rs")];
+
+        let live = dir.path().join("live.sock");
+        let served = serve_once(&live, &[r#"{"reply":"opened"}"#]);
+        assert_eq!(forward_to(&live, 7, &paths), Forward::Opened);
+        served.join().unwrap();
+
+        let quiet = dir.path().join("quiet.sock");
+        let served = serve_once(&quiet, &[]);
+        assert_eq!(
+            forward_to(&quiet, 7, &paths),
+            Forward::Failed(format!(
+                "the parent instance at {} closed without opening the files",
+                quiet.display()
+            )),
+        );
+        served.join().unwrap();
+
+        let absent = dir.path().join("absent.sock");
+        let unreached = forward_to(&absent, 7, &paths);
+        let prefix = format!(
+            "could not reach the parent instance at {}: ",
+            absent.display()
+        );
+        assert!(
+            matches!(&unreached, Forward::Failed(reason) if reason.starts_with(&prefix)),
+            "an unbound socket names itself and the error, got {unreached:?}",
         );
     }
 

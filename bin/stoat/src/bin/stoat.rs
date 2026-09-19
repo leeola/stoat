@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stoat::log::ident::{self, LogId, ProcessIdent};
+use stoat_bin::commands::term_open::{self, Forward};
 
 /// The log stem every client invocation shares, where a session takes a stem
 /// of its own.
@@ -27,6 +28,16 @@ const CLIENT_LOG_MAX: u64 = 4 * 1024 * 1024;
 
 fn main() {
     let args = stoat_bin::commands::default::Args::parse();
+
+    // A bare file open from a stoat terminal pane goes to the parent instance
+    // and exits. Trying it before logging starts leaves no log file behind.
+    // Outside a pane this costs one absent environment read.
+    let forward_failure = match args.forwardable_files().map(term_open::try_forward) {
+        Some(Forward::Opened) => return,
+        Some(Forward::Failed(reason)) => Some(reason),
+        Some(Forward::NoParent) | None => None,
+    };
+
     let stoat_log = std::env::var("STOAT_LOG").ok();
     let rust_log = std::env::var("RUST_LOG").ok();
 
@@ -81,6 +92,13 @@ fn main() {
         stoatty = std::env::var_os("STOATTY").is_some(),
         "Starting Stoat editor"
     );
+    if let Some(reason) = forward_failure {
+        tracing::warn!(
+            target: "stoat::bin",
+            %reason,
+            "the parent instance did not take the files; starting a nested session",
+        );
+    }
 
     if let Err(e) = stoat_bin::commands::default::run(args) {
         println!("Error: {e}");

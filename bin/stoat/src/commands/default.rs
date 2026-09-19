@@ -98,6 +98,21 @@ impl Args {
                 None | Some(Command::Review | Command::Conflict | Command::Fixture(_))
             )
     }
+
+    /// The files this invocation names, when it is the bare `stoat <files>`
+    /// form that a stoat terminal pane's parent instance takes in place of a
+    /// nested editor.
+    ///
+    /// The process entry tries the forward before its log opens and before
+    /// anything takes over the terminal. A forwarded open then leaves the shell
+    /// as it found it and no log file behind. `None` for every form that asks
+    /// for a session of its own.
+    pub fn forwardable_files(&self) -> Option<&[PathBuf]> {
+        let forwards = self.attachable.is_none()
+            && self.command.is_none()
+            && forwardable(&TuiStart::Files, &self.common, self.working_dir.as_deref());
+        forwards.then_some(self.common.files.as_slice())
+    }
 }
 
 #[derive(Subcommand)]
@@ -282,15 +297,6 @@ fn run_tui(
     start: TuiStart,
     attach_serve: Option<String>,
 ) -> Result<(), Whatever> {
-    // Run before anything takes over the terminal, so a forwarded open leaves
-    // the shell exactly as it found it. Outside a stoat terminal pane this
-    // costs one absent environment read.
-    if forwardable(&start, &common, working_dir.as_deref())
-        && crate::commands::term_open::try_forward(&common.files)
-    {
-        return Ok(());
-    }
-
     // Read before `common` is spent, since the answer depends on flags the
     // destructure moves out.
     let bare = bare_launch(&start, &common, working_dir.as_deref());
@@ -717,6 +723,37 @@ mod tests {
             })
             .collect();
         assert_eq!(sessions, cases);
+    }
+
+    #[test]
+    fn only_a_bare_file_open_offers_its_files_to_the_parent() {
+        let cases: [(&[&str], Option<&[&str]>); 7] = [
+            (&["a.rs"], Some(&["a.rs"])),
+            (&["a.rs", "b.rs"], Some(&["a.rs", "b.rs"])),
+            (&[], None),
+            (&["review"], None),
+            (&["--attachable", "main", "a.rs"], None),
+            (&["-d", "/elsewhere", "a.rs"], None),
+            (&["--continue", "a.rs"], None),
+        ];
+        let offered: Vec<(&[&str], Option<Vec<PathBuf>>)> = cases
+            .iter()
+            .map(|&(argv, _)| {
+                let args = Args::try_parse_from(["stoat"].into_iter().chain(argv.iter().copied()))
+                    .unwrap_or_else(|e| panic!("stoat {argv:?}: {e}"));
+                (argv, args.forwardable_files().map(<[PathBuf]>::to_vec))
+            })
+            .collect();
+        let expected: Vec<(&[&str], Option<Vec<PathBuf>>)> = cases
+            .iter()
+            .map(|&(argv, files)| {
+                (
+                    argv,
+                    files.map(|files| files.iter().map(PathBuf::from).collect()),
+                )
+            })
+            .collect();
+        assert_eq!(offered, expected);
     }
 
     #[test]
