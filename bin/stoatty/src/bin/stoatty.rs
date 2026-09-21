@@ -84,6 +84,7 @@ fn main() {
         cli.working_directory,
         cli.common,
         cli.terminal,
+        cli.maximized,
     );
 }
 

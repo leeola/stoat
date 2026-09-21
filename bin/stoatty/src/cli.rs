@@ -74,6 +74,11 @@ pub struct Cli {
     /// names its own program.
     #[arg(long = "terminal", conflicts_with = "command")]
     pub terminal: bool,
+
+    /// Open the window maximized. The compositor decides the exact size, and
+    /// the grid takes it from the first resize.
+    #[arg(long = "maximized")]
+    pub maximized: bool,
 }
 
 /// Subcommands stoatty handles before opening a window.
@@ -171,6 +176,12 @@ mod tests {
     fn terminal_flag_parses() {
         assert!(Cli::parse_from(["stoatty", "--terminal"]).terminal);
         assert!(!Cli::parse_from(["stoatty"]).terminal);
+    }
+
+    #[test]
+    fn maximized_flag_parses() {
+        assert!(Cli::parse_from(["stoatty", "--maximized"]).maximized);
+        assert!(!Cli::parse_from(["stoatty"]).maximized);
     }
 
     #[test]

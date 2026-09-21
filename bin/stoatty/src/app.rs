@@ -125,6 +125,9 @@ const MAX_AUX_WINDOWS: usize = 8;
 /// Open the stoatty window running the launch command, or the resolved stoat
 /// editor when none is given, at the winit default window size.
 ///
+/// `maximized` opens the window maximized instead, at whatever size the
+/// compositor gives it.
+///
 /// The launch program and arguments follow a precedence. `command` (the
 /// `-e`/`--command` CLI override) wins first, then `--terminal` runs the login
 /// shell, then the `[shell]` config, then the stoat editor resolved by
@@ -145,6 +148,7 @@ pub fn run(
     working_directory: Option<PathBuf>,
     common: CommonArgs,
     terminal: bool,
+    maximized: bool,
 ) {
     let start = Instant::now();
     // Ahead of the config read, so the system-font scan overlaps that too.
@@ -184,6 +188,7 @@ pub fn run(
         None,
         working_directory,
         stoat_dir,
+        maximized,
     );
 }
 
@@ -211,6 +216,7 @@ pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>
         size,
         None,
         None,
+        false,
     );
 }
 
@@ -231,6 +237,7 @@ fn run_with_config(
     size: Option<[u16; 2]>,
     working_directory: Option<PathBuf>,
     stoat_dir: Option<PathBuf>,
+    maximized: bool,
 ) {
     let theme = config.resolve_theme();
 
@@ -259,6 +266,7 @@ fn run_with_config(
         },
         config.cursor_animation,
         size,
+        maximized,
         working_directory,
         stoat_dir,
     );
@@ -348,6 +356,9 @@ struct App {
     /// The window's content size in cells (`[cols, rows]`) to open sized to, or
     /// `None` for the winit default window. Read once at window creation.
     size: Option<[u16; 2]>,
+    /// Whether the window opens maximized, from `--maximized`. Read once at
+    /// window creation.
+    maximized: bool,
     state: Option<State>,
     /// Child output events that arrived before the window existed.
     ///
@@ -382,6 +393,7 @@ impl App {
         font: FontSettings,
         cursor_animation: CursorAnimation,
         size: Option<[u16; 2]>,
+        maximized: bool,
         working_directory: Option<PathBuf>,
         stoat_dir: Option<PathBuf>,
     ) -> App {
@@ -400,6 +412,7 @@ impl App {
             ligatures: font.ligatures,
             cursor_animation,
             size,
+            maximized,
             state: None,
             pending_events: Vec::new(),
             scanned_fonts: None,
@@ -840,6 +853,9 @@ impl ApplicationHandler<PtyEvent> for App {
                 cols as f32 * cell_width,
                 rows as f32 * cell_height,
             ));
+        }
+        if self.maximized {
+            attributes = attributes.with_maximized(true);
         }
         let t_window = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
