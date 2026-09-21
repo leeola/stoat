@@ -12,7 +12,7 @@
 //! Between them the stops drive the fallbacks in `place_callouts`
 //! (crate::walkthrough::slide): labels pushed off their row by
 //! `LABEL_ROW_OFFSETS`, a label that finds no candidate at all, the marker
-//! color cycle wrapping at six, a rect mark over a multi-line annotation, and a
+//! color cycle wrapping at six, a highlight over a three-row annotation, and a
 //! focus long enough for soft wrap to spread over several display rows.
 
 use crate::{
@@ -155,7 +155,7 @@ const NARRATION_PAIR: &str = "\
 Both annotations start on the same row, so only one label can have it.
 
 The first takes the row and reads as part of the line. The second drops one
-row and draws a connector to say which mark it belongs to.
+row and draws a connector to say which code it belongs to.
 ";
 
 const NARRATION_SEVEN: &str = "\
@@ -168,8 +168,9 @@ is visible at all.
 const NARRATION_BLOCK: &str = "\
 The focus is one line, so its mark is an ellipse.
 
-The annotation below it covers three, so that one is boxed instead. Both marks
-are on screen at once, which is the comparison this stop is for.
+The annotation below it covers three lines, and stepping onto it lights all
+three in its color while the focus ring stays. The ring and the highlight are
+on screen at once, which is the comparison this stop is for.
 ";
 
 const NARRATION_NO_ROOM: &str = "\
@@ -529,7 +530,7 @@ mod tests {
                 block.end.line - block.start.line + 1,
             ),
             (true, 3),
-            "a one-line focus is circled and its three-line annotation is boxed",
+            "a one-line focus is circled and its three-line annotation is highlighted",
         );
 
         assert!(

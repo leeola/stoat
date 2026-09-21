@@ -10,12 +10,13 @@
 //!
 //! Here they differ at every stop. The table is indented with real tab
 //! characters, and its greetings are accented, CJK, and supplementary-plane
-//! text, so a mark placed a byte short or a cell short lands somewhere the
-//! reader sees.
+//! text, so a highlight placed a byte short or a cell short lands somewhere
+//! the reader sees.
 //!
-//! The last stop is about the boxes rather than the marks. `label_size` and
-//! `card_width` both measure by counting characters, so a label written in a
-//! script whose glyphs take two cells is sized for half the room it needs.
+//! The last stop is about the label boxes rather than the highlights.
+//! `label_size` and `card_width` both measure by counting characters, so a
+//! label written in a script whose glyphs take two cells is sized for half the
+//! room it needs.
 
 use crate::{
     fixture::{FixtureError, FixtureRepo},
@@ -67,23 +68,23 @@ const NARRATION_TAB: &str = "\
 Two tabs stand before this arm. The store counts them as two bytes, and the
 screen draws them as several cells each.
 
-The annotation names a span whose column is measured in bytes, so the mark
-around it is right only if the tabs are expanded on the way to the screen.
+The annotation names a span whose column is measured in bytes, so the highlight
+on it is right only if the tabs are expanded on the way to the screen.
 ";
 
 const NARRATION_ACCENTS: &str = "\
 The word this annotation names starts after an accented letter, which is two
 bytes and one cell.
 
-A mark placed at the byte column without the conversion lands one cell to the
-right of the word.
+A highlight placed at the byte column without the conversion lands one cell to
+the right of the word.
 ";
 
 const NARRATION_CJK: &str = "\
 Every character in this greeting is three bytes and two cells, so the byte
 column and the screen column pull apart in both directions at once.
 
-The annotation names the last two characters. Its mark is four cells wide,
+The annotation names the last two characters. Its highlight is four cells wide,
 over six bytes.
 ";
 

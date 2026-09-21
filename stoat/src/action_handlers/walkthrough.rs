@@ -367,11 +367,11 @@ fn reclaim_annotations(stoat: &mut Stoat, keys: RangeInclusive<usize>) {
     }
 }
 
-/// The mark, connector, and label ids of annotations `keys`.
+/// The connector and label ids of annotations `keys`.
 fn annotation_part_ids(run: &WalkthroughRun, keys: RangeInclusive<usize>) -> Vec<u32> {
     keys.flat_map(|key| {
-        let (mark, link, label) = run.annotation_ids(key);
-        [mark, link, label]
+        let (link, label) = run.annotation_ids(key);
+        [link, label]
     })
     .collect()
 }

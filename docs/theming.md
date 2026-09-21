@@ -170,7 +170,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.walkthrough.focus`, `ui.walkthrough.card`, `ui.walkthrough.marker1`
   through `marker6` -- a walkthrough stop's hand-drawn marks: the focus mark and its
   connector, the narration card and label boxes (foreground the stroke,
-  background the fill), and the annotation colors, which cycle through the six.
+  background the fill), and the annotation colors, which cycle through the six
+  and color each annotation's label box, its connector, and its code while the
+  reader is on it.
 - `ui.statusbar.focused`, `ui.statusbar.unfocused`, `ui.mode_label` -- the
   docked status bar and its mode chip.
 - `ui.statusline.<mode>` -- the mode chip color per editor mode (`normal`,

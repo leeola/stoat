@@ -46,10 +46,10 @@ pub(crate) struct WalkthroughRun {
 /// accident, since a collision would have two things sharing one clock.
 pub(crate) const ID_SPACE: u32 = 0x5700_0000;
 
-/// Ids one stop reserves, which caps its drawn annotations at 60.
+/// Ids one stop reserves, which caps its drawn annotations at 126.
 ///
-/// A slide with more marks than that is unreadable long before it runs out of
-/// room, so the cap costs nothing and keeps a stop's ids contiguous.
+/// A slide with more annotations than that is unreadable long before it runs
+/// out of room, so the cap costs nothing and keeps a stop's ids contiguous.
 pub(crate) const STOP_ID_STRIDE: u32 = 0x100;
 
 /// The parts of a slide, in the order their ids run.
@@ -60,9 +60,10 @@ pub(crate) mod part {
     pub(crate) const FOCUS_MARK: u32 = 0;
     pub(crate) const CARD: u32 = 1;
     pub(crate) const FOCUS_LINK: u32 = 2;
-    /// The first annotation's three ids, which then repeat every three.
+    /// The first annotation's two ids, its connector and its label, which then
+    /// repeat every two. An annotation draws no mark of its own.
     pub(crate) const ANNOTATION_BASE: u32 = 3;
-    pub(crate) const ANNOTATION_STRIDE: u32 = 3;
+    pub(crate) const ANNOTATION_STRIDE: u32 = 2;
 }
 
 impl WalkthroughRun {
@@ -92,14 +93,10 @@ impl WalkthroughRun {
         self.id_base + self.stop_idx as u32 * STOP_ID_STRIDE + part
     }
 
-    /// The mark, connector, and label ids of annotation `index`.
-    pub(crate) fn annotation_ids(&self, index: usize) -> (u32, u32, u32) {
+    /// The connector and label ids of annotation `index`.
+    pub(crate) fn annotation_ids(&self, index: usize) -> (u32, u32) {
         let base = part::ANNOTATION_BASE + part::ANNOTATION_STRIDE * index as u32;
-        (
-            self.part_id(base),
-            self.part_id(base + 1),
-            self.part_id(base + 2),
-        )
+        (self.part_id(base), self.part_id(base + 1))
     }
 
     /// How many of a stop's annotations fit its reserved ids.

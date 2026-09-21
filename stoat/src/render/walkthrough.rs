@@ -1,13 +1,15 @@
 //! Draw the current walkthrough stop as hand-drawn marks over the code.
 //!
 //! One stop becomes a mark around its focus, a connector to the narration card,
-//! and a mark, connector, and label box per annotation the reader has reached.
-//! The geometry comes from [`crate::walkthrough::slide`], which is pure. This
-//! pass measures the screen for it and emits what it returns.
+//! and a connector and label box per annotation the reader has reached. The
+//! annotation the reader is on shows its code in its marker color while the
+//! rest of the pane dims. The geometry comes from [`crate::walkthrough::slide`],
+//! which is pure. This pass measures the screen for it and emits what it
+//! returns.
 //!
-//! Nothing is emitted under a terminal that draws no marks. The pinned card and
-//! the status line already carry the stop there, and a cell fallback covers the
-//! code the tour is about.
+//! Under a terminal that draws no marks, only the highlight applies, since it is
+//! plain cell color. The pinned card and the status line already carry the stop
+//! there, and a cell fallback for the marks covers the code the tour is about.
 //!
 //! Ids are derived from the stop and the part rather than allocated. The
 //! terminal latches a mark's timing when its id first appears, so a scene
@@ -26,7 +28,7 @@ use crate::{
         },
     },
 };
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -57,6 +59,12 @@ const WIDTH_CURRENT: u16 = 88;
 const ALPHA_PLAIN: u8 = 255;
 const ALPHA_DIMMED: u8 = 110;
 
+/// How far the code outside the current annotation dims toward the background.
+///
+/// Twice the default dim of an unfocused pane. An unfocused pane has to stay
+/// readable, where code the reader is not on has to recede.
+const SPOTLIGHT_DIM: f32 = 0.5;
+
 /// A connector is thinner than the marks it joins, so it reads as a pointer
 /// rather than as another annotation.
 const LINK_WIDTH: u16 = 48;
@@ -79,17 +87,21 @@ pub(crate) const EXIT_MS: u16 = 140;
 /// that long has lost its clock, and it draws on the next timing it is sent.
 const REDECLARE_GRACE: Duration = Duration::from_millis(250);
 
-/// Emit the current stop's marks, connectors, and label boxes.
+/// Light the current annotation's code, and emit the current stop's marks,
+/// connectors, and label boxes.
 ///
-/// A no-op with no walkthrough playing, under a terminal that draws no marks,
-/// or when the focused pane is not an editor.
+/// A no-op with no walkthrough playing or when the focused pane is not an
+/// editor. Under a terminal that draws no marks, only the code is lit.
 pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
-    if !scene.live() || !stoat.stoatty || stoat.stoatty_protocol < SKETCH_PROTOCOL {
-        return;
-    }
     let Some(input) = measure(stoat) else {
         return;
     };
+    let colors = Colors::of(stoat);
+    spotlight(buf, &input, &colors);
+
+    if !scene.live() || !stoat.stoatty || stoat.stoatty_protocol < SKETCH_PROTOCOL {
+        return;
+    }
 
     // A retiring slide holds the screen while it goes, and the arriving one
     // waits that out rather than drawing over it.
@@ -123,7 +135,7 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     };
     let painter = Painter {
         ids: SlideIds::of(run),
-        colors: Colors::of(stoat),
+        colors,
         labels: input
             .annotations
             .iter()
@@ -149,6 +161,55 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
         run.last_parts = declared;
         run.last_declared = last_declared;
+    }
+}
+
+/// Light the current annotation's code in its marker color, and dim the rest of
+/// the pane's content toward the background.
+///
+/// A no-op while the reader is on the focus, or when the current annotation's
+/// code is off screen or in another file. A theme with no RGB background gets
+/// the color without the dim.
+fn spotlight(buf: &mut Buffer, input: &SlideInput, colors: &Colors) {
+    let Some(annotation) = input.current.and_then(|key| {
+        input
+            .annotations
+            .iter()
+            .find(|annotation| annotation.key == key)
+    }) else {
+        return;
+    };
+    let range = &annotation.range;
+    let (Some(&first), Some(&last)) = (range.rows.first(), range.rows.last()) else {
+        return;
+    };
+
+    if let Some(bg) = colors.background {
+        crate::render::pane::dim_pane_content(buf, input.pane, bg, SPOTLIGHT_DIM);
+    }
+
+    let line_end = |row: u16| {
+        input
+            .line_ends
+            .iter()
+            .find(|(at, _)| *at == row)
+            .map_or(input.pane.right(), |(_, end)| *end)
+    };
+    let [r, g, b] = colors.marker(annotation.key);
+    for &row in &range.rows {
+        let start = if row == first {
+            range.start_x
+        } else {
+            input.pane.x
+        };
+        let end = if row == last {
+            range.end_x + 1
+        } else {
+            line_end(row)
+        };
+        for x in start..end.min(input.pane.right()) {
+            buf[(x, row)].set_fg(Color::Rgb(r, g, b));
+        }
     }
 }
 
@@ -199,8 +260,8 @@ struct SlideIds {
     focus: u32,
     card: u32,
     focus_link: u32,
-    /// The mark, connector, and label of each annotation, in order.
-    annotations: Vec<(u32, u32, u32)>,
+    /// The connector and label of each annotation, in order.
+    annotations: Vec<(u32, u32)>,
 }
 
 impl SlideIds {
@@ -229,6 +290,9 @@ struct Colors {
     /// The narration card's outline, which is the one part with a color of its
     /// own rather than its annotation's.
     card_stroke: [u8; 3],
+    /// The theme background, which the code outside a lit annotation dims
+    /// toward. `None` when the theme gives no RGB background.
+    background: Option<[u8; 3]>,
 }
 
 impl Colors {
@@ -245,6 +309,7 @@ impl Colors {
             }),
             fill: crate::render::paint::style_rgb(card.bg).unwrap_or([40, 44, 52]),
             card_stroke: crate::render::paint::style_rgb(card.fg).unwrap_or([255, 255, 255]),
+            background: crate::render::paint::style_rgb(stoat.theme.get(scope::UI_BACKGROUND).bg),
         }
     }
 
@@ -384,7 +449,10 @@ impl Painter {
                 timing,
                 ..stroke
             },
-            self.ids.focus,
+            SketchEnd::Component {
+                id: self.ids.focus,
+                side: SketchSide::Auto,
+            },
             self.ids.card,
             buf,
             scene,
@@ -427,58 +495,53 @@ impl Painter {
         );
     }
 
-    /// Emit each annotation's mark, connector, and label box.
+    /// Emit each annotation's label box and the connector to it.
     fn callouts(&mut self, slide: &Slide, buf: &mut Buffer, scene: &mut ApcScene) {
         for callout in &slide.callouts {
-            let Some(&(mark_id, link_id, label_id)) = self.ids.annotations.get(callout.key) else {
+            let Some(&(link_id, label_id)) = self.ids.annotations.get(callout.key) else {
                 continue;
             };
 
-            // A mark this slide never drew belongs to an annotation a step just
-            // reached, so its callout draws from this frame on. A part back in
-            // view after the grace was drawn before, and draws at once.
-            let mark_scheduled = timing_of(slide, Some(slide::Part::Mark(callout.key)));
-            let group_start = (!self.opening && !self.last_declared.contains_key(&mark_id))
-                .then_some(mark_scheduled.delay_ms);
+            // A label this slide never drew belongs to an annotation a step just
+            // reached, so its callout draws from this frame on, starting with
+            // its first part. A part back in view after the grace was drawn
+            // before, and draws at once.
+            let label_scheduled = timing_of(slide, Some(slide::Part::Label(callout.key)));
+            let link_scheduled = callout
+                .link
+                .then(|| timing_of(slide, Some(slide::Part::Link(callout.key))));
+            let group_start = (!self.opening && !self.last_declared.contains_key(&label_id))
+                .then(|| link_scheduled.unwrap_or(label_scheduled).delay_ms);
             let start = |scheduled: SketchTiming| group_start.unwrap_or(scheduled.delay_ms);
-
-            let stroke = Stroke {
-                id: mark_id,
-                color: self.colors.marker(callout.key),
-                emphasis: slide.emphasis(callout.key),
-                timing: self.schedule_with(mark_id, mark_scheduled, start(mark_scheduled)),
-                fill: None,
-            };
-            self.mark(callout.mark, stroke, buf, scene);
 
             // The box before its connector, so the line has something to
             // arrive at by the time it is drawn.
             let lines = self.labels.get(&callout.key).cloned().unwrap_or_default();
-            let scheduled = timing_of(slide, Some(slide::Part::Label(callout.key)));
-            let timing = self.schedule_with(label_id, scheduled, start(scheduled));
-            self.label(
-                callout.label,
-                Stroke {
-                    id: label_id,
-                    timing,
-                    fill: Some(self.colors.fill),
-                    ..stroke
-                },
-                &lines,
-                buf,
-                scene,
-            );
+            let stroke = Stroke {
+                id: label_id,
+                color: self.colors.marker(callout.key),
+                emphasis: slide.emphasis(callout.key),
+                timing: self.schedule_with(label_id, label_scheduled, start(label_scheduled)),
+                fill: Some(self.colors.fill),
+            };
+            self.label(callout.label, stroke, &lines, buf, scene);
 
-            if callout.link {
-                let scheduled = timing_of(slide, Some(slide::Part::Link(callout.key)));
+            if let Some(scheduled) = link_scheduled {
                 let timing = self.schedule_with(link_id, scheduled, start(scheduled));
+                // The line leaves the code just past its last cell, level with
+                // its first row, which the label's placement is measured from.
+                let code_end = SketchEnd::Point {
+                    x: (callout.range.end_x as i16 + 1) * 16 + 4,
+                    y: callout.range.rows[0] as i16 * 16 + 8,
+                };
                 self.link(
                     Stroke {
                         id: link_id,
                         timing,
+                        fill: None,
                         ..stroke
                     },
-                    mark_id,
+                    code_end,
                     label_id,
                     buf,
                     scene,
@@ -515,22 +578,18 @@ impl Painter {
         );
     }
 
-    /// Emit a connector between two marks.
+    /// Emit a connector from `from` to the mark `to`.
     ///
-    /// Both ends name a mark, so the connector tracks them as they move and
-    /// leaves each on the side facing the other.
+    /// The `to` end names a mark, so the connector tracks it as it moves and
+    /// meets it on the side facing `from`.
     fn link(
         &mut self,
         stroke: Stroke,
-        from: u32,
+        from: SketchEnd,
         to: u32,
         _buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
-        let end = |id| SketchEnd::Component {
-            id,
-            side: SketchSide::Auto,
-        };
         self.declare(
             SketchCommand {
                 id: stroke.id,
@@ -540,8 +599,11 @@ impl Painter {
                 },
                 timing: stroke.timing,
                 shape: SketchShape::Line {
-                    from: end(from),
-                    to: end(to),
+                    from,
+                    to: SketchEnd::Component {
+                        id: to,
+                        side: SketchSide::Auto,
+                    },
                     bend: 0,
                     heads: 0,
                 },
@@ -628,9 +690,9 @@ impl Painter {
 /// side is found under the typical two-to-one cell aspect. A cell is twice as
 /// tall as it is wide, so a height in cells counts double against a width.
 ///
-/// A focus or annotation mark passes no radius through here. Such a mark hugs
-/// its text with a four-sixteenth pad, so rounding pulls the stroke across the
-/// first and last characters it circles.
+/// The focus mark passes no radius through here. It hugs its text with a
+/// four-sixteenth pad, so rounding pulls the stroke across the first and last
+/// characters it circles.
 pub(crate) fn sketch_corner_radius(width_cells: u16, height_cells: u16) -> u8 {
     let shorter = width_cells.min(height_cells.saturating_mul(2));
     let radius = shorter.saturating_mul(4).min(CORNER_RADIUS_CAP);
@@ -842,7 +904,7 @@ fn line_ends(
 
 #[cfg(test)]
 mod tests {
-    use super::{sketch_corner_radius, EXIT_MS};
+    use super::{sketch_corner_radius, EXIT_MS, SPOTLIGHT_DIM};
     use crate::{
         action_handlers::walkthrough::open,
         app::Stoat,
@@ -854,9 +916,10 @@ mod tests {
             slide, Location, Point, Range, Walkthrough,
         },
     };
+    use ratatui::style::Color;
     use std::{path::PathBuf, time::Duration};
     use stoatty_protocol::command::{
-        self, Command, SketchCommand, SketchPhase, SketchShape, SketchTiming,
+        self, Command, SketchCommand, SketchEnd, SketchPhase, SketchShape, SketchTiming,
     };
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
@@ -991,8 +1054,8 @@ mod tests {
         run.part_id(part)
     }
 
-    /// The mark, connector, and label ids of annotation `at`.
-    fn annotation_ids(h: &TestHarness, at: usize) -> (u32, u32, u32) {
+    /// The connector and label ids of annotation `at`.
+    fn annotation_ids(h: &TestHarness, at: usize) -> (u32, u32) {
         let run = h
             .stoat
             .active_workspace()
@@ -1056,33 +1119,39 @@ mod tests {
         );
     }
 
-    /// Every annotation draws a mark and a label box, each under its own id, so
-    /// a stop with two points reads as two rather than one.
+    /// Every annotation draws a label box under its own id, so a stop with two
+    /// points reads as two rather than one. None draws a mark of its own, so
+    /// the focus is the only enclosure on screen.
     #[test]
-    fn each_annotation_draws_its_mark_and_its_label() {
+    fn each_annotation_draws_only_its_label() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
         reach(&mut h, 2);
 
         let emitted = sketches(&mut h);
-        let run = h
-            .stoat
-            .active_workspace()
-            .walkthrough
-            .as_ref()
-            .expect("playing");
-
         for at in 0..2 {
-            let (mark, _, label) = run.annotation_ids(at);
-            assert!(
-                emitted.iter().any(|sketch| sketch.id == mark),
-                "annotation {at} draws its mark",
-            );
+            let (_, label) = annotation_ids(&h, at);
             assert!(
                 emitted.iter().any(|sketch| sketch.id == label),
                 "annotation {at} draws its label box",
             );
         }
+
+        let enclosures: Vec<u32> = emitted
+            .iter()
+            .filter(|sketch| {
+                matches!(
+                    sketch.shape,
+                    SketchShape::Ellipse { .. } | SketchShape::Rect { fill: None, .. }
+                )
+            })
+            .map(|sketch| sketch.id)
+            .collect();
+        assert_eq!(
+            enclosures,
+            [part_id(&h, part::FOCUS_MARK)],
+            "the focus is the only enclosure",
+        );
     }
 
     /// An annotation in another file names a range of that file. The same line
@@ -1142,7 +1211,7 @@ mod tests {
                 .walkthrough
                 .as_ref()
                 .expect("playing");
-            run.annotation_ids(0).0
+            run.annotation_ids(0).1
         };
 
         let emitted = sketches(&mut h);
@@ -1183,7 +1252,7 @@ mod tests {
                 .walkthrough
                 .as_ref()
                 .expect("playing");
-            [run.annotation_ids(0).0, run.annotation_ids(1).0]
+            [run.annotation_ids(0).1, run.annotation_ids(1).1]
         };
         let emitted = sketches(&mut h);
         let drawn: Vec<[u8; 3]> = ids
@@ -1215,7 +1284,7 @@ mod tests {
                     .walkthrough
                     .as_ref()
                     .expect("playing");
-                [run.annotation_ids(0).0, run.annotation_ids(1).0]
+                [run.annotation_ids(0).1, run.annotation_ids(1).1]
             };
             let emitted = sketches(h);
             run_ids.map(|id| {
@@ -1243,13 +1312,16 @@ mod tests {
         );
     }
 
-    /// A step onto an annotation draws its callout then and there. On the
-    /// slide's own schedule it waits out the focus, the card, and every callout
-    /// before it.
+    /// A step onto an annotation draws its callout then and there, connector
+    /// first. On the slide's own schedule it waits out the focus, the card, and
+    /// every callout before it.
     #[test]
-    fn a_stepped_onto_annotation_draws_its_mark_at_once() {
-        let mut h = harness(&[(1, "one")]);
+    fn a_stepped_onto_annotation_draws_its_callout_at_once() {
+        // On its own row the second label overlaps the first, so it moves off
+        // that row and takes a connector.
+        let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
+        reach(&mut h, 1);
         sketches(&mut h);
 
         reach(&mut h, 1);
@@ -1260,15 +1332,117 @@ mod tests {
                 .find(|sketch| sketch.id == id)
                 .map(|sketch| sketch.timing)
         };
-        let (mark, _, label) = annotation_ids(&h, 0);
-        let (mark_at, mark_ms) = slide_timing(&mut h.stoat, slide::Part::Mark(0));
-        let (label_at, label_ms) = slide_timing(&mut h.stoat, slide::Part::Label(0));
+        let (link, label) = annotation_ids(&h, 1);
+        let (link_at, link_ms) = slide_timing(&mut h.stoat, slide::Part::Link(1));
+        let (label_at, label_ms) = slide_timing(&mut h.stoat, slide::Part::Label(1));
 
-        assert_eq!(timing(mark), Some(SketchTiming::after(0, mark_ms)));
+        assert_eq!(timing(link), Some(SketchTiming::after(0, link_ms)));
         assert_eq!(
             timing(label),
-            Some(SketchTiming::after(label_at - mark_at, label_ms)),
-            "the label follows its mark as the slide choreographs it",
+            Some(SketchTiming::after(label_at - link_at, label_ms)),
+            "the label follows its connector as the slide choreographs it",
+        );
+    }
+
+    /// A connector leaves the annotation's code just past its last cell, so it
+    /// reads as pointing from the code to the label.
+    #[test]
+    fn a_labels_connector_starts_at_its_code() {
+        let mut h = harness(&[(1, "one"), (3, "two")]);
+        open(&mut h.stoat, "tour");
+        reach(&mut h, 2);
+
+        let emitted = sketches(&mut h);
+        let input = super::measure(&mut h.stoat).expect("the pane measures");
+        let range = &input.annotations[1].range;
+        let link = emitted
+            .iter()
+            .find(|sketch| sketch.id == annotation_ids(&h, 1).0)
+            .expect("the label that moved has a connector");
+
+        let SketchShape::Line { from, .. } = &link.shape else {
+            panic!("a connector is a line, got {:?}", link.shape);
+        };
+        assert_eq!(
+            *from,
+            SketchEnd::Point {
+                x: (range.end_x as i16 + 1) * 16 + 4,
+                y: range.rows[0] as i16 * 16 + 8,
+            },
+        );
+    }
+
+    /// The annotation the reader is on shows its code in its own marker color,
+    /// and the code around it recedes toward the background.
+    #[test]
+    fn the_current_annotations_code_takes_its_marker_color() {
+        assert_spotlit(3);
+    }
+
+    /// The highlight is plain cell color, so a terminal that draws no marks
+    /// still shows which code the reader is on.
+    #[test]
+    fn a_plain_terminal_still_highlights_the_annotation() {
+        assert_spotlit(0);
+    }
+
+    /// Step onto the one annotation of a tour under `protocol`, then check that
+    /// its first cell takes its marker color and a cell two rows down dims.
+    fn assert_spotlit(protocol: u32) {
+        let mut h = harness(&[(1, "one")]);
+        h.stoat.stoatty_protocol = protocol;
+        open(&mut h.stoat, "tour");
+        h.snapshot();
+        let pane = super::measure(&mut h.stoat)
+            .expect("the pane measures")
+            .pane;
+        let outside = (pane.x, pane.y + 2);
+        let Color::Rgb(r, g, b) = h.rendered_buffer()[outside].fg else {
+            panic!("the code is painted in RGB");
+        };
+
+        reach(&mut h, 1);
+        h.snapshot();
+        let range = super::measure(&mut h.stoat)
+            .expect("the pane measures")
+            .annotations[0]
+            .range
+            .clone();
+        let rgb = |color| paint::style_rgb(color).expect("the theme names an RGB color");
+        let marker = rgb(h.stoat.theme.get(scope::UI_WALKTHROUGH_MARKERS[0]).fg);
+        let background = rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg);
+        let dimmed = paint::dim_rgb([r, g, b], background, SPOTLIGHT_DIM);
+
+        let fg = |cell: (u16, u16)| h.rendered_buffer()[cell].fg;
+        assert_eq!(
+            (fg((range.start_x, range.rows[0])), fg(outside)),
+            (
+                Color::Rgb(marker[0], marker[1], marker[2]),
+                Color::Rgb(dimmed[0], dimmed[1], dimmed[2]),
+            ),
+            "the annotation's code lights and the code around it dims",
+        );
+    }
+
+    /// On the focus nothing is lit, so the code reads as it does with no tour
+    /// open. The focus mark alone says what the stop is about.
+    #[test]
+    fn the_focus_alone_dims_nothing() {
+        let mut h = harness(&[(1, "one")]);
+        open(&mut h.stoat, "tour");
+        h.snapshot();
+        let pane = super::measure(&mut h.stoat)
+            .expect("the pane measures")
+            .pane;
+        let cell = (pane.x, pane.y + 2);
+        let on_the_focus = h.rendered_buffer()[cell].fg;
+
+        crate::action_handlers::walkthrough::done(&mut h.stoat);
+        h.snapshot();
+        assert_eq!(
+            h.rendered_buffer()[cell].fg,
+            on_the_focus,
+            "the code keeps its color",
         );
     }
 
@@ -1351,7 +1525,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         reach(&mut h, 1);
 
-        let label = annotation_ids(&h, 0).2;
+        let label = annotation_ids(&h, 0).1;
         let timing = |h: &mut TestHarness| {
             sketches(h)
                 .into_iter()
@@ -1546,12 +1720,12 @@ mod tests {
         };
 
         assert_eq!(
-            declared(annotation_ids(&h, 1).2),
+            declared(annotation_ids(&h, 1).1),
             [(SketchPhase::Exit, 255)],
             "the label left runs its stroke back off as it last drew",
         );
         assert_eq!(
-            declared(annotation_ids(&h, 0).2),
+            declared(annotation_ids(&h, 0).1),
             [(SketchPhase::Enter, 255)],
             "and the one landed on is current again",
         );
@@ -1574,7 +1748,7 @@ mod tests {
         sketches(&mut h);
 
         reach(&mut h, 1);
-        let label = annotation_ids(&h, 1).2;
+        let label = annotation_ids(&h, 1).1;
         let phases: Vec<SketchPhase> = sketches(&mut h)
             .iter()
             .filter(|sketch| sketch.id == label)
@@ -1654,8 +1828,8 @@ mod tests {
             run.part_id(part::FOCUS_LINK),
         ];
         for at in 0..2 {
-            let (mark, link, label) = run.annotation_ids(at);
-            ids.extend([mark, link, label]);
+            let (link, label) = run.annotation_ids(at);
+            ids.extend([link, label]);
         }
 
         let declared = ids.len();

@@ -1,9 +1,14 @@
 //! Where a walkthrough stop's marks, card, and labels go, and when each draws.
 //!
 //! One stop becomes a [`Slide`]: a mark around its focus, a narration card, a
-//! mark and a label box per annotation the reader has reached, and a table
-//! saying when each part starts and how long it takes. [`layout`] is the whole
-//! of it, and it is pure.
+//! label box per annotation the reader has reached, and a table saying when
+//! each part starts and how long it takes. [`layout`] is the whole of it, and it
+//! is pure.
+//!
+//! An annotation draws no mark of its own. The caller shows its code by color
+//! instead, so a stop with several annotations is not a stack of strokes over
+//! the lines they name. Only the focus is enclosed, because that one outline is
+//! what the reader orients by.
 //!
 //! Placement is where the fiddly rules live. A label must not cover the code it
 //! describes, the card must not sit over a long line, and a mark whose code
@@ -52,7 +57,7 @@ pub(crate) struct SixteenthRect {
     pub(crate) h: u16,
 }
 
-/// The shape a mark takes around what it points at.
+/// The shape the focus mark takes around the stop's subject.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mark {
     /// A single row, circled. A ring says "this word" without covering it.
@@ -62,17 +67,21 @@ pub(crate) enum Mark {
     Rect(SixteenthRect),
 }
 
-/// One annotation's mark, its label box, and whether a line joins them.
+/// One annotation's code, its label box, and whether a line joins them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Callout {
     /// The annotation's index in the stop, which is what matches a callout to
     /// the text it came from and to a marker color.
     pub(crate) key: usize,
-    pub(crate) mark: Mark,
+    /// The annotation's cells as measured, where the connector starts.
+    ///
+    /// Its rows are never empty, since an annotation off screen places no
+    /// callout.
+    pub(crate) range: CellRange,
     /// The label box, in whole cells.
     pub(crate) label: Rect,
-    /// Whether a connector joins the mark to the label. False when the label
-    /// sits against the mark and a line between them has nowhere to go.
+    /// Whether a connector joins the code to the label. False when the label
+    /// sits on the annotation's own row, which already says what it names.
     pub(crate) link: bool,
 }
 
@@ -82,8 +91,7 @@ pub(crate) enum Part {
     Focus,
     FocusLink,
     Card,
-    /// The `k`th annotation's mark, link, and label.
-    Mark(usize),
+    /// The `k`th annotation's connector and label.
     Link(usize),
     Label(usize),
 }
@@ -122,7 +130,7 @@ impl Slide {
     ///
     /// Everything is [`Emphasis::Plain`] until the reader walks into the
     /// annotations. From then on exactly one is current and the rest recede, so
-    /// a stop with six marks still reads as being about one of them.
+    /// a stop with six labels still reads as being about one of them.
     pub(crate) fn emphasis(&self, key: usize) -> Emphasis {
         match self.current {
             None => Emphasis::Plain,
@@ -422,18 +430,18 @@ const LABEL_GAP: u16 = 4;
 ///
 /// The annotation's own row first, so a label reads as belonging to the line it
 /// names. Then one row out either way, then two, which keeps a label near its
-/// mark rather than sliding to wherever there happens to be room.
+/// code rather than sliding to wherever there happens to be room.
 const LABEL_ROW_OFFSETS: [i32; 5] = [0, 1, -1, 2, -2];
 
-/// Place the mark and label box of each annotation the reader has reached.
+/// Place the label box of each annotation the reader has reached.
 ///
 /// A label never covers the code it describes. Every candidate is rejected if
 /// it overlaps the card, an earlier label, the focus rows, or the annotation's
 /// own rows, and the first that clears all four is taken.
 ///
 /// An annotation whose code is off screen contributes no callout, for the same
-/// reason a focus does: a clamped mark points at whatever scrolled into its
-/// place.
+/// reason a focus does. A connector to clamped cells points at whatever
+/// scrolled into their place.
 fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
     let focus_rows: Vec<u16> = input
         .focus
@@ -450,9 +458,6 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
         .iter()
         .filter(|annotation| annotation.key < reached)
     {
-        let Some(mark) = focus_mark(&annotation.range, input) else {
-            continue;
-        };
         let Some((width, height)) = label_size(&annotation.label_lines) else {
             continue;
         };
@@ -487,10 +492,10 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
         placed.push(label);
         callouts.push(Callout {
             key: annotation.key,
-            mark,
+            range: annotation.range.clone(),
             label,
-            // A label sitting on its own row against its mark needs no line to
-            // say which mark it belongs to. One that moved does.
+            // A label sitting on its annotation's own row needs no line to say
+            // which code it belongs to. One that moved does.
             link: label.y != first,
         });
     }
@@ -564,11 +569,9 @@ mod choreography {
     /// as separate points.
     pub(super) const ANNOTATION_DELAY_MS: i32 = 60;
     pub(super) const ANNOTATION_STRIDE_MS: u16 = 140;
-    pub(super) const ANNOTATION_MARK_MS: u16 = 220;
 
-    /// A callout's own connector and label overlap their mark, so one
-    /// annotation reads as a single gesture rather than three.
-    pub(super) const ANNOTATION_LINK_DELAY_MS: i32 = -40;
+    /// A callout's label opens before its connector quite reaches it, so one
+    /// annotation reads as a single gesture rather than two.
     pub(super) const ANNOTATION_LINK_MS: u16 = 150;
     pub(super) const ANNOTATION_LABEL_DELAY_MS: i32 = -40;
     pub(super) const ANNOTATION_LABEL_MS: u16 = 150;
@@ -613,20 +616,18 @@ fn choreograph(
     }
 
     for (index, callout) in callouts.iter().enumerate() {
-        let mark_at = shift(after, c::ANNOTATION_DELAY_MS)
+        let link_at = shift(after, c::ANNOTATION_DELAY_MS)
             + c::ANNOTATION_STRIDE_MS.saturating_mul(index as u16);
-        timing.push((Part::Mark(callout.key), mark_at, c::ANNOTATION_MARK_MS));
-
-        let mark_end = mark_at + c::ANNOTATION_MARK_MS;
-        let link_at = shift(mark_end, c::ANNOTATION_LINK_DELAY_MS);
-        if callout.link {
-            timing.push((Part::Link(callout.key), link_at, c::ANNOTATION_LINK_MS));
-        }
-
-        let label_at = shift(
-            link_at + c::ANNOTATION_LINK_MS,
-            c::ANNOTATION_LABEL_DELAY_MS,
-        );
+        let label_at = match callout.link {
+            true => {
+                timing.push((Part::Link(callout.key), link_at, c::ANNOTATION_LINK_MS));
+                shift(
+                    link_at + c::ANNOTATION_LINK_MS,
+                    c::ANNOTATION_LABEL_DELAY_MS,
+                )
+            },
+            false => link_at,
+        };
         timing.push((Part::Label(callout.key), label_at, c::ANNOTATION_LABEL_MS));
     }
 
@@ -955,15 +956,15 @@ mod tests {
             "starts run forward, got {starts:?}",
         );
 
-        let mark_at = |key: usize| {
+        let label_at = |key: usize| {
             timing
                 .iter()
-                .find(|(part, ..)| *part == Part::Mark(key))
+                .find(|(part, ..)| *part == Part::Label(key))
                 .map(|(_, start, _)| *start)
-                .expect("every annotation has a mark")
+                .expect("every annotation has a label")
         };
         assert_eq!(
-            mark_at(2) - mark_at(0),
+            label_at(2) - label_at(0),
             2 * choreography::ANNOTATION_STRIDE_MS,
             "annotations are evenly spaced",
         );
@@ -1036,7 +1037,7 @@ mod tests {
     }
 
     /// Until the reader walks into the annotations no callout is up. From then
-    /// on exactly one is current, so a stop with six marks still reads as being
+    /// on exactly one is current, so a stop with six labels still reads as being
     /// about one of them.
     #[test]
     fn one_current_annotation_dims_the_rest() {
@@ -1117,7 +1118,7 @@ mod tests {
         );
         assert_ne!(
             callout.label.y, 5,
-            "so it left the row beside its mark, landing at {:?}",
+            "so it left the row beside its code, landing at {:?}",
             callout.label,
         );
     }

@@ -529,6 +529,9 @@ pub mod scope {
 
     /// Annotation colors, cycled.
     ///
+    /// Each colors one annotation's label box, the connector to it, and the
+    /// annotation's code while the reader is on it.
+    ///
     /// A stop annotates an unknown number of things, so the colors repeat
     /// rather than being named by role: the layout cannot know in advance
     /// which role an annotation plays. Six runs out of distinguishable hues
