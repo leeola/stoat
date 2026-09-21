@@ -230,6 +230,16 @@ pub(crate) struct EditorState {
     /// the pane is too narrow to inset. Transient render state written by
     /// `render_editor`, not persisted.
     pub(crate) minimap_rect: Option<Rect>,
+    /// Cells the last render painted buffer text into, so a question about
+    /// where an offset sits on screen reads the paint's own geometry instead
+    /// of repeating its insets.
+    ///
+    /// In a plain editor this is the pane content area minus the gutter and
+    /// the minimap strip. A diff view records its right text column, and a
+    /// conflict view records its center text column. `None` before the first
+    /// render and after a render that painted no rows. Transient render state
+    /// written by `render_editor`, not persisted.
+    pub(crate) text_rect: Option<Rect>,
     /// Absolute terminal cell `(col, row)` the last render reserved for this
     /// editor's primary cursor, so the terminal can position its own cursor
     /// there instead of the render painting a styled grid cell.
@@ -295,6 +305,7 @@ impl EditorState {
             diagnostic_paint_scratch: Default::default(),
             gutter_width: 0,
             minimap_rect: None,
+            text_rect: None,
             cursor_screen_cell: None,
         }
     }
@@ -339,6 +350,7 @@ impl EditorState {
             diagnostic_paint_scratch: Default::default(),
             gutter_width: 0,
             minimap_rect: None,
+            text_rect: None,
             cursor_screen_cell: None,
         }
     }

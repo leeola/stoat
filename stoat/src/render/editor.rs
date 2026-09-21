@@ -157,6 +157,7 @@ pub(crate) fn render_editor_with_overlay(
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
     editor.minimap_rect = None;
+    editor.text_rect = None;
 
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
@@ -386,6 +387,7 @@ pub(crate) fn render_editor_with_overlay(
     } else {
         inner
     };
+    editor.text_rect = Some(inner);
 
     let right = inner.x + inner.width;
     let bottom = inner.y + inner.height;

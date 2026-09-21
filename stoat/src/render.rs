@@ -31,6 +31,7 @@ pub(crate) mod review;
 pub(crate) mod reword;
 pub(crate) mod run_pane;
 pub(crate) mod sanitize;
+pub(crate) mod screen;
 pub(crate) mod signature_help;
 pub(crate) mod symbol_finder;
 pub(crate) mod symbol_picker;

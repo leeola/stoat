@@ -13,9 +13,8 @@
 
 use crate::{
     app::Stoat,
-    editor_state::EditorState,
     pane::{FocusTarget, View},
-    render::layout::split_pane_status,
+    render::{layout::split_pane_status, screen},
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
@@ -45,7 +44,7 @@ pub(crate) fn focused_editor_popup_ctx(
     let (content_area, _) = split_pane_status(pane.area);
 
     let editor = ws.editors.get_mut(editor_id)?;
-    let cursor = cursor_screen_position(editor, content_area, anchor_offset)?;
+    let cursor = screen::cell(editor, anchor_offset)?;
     Some((content_area, cursor))
 }
 
@@ -164,20 +163,6 @@ fn paint_row(line: &str, inner: Rect, row: u16, style: Style, buf: &mut Buffer) 
         }
         buf[(col, row)].set_char(ch).set_style(style);
     }
-}
-
-/// The screen cell holding `anchor_offset`, or `None` when the popup should
-/// not appear at all.
-///
-/// An editor showing a review diff has no stable mapping from a buffer offset
-/// to a screen row, so a popup anchored to one would land somewhere arbitrary.
-/// Returning `None` there is what keeps it from being painted.
-fn cursor_screen_position(
-    editor: &mut EditorState,
-    content_area: Rect,
-    anchor_offset: usize,
-) -> Option<(u16, u16)> {
-    crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
 }
 
 #[cfg(test)]

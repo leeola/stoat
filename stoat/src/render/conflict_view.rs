@@ -105,6 +105,12 @@ pub(crate) fn render_conflict_view(
     stoatty: bool,
 ) {
     let cols = ConflictColumns::compute(inner);
+    editor.text_rect = Some(Rect {
+        x: cols.center_text_x,
+        y: inner.y,
+        width: cols.sep2_x.saturating_sub(cols.center_text_x),
+        height: inner.height,
+    });
     let snapshot = editor.display_map.snapshot();
     let scroll_row = editor.scroll_row;
 

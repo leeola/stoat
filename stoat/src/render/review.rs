@@ -137,6 +137,13 @@ pub(crate) fn render_diff_view(
     tint_amount: f32,
 ) {
     let stoatty = scene.is_some();
+    let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+    editor.text_rect = Some(Rect {
+        x: cols.right_text_x,
+        y: inner.y,
+        width: cols.right_content_w as u16,
+        height: inner.height,
+    });
     // The base rows pair with the live ones only where there are two columns to
     // pair across, so the width decides it, and it has to be settled before the
     // snapshot because it changes which blocks the display map splices.
@@ -162,7 +169,7 @@ pub(crate) fn render_diff_view(
         editor,
         &snapshot,
         inner,
-        right_text_x(inner),
+        cols.right_text_x,
         theme,
         buf,
         stoatty,

@@ -2011,7 +2011,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_action::OpenFile;
+    use stoat_action::{OpenFile, SplitDown, SplitRight};
     /// A buffer with `count` single-line diagnostics on consecutive rows,
     /// painted once so the pane areas and the render's span cache exist.
     fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
@@ -2205,18 +2205,18 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let left = {
-            let ws = h.stoat.active_workspace_mut();
-            let left = ws.panes.focus();
-            ws.panes.split(crate::pane::Axis::Vertical);
-            ws.panes.resize(Rect::new(0, 0, 80, 24));
-            left
-        };
+        let left = h.stoat.active_workspace().panes.focus();
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
         let left_content = crate::render::layout::split_pane_status(
             h.stoat.active_workspace().panes.pane(left).area,
         )
         .0;
         focus_at(&mut h.stoat, left_content.x + 1, left_content.y + 1);
+        h.stoat.render();
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
 
         // A hover wider than the left pane.
@@ -2304,18 +2304,18 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let top = {
-            let ws = h.stoat.active_workspace_mut();
-            let top = ws.panes.focus();
-            ws.panes.split(crate::pane::Axis::Horizontal);
-            ws.panes.resize(Rect::new(0, 0, 40, 24));
-            top
-        };
+        let top = h.stoat.active_workspace().panes.focus();
+        action_handlers::dispatch(&mut h.stoat, &SplitDown);
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 40, 24));
         let top_content = crate::render::layout::split_pane_status(
             h.stoat.active_workspace().panes.pane(top).area,
         )
         .0;
         focus_at(&mut h.stoat, top_content.x + 1, top_content.y + 1);
+        h.stoat.render();
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
 
         // Anchor on the top pane's last visible row (each "x\n" line is 2 bytes).

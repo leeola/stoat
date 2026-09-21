@@ -2387,8 +2387,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        let size = h.stoat.size();
-        h.stoat.active_workspace_mut().layout(size);
+        h.stoat.render();
 
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
         h.stoat.pending_hover = Some(HoverPopup::new(
@@ -2433,8 +2432,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        let size = h.stoat.size();
-        h.stoat.active_workspace_mut().layout(size);
+        h.stoat.render();
 
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
         h.stoat.pending_hover = Some(HoverPopup::new(
