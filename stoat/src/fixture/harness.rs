@@ -14,7 +14,7 @@
 
 use crate::{
     host::LocalFsWatcher,
-    input_parse::{self, InputParseError},
+    input_parse::{self, InputParseError, InputStep},
     run,
     ui::RenderFrame,
     Settings, Stoat,
@@ -44,8 +44,8 @@ const DEFAULT_COLS: u16 = 80;
 
 const DEFAULT_ROWS: u16 = 24;
 
-/// Gap between driven keys, matching the terminal front-end's inter-key pacing
-/// so each keystroke's effects settle before the next arrives.
+/// Settle gap between driven keys, so each keystroke's effects land before the
+/// next arrives. A script that needs a longer hold writes a `<Wait:N>` token.
 const INTER_KEY_DELAY: Duration = Duration::from_millis(20);
 
 /// How long [`Handle::query`] waits for the session socket to appear. The socket
@@ -262,12 +262,18 @@ pub struct Handle {
 
 impl Handle {
     /// Parse `keys` in the Helix/vim-style grammar and feed them as key events,
-    /// pausing [`INTER_KEY_DELAY`] between keys so effects settle.
+    /// pausing [`INTER_KEY_DELAY`] between keys so effects settle. A `<Wait:N>`
+    /// token holds for its own duration instead.
     pub async fn send_keys(&self, keys: &str) -> Result<(), HarnessError> {
         let parsed = input_parse::parse_input_sequence(keys).context(ParseInputSnafu)?;
-        for key in parsed {
-            self.send_event(Event::Key(key))?;
-            time::sleep(INTER_KEY_DELAY).await;
+        for step in parsed {
+            match step {
+                InputStep::Key(key) => {
+                    self.send_event(Event::Key(key))?;
+                    time::sleep(INTER_KEY_DELAY).await;
+                },
+                InputStep::Wait(duration) => time::sleep(duration).await,
+            }
         }
         Ok(())
     }

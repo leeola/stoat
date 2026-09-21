@@ -132,6 +132,7 @@ pub struct CommonArgs {
 
     /// Keystroke sequence fed once the editor is live, in the Helix/vim-style
     /// grammar (e.g. `ifoo<Esc>`). Drives the editor for a scripted run.
+    /// `<Wait:N>` holds N milliseconds before the next key.
     #[arg(long = "inputs", value_name = "KEYS")]
     pub inputs: Option<String>,
 

@@ -7,6 +7,10 @@
 //! `<F1>`..`<F12>`), modifier prefixes that set ctrl/shift/alt on a single
 //! trailing key (`<C-w>`, `<C-S-w>`, `<A-Left>`), and `<lt>` for a literal `<`.
 //!
+//! `<Wait:N>` is a pause of N whole milliseconds rather than a key, so a script
+//! holds between typing bursts the way a reader stops to take in the screen.
+//! A modifier prefix does not apply to it. `<C-Wait:5>` is an unknown key.
+//!
 //! Events are emitted in the same canonical form the live input path produces
 //! after [`crate::keymap_state::normalize_shift_event`], so a driver that feeds
 //! them through that path reproduces real typing. A shifted letter is an
@@ -15,6 +19,18 @@
 use crate::keymap_state::normalize_shift_event;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use snafu::{Location, Snafu};
+use std::time::Duration;
+
+/// One element of a parsed input script.
+///
+/// A step is either a key to send or a pause to hold before the next step.
+/// Each driver decides what a pause means for it. The `--inputs` front-end
+/// sleeps for it, while a consumer that only replays keystrokes skips it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputStep {
+    Key(KeyEvent),
+    Wait(Duration),
+}
 
 /// Failure parsing an input string in [`parse_input_sequence`].
 #[derive(Debug, Snafu)]
@@ -33,19 +49,26 @@ pub enum InputParseError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("invalid wait token '<{token}>': expected whole milliseconds"))]
+    InvalidWait {
+        token: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
-/// Parse a Helix/vim-style input string into the crossterm [`KeyEvent`]
-/// sequence a self-driver feeds through the input path.
+/// Parse a Helix/vim-style input string into the [`InputStep`] sequence a
+/// self-driver feeds through the input path.
 ///
-/// Errors on a `<...>` token that names no known key or a `<` with no closing
-/// `>`.
-pub fn parse_input_sequence(input: &str) -> Result<Vec<KeyEvent>, InputParseError> {
-    let mut events = Vec::new();
+/// Errors on a `<...>` token that names no known key, a `<Wait:N>` whose count
+/// is not whole milliseconds, or a `<` with no closing `>`.
+pub fn parse_input_sequence(input: &str) -> Result<Vec<InputStep>, InputParseError> {
+    let mut steps = Vec::new();
     let mut chars = input.char_indices();
 
     while let Some((offset, ch)) = chars.next() {
-        let event = match ch {
+        let step = match ch {
             '<' => {
                 let mut token = String::new();
                 let mut closed = false;
@@ -59,14 +82,27 @@ pub fn parse_input_sequence(input: &str) -> Result<Vec<KeyEvent>, InputParseErro
                 if !closed {
                     return UnterminatedTokenSnafu { offset }.fail();
                 }
-                parse_angle_token(&token)?
+                match strip_prefix_ci(&token, "wait:") {
+                    Some(count) => InputStep::Wait(parse_wait(&token, count)?),
+                    None => InputStep::Key(parse_angle_token(&token)?),
+                }
             },
-            _ => canonical(KeyCode::Char(ch), KeyModifiers::NONE),
+            _ => InputStep::Key(canonical(KeyCode::Char(ch), KeyModifiers::NONE)),
         };
-        events.push(event);
+        steps.push(step);
     }
 
-    Ok(events)
+    Ok(steps)
+}
+
+fn parse_wait(token: &str, count: &str) -> Result<Duration, InputParseError> {
+    match count.parse::<u32>() {
+        Ok(millis) => Ok(Duration::from_millis(u64::from(millis))),
+        Err(_) => InvalidWaitSnafu {
+            token: token.to_string(),
+        }
+        .fail(),
+    }
 }
 
 fn parse_angle_token(token: &str) -> Result<KeyEvent, InputParseError> {
@@ -165,7 +201,14 @@ mod tests {
     use super::*;
 
     fn parse(input: &str) -> Vec<KeyEvent> {
-        parse_input_sequence(input).expect("parse")
+        parse_input_sequence(input)
+            .expect("parse")
+            .into_iter()
+            .map(|step| match step {
+                InputStep::Key(key) => key,
+                InputStep::Wait(duration) => panic!("unexpected wait of {duration:?}"),
+            })
+            .collect()
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -308,6 +351,43 @@ mod tests {
     fn multi_char_after_modifier_errors() {
         assert!(matches!(
             parse_input_sequence("<C-ab>"),
+            Err(InputParseError::UnknownToken { .. })
+        ));
+    }
+
+    #[test]
+    fn wait_token_yields_a_pause() {
+        assert_eq!(
+            parse_input_sequence("a<Wait:250>b").expect("parse"),
+            vec![
+                InputStep::Key(key(KeyCode::Char('a'))),
+                InputStep::Wait(Duration::from_millis(250)),
+                InputStep::Key(key(KeyCode::Char('b'))),
+            ],
+        );
+        assert_eq!(
+            parse_input_sequence("<wait:0>").expect("parse"),
+            vec![InputStep::Wait(Duration::ZERO)],
+        );
+    }
+
+    #[test]
+    fn wait_token_rejects_a_bad_count() {
+        for input in ["<Wait:>", "<Wait:1.5>", "<Wait:-1>", "<Wait:99999999999>"] {
+            assert!(
+                matches!(
+                    parse_input_sequence(input),
+                    Err(InputParseError::InvalidWait { .. })
+                ),
+                "{input} is not a wait",
+            );
+        }
+    }
+
+    #[test]
+    fn modified_wait_is_unknown() {
+        assert!(matches!(
+            parse_input_sequence("<C-Wait:5>"),
             Err(InputParseError::UnknownToken { .. })
         ));
     }

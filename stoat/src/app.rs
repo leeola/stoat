@@ -8155,6 +8155,7 @@ mod tests {
         debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
         display_map::{DisplayPoint, PaintVersion},
         host::FsEventKind,
+        input_parse::{self, InputStep},
         input_view::{InputView, SubmitTarget},
         run::GridSelection,
         term_session::{TermSelection, TermSession},
@@ -16919,8 +16920,10 @@ mod tests {
         // The `--inputs` driver injects plain `Event::Key`s into the same
         // channel real keystrokes use, so feed the parsed sequence through
         // `update` directly rather than the double-firing keystroke helper.
-        for key in crate::input_parse::parse_input_sequence("ifoo<Esc>").expect("parse") {
-            h.stoat.update(Event::Key(key));
+        for step in input_parse::parse_input_sequence("ifoo<Esc>").expect("parse") {
+            if let InputStep::Key(key) = step {
+                h.stoat.update(Event::Key(key));
+            }
         }
 
         assert_eq!(buffer_text(&h, &path), "foo");

@@ -1,5 +1,5 @@
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
-use crossterm::event::{Event, KeyEvent};
+use crossterm::event::Event;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
     path::{Path, PathBuf},
@@ -8,7 +8,7 @@ use std::{
 };
 use stoat::{
     host::{EnvHost, FsHost, LocalClipboard, LocalEnv, LocalFs, LocalFsWatcher},
-    input_parse,
+    input_parse::{self, InputStep},
     lsp::hosts,
     Axis, Settings, Stoat,
 };
@@ -658,24 +658,30 @@ fn window_socket_path() -> Option<PathBuf> {
 /// render wiring are live before input arrives.
 const READINESS_DELAY: Duration = Duration::from_millis(300);
 
-/// Gap between driven keys, so each keystroke's effect settles before the
-/// next is sent.
-const INTER_KEY_DELAY: Duration = Duration::from_millis(20);
+/// Gap between two keys a person types, so a scripted run reads at the speed
+/// a viewer follows rather than arriving all at once.
+const TYPING_GAP: Duration = Duration::from_millis(100);
 
-/// Feed `keys` into the event channel as `Event::Key`s, paced like real
+/// Feed `steps` into the event channel as `Event::Key`s, paced like real
 /// typing.
 ///
-/// A readiness delay comes first so the workspace and render wiring are
-/// live, then one key lands every [`INTER_KEY_DELAY`]. This is the
-/// `--inputs` self-driver, run on the shared executor so a scripted session
-/// exercises the same input path a human keyboard drives. Stops early if the
-/// receiver has gone away.
-async fn drive_inputs(tx: UnboundedSender<Event>, keys: Vec<KeyEvent>, executor: Executor) {
+/// A readiness delay comes first so the workspace and render wiring are live,
+/// then one key lands every [`TYPING_GAP`]. A script paces itself with
+/// `<Wait:N>` between its typing bursts, which holds for that long before the
+/// next key. This is the `--inputs` self-driver, run on the shared executor so
+/// a scripted session exercises the same input path a human keyboard drives.
+/// Stops early if the receiver has gone away.
+async fn drive_inputs(tx: UnboundedSender<Event>, steps: Vec<InputStep>, executor: Executor) {
     executor.timer(READINESS_DELAY).await;
-    for key in keys {
-        executor.timer(INTER_KEY_DELAY).await;
-        if tx.send(Event::Key(key)).is_err() {
-            break;
+    for step in steps {
+        match step {
+            InputStep::Key(key) => {
+                executor.timer(TYPING_GAP).await;
+                if tx.send(Event::Key(key)).is_err() {
+                    break;
+                }
+            },
+            InputStep::Wait(duration) => executor.timer(duration).await,
         }
     }
 }
@@ -684,6 +690,15 @@ async fn drive_inputs(tx: UnboundedSender<Event>, keys: Vec<KeyEvent>, executor:
 mod tests {
     use super::*;
     use stoat_scheduler::TestScheduler;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    fn drain(rx: &mut UnboundedReceiver<Event>) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
 
     fn bare_files() -> CommonArgs {
         CommonArgs {
@@ -933,11 +948,17 @@ mod tests {
         let executor = scheduler.executor();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
 
-        let keys = input_parse::parse_input_sequence("if<Esc>").expect("parse");
-        let expected: Vec<Event> = keys.iter().cloned().map(Event::Key).collect();
+        let steps = input_parse::parse_input_sequence("if<Esc>").expect("parse");
+        let expected: Vec<Event> = steps
+            .iter()
+            .filter_map(|step| match step {
+                InputStep::Key(key) => Some(Event::Key(*key)),
+                InputStep::Wait(_) => None,
+            })
+            .collect();
 
         executor
-            .spawn(drive_inputs(tx, keys, executor.clone()))
+            .spawn(drive_inputs(tx, steps, executor.clone()))
             .detach();
 
         scheduler.run_until_parked();
@@ -946,14 +967,35 @@ mod tests {
             "no key arrives before the readiness delay"
         );
 
-        scheduler.advance_clock(READINESS_DELAY + INTER_KEY_DELAY * 4);
+        scheduler.advance_clock(READINESS_DELAY + TYPING_GAP * 4);
         scheduler.run_until_parked();
 
-        let mut got = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            got.push(event);
-        }
-        assert_eq!(got, expected);
+        assert_eq!(drain(&mut rx), expected);
+    }
+
+    #[test]
+    fn a_wait_token_holds_the_next_key() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+
+        let steps = input_parse::parse_input_sequence("a<Wait:500>b").expect("parse");
+
+        executor
+            .spawn(drive_inputs(tx, steps, executor.clone()))
+            .detach();
+
+        scheduler.advance_clock(READINESS_DELAY + TYPING_GAP);
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 1, "keys after the first typing gap");
+
+        scheduler.advance_clock(Duration::from_millis(500));
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 0, "keys while the wait holds");
+
+        scheduler.advance_clock(TYPING_GAP);
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 1, "keys after the wait releases");
     }
 
     #[test]
