@@ -307,6 +307,7 @@ fn run_tui(
         resume,
         inputs,
         timeout,
+        input_speed,
         fixture,
     } = common;
 
@@ -598,8 +599,9 @@ fn run_tui(
         }
 
         if let (Some(keys), Some(tx)) = (inputs, driver_tx) {
+            let speed = input_speed.unwrap_or(1.0);
             executor
-                .spawn(drive_inputs(tx, keys, executor.clone()))
+                .spawn(drive_inputs(tx, keys, speed, executor.clone()))
                 .detach();
         }
 
@@ -671,17 +673,26 @@ const TYPING_GAP: Duration = Duration::from_millis(100);
 /// next key. This is the `--inputs` self-driver, run on the shared executor so
 /// a scripted session exercises the same input path a human keyboard drives.
 /// Stops early if the receiver has gone away.
-async fn drive_inputs(tx: UnboundedSender<Event>, steps: Vec<InputStep>, executor: Executor) {
+///
+/// `speed` divides both the typing gap and each `<Wait:N>`, so the whole script
+/// slows or hurries with its proportions intact. The readiness delay does not
+/// scale, because it waits on the app coming up rather than on the script.
+async fn drive_inputs(
+    tx: UnboundedSender<Event>,
+    steps: Vec<InputStep>,
+    speed: f64,
+    executor: Executor,
+) {
     executor.timer(READINESS_DELAY).await;
     for step in steps {
         match step {
             InputStep::Key(key) => {
-                executor.timer(TYPING_GAP).await;
+                executor.timer(TYPING_GAP.div_f64(speed)).await;
                 if tx.send(Event::Key(key)).is_err() {
                     break;
                 }
             },
-            InputStep::Wait(duration) => executor.timer(duration).await,
+            InputStep::Wait(duration) => executor.timer(duration.div_f64(speed)).await,
         }
     }
 }
@@ -707,6 +718,7 @@ mod tests {
             resume: false,
             inputs: None,
             timeout: None,
+            input_speed: None,
             fixture: None,
         }
     }
@@ -958,7 +970,7 @@ mod tests {
             .collect();
 
         executor
-            .spawn(drive_inputs(tx, steps, executor.clone()))
+            .spawn(drive_inputs(tx, steps, 1.0, executor.clone()))
             .detach();
 
         scheduler.run_until_parked();
@@ -982,7 +994,7 @@ mod tests {
         let steps = input_parse::parse_input_sequence("a<Wait:500>b").expect("parse");
 
         executor
-            .spawn(drive_inputs(tx, steps, executor.clone()))
+            .spawn(drive_inputs(tx, steps, 1.0, executor.clone()))
             .detach();
 
         scheduler.advance_clock(READINESS_DELAY + TYPING_GAP);
@@ -996,6 +1008,35 @@ mod tests {
         scheduler.advance_clock(TYPING_GAP);
         scheduler.run_until_parked();
         assert_eq!(drain(&mut rx).len(), 1, "keys after the wait releases");
+    }
+
+    #[test]
+    fn half_speed_doubles_every_gap() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+
+        let steps = input_parse::parse_input_sequence("a<Wait:200>b").expect("parse");
+
+        executor
+            .spawn(drive_inputs(tx, steps, 0.5, executor.clone()))
+            .detach();
+
+        scheduler.advance_clock(READINESS_DELAY + TYPING_GAP);
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 0, "keys after one unscaled gap");
+
+        scheduler.advance_clock(TYPING_GAP);
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 1, "keys after the doubled gap");
+
+        scheduler.advance_clock(Duration::from_millis(400));
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 0, "keys while the doubled wait holds");
+
+        scheduler.advance_clock(TYPING_GAP * 2);
+        scheduler.run_until_parked();
+        assert_eq!(drain(&mut rx).len(), 1, "keys after the doubled wait");
     }
 
     #[test]

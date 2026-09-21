@@ -7,6 +7,12 @@
 use clap::{builder::PossibleValuesParser, Args, Subcommand, ValueHint};
 use std::path::PathBuf;
 
+/// Smallest `--input-speed` factor accepted.
+///
+/// The driver divides every gap by the factor, so a smaller one stretches a
+/// gap past what a `Duration` holds.
+const MIN_INPUT_SPEED: f64 = 0.001;
+
 /// The deterministic fixtures both binaries expose, as `(name, one-line
 /// description)`, in the order `stoat fixture ls` prints them.
 ///
@@ -111,7 +117,8 @@ pub fn ls_text() -> String {
 /// The workspace-open arguments both stoat and stoatty accept.
 ///
 /// These are the files to open, the `--continue`/`--resume` session-restore
-/// selectors, and the `--inputs`/`--timeout` scripted-run controls.
+/// selectors, and the `--inputs`/`--timeout`/`--input-speed` scripted-run
+/// controls.
 #[derive(Args, Debug, PartialEq)]
 pub struct CommonArgs {
     /// Files to open.
@@ -140,6 +147,12 @@ pub struct CommonArgs {
     /// run exits on its own. Rejects non-finite or negative values.
     #[arg(long = "timeout", value_name = "SECONDS", value_parser = parse_timeout)]
     pub timeout: Option<f64>,
+
+    /// Multiplier on the pace of a scripted `--inputs` run, defaulting to `1`.
+    /// A factor below `1` plays slower and above `1` faster, and a fixture's
+    /// default inputs scale the same way.
+    #[arg(long = "input-speed", value_name = "FACTOR", value_parser = parse_speed)]
+    pub input_speed: Option<f64>,
 
     /// Materialize the named deterministic fixture into a fresh temp repo and
     /// open the editor there. Requires a stoat built with the `fixture`
@@ -181,6 +194,20 @@ fn parse_timeout(value: &str) -> Result<f64, String> {
     Ok(seconds)
 }
 
+/// Parse and validate an `--input-speed` factor, rejecting non-finite values
+/// and anything below [`MIN_INPUT_SPEED`] so a bad factor fails at parse time.
+fn parse_speed(value: &str) -> Result<f64, String> {
+    let factor: f64 = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number"))?;
+    if !factor.is_finite() || factor < MIN_INPUT_SPEED {
+        return Err(format!(
+            "must be finite and at least {MIN_INPUT_SPEED}, got {factor}"
+        ));
+    }
+    Ok(factor)
+}
+
 impl CommonArgs {
     /// Reconstruct the canonical argv these arguments parse from, for
     /// forwarding to a child process.
@@ -203,6 +230,10 @@ impl CommonArgs {
             argv.push("--timeout".to_string());
             argv.push(timeout.to_string());
         }
+        if let Some(speed) = self.input_speed {
+            argv.push("--input-speed".to_string());
+            argv.push(speed.to_string());
+        }
         if let Some(fixture) = &self.fixture {
             argv.push("--fixture".to_string());
             argv.push(fixture.clone());
@@ -218,7 +249,7 @@ impl CommonArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_inputs, parse_timeout, CommonArgs, FIXTURES};
+    use super::{default_inputs, parse_speed, parse_timeout, CommonArgs, FIXTURES};
     use clap::Parser;
     use std::path::PathBuf;
 
@@ -270,6 +301,7 @@ mod tests {
             resume: false,
             inputs: None,
             timeout: None,
+            input_speed: None,
             fixture: None,
         });
         round_trip(CommonArgs {
@@ -278,6 +310,7 @@ mod tests {
             resume: true,
             inputs: None,
             timeout: None,
+            input_speed: None,
             fixture: None,
         });
         round_trip(CommonArgs {
@@ -286,6 +319,7 @@ mod tests {
             resume: false,
             inputs: Some("ifoo<Esc>".to_string()),
             timeout: Some(1.5),
+            input_speed: None,
             fixture: None,
         });
         round_trip(CommonArgs {
@@ -294,7 +328,17 @@ mod tests {
             resume: false,
             inputs: None,
             timeout: None,
+            input_speed: None,
             fixture: Some("basic-diff".to_string()),
+        });
+        round_trip(CommonArgs {
+            files: Vec::new(),
+            continue_: false,
+            resume: false,
+            inputs: Some("a<Wait:200>b".to_string()),
+            timeout: None,
+            input_speed: Some(0.5),
+            fixture: None,
         });
     }
 
@@ -306,6 +350,17 @@ mod tests {
         assert!(parse_timeout("nan").is_err());
         assert!(parse_timeout("inf").is_err());
         assert!(parse_timeout("abc").is_err());
+    }
+
+    #[test]
+    fn parse_speed_rejects_non_positive_and_non_finite() {
+        assert_eq!(parse_speed("1"), Ok(1.0));
+        assert_eq!(parse_speed("0.5"), Ok(0.5));
+        assert!(parse_speed("0").is_err());
+        assert!(parse_speed("-1").is_err());
+        assert!(parse_speed("nan").is_err());
+        assert!(parse_speed("inf").is_err());
+        assert!(parse_speed("abc").is_err());
     }
 
     #[test]
