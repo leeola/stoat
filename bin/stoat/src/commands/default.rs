@@ -315,8 +315,8 @@ fn run_tui(
     // sequence fails the invocation with a plain error instead of after a
     // UI takeover that must then be unwound.
     let inputs = inputs
+        .or_else(|| fixture.as_deref().and_then(fixture_inputs))
         .as_deref()
-        .or_else(|| fixture.as_deref().and_then(stoat_cli::default_inputs))
         .map(input_parse::parse_input_sequence)
         .transpose()
         .with_whatever_context(|e| format!("parse --inputs sequence: {e}"))?;
@@ -654,6 +654,23 @@ fn read_config(path: &Path) -> Option<String> {
 #[allow(clippy::disallowed_methods)]
 fn window_socket_path() -> Option<PathBuf> {
     std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from)
+}
+
+/// The input sequence the named fixture opens itself with, or `None` when it
+/// names no fixture or the fixture has nothing to drive.
+///
+/// A build without the `fixture` feature rejects `--fixture` before any input
+/// runs, so this half answers `None` for every name.
+#[cfg(not(feature = "fixture"))]
+fn fixture_inputs(_name: &str) -> Option<String> {
+    None
+}
+
+/// The input sequence the named fixture opens itself with, or `None` when the
+/// fixture has nothing to drive.
+#[cfg(feature = "fixture")]
+fn fixture_inputs(name: &str) -> Option<String> {
+    stoat::fixture::default_inputs(name)
 }
 
 /// Delay before the first driven key, so the workspace, UI thread, and

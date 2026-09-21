@@ -129,7 +129,7 @@ pub(in crate::fixture) fn materialize(dest: &Path) -> Result<(), FixtureError> {
 }
 
 /// The five-stop tour the `walkthrough-columns` fixture commits.
-fn build() -> Walkthrough {
+pub(in crate::fixture) fn build() -> Walkthrough {
     let mut tour = Walkthrough::new(
         "tour".to_string(),
         "Bytes, characters, and cells".to_string(),

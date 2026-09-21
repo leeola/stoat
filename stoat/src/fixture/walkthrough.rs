@@ -17,6 +17,39 @@ pub(super) mod marks;
 pub(super) mod tour;
 pub(super) mod trail;
 
+/// How long a driven tour rests on a stop before stepping to the next.
+///
+/// The slide draws in about two seconds, and the narration card is two
+/// sentences, so this leaves a reader time to finish both.
+const STOP_DWELL_MS: u32 = 4000;
+
+/// How long a driven tour rests on an annotation before stepping past it.
+///
+/// An annotation is a label over a range rather than a fresh screen, so it
+/// needs less than a stop.
+const ANNOTATION_DWELL_MS: u32 = 2500;
+
+/// The `--inputs` script that opens `tour` and walks every stop and annotation
+/// in it, pausing on each one long enough to read.
+///
+/// The script is derived from the tour rather than written beside it, so a
+/// fixture that gains a stop or an annotation drives the new one with no edit
+/// here.
+pub(super) fn stepping_inputs(tour: &Walkthrough) -> String {
+    let mut script = format!(":walkthrough {}<Enter><Space>W", tour.slug);
+
+    for (index, stop) in tour.stops.iter().enumerate() {
+        for _ in &stop.annotations {
+            script.push_str(&format!("<Wait:{ANNOTATION_DWELL_MS}>a"));
+        }
+        if index + 1 < tour.stops.len() {
+            script.push_str(&format!("<Wait:{STOP_DWELL_MS}>n"));
+        }
+    }
+
+    script
+}
+
 /// Returns the tour serialized the way the store writes it to disk.
 ///
 /// `store::save` rewrites `git_head` from the workspace, and a fixture's tour
@@ -128,4 +161,40 @@ pub(super) fn annotate(
         narration.to_string(),
     )
     .expect("the stop was just added");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stepping_inputs_walks_every_stop_and_annotation() {
+        let content = "fn first() {}\nfn second() {}\n";
+        let mut tour = Walkthrough::new("tour".to_string(), "Two stops".to_string(), None);
+
+        for needle in ["fn first", "fn second"] {
+            tour.add_stop(
+                None,
+                String::new(),
+                location("src/main.rs", content, line_of(content, needle)),
+                None,
+            )
+            .expect("the tour accepts a stop");
+        }
+
+        annotate(
+            &mut tour,
+            "s1",
+            None,
+            content,
+            span_of(content, "first"),
+            "first",
+            "",
+        );
+
+        assert_eq!(
+            stepping_inputs(&tour),
+            ":walkthrough tour<Enter><Space>W<Wait:2500>a<Wait:4000>n",
+        );
+    }
 }

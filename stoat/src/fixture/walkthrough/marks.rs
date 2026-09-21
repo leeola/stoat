@@ -260,7 +260,7 @@ pub(in crate::fixture) fn materialize(dest: &Path) -> Result<(), FixtureError> {
 }
 
 /// The eight-stop tour the `walkthrough-marks` fixture commits.
-fn build() -> Walkthrough {
+pub(in crate::fixture) fn build() -> Walkthrough {
     let mut tour = Walkthrough::new(
         "tour".to_string(),
         "Where the labels land".to_string(),

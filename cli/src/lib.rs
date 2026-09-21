@@ -82,17 +82,6 @@ pub const FIXTURES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The input sequence a fixture opens itself with, for one whose point is a
-/// screen the reader would otherwise have to summon by hand.
-///
-/// Only the fixture knows what makes it worth looking at, so it names the
-/// sequence rather than every caller repeating it. An explicit `--inputs`
-/// outranks this, since the reader asked for something specific.
-pub fn default_inputs(name: &str) -> Option<&'static str> {
-    (name == "walkthrough" || name.starts_with("walkthrough-"))
-        .then_some(":walkthrough tour<Enter>")
-}
-
 /// A clap value parser accepting only the [`FIXTURES`] names, so an unknown
 /// fixture fails at parse time with a did-you-mean suggestion.
 fn fixture_value_parser() -> PossibleValuesParser {
@@ -249,37 +238,9 @@ impl CommonArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_inputs, parse_speed, parse_timeout, CommonArgs, FIXTURES};
+    use super::{parse_speed, parse_timeout, CommonArgs, FIXTURES};
     use clap::Parser;
     use std::path::PathBuf;
-
-    /// Every fixture in the walkthrough family commits a tour, and the player
-    /// is the only reason to open one, so each opens on its tour rather than
-    /// on a workspace the reader has to navigate out of.
-    #[test]
-    fn every_walkthrough_fixture_opens_its_tour() {
-        assert_eq!(
-            default_inputs("walkthrough"),
-            Some(":walkthrough tour<Enter>"),
-        );
-        assert_eq!(
-            default_inputs("walkthrough-drift"),
-            Some(":walkthrough tour<Enter>"),
-        );
-        assert_eq!(default_inputs("basic-diff"), None);
-    }
-
-    /// Every name that opens itself must be one the catalog carries, or the
-    /// sequence is dead text nothing reaches. The walkthrough family is the
-    /// whole of that set, so the two lists are one list.
-    #[test]
-    fn the_self_opening_fixtures_are_the_walkthrough_family() {
-        let names = || FIXTURES.iter().map(|(name, _)| *name);
-        let self_opening: Vec<&str> = names().filter(|n| default_inputs(n).is_some()).collect();
-        let walkthroughs: Vec<&str> = names().filter(|n| n.starts_with("walkthrough")).collect();
-
-        assert_eq!(self_opening, walkthroughs);
-    }
 
     #[derive(Parser)]
     struct Harness {

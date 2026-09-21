@@ -452,6 +452,28 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
     }
 }
 
+/// The input sequence a fixture opens itself with, for one whose point is a
+/// screen the reader otherwise has to summon by hand.
+///
+/// Only the fixture knows what makes it worth looking at, so it names the
+/// sequence rather than every caller repeating it. An explicit `--inputs`
+/// outranks this, since the reader asked for something specific.
+///
+/// Every walkthrough fixture answers with a script that opens its tour and
+/// then walks each stop and annotation, derived from the tour it commits.
+pub fn default_inputs(name: &str) -> Option<String> {
+    let tour = match name {
+        "walkthrough" | "walkthrough-drift" | "walkthrough-catalog" => walkthrough::tour::build(),
+        "walkthrough-marks" => walkthrough::marks::build(),
+        "walkthrough-card" => walkthrough::card::build(),
+        "walkthrough-trail" => walkthrough::trail::build(),
+        "walkthrough-columns" => walkthrough::columns::build(),
+        _ => return None,
+    };
+
+    Some(walkthrough::stepping_inputs(&tour))
+}
+
 fn materialize_basic_diff(dest: &Path) -> Result<(), FixtureError> {
     let mut repo = FixtureRepo::init(dest)?;
     repo.commit(

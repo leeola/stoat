@@ -262,7 +262,7 @@ pub(in crate::fixture) fn materialize(dest: &Path) -> Result<(), FixtureError> {
 /// The order carries the meaning. Each stop is chosen for the relation the step
 /// onto it exercises, so walking the tour once runs all four searches and both
 /// ways of finding nothing.
-fn build() -> Walkthrough {
+pub(in crate::fixture) fn build() -> Walkthrough {
     let mut tour = Walkthrough::new(
         "tour".to_string(),
         "How the stops are related".to_string(),
