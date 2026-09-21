@@ -58,7 +58,7 @@ pub const FIXTURES: &[(&str, &str)] = &[
     ),
     (
         "walkthrough-marks",
-        "a rules table whose tour crowds, stacks, boxes, wraps, and drops labels",
+        "a rules table over three modules whose tour crowds, stacks, boxes, wraps, and drops labels",
     ),
     (
         "walkthrough-card",

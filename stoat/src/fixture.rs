@@ -395,11 +395,12 @@ pub enum FixtureError {
 ///   `.stoat/walkthroughs/tour.json`, so the walkthrough player opens on real code. The tour covers
 ///   a one-line focus, a many-line focus, a step that glides more than a screen, several
 ///   annotations in one file, a cross-file annotation, and an untitled stop with no narration.
-/// - `walkthrough-marks`: the same shape of cargo crate over a lint-rule table, committed with an
-///   eight-stop tour that puts one label and mark placement under the layout per stop. It stages
-///   labels crowded off their rows, two labels starting on one row, a seventh annotation wrapping
-///   the marker color cycle, a rect mark over a three-line annotation, labels with no room to land,
-///   a soft-wrapped focus, and focuses at the left edge and the last line.
+/// - `walkthrough-marks`: the same shape of cargo crate over a lint-rule table split over three
+///   modules, committed with an eight-stop tour that puts one label and mark placement under the
+///   layout per stop and crosses a file boundary at five of its seven steps. It stages labels
+///   crowded off their rows, two labels starting on one row, a seventh annotation wrapping the
+///   marker color cycle, a highlight over a three-line annotation, labels with no room to land, a
+///   soft-wrapped focus, and focuses at the left edge and the last line.
 /// - `walkthrough-card`: a text report builder committed with an eight-stop tour that pushes the
 ///   narration card into every placement and content shape. It stages the card below the focus and
 ///   over the code when nothing else fits, the narrowest and widest cards, a card taller than the

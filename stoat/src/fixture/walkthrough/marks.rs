@@ -9,6 +9,11 @@
 //! placement it forces is reproducible rather than a screen someone has to
 //! find.
 //!
+//! The table is split over three modules, `table`, `message`, and `rules`, so
+//! the tour changes file at five of its seven steps the way a real tour does.
+//! Each stop still stages one placement, and every annotation names code in
+//! its stop's own file.
+//!
 //! Between them the stops drive the fallbacks in `place_callouts`
 //! (crate::walkthrough::slide): labels pushed off their row by
 //! `LABEL_ROW_OFFSETS`, a label that finds no candidate at all, the marker
@@ -29,7 +34,9 @@ edition = "2021"
 [workspace]
 "#;
 
-const MAIN: &str = r#"mod rules;
+const MAIN: &str = r#"mod message;
+mod rules;
+mod table;
 
 use rules::Rule;
 
@@ -49,25 +56,11 @@ fn main() {
         println!("{} {}: {}", finding.code, finding.rule, finding.text);
     }
 
-    println!("{}", rules::message("unused-import"));
+    println!("{}", message::message("unused-import"));
 }
 "#;
 
-const RULES: &str = r#"/// A rule as the table carries it: the name it is keyed by, and the path it
-/// applies to.
-pub struct Rule {
-    pub name: String,
-    pub target: String,
-}
-
-/// What a rule reports when it fires.
-pub struct Finding {
-    pub code: u16,
-    pub rule: String,
-    pub text: String,
-}
-
-/// How loudly a rule reports.
+const TABLE: &str = r#"/// How loudly a rule reports.
 #[derive(Clone, Copy)]
 pub enum Severity {
     Allow,
@@ -99,8 +92,9 @@ pub fn code(rule: &str) -> u16 {
         _ => 0,
     }
 }
+"#;
 
-/// What a rule says when it fires, written out for the reader rather than
+const MESSAGE: &str = r#"/// What a rule says when it fires, written out for the reader rather than
 /// abbreviated into a code.
 pub fn message(rule: &str) -> &'static str {
     match rule {
@@ -108,6 +102,26 @@ pub fn message(rule: &str) -> &'static str {
         "shadowed-binding" => "a later binding of this name hides the earlier one, and every read below the shadow reaches the later value",
         _ => "this rule has no message of its own",
     }
+}
+
+/// One line of prose about the table, left unwrapped on purpose.
+pub const SUMMARY: &str = "The table is deliberately flat: a rule is a name, the name resolves to a severity and a code, and the message is looked up from the same name, so adding a rule is three arms and never a new concept.";
+"#;
+
+const RULES: &str = r#"use crate::{message::message, table::{code, severity, Severity}};
+
+/// A rule as the table carries it: the name it is keyed by, and the path it
+/// applies to.
+pub struct Rule {
+    pub name: String,
+    pub target: String,
+}
+
+/// What a rule reports when it fires.
+pub struct Finding {
+    pub code: u16,
+    pub rule: String,
+    pub text: String,
 }
 
 /// Whether a rule reporting at `rule_level` is worth recording at all.
@@ -135,9 +149,6 @@ pub fn check(rules: &[Rule]) -> Vec<Finding> {
 
     findings
 }
-
-/// One line of prose about the table, left unwrapped on purpose.
-pub const SUMMARY: &str = "The table is deliberately flat: a rule is a name, the name resolves to a severity and a code, and the message is looked up from the same name, so adding a rule is three arms and never a new concept.";
 
 /// How many rules the table names.
 pub const RULE_COUNT: usize = 6;
@@ -253,7 +264,9 @@ pub(in crate::fixture) fn materialize(dest: &Path) -> Result<(), FixtureError> {
         &[
             ("Cargo.toml", CARGO),
             ("src/main.rs", MAIN),
+            ("src/message.rs", MESSAGE),
             ("src/rules.rs", RULES),
+            ("src/table.rs", TABLE),
             (".stoat/walkthroughs/tour.json", &json),
         ],
     )?;
@@ -268,14 +281,16 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         None,
     );
 
+    let table = |range| super::location("src/table.rs", TABLE, range);
+    let message = |range| super::location("src/message.rs", MESSAGE, range);
     let rules = |range| super::location("src/rules.rs", RULES, range);
 
     let s1 = tour
         .add_stop(
             Some("Crowded labels".to_string()),
             NARRATION_CROWDED.to_string(),
-            rules(super::block_of(
-                RULES,
+            table(super::block_of(
+                TABLE,
                 SEVERITY_ARMS[0],
                 SEVERITY_ARMS[SEVERITY_ARMS.len() - 1],
             )),
@@ -285,7 +300,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         .id
         .clone();
     for (needle, label) in SEVERITY_ARMS.iter().zip(CROWDED_LABELS) {
-        annotate(&mut tour, &s1, needle, label);
+        annotate(&mut tour, &s1, TABLE, needle, label);
     }
 
     let s2 = tour
@@ -301,12 +316,14 @@ pub(in crate::fixture) fn build() -> Walkthrough {
     annotate(
         &mut tour,
         &s2,
+        RULES,
         "rule_name,",
         "the name the table is keyed by",
     );
     annotate(
         &mut tour,
         &s2,
+        RULES,
         "rule_level)",
         "the severity that name resolved to",
     );
@@ -315,8 +332,8 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         .add_stop(
             Some("Seven markers".to_string()),
             NARRATION_SEVEN.to_string(),
-            rules(super::block_of(
-                RULES,
+            table(super::block_of(
+                TABLE,
                 CODE_ARMS[0],
                 CODE_ARMS[CODE_ARMS.len() - 1],
             )),
@@ -326,7 +343,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         .id
         .clone();
     for (needle, label) in CODE_ARMS.iter().zip(CODE_LABELS) {
-        annotate(&mut tour, &s3, needle, label);
+        annotate(&mut tour, &s3, TABLE, needle, label);
     }
 
     let s4 = tour
@@ -353,7 +370,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         .add_stop(
             Some("No room".to_string()),
             NARRATION_NO_ROOM.to_string(),
-            rules(super::block_of(RULES, MESSAGE_ARMS[0], MESSAGE_ARMS[1])),
+            message(super::block_of(MESSAGE, MESSAGE_ARMS[0], MESSAGE_ARMS[1])),
             None,
         )
         .expect("appending a stop cannot fail")
@@ -362,12 +379,14 @@ pub(in crate::fixture) fn build() -> Walkthrough {
     annotate(
         &mut tour,
         &s5,
+        MESSAGE,
         MESSAGE_ARMS[0],
         "the message an unused import gets",
     );
     annotate(
         &mut tour,
         &s5,
+        MESSAGE,
         MESSAGE_ARMS[1],
         "the message a shadowed binding gets",
     );
@@ -375,7 +394,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
     tour.add_stop(
         Some("A wrapped focus".to_string()),
         NARRATION_WRAPPED.to_string(),
-        rules(super::line_of(RULES, "pub const SUMMARY")),
+        message(super::line_of(MESSAGE, "pub const SUMMARY")),
         None,
     )
     .expect("appending a stop cannot fail");
@@ -399,18 +418,19 @@ pub(in crate::fixture) fn build() -> Walkthrough {
     tour
 }
 
-/// Attach an annotation over `needle`'s own bytes in `src/rules.rs`.
+/// Attach an annotation over `needle`'s own bytes in `content`, the source of
+/// the stop's own file.
 ///
-/// Every annotation in this tour names a span of the focus file, so the
-/// cross-file and per-annotation-narration branches are left to the
+/// Every annotation in this tour names a span of its stop's focus file, so the
+/// cross-file annotation and per-annotation-narration branches are left to the
 /// `walkthrough` fixture and this one stays about placement.
-fn annotate(tour: &mut Walkthrough, stop: &str, needle: &str, label: &str) {
+fn annotate(tour: &mut Walkthrough, stop: &str, content: &str, needle: &str, label: &str) {
     super::annotate(
         tour,
         stop,
         None,
-        RULES,
-        super::span_of(RULES, needle),
+        content,
+        super::span_of(content, needle),
         label,
         "",
     );
@@ -450,7 +470,7 @@ fn closing_of(content: &str, after: &str) -> Range {
 
 #[cfg(test)]
 mod tests {
-    use super::RULES;
+    use super::{MESSAGE, RULES, TABLE};
     use crate::{
         host::LocalFs,
         walkthrough::{self, store, Stop},
@@ -476,8 +496,8 @@ mod tests {
 
     /// Each stop stages one placement the layout has to make, and each is
     /// staged by a shape of the source rather than by the tour alone. An edit
-    /// to `RULES` that flattens a shape leaves the stop pointing at code that
-    /// no longer forces the placement, which is what these pin.
+    /// to a source const that flattens a shape leaves the stop pointing at code
+    /// that no longer forces the placement, which is what these pin.
     #[test]
     fn marks_tour_stages_every_placement_shape() {
         let dir = tempfile::tempdir().unwrap();
@@ -485,10 +505,27 @@ mod tests {
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
 
         assert_eq!(tour.stops.len(), 8, "eight stops");
+        assert_eq!(
+            tour.stops
+                .iter()
+                .map(|stop| stop.focus.path.to_str().expect("fixture paths are UTF-8"))
+                .collect::<Vec<_>>(),
+            [
+                "src/table.rs",
+                "src/rules.rs",
+                "src/table.rs",
+                "src/rules.rs",
+                "src/message.rs",
+                "src/message.rs",
+                "src/rules.rs",
+                "src/rules.rs",
+            ],
+            "the tour changes file at five of its seven steps",
+        );
 
         let rows = |stop: &Stop| {
             (stop.focus.range.start.line..=stop.focus.range.end.line)
-                .map(line_len)
+                .map(|line| line_len(stop, line))
                 .collect::<Vec<_>>()
         };
 
@@ -563,12 +600,18 @@ mod tests {
         );
     }
 
-    /// The byte length of `RULES`' one-based line `line`.
-    fn line_len(line: u32) -> usize {
-        RULES
+    /// The byte length of one-based line `line` in the file `stop` focuses.
+    fn line_len(stop: &Stop, line: u32) -> usize {
+        let content = match stop.focus.path.to_str() {
+            Some("src/table.rs") => TABLE,
+            Some("src/message.rs") => MESSAGE,
+            Some("src/rules.rs") => RULES,
+            other => panic!("the tour focuses a file the fixture does not commit: {other:?}"),
+        };
+        content
             .lines()
             .nth(line as usize - 1)
-            .expect("the tour's ranges are derived from RULES")
+            .expect("the tour's ranges are derived from the source they name")
             .len()
     }
 }
