@@ -2237,20 +2237,21 @@ mod tests {
 
         let walkthrough = TestState::new().set("mode", StateValue::String("walkthrough".into()));
         for (key, action) in [
-            ('n', "WalkthroughNext"),
-            ('p', "WalkthroughPrev"),
-            ('s', "WalkthroughShowNarration"),
+            (KeyCode::Char('n'), "WalkthroughNext"),
+            (KeyCode::Char('p'), "WalkthroughPrev"),
+            (KeyCode::Char('s'), "WalkthroughShowNarration"),
+            (KeyCode::Right, "WalkthroughForward"),
+            (KeyCode::Left, "WalkthroughBackward"),
+            (KeyCode::Down, "WalkthroughNext"),
+            (KeyCode::Up, "WalkthroughPrev"),
         ] {
             let bound = keymap
-                .lookup(
-                    &walkthrough,
-                    &key_event(KeyCode::Char(key), KeyModifiers::NONE),
-                )
-                .unwrap_or_else(|| panic!("{key} is bound in walkthrough mode"));
+                .lookup(&walkthrough, &key_event(key, KeyModifiers::NONE))
+                .unwrap_or_else(|| panic!("{key:?} is bound in walkthrough mode"));
             assert_eq!(
                 (bound.len(), bound[0].name.as_str()),
                 (1, action),
-                "{key} resets no mode, so a second press steps again",
+                "{key:?} resets no mode, so a second press steps again",
             );
         }
 

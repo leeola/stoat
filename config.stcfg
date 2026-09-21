@@ -1208,7 +1208,9 @@ on key {
     # mode instead of running a single arm. n and p walk the stops and a and A
     # the annotations until Escape. No arm here chains SetMode(normal), which
     # is what holds the mode, so the tour needs no pin of its own. Escape
-    # leaves the tour open for `space W` to return to, and d ends it.
+    # leaves the tour open for `space W` to return to, and d ends it. The
+    # arrows walk the tour too, Right and Left by attention point and Down and
+    # Up by stop.
     mode == walkthrough {
         Escape -> SetMode(normal);
         n -> WalkthroughNext();
@@ -1217,6 +1219,10 @@ on key {
         A -> WalkthroughPrevAnnotation();
         s -> WalkthroughShowNarration();
         d -> [WalkthroughDone(), SetMode(normal)];
+        Right -> WalkthroughForward();
+        Left -> WalkthroughBackward();
+        Down -> WalkthroughNext();
+        Up -> WalkthroughPrev();
         # The wheel walks the tour's attention points where the diff view walks
         # its changes. A bare notch still scrolls, so the reader roams the file
         # and Alt-notches back onto the path.
