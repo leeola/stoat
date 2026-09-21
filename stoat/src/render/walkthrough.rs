@@ -19,7 +19,7 @@
 use crate::{
     app::Stoat,
     pane::View,
-    render::TEXT_SCALE_POPUP,
+    render::{layout, screen, TEXT_SCALE_POPUP},
     theme::scope,
     walkthrough::{
         run::{part, WalkthroughRun},
@@ -99,11 +99,14 @@ const REDECLARE_GRACE: Duration = Duration::from_millis(250);
 /// A no-op with no walkthrough playing or when the focused pane is not an
 /// editor. Under a terminal that draws no marks, only the code is lit.
 pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
+    let Some(content) = focused_content_area(stoat) else {
+        return;
+    };
     let Some(input) = measure(stoat) else {
         return;
     };
     let colors = Colors::of(stoat);
-    spotlight(buf, &input, &colors);
+    spotlight(buf, &input, &colors, content);
 
     if !scene.live() || !stoat.stoatty || stoat.stoatty_protocol < SKETCH_PROTOCOL {
         return;
@@ -173,10 +176,13 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 /// Light the current annotation's code in its marker color, and dim the rest of
 /// the pane's content toward the background.
 ///
+/// The dim covers all of `dim`, gutter included, so the line numbers recede
+/// with the code.
+///
 /// A no-op while the reader is on the focus, or when the current annotation's
 /// code is off screen or in another file. A theme with no RGB background gets
 /// the color without the dim.
-fn spotlight(buf: &mut Buffer, input: &SlideInput, colors: &Colors) {
+fn spotlight(buf: &mut Buffer, input: &SlideInput, colors: &Colors, dim: Rect) {
     let Some(annotation) = input.current.and_then(|key| {
         input
             .annotations
@@ -191,7 +197,7 @@ fn spotlight(buf: &mut Buffer, input: &SlideInput, colors: &Colors) {
     };
 
     if let Some(bg) = colors.background {
-        crate::render::pane::dim_pane_content(buf, input.pane, bg, SPOTLIGHT_DIM);
+        crate::render::pane::dim_pane_content(buf, dim, bg, SPOTLIGHT_DIM);
     }
 
     let line_end = |row: u16| {
@@ -776,19 +782,23 @@ fn pool_anchor(stoat: &Stoat) -> Option<(u32, f32)> {
     Some((pane.index, editor.scroll_row as f32))
 }
 
+/// The focused pane's content area, gutter included.
+///
+/// `None` when the focused pane is not an editor.
+fn focused_content_area(stoat: &Stoat) -> Option<Rect> {
+    let ws = stoat.active_workspace();
+    let pane = ws.panes.pane(ws.panes.focus());
+    match pane.view {
+        View::Editor(_) => Some(layout::split_pane_status(pane.area).0),
+        _ => None,
+    }
+}
+
 /// Measure the screen into the layout's input.
 ///
-/// `None` when no tour plays or the focused pane is not an editor.
+/// `None` when no tour plays, the focused pane is not an editor, or the render
+/// has not painted that editor yet.
 fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
-    let pane_area = {
-        let ws = stoat.active_workspace();
-        let pane = ws.panes.pane(ws.panes.focus());
-        match pane.view {
-            View::Editor(_) => pane.area,
-            _ => return None,
-        }
-    };
-
     let (focus_range, annotations, card, current, card_hidden) = {
         let run = stoat.active_workspace().walkthrough.as_ref()?;
         let stop = run.current_stop();
@@ -817,29 +827,18 @@ fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
         )
     };
 
-    // The minimap strip is not code, so a mark placed over it points at
-    // nothing. The card and the labels are clamped into what is left.
-    let (content, _) = crate::render::layout::split_pane_status(pane_area);
     let ws = stoat.active_workspace();
     let pane = ws.panes.pane(ws.panes.focus());
     let View::Editor(editor_id) = pane.view else {
         return None;
     };
-    let strip_cols = ws
-        .editors
-        .get(editor_id)
-        .and_then(|editor| editor.minimap_rect)
-        .map_or(0, |rect| rect.width);
-    let pane_rect = Rect {
-        width: content.width.saturating_sub(strip_cols),
-        ..content
-    };
+    let pane_rect = ws.editors.get(editor_id)?.text_rect?;
 
-    let focus = measure_range(stoat, editor_id, pane_rect, &focus_range);
+    let focus = measure_range(stoat, editor_id, &focus_range);
     let annotations = annotations
         .into_iter()
         .filter_map(|(key, range, label)| {
-            let range = measure_range(stoat, editor_id, pane_rect, &range)?;
+            let range = measure_range(stoat, editor_id, &range)?;
             Some(AnnotationCells {
                 key,
                 range,
@@ -862,12 +861,10 @@ fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
 
 /// Turn a stored range into the cells it covers on screen.
 ///
-/// `None` when neither end is visible, which the layout turns into no mark. A
-/// range clamped into view puts a box around whatever scrolled into its place.
+/// `None` when either end is off screen, which the layout turns into no mark.
 fn measure_range(
     stoat: &mut Stoat,
     editor_id: crate::editor_state::EditorId,
-    pane: Rect,
     range: &crate::walkthrough::Range,
 ) -> Option<CellRange> {
     let ws = stoat.active_workspace_mut();
@@ -888,13 +885,11 @@ fn measure_range(
         )
     };
 
-    let start = crate::render::hover::cursor_screen_position(editor, pane, offsets.0)?;
-    let end = crate::render::hover::cursor_screen_position(editor, pane, offsets.1)?;
-
+    let span = screen::span(editor, offsets.0..=offsets.1)?;
     Some(CellRange {
-        rows: (start.1..=end.1).collect(),
-        start_x: start.0,
-        end_x: end.0,
+        rows: span.rows.collect(),
+        start_x: span.start_x,
+        end_x: span.end_x,
     })
 }
 
@@ -1421,6 +1416,53 @@ mod tests {
                 y: range.rows[0] as i16 * 16 + 8,
             },
         );
+    }
+
+    /// The focus mark starts and ends on the glyphs of `fn two() {}`, and the
+    /// pane the marks clamp into starts where the code does, past the gutter.
+    #[test]
+    fn a_mark_encloses_the_code_it_names() {
+        let mut h = harness(&[]);
+        let (input, x) = painted_focus(&mut h);
+        let focus = input.focus.expect("the focus is on screen");
+        let content = super::focused_content_area(&h.stoat).expect("an editor has focus");
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("focused editor");
+        let gutter = h.stoat.active_workspace().editors[editor_id].gutter_width;
+
+        assert!(gutter > 0, "the relative line numbers take a gutter");
+        assert_eq!(x, content.x + gutter, "the code starts past the gutter");
+        assert_eq!(
+            (focus.start_x, focus.end_x, input.pane.x),
+            (x, x + 10, x),
+            "the mark covers columns 1 to 11, and the pane starts at the code",
+        );
+    }
+
+    /// A line ends one cell past its last glyph, so a box placed at the end
+    /// sits beside the code rather than over it.
+    #[test]
+    fn a_line_end_lands_past_the_text() {
+        let mut h = harness(&[]);
+        let (input, x) = painted_focus(&mut h);
+        let row = input.focus.as_ref().expect("the focus is on screen").rows[0];
+        assert_eq!(
+            input.line_ends.iter().find(|(at, _)| *at == row),
+            Some(&(row, x + 11)),
+        );
+    }
+
+    /// Open the tour and paint it, then return the measured input and the
+    /// column where the first glyph of the focus line paints.
+    fn painted_focus(h: &mut TestHarness) -> (slide::SlideInput, u16) {
+        open(&mut h.stoat, "tour");
+        h.snapshot();
+        let input = super::measure(&mut h.stoat).expect("the pane measures");
+        let row = input.focus.as_ref().expect("the focus is on screen").rows[0];
+        let buf = h.rendered_buffer();
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, row)].symbol() == "f")
+            .expect("the focus line is painted");
+        (input, x)
     }
 
     /// The annotation the reader is on shows its code in its own marker color,
@@ -1972,8 +2014,7 @@ mod tests {
         open(&mut h.stoat, "tour");
 
         let card = card_rect(&mut h);
-        // The card's last row, past the gutter, which its own body does not
-        // reach.
+        // The card's last row, which its own body does not reach.
         let row = card.y + card.height - 1;
         let under = |h: &TestHarness| -> String {
             (card.x + 4..card.x + card.width)

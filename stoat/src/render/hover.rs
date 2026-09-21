@@ -780,42 +780,6 @@ pub(crate) fn render_hover_page(
     bytes
 }
 
-pub(crate) fn cursor_screen_position(
-    editor: &mut crate::editor_state::EditorState,
-    content_area: Rect,
-    anchor_offset: usize,
-) -> Option<(u16, u16)> {
-    let snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    if anchor_offset > rope.len() {
-        return None;
-    }
-    let point = rope.offset_to_point(anchor_offset);
-    let display = snapshot.buffer_to_display(point);
-    if display.row < editor.scroll_row {
-        return None;
-    }
-    let visible_rows = content_area.height as u32;
-    if display.row >= editor.scroll_row + visible_rows {
-        return None;
-    }
-    let y = content_area.y + (display.row - editor.scroll_row) as u16;
-    // The diff view paints the buffer text in its right column, so a cursor-
-    // anchored popup lines up against right_text_x rather than the pane's left
-    // edge. The clamp below still skips a popup that would fall past the pane.
-    let base_x = if editor.diff_view {
-        crate::render::review::right_text_x(content_area)
-    } else {
-        content_area.x
-    };
-    let x = base_x + display.column as u16;
-    if x >= content_area.x + content_area.width || y >= content_area.y + content_area.height {
-        return None;
-    }
-    Some((x, y))
-}
-
 /// Byte offset of the `char_idx`-th character in `s`, or `s.len()` when
 /// `char_idx` is at or past the end.
 fn char_to_byte(s: &str, char_idx: usize) -> usize {

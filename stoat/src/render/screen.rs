@@ -6,6 +6,16 @@
 //! [`EditorState::text_rect`], and every answer here starts from that record.
 
 use crate::editor_state::EditorState;
+use std::ops::RangeInclusive;
+
+/// The cells a buffer range covers on screen, in absolute screen cells.
+pub(crate) struct Span {
+    pub(crate) rows: RangeInclusive<u16>,
+    /// The first cell on the first row.
+    pub(crate) start_x: u16,
+    /// The last cell on the last row, inclusive.
+    pub(crate) end_x: u16,
+}
 
 /// The screen cell that shows buffer `offset`, as absolute `(x, y)`.
 ///
@@ -29,6 +39,21 @@ pub(crate) fn cell(editor: &mut EditorState, offset: usize) -> Option<(u16, u16)
         return None;
     }
     Some((area.x + display.column as u16, area.y + row as u16))
+}
+
+/// The cells `range` covers, from the cell of its first offset to the cell of
+/// its last.
+///
+/// `None` when either end is off screen. A range is never clamped into view,
+/// because a clamped range marks whatever scrolled into its place.
+pub(crate) fn span(editor: &mut EditorState, range: RangeInclusive<usize>) -> Option<Span> {
+    let (start_x, first) = cell(editor, *range.start())?;
+    let (end_x, last) = cell(editor, *range.end())?;
+    Some(Span {
+        rows: first..=last,
+        start_x,
+        end_x,
+    })
 }
 
 #[cfg(test)]

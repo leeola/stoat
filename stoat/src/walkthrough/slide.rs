@@ -31,9 +31,10 @@ const CELL: i32 = 16;
 
 /// A run of cells on one or more rows, as the caller measured them on screen.
 ///
-/// Rows and columns are pane-relative. A range whose rows all scrolled out of
-/// view is reported by an empty [`Self::rows`] rather than by an absent range,
-/// so the caller does not have to decide what "off screen" means.
+/// Rows and columns are absolute screen cells, not pane-relative. A range whose
+/// rows all scrolled out of view is reported by an empty [`Self::rows`] rather
+/// than by an absent range, so the caller does not have to decide what "off
+/// screen" means.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct CellRange {
     /// First and last row the range covers, inclusive, clamped to what is
@@ -155,8 +156,9 @@ pub(crate) struct AnnotationCells {
 /// The screen geometry one stop is laid out against.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct SlideInput {
-    /// The editor's content area, minus the minimap strip. Marks and boxes are
-    /// clamped into it, so nothing draws over the gutter or the strip.
+    /// The cells the pane paints buffer text into, which is its content area
+    /// minus the gutter and the minimap strip. Marks and boxes are clamped into
+    /// it, so nothing draws over either.
     pub(crate) pane: Rect,
     pub(crate) focus: Option<CellRange>,
     pub(crate) annotations: Vec<AnnotationCells>,
