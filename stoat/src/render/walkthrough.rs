@@ -1,9 +1,9 @@
 //! Draw the current walkthrough stop as hand-drawn marks over the code.
 //!
 //! One stop becomes a mark around its focus, a connector to the narration card,
-//! and a mark, connector, and label box per annotation. The geometry comes from
-//! [`crate::walkthrough::slide`], which is pure. This pass measures the screen
-//! for it and emits what it returns.
+//! and a mark, connector, and label box per annotation the reader has reached.
+//! The geometry comes from [`crate::walkthrough::slide`], which is pure. This
+//! pass measures the screen for it and emits what it returns.
 //!
 //! Nothing is emitted under a terminal that draws no marks. The pinned card and
 //! the status line already carry the stop there, and a cell fallback covers the
@@ -332,12 +332,29 @@ impl Painter {
     /// no delay. The terminal still holds that part's clock and ignores the
     /// timing, so the screen does not change.
     fn schedule(&mut self, id: u32, scheduled: SketchTiming) -> SketchTiming {
+        self.schedule_with(id, scheduled, scheduled.delay_ms)
+    }
+
+    /// [`Self::schedule`], but a part the terminal does not hold starts at its
+    /// offset from `group_start` in the slide's schedule, rather than at once.
+    ///
+    /// A callout that a step reveals draws as one gesture. Its mark goes at
+    /// once, and its connector and label follow at their offsets from the mark.
+    fn schedule_with(
+        &mut self,
+        id: u32,
+        scheduled: SketchTiming,
+        group_start: u16,
+    ) -> SketchTiming {
         let last = self.last_declared.insert(id, self.now);
         let seen = last.is_some_and(|at| self.now.saturating_duration_since(at) < REDECLARE_GRACE);
         if self.opening || seen {
             return scheduled;
         }
-        SketchTiming::after(0, scheduled.duration_ms)
+        SketchTiming::after(
+            scheduled.delay_ms.saturating_sub(group_start),
+            scheduled.duration_ms,
+        )
     }
 
     /// Emit the focus mark and the connector to the card.
@@ -416,14 +433,20 @@ impl Painter {
             let Some(&(mark_id, link_id, label_id)) = self.ids.annotations.get(callout.key) else {
                 continue;
             };
+
+            // A mark this slide never drew belongs to an annotation a step just
+            // reached, so its callout draws from this frame on. A part back in
+            // view after the grace was drawn before, and draws at once.
+            let mark_scheduled = timing_of(slide, Some(slide::Part::Mark(callout.key)));
+            let group_start = (!self.opening && !self.last_declared.contains_key(&mark_id))
+                .then_some(mark_scheduled.delay_ms);
+            let start = |scheduled: SketchTiming| group_start.unwrap_or(scheduled.delay_ms);
+
             let stroke = Stroke {
                 id: mark_id,
                 color: self.colors.marker(callout.key),
                 emphasis: slide.emphasis(callout.key),
-                timing: self.schedule(
-                    mark_id,
-                    timing_of(slide, Some(slide::Part::Mark(callout.key))),
-                ),
+                timing: self.schedule_with(mark_id, mark_scheduled, start(mark_scheduled)),
                 fill: None,
             };
             self.mark(callout.mark, stroke, buf, scene);
@@ -431,10 +454,8 @@ impl Painter {
             // The box before its connector, so the line has something to
             // arrive at by the time it is drawn.
             let lines = self.labels.get(&callout.key).cloned().unwrap_or_default();
-            let timing = self.schedule(
-                label_id,
-                timing_of(slide, Some(slide::Part::Label(callout.key))),
-            );
+            let scheduled = timing_of(slide, Some(slide::Part::Label(callout.key)));
+            let timing = self.schedule_with(label_id, scheduled, start(scheduled));
             self.label(
                 callout.label,
                 Stroke {
@@ -449,10 +470,8 @@ impl Painter {
             );
 
             if callout.link {
-                let timing = self.schedule(
-                    link_id,
-                    timing_of(slide, Some(slide::Part::Link(callout.key))),
-                );
+                let scheduled = timing_of(slide, Some(slide::Part::Link(callout.key)));
+                let timing = self.schedule_with(link_id, scheduled, start(scheduled));
                 self.link(
                     Stroke {
                         id: link_id,
@@ -972,6 +991,24 @@ mod tests {
         run.part_id(part)
     }
 
+    /// The mark, connector, and label ids of annotation `at`.
+    fn annotation_ids(h: &TestHarness, at: usize) -> (u32, u32, u32) {
+        let run = h
+            .stoat
+            .active_workspace()
+            .walkthrough
+            .as_ref()
+            .expect("a tour is playing");
+        run.annotation_ids(at)
+    }
+
+    /// Step onto the next `count` annotations, as a reader pressing `a` does.
+    fn reach(h: &mut TestHarness, count: usize) {
+        for _ in 0..count {
+            crate::action_handlers::walkthrough::next_annotation(&mut h.stoat);
+        }
+    }
+
     /// A stop's focus gets a ring around the line it names, under the first id
     /// of the run.
     #[test]
@@ -1025,6 +1062,7 @@ mod tests {
     fn each_annotation_draws_its_mark_and_its_label() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
+        reach(&mut h, 2);
 
         let emitted = sketches(&mut h);
         let run = h
@@ -1047,9 +1085,9 @@ mod tests {
         }
     }
 
-    /// An annotation in another file names a range of that file. Measured
-    /// against the one on screen it would mark whatever lines happen to sit at
-    /// those numbers here, so it draws nothing until the reader opens it.
+    /// An annotation in another file names a range of that file. The same line
+    /// numbers in the file on screen hold other code, so it draws nothing here,
+    /// even once reached.
     #[test]
     fn a_cross_file_annotation_draws_nothing_here() {
         let mut h = Stoat::test();
@@ -1075,6 +1113,16 @@ mod tests {
                 String::new(),
             )
             .expect("s1 exists");
+        walkthrough
+            .add_annotation(
+                "s1",
+                None,
+                range_of(1, (1, 11)),
+                "fn one() {}".to_owned(),
+                "right here".to_owned(),
+                String::new(),
+            )
+            .expect("s1 exists");
 
         h.fake_fs().insert_file("/repo/a.rs", CODE);
         h.fake_fs().insert_file("/repo/elsewhere.rs", CODE);
@@ -1084,6 +1132,9 @@ mod tests {
         );
 
         open(&mut h.stoat, "tour");
+        // On past it to the annotation in this file, so it is reached while
+        // this file is on screen.
+        reach(&mut h, 2);
         let mark = {
             let run = h
                 .stoat
@@ -1115,6 +1166,7 @@ mod tests {
     fn adjacent_annotations_take_different_marker_colors() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
+        reach(&mut h, 2);
 
         let expected: Vec<[u8; 3]> = (0..2)
             .map(|at| {
@@ -1149,13 +1201,13 @@ mod tests {
     }
 
     /// A stop with six marks still has to read as being about one of them, so
-    /// walking onto an annotation brightens it and dims the rest.
+    /// walking onto an annotation draws it bright and dims the ones before it.
     #[test]
     fn walking_onto_an_annotation_dims_the_others() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
 
-        let alphas = |h: &mut TestHarness| {
+        let alphas = |h: &mut TestHarness| -> [Option<u8>; 2] {
             let run_ids = {
                 let run = h
                     .stoat
@@ -1171,17 +1223,52 @@ mod tests {
                     .iter()
                     .find(|sketch| sketch.id == id)
                     .map(|sketch| sketch.style.alpha)
-                    .expect("the mark draws")
             })
         };
 
-        assert_eq!(alphas(&mut h), [255, 255], "nothing is singled out yet");
+        assert_eq!(alphas(&mut h), [None, None], "the stop opens on its focus");
 
-        crate::action_handlers::walkthrough::next_annotation(&mut h.stoat);
+        reach(&mut h, 1);
         assert_eq!(
             alphas(&mut h),
-            [255, 110],
-            "the one walked onto stays bright and the other recedes",
+            [Some(255), None],
+            "a step draws the one it lands on",
+        );
+
+        reach(&mut h, 1);
+        assert_eq!(
+            alphas(&mut h),
+            [Some(110), Some(255)],
+            "the one walked onto is bright and the one before it recedes",
+        );
+    }
+
+    /// A step onto an annotation draws its callout then and there. On the
+    /// slide's own schedule it waits out the focus, the card, and every callout
+    /// before it.
+    #[test]
+    fn a_stepped_onto_annotation_draws_its_mark_at_once() {
+        let mut h = harness(&[(1, "one")]);
+        open(&mut h.stoat, "tour");
+        sketches(&mut h);
+
+        reach(&mut h, 1);
+        let emitted = sketches(&mut h);
+        let timing = |id: u32| {
+            emitted
+                .iter()
+                .find(|sketch| sketch.id == id)
+                .map(|sketch| sketch.timing)
+        };
+        let (mark, _, label) = annotation_ids(&h, 0);
+        let (mark_at, mark_ms) = slide_timing(&mut h.stoat, slide::Part::Mark(0));
+        let (label_at, label_ms) = slide_timing(&mut h.stoat, slide::Part::Label(0));
+
+        assert_eq!(timing(mark), Some(SketchTiming::after(0, mark_ms)));
+        assert_eq!(
+            timing(label),
+            Some(SketchTiming::after(label_at - mark_at, label_ms)),
+            "the label follows its mark as the slide choreographs it",
         );
     }
 
@@ -1207,7 +1294,7 @@ mod tests {
         );
         let card = cards[0];
 
-        let scheduled = slide_timing(&mut h.stoat);
+        let scheduled = slide_timing(&mut h.stoat, slide::Part::Card);
         assert_eq!(
             (card.timing.delay_ms, card.timing.duration_ms),
             scheduled,
@@ -1226,16 +1313,16 @@ mod tests {
         );
     }
 
-    /// The card's `Part::Card` entry, as the slide's own table holds it.
-    fn slide_timing(stoat: &mut Stoat) -> (u16, u16) {
+    /// The start and duration of `part`, as the slide's own table holds them.
+    fn slide_timing(stoat: &mut Stoat, part: slide::Part) -> (u16, u16) {
         let input = super::measure(stoat).expect("the pane measures");
         let slide = slide::layout(&input);
         slide
             .timing
             .iter()
-            .find(|(part, ..)| *part == slide::Part::Card)
+            .find(|(at, ..)| *at == part)
             .map(|(_, start, duration)| (*start, *duration))
-            .expect("the card is scheduled")
+            .expect("the part is scheduled")
     }
 
     /// The terminal drops the clock of a mark it has not seen for a quarter
@@ -1244,7 +1331,7 @@ mod tests {
     /// again.
     #[test]
     fn a_part_scrolled_back_into_view_draws_at_once() {
-        let (opening, returned) = mark_timing_around(Duration::from_millis(300));
+        let (opening, returned) = label_timing_around(Duration::from_millis(300));
         assert_eq!(returned, SketchTiming::after(0, opening.duration_ms));
     }
 
@@ -1252,22 +1339,23 @@ mod tests {
     /// the part keeps the timing it opened with.
     #[test]
     fn a_short_absence_keeps_the_schedule() {
-        let (opening, returned) = mark_timing_around(Duration::from_millis(100));
+        let (opening, returned) = label_timing_around(Duration::from_millis(100));
         assert_eq!(returned, opening);
     }
 
-    /// An annotation mark's timing on the slide's opening frame, and on the
+    /// An annotation label's timing on the slide's opening frame, and on the
     /// frame it comes back on after `absence` out of view.
-    fn mark_timing_around(absence: Duration) -> (SketchTiming, SketchTiming) {
+    fn label_timing_around(absence: Duration) -> (SketchTiming, SketchTiming) {
         let filler: String = (4..=60).map(|n| format!("fn line_{n}() {{}}\n")).collect();
         let mut h = harness_over(&[(1, "one")], &format!("{CODE}{filler}"));
         open(&mut h.stoat, "tour");
+        reach(&mut h, 1);
 
-        let mark = part_id(&h, part::ANNOTATION_BASE);
+        let label = annotation_ids(&h, 0).2;
         let timing = |h: &mut TestHarness| {
             sketches(h)
                 .into_iter()
-                .find(|sketch| sketch.id == mark)
+                .find(|sketch| sketch.id == label)
                 .map(|sketch| sketch.timing)
         };
         let scroll_to = |h: &mut TestHarness, row: u32| {
@@ -1275,18 +1363,15 @@ mod tests {
             h.stoat.active_workspace_mut().editors[editor].scroll_row = row;
         };
 
-        let opening = timing(&mut h).expect("the mark draws");
-        assert_ne!(
-            opening.delay_ms, 0,
-            "the mark waits its turn in the stagger"
-        );
+        let opening = timing(&mut h).expect("the label draws");
+        assert_ne!(opening.delay_ms, 0, "the label waits for its mark");
 
         scroll_to(&mut h, 30);
-        assert_eq!(timing(&mut h), None, "the mark is out of view");
+        assert_eq!(timing(&mut h), None, "the label is out of view");
 
         h.advance_clock(absence);
         scroll_to(&mut h, 0);
-        (opening, timing(&mut h).expect("the mark is back in view"))
+        (opening, timing(&mut h).expect("the label is back in view"))
     }
 
     /// A card that vanished on the step frame left the screen while every mark
@@ -1420,10 +1505,10 @@ mod tests {
         );
     }
 
-    /// An annotation step within one file leaves the same marks on the same
+    /// A step forward within one file leaves the marks already up on the same
     /// code. Un-drawing them only to draw them again reads as a flicker.
     #[test]
-    fn walking_within_a_file_retires_nothing() {
+    fn stepping_forward_within_a_file_retires_nothing() {
         let mut h = harness(&[(1, "one")]);
         open(&mut h.stoat, "tour");
         sketches(&mut h);
@@ -1441,6 +1526,63 @@ mod tests {
         );
     }
 
+    /// A step back takes the callout it leaves with it, so the annotations up
+    /// are always the ones the reader has reached.
+    #[test]
+    fn stepping_back_retires_the_annotation_left() {
+        let mut h = harness(&[(1, "one"), (3, "two")]);
+        open(&mut h.stoat, "tour");
+        reach(&mut h, 2);
+        sketches(&mut h);
+
+        crate::action_handlers::walkthrough::prev_annotation(&mut h.stoat);
+        let emitted = sketches(&mut h);
+        let declared = |id: u32| -> Vec<(SketchPhase, u8)> {
+            emitted
+                .iter()
+                .filter(|sketch| sketch.id == id)
+                .map(|sketch| (sketch.timing.phase, sketch.style.alpha))
+                .collect()
+        };
+
+        assert_eq!(
+            declared(annotation_ids(&h, 1).2),
+            [(SketchPhase::Exit, 255)],
+            "the label left runs its stroke back off as it last drew",
+        );
+        assert_eq!(
+            declared(annotation_ids(&h, 0).2),
+            [(SketchPhase::Enter, 255)],
+            "and the one landed on is current again",
+        );
+        assert!(
+            h.stoat.active_workspace().walkthrough_exit.is_some(),
+            "with the exit holding it",
+        );
+    }
+
+    /// A callout reached again while it still runs off draws under the same
+    /// ids. Declared in both phases, it restarts its stroke on every frame of
+    /// what is left of the exit.
+    #[test]
+    fn a_callout_reached_again_mid_exit_is_declared_once() {
+        let mut h = harness(&[(1, "one"), (3, "two")]);
+        open(&mut h.stoat, "tour");
+        reach(&mut h, 2);
+        sketches(&mut h);
+        crate::action_handlers::walkthrough::prev_annotation(&mut h.stoat);
+        sketches(&mut h);
+
+        reach(&mut h, 1);
+        let label = annotation_ids(&h, 1).2;
+        let phases: Vec<SketchPhase> = sketches(&mut h)
+            .iter()
+            .filter(|sketch| sketch.id == label)
+            .map(|sketch| sketch.timing.phase)
+            .collect();
+        assert_eq!(phases, [SketchPhase::Enter], "drawn back on, not also off");
+    }
+
     /// A label is declared to fade in with the box it sits in. Dropped from the
     /// exit frame it disappears at once, leaving the box to run its stroke back
     /// around where the text was.
@@ -1448,6 +1590,7 @@ mod tests {
     fn a_retiring_label_goes_with_its_box() {
         let mut h = harness(&[(1, "one")]);
         open(&mut h.stoat, "tour");
+        reach(&mut h, 1);
         sketches(&mut h);
 
         crate::action_handlers::walkthrough::next(&mut h.stoat);
@@ -1532,6 +1675,7 @@ mod tests {
     fn a_second_frame_emits_the_same_ids() {
         let mut h = harness(&[(1, "one")]);
         open(&mut h.stoat, "tour");
+        reach(&mut h, 1);
 
         let ids = |h: &mut TestHarness| -> Vec<u32> {
             let mut ids: Vec<u32> = sketches(h).iter().map(|sketch| sketch.id).collect();

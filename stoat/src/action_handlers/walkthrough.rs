@@ -5,7 +5,7 @@ use crate::{
     render::{
         hover::{HoverFrame, HoverPopup},
         text::text_width,
-        walkthrough::EXIT_MS,
+        walkthrough::{SlideParts, EXIT_MS},
     },
     walkthrough::{
         self,
@@ -16,6 +16,7 @@ use crate::{
 use codegraph::{EdgeKind, SymbolKey};
 use ratatui::{layout::Rect, style::Style};
 use std::{
+    ops::RangeInclusive,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -176,6 +177,14 @@ fn retire_slide(stoat: &mut Stoat) {
         },
         None => return,
     };
+    start_exit(stoat, parts);
+}
+
+/// Start `parts` running back off with the exit stroke.
+///
+/// An exit still running is replaced, and its parts go at once. Empty parts
+/// start nothing, so they never cut a running exit short.
+fn start_exit(stoat: &mut Stoat, parts: SlideParts) {
     if parts.marks.is_empty() && parts.runs.is_empty() {
         return;
     }
@@ -230,6 +239,7 @@ fn step_annotation(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
     let from = current_anchor(run);
+    let from_at = run.annotation_progress().map(|(at, _)| at - 1);
 
     if run.current_stop().annotations.is_empty() {
         stoat.set_status("this stop has no annotations");
@@ -245,12 +255,15 @@ fn step_annotation(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     }
 
     let to = current_anchor(run_of(stoat));
+    let to_at = run_of(stoat).annotation_progress().map(|(at, _)| at - 1);
     // An annotation step within one file leaves the same marks on the same
-    // code, so nothing retires: un-drawing them to draw them again reads as a
-    // flicker. A step into another file leaves marks that no longer describe
-    // what is on screen.
+    // code, so they stay: un-drawing them to draw them again reads as a
+    // flicker. A step back takes the callout it leaves with it. A step into
+    // another file leaves marks that no longer describe what is on screen.
     if to.path != from.path {
         retire_slide(stoat);
+    } else {
+        step_callouts(stoat, from_at, to_at);
     }
     let note = install_step_trail(stoat, &from, &to);
 
@@ -273,6 +286,7 @@ fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     };
     let from = current_anchor(run);
     let from_stop = run.current_stop().id.clone();
+    let from_at = run.annotation_progress().map(|(at, _)| at - 1);
 
     if !run.step_linear(delta) {
         let end = if delta < 0 { "start" } else { "end" };
@@ -282,12 +296,15 @@ fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     }
 
     let to = current_anchor(run_of(stoat));
+    let to_at = run_of(stoat).annotation_progress().map(|(at, _)| at - 1);
     // A point on the same stop and the same file leaves the same marks on the
-    // same code, so nothing retires: un-drawing them to draw them again reads
-    // as a flicker. A new stop, or another file, leaves marks that no longer
-    // describe what is on screen.
+    // same code, so they stay: un-drawing them to draw them again reads as a
+    // flicker. A step back takes the callout it leaves with it. A new stop, or
+    // another file, leaves marks that no longer describe what is on screen.
     if run_of(stoat).current_stop().id != from_stop || to.path != from.path {
         retire_slide(stoat);
+    } else {
+        step_callouts(stoat, from_at, to_at);
     }
     let note = install_step_trail(stoat, &from, &to);
 
@@ -295,6 +312,68 @@ fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         true => jump_to_annotation(stoat, note),
         false => jump_to_stop(stoat, note),
     }
+}
+
+/// Retire the callouts a step within one slide leaves behind, and take back
+/// from a running exit the ones it reaches again.
+///
+/// A callout reached again before its exit ends draws under the same ids. Left
+/// in the exit as well, every frame declares it once per phase, and the
+/// terminal restarts a stroke whenever its phase changes.
+fn step_callouts(stoat: &mut Stoat, from_at: Option<usize>, to_at: Option<usize>) {
+    let past = |at: Option<usize>| at.map_or(0, |at| at + 1);
+    match (from_at, to_at) {
+        (Some(from), to) if to < from_at => retire_annotations(stoat, past(to)..=from),
+        (from, Some(to)) if from < to_at => reclaim_annotations(stoat, past(from)..=to),
+        _ => {},
+    }
+}
+
+/// Run the callouts of annotations `keys` back off, and leave the rest of the
+/// slide up.
+///
+/// Their ids leave the declared record as well, so a step that reaches them
+/// again draws them as a reveal rather than as parts still on screen.
+fn retire_annotations(stoat: &mut Stoat, keys: RangeInclusive<usize>) {
+    let parts = {
+        let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() else {
+            return;
+        };
+        let ids = annotation_part_ids(run, keys);
+        run.last_declared.retain(|id, _| !ids.contains(id));
+
+        SlideParts {
+            marks: run
+                .last_parts
+                .marks
+                .extract_if(.., |mark| ids.contains(&mark.id))
+                .collect(),
+            runs: run
+                .last_parts
+                .runs
+                .extract_if(.., |text| ids.contains(&text.follow))
+                .collect(),
+        }
+    };
+    start_exit(stoat, parts);
+}
+
+/// Take the callouts of annotations `keys` back out of a running exit.
+fn reclaim_annotations(stoat: &mut Stoat, keys: RangeInclusive<usize>) {
+    let ids = annotation_part_ids(run_of(stoat), keys);
+    if let Some((parts, _)) = stoat.active_workspace_mut().walkthrough_exit.as_mut() {
+        parts.marks.retain(|mark| !ids.contains(&mark.id));
+        parts.runs.retain(|text| !ids.contains(&text.follow));
+    }
+}
+
+/// The mark, connector, and label ids of annotations `keys`.
+fn annotation_part_ids(run: &WalkthroughRun, keys: RangeInclusive<usize>) -> Vec<u32> {
+    keys.flat_map(|key| {
+        let (mark, link, label) = run.annotation_ids(key);
+        [mark, link, label]
+    })
+    .collect()
 }
 
 /// The active run, which every stepping path has already confirmed is there.

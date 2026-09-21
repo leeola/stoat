@@ -1,8 +1,9 @@
 //! Where a walkthrough stop's marks, card, and labels go, and when each draws.
 //!
 //! One stop becomes a [`Slide`]: a mark around its focus, a narration card, a
-//! mark and a label box per annotation, and a table saying when each part
-//! starts and how long it takes. [`layout`] is the whole of it, and it is pure.
+//! mark and a label box per annotation the reader has reached, and a table
+//! saying when each part starts and how long it takes. [`layout`] is the whole
+//! of it, and it is pure.
 //!
 //! Placement is where the fiddly rules live. A label must not cover the code it
 //! describes, the card must not sit over a long line, and a mark whose code
@@ -106,6 +107,7 @@ pub(crate) struct Slide {
     pub(crate) card: Option<Rect>,
     /// Whether a connector joins the focus mark to the card.
     pub(crate) focus_link: bool,
+    /// One callout per annotation the reader has reached.
     pub(crate) callouts: Vec<Callout>,
     /// When each part starts and how long it draws, in milliseconds from the
     /// stop's own zero.
@@ -156,6 +158,10 @@ pub(crate) struct SlideInput {
     /// The card's size in whole cells, or `None` when the stop has no
     /// narration.
     pub(crate) card: Option<(u16, u16)>,
+    /// The key of the annotation the reader is on, or `None` while the reader
+    /// is on the focus.
+    ///
+    /// Annotations past it are not yet reached and place no callout.
     pub(crate) current: Option<usize>,
     /// Whether the reader has dismissed the card. A hidden card takes no space
     /// and no connector points at it.
@@ -419,7 +425,7 @@ const LABEL_GAP: u16 = 4;
 /// mark rather than sliding to wherever there happens to be room.
 const LABEL_ROW_OFFSETS: [i32; 5] = [0, 1, -1, 2, -2];
 
-/// Place each annotation's mark and label box.
+/// Place the mark and label box of each annotation the reader has reached.
 ///
 /// A label never covers the code it describes. Every candidate is rejected if
 /// it overlaps the card, an earlier label, the focus rows, or the annotation's
@@ -438,7 +444,12 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
     let mut placed: Vec<Rect> = Vec::new();
     let mut callouts = Vec::new();
 
-    for annotation in &input.annotations {
+    let reached = input.current.map_or(0, |at| at + 1);
+    for annotation in input
+        .annotations
+        .iter()
+        .filter(|annotation| annotation.key < reached)
+    {
         let Some(mark) = focus_mark(&annotation.range, input) else {
             continue;
         };
@@ -869,6 +880,7 @@ mod tests {
             annotation(0, &[10], 4, 8, &["first note"]),
             annotation(1, &[11], 4, 8, &["second note"]),
         ];
+        input.current = Some(1);
 
         let slide = layout(&input);
         let [first, second] = slide.callouts.as_slice() else {
@@ -902,6 +914,7 @@ mod tests {
             .collect();
         input.card = None;
         input.annotations = vec![annotation(0, &[8], 4, 8, &["one", "two", "three"])];
+        input.current = Some(0);
 
         let slide = layout(&input);
         let [callout] = slide.callouts.as_slice() else {
@@ -933,6 +946,7 @@ mod tests {
             annotation(1, &[13], 4, 8, &["two"]),
             annotation(2, &[16], 4, 8, &["three"]),
         ];
+        input.current = Some(2);
 
         let timing = layout(&input).timing;
         let starts: Vec<u16> = timing.iter().map(|(_, start, _)| *start).collect();
@@ -986,6 +1000,7 @@ mod tests {
     fn a_start_offset_shifts_every_part_by_the_same_amount() {
         let mut base = input(pane(), Some(range(&[4], 8, 11)));
         base.annotations = vec![annotation(0, &[10], 4, 8, &["one"])];
+        base.current = Some(0);
 
         let mut delayed = base.clone();
         delayed.start_offset_ms = 500;
@@ -1020,9 +1035,9 @@ mod tests {
         );
     }
 
-    /// Until the reader walks into the annotations nothing is singled out. From
-    /// then on exactly one is current, so a stop with six marks still reads as
-    /// being about one of them.
+    /// Until the reader walks into the annotations no callout is up. From then
+    /// on exactly one is current, so a stop with six marks still reads as being
+    /// about one of them.
     #[test]
     fn one_current_annotation_dims_the_rest() {
         let mut input = input(pane(), None);
@@ -1032,13 +1047,48 @@ mod tests {
         ];
 
         let plain = layout(&input);
-        assert_eq!(plain.emphasis(0), Emphasis::Plain);
-        assert_eq!(plain.emphasis(1), Emphasis::Plain);
+        assert!(
+            plain.callouts.is_empty(),
+            "no annotation is reached yet, got {:?}",
+            plain.callouts,
+        );
 
         input.current = Some(1);
         let walked = layout(&input);
         assert_eq!(walked.emphasis(1), Emphasis::Current);
         assert_eq!(walked.emphasis(0), Emphasis::Dimmed);
+    }
+
+    /// A stop opens on its focus alone, and each step onto an annotation adds
+    /// that annotation's callout. A label already up keeps its place when the
+    /// next one arrives, so a reveal never moves what the reader just read.
+    #[test]
+    fn an_annotation_not_yet_reached_places_no_callout() {
+        let mut base = input(pane(), None);
+        // Adjacent rows, so the second label has to move around the first.
+        base.annotations = vec![
+            annotation(0, &[10], 4, 8, &["one"]),
+            annotation(1, &[11], 4, 8, &["two"]),
+        ];
+        let labels = |current: Option<usize>| -> Vec<(usize, Rect)> {
+            let slide = layout(&SlideInput {
+                current,
+                ..base.clone()
+            });
+            slide
+                .callouts
+                .iter()
+                .map(|callout| (callout.key, callout.label))
+                .collect()
+        };
+
+        let both = labels(Some(1));
+        assert_eq!(labels(None), Vec::new(), "the focus comes alone");
+        assert_eq!(
+            labels(Some(0)),
+            both[..1],
+            "the first label lands where it stays"
+        );
     }
 
     /// The card carries the narration the whole stop is about, so a label over
@@ -1049,6 +1099,7 @@ mod tests {
         // Long enough that the label beside it reaches into the right margin
         // the card takes.
         input.annotations = vec![annotation(0, &[5], 4, 8, &["a label wide enough to reach"])];
+        input.current = Some(0);
 
         let slide = layout(&input);
         let card = slide.card.expect("the card is placed");
