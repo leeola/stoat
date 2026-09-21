@@ -1,4 +1,7 @@
-use super::{walkthrough::sketch_corner_radius, TEXT_SCALE_POPUP};
+use super::{
+    walkthrough::{card_style, sketch_corner_radius},
+    TEXT_SCALE_POPUP,
+};
 use crate::{app::Stoat, editor_state::EditorId, pane::View};
 use ratatui::{
     buffer::Buffer,
@@ -12,7 +15,7 @@ use stoat_widgets::{
     ApcScene,
 };
 use stoatty_protocol::command::{
-    self, SketchBounds, SketchFill, SketchFillStyle, SketchStyle, SketchTiming, TextRunCommand,
+    self, SketchBounds, SketchFill, SketchFillStyle, SketchTiming, TextRunCommand,
 };
 
 /// A live text selection over the hover popup body.
@@ -184,7 +187,7 @@ fn sketch_frame(
     if !card.declared {
         SketchRect {
             id: card.id,
-            style: SketchStyle::marker(card.stroke),
+            style: card_style(card.stroke),
             timing: SketchTiming::after(0, CARD_DRAW_MS),
             // Area-relative, and the widget shifts it by the area it renders into,
             // so a zero origin here places the box exactly on `area`.

@@ -49,10 +49,16 @@ const LABEL_WRAP: usize = 38;
 
 /// Stroke widths in 256ths of a cell, by emphasis.
 ///
-/// The current annotation draws heavier as well as brighter. Brightness alone
-/// reads as a color change on a busy screen, where weight reads as attention.
-const WIDTH_PLAIN: u16 = 64;
-const WIDTH_CURRENT: u16 = 88;
+/// A plain stroke is an eighth of a cell, about one pixel at a typical cell
+/// width. That reads as a pen line rather than as a border over the glyphs
+/// beside it. The rough pass draws each stroke twice, which thickens a wide one
+/// further.
+///
+/// The current annotation draws heavier as well as brighter, at about a sixth
+/// of a cell. Brightness alone reads as a color change on a busy screen, where
+/// weight reads as attention.
+const WIDTH_PLAIN: u16 = 32;
+const WIDTH_CURRENT: u16 = 44;
 
 /// Stroke opacity by emphasis. A dimmed mark stays legible, since the reader
 /// still has to see what else the stop calls out.
@@ -65,9 +71,9 @@ const ALPHA_DIMMED: u8 = 110;
 /// readable, where code the reader is not on has to recede.
 const SPOTLIGHT_DIM: f32 = 0.5;
 
-/// A connector is thinner than the marks it joins, so it reads as a pointer
-/// rather than as another annotation.
-const LINK_WIDTH: u16 = 48;
+/// A connector is under a tenth of a cell, thinner than the marks it joins, so
+/// it reads as a pointer rather than as another annotation.
+const LINK_WIDTH: u16 = 24;
 
 /// Where a sketched box stops rounding further, in sixteenths of a cell.
 ///
@@ -473,7 +479,7 @@ impl Painter {
         self.declare(
             SketchCommand {
                 id: self.ids.card,
-                style: SketchStyle::marker(self.colors.card_stroke),
+                style: card_style(self.colors.card_stroke),
                 timing,
                 shape: SketchShape::Rect {
                     bounds: SketchBounds {
@@ -697,6 +703,18 @@ pub(crate) fn sketch_corner_radius(width_cells: u16, height_cells: u16) -> u8 {
     let shorter = width_cells.min(height_cells.saturating_mul(2));
     let radius = shorter.saturating_mul(4).min(CORNER_RADIUS_CAP);
     radius as u8
+}
+
+/// The stroke the narration card draws with.
+///
+/// The slide draws the card when it places it, and the hover render draws it
+/// when the slide does not. Both take this, so the card has one weight
+/// whichever path draws it.
+pub(crate) fn card_style(stroke: [u8; 3]) -> SketchStyle {
+    SketchStyle {
+        width: WIDTH_PLAIN,
+        ..SketchStyle::marker(stroke)
+    }
 }
 
 /// The stroke a mark draws with, at the weight and opacity its emphasis says.
@@ -1151,6 +1169,39 @@ mod tests {
             enclosures,
             [part_id(&h, part::FOCUS_MARK)],
             "the focus is the only enclosure",
+        );
+    }
+
+    /// The card and a label the reader has left behind draw at the focus mark's
+    /// weight, so no box reads as heavier chrome than the rest. Only the label
+    /// the reader is on draws heavier.
+    #[test]
+    fn only_the_current_label_draws_heavier_than_the_focus() {
+        let mut h = harness(&[(1, "one"), (3, "two")]);
+        open(&mut h.stoat, "tour");
+        reach(&mut h, 2);
+
+        let emitted = sketches(&mut h);
+        let width = |id: u32| {
+            emitted
+                .iter()
+                .find(|sketch| sketch.id == id)
+                .map(|sketch| sketch.style.width)
+                .expect("the part draws")
+        };
+        let plain = width(part_id(&h, part::FOCUS_MARK));
+
+        assert_eq!(
+            [
+                width(part_id(&h, part::CARD)),
+                width(annotation_ids(&h, 0).1)
+            ],
+            [plain, plain],
+            "the card and the label left behind take the focus mark's weight",
+        );
+        assert!(
+            width(annotation_ids(&h, 1).1) > plain,
+            "the current label draws heavier",
         );
     }
 
