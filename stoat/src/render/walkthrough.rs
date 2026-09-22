@@ -41,12 +41,17 @@ use stoat_text::{Point, Rope};
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{
     self, SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchFillStyle,
-    SketchPhase, SketchShape, SketchSide, SketchStyle, SketchTiming, TextRunCommand,
+    SketchPhase, SketchPoint, SketchShape, SketchSide, SketchStyle, SketchTiming, TextRunCommand,
 };
 
 /// The protocol version that decodes a sketch. An older stoatty ignores the
 /// frames, so nothing is emitted rather than sending what it drops.
 const SKETCH_PROTOCOL: u32 = 3;
+
+/// The protocol version that draws a sketch path. An older stoatty ignores the
+/// frame whole, so a connector that bends goes to it as a straight line
+/// between the same ends rather than vanishing.
+const PATH_PROTOCOL: u32 = 6;
 
 /// Columns a label is wrapped at, chosen so a box stays narrower than the code
 /// it sits beside.
@@ -156,6 +161,7 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|annotation| (annotation.key, annotation.label_lines.clone()))
             .collect(),
         anchor: pool_anchor(stoat),
+        paths: stoat.stoatty_protocol >= PATH_PROTOCOL,
         now,
         opening: last_declared.is_empty(),
         last_declared,
@@ -405,6 +411,9 @@ struct Painter {
     /// The pool the marks ride, so they glide with the pane rather than
     /// staying pinned to the screen.
     anchor: Option<(u32, f32)>,
+    /// Whether the terminal draws a sketch path, which a connector that bends
+    /// needs.
+    paths: bool,
     /// The scheduler clock this frame reads, so every part measures its absence
     /// against the same instant.
     now: Instant,
@@ -522,15 +531,18 @@ impl Painter {
                 timing,
                 ..stroke
             },
-            SketchEnd::Component {
-                id: self.ids.focus,
-                side: SketchSide::Auto,
+            SketchShape::Line {
+                from: SketchEnd::Component {
+                    id: self.ids.focus,
+                    side: SketchSide::Auto,
+                },
+                to: SketchEnd::Component {
+                    id: self.ids.card,
+                    side: SketchSide::Auto,
+                },
+                bend: 0,
+                heads: 0,
             },
-            SketchEnd::Component {
-                id: self.ids.card,
-                side: SketchSide::Auto,
-            },
-            0,
             buf,
             scene,
         );
@@ -605,7 +617,7 @@ impl Painter {
             self.label(callout.label, stroke, &lines, buf, scene);
 
             if let Some(scheduled) = link_scheduled
-                && let Some(Link { from, to, bend }) = callout.link
+                && let Some(link) = &callout.link
             {
                 let timing = self.schedule_with(link_id, scheduled, start(scheduled));
                 self.link(
@@ -615,12 +627,7 @@ impl Painter {
                         fill: None,
                         ..stroke
                     },
-                    SketchEnd::Point {
-                        x: from.0,
-                        y: from.1,
-                    },
-                    SketchEnd::Point { x: to.0, y: to.1 },
-                    bend,
+                    link_shape(link, self.paths),
                     buf,
                     scene,
                 );
@@ -656,18 +663,15 @@ impl Painter {
         );
     }
 
-    /// Emit a connector from `from` to `to`, bowed by `bend`.
+    /// Emit a connector as `shape`, a line or a path.
     ///
     /// The focus connector names the card, so the terminal meets the card on
-    /// the side facing the mark. A label connector carries both ends and its
-    /// bend from the layout, which alone knows what lies between the code and
-    /// the box.
+    /// the side facing the mark. A label connector carries every point from the
+    /// layout, which alone knows what lies between the code and the box.
     fn link(
         &mut self,
         stroke: Stroke,
-        from: SketchEnd,
-        to: SketchEnd,
-        bend: i8,
+        shape: SketchShape,
         _buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
@@ -679,12 +683,7 @@ impl Painter {
                     ..mark_style(stroke)
                 },
                 timing: stroke.timing,
-                shape: SketchShape::Line {
-                    from,
-                    to,
-                    bend,
-                    heads: 0,
-                },
+                shape,
                 anchor: self.anchor,
             },
             scene,
@@ -755,6 +754,38 @@ impl Painter {
                 scene,
             );
         }
+    }
+}
+
+/// The shape a label connector goes out as.
+///
+/// A connector with no via is a straight line. One that bends is a path
+/// through every point the layout planned, when `paths` says the terminal
+/// draws one. A terminal that does not ignores a path frame whole, so there
+/// the connector is a straight line between the same ends. A pointer that
+/// crosses something still says which code the label names.
+fn link_shape(link: &Link, paths: bool) -> SketchShape {
+    if link.via.is_empty() || !paths {
+        return SketchShape::Line {
+            from: SketchEnd::Point {
+                x: link.from.0,
+                y: link.from.1,
+            },
+            to: SketchEnd::Point {
+                x: link.to.0,
+                y: link.to.1,
+            },
+            bend: 0,
+            heads: 0,
+        };
+    }
+
+    SketchShape::Path {
+        points: [&[link.from][..], link.via.as_slice(), &[link.to]]
+            .concat()
+            .into_iter()
+            .map(|(x, y)| SketchPoint { x, y })
+            .collect(),
     }
 }
 
@@ -989,7 +1020,8 @@ mod tests {
     use ratatui::style::Color;
     use std::{path::PathBuf, time::Duration};
     use stoatty_protocol::command::{
-        self, Command, SketchCommand, SketchEnd, SketchPhase, SketchShape, SketchTiming,
+        self, Command, SketchCommand, SketchEnd, SketchPhase, SketchPoint, SketchShape,
+        SketchTiming,
     };
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
@@ -1447,8 +1479,8 @@ mod tests {
         );
     }
 
-    /// A connector is the line the layout planned, both ends and the bend,
-    /// since the layout alone knows what lies between the code and the box.
+    /// A connector is the line the layout planned, every point of it, since the
+    /// layout alone knows what lies between the code and the box.
     #[test]
     fn a_labels_connector_is_the_line_the_layout_planned() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
@@ -1459,7 +1491,7 @@ mod tests {
         let input = super::measure(&mut h.stoat).expect("the pane measures");
         let planned = slide::layout(&input)
             .callouts
-            .iter()
+            .into_iter()
             .find(|callout| callout.key == 1)
             .and_then(|callout| callout.link)
             .expect("the label that moved has a connector");
@@ -1468,22 +1500,50 @@ mod tests {
             .find(|sketch| sketch.id == annotation_ids(&h, 1).0)
             .expect("the connector is emitted");
 
-        let SketchShape::Line { from, to, bend, .. } = &link.shape else {
-            panic!("a connector is a line, got {:?}", link.shape);
+        let paths = h.stoat.stoatty_protocol >= super::PATH_PROTOCOL;
+        assert_eq!(link.shape, super::link_shape(&planned, paths));
+    }
+
+    /// A connector that bends goes out as a path through every point the layout
+    /// planned, where the terminal draws one. An older terminal ignores a path
+    /// whole, so there the connector is a straight line between the same ends.
+    #[test]
+    fn a_bent_connector_is_a_path_where_the_terminal_draws_one() {
+        let bent = slide::Link {
+            from: (0, 16),
+            to: (160, 48),
+            via: vec![(80, 0)],
         };
+        let straight = slide::Link {
+            via: Vec::new(),
+            ..bent.clone()
+        };
+        let line = SketchShape::Line {
+            from: SketchEnd::Point { x: 0, y: 16 },
+            to: SketchEnd::Point { x: 160, y: 48 },
+            bend: 0,
+            heads: 0,
+        };
+
         assert_eq!(
-            (*from, *to, *bend),
-            (
-                SketchEnd::Point {
-                    x: planned.from.0,
-                    y: planned.from.1,
+            [
+                super::link_shape(&bent, true),
+                super::link_shape(&bent, false),
+                super::link_shape(&straight, true),
+            ],
+            [
+                SketchShape::Path {
+                    points: vec![
+                        SketchPoint { x: 0, y: 16 },
+                        SketchPoint { x: 80, y: 0 },
+                        SketchPoint { x: 160, y: 48 },
+                    ],
                 },
-                SketchEnd::Point {
-                    x: planned.to.0,
-                    y: planned.to.1,
-                },
-                planned.bend,
-            ),
+                line.clone(),
+                line,
+            ],
+            "a path where the terminal draws one, else a straight line, and a \
+             straight line with no via",
         );
     }
 
