@@ -722,11 +722,15 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
 ///
 /// The `region_height` body lines starting at `page * region_height` paint as
 /// sub-cell text runs at the 0.85x hover scale over the region's opaque cell
-/// background. Every cell carries a background (the default resolves to the
-/// theme background), so when the pool composites over the region during a
-/// glide it occludes the live body drawn there rather than double-rendering it.
-/// Coordinates are region-local because the pool composites the page at the
-/// region origin.
+/// background. Every cell carries a background, so when the pool composites
+/// over the region during a glide it occludes the live body drawn there rather
+/// than double-rendering it. Coordinates are region-local because the pool
+/// composites the page at the region origin.
+///
+/// A walkthrough card's page takes the card's fill, and any other hover's page
+/// takes the theme background. The page shows inside the popup's frame, and a
+/// color other than the frame's fill shows as a band behind the body for as
+/// long as the glide runs.
 pub(crate) fn render_hover_page(
     popup: &HoverPopup,
     page: u64,
@@ -735,16 +739,25 @@ pub(crate) fn render_hover_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let buf = crate::smooth_scroll::page_buffer(area, theme);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let modal_fg = crate::render::paint::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
-    let run_bg = crate::render::paint::style_rgb(
-        theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
-            .and_then(|s| s.bg),
-    )
-    .unwrap_or([0, 0, 0]);
+    let (buf, run_bg) = match popup.frame {
+        HoverFrame::Sketch { fill, .. } => {
+            let mut cell = crate::render::themed_blank(theme);
+            cell.bg = Color::Rgb(fill[0], fill[1], fill[2]);
+            (Buffer::filled(area, cell), fill)
+        },
+        HoverFrame::Modal => {
+            let run_bg = crate::render::paint::style_rgb(
+                theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|s| s.bg),
+            )
+            .unwrap_or([0, 0, 0]);
+            (crate::smooth_scroll::page_buffer(area, theme), run_bg)
+        },
+    };
 
     let start_row = page.saturating_mul(region_height as u64) as usize;
 
@@ -849,8 +862,10 @@ fn truncate_line(line: &[(String, Style)], width: usize) -> Vec<(String, Style)>
 
 #[cfg(test)]
 mod tests {
-    use super::clip_line;
+    use super::{clip_line, render_hover_page, HoverFrame, HoverPopup};
+    use crate::{editor_state::EditorId, theme::Theme};
     use ratatui::style::{Color, Style};
+    use stoatty_protocol::command::{self, Command};
 
     fn line(spans: &[&str]) -> Vec<(String, Style)> {
         spans
@@ -921,6 +936,42 @@ mod tests {
             styles,
             [Some(Color::Red), Some(Color::Blue)],
             "a cut span keeps its own style"
+        );
+    }
+
+    /// A scroll inside a walkthrough card composites its page inside the card's
+    /// box. The empty theme's background differs from the fill, so a page left
+    /// in the theme's colors shows here as a band behind the body.
+    #[test]
+    fn a_sketch_card_page_paints_in_the_card_fill() {
+        let mut popup = HoverPopup::new(
+            vec![vec![("body".to_owned(), Style::default())]],
+            0,
+            EditorId::default(),
+        );
+        popup.frame = HoverFrame::Sketch {
+            id: 1,
+            stroke: [0; 3],
+            fill: [1, 2, 3],
+        };
+
+        let page = render_hover_page(&popup, 0, &Theme::empty(), 12, 3);
+        let run_backings: Vec<Option<[u8; 3]>> = command::decode_stream(&page)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::TextRun(run) => Some(run.bg),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            run_backings,
+            [Some([1, 2, 3])],
+            "the body's one run is backed by the fill"
+        );
+        assert!(
+            page.windows(10).any(|bytes| bytes == b"48;2;1;2;3"),
+            "the page's cells take the fill as their background"
         );
     }
 }
