@@ -24,7 +24,8 @@ use crate::{
     walkthrough::{
         run::{part, WalkthroughRun},
         slide::{
-            self, AnnotationCells, CellRange, Emphasis, Mark, SixteenthRect, Slide, SlideInput,
+            self, AnnotationCells, CellRange, Emphasis, Link, Mark, SixteenthRect, Slide,
+            SlideInput,
         },
     },
 };
@@ -465,7 +466,11 @@ impl Painter {
                 id: self.ids.focus,
                 side: SketchSide::Auto,
             },
-            self.ids.card,
+            SketchEnd::Component {
+                id: self.ids.card,
+                side: SketchSide::Auto,
+            },
+            0,
             buf,
             scene,
         );
@@ -540,10 +545,9 @@ impl Painter {
             self.label(callout.label, stroke, &lines, buf, scene);
 
             if let Some(scheduled) = link_scheduled
-                && let Some((x, y)) = callout.link
+                && let Some(Link { from, to, bend }) = callout.link
             {
                 let timing = self.schedule_with(link_id, scheduled, start(scheduled));
-                let code_end = SketchEnd::Point { x, y };
                 self.link(
                     Stroke {
                         id: link_id,
@@ -551,8 +555,12 @@ impl Painter {
                         fill: None,
                         ..stroke
                     },
-                    code_end,
-                    label_id,
+                    SketchEnd::Point {
+                        x: from.0,
+                        y: from.1,
+                    },
+                    SketchEnd::Point { x: to.0, y: to.1 },
+                    bend,
                     buf,
                     scene,
                 );
@@ -588,15 +596,18 @@ impl Painter {
         );
     }
 
-    /// Emit a connector from `from` to the mark `to`.
+    /// Emit a connector from `from` to `to`, bowed by `bend`.
     ///
-    /// The `to` end names a mark, so the connector tracks it as it moves and
-    /// meets it on the side facing `from`.
+    /// The focus connector names the card, so the terminal meets the card on
+    /// the side facing the mark. A label connector carries both ends and its
+    /// bend from the layout, which alone knows what lies between the code and
+    /// the box.
     fn link(
         &mut self,
         stroke: Stroke,
         from: SketchEnd,
-        to: u32,
+        to: SketchEnd,
+        bend: i8,
         _buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
@@ -610,11 +621,8 @@ impl Painter {
                 timing: stroke.timing,
                 shape: SketchShape::Line {
                     from,
-                    to: SketchEnd::Component {
-                        id: to,
-                        side: SketchSide::Auto,
-                    },
-                    bend: 0,
+                    to,
+                    bend,
                     heads: 0,
                 },
                 anchor: self.anchor,
@@ -1388,17 +1396,17 @@ mod tests {
         );
     }
 
-    /// A connector leaves the annotation's code where the layout says, since
-    /// the layout alone knows where the text on each row ends.
+    /// A connector is the line the layout planned, both ends and the bend,
+    /// since the layout alone knows what lies between the code and the box.
     #[test]
-    fn a_labels_connector_starts_at_its_code() {
+    fn a_labels_connector_is_the_line_the_layout_planned() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
         reach(&mut h, 2);
 
         let emitted = sketches(&mut h);
         let input = super::measure(&mut h.stoat).expect("the pane measures");
-        let (x, y) = slide::layout(&input)
+        let planned = slide::layout(&input)
             .callouts
             .iter()
             .find(|callout| callout.key == 1)
@@ -1409,10 +1417,23 @@ mod tests {
             .find(|sketch| sketch.id == annotation_ids(&h, 1).0)
             .expect("the connector is emitted");
 
-        let SketchShape::Line { from, .. } = &link.shape else {
+        let SketchShape::Line { from, to, bend, .. } = &link.shape else {
             panic!("a connector is a line, got {:?}", link.shape);
         };
-        assert_eq!(*from, SketchEnd::Point { x, y });
+        assert_eq!(
+            (*from, *to, *bend),
+            (
+                SketchEnd::Point {
+                    x: planned.from.0,
+                    y: planned.from.1,
+                },
+                SketchEnd::Point {
+                    x: planned.to.0,
+                    y: planned.to.1,
+                },
+                planned.bend,
+            ),
+        );
     }
 
     /// The focus mark starts and ends on the glyphs of `fn two() {}`, and the

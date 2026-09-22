@@ -77,14 +77,31 @@ pub(crate) struct Callout {
     pub(crate) key: usize,
     /// The label box, in whole cells.
     pub(crate) label: Rect,
-    /// Where the connector to the label leaves the code, in sixteenths of a
-    /// cell, or `None` when the label sits on the annotation's own row, which
-    /// already says what it names.
+    /// The connector from the code to the label, or `None` when the label sits
+    /// on the annotation's own row, which already says what it names.
     ///
-    /// The layout picks the point because only it knows where each row's text
-    /// ends. A line that leaves beside text on the annotation's row runs
-    /// through that text on its way to the label.
-    pub(crate) link: Option<(i16, i16)>,
+    /// The layout plans the whole line because only it knows what lies between
+    /// the code and the box. The text on each row, the card, and the earlier
+    /// labels all lie there.
+    pub(crate) link: Option<Link>,
+}
+
+/// The line a connector draws from an annotation's code to its label.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Link {
+    /// Where the line leaves the code, in sixteenths of a cell.
+    ///
+    /// A line that leaves beside text on the annotation's row runs through
+    /// that text on its way to the label, so the point depends on where each
+    /// row's text ends.
+    pub(crate) from: (i16, i16),
+    /// Where the line meets the label, in sixteenths of a cell, just left of
+    /// the label's left edge.
+    pub(crate) to: (i16, i16),
+    /// How far the line bows off its chord, in 64ths of the chord's length as
+    /// the protocol states it, the sign picking the side. Zero draws it
+    /// straight.
+    pub(crate) bend: i8,
 }
 
 /// A part of a slide, for the timing table.
@@ -436,6 +453,10 @@ const LABEL_GAP: u16 = 4;
 /// rows its connector crosses. The first candidate that fits the pane and
 /// clears the card and every earlier label is taken.
 ///
+/// A connector arrives on its label's left side, and it bows only to get
+/// around something in its way. The card, the earlier labels, and the text on
+/// the rows it crosses are all in its way.
+///
 /// A label that fits nowhere draws nothing. A label over code hides what the
 /// stop is about, which costs the reader more than one missing label.
 ///
@@ -455,7 +476,8 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
         let Some((width, height)) = label_size(&annotation.label_lines) else {
             continue;
         };
-        let Some(&first) = annotation.range.rows.first() else {
+        let rows = &annotation.range.rows;
+        let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
             continue;
         };
 
@@ -480,15 +502,66 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
         let Some(label) = label else {
             continue;
         };
+
+        let link = link_point(input, &annotation.range, label.y).map(|from| {
+            let to = link_end(from, label);
+            let crossed = first.min(label.y)..=last.max(label.y + height - 1);
+            let obstacles = link_obstacles(input, card, &placed, crossed);
+            Link {
+                from,
+                to,
+                bend: link_bend(from, to, &obstacles),
+            }
+        });
         placed.push(label);
         callouts.push(Callout {
             key: annotation.key,
             label,
-            link: link_point(input, &annotation.range, label.y),
+            link,
         });
     }
 
     callouts
+}
+
+/// The boxes a connector goes around, with `crossed` the rows from its code to
+/// the far edge of its label.
+///
+/// The card and the labels placed before this one grow by a quarter cell on
+/// each side, which is the room the rough pass jitters a stroke by. The text
+/// on the crossed rows is not grown. The line starts on the edge of its own
+/// row's text, and a grown row puts that start inside it, where every line
+/// runs into it.
+fn link_obstacles(
+    input: &SlideInput,
+    card: Option<Rect>,
+    placed: &[Rect],
+    crossed: RangeInclusive<u16>,
+) -> Vec<SixteenthRect> {
+    let room = CELL / 4;
+    let grown = |rect: Rect| SixteenthRect {
+        x: (i32::from(rect.x) * CELL - room) as i16,
+        y: (i32::from(rect.y) * CELL - room) as i16,
+        w: (i32::from(rect.width) * CELL + 2 * room) as u16,
+        h: (i32::from(rect.height) * CELL + 2 * room) as u16,
+    };
+
+    let pane_x = input.pane.x;
+    let text = crossed.filter_map(|row| {
+        let end = line_end(input, row).filter(|&end| end > pane_x)?;
+        Some(SixteenthRect {
+            x: (i32::from(pane_x) * CELL) as i16,
+            y: (i32::from(row) * CELL) as i16,
+            w: (i32::from(end - pane_x) * CELL) as u16,
+            h: CELL as u16,
+        })
+    });
+
+    card.into_iter()
+        .chain(placed.iter().copied())
+        .map(grown)
+        .chain(text)
+        .collect()
 }
 
 /// The label box's size in cells: the widest line plus a one-cell border on
@@ -562,6 +635,122 @@ fn link_point(input: &SlideInput, range: &CellRange, label_y: u16) -> Option<(i1
             (sixteenths(over, CELL / 2), sixteenths(first, 0))
         },
     })
+}
+
+/// Where a connector from `from` meets `label`, in sixteenths.
+///
+/// The point is a quarter cell left of the box, level with `from` where the
+/// side allows. The height is held to the middle three fifths of the side, so
+/// the line meets the side rather than a rounded corner.
+///
+/// A label always sits past the text its connector comes from, so its left
+/// side is the one side no other label or line is against. A line that names
+/// the box and lets the terminal pick the side facing the code meets a stacked
+/// label on the edge it shares with its neighbor.
+fn link_end(from: (i16, i16), label: Rect) -> (i16, i16) {
+    let top = i32::from(label.y) * CELL;
+    let height = i32::from(label.height) * CELL;
+    let inset = height / 5;
+    (
+        (i32::from(label.x) * CELL - CELL / 4) as i16,
+        i32::from(from.1).clamp(top + inset, top + height - inset) as i16,
+    )
+}
+
+/// The bends a connector tries, straight first, then each side in turn at a
+/// growing bow.
+const LINK_BENDS: [i8; 7] = [0, -12, 12, -24, 24, -32, 32];
+
+/// The bend that takes a connector from `from` to `to` around `obstacles`.
+///
+/// A straight line that clears everything stays straight, because a bend with
+/// nothing to explain it reads as a flourish. A line that no bend gets clear
+/// also stays straight. A pointer that crosses something still says which code
+/// the label names, and a missing one says nothing.
+fn link_bend(from: (i16, i16), to: (i16, i16), obstacles: &[SixteenthRect]) -> i8 {
+    LINK_BENDS
+        .into_iter()
+        .find(|&bend| {
+            link_samples(from, to, bend)
+                .into_iter()
+                .skip(1)
+                .all(|point| obstacles.iter().all(|&rect| !strictly_inside(point, rect)))
+        })
+        .unwrap_or(0)
+}
+
+/// Points sampled along each segment of a connector, both ends included.
+const LINK_SAMPLES: usize = 32;
+
+/// Points along the connector from `from` to `to` at `bend`, in sixteenths.
+///
+/// The points follow the terminal's curve before its rough jitter. A straight
+/// line is sampled along its chord. A bowed line is the Catmull-Rom spline
+/// through the bowed midpoint, with both ends doubled so the curve reaches
+/// them, which the terminal draws as two cubics.
+fn link_samples(from: (i16, i16), to: (i16, i16), bend: i8) -> Vec<(f32, f32)> {
+    let from = (f32::from(from.0), f32::from(from.1));
+    let to = (f32::from(to.0), f32::from(to.1));
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+
+    if bend == 0 {
+        return sample_ts()
+            .map(|t| (from.0 + dx * t, from.1 + dy * t))
+            .collect();
+    }
+
+    // FIXME: The terminal bows a line in pixels, and a cell is taller than it
+    // is wide. A level connector there bows fewer rows than this midpoint says,
+    // so the drawn line sometimes crosses what its bend was chosen to clear.
+    let bow = f32::from(bend) / 64.0;
+    let mid = (
+        (from.0 + to.0) / 2.0 - dy * bow,
+        (from.1 + to.1) / 2.0 + dx * bow,
+    );
+
+    let plus_sixth = |at: (f32, f32), tail: (f32, f32), head: (f32, f32)| {
+        (
+            at.0 + (head.0 - tail.0) / 6.0,
+            at.1 + (head.1 - tail.1) / 6.0,
+        )
+    };
+    let first = [
+        from,
+        plus_sixth(from, from, mid),
+        plus_sixth(mid, to, from),
+        mid,
+    ];
+    let second = [mid, plus_sixth(mid, from, to), plus_sixth(to, to, mid), to];
+    bezier(first).chain(bezier(second)).collect()
+}
+
+/// The curve parameters a segment is sampled at, both ends included.
+fn sample_ts() -> impl Iterator<Item = f32> {
+    (0..LINK_SAMPLES).map(|i| i as f32 / (LINK_SAMPLES - 1) as f32)
+}
+
+/// Points along the cubic Bezier curve with control points `points`.
+fn bezier(points: [(f32, f32); 4]) -> impl Iterator<Item = (f32, f32)> {
+    sample_ts().map(move |t| {
+        let u = 1.0 - t;
+        let weights = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+        weights
+            .iter()
+            .zip(points)
+            .fold((0.0, 0.0), |(x, y), (weight, point)| {
+                (x + weight * point.0, y + weight * point.1)
+            })
+    })
+}
+
+/// Whether `point` lies inside `rect` and on none of its edges.
+///
+/// A connector starts on the edge of its own row's text and ends on the edge
+/// of its label's jitter room, so a point on an edge is not in the way.
+fn strictly_inside(point: (f32, f32), rect: SixteenthRect) -> bool {
+    let (left, top) = (f32::from(rect.x), f32::from(rect.y));
+    let (right, bottom) = (left + f32::from(rect.w), top + f32::from(rect.h));
+    point.0 > left && point.0 < right && point.1 > top && point.1 < bottom
 }
 
 /// When each part of a slide starts and how long it draws.
@@ -1134,7 +1323,7 @@ mod tests {
         input.current = Some(0);
         place_callouts(&input, Some(card))
             .iter()
-            .map(|callout| callout.link)
+            .map(|callout| callout.link.map(|link| link.from))
             .collect()
     }
 
@@ -1191,6 +1380,67 @@ mod tests {
             [Some((9 * 16 + 4, 11 * 16 + 8))],
             "a quarter cell past cell 8, halfway down row 11",
         );
+    }
+
+    /// A label sits past the text its connector comes from, so its left side
+    /// faces the code and no other box is against it. The line meets that side
+    /// level with the code where the side allows, clear of the rounded corners.
+    #[test]
+    fn a_connector_arrives_on_the_label_side_facing_the_code() {
+        let label = Rect {
+            x: 24,
+            y: 13,
+            width: 12,
+            height: 3,
+        };
+
+        assert_eq!(
+            link_end((8 * 16 + 8, 11 * 16), label),
+            (24 * 16 - 4, 13 * 16 + 9),
+            "a quarter cell left of the box, as high up its side as the corner allows",
+        );
+    }
+
+    /// A bend with nothing to explain it reads as a flourish.
+    #[test]
+    fn a_straight_connector_that_clears_everything_stays_straight() {
+        assert_eq!(link_bend((136, 192), (380, 217), &[]), 0);
+    }
+
+    /// A label between the code and the box its connector points at bends the
+    /// line around it, so the line does not run through the label.
+    #[test]
+    fn a_connector_bows_around_a_label_in_its_way() {
+        let (from, to) = ((136, 192), (700, 217));
+        let label = SixteenthRect {
+            x: 384,
+            y: 192,
+            w: 96,
+            h: 48,
+        };
+
+        let bend = link_bend(from, to, &[label]);
+        assert_ne!(bend, 0, "the straight line runs through the label");
+        assert!(
+            link_samples(from, to, bend)
+                .iter()
+                .all(|&point| !strictly_inside(point, label)),
+            "the line bowed by {bend} clears the label",
+        );
+    }
+
+    /// A pointer that crosses something still says which code its label names,
+    /// where a missing one says nothing.
+    #[test]
+    fn a_connector_with_no_clear_path_stays_straight() {
+        let corridor = SixteenthRect {
+            x: 200,
+            y: -1000,
+            w: 400,
+            h: 2000,
+        };
+
+        assert_eq!(link_bend((136, 192), (700, 217), &[corridor]), 0);
     }
 
     /// A stop reads as one hand moving, which needs every part to start after
@@ -1345,6 +1595,72 @@ mod tests {
             labels(Some(0)),
             both[..1],
             "the first label lands where it stays"
+        );
+    }
+
+    /// A label placed later is never in the way of an earlier connector, so a
+    /// step onto the next annotation leaves every line already drawn as it
+    /// was.
+    ///
+    /// The card pushes the first label down a row, and its connector runs
+    /// straight over short rows. The second label then lands across that
+    /// straight path.
+    #[test]
+    fn a_later_label_moves_no_earlier_connector() {
+        let mut base = input(pane(), None);
+        base.line_ends = (0..30)
+            .map(|row| (row, if row == 10 { 20 } else { 2 }))
+            .collect();
+        base.annotations = vec![
+            annotation(0, &[10], 4, 8, &["note"]),
+            annotation(1, &[11], 0, 1, &["later"]),
+        ];
+        let callouts = |current: Option<usize>| {
+            place_callouts(
+                &SlideInput {
+                    current,
+                    ..base.clone()
+                },
+                Some(card_over_rows(10, 1)),
+            )
+        };
+
+        let first = Callout {
+            key: 0,
+            label: Rect {
+                x: 24,
+                y: 11,
+                width: 6,
+                height: 3,
+            },
+            link: Some(Link {
+                from: (8 * 16 + 8, 11 * 16),
+                to: (24 * 16 - 4, 11 * 16 + 9),
+                bend: 0,
+            }),
+        };
+        let alone = callouts(Some(0));
+        assert_eq!(
+            alone,
+            [first],
+            "alone, the first connector runs straight from under its word",
+        );
+        assert_eq!(
+            callouts(Some(1)),
+            [
+                alone[0].clone(),
+                Callout {
+                    key: 1,
+                    label: Rect {
+                        x: 6,
+                        y: 11,
+                        width: 7,
+                        height: 3,
+                    },
+                    link: None,
+                },
+            ],
+            "the second label lands across that line and leaves it as it was",
         );
     }
 

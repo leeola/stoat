@@ -16,7 +16,8 @@
 //!
 //! Between them the stops drive the label search in `place_callouts`
 //! (crate::walkthrough::slide) and the marks around it: labels stacked downward
-//! from their code, each past the text beside it, labels that find no
+//! from their code, each past the text beside it, connectors that meet their
+//! labels on the left and bow around what lies between, labels that find no
 //! candidate at all, the marker color cycle wrapping at six, a highlight over
 //! a three-row annotation, and a focus long enough for soft wrap to spread
 //! over several display rows.
@@ -160,9 +161,11 @@ Five annotations land on five consecutive rows, and each label is long enough
 to wrap into a two-line box.
 
 Only the first fits on its own row. Each of the rest sits under the one before
-it, past every line between its arm and its far edge, with a connector back to
-the arm it names. A label goes above the first only when the pane below is
-full.
+it, past every line between its arm and its far edge. A label goes above the
+first only when the pane below is full.
+
+Each connector runs back to the arm it names and meets its box on the left. It
+bows around whatever lies between.
 ";
 
 const NARRATION_PAIR: &str = "\
