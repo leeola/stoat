@@ -14,11 +14,12 @@
 //! Each stop still stages one placement, and every annotation names code in
 //! its stop's own file.
 //!
-//! Between them the stops drive the fallbacks in `place_callouts`
-//! (crate::walkthrough::slide): labels pushed off their row by
-//! `LABEL_ROW_OFFSETS`, a label that finds no candidate at all, the marker
-//! color cycle wrapping at six, a highlight over a three-row annotation, and a
-//! focus long enough for soft wrap to spread over several display rows.
+//! Between them the stops drive the label search in `place_callouts`
+//! (crate::walkthrough::slide) and the marks around it: labels stacked outward
+//! from their code, each past the text beside it, labels that find no
+//! candidate at all, the marker color cycle wrapping at six, a highlight over
+//! a three-row annotation, and a focus long enough for soft wrap to spread
+//! over several display rows.
 
 use crate::{
     fixture::{FixtureError, FixtureRepo},
@@ -158,15 +159,17 @@ const NARRATION_CROWDED: &str = "\
 Five annotations land on five consecutive rows, and each label is long enough
 to wrap into a two-line box.
 
-Only the first fits on its own row. The rest are pushed out one and two rows
-by `LABEL_ROW_OFFSETS`, each keeping a connector back to the arm it names.
+Only the first fits on its own row. Each of the rest takes the nearest free
+rows, below before above. It sits past every line between its arm and its far
+edge, with a connector back to the arm it names.
 ";
 
 const NARRATION_PAIR: &str = "\
-Both annotations start on the same row, so only one label can have it.
+Both annotations start on the same row, and only one label fits there.
 
-The first takes the row and reads as part of the line. The second drops one
-row and draws a connector to say which code it belongs to.
+The first takes the row and reads as part of the line. The second sits
+directly under the first, right of the line, and draws a connector to say
+which code it belongs to.
 ";
 
 const NARRATION_SEVEN: &str = "\
@@ -187,8 +190,9 @@ on screen at once, which is the comparison this stop is for.
 const NARRATION_NO_ROOM: &str = "\
 Both arms run past column 110, and both labels want the space to their right.
 
-In a narrow pane the first falls back to the left below the focus, and the
-second finds no candidate anywhere and draws nothing at all.
+In a wide pane the first takes its own row past both arms, and the second
+stacks under it. In a narrow pane neither label has room past the arms, so
+neither draws. A label over the arms hides the code it names.
 ";
 
 const NARRATION_WRAPPED: &str = "\

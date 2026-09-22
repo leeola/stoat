@@ -21,6 +21,7 @@
 
 use crate::render::text::text_width;
 use ratatui::layout::Rect;
+use std::ops::RangeInclusive;
 
 /// Sixteenths in one cell, the unit a mark's geometry is stated in.
 ///
@@ -424,33 +425,24 @@ fn clamp_rect(pane: Rect, x: u16, y: u16, width: u16, height: u16) -> Rect {
     }
 }
 
-/// Cells between an annotation's line end and its label box.
+/// Cells between the longest line beside a label and its box.
 const LABEL_GAP: u16 = 4;
-
-/// Rows a label candidate is tried at, relative to the annotation's first row,
-/// in the order they are tried.
-///
-/// The annotation's own row first, so a label reads as belonging to the line it
-/// names. Then one row out either way, then two, which keeps a label near its
-/// code rather than sliding to wherever there happens to be room.
-const LABEL_ROW_OFFSETS: [i32; 5] = [0, 1, -1, 2, -2];
 
 /// Place the label box of each annotation the reader has reached.
 ///
-/// A label never covers the code it describes. Every candidate is rejected if
-/// it overlaps the card, an earlier label, the focus rows, or the annotation's
-/// own rows, and the first that clears all four is taken.
+/// A label never covers code. Its rows are searched outward from the
+/// annotation's first row, and each candidate sits [`LABEL_GAP`] past the
+/// longest line among the rows the box spans and the rows its connector
+/// crosses. The first candidate that fits the pane and clears the card and
+/// every earlier label is taken.
+///
+/// A label that fits nowhere draws nothing. A label over code hides what the
+/// stop is about, which costs the reader more than one missing label.
 ///
 /// An annotation whose code is off screen contributes no callout, for the same
 /// reason a focus does. A connector to clamped cells points at whatever
 /// scrolled into their place.
 fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
-    let focus_rows: Vec<u16> = input
-        .focus
-        .as_ref()
-        .map(|focus| focus.rows.clone())
-        .unwrap_or_default();
-
     let mut placed: Vec<Rect> = Vec::new();
     let mut callouts = Vec::new();
 
@@ -467,25 +459,22 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
             continue;
         };
 
-        let x = line_end(input, first).unwrap_or(annotation.range.end_x) + LABEL_GAP;
-        let below_focus = focus_rows.last().map(|last| last + 1 + CARD_GAP);
-
-        let label = LABEL_ROW_OFFSETS
-            .iter()
-            .filter_map(|offset| offset_row(first, *offset).map(|y| (x, y)))
-            .chain(below_focus.map(|y| (input.pane.x, y)))
-            .map(|(x, y)| Rect {
-                x,
-                y,
-                width,
-                height,
+        let label = label_rows(first, input.pane)
+            .map(|y| {
+                // The connector crosses every row between the annotation's and
+                // the box's, so with the box's own rows they form one run.
+                let band = first.min(y)..=first.max(y + height - 1);
+                Rect {
+                    x: widest_end(input, band, annotation.range.end_x) + LABEL_GAP,
+                    y,
+                    width,
+                    height,
+                }
             })
             .find(|box_| {
                 fits(input.pane, box_.x, box_.y, width, height)
                     && card.is_none_or(|card| !overlaps(*box_, card))
                     && placed.iter().all(|earlier| !overlaps(*box_, *earlier))
-                    && !covers_code(*box_, &focus_rows, input)
-                    && !covers_code(*box_, &annotation.range.rows, input)
             });
 
         let Some(label) = label else {
@@ -515,28 +504,37 @@ fn label_size(lines: &[String]) -> Option<(u16, u16)> {
     Some((widest as u16 + 2, lines.len() as u16 + 2))
 }
 
-/// `row` moved by `offset`, or `None` when that lands above the screen.
-fn offset_row(row: u16, offset: i32) -> Option<u16> {
-    let moved = i32::from(row) + offset;
-    u16::try_from(moved).ok()
+/// The pane rows a label is tried at, by distance from `first`, below before
+/// above at each distance.
+///
+/// The annotation's own row leads, so a label reads as belonging to the line it
+/// names. Growing one row at a time keeps a label near its code, and running
+/// to the pane's edges lets a crowded stop stack its labels rather than drop
+/// them.
+fn label_rows(first: u16, pane: Rect) -> impl Iterator<Item = u16> {
+    let rows = pane.y..pane.y + pane.height;
+    (0..=pane.height)
+        .flat_map(move |distance| {
+            let below = first.checked_add(distance);
+            let above = first.checked_sub(distance).filter(|_| distance > 0);
+            [below, above]
+        })
+        .flatten()
+        .filter(move |row| rows.contains(row))
+}
+
+/// Where the longest line among `rows` ends.
+///
+/// A row the caller did not measure counts as ending at `unmeasured`.
+fn widest_end(input: &SlideInput, rows: RangeInclusive<u16>, unmeasured: u16) -> u16 {
+    rows.map(|row| line_end(input, row).unwrap_or(unmeasured))
+        .max()
+        .unwrap_or(unmeasured)
 }
 
 /// Whether two boxes share any cell.
 fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
-}
-
-/// Whether `box_` covers the text on any of `rows`.
-///
-/// Sharing a row is not enough. A label placed past where that row's text ends
-/// sits beside the code rather than over it, which is exactly where a label
-/// belongs. Rejecting the whole row would push every label off the line it
-/// names.
-fn covers_code(box_: Rect, rows: &[u16], input: &SlideInput) -> bool {
-    rows.iter().any(|row| {
-        let shares_row = *row >= box_.y && *row < box_.y + box_.height;
-        shares_row && box_.x <= line_end(input, *row).unwrap_or(input.pane.width)
-    })
 }
 
 /// When each part of a slide starts and how long it draws.
@@ -715,6 +713,14 @@ mod tests {
             range: range(rows, start_x, end_x),
             label_lines: lines.iter().map(|line| (*line).to_owned()).collect(),
         }
+    }
+
+    /// Each callout's label box and whether a connector joins it to its code.
+    fn placed(callouts: &[Callout]) -> Vec<(Rect, bool)> {
+        callouts
+            .iter()
+            .map(|callout| (callout.label, callout.link))
+            .collect()
     }
 
     /// A word gets a ring rather than a box, and the ring bulges past the word
@@ -905,13 +911,13 @@ mod tests {
 
     /// A label over the focus text hides the code the whole stop is about.
     ///
-    /// Sharing a row is fine, and is where a label belongs: past where that
-    /// row's text ends. Only reaching back over the text is wrong.
+    /// A tall label on a short line hangs down beside the focus block, so it
+    /// starts past the block's longest line rather than past its own.
     #[test]
     fn a_label_never_covers_the_focus_text() {
         let mut input = input(pane(), Some(range(&[10, 11, 12], 4, 60)));
         // The annotation sits on a short line just above a long focus block, so
-        // a tall label starting beside it hangs down over the focus text.
+        // a tall label on its own row reaches down beside the focus rows.
         input.line_ends = (0..30)
             .map(|row| (row, if (10..=12).contains(&row) { 60 } else { 20 }))
             .collect();
@@ -927,15 +933,122 @@ mod tests {
             );
         };
 
-        assert!(
-            !covers_code(callout.label, &[10, 11, 12], &input),
-            "the label at {:?} hangs over the focus text",
+        assert_eq!(
             callout.label,
+            Rect {
+                x: 60 + LABEL_GAP,
+                y: 8,
+                width: 7,
+                height: 5,
+            },
+            "the label keeps its own row and starts past the focus text it hangs beside",
         );
-        assert!(
-            callout.label.y > 12,
-            "so it moved clear of the block entirely, to {:?}",
-            callout.label,
+    }
+
+    /// Only one label fits on a row that two annotations share, so the second
+    /// stacks directly under the first, in the same column past the text.
+    #[test]
+    fn a_second_label_on_the_same_row_stacks_under_the_first() {
+        let mut input = input(pane(), None);
+        input.card = None;
+        input.annotations = vec![
+            annotation(0, &[10], 4, 8, &["first note"]),
+            annotation(1, &[10], 12, 16, &["second note"]),
+        ];
+        input.current = Some(1);
+
+        assert_eq!(
+            placed(&layout(&input).callouts),
+            [
+                (
+                    Rect {
+                        x: 44,
+                        y: 10,
+                        width: 12,
+                        height: 3,
+                    },
+                    false,
+                ),
+                (
+                    Rect {
+                        x: 44,
+                        y: 13,
+                        width: 13,
+                        height: 3,
+                    },
+                    true,
+                ),
+            ],
+            "the first on its own row, the second under it with a connector back",
+        );
+    }
+
+    /// The labels placed for one annotation on `row` when every line ends at
+    /// column 20 but `long_row`'s, which ends at 60, and `card` holds part of
+    /// the pane.
+    fn placed_beside_long_row(row: u16, long_row: u16, card: Rect) -> Vec<(Rect, bool)> {
+        let mut input = input(pane(), None);
+        input.line_ends = (0..30)
+            .map(|at| (at, if at == long_row { 60 } else { 20 }))
+            .collect();
+        input.annotations = vec![annotation(0, &[row], 4, 8, &["note"])];
+        input.current = Some(0);
+        placed(&place_callouts(&input, Some(card)))
+    }
+
+    /// A label pushed off its row starts past the longest line it spans. A
+    /// column measured from the label's own row alone puts the box over the
+    /// longer line below.
+    #[test]
+    fn a_label_clears_the_longest_row_it_spans() {
+        // Over the rest of the annotation's row, so the label has to leave it.
+        let card = Rect {
+            x: 24,
+            y: 11,
+            width: pane().width - 24,
+            height: 1,
+        };
+
+        assert_eq!(
+            placed_beside_long_row(11, 12, card),
+            [(
+                Rect {
+                    x: 60 + LABEL_GAP,
+                    y: 12,
+                    width: 6,
+                    height: 3,
+                },
+                true,
+            )],
+            "one row down, past the long line it spans",
+        );
+    }
+
+    /// A label also starts past the longest line its connector crosses, so a
+    /// label that leaves its row stays right of the code between it and its
+    /// annotation.
+    #[test]
+    fn a_label_clears_the_rows_its_connector_crosses() {
+        // Over rows 12 to 16, so the nearest free rows are under the long one.
+        let card = Rect {
+            x: 24,
+            y: 12,
+            width: pane().width - 24,
+            height: 5,
+        };
+
+        assert_eq!(
+            placed_beside_long_row(14, 15, card),
+            [(
+                Rect {
+                    x: 60 + LABEL_GAP,
+                    y: 17,
+                    width: 6,
+                    height: 3,
+                },
+                true,
+            )],
+            "under the long line, and past it, since the connector crosses it",
         );
     }
 
