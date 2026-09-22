@@ -521,6 +521,7 @@ impl Painter {
             let label_scheduled = timing_of(slide, Some(slide::Part::Label(callout.key)));
             let link_scheduled = callout
                 .link
+                .is_some()
                 .then(|| timing_of(slide, Some(slide::Part::Link(callout.key))));
             let group_start = (!self.opening && !self.last_declared.contains_key(&label_id))
                 .then(|| link_scheduled.unwrap_or(label_scheduled).delay_ms);
@@ -538,14 +539,11 @@ impl Painter {
             };
             self.label(callout.label, stroke, &lines, buf, scene);
 
-            if let Some(scheduled) = link_scheduled {
+            if let Some(scheduled) = link_scheduled
+                && let Some((x, y)) = callout.link
+            {
                 let timing = self.schedule_with(link_id, scheduled, start(scheduled));
-                // The line leaves the code just past its last cell, level with
-                // its first row, which the label's placement is measured from.
-                let code_end = SketchEnd::Point {
-                    x: (callout.range.end_x as i16 + 1) * 16 + 4,
-                    y: callout.range.rows[0] as i16 * 16 + 8,
-                };
+                let code_end = SketchEnd::Point { x, y };
                 self.link(
                     Stroke {
                         id: link_id,
@@ -1390,8 +1388,8 @@ mod tests {
         );
     }
 
-    /// A connector leaves the annotation's code just past its last cell, so it
-    /// reads as pointing from the code to the label.
+    /// A connector leaves the annotation's code where the layout says, since
+    /// the layout alone knows where the text on each row ends.
     #[test]
     fn a_labels_connector_starts_at_its_code() {
         let mut h = harness(&[(1, "one"), (3, "two")]);
@@ -1400,22 +1398,21 @@ mod tests {
 
         let emitted = sketches(&mut h);
         let input = super::measure(&mut h.stoat).expect("the pane measures");
-        let range = &input.annotations[1].range;
+        let (x, y) = slide::layout(&input)
+            .callouts
+            .iter()
+            .find(|callout| callout.key == 1)
+            .and_then(|callout| callout.link)
+            .expect("the label that moved has a connector");
         let link = emitted
             .iter()
             .find(|sketch| sketch.id == annotation_ids(&h, 1).0)
-            .expect("the label that moved has a connector");
+            .expect("the connector is emitted");
 
         let SketchShape::Line { from, .. } = &link.shape else {
             panic!("a connector is a line, got {:?}", link.shape);
         };
-        assert_eq!(
-            *from,
-            SketchEnd::Point {
-                x: (range.end_x as i16 + 1) * 16 + 4,
-                y: range.rows[0] as i16 * 16 + 8,
-            },
-        );
+        assert_eq!(*from, SketchEnd::Point { x, y });
     }
 
     /// The focus mark starts and ends on the glyphs of `fn two() {}`, and the

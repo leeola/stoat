@@ -69,22 +69,22 @@ pub(crate) enum Mark {
     Rect(SixteenthRect),
 }
 
-/// One annotation's code, its label box, and whether a line joins them.
+/// One annotation's label box, and where a line joins it to the code.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Callout {
     /// The annotation's index in the stop, which is what matches a callout to
     /// the text it came from and to a marker color.
     pub(crate) key: usize,
-    /// The annotation's cells as measured, where the connector starts.
-    ///
-    /// Its rows are never empty, since an annotation off screen places no
-    /// callout.
-    pub(crate) range: CellRange,
     /// The label box, in whole cells.
     pub(crate) label: Rect,
-    /// Whether a connector joins the code to the label. False when the label
-    /// sits on the annotation's own row, which already says what it names.
-    pub(crate) link: bool,
+    /// Where the connector to the label leaves the code, in sixteenths of a
+    /// cell, or `None` when the label sits on the annotation's own row, which
+    /// already says what it names.
+    ///
+    /// The layout picks the point because only it knows where each row's text
+    /// ends. A line that leaves beside text on the annotation's row runs
+    /// through that text on its way to the label.
+    pub(crate) link: Option<(i16, i16)>,
 }
 
 /// A part of a slide, for the timing table.
@@ -483,11 +483,8 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
         placed.push(label);
         callouts.push(Callout {
             key: annotation.key,
-            range: annotation.range.clone(),
             label,
-            // A label sitting on its annotation's own row needs no line to say
-            // which code it belongs to. One that moved does.
-            link: label.y != first,
+            link: link_point(input, &annotation.range, label.y),
         });
     }
 
@@ -535,6 +532,42 @@ fn widest_end(input: &SlideInput, rows: RangeInclusive<u16>, unmeasured: u16) ->
 /// Whether two boxes share any cell.
 fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
+/// Where the connector from `range` to a label at row `label_y` leaves the
+/// code, in sixteenths, or `None` when the label sits on the range's first row.
+///
+/// When the range ends its last row, the line leaves just past the last cell,
+/// level with it. When text follows the range, a sideways start runs through
+/// that text. The line then leaves from under the last cell toward a label
+/// below the range, and from over the first row toward any other label.
+///
+/// Over the first row means over the last cell of a one-row range. A longer
+/// range's last cell sits under rows of the range itself, so the line leaves
+/// from over its first cell instead.
+fn link_point(input: &SlideInput, range: &CellRange, label_y: u16) -> Option<(i16, i16)> {
+    let (&first, &last) = (range.rows.first()?, range.rows.last()?);
+    if label_y == first {
+        return None;
+    }
+
+    let sixteenths = |cells: u16, offset: i32| (i32::from(cells) * CELL + offset) as i16;
+    let tail = line_end(input, last).is_some_and(|end| end > range.end_x + 1);
+
+    Some(match (tail, label_y > last) {
+        (false, _) => (
+            sixteenths(range.end_x + 1, CELL / 4),
+            sixteenths(last, CELL / 2),
+        ),
+        (true, true) => (sixteenths(range.end_x, CELL / 2), sixteenths(last + 1, 0)),
+        (true, false) => {
+            let over = match first == last {
+                true => range.end_x,
+                false => range.start_x,
+            };
+            (sixteenths(over, CELL / 2), sixteenths(first, 0))
+        },
+    })
 }
 
 /// When each part of a slide starts and how long it draws.
@@ -618,7 +651,7 @@ fn choreograph(
     for (index, callout) in callouts.iter().enumerate() {
         let link_at = shift(after, c::ANNOTATION_DELAY_MS)
             + c::ANNOTATION_STRIDE_MS.saturating_mul(index as u16);
-        let label_at = match callout.link {
+        let label_at = match callout.link.is_some() {
             true => {
                 timing.push((Part::Link(callout.key), link_at, c::ANNOTATION_LINK_MS));
                 shift(
@@ -719,8 +752,22 @@ mod tests {
     fn placed(callouts: &[Callout]) -> Vec<(Rect, bool)> {
         callouts
             .iter()
-            .map(|callout| (callout.label, callout.link))
+            .map(|callout| (callout.label, callout.link.is_some()))
             .collect()
+    }
+
+    /// A card from column 24 to the pane's right edge, over `height` rows from
+    /// row `y`.
+    ///
+    /// A label beside lines that end at column 20 starts at column 24, so the
+    /// card blocks that column on each row it covers.
+    fn card_over_rows(y: u16, height: u16) -> Rect {
+        Rect {
+            x: 24,
+            y,
+            width: pane().width - 24,
+            height,
+        }
     }
 
     /// A word gets a ring rather than a box, and the ring bulges past the word
@@ -1002,15 +1049,8 @@ mod tests {
     #[test]
     fn a_label_clears_the_longest_row_it_spans() {
         // Over the rest of the annotation's row, so the label has to leave it.
-        let card = Rect {
-            x: 24,
-            y: 11,
-            width: pane().width - 24,
-            height: 1,
-        };
-
         assert_eq!(
-            placed_beside_long_row(11, 12, card),
+            placed_beside_long_row(11, 12, card_over_rows(11, 1)),
             [(
                 Rect {
                     x: 60 + LABEL_GAP,
@@ -1030,15 +1070,8 @@ mod tests {
     #[test]
     fn a_label_clears_the_rows_its_connector_crosses() {
         // Over rows 12 to 16, so the nearest free rows are under the long one.
-        let card = Rect {
-            x: 24,
-            y: 12,
-            width: pane().width - 24,
-            height: 5,
-        };
-
         assert_eq!(
-            placed_beside_long_row(14, 15, card),
+            placed_beside_long_row(14, 15, card_over_rows(12, 5)),
             [(
                 Rect {
                     x: 60 + LABEL_GAP,
@@ -1049,6 +1082,79 @@ mod tests {
                 true,
             )],
             "under the long line, and past it, since the connector crosses it",
+        );
+    }
+
+    /// Where the connector of each callout placed for one annotation leaves
+    /// the code. The annotation runs over `rows`, from column 4 on the first to
+    /// column 8 on the last, and `card` holds part of the pane. The last row's
+    /// text ends at `last_end` and every other row's at 20.
+    fn links_from(rows: &[u16], last_end: u16, card: Rect) -> Vec<Option<(i16, i16)>> {
+        let last = *rows.last().expect("an annotation covers a row");
+        let mut input = input(pane(), None);
+        input.line_ends = (0..30)
+            .map(|row| (row, if row == last { last_end } else { 20 }))
+            .collect();
+        input.annotations = vec![annotation(0, rows, 4, 8, &["note"])];
+        input.current = Some(0);
+        place_callouts(&input, Some(card))
+            .iter()
+            .map(|callout| callout.link)
+            .collect()
+    }
+
+    /// A line that leaves beside a word runs through the text after it, so a
+    /// label below takes its line from under the word's last cell.
+    #[test]
+    fn a_connector_leaves_from_under_a_word_that_text_follows() {
+        assert_eq!(
+            links_from(&[10], 20, card_over_rows(10, 1)),
+            [Some((8 * 16 + 8, 11 * 16))],
+            "the bottom middle of cell 8",
+        );
+    }
+
+    /// A word that ends its row has nothing after it to cross, so its line
+    /// leaves just past its last cell, level with it.
+    #[test]
+    fn a_connector_leaves_past_a_word_that_ends_its_row() {
+        assert_eq!(
+            links_from(&[10], 9, card_over_rows(10, 1)),
+            [Some((9 * 16 + 4, 10 * 16 + 8))],
+            "a quarter cell past cell 8, halfway down row 10",
+        );
+    }
+
+    /// A label above takes its line from over the word's last cell, the end
+    /// nearest the label, so the line crosses the least of the code above.
+    #[test]
+    fn a_connector_leaves_from_over_a_word_when_its_label_sits_above() {
+        assert_eq!(
+            links_from(&[10], 20, card_over_rows(10, 20)),
+            [Some((8 * 16 + 8, 10 * 16))],
+            "the top middle of cell 8",
+        );
+    }
+
+    /// A block's last cell sits under rows of the block itself, so the line to
+    /// a label above leaves from over the block's first cell.
+    #[test]
+    fn a_block_connector_to_a_label_above_leaves_over_its_first_cell() {
+        assert_eq!(
+            links_from(&[10, 11], 20, card_over_rows(10, 20)),
+            [Some((4 * 16 + 8, 10 * 16))],
+            "the top middle of cell 4 on row 10",
+        );
+    }
+
+    /// A block that ends its last row leaves from just past that row's last
+    /// cell. Level with its first row, the line starts inside that row's text.
+    #[test]
+    fn a_block_that_ends_its_row_connects_from_past_its_last_cell() {
+        assert_eq!(
+            links_from(&[10, 11], 9, card_over_rows(10, 1)),
+            [Some((9 * 16 + 4, 11 * 16 + 8))],
+            "a quarter cell past cell 8, halfway down row 11",
         );
     }
 
