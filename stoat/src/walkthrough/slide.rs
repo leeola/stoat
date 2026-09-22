@@ -755,13 +755,22 @@ fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
+/// Cells after a range that its connector steps over rather than starts under.
+///
+/// Two cover a comma, or a closing bracket and its comma.
+const SHORT_TAIL: u16 = 2;
+
 /// Where the connector from `range` to a label at row `label_y` leaves the
 /// code, in sixteenths, or `None` when the label sits on the range's first row.
 ///
-/// When the range ends its last row, the line leaves just past the last cell,
-/// level with it. When text follows the range, a sideways start runs through
-/// that text. The line then leaves from under the last cell toward a label
-/// below the range, and from over the first row toward any other label.
+/// A range that ends its last row, or that at most [`SHORT_TAIL`] cells
+/// follow, takes its line from a quarter cell past the row's end, level with
+/// it. A line that starts under a word to dodge one comma reads as pointing at
+/// the row below.
+///
+/// When more text follows the range, a sideways start runs through that text.
+/// The line then leaves from under the last cell toward a label below the
+/// range, and from over the first row toward any other label.
 ///
 /// Over the first row means over the last cell of a one-row range. A longer
 /// range's last cell sits under rows of the range itself, so the line leaves
@@ -773,11 +782,15 @@ fn link_point(input: &SlideInput, range: &CellRange, label_y: u16) -> Option<(i1
     }
 
     let sixteenths = |cells: u16, offset: i32| (i32::from(cells) * CELL + offset) as i16;
-    let tail = line_end(input, last).is_some_and(|end| end > range.end_x + 1);
+    let end = line_end(input, last);
+    let tail = end.is_some_and(|end| end > range.end_x + 1 + SHORT_TAIL);
 
     Some(match (tail, label_y > last) {
         (false, _) => (
-            sixteenths(range.end_x + 1, CELL / 4),
+            sixteenths(
+                end.map_or(range.end_x + 1, |end| end.max(range.end_x + 1)),
+                CELL / 4,
+            ),
             sixteenths(last, CELL / 2),
         ),
         (true, true) => (sixteenths(range.end_x, CELL / 2), sixteenths(last + 1, 0)),
@@ -1566,6 +1579,29 @@ mod tests {
             links_from(&[10], 9, card_over_rows(10, 1)),
             [Some((9 * 16 + 4, 10 * 16 + 8))],
             "a quarter cell past cell 8, halfway down row 10",
+        );
+    }
+
+    /// A match arm's comma is not text worth dodging. A line that starts under
+    /// the arm to miss it reads as pointing at the row below, so the line steps
+    /// over two tail cells and leaves past the row's end, level with the code.
+    #[test]
+    fn a_connector_steps_over_a_short_tail() {
+        assert_eq!(
+            links_from(&[10], 11, card_over_rows(10, 1)),
+            [Some((11 * 16 + 4, 10 * 16 + 8))],
+            "a quarter cell past the row's end at cell 11, halfway down row 10",
+        );
+    }
+
+    /// Three cells after the word are more than a comma, so a sideways start
+    /// runs through text and the line leaves from under the word instead.
+    #[test]
+    fn a_connector_leaves_from_under_a_word_a_longer_tail_follows() {
+        assert_eq!(
+            links_from(&[10], 12, card_over_rows(10, 1)),
+            [Some((8 * 16 + 8, 11 * 16))],
+            "the bottom middle of cell 8",
         );
     }
 
