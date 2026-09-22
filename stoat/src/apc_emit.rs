@@ -20,7 +20,11 @@ use crate::{
     input_view::InputView,
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, Placement, View},
-    render::{hover::HoverFrame, undercurl::UndercurlBatch},
+    render::{
+        hover::HoverFrame,
+        undercurl::UndercurlBatch,
+        walkthrough::{self, Spotlight},
+    },
     workspace::{diff, Workspace},
 };
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -801,6 +805,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             dim: f32,
             soften_scale: f32,
             tint_amount: f32,
+            /// The walkthrough spotlight the live grid paints on this editor.
+            spotlight: Option<Spotlight>,
         },
         Conflict {
             snapshot: DisplaySnapshot,
@@ -812,6 +818,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         },
     }
     let mut async_jobs: Vec<PoolFill> = Vec::new();
+    // Found before the closures below borrow `stoat` for the rest of the emit,
+    // because the search measures the focused editor through a mutable borrow.
+    let spotlight = walkthrough::spotlight_of(stoat);
     let syntax_highlight = stoat.syntax_highlight;
     // What each editor actually paints with, which is what a page's hash has to
     // carry. The diff toggle only subtracts, and only from a diff view.
@@ -856,6 +865,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         } else {
             inactive_dim
         };
+        // The walkthrough spotlight rides the pages of the editor the live grid
+        // paints it on, so a glide composites the lit annotation and the dim.
+        let page_spotlight = spotlight
+            .as_ref()
+            .filter(|(lit, _)| lit == editor_id)
+            .map(|(_, spotlight)| spotlight);
         let soften_scale = crate::render::review::diff_soften_scale(stoat.diff_soften);
         let tint_amount = crate::render::review::diff_tint_amount(stoat.diff_tint);
         // scroll_row is the source of truth for the pool page. The wheel
@@ -938,6 +953,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             buffer_version,
             paint_version,
             theme_epoch,
+            page_spotlight,
         );
         let Refill {
             entered,
@@ -1065,6 +1081,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     soften_scale,
                     tint_amount,
                     dim,
+                    spotlight: page_spotlight.cloned(),
                 });
             }
         }
@@ -1176,6 +1193,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.display_map.buffer_snapshot().version(),
                 editor.display_map.snapshot().paint_version(),
                 theme_epoch,
+                None,
             );
             let snapshot = editor.display_map.snapshot();
             let severity = editor
@@ -1218,6 +1236,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     soften_scale: 1.0,
                     tint_amount: 0.0,
                     dim: 0.0,
+                    spotlight: None,
                 });
             }
         }
@@ -1753,6 +1772,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 dim,
                 soften_scale,
                 tint_amount,
+                spotlight,
             } => {
                 // One job for the whole refill rather than one per page.
                 // Every page reads the same highlight endpoints and the same
@@ -1798,6 +1818,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                                 tint_amount,
                                 endpoints.clone(),
                                 live.as_ref(),
+                                spotlight.as_ref(),
                             );
                             if apc_tx.send(fill).is_err() {
                                 return;
@@ -2092,7 +2113,8 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
 /// the gutter, a gutter-width or wrap-width change reflows the text, the
 /// cursor's buffer line moves under relative numbering, either of the diff
-/// view's dials moves, or the theme changes every color on the page.
+/// view's dials moves, the theme changes every color on the page, or the
+/// walkthrough spotlight lights another annotation or goes out.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -2108,6 +2130,7 @@ pub(crate) fn editor_page_content_version(
     buffer_version: u64,
     paint_version: PaintVersion,
     theme_epoch: u64,
+    spotlight: Option<&Spotlight>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -2125,6 +2148,16 @@ pub(crate) fn editor_page_content_version(
     // stuck at 0) with no diagnostics glides pre-edit text.
     display_map_stamp(buffer_version, paint_version).hash(&mut hasher);
     theme_epoch.hash(&mut hasher);
+    spotlight
+        .map(|spotlight| {
+            (
+                *spotlight.range.start(),
+                *spotlight.range.end(),
+                spotlight.color,
+                (spotlight.dim * 1000.0) as u32,
+            )
+        })
+        .hash(&mut hasher);
     hasher.finish()
 }
 

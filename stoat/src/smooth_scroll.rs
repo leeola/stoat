@@ -38,10 +38,15 @@ use crate::{
         review::paint_diff_rows,
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
+        walkthrough::Spotlight,
     },
     symbol_finder::SymbolFinder,
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
 use std::{path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
 use stoat_widgets::ApcScene;
@@ -122,6 +127,7 @@ pub(crate) fn render_page_fill(
     tint_amount: f32,
     endpoints: Arc<[HighlightEndpoint]>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
+    spotlight: Option<&Spotlight>,
 ) -> Vec<u8> {
     let top_row = page_top_row(index, region_height);
     let bytes = render_page_from_snapshot(
@@ -137,6 +143,7 @@ pub(crate) fn render_page_fill(
         tint_amount,
         endpoints,
         live,
+        spotlight,
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
@@ -206,6 +213,10 @@ pub(crate) fn render_page_decorations(
 /// `live` offers hunks a caller already resolved, for a run of pages over one
 /// snapshot that would otherwise each pay an anchor batch over every hunk in the
 /// file. `None` resolves them here, which is what a lone page wants.
+///
+/// `spotlight` dims the page and lights the walkthrough annotation on it, as the
+/// live grid does for the focused editor. A diff-view page takes none, since its
+/// columns are not the display columns a spotlight's range maps to.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_from_snapshot(
     snapshot: &DisplaySnapshot,
@@ -220,6 +231,7 @@ pub(crate) fn render_page_from_snapshot(
     tint_amount: f32,
     endpoints: Arc<[HighlightEndpoint]>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
+    spotlight: Option<&Spotlight>,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = page_buffer(area, gutter.theme());
@@ -273,6 +285,10 @@ pub(crate) fn render_page_from_snapshot(
     }
 
     dim_page(&mut buf, area, gutter.theme(), dim);
+    if let Some(spotlight) = spotlight {
+        dim_page(&mut buf, area, gutter.theme(), spotlight.dim);
+        light_page_range(&mut buf, area, gutter_w, top_row, snapshot, spotlight);
+    }
     let mut bytes = serialize_buffer(&buf);
     bytes.extend_from_slice(&apc);
     bytes
@@ -290,6 +306,47 @@ fn dim_page(buf: &mut Buffer, area: Rect, theme: &crate::theme::Theme, dim: f32)
         )
     {
         crate::render::pane::dim_pane_content(buf, area, bg, dim);
+    }
+}
+
+/// Recolor the cells of `spotlight`'s range that fall on this page, which
+/// starts at display row `top_row` with its text `gutter_w` cells in.
+///
+/// This is the rule the live walkthrough spotlight paints on the grid, so the
+/// composite a glide shows matches it. The first row lights from the range's
+/// start and the last up to its end, and every row between lights from the
+/// line's start to its end.
+fn light_page_range(
+    buf: &mut Buffer,
+    area: Rect,
+    gutter_w: u16,
+    top_row: u32,
+    snapshot: &DisplaySnapshot,
+    spotlight: &Spotlight,
+) {
+    let rope = snapshot.buffer_snapshot().rope();
+    let display = |offset: usize| snapshot.buffer_to_display(rope.offset_to_point(offset));
+    let (start, end) = (
+        display(*spotlight.range.start()),
+        display(*spotlight.range.end()),
+    );
+    let [r, g, b] = spotlight.color;
+
+    let text_x = u32::from(area.x + gutter_w);
+    let right = u32::from(area.x + area.width);
+    let page_end = top_row.saturating_add(u32::from(area.height));
+    for row in start.row.max(top_row)..end.row.saturating_add(1).min(page_end) {
+        let from = if row == start.row { start.column } else { 0 };
+        let to = if row == end.row {
+            end.column + 1
+        } else {
+            snapshot.line_len(row)
+        };
+        let y = area.y + (row - top_row) as u16;
+        let columns = (text_x + from).min(right)..(text_x + to).min(right);
+        for x in columns {
+            buf[(x as u16, y)].set_fg(Color::Rgb(r, g, b));
+        }
     }
 }
 
@@ -935,6 +992,7 @@ mod tests {
                 0.0,
                 page_endpoints(&snapshot, top_row, 4),
                 None,
+                None,
             );
 
             assert_eq!(got, expected, "page at top_row {top_row}");
@@ -1016,6 +1074,7 @@ mod tests {
             1.0,
             0.0,
             page_endpoints(&snapshot, 0, 2),
+            None,
             None,
         );
 
@@ -1110,6 +1169,7 @@ mod tests {
             0.0,
             page_endpoints(&snapshot, 0, 3),
             None,
+            None,
         );
 
         assert_eq!(
@@ -1170,6 +1230,7 @@ mod tests {
             0.0,
             page_endpoints(&snapshot, 0, 4),
             None,
+            None,
         );
         let dimmed = render_page_from_snapshot(
             &snapshot,
@@ -1183,6 +1244,7 @@ mod tests {
             1.0,
             0.0,
             page_endpoints(&snapshot, 0, 4),
+            None,
             None,
         );
         assert_ne!(undimmed, dimmed, "threading dim changes the page bytes");
@@ -1198,6 +1260,86 @@ mod tests {
         assert_eq!(
             via_page, via_helper,
             "a page dims by exactly the live grid's cell blend"
+        );
+    }
+
+    /// The focused editor's pooled page carries the walkthrough spotlight the
+    /// live grid paints, the dim and the lit annotation, so a glide composites
+    /// the colors the settled grid shows.
+    #[test]
+    fn a_lit_page_is_the_dimmed_page_with_the_annotation_recolored() {
+        use super::{light_page_range, render_page_from_snapshot, Buffer, PageGutter, Rect};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::{editor::RowSeverity, walkthrough::Spotlight},
+            theme::scope,
+            Stoat,
+        };
+        use ratatui::style::Color;
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-lit");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let gutter = PageGutter::new(true, Arc::new(RowSeverity::default()), theme, None, None);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        // "bravo" is the second line, offsets 6 through 10.
+        let spotlight = |dim: f32| Spotlight {
+            range: 6..=10,
+            color: [1, 2, 3],
+            dim,
+        };
+
+        let page = |spotlight: Option<&Spotlight>, dim: f32| {
+            render_page_from_snapshot(
+                &snapshot,
+                0,
+                fallback,
+                12,
+                4,
+                &gutter,
+                false,
+                dim,
+                1.0,
+                0.0,
+                page_endpoints(&snapshot, 0, 4),
+                None,
+                spotlight,
+            )
+        };
+        let lit_page = page(Some(&spotlight(0.5)), 0.0);
+        assert_ne!(
+            lit_page,
+            page(None, 0.5),
+            "the annotation is recolored over the dim",
+        );
+        assert_ne!(
+            lit_page,
+            page(Some(&spotlight(0.0)), 0.0),
+            "and the spotlight dims the rest of the page",
+        );
+
+        let area = Rect::new(0, 0, 12, 4);
+        let gutter_w = 3;
+        let mut lit = Buffer::empty(area);
+        light_page_range(&mut lit, area, gutter_w, 0, &snapshot, &spotlight(0.5));
+        let mut expected = Buffer::empty(area);
+        for x in gutter_w..gutter_w + 5 {
+            expected[(x, 1)].set_fg(Color::Rgb(1, 2, 3));
+        }
+        assert_eq!(
+            lit, expected,
+            "the five cells of bravo take the marker color and no other cell changes",
         );
     }
 
@@ -1276,6 +1418,7 @@ mod tests {
             1.0,
             0.0,
             page_endpoints(&snapshot, 0, 8),
+            None,
             None,
         );
         assert_eq!(
@@ -1513,7 +1656,7 @@ mod tests {
             let fill = |endpoints| {
                 render_page_fill(
                     &snapshot, 5, index, fallback, 40, height, &gutter, false, 0.0, 1.0, 0.0,
-                    endpoints, None,
+                    endpoints, None, None,
                 )
             };
             assert_eq!(fill(shared.clone()), fill(own), "page {index}");
@@ -1607,6 +1750,7 @@ mod tests {
                     0.0,
                     page_endpoints(&snapshot, page_top_row(index, height), height),
                     live,
+                    None,
                 )
             };
             assert_eq!(
@@ -1664,6 +1808,7 @@ mod tests {
             0.0,
             page_endpoints(&snapshot, 6, 3),
             None,
+            None,
         );
 
         let cmds = commands(&frame);
@@ -1688,6 +1833,7 @@ mod tests {
             1.0,
             0.0,
             page_endpoints(&snapshot, 6, 3),
+            None,
             None,
         );
         assert!(
@@ -1745,6 +1891,7 @@ mod tests {
             1.0,
             0.0,
             page_endpoints(&snapshot, 0, 4),
+            None,
             None,
         );
         let cmds = commands(&frame);
@@ -1811,6 +1958,7 @@ mod tests {
             1.0,
             0.0,
             page_endpoints(&snapshot, 4, 4),
+            None,
             None,
         );
         let decorations = render_page_decorations(&snapshot, 3, 1, 12, 4, &gutter, None);

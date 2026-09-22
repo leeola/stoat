@@ -8162,6 +8162,7 @@ mod tests {
         host::FsEventKind,
         input_parse::{self, InputStep},
         input_view::{InputView, SubmitTarget},
+        render::walkthrough::Spotlight,
         run::GridSelection,
         term_session::{TermSelection, TermSession},
         test_fixture::{
@@ -19056,6 +19057,7 @@ mod tests {
             0,
             paint,
             0,
+            None,
         );
         assert_eq!(
             base,
@@ -19072,7 +19074,8 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                0
+                0,
+                None
             ),
             "identical inputs keep a buffered page cached"
         );
@@ -19091,14 +19094,15 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                0
+                0,
+                None
             ),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
             editor_page_content_version(
-                true, 3, None, None, 0, false, 0, 0.0, 1.0, 0.0, 0, paint, 0
+                true, 3, None, None, 0, false, 0, 0.0, 1.0, 0.0, 0, paint, 0, None
             ),
             "switching to absolute numbering refills"
         );
@@ -19117,7 +19121,8 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                0
+                0,
+                None
             ),
             "a wrap-width change refills buffered pages"
         );
@@ -19136,7 +19141,8 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                0
+                0,
+                None
             ),
             "a diff-view hunk change refills buffered pages"
         );
@@ -19155,7 +19161,8 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                0
+                0,
+                None
             ),
             "a soften step refills buffered pages rather than gliding stale colors"
         );
@@ -19174,7 +19181,8 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                0
+                0,
+                None
             ),
             "a focus change to a dimmed pane refills buffered pages"
         );
@@ -19193,7 +19201,8 @@ mod tests {
                 0.0,
                 1,
                 paint,
-                0
+                0,
+                None
             ),
             "a buffer edit refills buffered pages"
         );
@@ -19212,9 +19221,44 @@ mod tests {
                 0.0,
                 0,
                 paint,
-                1
+                1,
+                None
             ),
             "a theme switch refills buffered pages"
+        );
+
+        let lit = |start: usize| {
+            let spotlight = Spotlight {
+                range: start..=start + 4,
+                color: [1, 2, 3],
+                dim: 0.5,
+            };
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                1.0,
+                0.0,
+                0,
+                paint,
+                0,
+                Some(&spotlight),
+            )
+        };
+        assert_ne!(
+            base,
+            lit(6),
+            "a walkthrough spotlight refills buffered pages"
+        );
+        assert_ne!(
+            lit(6),
+            lit(12),
+            "and so does the spotlight moving to another annotation"
         );
     }
 
@@ -19264,6 +19308,7 @@ mod tests {
                     buffer_version,
                     paint_version,
                     0,
+                    None,
                 ),
                 display_map_stamp(buffer_version, paint_version),
             )

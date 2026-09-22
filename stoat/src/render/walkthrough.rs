@@ -18,6 +18,7 @@
 
 use crate::{
     app::Stoat,
+    editor_state::EditorId,
     pane::View,
     render::{layout, screen, TEXT_SCALE_POPUP},
     theme::scope,
@@ -27,13 +28,16 @@ use crate::{
             self, AnnotationCells, CellRange, Emphasis, Link, Mark, SixteenthRect, Slide,
             SlideInput,
         },
+        Range,
     },
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use std::{
     collections::HashMap,
+    ops::RangeInclusive,
     time::{Duration, Instant},
 };
+use stoat_text::{Point, Rope};
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{
     self, SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchFillStyle,
@@ -224,6 +228,62 @@ fn spotlight(buf: &mut Buffer, input: &SlideInput, colors: &Colors, dim: Rect) {
             buf[(x, row)].set_fg(Color::Rgb(r, g, b));
         }
     }
+}
+
+/// What [`spotlight`] paints on the live grid, carried to the focused editor's
+/// pooled pages so a glide composites the same colors.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Spotlight {
+    /// The buffer offsets of the current annotation's code, first and last
+    /// character.
+    pub(crate) range: RangeInclusive<usize>,
+    /// The annotation's marker color.
+    pub(crate) color: [u8; 3],
+    /// How far the rest of the page dims toward the background, zero when the
+    /// theme gives no RGB background.
+    pub(crate) dim: f32,
+}
+
+/// The focused pane's editor and the spotlight the live grid paints on it for
+/// the frame just drawn, or `None` when it paints none.
+///
+/// It paints none while the reader is on the focus, for an annotation in
+/// another file, and for one whose code is off screen. A pooled page carries
+/// the same answer, because a page lit where the settled grid is not flashes
+/// a dim that the grid never shows once the glide ends.
+pub(crate) fn spotlight_of(stoat: &mut Stoat) -> Option<(EditorId, Spotlight)> {
+    let (range, key) = {
+        let run = stoat.active_workspace().walkthrough.as_ref()?;
+        let annotation = run
+            .current_annotation()
+            .filter(|annotation| annotation.path.is_none())?;
+        let key = run.annotation_progress()?.0 - 1;
+        (key < run.drawable_annotations()).then_some((annotation.range, key))?
+    };
+    let colors = Colors::of(stoat);
+
+    let ws = stoat.active_workspace_mut();
+    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    let editor = ws.editors.get_mut(editor_id)?;
+    let offsets = {
+        let snapshot = editor.display_map.snapshot();
+        range_offsets(snapshot.buffer_snapshot().rope(), &range)
+    };
+    screen::span(editor, offsets.clone())?;
+
+    Some((
+        editor_id,
+        Spotlight {
+            range: offsets,
+            color: colors.marker(key),
+            dim: match colors.background {
+                Some(_) => SPOTLIGHT_DIM,
+                None => 0.0,
+            },
+        },
+    ))
 }
 
 /// Re-declare the retiring slide with the exit phase, and report whether one is
@@ -869,30 +929,15 @@ fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
 /// Turn a stored range into the cells it covers on screen.
 ///
 /// `None` when either end is off screen, which the layout turns into no mark.
-fn measure_range(
-    stoat: &mut Stoat,
-    editor_id: crate::editor_state::EditorId,
-    range: &crate::walkthrough::Range,
-) -> Option<CellRange> {
+fn measure_range(stoat: &mut Stoat, editor_id: EditorId, range: &Range) -> Option<CellRange> {
     let ws = stoat.active_workspace_mut();
     let editor = ws.editors.get_mut(editor_id)?;
     let offsets = {
         let snapshot = editor.display_map.snapshot();
-        let rope = snapshot.buffer_snapshot().rope();
-        // Stored ranges are one-based, and a Point is zero-based.
-        let point = |line: u32, col: u32| {
-            rope.point_to_offset(stoat_text::Point::new(
-                line.saturating_sub(1),
-                col.saturating_sub(1),
-            ))
-        };
-        (
-            point(range.start.line, range.start.col),
-            point(range.end.line, range.end.col),
-        )
+        range_offsets(snapshot.buffer_snapshot().rope(), range)
     };
 
-    let span = screen::span(editor, offsets.0..=offsets.1)?;
+    let span = screen::span(editor, offsets)?;
     Some(CellRange {
         rows: span.rows.collect(),
         start_x: span.start_x,
@@ -900,13 +945,18 @@ fn measure_range(
     })
 }
 
+/// The buffer offsets of a stored range's first and last characters.
+fn range_offsets(rope: &Rope, range: &Range) -> RangeInclusive<usize> {
+    // Stored ranges are one-based, and a Point is zero-based.
+    let offset = |line: u32, col: u32| {
+        rope.point_to_offset(Point::new(line.saturating_sub(1), col.saturating_sub(1)))
+    };
+    offset(range.start.line, range.start.col)..=offset(range.end.line, range.end.col)
+}
+
 /// Where the text ends on each visible row, so a box lands past it rather than
 /// over it.
-fn line_ends(
-    stoat: &mut Stoat,
-    editor_id: crate::editor_state::EditorId,
-    pane: Rect,
-) -> Vec<(u16, u16)> {
+fn line_ends(stoat: &mut Stoat, editor_id: EditorId, pane: Rect) -> Vec<(u16, u16)> {
     let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
         return Vec::new();
     };
@@ -924,7 +974,7 @@ fn line_ends(
 
 #[cfg(test)]
 mod tests {
-    use super::{sketch_corner_radius, EXIT_MS, SPOTLIGHT_DIM};
+    use super::{sketch_corner_radius, Spotlight, EXIT_MS, SPOTLIGHT_DIM};
     use crate::{
         action_handlers::walkthrough::open,
         app::Stoat,
@@ -1605,6 +1655,43 @@ mod tests {
             h.rendered_buffer()[cell].fg,
             on_the_focus,
             "the code keeps its color",
+        );
+    }
+
+    /// The pooled pages carry the spotlight the live grid paints and no other.
+    /// An annotation scrolled off the pane lights nothing on the grid, so its
+    /// pages stay unlit too. A lit page there flashes a dim through the glide
+    /// that the settled grid never shows.
+    #[test]
+    fn the_pooled_spotlight_is_the_one_the_grid_paints() {
+        let filler: String = (4..=60).map(|n| format!("fn line_{n}() {{}}\n")).collect();
+        let mut h = harness_over(&[(1, "one")], &format!("{CODE}{filler}"));
+        open(&mut h.stoat, "tour");
+        reach(&mut h, 1);
+        h.stoat.render();
+
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("an editor has focus");
+        let marker = paint::style_rgb(h.stoat.theme.get(scope::UI_WALKTHROUGH_MARKERS[0]).fg)
+            .expect("the theme names an RGB color");
+        assert_eq!(
+            super::spotlight_of(&mut h.stoat),
+            Some((
+                editor_id,
+                Spotlight {
+                    range: 0..=10,
+                    color: marker,
+                    dim: SPOTLIGHT_DIM,
+                },
+            )),
+            "an annotation on screen lights the pages as it lights the grid",
+        );
+
+        h.stoat.active_workspace_mut().editors[editor_id].scroll_row = 30;
+        h.stoat.render();
+        assert_eq!(
+            super::spotlight_of(&mut h.stoat),
+            None,
+            "and scrolled off the pane it lights neither",
         );
     }
 
