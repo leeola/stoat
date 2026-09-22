@@ -14,12 +14,12 @@
 //! Each stop still stages one placement, and every annotation names code in
 //! its stop's own file.
 //!
-//! Between them the stops drive the label search in `place_callouts`
-//! (crate::walkthrough::slide) and the marks around it: labels stacked downward
-//! from their code, each past the text beside it, connectors that meet their
-//! labels on the left and bow around what lies between, labels that find no
-//! candidate at all, the marker color cycle wrapping at six, a highlight over
-//! a three-row annotation, and a focus long enough for soft wrap to spread
+//! Between them the stops drive the label plan in `place_callouts`
+//! (crate::walkthrough::slide) and the marks around it: labels planned as one
+//! column centered on their code, each past the text beside it, connectors that
+//! meet their labels on the left and bow around what lies between, labels that
+//! find no room at all, the marker color cycle wrapping at six, a highlight
+//! over a three-row annotation, and a focus long enough for soft wrap to spread
 //! over several display rows.
 
 use crate::{
@@ -160,9 +160,9 @@ const NARRATION_CROWDED: &str = "\
 Five annotations land on five consecutive rows, and each label is long enough
 to wrap into a two-line box.
 
-Only the first fits on its own row. Each of the rest sits under the one before
-it, past every line between its arm and its far edge. A label goes above the
-first only when the pane below is full.
+The five labels form one column centered on the arms. The middle label sits on
+its own row with two above and two below, each past every line between its arm
+and its far edge. A label not yet reached already holds its place.
 
 Each connector runs back to the arm it names and meets its box on the left. It
 bows around whatever lies between.
@@ -171,9 +171,9 @@ bows around whatever lies between.
 const NARRATION_PAIR: &str = "\
 Both annotations start on the same row, and only one label fits there.
 
-The first takes the row and reads as part of the line. The second sits
-directly under the first, right of the line, and draws a connector to say
-which code it belongs to.
+The two boxes straddle the row. The first starts one row above it, and the
+second sits directly under the first, right of the line. Each draws a
+connector to say which code it belongs to.
 ";
 
 const NARRATION_SEVEN: &str = "\
@@ -194,9 +194,9 @@ on screen at once, which is the comparison this stop is for.
 const NARRATION_NO_ROOM: &str = "\
 Both arms run past column 110, and both labels want the space to their right.
 
-In a wide pane the first takes its own row past both arms, and the second
-stacks under it. In a narrow pane neither label has room past the arms, so
-neither draws. A label over the arms hides the code it names.
+In a wide pane the two labels straddle the arms, past both of them, and each
+draws a connector to its arm. In a narrow pane neither label has room past the
+arms, so neither draws. A label over the arms hides the code it names.
 ";
 
 const NARRATION_WRAPPED: &str = "\

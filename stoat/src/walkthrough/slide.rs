@@ -21,7 +21,7 @@
 
 use crate::render::text::text_width;
 use ratatui::layout::Rect;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 
 /// Sixteenths in one cell, the unit a mark's geometry is stated in.
 ///
@@ -81,7 +81,7 @@ pub(crate) struct Callout {
     /// on the annotation's own row, which already says what it names.
     ///
     /// The layout plans the whole line because only it knows what lies between
-    /// the code and the box. The text on each row, the card, and the earlier
+    /// the code and the box. The text on each row, the card, and the other
     /// labels all lie there.
     pub(crate) link: Option<Link>,
 }
@@ -196,7 +196,8 @@ pub(crate) struct SlideInput {
     /// The key of the annotation the reader is on, or `None` while the reader
     /// is on the focus.
     ///
-    /// Annotations past it are not yet reached and place no callout.
+    /// Annotations past it are not yet reached and draw no callout. Their
+    /// labels still hold their place in the plan.
     pub(crate) current: Option<usize>,
     /// Whether the reader has dismissed the card. A hidden card takes no space
     /// and no connector points at it.
@@ -452,16 +453,21 @@ fn clamp_rect(pane: Rect, x: u16, y: u16, width: u16, height: u16) -> Rect {
 /// Cells between the longest line beside a label and its box.
 const LABEL_GAP: u16 = 4;
 
-/// Place the label box of each annotation the reader has reached.
+/// Place the label of every annotation, and return the callouts the reader has
+/// reached.
 ///
-/// A label never covers code. Its rows are searched down from the
-/// annotation's first row, then up from it, and each candidate sits
+/// Every annotation is placed whether or not the reader has reached it. A
+/// reveal therefore moves nothing, and a label already up was planned around
+/// the labels still to come.
+///
+/// A label never covers code. The labels form one column past the text,
+/// planned as one stack centered on the rows it names. Each box sits
 /// [`LABEL_GAP`] past the longest line among the rows the box spans and the
-/// rows its connector crosses. The first candidate that fits the pane and
-/// clears the card and every earlier label is taken.
+/// rows its connector crosses. A card splits the column, as [`plan_labels`]
+/// describes.
 ///
 /// A connector arrives on its label's left side, and it bows only to get
-/// around something in its way. The card, the earlier labels, and the text on
+/// around something in its way. The card, the other labels, and the text on
 /// the rows it crosses are all in its way.
 ///
 /// A label that fits nowhere draws nothing. A label over code hides what the
@@ -471,60 +477,50 @@ const LABEL_GAP: u16 = 4;
 /// reason a focus does. A connector to clamped cells points at whatever
 /// scrolled into their place.
 fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
-    let mut placed: Vec<Rect> = Vec::new();
-    let mut callouts = Vec::new();
+    let sizes: Vec<(usize, u16, u16, u16)> = input
+        .annotations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, annotation)| {
+            let (width, height) = label_size(&annotation.label_lines)?;
+            let first = *annotation.range.rows.first()?;
+            Some((index, first, width, height))
+        })
+        .collect();
+    let labels = plan_labels(input, card, &sizes);
 
     let aspect = input
         .cell_pixels
         .filter(|&(width, height)| width > 0 && height > 0)
         .map_or(1.0, |(width, height)| f32::from(height) / f32::from(width));
     let reached = input.current.map_or(0, |at| at + 1);
-    for annotation in input
-        .annotations
-        .iter()
-        .filter(|annotation| annotation.key < reached)
-    {
-        let Some((width, height)) = label_size(&annotation.label_lines) else {
-            continue;
-        };
-        let rows = &annotation.range.rows;
-        let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
-            continue;
-        };
 
-        let label = label_rows(first, input.pane)
-            .map(|y| {
-                // The connector crosses every row between the annotation's and
-                // the box's, so with the box's own rows they form one run.
-                let band = first.min(y)..=first.max(y + height - 1);
-                Rect {
-                    x: widest_end(input, band, annotation.range.end_x) + LABEL_GAP,
-                    y,
-                    width,
-                    height,
-                }
-            })
-            .find(|box_| {
-                fits(input.pane, box_.x, box_.y, width, height)
-                    && card.is_none_or(|card| !overlaps(*box_, card))
-                    && placed.iter().all(|earlier| !overlaps(*box_, *earlier))
-            });
-
-        let Some(label) = label else {
+    let mut callouts = Vec::new();
+    for (slot, (&(index, first, _, height), label)) in sizes.iter().zip(&labels).enumerate() {
+        let annotation = &input.annotations[index];
+        let (Some(label), Some(&last)) = (*label, annotation.range.rows.last()) else {
             continue;
         };
+        if annotation.key >= reached {
+            continue;
+        }
 
         let link = link_point(input, &annotation.range, label.y).map(|from| {
             let to = link_end(from, label);
             let crossed = first.min(label.y)..=last.max(label.y + height - 1);
-            let obstacles = link_obstacles(input, card, &placed, crossed);
+            let others: Vec<Rect> = labels
+                .iter()
+                .enumerate()
+                .filter(|&(other, _)| other != slot)
+                .filter_map(|(_, other)| *other)
+                .collect();
+            let obstacles = link_obstacles(input, card, &others, crossed);
             Link {
                 from,
                 to,
                 bend: link_bend(from, to, &obstacles, aspect),
             }
         });
-        placed.push(label);
         callouts.push(Callout {
             key: annotation.key,
             label,
@@ -535,18 +531,178 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
     callouts
 }
 
+/// The label box for each entry of `sizes`, or `None` for a label that fits
+/// nowhere.
+///
+/// Each entry is an annotation's index in `input.annotations`, its first row,
+/// and its label's width and height. The whole pane is one column at first.
+///
+/// When a box of that column lands on the card, the card splits the column,
+/// since a label over the card hides the narration. The segments over and
+/// under the card leave out its rows outright, so no box lands on it whatever
+/// its column.
+///
+/// The labels whose code sits beside the card fill the room under it from the
+/// last label up, after the labels whose code sits under the card. The first
+/// label that does not fit goes over the card, and so does every label beside
+/// the card before it. A run too tall for the rows under the card thus splits
+/// around the card in order, and the rows over the card take the labels that
+/// do not fit under it.
+fn plan_labels(
+    input: &SlideInput,
+    card: Option<Rect>,
+    sizes: &[(usize, u16, u16, u16)],
+) -> Vec<Option<Rect>> {
+    let pane_end = input.pane.y + input.pane.height;
+    let ideals: Vec<(u16, u16)> = sizes
+        .iter()
+        .map(|&(_, first, _, height)| (first, height))
+        .collect();
+
+    let whole = label_boxes(input, sizes, &stack_rows(&ideals, input.pane.y, pane_end));
+    let Some(card) =
+        card.filter(|&card| whole.iter().flatten().any(|&label| overlaps(label, card)))
+    else {
+        return whole;
+    };
+
+    let under_card = card.y + card.height;
+    let mut room_under = ideals
+        .iter()
+        .filter(|&&(first, _)| first >= under_card)
+        .fold(pane_end.saturating_sub(under_card), |room, &(_, height)| {
+            room.saturating_sub(height)
+        });
+    let mut goes_under = vec![false; ideals.len()];
+    let mut filling = true;
+    for (at, &(first, height)) in ideals.iter().enumerate().rev() {
+        if first >= under_card {
+            goes_under[at] = true;
+        } else if first >= card.y && filling {
+            filling = height <= room_under;
+            if filling {
+                room_under -= height;
+            }
+            goes_under[at] = filling;
+        }
+    }
+
+    let mut rows = vec![None; ideals.len()];
+    for (under, lo, hi) in [(false, input.pane.y, card.y), (true, under_card, pane_end)] {
+        let members: Vec<usize> = (0..ideals.len())
+            .filter(|&at| goes_under[at] == under)
+            .collect();
+        let segment: Vec<(u16, u16)> = members.iter().map(|&at| ideals[at]).collect();
+        for (at, row) in members.into_iter().zip(stack_rows(&segment, lo, hi)) {
+            rows[at] = row;
+        }
+    }
+
+    label_boxes(input, sizes, &rows)
+}
+
+/// The top row of each label in one column over rows `lo..hi`, or `None` for
+/// a label that hangs past `hi`.
+///
+/// `labels` holds each label's ideal top row and height, in annotation order,
+/// and the column keeps that order. The labels sit past the text in one
+/// column, so a stack reads as one list.
+///
+/// Labels that overlap at their ideal rows form a block, and the block's top
+/// is the mean, over its members, of each ideal top less the heights stacked
+/// above it in the block. The mean puts a block's labels as near their rows as
+/// the order allows. Five equal boxes on consecutive rows put the middle one
+/// on its own row, two above it, and two below. The mean rounds half away from
+/// zero.
+///
+/// A block that crosses an end of the segment slides back inside it. A block
+/// taller than the segment starts at `lo`, and its labels past `hi` drop out.
+fn stack_rows(labels: &[(u16, u16)], lo: u16, hi: u16) -> Vec<Option<u16>> {
+    let (lo, hi) = (i32::from(lo), i32::from(hi));
+    let top_and_height = |members: Range<usize>| {
+        let count = members.len() as f32;
+        let (sum, height) =
+            labels[members]
+                .iter()
+                .fold((0, 0), |(sum, offset), &(ideal, height)| {
+                    (sum + i32::from(ideal) - offset, offset + i32::from(height))
+                });
+
+        let mean = (sum as f32 / count).round() as i32;
+        (mean.clamp(lo, (hi - height).max(lo)), height)
+    };
+
+    // This loop is the pool-adjacent-violators pass. A block that overlaps the
+    // one above absorbs it, and the merged block sits no lower than the block
+    // it absorbed, so the loop then checks it against the next block up.
+    let mut blocks: Vec<(Range<usize>, i32, i32)> = Vec::new();
+    for at in 0..labels.len() {
+        let mut members = at..at + 1;
+        loop {
+            let (top, height) = top_and_height(members.clone());
+            match blocks.last() {
+                Some((above, above_top, above_height)) if above_top + above_height > top => {
+                    members = above.start..members.end;
+                    blocks.pop();
+                },
+                _ => {
+                    blocks.push((members, top, height));
+                    break;
+                },
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(labels.len());
+    for (members, top, _) in blocks {
+        let mut row = top;
+        for &(_, height) in &labels[members] {
+            let height = i32::from(height);
+            rows.push((row + height <= hi).then_some(row as u16));
+            row += height;
+        }
+    }
+    rows
+}
+
+/// The box for each label of `sizes` at its row in `rows`, or `None` where the
+/// row is `None` or the box does not fit the pane.
+fn label_boxes(
+    input: &SlideInput,
+    sizes: &[(usize, u16, u16, u16)],
+    rows: &[Option<u16>],
+) -> Vec<Option<Rect>> {
+    sizes
+        .iter()
+        .zip(rows)
+        .map(|(&(index, first, width, height), &row)| {
+            let y = row?;
+            // The connector crosses every row between the annotation's and the
+            // box's, so with the box's own rows they form one run.
+            let band = first.min(y)..=first.max(y + height - 1);
+            let x = widest_end(input, band, input.annotations[index].range.end_x) + LABEL_GAP;
+            fits(input.pane, x, y, width, height).then_some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        })
+        .collect()
+}
+
 /// The boxes a connector goes around, with `crossed` the rows from its code to
 /// the far edge of its label.
 ///
-/// The card and the labels placed before this one grow by a quarter cell on
-/// each side, which is the room the rough pass jitters a stroke by. The text
-/// on the crossed rows is not grown. The line starts on the edge of its own
-/// row's text, and a grown row puts that start inside it, where every line
-/// runs into it.
+/// The card and the other labels of the stop grow by a quarter cell on each
+/// side, which is the room the rough pass jitters a stroke by. The text on the
+/// crossed rows is not grown. The line starts on the edge of its own row's
+/// text, and a grown row puts that start inside it, where every line runs into
+/// it.
 fn link_obstacles(
     input: &SlideInput,
     card: Option<Rect>,
-    placed: &[Rect],
+    others: &[Rect],
     crossed: RangeInclusive<u16>,
 ) -> Vec<SixteenthRect> {
     let room = CELL / 4;
@@ -569,7 +725,7 @@ fn link_obstacles(
     });
 
     card.into_iter()
-        .chain(placed.iter().copied())
+        .chain(others.iter().copied())
         .map(grown)
         .chain(text)
         .collect()
@@ -583,19 +739,6 @@ fn link_obstacles(
 fn label_size(lines: &[String]) -> Option<(u16, u16)> {
     let widest = lines.iter().map(|line| text_width(line)).max()?;
     Some((widest as u16 + 2, lines.len() as u16 + 2))
-}
-
-/// The pane rows a label is tried at, in the order they are tried.
-///
-/// The annotation's own row leads, so a label reads as belonging to the line it
-/// names. The rows below follow in order, so each later label stacks under the
-/// earlier ones and the labels keep the reading order of their code.
-///
-/// The rows above, nearest first, are the fallback for a pane with no room
-/// below. A crowded stop then stacks its last labels above its first rather
-/// than drop them.
-fn label_rows(first: u16, pane: Rect) -> impl Iterator<Item = u16> {
-    (first..pane.y + pane.height).chain((pane.y..first).rev())
 }
 
 /// Where the longest line among `rows` ends.
@@ -1125,8 +1268,10 @@ mod tests {
         );
     }
 
-    /// Two labels on adjacent rows cannot both sit on their own row, so the
-    /// second moves. Left overlapping, one would be unreadable.
+    /// Two labels on adjacent rows do not both fit on their own rows, so the
+    /// pair straddles the two rows. One box starts a row above the first row,
+    /// and the other starts a row under the second. Left to overlap, one label
+    /// hides the other.
     #[test]
     fn two_adjacent_annotations_get_labels_that_do_not_overlap() {
         let mut input = input(pane(), None);
@@ -1151,8 +1296,11 @@ mod tests {
             first.label,
             second.label,
         );
-        assert_eq!(first.label.y, 10, "the first sits on its own row");
-        assert_ne!(second.label.y, 11, "the second had to move");
+        assert_eq!(
+            [first.label.y, second.label.y],
+            [9, 12],
+            "one box a row above the pair and one a row under it",
+        );
     }
 
     /// A label over the focus text hides the code the whole stop is about.
@@ -1191,10 +1339,12 @@ mod tests {
         );
     }
 
-    /// Only one label fits on a row that two annotations share, so the second
-    /// stacks directly under the first, in the same column past the text.
+    /// Only one label fits on a row that two annotations share, so the pair
+    /// straddles the row. The first box starts a row above it, and the second
+    /// sits directly under the first, in the same column past the text. Neither
+    /// box starts on the row, so both carry a connector.
     #[test]
-    fn a_second_label_on_the_same_row_stacks_under_the_first() {
+    fn two_labels_on_one_row_straddle_it() {
         let mut input = input(pane(), None);
         input.card = None;
         input.annotations = vec![
@@ -1209,65 +1359,119 @@ mod tests {
                 (
                     Rect {
                         x: 44,
-                        y: 10,
+                        y: 9,
                         width: 12,
                         height: 3,
                     },
-                    false,
+                    true,
                 ),
                 (
                     Rect {
                         x: 44,
-                        y: 13,
+                        y: 12,
                         width: 13,
                         height: 3,
                     },
                     true,
                 ),
             ],
-            "the first on its own row, the second under it with a connector back",
+            "the first a row above the shared row, the second under the first",
         );
     }
 
-    /// The row of each label placed for five annotations on consecutive rows
-    /// from `first`. Every label has two lines, so every box is four rows tall.
-    fn stacked_label_rows(first: u16) -> Vec<u16> {
+    /// The row of each label placed for one annotation on each of `rows`, with
+    /// `card` holding part of the pane. Every label has two lines, so every box
+    /// is four rows tall.
+    fn stacked_label_rows(rows: Range<u16>, card: Option<Rect>) -> Vec<u16> {
         let mut input = input(pane(), None);
-        input.card = None;
-        input.annotations = (first..first + 5)
+        input.annotations = rows
             .enumerate()
             .map(|(key, row)| annotation(key, &[row], 4, 8, &["a", "b"]))
             .collect();
-        input.current = Some(4);
+        input.current = Some(input.annotations.len() - 1);
 
-        layout(&input)
-            .callouts
+        place_callouts(&input, card)
             .iter()
             .map(|callout| callout.label.y)
             .collect()
     }
 
-    /// Each label after the first takes the nearest free rows below its code,
-    /// so the stack grows down in the reading order of the lines it names. A
-    /// label that jumps above the stack breaks that order.
+    /// The layout centers a stack on the rows it names. A stack that hangs
+    /// from its first label puts the last labels far from their code, with no
+    /// room planned for them near it.
     #[test]
-    fn a_stack_of_labels_grows_downward() {
+    fn a_stack_centers_on_the_rows_it_names() {
         assert_eq!(
-            stacked_label_rows(10),
-            [10, 14, 18, 22, 26],
-            "each label under the one before it",
+            stacked_label_rows(10..15, None),
+            [4, 8, 12, 16, 20],
+            "the middle label on its own row, two above it and two below",
         );
     }
 
-    /// No four-row box fits under row 27, so the fourth and fifth boxes stack
-    /// upward from the first rather than drop out.
+    /// A centered stack that runs past the pane's bottom slides up as one
+    /// until its last box fits, so the labels keep their order.
     #[test]
-    fn a_stack_with_no_room_below_grows_upward() {
+    fn a_stack_past_the_pane_bottom_slides_up() {
         assert_eq!(
-            stacked_label_rows(16),
-            [16, 20, 24, 12, 8],
-            "three down to the pane's bottom, then two above the first",
+            stacked_label_rows(24..29, None),
+            [10, 14, 18, 22, 26],
+            "the last box ends on the pane's last row",
         );
+    }
+
+    /// A centered stack that runs past the pane's top slides down as one until
+    /// its first box fits.
+    #[test]
+    fn a_stack_past_the_pane_top_slides_down() {
+        assert_eq!(
+            stacked_label_rows(2..7, None),
+            [0, 4, 8, 12, 16],
+            "the first box starts on the pane's first row",
+        );
+    }
+
+    /// Eight four-row boxes need 32 rows, and the pane has 30. The stack starts
+    /// at the pane's top, and the box that hangs past its bottom draws nothing.
+    #[test]
+    fn a_stack_taller_than_the_pane_drops_its_last_labels() {
+        assert_eq!(
+            stacked_label_rows(0..8, None),
+            [0, 4, 8, 12, 16, 20, 24],
+            "seven boxes from the top, and no eighth",
+        );
+    }
+
+    /// Five four-row labels beside a card have eight free rows under it and
+    /// twelve over it. The last two fill the rows under the card and the first
+    /// three go over it, so the stack keeps its order and drops no label that
+    /// fits.
+    #[test]
+    fn a_stack_too_tall_for_the_rows_under_the_card_splits_around_it() {
+        assert_eq!(
+            stacked_label_rows(12..17, Some(card_over_rows(12, 10))),
+            [0, 4, 8, 22, 26],
+            "three over the card and two under it",
+        );
+    }
+
+    /// A card over the middle of a stack splits it. A label over the card hides
+    /// the narration, so the two labels above the card move up off it and the
+    /// two below it start under it.
+    #[test]
+    fn a_card_splits_the_stack_around_it() {
+        let mut input = input(pane(), None);
+        input.annotations = [10, 11, 16, 17]
+            .into_iter()
+            .enumerate()
+            .map(|(key, row)| annotation(key, &[row], 4, 8, &["note"]))
+            .collect();
+        input.current = Some(3);
+
+        let rows: Vec<u16> = place_callouts(&input, Some(card_over_rows(12, 4)))
+            .iter()
+            .map(|callout| callout.label.y)
+            .collect();
+        assert_eq!(rows, [6, 9, 16, 19], "two over the card and two under it");
     }
 
     /// The labels placed for one annotation on `row` when every line ends at
@@ -1620,100 +1824,31 @@ mod tests {
     }
 
     /// A stop opens on its focus alone, and each step onto an annotation adds
-    /// that annotation's callout. A label already up keeps its place when the
-    /// next one arrives, so a reveal never moves what the reader just read.
+    /// that annotation's callout. The layout plans every label of the stop
+    /// before any is revealed, so a step moves no label and no connector the
+    /// reader already sees.
     #[test]
-    fn an_annotation_not_yet_reached_places_no_callout() {
+    fn every_label_is_planned_before_any_is_revealed() {
         let mut base = input(pane(), None);
-        // Adjacent rows, so the second label has to move around the first.
+        // Adjacent rows, so the first label makes room for the second.
         base.annotations = vec![
             annotation(0, &[10], 4, 8, &["one"]),
             annotation(1, &[11], 4, 8, &["two"]),
         ];
-        let labels = |current: Option<usize>| -> Vec<(usize, Rect)> {
-            let slide = layout(&SlideInput {
+        let callouts = |current: Option<usize>| {
+            layout(&SlideInput {
                 current,
                 ..base.clone()
-            });
-            slide
-                .callouts
-                .iter()
-                .map(|callout| (callout.key, callout.label))
-                .collect()
+            })
+            .callouts
         };
 
-        let both = labels(Some(1));
-        assert_eq!(labels(None), Vec::new(), "the focus comes alone");
+        let both = callouts(Some(1));
+        assert_eq!(callouts(None), Vec::new(), "the focus comes alone");
         assert_eq!(
-            labels(Some(0)),
+            callouts(Some(0)),
             both[..1],
-            "the first label lands where it stays"
-        );
-    }
-
-    /// A label placed later is never in the way of an earlier connector, so a
-    /// step onto the next annotation leaves every line already drawn as it
-    /// was.
-    ///
-    /// The card pushes the first label down a row, and its connector runs
-    /// straight over short rows. The second label then lands across that
-    /// straight path.
-    #[test]
-    fn a_later_label_moves_no_earlier_connector() {
-        let mut base = input(pane(), None);
-        base.line_ends = (0..30)
-            .map(|row| (row, if row == 10 { 20 } else { 2 }))
-            .collect();
-        base.annotations = vec![
-            annotation(0, &[10], 4, 8, &["note"]),
-            annotation(1, &[11], 0, 1, &["later"]),
-        ];
-        let callouts = |current: Option<usize>| {
-            place_callouts(
-                &SlideInput {
-                    current,
-                    ..base.clone()
-                },
-                Some(card_over_rows(10, 1)),
-            )
-        };
-
-        let first = Callout {
-            key: 0,
-            label: Rect {
-                x: 24,
-                y: 11,
-                width: 6,
-                height: 3,
-            },
-            link: Some(Link {
-                from: (8 * 16 + 8, 11 * 16),
-                to: (24 * 16 - 4, 11 * 16 + 9),
-                bend: 0,
-            }),
-        };
-        let alone = callouts(Some(0));
-        assert_eq!(
-            alone,
-            [first],
-            "alone, the first connector runs straight from under its word",
-        );
-        assert_eq!(
-            callouts(Some(1)),
-            [
-                alone[0].clone(),
-                Callout {
-                    key: 1,
-                    label: Rect {
-                        x: 6,
-                        y: 11,
-                        width: 7,
-                        height: 3,
-                    },
-                    link: None,
-                },
-            ],
-            "the second label lands across that line and leaves it as it was",
+            "the first callout lands where it stays",
         );
     }
 
