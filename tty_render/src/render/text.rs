@@ -11,8 +11,8 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        globals_offset, globals_slot_index, row_len, row_uploads, AnchoredPanel, CellMetrics,
-        CompositeSlot, CompositeSlots, Frame, GridVersion, Occluder, OccluderBuffer, PoolOccluders,
+        globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics, CompositeSlot,
+        CompositeSlots, Frame, GridVersion, HostRide, Occluder, OccluderBuffer, PoolOccluders,
         SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
@@ -1340,7 +1340,7 @@ impl TextPass {
         resolution: [f32; 2],
         frame: &Frame<'_>,
         occluders: &[Occluder],
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
     ) {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
@@ -2347,7 +2347,7 @@ impl TextPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
     ) {
         self.riding_runs.clear();
         let mut glyphs = mem::take(&mut self.riding_glyph_scratch);
@@ -2359,9 +2359,13 @@ impl TextPass {
             for ride in anchored {
                 let (glyph_start, rect_start) = (glyphs.len() as u32, rects.len() as u32);
                 for run in grid.text_runs() {
-                    if run.anchor.map(|(host, _)| host) != Some(ride.host) {
+                    let Some((host, top_rows)) = run.anchor else {
+                        continue;
+                    };
+                    if host != ride.host {
                         continue;
                     }
+                    let dy_px = ride.shift_px(top_rows, self.metrics.height);
                     let follow = follow_slot(grid, run.follow);
                     self.push_run_glyphs(
                         device,
@@ -2370,10 +2374,10 @@ impl TextPass {
                         follow,
                         [0.0; 2],
                         0,
-                        ride.dy_px,
+                        dy_px,
                         &mut glyphs,
                     );
-                    if let Some(rect) = self.run_rect(grid, run, ride.dy_px) {
+                    if let Some(rect) = self.run_rect(grid, run, dy_px) {
                         rects.push(rect);
                     }
                 }
@@ -4855,9 +4859,7 @@ mod tests {
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
-        render::{
-            row_uploads, AnchoredPanel, CellMetrics, Frame, PoolOccluders, Scroll, SketchReveal,
-        },
+        render::{row_uploads, CellMetrics, Frame, HostRide, PoolOccluders, Scroll, SketchReveal},
     };
     use stoatty_protocol::command::{
         SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle,
@@ -7125,7 +7127,7 @@ mod tests {
         let frame = chrome_frame();
 
         let mut anchored_run = chrome_run("x");
-        anchored_run.anchor = Some((3, 0.0));
+        anchored_run.anchor = Some((3, 10.0));
         anchored_run.bg = Some(Rgb::new(4, 5, 6));
         let mut fixed_run = chrome_run("y");
         fixed_run.row = 2 * 16;
@@ -7142,9 +7144,11 @@ mod tests {
         let unshifted = pass.text_run_build_scratch[0].pos[1];
         let rect_unshifted = pass.run_rect_build_scratch[0].pos[1];
 
-        let anchored = [AnchoredPanel {
+        // The host eased half a row past the top the run was laid out at, which
+        // is 9.5 pixels on this pass's 19-pixel cell.
+        let anchored = [HostRide {
             host: 3,
-            dy_px: -12.0,
+            top_rows: 10.5,
             scissor: [0, 0, 40, 40],
         }];
         pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
@@ -7171,15 +7175,15 @@ mod tests {
         let rect_riding = pass.riding_rect_scratch[host.rects.start as usize].pos[1];
         assert_eq!(
             rect_riding - rect_unshifted,
-            -12.0,
+            -9.5,
             "the backing rides with the glyphs it backs",
         );
 
         let riding = pass.riding_glyph_scratch[host.glyphs.start as usize].pos[1];
         assert_eq!(
             riding - unshifted,
-            -12.0,
-            "the same run, shifted by its host's glide",
+            -9.5,
+            "the same run, shifted from its own top row to the host's eased top",
         );
     }
 
@@ -7196,9 +7200,9 @@ mod tests {
         let grid = chrome_grid(vec![run], Vec::new());
 
         // A different pool glides, so this run's host is not among them.
-        let elsewhere = [AnchoredPanel {
+        let elsewhere = [HostRide {
             host: 9,
-            dy_px: -12.0,
+            top_rows: 0.5,
             scissor: [0, 0, 40, 40],
         }];
         pass.prepare(
@@ -7229,9 +7233,9 @@ mod tests {
         let mut run = chrome_run("x");
         run.anchor = Some((3, 0.0));
         let grid = chrome_grid(vec![run], Vec::new());
-        let anchored = [AnchoredPanel {
+        let anchored = [HostRide {
             host: 3,
-            dy_px: -12.0,
+            top_rows: 0.5,
             scissor: [0, 0, 40, 40],
         }];
 

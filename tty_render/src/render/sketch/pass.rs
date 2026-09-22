@@ -11,7 +11,8 @@
 
 use crate::render::{
     sketch::rough::{self, ComponentBox, Rounding},
-    CellMetrics, GridVersion, Occluder, OccluderBuffer, SketchReveal, GLOBALS_SLOT_STRIDE,
+    CellMetrics, GridVersion, HostRide, Occluder, OccluderBuffer, SketchReveal,
+    GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -347,7 +348,7 @@ impl SketchPass {
         queue: &Queue,
         grid: &Grid,
         reveals: &[SketchReveal],
-        anchored: &[crate::render::AnchoredPanel],
+        anchored: &[HostRide],
         occluders: &[Occluder],
         resolution: [f32; 2],
     ) {
@@ -528,7 +529,7 @@ fn build_instances(
     sketches: &[Sketch],
     geometry: &[MarkGeometry],
     reveals: &[SketchReveal],
-    anchored: &[crate::render::AnchoredPanel],
+    anchored: &[HostRide],
     metrics: CellMetrics,
     built: &mut Vec<SketchInstance>,
     spans: &mut Vec<SpanInstance>,
@@ -551,7 +552,7 @@ fn build_instances(
             alpha: f32::from(style.alpha) / 255.0,
         });
         let revealed = reveal.revealed.clamp(0.0, 1.0);
-        let ride = ride_shift(sketch, anchored);
+        let ride = ride_shift(sketch, anchored, metrics);
         let dy = ride.map_or(0.0, |(dy, _)| dy);
 
         let mut push = |instance: SketchInstance| {
@@ -738,11 +739,12 @@ fn generate_marks(
 /// Where a mark rides, when its anchor names a pool compositing this frame.
 fn ride_shift(
     sketch: &Sketch,
-    anchored: &[crate::render::AnchoredPanel],
+    anchored: &[HostRide],
+    metrics: CellMetrics,
 ) -> Option<(f32, [u32; 4])> {
-    let (host, _) = sketch.command.anchor?;
+    let (host, top_rows) = sketch.command.anchor?;
     let ride = anchored.iter().find(|ride| ride.host == host)?;
-    Some((ride.dy_px, ride.scissor))
+    Some((ride.shift_px(top_rows, metrics.height), ride.scissor))
 }
 
 /// The pixel box of the mark `id` names, for a connector pointing at it.

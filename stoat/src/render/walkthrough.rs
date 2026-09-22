@@ -1437,6 +1437,56 @@ mod tests {
         );
     }
 
+    /// A scroll glides the pane under the slide, so every mark, label, and card
+    /// run rides the pane's pool from the top row it was laid out at. A part
+    /// that rides nothing stays on the screen while the code under it moves.
+    #[test]
+    fn every_part_of_a_slide_rides_the_focused_pane() {
+        let mut h = harness(&[(1, "one"), (3, "two")]);
+        open(&mut h.stoat, "tour");
+        reach(&mut h, 1);
+
+        let emitted = frame(&mut h);
+        let pane_top = {
+            let ws = h.stoat.active_workspace();
+            let pane = ws.panes.pane(ws.panes.focus());
+            let (editor_id, _) = h.stoat.focused_editor_ids().expect("an editor has focus");
+            (pane.index, ws.editors[editor_id].scroll_row as f32)
+        };
+        // The slide's marks take the stop's ids, and its label and card runs
+        // follow one of them. The chrome around the pane takes neither.
+        let stop = {
+            let first = part_id(&h, part::FOCUS_MARK);
+            first..first + STOP_ID_STRIDE
+        };
+        let anchors = |marks: bool| -> Vec<Option<(u32, f32)>> {
+            emitted
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Sketch(sketch) if marks && stop.contains(&sketch.id) => {
+                        Some(sketch.anchor)
+                    },
+                    Command::TextRun(run) if !marks && stop.contains(&run.follow) => {
+                        Some(run.anchor)
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let (marks, runs) = (anchors(true), anchors(false));
+
+        assert!(
+            !marks.is_empty() && !runs.is_empty(),
+            "the slide draws marks and runs, got {marks:?} and {runs:?}",
+        );
+        let riding = |count: usize| vec![Some(pane_top); count];
+        assert_eq!(
+            (&marks, &runs),
+            (&riding(marks.len()), &riding(runs.len())),
+            "every mark and text run of the slide rides the pane",
+        );
+    }
+
     /// The focus mark starts and ends on the glyphs of `fn two() {}`, and the
     /// pane the marks clamp into starts where the code does, past the gutter.
     #[test]

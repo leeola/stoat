@@ -7,11 +7,11 @@
 
 use crate::config::CursorAnimation;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
-use stoatty_render::gpu::SketchReveal;
+use stoatty_render::gpu::{HostRide, SketchReveal};
 use stoatty_term::{
     grid::{Grid, Overlay, PoolRegion, Sketch},
     term::{Cursor, CursorShape, PoolView, Terminal},
@@ -486,6 +486,33 @@ pub(crate) struct AnchorRide {
     pub(crate) host_scroll: f32,
     /// The host's region, which both scales the shift and clips the ride.
     pub(crate) host_region: PoolRegion,
+}
+
+/// The hosts that moved this frame, each at its eased top, for the components
+/// anchored to them.
+///
+/// A panel, mark, or text run anchored to one of these draws shifted from the
+/// top row its own layout assumed, so it rides whether or not a popup pool
+/// rides the same host.
+pub(crate) fn host_rides(
+    glided: &[u32],
+    pools: &[PoolView],
+    anims: &BTreeMap<u32, PoolAnim>,
+    cw: f32,
+    ch: f32,
+) -> Vec<HostRide> {
+    glided
+        .iter()
+        .filter_map(|&id| {
+            let view = pools.iter().find(|pool| pool.id == id)?;
+            let anim = anims.get(&id)?;
+            Some(HostRide {
+                host: id,
+                top_rows: anim.scroll * (view.region.height as f32).max(1.0),
+                scissor: region_scissor(view.region, cw, ch),
+            })
+        })
+        .collect()
 }
 
 /// Move scissor rect `[x, y, width, height]` down by `dy_px`, clamping at the
@@ -1278,6 +1305,40 @@ mod tests {
         // what lets the surface ride the ease sub-cell. A 1/32-row gap is exact
         // in f32, so this pins the half-pixel rather than a rounding artifact.
         assert_eq!(anchored_shift(10.031_25, 0.25, 40.0, 16.0), 0.5);
+    }
+
+    /// Every pool that moved this frame is a ride at its eased top, so the
+    /// components anchored to it ride with no popup pool on the same host. A
+    /// still pool gives no ride, and its components draw with the live grid.
+    #[test]
+    fn host_rides_names_every_glided_pool_at_its_eased_top() {
+        let view = |id: u32, left: u16| PoolView {
+            id,
+            region: PoolRegion {
+                pool: id,
+                window: 0,
+                top: 0,
+                left,
+                width: 20,
+                height: 40,
+            },
+            scroll_target: DocumentOffset::default(),
+            cursor_anchor: None,
+            anchor: None,
+            content_version: 0,
+        };
+        let (glided, still) = (view(1, 0), view(2, 20));
+        let anims = BTreeMap::from([(1, PoolAnim::new(0.25)), (2, PoolAnim::new(0.5))]);
+
+        assert_eq!(
+            host_rides(&[1], &[glided, still], &anims, 8.0, 16.0),
+            [HostRide {
+                host: 1,
+                top_rows: 10.0,
+                scissor: region_scissor(glided.region, 8.0, 16.0),
+            }],
+            "the glided pool a quarter page down its 40 rows, and no ride for the still one",
+        );
     }
 
     #[test]

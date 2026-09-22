@@ -11,8 +11,8 @@
 
 use stoatty_render::{
     gpu::{
-        build_font_system, headless_device, AnchoredPanel, FontConfig, Frame, PoolComposite,
-        Renderer, Scroll,
+        build_font_system, headless_device, FontConfig, Frame, HostRide, PoolComposite, Renderer,
+        Scroll,
     },
     render::cell_size,
 };
@@ -747,9 +747,9 @@ fn a_box_riding_a_pool_stops_occluding_it() {
             sketch_reveals: &[],
         },
         &pools,
-        &[AnchoredPanel {
+        &[HostRide {
             host,
-            dy_px: 0.0,
+            top_rows: 0.0,
             scissor: full,
         }],
     );

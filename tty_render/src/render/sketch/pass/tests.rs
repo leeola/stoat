@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     gpu::headless_device,
-    render::{sketch::rough::COMPONENT_GAP, AnchoredPanel},
+    render::{sketch::rough::COMPONENT_GAP, HostRide},
 };
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
@@ -563,13 +563,13 @@ fn a_riding_mark_is_shifted_and_held_back() {
             fill: None,
         },
     )];
-    list[0].command.anchor = Some((3, 0.0));
+    list[0].command.anchor = Some((3, 10.0));
 
     let (_, geometry) = marks(&list);
     let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
-    let anchored = [AnchoredPanel {
+    let anchored = [HostRide {
         host: 3,
-        dy_px: -12.0,
+        top_rows: 10.75,
         scissor: [0, 0, 40, 40],
     }];
     build_instances(
@@ -586,7 +586,7 @@ fn a_riding_mark_is_shifted_and_held_back() {
     assert_eq!(riding.len(), built.len(), "every instance of it rides");
     assert!(
         built.iter().all(|instance| instance.dy == -12.0),
-        "each carries the host's shift",
+        "each carries the shift from its own top row to the host's eased top",
     );
     assert!(
         riding.iter().all(|&(_, scissor)| scissor == [0, 0, 40, 40]),
@@ -635,7 +635,7 @@ fn render_red(
     queue: &Queue,
     sketches: &[Sketch],
     progress: &[f32],
-    anchored: &[AnchoredPanel],
+    anchored: &[HostRide],
 ) -> Option<Vec<u8>> {
     let mut grid = Grid::new(16, 12);
     grid.set_sketches(sketches.to_vec());
@@ -751,7 +751,8 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
     };
     let plain = [sketch(1, filled)];
     let mut ridden = plain.clone();
-    ridden[0].command.anchor = Some((3, 0.0));
+    // The mark's layout assumed a top SHIFT pixels past the host's eased top.
+    ridden[0].command.anchor = Some((3, SHIFT as f32 / metrics().height));
 
     let rest = render_red(&device, &queue, &plain, &[1.0], &[]).expect("readback");
     let carried = render_red(
@@ -759,9 +760,9 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
         &queue,
         &ridden,
         &[1.0],
-        &[AnchoredPanel {
+        &[HostRide {
             host: 3,
-            dy_px: SHIFT as f32,
+            top_rows: 0.0,
             scissor: [0, 0, 64, 64],
         }],
     )

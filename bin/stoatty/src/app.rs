@@ -11,7 +11,7 @@
 use crate::{
     anim::{
         advance_pool_glide, advance_sketches, anchored_cursor_pos, anchored_shift, block_corners,
-        compose_gate, cursor_in_region, cursor_position, intersect_scissor,
+        compose_gate, cursor_in_region, cursor_position, host_rides, intersect_scissor,
         refresh_popover_overflows, region_scissor, seed_settle_flight, shift_scissor, step_cursor,
         step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
         ActivePool, AnchorRide, AnchoredCursor, PoolAnim, PoolStep, PopoverScroll, SketchClocks,
@@ -56,8 +56,8 @@ use stoatty_protocol::{
 };
 use stoatty_render::{
     gpu::{
-        fontdb::Database as FontDatabase, AnchoredPanel, FontConfig, FontLoad, Frame, FrameOutcome,
-        GpuContext, PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
+        fontdb::Database as FontDatabase, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext,
+        PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
     },
     render,
 };
@@ -2536,6 +2536,7 @@ fn redraw(state: &mut State) {
         pool_easing,
         cursor_anchor,
         rides,
+        glided,
         clear_colors,
     ) = {
         let mut terminal = state.terminal.lock();
@@ -2716,6 +2717,7 @@ fn redraw(state: &mut State) {
             pool_easing,
             cursor_anchor,
             rides,
+            glided,
             clear_colors,
         )
     };
@@ -2973,21 +2975,10 @@ fn redraw(state: &mut State) {
             })
             .collect::<Vec<_>>();
 
-        // The panel half of a ride. The renderer matches these against each
-        // panel's own anchor, so one entry per host carries every frame riding it.
-        let anchored_panels = rides
-            .iter()
-            .map(|ride| AnchoredPanel {
-                host: ride.host_region.pool,
-                dy_px: anchored_shift(
-                    ride.top_rows,
-                    ride.host_scroll,
-                    (ride.host_region.height as f32).max(1.0),
-                    ch,
-                ),
-                scissor: region_scissor(ride.host_region, cw, ch),
-            })
-            .collect::<Vec<_>>();
+        // The component half of a ride. The renderer matches these against each
+        // panel's, mark's, and text run's own anchor, so a component rides its
+        // host whether or not a popup pool rides the same host.
+        let riding_hosts = host_rides(&glided, &state.pools_scratch, &state.pool_anims, cw, ch);
 
         let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
             Some(anchor) => {
@@ -3054,7 +3045,7 @@ fn redraw(state: &mut State) {
                 sketch_reveals: &state.sketch_reveals,
             },
             &composites,
-            &anchored_panels,
+            &riding_hosts,
             cursor_scissor,
         );
         latch_skipped(&mut state.force_full, &state.window, outcome);

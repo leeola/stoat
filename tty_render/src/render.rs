@@ -195,22 +195,35 @@ pub(crate) struct Occluder {
     _pad: u32,
 }
 
-/// One panel riding a pool that composites this frame.
+/// One pool that glides this frame, for the components anchored to it.
 ///
-/// A popup's frame is laid out by a live frame, and no live frame ships while
-/// its host glides, so the frame holds its screen position while the text under
-/// it eases. Drawing it shifted by [`Self::dy_px`], after the host's composite
-/// and clipped to [`Self::scissor`], carries it along instead.
+/// A panel, mark, or text run anchored to a pool is laid out by a live frame,
+/// and no live frame ships while its host glides, so it holds its screen
+/// position while the text under it eases. Each one draws after the host's
+/// composite instead, shifted by [`Self::shift_px`] from the top row its own
+/// layout assumed and clipped to [`Self::scissor`], so it stays over the text
+/// it annotates.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct AnchoredPanel {
-    /// The host pool the panel rides, matched against a panel's own anchor.
+pub struct HostRide {
+    /// The host pool, matched against a component's own anchor.
     pub host: u32,
-    /// Vertical pixel shift, from the gap between the top row the panel's layout
-    /// assumed and the host's eased top.
-    pub dy_px: f32,
-    /// The host region's scissor, so the panel is cut at the pane edge rather
+    /// The host's eased top, in document rows.
+    pub top_rows: f32,
+    /// The host region's scissor, so a component is cut at the pane edge rather
     /// than drawn over the neighbour.
     pub scissor: [u32; 4],
+}
+
+impl HostRide {
+    /// The vertical pixel shift of a component whose layout assumed the host's
+    /// top at `top_rows`.
+    ///
+    /// Positive while the host has not yet eased down to that row, so the
+    /// component draws lower. Not snapped to pixels, because a ride follows the
+    /// ease below one cell.
+    pub(crate) fn shift_px(&self, top_rows: f32, cell_h: f32) -> f32 {
+        (top_rows - self.top_rows) * cell_h
+    }
 }
 
 /// One pool's instances for a composite draw.

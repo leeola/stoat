@@ -12,7 +12,7 @@
 //! edge would break the line around it. The stroke records after the text, and
 //! in a frame compositing pools after those composites too.
 
-use crate::render::{AnchoredPanel, CellMetrics};
+use crate::render::{CellMetrics, HostRide};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
@@ -244,7 +244,7 @@ impl PanelPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
         resolution: [f32; 2],
     ) {
         // With no panel to draw now and none drawn last frame, nothing reads this
@@ -263,13 +263,14 @@ impl PanelPass {
         // skips its slot so it lands after the composites instead.
         self.riding.clear();
         for (index, panel) in grid.panels().iter().enumerate() {
-            let Some((host, _)) = panel.anchor else {
+            let Some((host, top_rows)) = panel.anchor else {
                 continue;
             };
             let Some(ride) = anchored.iter().find(|ride| ride.host == host) else {
                 continue;
             };
-            self.built[index].cell[1] += ride.dy_px / self.metrics.height;
+            self.built[index].cell[1] +=
+                ride.shift_px(top_rows, self.metrics.height) / self.metrics.height;
             self.riding.push((index as u32, ride.scissor));
         }
 

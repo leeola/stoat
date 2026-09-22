@@ -11,7 +11,7 @@
 
 pub use crate::render::{
     text::{build_font_system, shape_words, shape_words_cached, RunShapeCache},
-    AnchoredPanel, Frame, Scroll, SketchReveal,
+    Frame, HostRide, Scroll, SketchReveal,
 };
 use crate::{
     perf::FrameProfiler,
@@ -515,7 +515,7 @@ impl Renderer {
         grid: &Grid,
         frame: Frame<'_>,
         pools: &[PoolComposite<'_>],
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
     ) {
         self.prepare_frame(device, queue, grid, &frame, anchored);
 
@@ -586,7 +586,7 @@ impl Renderer {
         queue: &Queue,
         grid: &Grid,
         frame: &Frame<'_>,
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
     ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare(
@@ -1884,7 +1884,7 @@ impl GpuContext {
         live_grid: &Grid,
         frame: Frame<'_>,
         pools: &[PoolComposite<'_>],
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
         cursor_scissor: Option<[u32; 4]>,
     ) -> FrameOutcome {
         self.perf.begin_frame();
@@ -2035,7 +2035,7 @@ impl GpuContext {
         live_grid: &Grid,
         frame: &Frame<'_>,
         pools: &[PoolComposite<'_>],
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
     ) -> bool {
         let resolution = [self.config.width as f32, self.config.height as f32];
         let cursor_corners = frame.cursor_corners;
@@ -2108,7 +2108,7 @@ impl GpuContext {
         live_grid: &Grid,
         frame: &Frame<'_>,
         pools: &[PoolComposite<'_>],
-        anchored: &[AnchoredPanel],
+        anchored: &[HostRide],
     ) {
         self.renderer
             .prepare_frame(&self.device, &self.queue, live_grid, frame, anchored);
