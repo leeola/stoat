@@ -819,28 +819,56 @@ impl Keymap {
         best.map(|(_, binding)| binding.actions.clone())
     }
 
-    pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
-        let mut results = Vec::new();
-        for binding in &self.bindings {
-            let matches = binding.predicates.iter().all(|p| evaluate(p, state));
-            if matches {
-                results.push((&binding.key, binding.actions.as_ref()));
+    /// The binding a press reaches in `state`, for each key bound there, in
+    /// the order those bindings appear in the config.
+    ///
+    /// A key bound under two guards that both match resolves to one binding,
+    /// and only that one ever runs. Ranked as a press ranks it: the most
+    /// specific guard, then source order, which puts a user config's layer
+    /// ahead of the shipped one. A listing follows the winner's own place in
+    /// the config, since that is where its block reads.
+    fn effective_bindings(&self, state: &dyn KeymapState) -> Vec<&CompiledBinding> {
+        let mut reached: Vec<(usize, usize, &CompiledBinding)> = Vec::new();
+        for (at, binding) in self.bindings.iter().enumerate() {
+            if !binding.predicates.iter().all(|p| evaluate(p, state)) {
+                continue;
+            }
+
+            let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
+            match reached
+                .iter_mut()
+                .find(|(_, _, kept)| kept.key == binding.key)
+            {
+                // Strict `>` keeps the earliest binding on a tie, matching how
+                // a key press resolves equally specific matches.
+                Some(kept) if score > kept.0 => *kept = (score, at, binding),
+                Some(_) => {},
+                None => reached.push((score, at, binding)),
             }
         }
-        results
+
+        reached.sort_by_key(|(_, at, _)| *at);
+        reached.into_iter().map(|(_, _, binding)| binding).collect()
     }
 
-    /// Returns `(key_label, actions)` for all bindings whose predicates match
-    /// the current state. Uses the same evaluator as [`Keymap::lookup`].
+    /// Returns `(key, actions)` for every key a press reaches in `state`.
+    ///
+    /// A binding another one outranks is left out. Help that lists it offers a
+    /// key that does nothing.
+    pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
+        self.effective_bindings(state)
+            .into_iter()
+            .map(|binding| (&binding.key, binding.actions.as_ref()))
+            .collect()
+    }
+
+    /// Returns `(key_label, actions)` for every key a press reaches in
+    /// `state`. Uses the same evaluator and ranking as [`Keymap::lookup`].
     pub fn active_bindings(&self, state: &dyn KeymapState) -> Vec<(String, &[ResolvedAction])> {
-        let mut results = Vec::new();
-        for binding in &self.bindings {
-            let matches = binding.predicates.iter().all(|p| evaluate(p, state));
-            if matches {
-                results.push((binding.key.display_label(), binding.actions.as_ref()));
-            }
-        }
-        results
+        self.effective_bindings(state)
+            .into_iter()
+            .map(|binding| (binding.key.display_label(), binding.actions.as_ref()))
+            .collect()
     }
 
     /// Returns the active bindings scoped to `scope_field == scope_value`. A
@@ -852,27 +880,26 @@ impl Keymap {
     /// broader mode-level bindings and the generic `modal`-truthy bindings that
     /// also match while a modal is open, so the popup lists only that modal's
     /// own keys.
+    ///
+    /// A key that a binding outside the scope outranks is left out as well.
+    /// The popup otherwise promises this modal's action for a press that runs
+    /// another one.
     pub fn scoped_bindings(
         &self,
         state: &dyn KeymapState,
         scope_field: &str,
         scope_value: &str,
     ) -> Vec<(String, &[ResolvedAction])> {
-        let mut results = Vec::new();
-        for binding in &self.bindings {
-            let matches = binding.predicates.iter().all(|p| evaluate(p, state));
-            if !matches {
-                continue;
-            }
-            let in_scope = binding
-                .predicates
-                .iter()
-                .any(|p| predicate_eq_matches(p, scope_field, scope_value));
-            if in_scope {
-                results.push((binding.key.display_label(), binding.actions.as_ref()));
-            }
-        }
-        results
+        self.effective_bindings(state)
+            .into_iter()
+            .filter(|binding| {
+                binding
+                    .predicates
+                    .iter()
+                    .any(|p| predicate_eq_matches(p, scope_field, scope_value))
+            })
+            .map(|binding| (binding.key.display_label(), binding.actions.as_ref()))
+            .collect()
     }
 }
 
@@ -1807,15 +1834,60 @@ mod tests {
         assert_eq!(actions[0].name, "MoveLeft");
     }
 
-    /// The first action of every binding [`Keymap::active_keys`] lists for a
-    /// plain `q` in normal mode.
-    fn active_q_actions(keymap: &Keymap) -> Vec<&str> {
+    /// Every key [`Keymap::active_keys`] lists in `state`, with the first
+    /// action a press of it runs.
+    fn listed_keys(keymap: &Keymap, state: &dyn KeymapState) -> Vec<(String, String)> {
         keymap
-            .active_keys(&normal_state())
+            .active_keys(state)
             .into_iter()
-            .filter(|(key, _)| key.code == KeyCode::Char('q'))
-            .map(|(_, actions)| actions[0].name.as_str())
+            .map(|(key, actions)| (key.display_label(), actions[0].name.clone()))
             .collect()
+    }
+
+    /// One key bound under two guards that both match. A press reaches the
+    /// more specific binding, and help that lists the other offers a key that
+    /// does nothing.
+    #[test]
+    fn a_listing_leaves_out_a_binding_a_press_never_reaches() {
+        let keymap = Keymap::compile(&parse_config(
+            r#"on key {
+                mode == "normal" { q -> MoveLeft(); }
+                view == "commits" && mode == "normal" { q -> MoveRight(); }
+            }"#,
+        ));
+        let state = normal_state().set("view", StateValue::String("commits".into()));
+
+        assert_eq!(
+            listed_keys(&keymap, &state),
+            [("q".to_owned(), "MoveRight".to_owned())],
+            "the key lists once, with the action a press runs",
+        );
+        assert_eq!(
+            keymap
+                .active_bindings(&state)
+                .into_iter()
+                .map(|(label, actions)| (label, actions[0].name.clone()))
+                .collect::<Vec<_>>(),
+            [("q".to_owned(), "MoveRight".to_owned())],
+            "the help listing ranks the same way",
+        );
+    }
+
+    /// A user binding under a broad guard loses its press to a shipped binding
+    /// under a narrower one, so the listing names the action that runs.
+    #[test]
+    fn layered_lists_the_default_that_outranks_a_user_binding() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "walkthrough" { q -> MoveLeft(); } }"#,
+            r#"on key { mode != "normal" && mode != "goto" { q -> MoveRight(); } }"#,
+        );
+        let state = TestState::new().set("mode", StateValue::String("walkthrough".into()));
+
+        assert_eq!(
+            listed_keys(&keymap, &state),
+            [("q".to_owned(), "MoveRight".to_owned())],
+            "one q binding, the one a press reaches",
+        );
     }
 
     /// A user block never sits at the byte offset of the shipped block it
@@ -1828,9 +1900,9 @@ mod tests {
         );
 
         assert_eq!(
-            active_q_actions(&keymap),
-            ["MoveLeft"],
-            "one q binding, the user's"
+            listed_keys(&keymap, &normal_state()),
+            [("q".to_owned(), "MoveLeft".to_owned())],
+            "one q binding, the user's",
         );
     }
 
@@ -1844,9 +1916,9 @@ mod tests {
         );
 
         assert_eq!(
-            active_q_actions(&keymap),
-            ["MoveLeft"],
-            "one q binding, the user's"
+            listed_keys(&keymap, &normal_state()),
+            [("q".to_owned(), "MoveLeft".to_owned())],
+            "one q binding, the user's",
         );
     }
 
