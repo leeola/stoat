@@ -858,6 +858,7 @@ fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
         focus,
         annotations,
         line_ends: line_ends(stoat, editor_id, pane_rect),
+        cell_pixels: stoat.cell_pixels,
         card,
         current,
         card_hidden,

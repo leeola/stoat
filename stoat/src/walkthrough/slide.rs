@@ -183,6 +183,13 @@ pub(crate) struct SlideInput {
     /// Where the text ends on each visible row, so a box lands past the text
     /// rather than over it.
     pub(crate) line_ends: Vec<(u16, u16)>,
+    /// The size of one cell in pixels, width then height, or `None` when the
+    /// terminal reports none.
+    ///
+    /// The terminal bows a connector in pixels, so the bend that takes a line
+    /// around a box depends on the cell's shape. An unknown size counts as a
+    /// square cell.
+    pub(crate) cell_pixels: Option<(u16, u16)>,
     /// The card's size in whole cells, or `None` when the stop has no
     /// narration.
     pub(crate) card: Option<(u16, u16)>,
@@ -467,6 +474,10 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
     let mut placed: Vec<Rect> = Vec::new();
     let mut callouts = Vec::new();
 
+    let aspect = input
+        .cell_pixels
+        .filter(|&(width, height)| width > 0 && height > 0)
+        .map_or(1.0, |(width, height)| f32::from(height) / f32::from(width));
     let reached = input.current.map_or(0, |at| at + 1);
     for annotation in input
         .annotations
@@ -510,7 +521,7 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
             Link {
                 from,
                 to,
-                bend: link_bend(from, to, &obstacles),
+                bend: link_bend(from, to, &obstacles, aspect),
             }
         });
         placed.push(label);
@@ -661,17 +672,18 @@ fn link_end(from: (i16, i16), label: Rect) -> (i16, i16) {
 /// growing bow.
 const LINK_BENDS: [i8; 7] = [0, -12, 12, -24, 24, -32, 32];
 
-/// The bend that takes a connector from `from` to `to` around `obstacles`.
+/// The bend that takes a connector from `from` to `to` around `obstacles`, on
+/// a cell `aspect` times as tall as it is wide.
 ///
 /// A straight line that clears everything stays straight, because a bend with
 /// nothing to explain it reads as a flourish. A line that no bend gets clear
 /// also stays straight. A pointer that crosses something still says which code
 /// the label names, and a missing one says nothing.
-fn link_bend(from: (i16, i16), to: (i16, i16), obstacles: &[SixteenthRect]) -> i8 {
+fn link_bend(from: (i16, i16), to: (i16, i16), obstacles: &[SixteenthRect], aspect: f32) -> i8 {
     LINK_BENDS
         .into_iter()
         .find(|&bend| {
-            link_samples(from, to, bend)
+            link_samples(from, to, bend, aspect)
                 .into_iter()
                 .skip(1)
                 .all(|point| obstacles.iter().all(|&rect| !strictly_inside(point, rect)))
@@ -682,13 +694,19 @@ fn link_bend(from: (i16, i16), to: (i16, i16), obstacles: &[SixteenthRect]) -> i
 /// Points sampled along each segment of a connector, both ends included.
 const LINK_SAMPLES: usize = 32;
 
-/// Points along the connector from `from` to `to` at `bend`, in sixteenths.
+/// Points along the connector from `from` to `to` at `bend`, in sixteenths,
+/// on a cell `aspect` times as tall as it is wide.
 ///
 /// The points follow the terminal's curve before its rough jitter. A straight
 /// line is sampled along its chord. A bowed line is the Catmull-Rom spline
 /// through the bowed midpoint, with both ends doubled so the curve reaches
 /// them, which the terminal draws as two cubics.
-fn link_samples(from: (i16, i16), to: (i16, i16), bend: i8) -> Vec<(f32, f32)> {
+///
+/// The terminal bows the line in pixels, so the bow follows the cell's shape.
+/// A level line on a tall cell bows fewer rows than on a square one. A scale
+/// of either axis moves the spline with its points, so the midpoint is the
+/// only point that the cell's shape changes.
+fn link_samples(from: (i16, i16), to: (i16, i16), bend: i8, aspect: f32) -> Vec<(f32, f32)> {
     let from = (f32::from(from.0), f32::from(from.1));
     let to = (f32::from(to.0), f32::from(to.1));
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -699,13 +717,10 @@ fn link_samples(from: (i16, i16), to: (i16, i16), bend: i8) -> Vec<(f32, f32)> {
             .collect();
     }
 
-    // FIXME: The terminal bows a line in pixels, and a cell is taller than it
-    // is wide. A level connector there bows fewer rows than this midpoint says,
-    // so the drawn line sometimes crosses what its bend was chosen to clear.
     let bow = f32::from(bend) / 64.0;
     let mid = (
-        (from.0 + to.0) / 2.0 - dy * bow,
-        (from.1 + to.1) / 2.0 + dx * bow,
+        (from.0 + to.0) / 2.0 - dy * aspect * bow,
+        (from.1 + to.1) / 2.0 + dx / aspect * bow,
     );
 
     let plus_sixth = |at: (f32, f32), tail: (f32, f32), head: (f32, f32)| {
@@ -910,6 +925,7 @@ mod tests {
             // Every visible row ends at column 40, so the right margin of the
             // wide pane is clear and a narrow pane's is not.
             line_ends: (0..30).map(|row| (row, 40)).collect(),
+            cell_pixels: None,
             card: Some((30, 6)),
             current: None,
             card_hidden: false,
@@ -1404,7 +1420,7 @@ mod tests {
     /// A bend with nothing to explain it reads as a flourish.
     #[test]
     fn a_straight_connector_that_clears_everything_stays_straight() {
-        assert_eq!(link_bend((136, 192), (380, 217), &[]), 0);
+        assert_eq!(link_bend((136, 192), (380, 217), &[], 1.0), 0);
     }
 
     /// A label between the code and the box its connector points at bends the
@@ -1419,10 +1435,10 @@ mod tests {
             h: 48,
         };
 
-        let bend = link_bend(from, to, &[label]);
+        let bend = link_bend(from, to, &[label], 1.0);
         assert_ne!(bend, 0, "the straight line runs through the label");
         assert!(
-            link_samples(from, to, bend)
+            link_samples(from, to, bend, 1.0)
                 .iter()
                 .all(|&point| !strictly_inside(point, label)),
             "the line bowed by {bend} clears the label",
@@ -1440,7 +1456,44 @@ mod tests {
             h: 2000,
         };
 
-        assert_eq!(link_bend((136, 192), (700, 217), &[corridor]), 0);
+        assert_eq!(link_bend((136, 192), (700, 217), &[corridor], 1.0), 0);
+    }
+
+    /// The terminal bows a line in pixels, so a level line on a cell twice as
+    /// tall as it is wide bows half as many rows as on a square cell.
+    #[test]
+    fn a_tall_cell_bows_a_level_connector_less() {
+        let peak = |aspect| {
+            link_samples((0, 0), (640, 0), -32, aspect)
+                .into_iter()
+                .map(|(_, y)| y)
+                .fold(f32::INFINITY, f32::min)
+        };
+
+        assert_eq!(
+            (peak(1.0), peak(2.0)),
+            (-320.0, -160.0),
+            "the midpoint is the peak, and it rises half as far on the tall cell",
+        );
+    }
+
+    /// A bend that clears a label on a square cell falls short of it on a tall
+    /// cell, so the tall cell takes the next bend that clears it.
+    #[test]
+    fn a_tall_cell_takes_a_deeper_bend_around_a_label() {
+        let label = SixteenthRect {
+            x: 280,
+            y: -90,
+            w: 80,
+            h: 180,
+        };
+        let bend = |aspect| link_bend((0, 0), (640, 0), &[label], aspect);
+
+        assert_eq!(
+            (bend(1.0), bend(2.0)),
+            (-12, -24),
+            "a bow of 12 rises only 60 sixteenths on the tall cell, inside the label",
+        );
     }
 
     /// A stop reads as one hand moving, which needs every part to start after
