@@ -20,7 +20,7 @@ use crate::{
     input_view::InputView,
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, Placement, View},
-    render::undercurl::UndercurlBatch,
+    render::{hover::HoverFrame, undercurl::UndercurlBatch},
     workspace::{diff, Workspace},
 };
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -1713,7 +1713,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
         // Ships after the region so the terminal has the pool before it is told
         // what that pool rides.
-        if let Some((host, top_rows)) = popup.anchor {
+        //
+        // A sketch card rides no pool. Its box and body ride the pane through
+        // their own anchors, and a pool ride composites the page's unfaded text
+        // over a box the pen has not closed.
+        if let (Some((host, top_rows)), HoverFrame::Modal) = (popup.anchor, popup.frame) {
             stoatty_protocol::command::encode_pool_anchor_into(
                 &mut out,
                 &PoolAnchorCommand {
@@ -2523,6 +2527,50 @@ mod tests {
                         && (a.host, a.top_rows) == stamped
             )),
             "the hover pool names the pane it rides, got {batch:?}"
+        );
+    }
+
+    /// A walkthrough card's box and body carry the pane's anchor themselves.
+    /// Its pool keeps the region for a scroll inside the card. A ride composites
+    /// the page's unfaded text before the pen closes the box.
+    #[test]
+    fn a_sketch_card_pools_its_body_without_riding_the_pane() {
+        use stoatty_protocol::command::Command;
+
+        let (mut h, mut rx, _) = hover_harness();
+        h.stoat.pending_hover.as_mut().expect("popup").frame = HoverFrame::Sketch {
+            id: 1,
+            stroke: [0; 3],
+            fill: [0; 3],
+        };
+        h.snapshot();
+        assert!(
+            h.stoat
+                .pending_hover
+                .as_ref()
+                .expect("popup")
+                .anchor
+                .is_some(),
+            "the card's body still stamps the pane it rides"
+        );
+
+        emit_smooth_scroll(&mut h.stoat);
+        let batch = drain_apc(&mut rx);
+        let hover_pool: Vec<&str> = batch
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER => {
+                    Some("region")
+                },
+                Command::PoolAnchor(_) => Some("anchor"),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            hover_pool,
+            ["region"],
+            "the card declares its pool and rides nothing, got {batch:?}"
         );
     }
 
