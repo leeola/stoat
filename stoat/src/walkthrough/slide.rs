@@ -462,8 +462,9 @@ const LABEL_GAP: u16 = 4;
 /// A label never covers code. The labels form one column past the text,
 /// planned as one stack centered on the rows it names. Each box sits
 /// [`LABEL_GAP`] past the longest line among the rows the box spans and the
-/// rows its connector crosses. A card splits the column, as [`plan_labels`]
-/// describes.
+/// rows its connector crosses. Every label of the stop sits at one x, the
+/// farthest that any of their bands reaches past the text. A card splits the
+/// column, as [`plan_labels`] describes.
 ///
 /// A connector arrives on its label's left side, and it bows only to get
 /// around something in its way. The card, the other labels, and the text on
@@ -558,7 +559,8 @@ fn plan_labels(
         .map(|&(_, first, _, height)| (first, height))
         .collect();
 
-    let whole = label_boxes(input, sizes, &stack_rows(&ideals, input.pane.y, pane_end));
+    let mut whole = label_boxes(input, sizes, &stack_rows(&ideals, input.pane.y, pane_end));
+    align_column(input.pane, &mut whole);
     let Some(card) =
         card.filter(|&card| whole.iter().flatten().any(|&label| overlaps(label, card)))
     else {
@@ -597,7 +599,9 @@ fn plan_labels(
         }
     }
 
-    label_boxes(input, sizes, &rows)
+    let mut split = label_boxes(input, sizes, &rows);
+    align_column(input.pane, &mut split);
+    split
 }
 
 /// The top row of each label in one column over rows `lo..hi`, or `None` for
@@ -688,6 +692,23 @@ fn label_boxes(
             })
         })
         .collect()
+}
+
+/// Line every box up at the greatest x among them.
+///
+/// One x makes the stack read as one list, and it leaves the channel between
+/// the text and the column open on every row a connector crosses. A box that
+/// the column pushes past the pane's right edge keeps its own x, because a
+/// label past the code beats no label.
+fn align_column(pane: Rect, boxes: &mut [Option<Rect>]) {
+    let Some(column) = boxes.iter().flatten().map(|label| label.x).max() else {
+        return;
+    };
+    for label in boxes.iter_mut().flatten() {
+        if column + label.width <= pane.x + pane.width {
+            label.x = column;
+        }
+    }
 }
 
 /// The boxes a connector goes around, with `crossed` the rows from its code to
@@ -1564,6 +1585,67 @@ mod tests {
                 true,
             )],
             "under the long line, and past it, since the connector crosses it",
+        );
+    }
+
+    /// The x of each label placed for `annotations` in `pane`, when every line
+    /// ends at column 10 but `long_row`'s, which ends at `long_end`.
+    fn label_xs(
+        pane: Rect,
+        long_row: u16,
+        long_end: u16,
+        annotations: Vec<AnnotationCells>,
+    ) -> Vec<u16> {
+        let mut input = input(pane, None);
+        input.card = None;
+        input.line_ends = (0..30)
+            .map(|row| (row, if row == long_row { long_end } else { 10 }))
+            .collect();
+        input.current = annotations.len().checked_sub(1);
+        input.annotations = annotations;
+        layout(&input)
+            .callouts
+            .iter()
+            .map(|callout| callout.label.x)
+            .collect()
+    }
+
+    /// Every label of a stop takes one x, the farthest any band reaches, so the
+    /// column is straight and a connector to a lower box has the channel beside
+    /// it to run in. Only the third band here reaches the long row.
+    #[test]
+    fn a_stops_labels_share_a_column() {
+        let stacked = (10..13)
+            .enumerate()
+            .map(|(key, row)| annotation(key, &[row], 4, 8, &["a", "b"]))
+            .collect();
+
+        assert_eq!(
+            label_xs(pane(), 15, 30, stacked),
+            [34, 34, 34],
+            "every box past the long row",
+        );
+    }
+
+    /// A box that the shared column pushes past the pane's right edge keeps its
+    /// own x, because a label past the code beats no label.
+    #[test]
+    fn a_label_the_column_pushes_off_the_pane_keeps_its_own_end() {
+        let narrow = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+        let spread = vec![
+            annotation(0, &[10], 4, 8, &["a wide note"]),
+            annotation(1, &[20], 4, 8, &["note"]),
+        ];
+
+        assert_eq!(
+            label_xs(narrow, 20, 70, spread),
+            [14, 74],
+            "the wide box would end at 87, past the pane's 80",
         );
     }
 
