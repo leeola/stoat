@@ -15,7 +15,7 @@
 //! its stop's own file.
 //!
 //! Between them the stops drive the label search in `place_callouts`
-//! (crate::walkthrough::slide) and the marks around it: labels stacked outward
+//! (crate::walkthrough::slide) and the marks around it: labels stacked downward
 //! from their code, each past the text beside it, labels that find no
 //! candidate at all, the marker color cycle wrapping at six, a highlight over
 //! a three-row annotation, and a focus long enough for soft wrap to spread
@@ -159,9 +159,10 @@ const NARRATION_CROWDED: &str = "\
 Five annotations land on five consecutive rows, and each label is long enough
 to wrap into a two-line box.
 
-Only the first fits on its own row. Each of the rest takes the nearest free
-rows, below before above. It sits past every line between its arm and its far
-edge, with a connector back to the arm it names.
+Only the first fits on its own row. Each of the rest sits under the one before
+it, past every line between its arm and its far edge, with a connector back to
+the arm it names. A label goes above the first only when the pane below is
+full.
 ";
 
 const NARRATION_PAIR: &str = "\

@@ -430,11 +430,11 @@ const LABEL_GAP: u16 = 4;
 
 /// Place the label box of each annotation the reader has reached.
 ///
-/// A label never covers code. Its rows are searched outward from the
-/// annotation's first row, and each candidate sits [`LABEL_GAP`] past the
-/// longest line among the rows the box spans and the rows its connector
-/// crosses. The first candidate that fits the pane and clears the card and
-/// every earlier label is taken.
+/// A label never covers code. Its rows are searched down from the
+/// annotation's first row, then up from it, and each candidate sits
+/// [`LABEL_GAP`] past the longest line among the rows the box spans and the
+/// rows its connector crosses. The first candidate that fits the pane and
+/// clears the card and every earlier label is taken.
 ///
 /// A label that fits nowhere draws nothing. A label over code hides what the
 /// stop is about, which costs the reader more than one missing label.
@@ -501,23 +501,17 @@ fn label_size(lines: &[String]) -> Option<(u16, u16)> {
     Some((widest as u16 + 2, lines.len() as u16 + 2))
 }
 
-/// The pane rows a label is tried at, by distance from `first`, below before
-/// above at each distance.
+/// The pane rows a label is tried at, in the order they are tried.
 ///
 /// The annotation's own row leads, so a label reads as belonging to the line it
-/// names. Growing one row at a time keeps a label near its code, and running
-/// to the pane's edges lets a crowded stop stack its labels rather than drop
-/// them.
+/// names. The rows below follow in order, so each later label stacks under the
+/// earlier ones and the labels keep the reading order of their code.
+///
+/// The rows above, nearest first, are the fallback for a pane with no room
+/// below. A crowded stop then stacks its last labels above its first rather
+/// than drop them.
 fn label_rows(first: u16, pane: Rect) -> impl Iterator<Item = u16> {
-    let rows = pane.y..pane.y + pane.height;
-    (0..=pane.height)
-        .flat_map(move |distance| {
-            let below = first.checked_add(distance);
-            let above = first.checked_sub(distance).filter(|_| distance > 0);
-            [below, above]
-        })
-        .flatten()
-        .filter(move |row| rows.contains(row))
+    (first..pane.y + pane.height).chain((pane.y..first).rev())
 }
 
 /// Where the longest line among `rows` ends.
@@ -1027,6 +1021,47 @@ mod tests {
                 ),
             ],
             "the first on its own row, the second under it with a connector back",
+        );
+    }
+
+    /// The row of each label placed for five annotations on consecutive rows
+    /// from `first`. Every label has two lines, so every box is four rows tall.
+    fn stacked_label_rows(first: u16) -> Vec<u16> {
+        let mut input = input(pane(), None);
+        input.card = None;
+        input.annotations = (first..first + 5)
+            .enumerate()
+            .map(|(key, row)| annotation(key, &[row], 4, 8, &["a", "b"]))
+            .collect();
+        input.current = Some(4);
+
+        layout(&input)
+            .callouts
+            .iter()
+            .map(|callout| callout.label.y)
+            .collect()
+    }
+
+    /// Each label after the first takes the nearest free rows below its code,
+    /// so the stack grows down in the reading order of the lines it names. A
+    /// label that jumps above the stack breaks that order.
+    #[test]
+    fn a_stack_of_labels_grows_downward() {
+        assert_eq!(
+            stacked_label_rows(10),
+            [10, 14, 18, 22, 26],
+            "each label under the one before it",
+        );
+    }
+
+    /// No four-row box fits under row 27, so the fourth and fifth boxes stack
+    /// upward from the first rather than drop out.
+    #[test]
+    fn a_stack_with_no_room_below_grows_upward() {
+        assert_eq!(
+            stacked_label_rows(16),
+            [16, 20, 24, 12, 8],
+            "three down to the pane's bottom, then two above the first",
         );
     }
 
