@@ -17,10 +17,10 @@
 //! Between them the stops drive the label plan in `place_callouts`
 //! (crate::walkthrough::slide) and the marks around it: labels planned as one
 //! column centered on their code, each past the text beside it, connectors that
-//! meet their labels on the left and bow around what lies between, labels that
-//! find no room at all, the marker color cycle wrapping at six, a highlight
-//! over a three-row annotation, and a focus long enough for soft wrap to spread
-//! over several display rows.
+//! run the channel beside the label column and turn into their boxes, labels
+//! that find no room at all, the marker color cycle wrapping at six, a
+//! highlight over a three-row annotation, and a focus long enough for soft wrap
+//! to spread over several display rows.
 
 use crate::{
     fixture::{FixtureError, FixtureRepo},
@@ -164,8 +164,9 @@ The five labels form one column centered on the arms. The middle label sits on
 its own row with two above and two below, each past every line between its arm
 and its far edge. A label not yet reached already holds its place.
 
-Each connector runs back to the arm it names and meets its box on the left. It
-bows around whatever lies between.
+Connectors leave their arms past the comma. A connector that turns runs the
+channel between the code and the labels, side by side with any whose rows it
+shares, the longer nearer the code.
 ";
 
 const NARRATION_PAIR: &str = "\
