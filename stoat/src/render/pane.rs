@@ -1477,10 +1477,13 @@ mod tests {
         action_handlers::dispatch,
         buffer::{BufferId, TextBuffer},
         editor_state::EditorState,
+        host::LspNotification,
+        lsp::drain,
         workspace::diff::DiffBase,
         Stoat,
     };
-    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range};
+    use ratatui::buffer::Buffer;
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -1591,7 +1594,7 @@ mod tests {
         h.settle();
     }
 
-    fn bar_row(buf: &ratatui::buffer::Buffer) -> String {
+    fn bar_row(buf: &Buffer) -> String {
         let y = buf.area.height - 1;
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
     }
@@ -1904,6 +1907,32 @@ mod tests {
         assert!(
             error_y < status_y,
             "the error card auto-shows and stacks above the pinned status card"
+        );
+    }
+
+    /// A server error of several lines paints as one line of the error card.
+    /// A plain terminal takes the card text cell by cell, and flushing a frame
+    /// with a raw newline in a cell trips ratatui's control-character check.
+    #[test]
+    fn a_multi_line_server_error_paints_as_one_line() {
+        let mut h = Stoat::test();
+        h.stoat.stoatty = false;
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        fake.push_notification(LspNotification::ShowMessage {
+            typ: MessageType::ERROR,
+            message: "failed to fetch workspace\n\nno Cargo.toml".to_string(),
+        });
+        drain::drain_lsp_notifications(&mut h.stoat);
+
+        h.snapshot();
+        let frame = h.rendered_buffer();
+        // The same cell measure a terminal frontend runs when it flushes.
+        Buffer::empty(frame.area).diff(frame);
+        assert!(
+            h.rendered_text()
+                .contains("failed to fetch workspace no Cargo.toml"),
+            "the error card joins the lines with one space",
         );
     }
 

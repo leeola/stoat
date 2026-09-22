@@ -19,6 +19,7 @@ use crate::{
     buffer::BufferId,
     host::LspHost,
     lsp::util,
+    render::sanitize,
 };
 use std::{
     path::{Path, PathBuf},
@@ -365,7 +366,8 @@ fn drain_notifications_from(
                 }
             },
             LspNotification::ShowMessage { typ, message: text } => {
-                *message = Some((typ, format!("{server}: {text}")));
+                let text = sanitize::sanitize_status_text(&format!("{server}: {text}"));
+                *message = Some((typ, text));
             },
             other => {
                 tracing::debug!(
@@ -404,7 +406,11 @@ fn stale_publish_version(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::PendingSpawn;
+    use crate::{
+        app::PendingSpawn,
+        host::{FakeLsp, LspNotification},
+    };
+    use lsp_types::MessageType;
     use stoat_config::Settings;
 
     #[test]
@@ -424,6 +430,26 @@ mod tests {
         assert_eq!(
             h.stoat.lsp_message.as_ref().map(|(_, m)| m.as_str()),
             Some("rust-analyzer: workspace load failed"),
+        );
+    }
+
+    /// A server message of several paragraphs is stored as one line, since
+    /// every surface that shows it paints a single row of cells.
+    #[test]
+    fn a_multi_line_show_message_is_stored_as_one_line() {
+        let mut h = Stoat::test();
+        let fake = Arc::new(FakeLsp::new());
+        fake.push_notification(LspNotification::ShowMessage {
+            typ: MessageType::ERROR,
+            message: "failed to fetch workspace\n\nno Cargo.toml above the file".to_string(),
+        });
+        let host: Arc<dyn LspHost> = fake;
+
+        drain_host_notifications(&mut h.stoat, "rust-analyzer", &host);
+
+        assert_eq!(
+            h.stoat.lsp_message.as_ref().map(|(_, m)| m.as_str()),
+            Some("rust-analyzer: failed to fetch workspace no Cargo.toml above the file"),
         );
     }
 
@@ -457,7 +483,7 @@ mod tests {
     fn lsp_ready_host_installs_without_a_message() {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
-        let host: Arc<dyn LspHost> = Arc::new(crate::host::FakeLsp::new());
+        let host: Arc<dyn LspHost> = Arc::new(FakeLsp::new());
         stoat
             .pending_lsp_host
             .lock()

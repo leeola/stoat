@@ -27,6 +27,30 @@ pub(crate) fn sanitize_preview_text(input: &str) -> String {
     out
 }
 
+/// Flatten `input` into one line for a status surface.
+///
+/// A status row and the error card paint a single line of cells, so a newline
+/// or other control character there has no row break to become. Each C0
+/// control and DEL becomes a space, each run of whitespace then collapses to
+/// one space, and the ends are trimmed. A message of several paragraphs reads
+/// as one line.
+pub(crate) fn sanitize_status_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut gap = false;
+    for ch in input.chars() {
+        if ch.is_whitespace() || (ch as u32) < 0x20 || ch as u32 == 0x7f {
+            gap = !out.is_empty();
+            continue;
+        }
+        if gap {
+            out.push(' ');
+            gap = false;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +78,26 @@ mod tests {
     #[test]
     fn sanitize_preview_text_passes_multibyte_utf8_through() {
         assert_eq!(sanitize_preview_text("café naïve"), "café naïve");
+    }
+
+    #[test]
+    fn sanitize_status_text_turns_a_newline_and_an_esc_into_spaces() {
+        assert_eq!(sanitize_status_text("a\nb\x1bc"), "a b c");
+    }
+
+    #[test]
+    fn sanitize_status_text_collapses_runs_and_trims_the_ends() {
+        assert_eq!(
+            sanitize_status_text("\n  failed to fetch\n\n\t workspace \r\n"),
+            "failed to fetch workspace",
+        );
+    }
+
+    #[test]
+    fn sanitize_status_text_passes_plain_text_through() {
+        assert_eq!(
+            sanitize_status_text("rust-analyzer: workspace load failed"),
+            "rust-analyzer: workspace load failed",
+        );
     }
 }

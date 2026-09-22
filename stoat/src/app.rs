@@ -36,6 +36,7 @@ use crate::{
     register,
     render::{
         pane_cache::PaneCacheEntry,
+        sanitize,
         undercurl::{self, UndercurlBatch},
     },
     run::{CommandMark, PtyNotification, RunId},
@@ -4506,8 +4507,12 @@ impl Stoat {
     /// Stamps a fresh deadline and arms a timer that wakes the run loop when it
     /// elapses, so an idle screen retires the message on its own. A later call
     /// replaces the message and cancels the prior timer.
+    ///
+    /// The status row paints one line, so `text` is flattened into one. A
+    /// message carrying the output of a failed command reaches here with the
+    /// newlines and control characters that output had.
     pub(crate) fn set_status(&mut self, text: impl Into<String>) {
-        self.pending_message = Some(text.into());
+        self.pending_message = Some(sanitize::sanitize_status_text(&text.into()));
         self.pending_message_deadline = Some(self.executor.now() + STATUS_MESSAGE_TTL);
 
         let timer = self.executor.timer(STATUS_MESSAGE_TTL);
