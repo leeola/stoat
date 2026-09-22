@@ -654,6 +654,8 @@ impl Keymap {
     /// A `default` binding is dropped when a surviving user binding claims the
     /// same key under the same predicates. The lookup never reaches it, and
     /// [`Self::bindings`] must not offer help for a binding nothing triggers.
+    /// Predicates compare by what they say, so a user's `mode == "normal"`
+    /// block shadows the shipped `mode == normal` one.
     pub fn layered(user: Keymap, default: Keymap) -> Self {
         let mut bindings: Vec<CompiledBinding> = user
             .bindings
@@ -668,9 +670,15 @@ impl Keymap {
 
         let from_user = bindings.len();
         for binding in default.bindings {
-            let shadowed = bindings[..from_user]
-                .iter()
-                .any(|kept| kept.key == binding.key && kept.predicates == binding.predicates);
+            let shadowed = bindings[..from_user].iter().any(|kept| {
+                kept.key == binding.key
+                    && kept.predicates.len() == binding.predicates.len()
+                    && kept
+                        .predicates
+                        .iter()
+                        .zip(&binding.predicates)
+                        .all(|(a, b)| a.same_guard(b))
+            });
             if !shadowed {
                 bindings.push(binding);
             }
@@ -1797,6 +1805,49 @@ mod tests {
             )
             .expect("should match");
         assert_eq!(actions[0].name, "MoveLeft");
+    }
+
+    /// The first action of every binding [`Keymap::active_keys`] lists for a
+    /// plain `q` in normal mode.
+    fn active_q_actions(keymap: &Keymap) -> Vec<&str> {
+        keymap
+            .active_keys(&normal_state())
+            .into_iter()
+            .filter(|(key, _)| key.code == KeyCode::Char('q'))
+            .map(|(_, actions)| actions[0].name.as_str())
+            .collect()
+    }
+
+    /// A user block never sits at the byte offset of the shipped block it
+    /// replaces, so the guards must match wherever each config wrote them.
+    #[test]
+    fn layered_user_binding_shadows_a_default_written_at_another_offset() {
+        let keymap = layered_keymap(
+            "# every span below this line shifts\non key { mode == \"normal\" { q -> MoveLeft(); } }",
+            r#"on key { mode == "normal" { q -> MoveRight(); } }"#,
+        );
+
+        assert_eq!(
+            active_q_actions(&keymap),
+            ["MoveLeft"],
+            "one q binding, the user's"
+        );
+    }
+
+    /// A quoted mode and a bare one name the same state, so either spelling in
+    /// a user config shadows the other in the shipped one.
+    #[test]
+    fn layered_string_guard_shadows_the_same_guard_as_an_ident() {
+        let keymap = layered_keymap(
+            r#"on key { mode == "normal" { q -> MoveLeft(); } }"#,
+            r#"on key { mode == normal { q -> MoveRight(); } }"#,
+        );
+
+        assert_eq!(
+            active_q_actions(&keymap),
+            ["MoveLeft"],
+            "one q binding, the user's"
+        );
     }
 
     /// A user replacing a shipped binding writes the block they care about,

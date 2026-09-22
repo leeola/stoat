@@ -109,6 +109,39 @@ pub enum Predicate {
     Or(Box<Spanned<Predicate>>, Box<Spanned<Predicate>>),
 }
 
+impl Predicate {
+    /// Whether `self` and `other` state the same guard, wherever each was
+    /// written.
+    ///
+    /// The derived [`PartialEq`] also compares source spans, so one guard
+    /// written in two configs, or at two places in one, compares unequal
+    /// there. Here only the fields, operators, and values count. A value
+    /// written as a quoted string and as a bare identifier counts as one,
+    /// since `mode == "normal"` and `mode == normal` name the same mode.
+    pub fn same_guard(&self, other: &Predicate) -> bool {
+        match (self, other) {
+            (Predicate::Eq(a, x), Predicate::Eq(b, y))
+            | (Predicate::NotEq(a, x), Predicate::NotEq(b, y))
+            | (Predicate::Gt(a, x), Predicate::Gt(b, y))
+            | (Predicate::Lt(a, x), Predicate::Lt(b, y))
+            | (Predicate::Gte(a, x), Predicate::Gte(b, y))
+            | (Predicate::Lte(a, x), Predicate::Lte(b, y)) => {
+                a.node == b.node && same_value(&x.node, &y.node)
+            },
+            (Predicate::Matches(a, x), Predicate::Matches(b, y)) => {
+                a.node == b.node && x.node == y.node
+            },
+            (Predicate::Bool(a), Predicate::Bool(b)) => a.node == b.node,
+            (Predicate::Not(a), Predicate::Not(b)) => a.node.same_guard(&b.node),
+            (Predicate::And(a, x), Predicate::And(b, y))
+            | (Predicate::Or(a, x), Predicate::Or(b, y)) => {
+                a.node.same_guard(&b.node) && x.node.same_guard(&y.node)
+            },
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Display for Predicate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -196,6 +229,18 @@ impl fmt::Display for PredicateValue<'_> {
     }
 }
 
+/// Whether two predicate values name the same thing, for
+/// [`Predicate::same_guard`].
+///
+/// A quoted string and a bare identifier with equal text do, because a
+/// predicate compares either one against the same state string.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::String(a), Value::Ident(b)) | (Value::Ident(a), Value::String(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionExpr {
     Single(Action),
@@ -238,4 +283,48 @@ pub enum Value {
     Array(Vec<Spanned<Value>>),
     Map(Vec<(Spanned<String>, Spanned<Value>)>),
     StateRef(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Predicate, Statement};
+
+    /// The guard of `on key { <text> { q -> A(); } }`, parsed after `prefix`,
+    /// which shifts every span by its length.
+    fn guard(prefix: &str, text: &str) -> Predicate {
+        let source = format!("{prefix}on key {{ {text} {{ q -> A(); }} }}");
+        let (config, errors) = crate::parse(&source);
+        assert!(errors.is_empty(), "{source:?} parses, got {errors:?}");
+
+        match &config.expect("a config").blocks[0].node.statements[0].node {
+            Statement::PredicateBlock(block) => block.predicate.node.clone(),
+            other => panic!("expected a predicate block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_guard_compares_what_a_guard_says_not_where_it_sits() {
+        let shifted = "# shifted\n";
+        let same = |a: &str, b: &str| guard("", a).same_guard(&guard(shifted, b));
+
+        assert_ne!(
+            guard("", "mode == normal"),
+            guard(shifted, "mode == normal"),
+            "the derived PartialEq sees the shifted spans",
+        );
+        assert!(same("mode == normal", "mode == normal"), "a shifted span");
+        assert!(
+            same("mode == normal", r#"mode == "normal""#),
+            "a string against an ident",
+        );
+        assert!(
+            same("!modal && mode == normal", r#"!modal && mode == "normal""#),
+            "through Not and And",
+        );
+        assert!(!same("mode == normal", "mode == insert"), "another value");
+        assert!(
+            !same("!modal && mode == normal", "modal && mode == normal"),
+            "a Not on one side only",
+        );
+    }
 }
