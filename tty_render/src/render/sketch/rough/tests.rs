@@ -2,7 +2,7 @@
 
 use super::*;
 use stoatty_protocol::command::{
-    SketchEasing, SketchFill, SketchFillStyle, SketchPhase, SketchStyle, SketchTiming,
+    SketchEasing, SketchFill, SketchFillStyle, SketchPhase, SketchPoint, SketchStyle, SketchTiming,
 };
 
 fn options() -> Options {
@@ -83,7 +83,7 @@ fn an_ellipse_stays_near_its_center() {
     // small, or inward, as often as it lands out. A fixed spread of them makes
     // the difference certain while staying reproducible.
     for seed in 1..=16 {
-        let mut command = command(shape, 64);
+        let mut command = command(shape.clone(), 64);
         command.style.seed = seed;
         let geometry = geometry(&command, metrics(), &nothing_resolves);
 
@@ -497,6 +497,43 @@ fn a_bend_carries_the_connector_off_the_chord() {
         low > 1.0,
         "a bent connector leaves the chord, reached {low}"
     );
+}
+
+/// A path is a curve through every point it names, the first and last
+/// included, so a connector routed around the code runs where it was planned.
+#[test]
+fn a_path_passes_through_each_of_its_points() {
+    let points = [(0, 0), (96, 0), (96, 96)];
+    let shape = SketchShape::Path {
+        points: points.iter().map(|&(x, y)| SketchPoint { x, y }).collect(),
+    };
+    let strokes = geometry(&command(shape, 0), metrics(), &nothing_resolves).strokes;
+    assert!(!strokes.is_empty(), "a path of three points draws");
+
+    let cell = metrics();
+    for (x, y) in points {
+        let at = [
+            f32::from(x) / 16.0 * cell.width,
+            f32::from(y) / 16.0 * cell.height,
+        ];
+        let nearest = strokes
+            .iter()
+            .map(|stroke| distance_to_path(at, &stroke.points))
+            .fold(f32::MAX, f32::min);
+        assert!(nearest <= 2.0, "the curve passes {nearest} px from {at:?}");
+    }
+}
+
+/// One point has no second to curve toward, so it draws nothing rather than a
+/// dot the reader takes for a stray mark.
+#[test]
+fn a_path_of_one_point_draws_nothing() {
+    let shape = SketchShape::Path {
+        points: vec![SketchPoint { x: 16, y: 16 }],
+    };
+    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+
+    assert_eq!(geometry.strokes, Vec::new());
 }
 
 /// Both bits of the mask are read, so a connector can point at one end, the

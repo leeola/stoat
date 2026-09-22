@@ -88,7 +88,8 @@ pub use scale::{encode_scale, encode_scale_into, ScaleCommand};
 pub use scroll_region::{encode_scroll_region, encode_scroll_region_into, ScrollRegionCommand};
 pub use sketch::{
     encode_sketch, encode_sketch_into, SketchBounds, SketchCommand, SketchEasing, SketchEnd,
-    SketchFill, SketchFillStyle, SketchPhase, SketchShape, SketchSide, SketchStyle, SketchTiming,
+    SketchFill, SketchFillStyle, SketchPhase, SketchPoint, SketchShape, SketchSide, SketchStyle,
+    SketchTiming,
 };
 pub use terminal_control::{
     decode_ident_reply, encode_config_reload, encode_config_reload_into, encode_font_step,
@@ -442,7 +443,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "text_run_end" => Some(Command::TextRunEnd),
         "bar" => decode_bar(args).map(Command::Bar),
         "polyline" => decode_polyline(args).map(Command::Polyline),
-        "sketch_ellipse" | "sketch_rect" | "sketch_line" => {
+        "sketch_ellipse" | "sketch_rect" | "sketch_line" | "sketch_path" => {
             decode_sketch(sub, args).map(Command::Sketch)
         },
         "line_layout" => decode_line_layout(args).map(Command::LineLayout),

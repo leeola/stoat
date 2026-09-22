@@ -7,9 +7,10 @@
 //! what lets the stroke animate at the display refresh rate without the emitter
 //! sending a frame per step.
 //!
-//! One head serves three shapes. An ellipse circles a subject, a rectangle
-//! boxes a block, and a line connects one to a label. They exist for the
-//! walkthrough player, but nothing here knows about walkthroughs.
+//! One head serves four shapes. An ellipse circles a subject, a rectangle
+//! boxes a block, and a line connects one to a label. A path is a connector
+//! that turns more than once. They exist for the walkthrough player, but
+//! nothing here knows about walkthroughs.
 
 use crate::frame;
 
@@ -109,7 +110,7 @@ pub enum SketchPhase {
 }
 
 /// Which mark to draw, and the geometry it needs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SketchShape {
     Ellipse {
         bounds: SketchBounds,
@@ -139,6 +140,14 @@ pub enum SketchShape {
         /// [`Self::Line::to`].
         heads: u8,
     },
+    /// A curve through every one of [`Self::Path::points`], for a connector
+    /// that turns more than once.
+    ///
+    /// The terminal draws the Catmull-Rom spline through the points, with the
+    /// first and last doubled so the curve reaches them. That is the curve a
+    /// bent line draws through its bowed midpoint. Fewer than two points draw
+    /// nothing, and one frame carries at most 255 points.
+    Path { points: Vec<SketchPoint> },
 }
 
 /// A mark's box, in **sixteenths of a cell** so it tracks live font zoom.
@@ -148,6 +157,14 @@ pub struct SketchBounds {
     pub y: i16,
     pub w: u16,
     pub h: u16,
+}
+
+/// A spot a path passes through, in **sixteenths of a cell** so it tracks live
+/// font zoom.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SketchPoint {
+    pub x: i16,
+    pub y: i16,
 }
 
 /// What fills a rectangle behind its stroke.
@@ -198,6 +215,9 @@ const SKETCH_HEAD: usize = 21;
 
 /// Bytes a line's end spends, whichever kind it is.
 const END_LEN: usize = 7;
+
+/// The most points one `sketch_path` frame carries, since one byte counts them.
+const MAX_PATH_POINTS: usize = 255;
 
 /// Encode a [`SketchCommand`] as a full `Gstoatty;sketch_*` frame for an
 /// emitter.
@@ -250,6 +270,14 @@ pub fn encode_sketch_into(out: &mut Vec<u8>, command: &SketchCommand) {
                 write_end(w, to)?;
                 w.write_all(&bend.to_be_bytes())?;
                 w.write_all(&[*heads])?;
+            },
+            SketchShape::Path { points } => {
+                let points = &points[..points.len().min(MAX_PATH_POINTS)];
+                w.write_all(&[points.len() as u8])?;
+                for point in points {
+                    w.write_all(&point.x.to_be_bytes())?;
+                    w.write_all(&point.y.to_be_bytes())?;
+                }
             },
         }
 
@@ -306,6 +334,20 @@ pub(super) fn decode_sketch(sub: &str, args: &[Vec<u8>]) -> Option<SketchCommand
                 END_LEN * 2 + 2,
             )
         },
+        "sketch_path" => {
+            let count = usize::from(*body.first()?);
+            let points = body
+                .get(1..1 + 4 * count)?
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[x0, x1, y0, y1]| SketchPoint {
+                    x: i16::from_be_bytes([x0, x1]),
+                    y: i16::from_be_bytes([y0, y1]),
+                })
+                .collect();
+            (SketchShape::Path { points }, 1 + 4 * count)
+        },
         _ => return None,
     };
 
@@ -341,6 +383,7 @@ fn sub_command(shape: &SketchShape) -> &'static str {
         SketchShape::Ellipse { .. } => "sketch_ellipse",
         SketchShape::Rect { .. } => "sketch_rect",
         SketchShape::Line { .. } => "sketch_line",
+        SketchShape::Path { .. } => "sketch_path",
     }
 }
 
@@ -543,6 +586,12 @@ mod tests {
         }
     }
 
+    fn path(points: &[(i16, i16)]) -> SketchShape {
+        SketchShape::Path {
+            points: points.iter().map(|&(x, y)| SketchPoint { x, y }).collect(),
+        }
+    }
+
     /// The payload lengths the protocol doc publishes, checked against what the
     /// encoder writes. A doc that drifts from the wire is worse than none: the
     /// terminal reads by offset, so a wrong length there sends the next
@@ -574,11 +623,12 @@ mod tests {
                 },
                 37,
             ),
+            (path(&[(0, 0), (16, -8), (32, 40)]), 34),
         ];
 
         for (shape, expected) in cases {
             for (anchor, extra) in [(None, 0), (Some((1, 2.0)), 8)] {
-                let encoded = encode_sketch(&sketch(shape, anchor));
+                let encoded = encode_sketch(&sketch(shape.clone(), anchor));
                 let payload = decoded_arg_len(&encoded);
                 assert_eq!(
                     payload,
@@ -628,8 +678,9 @@ mod tests {
                 bend: -24,
                 heads: 0b10,
             },
+            path(&[(-4, 40), (96, 0), (96, 96)]),
         ] {
-            let command = sketch(shape, None);
+            let command = sketch(shape.clone(), None);
             assert_eq!(
                 decode(&encode_sketch(&command)),
                 Some(Command::Sketch(command.clone())),
@@ -662,14 +713,28 @@ mod tests {
                 bend: 0,
                 heads: 0,
             },
+            path(&[(0, 0), (-32, 8)]),
         ] {
-            let command = sketch(shape, Some((11, 3.5)));
+            let command = sketch(shape.clone(), Some((11, 3.5)));
             assert_eq!(
                 decode(&encode_sketch(&command)),
                 Some(Command::Sketch(command.clone())),
                 "{shape:?} round-trips carrying its anchor",
             );
         }
+    }
+
+    /// One byte counts a path's points, so a longer path ships its first 255
+    /// rather than a count that wraps and misreads the points after it.
+    #[test]
+    fn a_path_over_255_points_is_cut_to_255() {
+        let points: Vec<(i16, i16)> = (0..300).map(|at| (at, -at)).collect();
+
+        let Some(Command::Sketch(decoded)) = decode(&encode_sketch(&sketch(path(&points), None)))
+        else {
+            panic!("a path decodes");
+        };
+        assert_eq!(decoded.shape, path(&points[..255]), "the first 255 points");
     }
 
     /// An open box and a filled one differ only by the presence byte. A decoder
@@ -712,7 +777,7 @@ mod tests {
                     fill,
                 },
             ] {
-                let command = sketch(shape, None);
+                let command = sketch(shape.clone(), None);
                 assert_eq!(
                     decode(&encode_sketch(&command)),
                     Some(Command::Sketch(command.clone())),

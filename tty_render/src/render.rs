@@ -680,11 +680,11 @@ fn sketch_rides(sketch: &Sketch, riding: &[u32]) -> bool {
 /// slightly larger rounded rect than it draws, the same over-cover a square
 /// occluder has.
 fn sketch_occluder(sketch: &Sketch, cell_width: f32) -> Option<Occluder> {
-    let SketchShape::Rect {
+    let &SketchShape::Rect {
         bounds,
         radius,
         fill: Some(_),
-    } = sketch.command.shape
+    } = &sketch.command.shape
     else {
         return None;
     };

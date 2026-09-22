@@ -328,8 +328,9 @@ where
     let resolve = |id: u32| resolve(id).map(|component| component.logical(metrics.scale_factor));
     let mut random = Random::new(command.style.seed, command.id);
 
-    match command.shape {
+    match &command.shape {
         SketchShape::Ellipse { bounds, fill } => {
+            let (bounds, fill) = (*bounds, *fill);
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
             // An ellipse alone pins its fitting, so its radii do not wander and
@@ -361,6 +362,7 @@ where
             radius,
             fill,
         } => {
+            let (bounds, radius, fill) = (*bounds, *radius, *fill);
             let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
             let mut options = shape_options(command, w, h);
             let radius_px = (f64::from(radius) / CELL_FRACTION * cw)
@@ -404,12 +406,32 @@ where
             heads,
         } => {
             let connector = Connector {
-                from,
-                to,
-                bend,
-                heads,
+                from: *from,
+                to: *to,
+                bend: *bend,
+                heads: *heads,
             };
             line_geometry(command, connector, cw, ch, scale, &resolve, &mut random)
+        },
+        SketchShape::Path { points } => {
+            let points: Vec<[f64; 2]> = points
+                .iter()
+                .map(|point| point_px(point.x, point.y, cw, ch))
+                .collect();
+            let extent = |axis: usize| {
+                let (low, high) = points
+                    .iter()
+                    .fold((f64::MAX, f64::MIN), |(low, high), point| {
+                        (low.min(point[axis]), high.max(point[axis]))
+                    });
+                (high - low).max(0.0)
+            };
+            let options = shape_options(command, extent(0), extent(1));
+
+            Geometry {
+                strokes: flatten(&curve(&points, &options, &mut random), scale),
+                fill: None,
+            }
         },
     }
 }
@@ -521,7 +543,7 @@ fn shape_options(command: &SketchCommand, w: f64, h: f64) -> Options {
 /// alone.
 fn rough_kind(shape: &SketchShape) -> RoughKind {
     match shape {
-        SketchShape::Line { .. } => RoughKind::Linear,
+        SketchShape::Line { .. } | SketchShape::Path { .. } => RoughKind::Linear,
         SketchShape::Rect { radius, .. } if *radius > 0 => RoughKind::Round,
         _ => RoughKind::Other,
     }
