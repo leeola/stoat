@@ -536,6 +536,83 @@ fn a_path_of_one_point_draws_nothing() {
     assert_eq!(geometry.strokes, Vec::new());
 }
 
+fn elbow_shape(points: &[(i16, i16)], radius: u8) -> SketchShape {
+    SketchShape::Elbow {
+        points: points.iter().map(|&(x, y)| SketchPoint { x, y }).collect(),
+        radius,
+    }
+}
+
+fn elbow_strokes(points: &[(i16, i16)], radius: u8, roughness: u8) -> Vec<Stroke> {
+    geometry(
+        &command(elbow_shape(points, radius), roughness),
+        metrics(),
+        &nothing_resolves,
+    )
+    .strokes
+}
+
+/// An elbow strokes each leg and each corner twice, as a rounded box strokes
+/// its sides and corners. Its legs run along the route, and its corner stays
+/// inside the rounding it was given.
+#[test]
+fn an_elbow_runs_its_legs_and_rounds_its_corner() {
+    let strokes = elbow_strokes(&[(0, 0), (160, 0), (160, 160)], 8, 0);
+    assert_eq!(strokes.len(), 6, "two strokes per leg and two per corner");
+
+    let route = [[0.0, 0.0], [100.0, 0.0], [100.0, 200.0]];
+    for point in strokes.iter().flat_map(|stroke| &stroke.points) {
+        let off = distance_to_path(*point, &route);
+        assert!(off <= 2.0, "{point:?} strays {off} px off the route");
+    }
+    for point in strokes[2..4].iter().flat_map(|stroke| &stroke.points) {
+        assert!(
+            (95.0..=100.0).contains(&point[0]) && (0.0..=5.0).contains(&point[1]),
+            "corner point {point:?} left the 5 px square at the corner",
+        );
+    }
+}
+
+/// A corner rounds by at most half of the shorter leg it joins, so two corners
+/// on one short leg meet at its middle and do not cross.
+#[test]
+fn an_elbows_corner_is_clamped_to_half_its_shorter_leg() {
+    let strokes = elbow_strokes(&[(0, 0), (16, 0), (16, 160)], 64, 0);
+
+    assert_eq!(
+        strokes[2].points[0],
+        [5.0, 0.0],
+        "the corner starts halfway along the 10 px leg, not 40 px back",
+    );
+}
+
+/// Two points have no corner between them, so the elbow is one leg, stroked
+/// twice.
+#[test]
+fn an_elbow_of_two_points_is_a_straight_line() {
+    let strokes = elbow_strokes(&[(0, 0), (160, 80)], 8, 0);
+    assert_eq!(strokes.len(), 2, "one leg, stroked twice");
+
+    let chord = [[0.0, 0.0], [100.0, 100.0]];
+    for point in strokes.iter().flat_map(|stroke| &stroke.points) {
+        let off = distance_to_path(*point, &chord);
+        assert!(off <= 2.0, "{point:?} strays {off} px off the chord");
+    }
+}
+
+/// A leg carries one bow however long it runs, so a long elbow wobbles no more
+/// often than a short one. A jitter every half cell reads as a tremor.
+#[test]
+fn an_elbows_stroke_count_does_not_grow_with_its_length() {
+    let count = |end: i16| elbow_strokes(&[(0, 0), (end, 0), (end, end)], 8, 64).len();
+
+    assert_eq!(
+        (count(160), count(1600)),
+        (6, 6),
+        "two strokes per leg and two per corner at either length",
+    );
+}
+
 /// Both bits of the mask are read, so a connector can point at one end, the
 /// other, or both.
 #[test]

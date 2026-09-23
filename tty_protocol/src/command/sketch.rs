@@ -7,9 +7,10 @@
 //! what lets the stroke animate at the display refresh rate without the emitter
 //! sending a frame per step.
 //!
-//! One head serves four shapes. An ellipse circles a subject, a rectangle
+//! One head serves five shapes. An ellipse circles a subject, a rectangle
 //! boxes a block, and a line connects one to a label. A path is a connector
-//! that turns more than once. They exist for the walkthrough player, but
+//! that turns more than once, and an elbow is one that runs in straight legs
+//! between rounded corners. They exist for the walkthrough player, but
 //! nothing here knows about walkthroughs.
 
 use crate::frame;
@@ -148,6 +149,21 @@ pub enum SketchShape {
     /// bent line draws through its bowed midpoint. Fewer than two points draw
     /// nothing, and one frame carries at most 255 points.
     Path { points: Vec<SketchPoint> },
+    /// A polyline through every one of [`Self::Elbow::points`] with its
+    /// corners rounded, for a connector routed in straight legs.
+    ///
+    /// A straight leg joins each pair of successive points. Two points draw a
+    /// straight line, fewer draw nothing, and one frame carries at most 255
+    /// points.
+    Elbow {
+        points: Vec<SketchPoint>,
+        /// Corner rounding in sixteenths of a cell width.
+        ///
+        /// The terminal clamps each corner's rounding to half of the shorter
+        /// leg it joins, as an excalidraw elbow arrow does. Two corners at the
+        /// ends of one short leg meet at its middle and do not cross.
+        radius: u8,
+    },
 }
 
 /// A mark's box, in **sixteenths of a cell** so it tracks live font zoom.
@@ -216,7 +232,8 @@ const SKETCH_HEAD: usize = 21;
 /// Bytes a line's end spends, whichever kind it is.
 const END_LEN: usize = 7;
 
-/// The most points one `sketch_path` frame carries, since one byte counts them.
+/// The most points one `sketch_path` or `sketch_elbow` frame carries, since one
+/// byte counts them.
 const MAX_PATH_POINTS: usize = 255;
 
 /// Encode a [`SketchCommand`] as a full `Gstoatty;sketch_*` frame for an
@@ -271,13 +288,10 @@ pub fn encode_sketch_into(out: &mut Vec<u8>, command: &SketchCommand) {
                 w.write_all(&bend.to_be_bytes())?;
                 w.write_all(&[*heads])?;
             },
-            SketchShape::Path { points } => {
-                let points = &points[..points.len().min(MAX_PATH_POINTS)];
-                w.write_all(&[points.len() as u8])?;
-                for point in points {
-                    w.write_all(&point.x.to_be_bytes())?;
-                    w.write_all(&point.y.to_be_bytes())?;
-                }
+            SketchShape::Path { points } => write_points(w, points)?,
+            SketchShape::Elbow { points, radius } => {
+                w.write_all(&[*radius])?;
+                write_points(w, points)?;
             },
         }
 
@@ -335,18 +349,13 @@ pub(super) fn decode_sketch(sub: &str, args: &[Vec<u8>]) -> Option<SketchCommand
             )
         },
         "sketch_path" => {
-            let count = usize::from(*body.first()?);
-            let points = body
-                .get(1..1 + 4 * count)?
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&[x0, x1, y0, y1]| SketchPoint {
-                    x: i16::from_be_bytes([x0, x1]),
-                    y: i16::from_be_bytes([y0, y1]),
-                })
-                .collect();
-            (SketchShape::Path { points }, 1 + 4 * count)
+            let (points, used) = read_points(body, 0)?;
+            (SketchShape::Path { points }, used)
+        },
+        "sketch_elbow" => {
+            let radius = *body.first()?;
+            let (points, used) = read_points(body, 1)?;
+            (SketchShape::Elbow { points, radius }, used)
         },
         _ => return None,
     };
@@ -384,6 +393,7 @@ fn sub_command(shape: &SketchShape) -> &'static str {
         SketchShape::Rect { .. } => "sketch_rect",
         SketchShape::Line { .. } => "sketch_line",
         SketchShape::Path { .. } => "sketch_path",
+        SketchShape::Elbow { .. } => "sketch_elbow",
     }
 }
 
@@ -405,6 +415,41 @@ fn read_bounds(body: &[u8]) -> Option<SketchBounds> {
         w: u16::from_be_bytes([b[4], b[5]]),
         h: u16::from_be_bytes([b[6], b[7]]),
     })
+}
+
+/// Write a point list as its count byte, then each point's x and y.
+///
+/// A list longer than [`MAX_PATH_POINTS`] ships its first points only. A count
+/// that wraps past one byte misreads every point after it.
+fn write_points(
+    w: &mut (impl std::io::Write + ?Sized),
+    points: &[SketchPoint],
+) -> std::io::Result<()> {
+    let points = &points[..points.len().min(MAX_PATH_POINTS)];
+    w.write_all(&[points.len() as u8])?;
+    for point in points {
+        w.write_all(&point.x.to_be_bytes())?;
+        w.write_all(&point.y.to_be_bytes())?;
+    }
+    Ok(())
+}
+
+/// Read the point list at `at`, with the offset just past it, or `None` when
+/// the frame stops inside it.
+fn read_points(body: &[u8], at: usize) -> Option<(Vec<SketchPoint>, usize)> {
+    let count = usize::from(*body.get(at)?);
+    let end = at + 1 + 4 * count;
+    let points = body
+        .get(at + 1..end)?
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&[x0, x1, y0, y1]| SketchPoint {
+            x: i16::from_be_bytes([x0, x1]),
+            y: i16::from_be_bytes([y0, y1]),
+        })
+        .collect();
+    Some((points, end))
 }
 
 /// An end is a fixed-width 7 bytes whichever kind it is, so the second one
@@ -592,6 +637,13 @@ mod tests {
         }
     }
 
+    fn elbow(points: &[(i16, i16)], radius: u8) -> SketchShape {
+        SketchShape::Elbow {
+            points: points.iter().map(|&(x, y)| SketchPoint { x, y }).collect(),
+            radius,
+        }
+    }
+
     /// The payload lengths the protocol doc publishes, checked against what the
     /// encoder writes. A doc that drifts from the wire is worse than none: the
     /// terminal reads by offset, so a wrong length there sends the next
@@ -624,6 +676,7 @@ mod tests {
                 37,
             ),
             (path(&[(0, 0), (16, -8), (32, 40)]), 34),
+            (elbow(&[(0, 0), (16, -8), (32, 40)], 8), 35),
         ];
 
         for (shape, expected) in cases {
@@ -679,6 +732,7 @@ mod tests {
                 heads: 0b10,
             },
             path(&[(-4, 40), (96, 0), (96, 96)]),
+            elbow(&[(-4, 40), (96, 40), (96, 96)], 8),
         ] {
             let command = sketch(shape.clone(), None);
             assert_eq!(
@@ -714,6 +768,7 @@ mod tests {
                 heads: 0,
             },
             path(&[(0, 0), (-32, 8)]),
+            elbow(&[(0, 0), (-32, 8)], 0),
         ] {
             let command = sketch(shape.clone(), Some((11, 3.5)));
             assert_eq!(
@@ -724,17 +779,23 @@ mod tests {
         }
     }
 
-    /// One byte counts a path's points, so a longer path ships its first 255
-    /// rather than a count that wraps and misreads the points after it.
+    /// One byte counts a path's or an elbow's points, so a longer list ships
+    /// its first 255 rather than a count that wraps and misreads the points
+    /// after it.
     #[test]
-    fn a_path_over_255_points_is_cut_to_255() {
+    fn a_point_list_over_255_points_is_cut_to_255() {
         let points: Vec<(i16, i16)> = (0..300).map(|at| (at, -at)).collect();
 
-        let Some(Command::Sketch(decoded)) = decode(&encode_sketch(&sketch(path(&points), None)))
-        else {
-            panic!("a path decodes");
-        };
-        assert_eq!(decoded.shape, path(&points[..255]), "the first 255 points");
+        for (shape, cut) in [
+            (path(&points), path(&points[..255])),
+            (elbow(&points, 8), elbow(&points[..255], 8)),
+        ] {
+            let Some(Command::Sketch(decoded)) = decode(&encode_sketch(&sketch(shape, None)))
+            else {
+                panic!("a point list decodes");
+            };
+            assert_eq!(decoded.shape, cut, "the first 255 points");
+        }
     }
 
     /// An open box and a filled one differ only by the presence byte. A decoder

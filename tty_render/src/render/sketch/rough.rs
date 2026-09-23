@@ -418,18 +418,25 @@ where
                 .iter()
                 .map(|point| point_px(point.x, point.y, cw, ch))
                 .collect();
-            let extent = |axis: usize| {
-                let (low, high) = points
-                    .iter()
-                    .fold((f64::MAX, f64::MIN), |(low, high), point| {
-                        (low.min(point[axis]), high.max(point[axis]))
-                    });
-                (high - low).max(0.0)
-            };
-            let options = shape_options(command, extent(0), extent(1));
+            let (w, h) = extents(&points);
+            let options = shape_options(command, w, h);
 
             Geometry {
                 strokes: flatten(&curve(&points, &options, &mut random), scale),
+                fill: None,
+            }
+        },
+        SketchShape::Elbow { points, radius } => {
+            let points: Vec<[f64; 2]> = points
+                .iter()
+                .map(|point| point_px(point.x, point.y, cw, ch))
+                .collect();
+            let (w, h) = extents(&points);
+            let mut options = shape_options(command, w, h);
+            let radius_px = f64::from(*radius) / CELL_FRACTION * cw;
+
+            Geometry {
+                strokes: flatten(&elbow(&points, radius_px, &mut options, &mut random), scale),
                 fill: None,
             }
         },
@@ -530,6 +537,20 @@ fn pixel_bounds(bounds: SketchBounds, cw: f64, ch: f64) -> (f64, f64, f64, f64) 
     )
 }
 
+/// The width and height of the box around `points`, which is the size a
+/// connector's roughness damps by.
+fn extents(points: &[[f64; 2]]) -> (f64, f64) {
+    let extent = |axis: usize| {
+        let (low, high) = points
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(low, high), point| {
+                (low.min(point[axis]), high.max(point[axis]))
+            });
+        (high - low).max(0.0)
+    };
+    (extent(0), extent(1))
+}
+
 /// The knobs for one shape, with its roughness already damped for its size.
 fn shape_options(command: &SketchCommand, w: f64, h: f64) -> Options {
     let declared = f64::from(command.style.roughness) / ROUGHNESS_UNIT;
@@ -543,7 +564,9 @@ fn shape_options(command: &SketchCommand, w: f64, h: f64) -> Options {
 /// alone.
 fn rough_kind(shape: &SketchShape) -> RoughKind {
     match shape {
-        SketchShape::Line { .. } | SketchShape::Path { .. } => RoughKind::Linear,
+        SketchShape::Line { .. } | SketchShape::Path { .. } | SketchShape::Elbow { .. } => {
+            RoughKind::Linear
+        },
         SketchShape::Rect { radius, .. } if *radius > 0 => RoughKind::Round,
         _ => RoughKind::Other,
     }
@@ -1120,6 +1143,77 @@ fn rect(
         options.gain = 1.0;
         let (start, control, end) = corners[index];
         ops.extend(quadratic(start, control, end, options, random));
+    }
+    ops
+}
+
+/// A hand-drawn polyline through `points`, each interior corner rounded by
+/// `radius`.
+///
+/// The legs and corners are what [`rect`] draws for a rounded box, after the
+/// `L` and `Q` segments excalidraw hands rough.js's `path` for an elbow arrow.
+/// A leg therefore carries one bow and one endpoint jitter however long it
+/// runs, and a corner is one jittered arc.
+///
+/// Each corner rounds by at most half of the shorter leg it joins, so the two
+/// corners of one short leg meet at its middle. Fewer than two points draw
+/// nothing.
+fn elbow(points: &[[f64; 2]], radius: f64, options: &mut Options, random: &mut Random) -> Vec<Op> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut ops = Vec::new();
+    let mut pen = points[0];
+    for at in 1..points.len() - 1 {
+        let (before, corner_at, after) = (points[at - 1], points[at], points[at + 1]);
+        let length = |to: [f64; 2]| (to[0] - corner_at[0]).hypot(to[1] - corner_at[1]);
+        let (before_len, after_len) = (length(before), length(after));
+        let corner = radius.min(before_len / 2.0).min(after_len / 2.0);
+
+        // A corner of zero leaves both tangents on the vertex, which also
+        // keeps a zero-length leg from dividing by its length.
+        let tangent = |to: [f64; 2], len: f64| match corner > 0.0 {
+            true => [
+                corner_at[0] + (to[0] - corner_at[0]) / len * corner,
+                corner_at[1] + (to[1] - corner_at[1]) / len * corner,
+            ],
+            false => corner_at,
+        };
+        let (tangent_in, tangent_out) = (tangent(before, before_len), tangent(after, after_len));
+
+        if pen != tangent_in {
+            ops.extend(double_line(
+                pen[0],
+                pen[1],
+                tangent_in[0],
+                tangent_in[1],
+                options,
+                random,
+            ));
+        }
+
+        // `line` leaves the gain it computed for the leg in place, and
+        // `offset_opt` multiplies by it. Without this reset, a corner wobbles
+        // by the length of the leg before it.
+        options.gain = 1.0;
+        if corner > 0.0 {
+            ops.extend(quadratic(
+                tangent_in,
+                corner_at,
+                tangent_out,
+                options,
+                random,
+            ));
+        }
+        pen = tangent_out;
+    }
+
+    let last = points[points.len() - 1];
+    if pen != last {
+        ops.extend(double_line(
+            pen[0], pen[1], last[0], last[1], options, random,
+        ));
     }
     ops
 }

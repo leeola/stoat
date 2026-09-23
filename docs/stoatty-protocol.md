@@ -139,6 +139,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `sketch_rect` | D | 36 B, 44 B with anchor | Hand-drawn box, optionally filled |
 | `sketch_line` | D | 37 B, 45 B with anchor | Hand-drawn connector between points or components |
 | `sketch_path` | D | 22 B + 4 B per point, +8 B with anchor | Hand-drawn curve through listed points |
+| `sketch_elbow` | D | 23 B + 4 B per point, +8 B with anchor | Hand-drawn polyline through listed points, corners rounded |
 | `line_layout` | D | 2 B per line | Max 24567 lines, replaced whole |
 | `minimap` | D | 29 B + palette arg | Strip declaration; its content store is persistent |
 | `scroll_region` | D | 10 B | Eased by the change between declarations |

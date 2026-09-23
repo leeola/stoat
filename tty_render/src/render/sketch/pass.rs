@@ -771,7 +771,9 @@ fn shape_bounds(shape: &SketchShape, metrics: CellMetrics) -> Option<ComponentBo
                 radius_px: f32::from(*radius) / 16.0 * cw,
             },
         ),
-        SketchShape::Line { .. } | SketchShape::Path { .. } => return None,
+        SketchShape::Line { .. } | SketchShape::Path { .. } | SketchShape::Elbow { .. } => {
+            return None;
+        },
     };
     let x = f32::from(bounds.x) / 16.0 * cw;
     let y = f32::from(bounds.y) / 16.0 * ch;

@@ -69,9 +69,12 @@
 /// Version 6 strokes `sketch_path`, a hand-drawn curve through a list of
 /// points. A terminal that predates it ignores those frames whole.
 ///
+/// Version 7 strokes `sketch_elbow`, a hand-drawn polyline whose corners round.
+/// A terminal that predates it ignores those frames whole.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 pub mod command;
 pub mod detect;

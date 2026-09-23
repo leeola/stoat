@@ -443,7 +443,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "text_run_end" => Some(Command::TextRunEnd),
         "bar" => decode_bar(args).map(Command::Bar),
         "polyline" => decode_polyline(args).map(Command::Polyline),
-        "sketch_ellipse" | "sketch_rect" | "sketch_line" | "sketch_path" => {
+        "sketch_ellipse" | "sketch_rect" | "sketch_line" | "sketch_path" | "sketch_elbow" => {
             decode_sketch(sub, args).map(Command::Sketch)
         },
         "line_layout" => decode_line_layout(args).map(Command::LineLayout),
