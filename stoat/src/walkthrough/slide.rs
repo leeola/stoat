@@ -80,8 +80,11 @@ pub(crate) struct Callout {
     pub(crate) key: usize,
     /// The label box, in whole cells.
     pub(crate) label: Rect,
-    /// The connector from the code to the label, or `None` when the label sits
-    /// on the annotation's own row, which already says what it names.
+    /// The connector from the code to the label, or `None` for a range that
+    /// covers no row.
+    ///
+    /// A range with no rows never gets a label, so every placed label has a
+    /// connector, and every leader of the stop reaches the label column.
     ///
     /// The layout plans the whole line because only it knows what lies between
     /// the code and the box. The text on each row, the card, and the other
@@ -801,7 +804,7 @@ fn overlaps(a: Rect, b: Rect) -> bool {
 const SHORT_TAIL: u16 = 2;
 
 /// Where the connector from `range` to a label at row `label_y` leaves the
-/// code, in sixteenths, or `None` when the label sits on the range's first row.
+/// code, in sixteenths, or `None` when the range covers no row.
 ///
 /// A range that ends its last row, or that at most [`SHORT_TAIL`] cells
 /// follow, takes its line from a quarter cell past the row's end, level with
@@ -815,17 +818,18 @@ const SHORT_TAIL: u16 = 2;
 /// Over the first row means over the last cell of a one-row range. A longer
 /// range's last cell sits under rows of the range itself, so the line leaves
 /// from over its first cell instead.
+///
+/// A label on the range's first row takes its line from past the row's end,
+/// whatever follows the range. A level line from under or over the word runs
+/// through the row's text.
 fn link_point(input: &SlideInput, range: &CellRange, label_y: u16) -> Option<(i16, i16)> {
     let (&first, &last) = (range.rows.first()?, range.rows.last()?);
-    if label_y == first {
-        return None;
-    }
 
     let sixteenths = |cells: u16, offset: i32| (i32::from(cells) * CELL + offset) as i16;
     let end = line_end(input, last);
     let tail = end.is_some_and(|end| end > range.end_x + 1 + SHORT_TAIL);
 
-    Some(match (tail, label_y > last) {
+    Some(match (tail && label_y != first, label_y > last) {
         (false, _) => (
             sixteenths(
                 end.map_or(range.end_x + 1, |end| end.max(range.end_x + 1)),
@@ -1591,8 +1595,7 @@ mod tests {
 
     /// Only one label fits on a row that two annotations share, so the pair
     /// straddles the row. The first box starts a row above it, and the second
-    /// sits directly under the first, in the same column past the text. Neither
-    /// box starts on the row, so both carry a connector.
+    /// sits directly under the first, in the same column past the text.
     #[test]
     fn two_labels_on_one_row_straddle_it() {
         let mut input = input(pane(), None);
@@ -1903,6 +1906,18 @@ mod tests {
         );
     }
 
+    /// A level line from under the word runs through the eleven cells of text
+    /// after it, so a label on the word's own row takes its line from past the
+    /// row's end. The row says what the label names.
+    #[test]
+    fn a_connector_to_a_label_on_its_own_row_leaves_past_the_rows_end() {
+        assert_eq!(
+            links_from(&[10], 20, card_over_rows(20, 1)),
+            [Some((20 * 16 + 4, 10 * 16 + 8))],
+            "a quarter cell past the row's end at cell 20, halfway down row 10",
+        );
+    }
+
     /// A label above takes its line from over the word's last cell, the end
     /// nearest the label, so the line crosses the least of the code above.
     #[test]
@@ -2144,8 +2159,8 @@ mod tests {
 
     /// Stacked connectors whose rows overlap run side by side in the channel,
     /// the longer nearer the code. The second label's side sits four sixteenths
-    /// above its code, so its line runs level, and the third label sits on its
-    /// own row.
+    /// above its code, so its line runs level. The third label sits on its own
+    /// row, so its line runs level too.
     #[test]
     fn stacked_connectors_take_lanes_by_span() {
         let mut input = input(pane(), None);
@@ -2182,7 +2197,11 @@ mod tests {
                     to: (220, 180),
                     via: Vec::new(),
                 }),
-                None,
+                Some(Link {
+                    from: (164, 200),
+                    to: (220, 204),
+                    via: Vec::new(),
+                }),
                 elbow(
                     (164, 216),
                     &[(204, 216), (212, 224), (212, 260)],

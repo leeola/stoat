@@ -1452,8 +1452,8 @@ mod tests {
     /// every callout before it.
     #[test]
     fn a_stepped_onto_annotation_draws_its_callout_at_once() {
-        // On its own row the second label overlaps the first, so it moves off
-        // that row and takes a connector.
+        // Every label takes a connector. On its own row the second label
+        // overlaps the first, so it moves off that row and its line turns.
         let mut h = harness(&[(1, "one"), (3, "two")]);
         open(&mut h.stoat, "tour");
         reach(&mut h, 1);
