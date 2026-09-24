@@ -92,6 +92,19 @@ pub(crate) struct Callout {
     pub(crate) link: Option<Link>,
 }
 
+/// How a connector runs between its code and its label, in sixteenths of a
+/// cell.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Route {
+    Straight,
+    /// A curve through one midpoint, which the terminal's spline passes.
+    Bowed((i16, i16)),
+    /// A polyline through its corners, each rounded by [`LINK_CORNER`]. One
+    /// turns from the code's row onto the leg, and one turns from the leg onto
+    /// the label's row.
+    Elbow(Vec<(i16, i16)>),
+}
+
 /// The line a connector draws from an annotation's code to its label.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Link {
@@ -104,9 +117,7 @@ pub(crate) struct Link {
     /// Where the line meets the label, in sixteenths of a cell, just left of
     /// the label's left edge.
     pub(crate) to: (i16, i16),
-    /// The points the line passes between `from` and `to`, in order and in
-    /// sixteenths of a cell. Empty for a straight line.
-    pub(crate) via: Vec<(i16, i16)>,
+    pub(crate) route: Route,
 }
 
 /// A part of a slide, for the timing table.
@@ -540,7 +551,8 @@ fn place_callouts(input: &SlideInput, card: Option<Rect>) -> Vec<Callout> {
             Link {
                 from,
                 to,
-                via: elbow_via(from, to, &obstacles, lanes[slot])
+                route: elbow_via(from, to, &obstacles, lanes[slot])
+                    .map(Route::Elbow)
                     .unwrap_or_else(|| bowed_via(from, to, &obstacles, aspect)),
             }
         });
@@ -856,7 +868,10 @@ const LINK_CLEAR: i32 = CELL / 2;
 const LINK_LANE: i32 = CELL / 2;
 
 /// The radius an elbow turns each corner by, in sixteenths.
-const LINK_CORNER: i32 = CELL / 2;
+///
+/// The terminal clamps the rounding at each corner to half of the shorter leg
+/// it joins.
+pub(crate) const LINK_CORNER: i32 = CELL / 2;
 
 /// Where a connector from `from` meets `label`, in sixteenths.
 ///
@@ -910,8 +925,8 @@ fn link_lanes(ends: &[Option<LinkEnds>]) -> Vec<u8> {
     lanes
 }
 
-/// The points of an elbow from `from` to `to` around `obstacles`, with its leg
-/// in lane `lane` of the channel beside the label column, or `None` when no
+/// The two corners of an elbow from `from` to `to` around `obstacles`, with its
+/// leg in lane `lane` of the channel beside the label column, or `None` when no
 /// leg clears.
 ///
 /// The line runs along its code's row, turns down or up a leg, and turns again
@@ -921,8 +936,9 @@ fn link_lanes(ends: &[Option<LinkEnds>]) -> Vec<u8> {
 /// a shorter line turn into its label without crossing a longer one.
 ///
 /// A lane that fits nowhere falls back toward the labels, because two lines
-/// side by side beat one through the code. The samples decide, so a corner's
-/// overshoot counts. A line under two corners off level has no room to turn.
+/// side by side beat one through the code. The route's chords decide, since
+/// the terminal rounds each corner inside them. A line under two corners off
+/// level has no room to turn.
 fn elbow_via(
     from: (i16, i16),
     to: (i16, i16),
@@ -935,7 +951,6 @@ fn elbow_via(
         return None;
     }
 
-    let dir = (to_y - from_y).signum();
     let (top, bottom) = (from_y.min(to_y), from_y.max(to_y));
     let legs = from_x + LINK_CORNER..=to_x - LINK_CORNER;
     let mut candidates: Vec<i32> = obstacles
@@ -955,72 +970,20 @@ fn elbow_via(
         .rev()
         .flat_map(|tried| candidates.iter().map(move |&leg| leg - tried * LINK_LANE))
         .filter(|&leg| leg >= *legs.start())
-        .map(|leg| {
-            let mut corners = vec![
-                (leg - LINK_CORNER, from_y),
-                (leg, from_y + dir * LINK_CORNER),
-                (leg, to_y - dir * LINK_CORNER),
-                (leg + LINK_CORNER, to_y),
-            ];
-            if leg + LINK_CORNER >= to_x {
-                corners.pop();
-            }
-            if leg - LINK_CORNER <= from_x {
-                corners.remove(0);
-            }
-            let corners: Vec<(i16, i16)> = corners
-                .into_iter()
-                .map(|(x, y)| (x as i16, y as i16))
-                .collect();
-            trace(from, &corners, to)
-        })
-        .find(|via| clears(from, via, to, obstacles))
-}
-
-/// The most points [`trace`] lays along one route, which keeps a path frame
-/// with its two ends under the 255 points it carries.
-const LINK_TRACE_POINTS: f32 = 240.0;
-
-/// The points along the route from `from` through `corners` to `to`, at most
-/// [`LINK_CORNER`] apart and through every corner, with `from` and `to` left
-/// out.
-///
-/// The terminal draws a path as a spline through its points, and a point far
-/// from its neighbors throws the curve wide. A corner after a long run swings
-/// the line cells past the turn, into whatever stands there. Points spaced
-/// evenly along the route keep the curve on it, so an elbow turns where its
-/// corners stand. A route too long for [`LINK_TRACE_POINTS`] at that spacing
-/// takes a wider step.
-fn trace(from: (i16, i16), corners: &[(i16, i16)], to: (i16, i16)) -> Vec<(i16, i16)> {
-    let route = [&[from][..], corners, &[to]].concat();
-    let length = |a: (i16, i16), b: (i16, i16)| {
-        (f32::from(b.0) - f32::from(a.0)).hypot(f32::from(b.1) - f32::from(a.1))
-    };
-    let total: f32 = route.windows(2).map(|pair| length(pair[0], pair[1])).sum();
-    let step = (total / LINK_TRACE_POINTS).max(LINK_CORNER as f32);
-
-    let mut traced = Vec::new();
-    for pair in route.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let steps = (length(a, b) / step).ceil().max(1.0) as i32;
-        traced.extend((1..=steps).map(|at| {
-            let t = at as f32 / steps as f32;
-            (
-                (f32::from(a.0) + (f32::from(b.0) - f32::from(a.0)) * t).round() as i16,
-                (f32::from(a.1) + (f32::from(b.1) - f32::from(a.1)) * t).round() as i16,
+        .map(|leg| vec![(leg as i16, from.1), (leg as i16, to.1)])
+        .find(|corners| {
+            clears(
+                &chord_samples(&[from, corners[0], corners[1], to]),
+                obstacles,
             )
-        }));
-    }
-    // The last step of the last leg lands on `to` itself.
-    traced.pop();
-    traced
+        })
 }
 
 /// The bends a connector tries, straight first, then each side in turn at a
 /// growing bow.
 const LINK_BENDS: [i8; 7] = [0, -12, 12, -24, 24, -32, 32];
 
-/// The points that take a connector from `from` to `to` around `obstacles`,
+/// The route that takes a connector from `from` to `to` around `obstacles`,
 /// on a cell `aspect` times as tall as it is wide.
 ///
 /// Each of [`LINK_BENDS`] is tried in turn as one bowed midpoint. A straight
@@ -1028,20 +991,18 @@ const LINK_BENDS: [i8; 7] = [0, -12, 12, -24, 24, -32, 32];
 /// explain it reads as a flourish. A line that no bend gets clear also stays
 /// straight. A pointer that crosses something still says which code the label
 /// names, and a missing one says nothing.
-fn bowed_via(
-    from: (i16, i16),
-    to: (i16, i16),
-    obstacles: &[SixteenthRect],
-    aspect: f32,
-) -> Vec<(i16, i16)> {
+fn bowed_via(from: (i16, i16), to: (i16, i16), obstacles: &[SixteenthRect], aspect: f32) -> Route {
     LINK_BENDS
         .into_iter()
         .map(|bend| match bend {
-            0 => Vec::new(),
-            bend => vec![bow_midpoint(from, to, bend, aspect)],
+            0 => (Route::Straight, chord_samples(&[from, to])),
+            bend => {
+                let mid = bow_midpoint(from, to, bend, aspect);
+                (Route::Bowed(mid), spline_samples(&[from, mid, to]))
+            },
         })
-        .find(|via| clears(from, via, to, obstacles))
-        .unwrap_or_default()
+        .find(|(_, samples)| clears(samples, obstacles))
+        .map_or(Route::Straight, |(route, _)| route)
 }
 
 /// The midpoint of a connector from `from` to `to` bowed by `bend`, in
@@ -1062,46 +1023,52 @@ fn bow_midpoint(from: (i16, i16), to: (i16, i16), bend: i8, aspect: f32) -> (i16
     )
 }
 
-/// Whether the connector from `from` through `via` to `to` keeps out of every
-/// one of `obstacles`.
+/// Whether a connector sampled at `samples` keeps out of every one of
+/// `obstacles`.
 ///
 /// The first sample is the line's start, on the edge of its own row's text, so
 /// it never counts.
-fn clears(
-    from: (i16, i16),
-    via: &[(i16, i16)],
-    to: (i16, i16),
-    obstacles: &[SixteenthRect],
-) -> bool {
-    link_samples(&[&[from][..], via, &[to]].concat())
-        .into_iter()
+fn clears(samples: &[(f32, f32)], obstacles: &[SixteenthRect]) -> bool {
+    samples
+        .iter()
         .skip(1)
-        .all(|point| obstacles.iter().all(|&rect| !strictly_inside(point, rect)))
+        .all(|&point| obstacles.iter().all(|&rect| !strictly_inside(point, rect)))
 }
 
 /// Points sampled along each segment of a connector, both ends included.
 const LINK_SAMPLES: usize = 32;
 
-/// Points along the connector through `points`, in sixteenths.
+/// Points along each chord of the polyline through `points`, both ends of each
+/// chord included, in sixteenths.
 ///
-/// The points follow the terminal's curve before its rough jitter. Two points
-/// are sampled along their chord. More are the Catmull-Rom spline through
-/// them, with both ends doubled so the curve reaches them, which the terminal
-/// draws as one cubic per segment.
+/// An elbow's chords are its route before the terminal rounds its corners.
+/// Each arc lies inside the corner its chords cut, never more than a quarter of
+/// the rounding from them, so the chords stand for the line the terminal draws.
+fn chord_samples(points: &[(i16, i16)]) -> Vec<(f32, f32)> {
+    points
+        .windows(2)
+        .flat_map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            let (x, y) = (f32::from(from.0), f32::from(from.1));
+            let (dx, dy) = (f32::from(to.0) - x, f32::from(to.1) - y);
+            sample_ts().map(move |t| (x + dx * t, y + dy * t))
+        })
+        .collect()
+}
+
+/// Points along the Catmull-Rom spline through `points`, in sixteenths.
+///
+/// The points follow the terminal's curve for a sketch path before its rough
+/// jitter. Both ends count twice so the curve reaches them, and the terminal
+/// draws the spline as one cubic per segment.
 ///
 /// The spline moves with its points under a scale of either axis, so the
 /// cell's shape enters only where a point is chosen.
-fn link_samples(points: &[(i16, i16)]) -> Vec<(f32, f32)> {
+fn spline_samples(points: &[(i16, i16)]) -> Vec<(f32, f32)> {
     let points: Vec<(f32, f32)> = points
         .iter()
         .map(|&(x, y)| (f32::from(x), f32::from(y)))
         .collect();
-    if let [from, to] = points[..] {
-        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-        return sample_ts()
-            .map(|t| (from.0 + dx * t, from.1 + dy * t))
-            .collect();
-    }
     let (Some(&first), Some(&last)) = (points.first(), points.last()) else {
         return Vec::new();
     };
@@ -1973,7 +1940,7 @@ mod tests {
     /// A bend with nothing to explain it reads as a flourish.
     #[test]
     fn a_straight_connector_that_clears_everything_stays_straight() {
-        assert_eq!(bowed_via((136, 192), (380, 217), &[], 1.0), Vec::new());
+        assert_eq!(bowed_via((136, 192), (380, 217), &[], 1.0), Route::Straight);
     }
 
     /// A label between the code and the box its connector points at bends the
@@ -1988,12 +1955,12 @@ mod tests {
             h: 48,
         };
 
-        let via = bowed_via(from, to, &[label], 1.0);
-        let [mid] = via[..] else {
-            panic!("the straight line runs through the label, so one bow, got {via:?}");
+        let route = bowed_via(from, to, &[label], 1.0);
+        let Route::Bowed(mid) = route else {
+            panic!("the straight line runs through the label, so one bow, got {route:?}");
         };
         assert!(
-            link_samples(&[from, mid, to])
+            spline_samples(&[from, mid, to])
                 .iter()
                 .all(|&point| !strictly_inside(point, label)),
             "the line bowed through {mid:?} clears the label",
@@ -2013,7 +1980,7 @@ mod tests {
 
         assert_eq!(
             bowed_via((136, 192), (700, 217), &[corridor], 1.0),
-            Vec::new()
+            Route::Straight
         );
     }
 
@@ -2044,7 +2011,7 @@ mod tests {
 
         assert_eq!(
             (via(1.0), via(2.0)),
-            (vec![(320, -120)], vec![(320, -120)]),
+            (Route::Bowed((320, -120)), Route::Bowed((320, -120))),
             "the tall cell takes the deeper bend to land the midpoint where the \
              square cell's shallower one does",
         );
@@ -2074,10 +2041,9 @@ mod tests {
     /// crosses neither the text nor a label.
     #[test]
     fn a_connector_runs_down_the_channel_beside_the_column() {
-        let (from, to) = ((580, 168), (956, 236));
         assert_eq!(
-            elbow_via(from, to, &channel_obstacles(640), 0),
-            Some(trace(from, &[(940, 168), (948, 176), (948, 228)], to)),
+            elbow_via((580, 168), (956, 236), &channel_obstacles(640), 0),
+            Some(vec![(948, 168), (948, 236)]),
             "along row 10, down a leg half a cell left of the label, and in",
         );
     }
@@ -2086,38 +2052,43 @@ mod tests {
     /// for a shorter line to turn into its label without crossing this one.
     #[test]
     fn a_second_lane_runs_half_a_cell_nearer_the_text() {
-        let (from, to) = ((580, 168), (956, 236));
         assert_eq!(
-            elbow_via(from, to, &channel_obstacles(640), 1),
-            Some(trace(
-                from,
-                &[(932, 168), (940, 176), (940, 228), (948, 236)],
-                to
-            )),
+            elbow_via((580, 168), (956, 236), &channel_obstacles(640), 1),
+            Some(vec![(940, 168), (940, 236)]),
             "the leg a full cell left of the label, with a corner into it",
         );
     }
 
-    /// An elbow's points trace its route at most a corner's radius apart, so
-    /// the spline through them turns at each corner rather than swinging past
-    /// it after a long run.
+    /// An elbow's clearance is tested along its chords, the sharp route the
+    /// terminal rounds, so each leg is sampled from its start to its end.
     #[test]
-    fn an_elbow_traces_its_route_in_short_steps() {
+    fn chord_samples_walk_each_leg() {
+        let samples = chord_samples(&[(0, 0), (48, 0), (48, 40)]);
         assert_eq!(
-            trace((0, 0), &[(40, 0), (48, 8)], (48, 40)),
+            samples.len(),
+            2 * LINK_SAMPLES,
+            "one run of samples per leg"
+        );
+
+        let (first, second) = samples.split_at(LINK_SAMPLES);
+        assert_eq!(
             [
-                (8, 0),
-                (16, 0),
-                (24, 0),
-                (32, 0),
-                (40, 0),
-                (44, 4),
-                (48, 8),
-                (48, 16),
-                (48, 24),
-                (48, 32),
+                first[0],
+                first[LINK_SAMPLES - 1],
+                second[0],
+                second[LINK_SAMPLES - 1]
             ],
-            "every corner on the route, no step past eight sixteenths, and no end",
+            [(0.0, 0.0), (48.0, 0.0), (48.0, 0.0), (48.0, 40.0)],
+            "each leg from its start to its end, through the corner",
+        );
+        assert!(
+            first
+                .iter()
+                .all(|&(x, y)| y == 0.0 && (0.0..=48.0).contains(&x))
+                && second
+                    .iter()
+                    .all(|&(x, y)| x == 48.0 && (0.0..=40.0).contains(&y)),
+            "every sample on its own leg, got {samples:?}",
         );
     }
 
@@ -2132,8 +2103,8 @@ mod tests {
     }
 
     /// A connector that leaves from its row's top edge runs its elbow along the
-    /// edge between two rows of text. Float rounding strays the spline off that
-    /// edge by a hair, which does not count as running through the text.
+    /// edge between two rows of text. A line on that edge runs through neither
+    /// row.
     #[test]
     fn an_elbow_runs_along_the_edge_between_two_rows() {
         let text = [27, 28].map(|row| SixteenthRect {
@@ -2142,11 +2113,9 @@ mod tests {
             w: 656,
             h: 16,
         });
-        let (from, to) = ((552, 448), (860, 391));
-
         assert_eq!(
-            elbow_via(from, to, &text, 0),
-            Some(trace(from, &[(844, 448), (852, 440), (852, 399)], to)),
+            elbow_via((552, 448), (860, 391), &text, 0),
+            Some(vec![(852, 448), (852, 391)]),
             "along the edge above row 28, up a leg past the text, and in",
         );
     }
@@ -2177,41 +2146,28 @@ mod tests {
             .into_iter()
             .map(|callout| callout.link)
             .collect();
-        let elbow = |from: (i16, i16), corners: &[(i16, i16)], to: (i16, i16)| {
+        let elbow = |from: (i16, i16), leg: i16, to: (i16, i16)| {
             Some(Link {
                 from,
                 to,
-                via: trace(from, corners, to),
+                route: Route::Elbow(vec![(leg, from.1), (leg, to.1)]),
+            })
+        };
+        let straight = |from, to| {
+            Some(Link {
+                from,
+                to,
+                route: Route::Straight,
             })
         };
         assert_eq!(
             links,
             [
-                elbow(
-                    (164, 168),
-                    &[(204, 168), (212, 160), (212, 124)],
-                    (220, 116)
-                ),
-                Some(Link {
-                    from: (164, 184),
-                    to: (220, 180),
-                    via: Vec::new(),
-                }),
-                Some(Link {
-                    from: (164, 200),
-                    to: (220, 204),
-                    via: Vec::new(),
-                }),
-                elbow(
-                    (164, 216),
-                    &[(204, 216), (212, 224), (212, 260)],
-                    (220, 268)
-                ),
-                elbow(
-                    (164, 232),
-                    &[(196, 232), (204, 240), (204, 324), (212, 332)],
-                    (220, 332),
-                ),
+                elbow((164, 168), 212, (220, 116)),
+                straight((164, 184), (220, 180)),
+                straight((164, 200), (220, 204)),
+                elbow((164, 216), 212, (220, 268)),
+                elbow((164, 232), 204, (220, 332)),
             ],
             "legs at 212, 212, and 204, the fifth in the second lane since its \
              rows meet the fourth's",

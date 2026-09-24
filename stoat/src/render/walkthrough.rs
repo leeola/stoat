@@ -25,8 +25,8 @@ use crate::{
     walkthrough::{
         run::{part, WalkthroughRun},
         slide::{
-            self, AnnotationCells, CellRange, Emphasis, Link, Mark, SixteenthRect, Slide,
-            SlideInput,
+            self, AnnotationCells, CellRange, Emphasis, Link, Mark, Route, SixteenthRect, Slide,
+            SlideInput, LINK_CORNER,
         },
         Range,
     },
@@ -52,6 +52,11 @@ const SKETCH_PROTOCOL: u32 = 3;
 /// frame whole, so a connector that bends goes to it as a straight line
 /// between the same ends rather than vanishing.
 const PATH_PROTOCOL: u32 = 6;
+
+/// The protocol version that draws a sketch elbow. An older stoatty ignores the
+/// frame whole, so an elbow goes to it as a straight line between the same
+/// ends rather than vanishing.
+const ELBOW_PROTOCOL: u32 = 7;
 
 /// Columns a label is wrapped at, chosen so a box stays narrower than the code
 /// it sits beside.
@@ -161,7 +166,7 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|annotation| (annotation.key, annotation.label_lines.clone()))
             .collect(),
         anchor: pool_anchor(stoat),
-        paths: stoat.stoatty_protocol >= PATH_PROTOCOL,
+        protocol: stoat.stoatty_protocol,
         now,
         opening: last_declared.is_empty(),
         last_declared,
@@ -411,9 +416,9 @@ struct Painter {
     /// The pool the marks ride, so they glide with the pane rather than
     /// staying pinned to the screen.
     anchor: Option<(u32, f32)>,
-    /// Whether the terminal draws a sketch path, which a connector that bends
-    /// needs.
-    paths: bool,
+    /// The terminal's protocol version, which decides whether a connector
+    /// that bends goes out as the shape its route names or as a straight line.
+    protocol: u32,
     /// The scheduler clock this frame reads, so every part measures its absence
     /// against the same instant.
     now: Instant,
@@ -627,7 +632,7 @@ impl Painter {
                         fill: None,
                         ..stroke
                     },
-                    link_shape(link, self.paths),
+                    link_shape(link, self.protocol),
                     buf,
                     scene,
                 );
@@ -759,14 +764,30 @@ impl Painter {
 
 /// The shape a label connector goes out as.
 ///
-/// A connector with no via is a straight line. One that bends is a path
-/// through every point the layout planned, when `paths` says the terminal
-/// draws one. A terminal that does not ignores a path frame whole, so there
-/// the connector is a straight line between the same ends. A pointer that
-/// crosses something still says which code the label names.
-fn link_shape(link: &Link, paths: bool) -> SketchShape {
-    if link.via.is_empty() || !paths {
-        return SketchShape::Line {
+/// A straight route is a straight line. A bowed one is a path through its
+/// midpoint, and an elbow is a polyline through its corners, each rounded by
+/// [`LINK_CORNER`], when `protocol` says the terminal draws that shape. A
+/// terminal that does not ignores the frame whole, so there the connector is a
+/// straight line between the same ends. A pointer that crosses something still
+/// says which code the label names.
+fn link_shape(link: &Link, protocol: u32) -> SketchShape {
+    let points = |between: &[(i16, i16)]| {
+        [&[link.from][..], between, &[link.to]]
+            .concat()
+            .into_iter()
+            .map(|(x, y)| SketchPoint { x, y })
+            .collect()
+    };
+
+    match &link.route {
+        Route::Bowed(mid) if protocol >= PATH_PROTOCOL => SketchShape::Path {
+            points: points(&[*mid]),
+        },
+        Route::Elbow(corners) if protocol >= ELBOW_PROTOCOL => SketchShape::Elbow {
+            points: points(corners),
+            radius: LINK_CORNER as u8,
+        },
+        Route::Straight | Route::Bowed(_) | Route::Elbow(_) => SketchShape::Line {
             from: SketchEnd::Point {
                 x: link.from.0,
                 y: link.from.1,
@@ -777,15 +798,7 @@ fn link_shape(link: &Link, paths: bool) -> SketchShape {
             },
             bend: 0,
             heads: 0,
-        };
-    }
-
-    SketchShape::Path {
-        points: [&[link.from][..], link.via.as_slice(), &[link.to]]
-            .concat()
-            .into_iter()
-            .map(|(x, y)| SketchPoint { x, y })
-            .collect(),
+        },
     }
 }
 
@@ -1014,7 +1027,8 @@ mod tests {
         theme::scope,
         walkthrough::{
             run::{part, ID_SPACE, STOP_ID_STRIDE},
-            slide, Location, Point, Range, Walkthrough,
+            slide::{self, Link, Route},
+            Location, Point, Range, Walkthrough,
         },
     };
     use ratatui::style::Color;
@@ -1500,23 +1514,31 @@ mod tests {
             .find(|sketch| sketch.id == annotation_ids(&h, 1).0)
             .expect("the connector is emitted");
 
-        let paths = h.stoat.stoatty_protocol >= super::PATH_PROTOCOL;
-        assert_eq!(link.shape, super::link_shape(&planned, paths));
+        assert_eq!(
+            link.shape,
+            super::link_shape(&planned, h.stoat.stoatty_protocol)
+        );
     }
 
-    /// A connector that bends goes out as a path through every point the layout
-    /// planned, where the terminal draws one. An older terminal ignores a path
-    /// whole, so there the connector is a straight line between the same ends.
+    /// A connector that bends goes out as the shape its route names, where the
+    /// terminal draws that shape. A bowed route is a path through its midpoint,
+    /// and an elbow is a polyline through its corners. An older terminal ignores
+    /// either frame whole, so there the connector is a straight line between
+    /// the same ends.
     #[test]
-    fn a_bent_connector_is_a_path_where_the_terminal_draws_one() {
-        let bent = slide::Link {
+    fn a_bent_connector_takes_a_shape_the_terminal_draws() {
+        let bowed = Link {
             from: (0, 16),
             to: (160, 48),
-            via: vec![(80, 0)],
+            route: Route::Bowed((80, 0)),
         };
-        let straight = slide::Link {
-            via: Vec::new(),
-            ..bent.clone()
+        let straight = Link {
+            route: Route::Straight,
+            ..bowed.clone()
+        };
+        let elbow = Link {
+            route: Route::Elbow(vec![(80, 16), (80, 48)]),
+            ..bowed.clone()
         };
         let line = SketchShape::Line {
             from: SketchEnd::Point { x: 0, y: 16 },
@@ -1527,9 +1549,11 @@ mod tests {
 
         assert_eq!(
             [
-                super::link_shape(&bent, true),
-                super::link_shape(&bent, false),
-                super::link_shape(&straight, true),
+                super::link_shape(&bowed, 6),
+                super::link_shape(&bowed, 5),
+                super::link_shape(&straight, 6),
+                super::link_shape(&elbow, 7),
+                super::link_shape(&elbow, 6),
             ],
             [
                 SketchShape::Path {
@@ -1540,10 +1564,20 @@ mod tests {
                     ],
                 },
                 line.clone(),
+                line.clone(),
+                SketchShape::Elbow {
+                    points: vec![
+                        SketchPoint { x: 0, y: 16 },
+                        SketchPoint { x: 80, y: 16 },
+                        SketchPoint { x: 80, y: 48 },
+                        SketchPoint { x: 160, y: 48 },
+                    ],
+                    radius: 8,
+                },
                 line,
             ],
-            "a path where the terminal draws one, else a straight line, and a \
-             straight line with no via",
+            "a path or an elbow where the terminal draws one, else a straight \
+             line, and a straight line for a straight route",
         );
     }
 
