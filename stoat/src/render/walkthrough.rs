@@ -1572,7 +1572,7 @@ mod tests {
                         SketchPoint { x: 80, y: 48 },
                         SketchPoint { x: 160, y: 48 },
                     ],
-                    radius: 8,
+                    radius: 16,
                 },
                 line,
             ],

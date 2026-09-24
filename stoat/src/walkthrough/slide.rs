@@ -870,8 +870,17 @@ const LINK_LANE: i32 = CELL / 2;
 /// The radius an elbow turns each corner by, in sixteenths.
 ///
 /// The terminal clamps the rounding at each corner to half of the shorter leg
-/// it joins.
-pub(crate) const LINK_CORNER: i32 = CELL / 2;
+/// it joins. The corner into a label draws at the full radius only when the
+/// leg before it is two radii long, which [`elbow_via`] reserves.
+pub(crate) const LINK_CORNER: i32 = CELL;
+
+/// The least rise, in sixteenths of a cell height, that a connector turns an
+/// elbow across.
+///
+/// A connector with a smaller rise runs level or bows. Both corners of an
+/// elbow join its leg. The terminal clamps each corner to half of that leg, so
+/// under one row the corners shrink to a jog.
+const LINK_TURN: i32 = CELL;
 
 /// Where a connector from `from` meets `label`, in sixteenths.
 ///
@@ -907,7 +916,7 @@ fn link_lanes(ends: &[Option<LinkEnds>]) -> Vec<u8> {
         .filter_map(|(at, ends)| {
             let (from, to) = (*ends)?;
             let (top, bottom) = (i32::from(from.1.min(to.1)), i32::from(from.1.max(to.1)));
-            (bottom - top >= 2 * LINK_CORNER).then_some((at, top / CELL..=bottom / CELL))
+            (bottom - top >= LINK_TURN).then_some((at, top / CELL..=bottom / CELL))
         })
         .collect();
     turns.sort_by_key(|(_, rows)| rows.end() - rows.start());
@@ -937,8 +946,8 @@ fn link_lanes(ends: &[Option<LinkEnds>]) -> Vec<u8> {
 ///
 /// A lane that fits nowhere falls back toward the labels, because two lines
 /// side by side beat one through the code. The route's chords decide, since
-/// the terminal rounds each corner inside them. A line under two corners off
-/// level has no room to turn.
+/// the terminal rounds each corner inside them. A line under one row off level
+/// has no room to turn twice.
 fn elbow_via(
     from: (i16, i16),
     to: (i16, i16),
@@ -947,12 +956,15 @@ fn elbow_via(
 ) -> Option<Vec<(i16, i16)>> {
     let (from_x, from_y) = (i32::from(from.0), i32::from(from.1));
     let (to_x, to_y) = (i32::from(to.0), i32::from(to.1));
-    if (to_y - from_y).abs() < 2 * LINK_CORNER {
+    if (to_y - from_y).abs() < LINK_TURN {
         return None;
     }
 
     let (top, bottom) = (from_y.min(to_y), from_y.max(to_y));
-    let legs = from_x + LINK_CORNER..=to_x - LINK_CORNER;
+    // The terminal clamps each corner to half of its shorter leg. The leg into
+    // the label is two radii long, so its corner draws whole. The leg off the
+    // code's row takes what the row leaves.
+    let legs = from_x + LINK_CORNER..=to_x - 2 * LINK_CORNER;
     let mut candidates: Vec<i32> = obstacles
         .iter()
         .filter(|rect| i32::from(rect.y) <= bottom && i32::from(rect.y) + i32::from(rect.h) >= top)
@@ -960,7 +972,7 @@ fn elbow_via(
             let left = i32::from(rect.x);
             [left, left + i32::from(rect.w) + LINK_CLEAR]
         })
-        .chain([to_x - LINK_CORNER])
+        .chain([to_x - 2 * LINK_CORNER])
         .filter(|leg| legs.contains(leg))
         .collect();
     candidates.sort_unstable_by(|a, b| b.cmp(a));
@@ -2043,8 +2055,8 @@ mod tests {
     fn a_connector_runs_down_the_channel_beside_the_column() {
         assert_eq!(
             elbow_via((580, 168), (956, 236), &channel_obstacles(640), 0),
-            Some(vec![(948, 168), (948, 236)]),
-            "along row 10, down a leg half a cell left of the label, and in",
+            Some(vec![(924, 168), (924, 236)]),
+            "down a leg two cells left of the link end",
         );
     }
 
@@ -2054,8 +2066,8 @@ mod tests {
     fn a_second_lane_runs_half_a_cell_nearer_the_text() {
         assert_eq!(
             elbow_via((580, 168), (956, 236), &channel_obstacles(640), 1),
-            Some(vec![(940, 168), (940, 236)]),
-            "the leg a full cell left of the label, with a corner into it",
+            Some(vec![(916, 168), (916, 236)]),
+            "the leg two and a half cells left of the link end, with a corner into it",
         );
     }
 
@@ -2115,12 +2127,12 @@ mod tests {
         });
         assert_eq!(
             elbow_via((552, 448), (860, 391), &text, 0),
-            Some(vec![(852, 448), (852, 391)]),
+            Some(vec![(828, 448), (828, 391)]),
             "along the edge above row 28, up a leg past the text, and in",
         );
     }
 
-    /// A line under two corners off level has no room to turn twice.
+    /// A line under one row off level has no room to turn twice.
     #[test]
     fn a_nearly_level_connector_takes_no_elbow() {
         assert_eq!(elbow_via((580, 168), (956, 178), &[], 0), None);
@@ -2163,13 +2175,13 @@ mod tests {
         assert_eq!(
             links,
             [
-                elbow((164, 168), 212, (220, 116)),
+                elbow((164, 168), 188, (220, 116)),
                 straight((164, 184), (220, 180)),
                 straight((164, 200), (220, 204)),
-                elbow((164, 216), 212, (220, 268)),
-                elbow((164, 232), 204, (220, 332)),
+                elbow((164, 216), 188, (220, 268)),
+                elbow((164, 232), 180, (220, 332)),
             ],
-            "legs at 212, 212, and 204, the fifth in the second lane since its \
+            "legs at 188, 188, and 180, the fifth in the second lane since its \
              rows meet the fourth's",
         );
     }
