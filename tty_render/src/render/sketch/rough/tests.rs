@@ -613,6 +613,32 @@ fn an_elbows_stroke_count_does_not_grow_with_its_length() {
     );
 }
 
+/// A corner's vertex wanders before its tangents start from it, so its legs
+/// tilt off their axes and its arc moves. The ends hold, because the layout
+/// anchored them to the code and the label.
+#[test]
+fn an_elbows_corner_wanders_while_its_ends_hold() {
+    let strokes = elbow_strokes(&[(0, 0), (160, 0), (160, 160)], 16, 64);
+
+    let (first, last) = (&strokes[0].points, &strokes[strokes.len() - 1].points);
+    assert_eq!(
+        (first[0], last[last.len() - 1]),
+        ([0.0, 0.0], [100.0, 200.0]),
+        "the ends hold where the layout put them",
+    );
+    assert_ne!(
+        strokes[2].points[0],
+        [90.0, 0.0],
+        "the corner starts off the tangent an exact vertex gives",
+    );
+
+    let route = [[0.0, 0.0], [100.0, 0.0], [100.0, 200.0]];
+    for point in strokes.iter().flat_map(|stroke| &stroke.points) {
+        let off = distance_to_path(*point, &route);
+        assert!(off <= 8.0, "{point:?} strays {off} px off the route");
+    }
+}
+
 /// Both bits of the mask are read, so a connector can point at one end, the
 /// other, or both.
 #[test]

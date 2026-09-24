@@ -1155,6 +1155,16 @@ fn rect(
 /// A leg therefore carries one bow and one endpoint jitter however long it
 /// runs, and a corner is one jittered arc.
 ///
+/// Each interior vertex moves once, by up to the reach of a free line end's
+/// jitter on each axis. Its corner's tangents start from the moved vertex. The
+/// legs and the arc that meet there take their ends from that one vertex, so
+/// no gap opens between them. The move is what tilts a leg off its axis,
+/// because [`line`] bows a segment but never turns it.
+///
+/// The move skips the first and last points, whatever
+/// [`Options::preserve_vertices`] says, because the layout anchored them to
+/// the code and the label.
+///
 /// Each corner rounds by at most half of the shorter leg it joins, so the two
 /// corners of one short leg meet at its middle. Fewer than two points draw
 /// nothing.
@@ -1162,6 +1172,21 @@ fn elbow(points: &[[f64; 2]], radius: f64, options: &mut Options, random: &mut R
     if points.len() < 2 {
         return Vec::new();
     }
+
+    let points: Vec<[f64; 2]> = {
+        let last = points.len() - 1;
+        points
+            .iter()
+            .enumerate()
+            .map(|(at, &[x, y])| match at == 0 || at == last {
+                true => [x, y],
+                false => [
+                    x + options.offset_opt(options.max_randomness_offset, random),
+                    y + options.offset_opt(options.max_randomness_offset, random),
+                ],
+            })
+            .collect()
+    };
 
     let mut ops = Vec::new();
     let mut pen = points[0];
