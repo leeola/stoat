@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    auto_reload,
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
@@ -510,14 +511,16 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Leave the diff view once a walk's return lands, or put the walk back if the
-/// return failed.
+/// Leave the diff view once a walk's return lands, with every clean buffer
+/// re-read from the restored tree, or put the walk back if the return failed.
 fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>) {
     if let Err(err) = restored {
         restore_walk(stoat, walk);
         review_error(stoat, "could not return", Some(err));
         return;
     }
+
+    auto_reload::reload_clean_buffers(stoat);
 
     // Only a return that landed clears the base. A failed one leaves the tree at
     // the commit, and the base must still name that commit's parent.
@@ -903,7 +906,10 @@ fn land_walk_checkout(
     }
 
     match landed {
-        Ok(landing) => land_walk(stoat, workdir, standing, landing),
+        Ok(landing) => {
+            auto_reload::reload_clean_buffers(stoat);
+            land_walk(stoat, workdir, standing, landing);
+        },
         Err(failure) => report_failure(stoat, kind, failure),
     }
 
@@ -994,6 +1000,11 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
 
+    /// The text a checkout writes into `/repo/a.rs`. The fake host moves HEAD
+    /// without writing the tree, so a test writes this text itself in place of
+    /// the checkout.
+    const CHECKED_OUT_A: &str = "fn a() {}\nfn a2() {}\nfn a3() {}\n";
+
     /// A harness whose `/repo` carries three commits, `main` on the tip and
     /// `feature` one commit back, with the workspace rooted there.
     fn harness() -> TestHarness {
@@ -1048,6 +1059,14 @@ mod tests {
             .buffers
             .path_for(h.stoat.focused_editor_ids()?.1)
             .map(Path::to_path_buf)
+    }
+
+    /// The focused buffer's text, and whether it holds unsaved edits.
+    fn open_text(h: &TestHarness) -> (String, bool) {
+        let id = h.stoat.focused_editor_ids().expect("an editor").1;
+        let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        (guard.snapshot.visible_text.to_string(), guard.dirty)
     }
 
     fn review_badge(h: &TestHarness) -> Option<String> {
@@ -1828,6 +1847,46 @@ mod tests {
         );
     }
 
+    /// A step onto a file the reader already has open shows the text the
+    /// checkout wrote. The open hands back the buffer the file already has, so
+    /// without a re-read the step shows the last commit's text against the new
+    /// base.
+    #[test]
+    fn a_step_re_reads_an_open_file_the_checkout_rewrote() {
+        let mut h = harness();
+        start_walk(&mut h);
+        h.fake_fs().insert_file("/repo/a.rs", CHECKED_OUT_A);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(
+            (open_path(&h), open_text(&h)),
+            (
+                Some(PathBuf::from("/repo/a.rs")),
+                (CHECKED_OUT_A.to_string(), false)
+            ),
+            "the step lands on a.rs with the checked-out text, clean",
+        );
+    }
+
+    /// Edits the reader has not saved outlive a step, since only the reader
+    /// decides to discard them.
+    #[test]
+    fn a_landing_leaves_an_unsaved_buffer_alone() {
+        let mut h = harness();
+        start_walk(&mut h);
+        h.edit_focused(0..0, "// note\n");
+        h.fake_fs().insert_file("/repo/a.rs", CHECKED_OUT_A);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(
+            open_text(&h),
+            ("// note\nfn a() {}\nfn a2() {}\n".to_string(), true),
+            "the unsaved edit survives the step",
+        );
+    }
+
     /// The badge is the only thing naming where a walk stands, since the view
     /// it lands on is the ordinary diff view rather than a screen of its own.
     #[test]
@@ -1949,6 +2008,26 @@ mod tests {
             (diff_base(&h), latched(&h)),
             (None, false),
             "the base and the latch went with the walk",
+        );
+    }
+
+    /// The return checks the starting ref out under the open buffers, so they
+    /// show the tree it restored rather than the last walked commit.
+    #[test]
+    fn a_return_re_reads_open_files() {
+        let mut h = harness();
+        start_walk(&mut h);
+        h.fake_fs().insert_file("/repo/a.rs", CHECKED_OUT_A);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(
+            (open_path(&h), open_text(&h)),
+            (
+                Some(PathBuf::from("/repo/a.rs")),
+                (CHECKED_OUT_A.to_string(), false)
+            ),
+            "a.rs shows the restored tree, clean",
         );
     }
 

@@ -457,34 +457,11 @@ pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let mut reloaded = 0usize;
-    let mut skipped = 0usize;
-    let mut missing = 0usize;
-
-    for path in paths {
-        let Some(id) = stoat.active_workspace().buffers.id_for_path(&path) else {
-            continue;
-        };
-        let dirty = stoat
-            .active_workspace()
-            .buffers
-            .get(id)
-            .map(|b| b.read().expect("buffer poisoned").dirty)
-            .unwrap_or(false);
-        if dirty && !force {
-            skipped += 1;
-            continue;
-        }
-        match reload_from_disk(stoat, id, &path) {
-            ReloadOutcome::Reloaded => reloaded += 1,
-            ReloadOutcome::Missing => missing += 1,
-            ReloadOutcome::Unchanged => {},
-        }
-    }
-
-    if reloaded > 0 {
-        sync::notify_buffer_changes_pending(stoat);
-    }
+    let ReloadTally {
+        reloaded,
+        skipped,
+        missing,
+    } = reload_each(stoat, paths, force);
 
     let mut parts: Vec<String> = Vec::new();
     if reloaded > 0 {
@@ -503,6 +480,66 @@ pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     };
     stoat.set_status(status);
     UpdateEffect::Redraw
+}
+
+/// Re-read every open file-backed buffer that holds no unsaved edits.
+///
+/// A checkout rewrites the working tree under the open buffers. [`open_file`]
+/// on a path that is already open returns that path's buffer and discards what
+/// it read. Without this re-read, a file opened at one commit keeps that
+/// commit's text after the tree moves on, and the diff view compares stale
+/// text. The review walk and the rebase edit pause call this when a checkout
+/// lands.
+///
+/// Sets no status, because the re-read is part of the checkout the reader asked
+/// for rather than a command of its own.
+pub(crate) fn reload_clean_buffers(stoat: &mut Stoat) {
+    let paths = stoat.active_workspace().buffers.open_paths();
+    reload_each(stoat, paths, false);
+}
+
+/// What one [`reload_each`] pass did to the buffers it was given.
+#[derive(Default)]
+struct ReloadTally {
+    reloaded: usize,
+    /// Buffers left alone because they hold unsaved edits.
+    skipped: usize,
+    /// Files that fail to read from disk. Their buffers keep their content.
+    missing: usize,
+}
+
+/// Reload the buffer open on each of `paths` through [`reload_from_disk`].
+///
+/// A buffer with unsaved edits stays as it is unless `force` discards them.
+/// Notifies the language server once when anything reloaded.
+fn reload_each(stoat: &mut Stoat, paths: Vec<PathBuf>, force: bool) -> ReloadTally {
+    let mut tally = ReloadTally::default();
+
+    for path in paths {
+        let Some(id) = stoat.active_workspace().buffers.id_for_path(&path) else {
+            continue;
+        };
+        let dirty = stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .map(|b| b.read().expect("buffer poisoned").dirty)
+            .unwrap_or(false);
+        if dirty && !force {
+            tally.skipped += 1;
+            continue;
+        }
+        match reload_from_disk(stoat, id, &path) {
+            ReloadOutcome::Reloaded => tally.reloaded += 1,
+            ReloadOutcome::Missing => tally.missing += 1,
+            ReloadOutcome::Unchanged => {},
+        }
+    }
+
+    if tally.reloaded > 0 {
+        sync::notify_buffer_changes_pending(stoat);
+    }
+    tally
 }
 
 /// The disposition of a [`reload_from_disk`] attempt.
