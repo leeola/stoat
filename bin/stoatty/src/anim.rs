@@ -8,13 +8,14 @@
 use crate::config::CursorAnimation;
 use std::{
     collections::{BTreeMap, HashMap},
+    mem,
     time::{Duration, Instant},
 };
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
 use stoatty_render::gpu::{HostRide, SketchReveal};
 use stoatty_term::{
-    grid::{Grid, Overlay, PoolRegion, Sketch},
-    term::{Cursor, CursorShape, PoolView, Terminal},
+    grid::{Grid, Overlay, PoolRegion, Rgb, Sketch},
+    term::{Cursor, CursorShape, Damage, PoolView, Terminal},
 };
 
 /// The reference frame duration the easing factors are expressed against. A
@@ -550,6 +551,277 @@ pub(crate) fn region_scissor(region: PoolRegion, cw: f32, ch: f32) -> [u32; 4] {
     [x0, y0, x1 - x0, y1 - y0]
 }
 
+/// The primary window's per-pool animation state, and the buffers that each
+/// frame's pool projection reuses.
+///
+/// [`project_frame`] reads and steps it once per frame. The buffers hold nothing
+/// that outlives a frame. They exist so that frame assembly allocates no
+/// per-frame temporary.
+#[derive(Default)]
+pub(crate) struct PoolFrame {
+    /// Per-pool smooth-scroll animation state, keyed by pool id.
+    ///
+    /// Each entry eases its own offset toward the terminal's app-declared target
+    /// for that pool and holds the grids the composite reads, so several pools
+    /// (split panes, a modal over an editor) glide independently and stack in
+    /// ascending-id z-order. An entry is created when a pool first appears and
+    /// dropped when the app retires it.
+    pub(crate) anims: BTreeMap<u32, PoolAnim>,
+    /// The pool snapshot of the last projection, kept so that the composite
+    /// build after the lock reads the same list the projection stepped.
+    pools: Vec<PoolView>,
+    active: Vec<ActivePool>,
+    rides: Vec<AnchorRide>,
+}
+
+impl PoolFrame {
+    /// [`host_rides`] over the pool snapshot of the last projection.
+    pub(crate) fn host_rides(&self, glided: &[u32], cw: f32, ch: f32) -> Vec<HostRide> {
+        host_rides(glided, &self.pools, &self.anims, cw, ch)
+    }
+
+    /// Take back the buffers that a projection lent out, so the next frame
+    /// refills the same allocations.
+    pub(crate) fn recycle(&mut self, active: Vec<ActivePool>, rides: Vec<AnchorRide>) {
+        self.active = active;
+        self.rides = rides;
+    }
+}
+
+/// What one frame's projection read from the terminal and decided about its
+/// pools.
+pub(crate) struct FrameProjection {
+    pub(crate) cursor: Cursor,
+    /// Rows that live output pushed off the top since the last projection.
+    pub(crate) scroll_delta: usize,
+    pub(crate) damage: Damage,
+    pub(crate) decoration_damage: Damage,
+    pub(crate) display_offset: usize,
+    /// The pools that composite this frame, in ascending-id (z) order.
+    pub(crate) active: Vec<ActivePool>,
+    /// Whether a pool still moves, so the loop asks for the next frame.
+    pub(crate) pool_easing: bool,
+    pub(crate) cursor_anchor: Option<AnchoredCursor>,
+    /// The anchored pools that ride a host that moved this frame.
+    pub(crate) rides: Vec<AnchorRide>,
+    /// The pools that moved this frame, a pool that rests between two rows
+    /// included.
+    pub(crate) glided: Vec<u32>,
+    /// The terminal's default background and cursor colors.
+    pub(crate) clear_colors: (Rgb, Rgb),
+}
+
+/// Project one frame of `terminal` into `grid` and step the glide of every pool.
+///
+/// The caller holds the terminal's lock across the call, so everything in the
+/// projection comes from one view of the terminal. `force_full` widens both
+/// damages to the whole grid, and `dt` is the frame time the eases advance by.
+///
+/// Drops the animation of every pool that the terminal no longer lists, and
+/// turns every anchored pool whose host moved this frame into a ride.
+///
+/// [`FrameProjection::active`] and [`FrameProjection::rides`] reuse the buffers
+/// of `frame`. Hand them back with [`PoolFrame::recycle`] once the frame is
+/// drawn.
+pub(crate) fn project_frame(
+    terminal: &mut Terminal,
+    grid: &mut Grid,
+    frame: &mut PoolFrame,
+    force_full: bool,
+    dt: Duration,
+) -> FrameProjection {
+    // Read in the same pass as the cells, so the clear color and the cells it
+    // surrounds come from one view of the terminal.
+    let clear_colors = (terminal.default_background(), terminal.default_cursor());
+
+    let display_offset = terminal.display_offset();
+    // Scrolled back, the frame renders the composed history
+    // window instead of this grid, so projecting into it is a
+    // full pass nothing draws. The damage the skipped
+    // projections would have consumed accumulates, so returning
+    // to the bottom repaints exactly the rows that moved.
+    //
+    // Zero scroll is what the projection reports at a non-zero
+    // offset anyway, the viewport being pinned to its content,
+    // so standing in for it costs nothing.
+    let (cursor, scroll_delta, damage) = if display_offset > 0 {
+        let changed = terminal.take_damage_flag();
+        let damage = if changed {
+            Damage::Full
+        } else {
+            Damage::Partial(Vec::new())
+        };
+        (terminal.cursor(), 0, damage)
+    } else {
+        terminal.project(grid)
+    };
+    let decoration_damage = terminal.take_decoration_damage();
+    let damage = forced_damage(force_full, damage);
+    let decoration_damage = forced_damage(force_full, decoration_damage);
+    let mut pools = mem::take(&mut frame.pools);
+    terminal.pools_into(&mut pools);
+
+    // Drop animation state for pools the app has retired, so a
+    // closed pane or dismissed modal stops compositing and frees
+    // its grids.
+    frame
+        .anims
+        .retain(|id, _| pools.iter().any(|pool| pool.id == *id));
+
+    // Step each pool's ease toward its target and project the ones
+    // still gliding and buffered, in ascending-id (z) order. A pool
+    // that just settled is left out so the live grid takes over; one
+    // easing but not yet buffered keeps the loop ticking via
+    // `pool_easing` until the app fills its window.
+    let mut active = mem::take(&mut frame.active);
+    active.clear();
+    let mut pool_easing = false;
+    let mut cursor_anchor: Option<AnchoredCursor> = None;
+    // Which pools moved this frame. The anchored pass below reads it to tell
+    // an anchor whose host rides from one whose host sits still.
+    let mut glided: Vec<u32> = Vec::new();
+    for pool in &pools {
+        let anim = frame
+            .anims
+            .entry(pool.id)
+            .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
+        let reposition = terminal.take_reposition(pool.id);
+        let step = advance_pool_glide(anim, pool, terminal, reposition, dt);
+        if matches!(step, PoolStep::Settled) {
+            continue;
+        }
+        // A rested pool holds its composite without asking for frames: the
+        // ease has arrived, and only the sub-cell shift keeps the base grid
+        // from painting the same thing. It still counts as glided, so an
+        // anchored popup keeps its ride over the shifted text.
+        pool_easing |= !matches!(step, PoolStep::Resting(_));
+        glided.push(pool.id);
+
+        // While the focused pane glides it ships the primary
+        // cursor's document anchor, so place the cursor riding
+        // this pool's eased content offset instead of easing it
+        // toward the VT cell.
+        if let Some((row, col)) = pool.cursor_anchor {
+            let (pos, in_region) = anchored_cursor_pos(
+                pool.region.top as f32,
+                (pool.region.height as f32).max(1.0),
+                row as f32,
+                col as f32,
+                anim.scroll,
+            );
+            cursor_anchor = Some(AnchoredCursor {
+                pos,
+                in_region,
+                region: pool.region,
+            });
+        }
+
+        if let PoolStep::Gliding(tile) | PoolStep::Resting(tile) = step {
+            active.push(tile);
+        }
+    }
+
+    // Resolve every pool riding a host that moved this frame, to the pixel
+    // shift that keeps it over the text it was laid out against and the host
+    // region that clips it.
+    let mut rides = mem::take(&mut frame.rides);
+    rides.clear();
+    for pool in &pools {
+        let Some((host, top_rows)) = pool.anchor else {
+            continue;
+        };
+        if !glided.contains(&host) {
+            continue;
+        }
+        let Some(host_view) = pools.iter().find(|candidate| candidate.id == host) else {
+            continue;
+        };
+        let Some(host_anim) = frame.anims.get(&host) else {
+            continue;
+        };
+        rides.push(AnchorRide {
+            pool: pool.id,
+            top_rows,
+            host_scroll: host_anim.scroll,
+            host_region: host_view.region,
+        });
+    }
+
+    // A ridden pool has to composite even when its own scroll settled. The
+    // base grid still holds it where the last live frame drew it, and no live
+    // frame ships mid-glide, so without this its body stays put and tears
+    // away from the shifted frame.
+    for &AnchorRide { pool: id, .. } in &rides {
+        if active.iter().any(|tile| tile.id == id) {
+            continue;
+        }
+        let Some(view) = pools.iter().find(|pool| pool.id == id) else {
+            continue;
+        };
+        let anim = frame
+            .anims
+            .entry(id)
+            .or_insert_with(|| PoolAnim::new(view.scroll_target.pages()));
+
+        // A ride moves where the pool is drawn, never what it holds, so the
+        // same gate the glide uses answers here. Without it every host frame
+        // re-projects the pool and tells the renderer to re-shape every row
+        // of it.
+        let gate = compose_gate(anim, view, terminal, anim.scroll);
+        if gate.content_changed {
+            let composed = terminal
+                .project_pool(id, &mut anim.document_grid, anim.scroll)
+                .is_some();
+            anim.record_compose(&gate, composed);
+        }
+        if !anim.last_buffered {
+            continue;
+        }
+
+        pool_easing = true;
+        active.push(ActivePool {
+            id,
+            region: view.region,
+            frac: gate.frac,
+            content_changed: gate.content_changed,
+            scrolled_rows: gate.scrolled_rows.or(Some(0)),
+        });
+    }
+    // Pools composite in ascending id, which is their z-order, and a forced
+    // one is appended out of turn.
+    active.sort_by_key(|tile| tile.id);
+
+    frame.pools = pools;
+
+    FrameProjection {
+        cursor,
+        scroll_delta,
+        damage,
+        decoration_damage,
+        display_offset,
+        active,
+        pool_easing,
+        cursor_anchor,
+        rides,
+        glided,
+        clear_colors,
+    }
+}
+
+/// The damage a frame draws, widened to the whole grid when `force_full`.
+///
+/// A projection reports the rows it rewrote and the terminal then forgets them,
+/// so a frame that never reached the screen took its rows with it. Nothing
+/// names them again, and the screen holds what it had until something else
+/// happens to change the same rows. Redrawing everything once is what puts them
+/// back.
+pub(crate) fn forced_damage(force_full: bool, projected: Damage) -> Damage {
+    match force_full {
+        true => Damage::Full,
+        false => projected,
+    }
+}
+
 /// Seed the settle flight on the first non-anchored frame after a glide.
 ///
 /// Leaves `point` at its last anchored position so [`step_cursor`] eases from
@@ -579,7 +851,7 @@ pub(crate) fn centroid(corners: [[f32; 2]; 4]) -> [f32; 2] {
     ]
 }
 
-/// One pool's smooth-scroll animation state, held by [`State::pool_anims`].
+/// One pool's smooth-scroll animation state, held by [`PoolFrame::anims`].
 pub(crate) struct PoolAnim {
     /// The live eased offset, in document pages, easing toward the pool's
     /// app-declared target. Tracks an absolute position rather than decaying.
