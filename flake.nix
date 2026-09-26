@@ -79,8 +79,8 @@
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.zlib ];
-          # The four project commands own testing, and the workspace tests need
-          # the devshell's software-rasterizer setup.
+          # The verification commands in CLAUDE.md own testing, and the workspace
+          # tests need the devshell's software-rasterizer setup.
           doCheck = false;
           # Silence nixpkgs cc-wrapper's target-mismatch warning emitted
           # when Rust's `cc` crate canonicalizes Apple triples before
@@ -269,7 +269,7 @@
             NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING = "1";
 
             # difftastic line-based diffing for TUI snapshots.
-            DFT_OVERRIDE = "stoat/src/snapshots/tui/*.snap:text";
+            DFT_OVERRIDE = "stoat/src/snapshots/*.snap:text";
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             # Lavapipe, Mesa's software rasterizer. The renderer's headless
