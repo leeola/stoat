@@ -570,7 +570,7 @@ fn num_channels(kind: AtlasKind) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{uv_rect, GlyphAtlas, ATLAS_BUDGET};
-    use crate::gpu::headless_device;
+    use crate::test_support::require_headless_device;
     use wgpu::{
         BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode,
         Origin3d, PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout,
@@ -593,10 +593,7 @@ mod tests {
     /// into, growing is the answer, whatever is evictable.
     #[test]
     fn the_atlas_grows_before_it_evicts_while_it_has_room() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("atlas eviction test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let mut atlas = GlyphAtlas::new(&device);
         let (initial, _) = atlas.texture_dims();
@@ -620,10 +617,7 @@ mod tests {
     /// nothing to take and the atlas grows again instead.
     #[test]
     fn past_its_budget_only_the_frame_s_own_glyphs_are_safe() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("atlas budget test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // Each glyph is a sixteenth of the budget across, so a few hundred of
         // them ask for more than the budget holds.
@@ -700,10 +694,7 @@ mod tests {
 
     #[test]
     fn grow_copies_existing_glyphs_into_the_larger_texture() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("atlas grow test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let mut atlas = GlyphAtlas::new(&device);
         let (initial, _) = atlas.texture_dims();

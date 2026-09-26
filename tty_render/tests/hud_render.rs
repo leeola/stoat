@@ -3,15 +3,16 @@
 //! Builds the HUD pipeline on a real device and composites it over a rendered
 //! frame off-screen, so a bind-group-versus-shader mismatch or an invalid pass
 //! surfaces as a wgpu uncaptured-error panic rather than only in a live window.
-//! Skips when no GPU adapter is present so GPU-less CI stays green. Compiled
-//! only under the `perf` feature, where the HUD and `FrameSample` exist.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
+//! Compiled only under the `perf` feature, where the HUD and `FrameSample` exist.
 
 #![cfg(feature = "perf")]
 
 use std::time::Duration;
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     perf::{FrameSample, FrameStats, Percentiles},
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -37,10 +38,7 @@ fn sample(cpu_ms: f32) -> FrameSample {
 
 #[test]
 fn hud_composites_over_a_frame_off_screen() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("hud_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let (width, height) = (256, 128);

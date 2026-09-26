@@ -4,12 +4,13 @@
 //! things worth pinning are the ones a unit test over instance data cannot see:
 //! that a diagonal's edge blends rather than stair-steps, that a zero-length
 //! segment fills a disc, that a later panel hides a line beneath it, and that a
-//! pooled path moves with the composite's eased shift. Skips when no GPU adapter
-//! is present, so a GPU-less CI stays green.
+//! pooled path moves with the composite's eased shift.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Polyline, Rgb},
@@ -41,7 +42,7 @@ struct Harness {
 
 #[test]
 fn a_diagonal_paints_with_blended_edges() {
-    let Some(mut h) = Harness::new() else { return };
+    let mut h = Harness::new();
 
     let line = Rgb::new(220, 50, 47);
     let mut grid = h.filled_grid();
@@ -74,7 +75,7 @@ fn a_diagonal_paints_with_blended_edges() {
 
 #[test]
 fn a_zero_length_path_paints_a_disc() {
-    let Some(mut h) = Harness::new() else { return };
+    let mut h = Harness::new();
 
     let dot = Rgb::new(50, 200, 90);
     let mut grid = h.filled_grid();
@@ -99,7 +100,7 @@ fn a_zero_length_path_paints_a_disc() {
 
 #[test]
 fn a_later_panel_hides_the_line_beneath_it() {
-    let Some(mut h) = Harness::new() else { return };
+    let mut h = Harness::new();
 
     let line = Rgb::new(220, 50, 47);
     let mut grid = h.filled_grid();
@@ -146,7 +147,7 @@ fn a_later_panel_hides_the_line_beneath_it() {
 
 #[test]
 fn a_pooled_path_glides_with_the_composite_shift() {
-    let Some(mut h) = Harness::new() else { return };
+    let mut h = Harness::new();
 
     let line = Rgb::new(220, 50, 47);
     let base = h.filled_grid();
@@ -183,13 +184,9 @@ fn a_pooled_path_glides_with_the_composite_shift() {
 const BG: (u8, u8, u8) = (10, 20, 30);
 
 impl Harness {
-    /// Build a headless renderer over a 4-row target, or `None` when the
-    /// machine has no usable adapter.
-    fn new() -> Option<Harness> {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("polyline_render: no wgpu adapter available, skipping");
-            return None;
-        };
+    /// Build a headless renderer over a 4-row target.
+    fn new() -> Harness {
+        let (device, queue) = require_headless_device();
 
         let format = TextureFormat::Rgba8Unorm;
         let font_size = 30;
@@ -232,7 +229,7 @@ impl Harness {
         let (rows, cols) = renderer.grid_size();
         assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");
 
-        Some(Harness {
+        Harness {
             device,
             queue,
             renderer,
@@ -244,7 +241,7 @@ impl Harness {
             cell_h,
             rows,
             cols,
-        })
+        }
     }
 
     /// A grid of the renderer's size with every cell on the page background.

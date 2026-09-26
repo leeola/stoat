@@ -273,9 +273,9 @@
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             # Lavapipe, Mesa's software rasterizer. The renderer's headless
-            # tests ask Vulkan for an adapter and skip themselves when none
-            # answers, so on a machine with no GPU driver they report green
-            # having built no pipeline and drawn no pixel.
+            # tests ask Vulkan for an adapter and fail when none answers, so
+            # on a machine with no GPU driver lavapipe is what answers in this
+            # shell.
             #
             # Registered through the loader's additive variable rather than
             # VK_ICD_FILENAMES, which replaces the driver list outright. This

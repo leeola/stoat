@@ -10,3 +10,5 @@ pub mod atlas;
 pub mod gpu;
 pub mod perf;
 pub mod render;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;

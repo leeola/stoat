@@ -5,12 +5,13 @@
 //! is applied in the vertex shader, so a frame that only scrolls reuses the
 //! cached instances. This renders a glyph at row 0, then renders again at grid
 //! scroll 1 with no damage -- so the instances are not rebuilt -- and reads the
-//! pixels back to assert the glyph moved down exactly one row. Skips when no GPU
-//! adapter is present, so a GPU-less CI stays green.
+//! pixels back to assert the glyph moved down exactly one row.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb, UnderlineStyle},
@@ -25,10 +26,7 @@ use wgpu::{
 
 #[test]
 fn grid_scroll_moves_glyph_down_without_rebuild() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("scroll_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -140,10 +138,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
 
 #[test]
 fn document_scroll_shifts_the_grid_like_grid_scroll() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("scroll_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;

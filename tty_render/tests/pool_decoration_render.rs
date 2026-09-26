@@ -5,12 +5,13 @@
 //! glyphs. This builds a pool grid with a full-width bar on one row and a
 //! run-background rect on another, composites it at no shift and at a one-cell
 //! upward shift, and reads the pixels back to assert each decoration paints its
-//! color and moves up a row with the shift. Skips when no GPU adapter is
-//! present, so a GPU-less CI stays green.
+//! color and moves up a row with the shift.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Bar, Grid, Rgb, TextRun},
@@ -25,10 +26,7 @@ use wgpu::{
 
 #[test]
 fn pool_decorations_composite_and_glide_with_the_shift() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_decoration_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;

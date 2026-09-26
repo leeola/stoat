@@ -706,8 +706,8 @@ fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
 mod tests {
     use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
     use crate::{
-        gpu::headless_device,
         render::{panel_occluder, CellMetrics, Occluder},
+        test_support::require_headless_device,
     };
     use std::collections::HashMap;
     use stoatty_term::grid::{
@@ -927,9 +927,7 @@ mod tests {
 
     #[test]
     fn strips_rebuild_only_when_the_epoch_or_resolution_changes() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
 
         let mut grid = Grid::new(12, 24);
@@ -982,9 +980,7 @@ mod tests {
     /// strips over the other for as long as the two agreed.
     #[test]
     fn a_second_grid_holding_the_same_count_is_not_the_first() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
 
         // Built by the same calls in the same order, so both counters land in
@@ -1016,9 +1012,7 @@ mod tests {
     /// the old cell size.
     #[test]
     fn a_metrics_change_leaves_no_strip_to_draw() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
 
         let mut grid = Grid::new(12, 24);
@@ -1050,9 +1044,7 @@ mod tests {
     /// where the last frame left them.
     #[test]
     fn a_metrics_change_rebuilds_a_strip_the_grid_still_declares() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
 
         let mut grid = Grid::new(12, 24);
@@ -1085,9 +1077,7 @@ mod tests {
     /// the grid does or it hands one grid's lines to the other.
     #[test]
     fn a_second_grid_reuses_no_strip_of_the_first() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
 
         // The same strip over stores of different heights, declared by the same
@@ -1173,9 +1163,7 @@ mod tests {
     /// thumb drag rebuilds every pane on screen.
     #[test]
     fn a_view_move_rebuilds_only_the_strip_that_moved() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
         let mut grid = two_strip_grid(4, 7);
         let resolution = [640.0, 480.0];
@@ -1213,9 +1201,7 @@ mod tests {
     /// bytes on each of those is the idle cost the per-strip key removes.
     #[test]
     fn a_redeclared_but_unmoved_strip_set_sends_nothing() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
         let mut grid = two_strip_grid(4, 7);
         let resolution = [640.0, 480.0];
@@ -1240,9 +1226,7 @@ mod tests {
     /// version says the strip has to rebuild.
     #[test]
     fn a_same_length_content_edit_rebuilds_its_strip() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
         let mut grid = two_strip_grid(4, 7);
         let resolution = [640.0, 480.0];
@@ -1419,10 +1403,7 @@ mod tests {
     /// a whole pixel and reads twice its weight.
     #[test]
     fn a_half_pixel_run_covers_half_a_pixel() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("minimap coverage test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // One cell over 12 columns puts a column, and so a one-column run, at
         // half a pixel. One line a cell keeps the run tall enough that only the
@@ -1456,10 +1437,7 @@ mod tests {
     /// rect notches a square hole out of that chrome.
     #[test]
     fn a_rounded_corner_keeps_the_chrome_beneath_it() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("minimap occlusion test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // A 4x2-cell strip is 24 by 24 pixels under a 6x12 cell, so a radius of
         // 8 rounds well inside its 12-pixel half-extent.
@@ -1505,10 +1483,7 @@ mod tests {
     /// conserves the total.
     #[test]
     fn a_sub_pixel_scroll_hands_intensity_between_rows() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("minimap scroll test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // Cell 6x12 over 6 lines a cell puts a minimap line at 2px, and a strip
         // four cells tall shows 24 of them. With the viewport also 24 lines over
@@ -1556,10 +1531,7 @@ mod tests {
     /// of underscores cover the same pixels at the same strength.
     #[test]
     fn a_run_block_reads_at_the_weight_its_glyphs_carry() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("minimap weight test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // Lines 1 and 2, clear of the thumb border along the strip's top edge.
         let run = |weight| {
@@ -1589,10 +1561,7 @@ mod tests {
     /// what states where the viewport starts and ends.
     #[test]
     fn the_thumb_is_outlined_in_its_declared_border() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("minimap thumb border test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // No view, so the thumb spans the whole four-cell strip: 6 px wide and
         // 48 tall, with the border on rows 0 and 47 and columns 0 and 5.
@@ -1615,10 +1584,7 @@ mod tests {
     /// strength. The strip then beats between strong and weak rows.
     #[test]
     fn consecutive_minimap_rows_read_alike_across_a_clear_gap() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("minimap pitch test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // Eight lines a cell on the 12px cell asks for a 1.5px line, which the
         // layout rounds to 2: one row of run and one row of gap.

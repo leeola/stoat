@@ -4858,8 +4858,8 @@ mod tests {
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
-        gpu::headless_device,
         render::{row_uploads, CellMetrics, Frame, HostRide, PoolOccluders, Scroll, SketchReveal},
+        test_support::require_headless_device,
     };
     use stoatty_protocol::command::{
         SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle,
@@ -5584,16 +5584,17 @@ mod tests {
         (cells, starts)
     }
 
-    /// A text pass on the headless device, or `None` when no adapter is present.
-    fn headless_text_pass() -> Option<(Device, Queue, TextPass)> {
+    /// A text pass on the headless device.
+    fn headless_text_pass() -> (Device, Queue, TextPass) {
         headless_text_pass_font(16)
     }
 
-    /// A text pass at `font_size` on the headless device, or `None` when no
-    /// adapter is present. A large size makes a small glyph burst overflow the
-    /// initial atlas and force a grow.
-    fn headless_text_pass_font(font_size: u32) -> Option<(Device, Queue, TextPass)> {
-        let (device, queue) = headless_device()?;
+    /// A text pass at `font_size` on the headless device.
+    ///
+    /// A large size makes a small glyph burst overflow the initial atlas and
+    /// force a grow.
+    fn headless_text_pass_font(font_size: u32) -> (Device, Queue, TextPass) {
+        let (device, queue) = require_headless_device();
         let pass = TextPass::new(
             &device,
             TextureFormat::Rgba8Unorm,
@@ -5602,13 +5603,13 @@ mod tests {
             &["JetBrains Mono".to_owned()],
             true,
         );
-        Some((device, queue, pass))
+        (device, queue, pass)
     }
 
     /// A text pass over the bundled faces alone, at a fixed locale so a test
     /// never reads the environment's.
-    fn bundled_text_pass() -> Option<(Device, Queue, TextPass)> {
-        let (device, queue) = headless_device()?;
+    fn bundled_text_pass() -> (Device, Queue, TextPass) {
+        let (device, queue) = require_headless_device();
         let pass = TextPass::new(
             &device,
             TextureFormat::Rgba8Unorm,
@@ -5617,7 +5618,7 @@ mod tests {
             &["JetBrains Mono".to_owned()],
             true,
         );
-        Some((device, queue, pass))
+        (device, queue, pass)
     }
 
     fn fill_row(grid: &mut Grid, row: usize, text: &str) {
@@ -5709,10 +5710,7 @@ mod tests {
     /// uncached made a styled screen pay the per-character path every frame.
     #[test]
     fn only_a_run_the_face_reshapes_reaches_the_shaper() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("coverage routing test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
 
         rasterize_rows_by_coverage(&mut pass, &device, &queue, &["4f2a b91c 0e7d"]);
         assert_eq!(
@@ -5749,10 +5747,7 @@ mod tests {
     /// often than its words are.
     #[test]
     fn a_row_caches_one_run_per_word() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("run split test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         rasterize_rows(&mut pass, &device, &queue, &["a => b => a"]);
 
         assert_eq!(
@@ -5766,10 +5761,7 @@ mod tests {
     /// glyphs a mixed row shapes are the ones a row holding only `=>` shapes.
     #[test]
     fn a_word_shapes_its_ligature_the_same_beside_other_words() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("ligature split test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         rasterize_rows(&mut pass, &device, &queue, &["a => b => a"]);
         let beside_words = pass
             .run_shape_cache
@@ -5777,9 +5769,7 @@ mod tests {
             .expect("the arrow was cached")
             .to_vec();
 
-        let Some((device, queue, mut alone)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut alone) = headless_text_pass();
         rasterize_rows(&mut alone, &device, &queue, &["=>"]);
 
         assert_eq!(
@@ -5801,10 +5791,7 @@ mod tests {
     /// the number that leads them shape their shared words once.
     #[test]
     fn a_screen_of_prose_shapes_only_its_distinct_words() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("prose shaping test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let rows: Vec<String> = (0..20)
             .map(|row| format!("line {row:04} fn handle_event(ev) -> Result<()>"))
             .collect();
@@ -5830,10 +5817,7 @@ mod tests {
     /// by poisoning a placement and watching each epoch decide whether it is used.
     #[test]
     fn a_stored_placement_builds_what_a_fresh_lookup_would() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("stored placement test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(2, 12);
         fill_row(&mut grid, 0, "glyphs");
 
@@ -5950,10 +5934,7 @@ mod tests {
     /// derived from the atlas rect takes the wrong shape for it.
     #[test]
     fn a_built_glyph_decodes_to_its_atlas_rect_and_color() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("packed instance test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
 
         let info = GlyphInfo {
             kind: AtlasKind::Color,
@@ -6092,9 +6073,7 @@ mod tests {
     /// the wrong row or fades it with the wrong mark.
     #[test]
     fn a_run_glyph_packs_its_follow_slot_above_its_row() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let grid = followed(5, 5);
 
         let mut instances = Vec::new();
@@ -6111,9 +6090,7 @@ mod tests {
     /// opaque box appears before the label it backs.
     #[test]
     fn a_run_rect_follows_the_mark_its_glyphs_do() {
-        let Some((_device, _queue, pass)) = headless_text_pass() else {
-            return;
-        };
+        let (_device, _queue, pass) = headless_text_pass();
 
         assert_eq!(pass.build_run_rects(&followed(5, 5))[0].follow, 2);
         assert_eq!(pass.build_run_rects(&followed(5, 0))[0].follow, 0);
@@ -6124,9 +6101,7 @@ mod tests {
     /// change fades a label with the wrong mark.
     #[test]
     fn a_changed_mark_list_rebuilds_the_run_slots() {
-        let Some((_device, _queue, pass)) = headless_text_pass() else {
-            return;
-        };
+        let (_device, _queue, pass) = headless_text_pass();
         let mut grid = followed(5, 5);
 
         assert_eq!(pass.build_run_rects(&grid)[0].follow, 2);
@@ -6142,9 +6117,7 @@ mod tests {
 
     #[test]
     fn run_rect_carries_its_run_occlusion_seq() {
-        let Some((_device, _queue, pass)) = headless_text_pass() else {
-            return;
-        };
+        let (_device, _queue, pass) = headless_text_pass();
         let mut grid = Grid::new(2, 12);
         grid.set_text_runs(vec![TextRun {
             col: 0,
@@ -6169,9 +6142,7 @@ mod tests {
 
     #[test]
     fn run_without_bg_builds_no_rect() {
-        let Some((_device, _queue, pass)) = headless_text_pass() else {
-            return;
-        };
+        let (_device, _queue, pass) = headless_text_pass();
         let mut grid = Grid::new(2, 12);
         grid.set_text_runs(vec![TextRun {
             col: 0,
@@ -6193,9 +6164,7 @@ mod tests {
 
     #[test]
     fn build_run_rects_into_clears_prior_scratch() {
-        let Some((_device, _queue, pass)) = headless_text_pass() else {
-            return;
-        };
+        let (_device, _queue, pass) = headless_text_pass();
         let mut grid = Grid::new(2, 12);
         grid.set_text_runs(vec![TextRun {
             col: 0,
@@ -6233,9 +6202,7 @@ mod tests {
     /// one is off a whole cell.
     #[test]
     fn a_run_rect_covers_whole_pixels() {
-        let Some((_device, _queue, pass)) = headless_text_pass() else {
-            return;
-        };
+        let (_device, _queue, pass) = headless_text_pass();
         let mut grid = Grid::new(2, 12);
         grid.set_text_runs(vec![TextRun {
             col: 3 * 16 + 5,
@@ -6302,9 +6269,7 @@ mod tests {
 
     #[test]
     fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass_font(160);
         let mut grid = Grid::new(2, 4);
         grid.set_text_runs(vec![ascii_burst_run()]);
 
@@ -6354,9 +6319,7 @@ mod tests {
 
     #[test]
     fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass_font(160);
 
         // A small run packs first, then a cell glyph burst grows the atlas
         // during the row pack, after the run instances were built. The run must
@@ -6405,9 +6368,7 @@ mod tests {
 
     #[test]
     fn caches_clean_rows_and_rebuilds_damaged() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(3, 12);
         fill_row(&mut grid, 0, "a => b == c");
         fill_row(&mut grid, 1, "hello world");
@@ -6451,9 +6412,7 @@ mod tests {
 
     #[test]
     fn scaled_cells_reshape_only_damaged_rows() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(4, 12);
         fill_row(&mut grid, 0, "alpha");
         fill_row(&mut grid, 1, "bravo");
@@ -6489,9 +6448,7 @@ mod tests {
 
     #[test]
     fn routes_cell_fill_codepoints_by_kind() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(1, 4);
         grid.get_mut(0, 0).ch = '\u{E0B0}'; // geometric powerline separator
         grid.get_mut(0, 1).ch = 'M'; // ordinary glyph
@@ -6537,10 +6494,7 @@ mod tests {
     /// side and in the same order a from-scratch split puts them.
     #[test]
     fn a_patched_region_frame_matches_one_built_from_scratch() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("region patch test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let rows = 5;
 
@@ -6610,9 +6564,7 @@ mod tests {
         );
 
         // The same screen reached in one full frame, every row split from scratch.
-        let Some((device, queue, mut fresh)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut fresh) = headless_text_pass();
         fresh.prepare(
             &device,
             &queue,
@@ -6870,10 +6822,7 @@ mod tests {
     /// over the box.
     #[test]
     fn only_the_grid_rows_buffers_carry_a_rotation() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("globals rotation test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(4, 20);
         fill_row(&mut grid, 0, "cells");
 
@@ -6923,13 +6872,8 @@ mod tests {
     /// stale one sends the glyph to the wrong buffer.
     #[test]
     fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("scrolled region split test: no wgpu adapter available, skipping");
-            return;
-        };
-        let Some((_, _, mut fresh)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
+        let (_, _, mut fresh) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let rows = 5;
         let lines = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
@@ -7089,10 +7033,7 @@ mod tests {
     /// thing that separates a reuse from a rebuild producing the same bytes.
     #[test]
     fn an_unchanged_grid_rebuilds_neither_the_runs_nor_the_popovers() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("chrome reuse test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = chrome_frame();
         let grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
@@ -7119,10 +7060,7 @@ mod tests {
     /// the composite paints over it and the label vanishes mid-glide.
     #[test]
     fn an_anchored_run_leaves_the_base_draw_and_rides_shifted() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("riding run test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = chrome_frame();
 
@@ -7191,10 +7129,7 @@ mod tests {
     /// the rest, unshifted. Only a glide splits it out.
     #[test]
     fn a_run_whose_host_is_still_does_not_ride() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("still host test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut run = chrome_run("x");
         run.anchor = Some((3, 0.0));
         let grid = chrome_grid(vec![run], Vec::new());
@@ -7224,10 +7159,7 @@ mod tests {
     /// twice, or not at all.
     #[test]
     fn a_host_starting_to_glide_rebuilds_the_base_runs() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("glide start test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = chrome_frame();
         let mut run = chrome_run("x");
@@ -7258,10 +7190,7 @@ mod tests {
     /// fragment stage reads is what carries that, one entry per declared mark.
     #[test]
     fn a_label_fades_in_over_the_tail_of_its_mark_s_reveal() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("follow fade test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
         grid.set_sketches(vec![test_sketch(5), test_sketch(7)]);
@@ -7320,10 +7249,7 @@ mod tests {
     /// only the run list reuses instances that now name the wrong mark's fade.
     #[test]
     fn a_changed_mark_list_rebuilds_the_runs_it_renumbers() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("mark renumber test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = chrome_frame();
 
@@ -7350,10 +7276,7 @@ mod tests {
     /// runs over the other for as long as the two agreed.
     #[test]
     fn a_second_grid_holding_the_same_run_count_is_not_the_first() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("text run grid test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = chrome_frame();
 
@@ -7380,10 +7303,7 @@ mod tests {
     /// [`a_second_grid_holding_the_same_run_count_is_not_the_first`].
     #[test]
     fn a_second_grid_holding_the_same_popover_count_is_not_the_first() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("popover grid test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = chrome_frame();
 
@@ -7409,10 +7329,7 @@ mod tests {
 
     #[test]
     fn only_a_moved_region_rectangle_resplits_the_rows() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            eprintln!("region split test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let frame = Frame {
             cursor: None,
@@ -7494,9 +7411,7 @@ mod tests {
     /// have produced for their new positions.
     #[test]
     fn a_rotated_frame_matches_one_built_from_scratch() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let rows = 5;
         let lines = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
@@ -7554,9 +7469,7 @@ mod tests {
         let rotated = pass.collect_grid_glyphs();
 
         // The same screen reached without a scroll, every row rebuilt.
-        let Some((device, queue, mut fresh_pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut fresh_pass) = headless_text_pass();
         fresh_pass.prepare(
             &device,
             &queue,
@@ -7631,9 +7544,7 @@ mod tests {
     /// which the comparison against a rebuild catches.
     #[test]
     fn a_scrolled_composite_matches_one_built_from_scratch() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let rows = 5;
         let lines = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
@@ -7679,9 +7590,7 @@ mod tests {
         let carried = pass.composite_glyphs(0);
 
         // The same rows reached without a scroll, every one of them shaped here.
-        let Some((device, queue, mut fresh_pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut fresh_pass) = headless_text_pass();
         fresh_pass.prepare_composite(
             &device,
             &queue,
@@ -7723,9 +7632,7 @@ mod tests {
     fn a_moved_composite_rebuilds_against_its_new_origin() {
         // A quarter cell is the move here, because the cell is whole pixels and
         // a whole-cell move therefore snaps to the same offsets it started on.
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let mut grid = Grid::new(3, 20);
         fill_row(&mut grid, 0, "alpha");
@@ -7801,9 +7708,7 @@ mod tests {
     /// at that drift holds.
     #[test]
     fn a_sub_cell_drift_leaves_the_instances_a_rebuild_would_hold() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let mut grid = Grid::new(3, 20);
         fill_row(&mut grid, 0, "alpha");
@@ -7851,9 +7756,7 @@ mod tests {
     /// the only thing that can put anything back in it.
     #[test]
     fn a_composite_whose_runs_held_builds_none_of_them_again() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
         let mut grid = Grid::new(3, 20);
         fill_row(&mut grid, 0, "alpha");
@@ -7926,9 +7829,7 @@ mod tests {
     /// held run list is held only while the atlas has not moved under it.
     #[test]
     fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass_font(160);
         let resolution = [640.0, 480.0];
 
         let mut grid = Grid::new(3, 10);
@@ -7998,9 +7899,7 @@ mod tests {
     /// slot before it.
     #[test]
     fn a_reusing_composite_still_writes_its_own_globals() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let resolution = [640.0, 480.0];
 
         let mut mine = Grid::new(3, 8);
@@ -8049,9 +7948,7 @@ mod tests {
     /// the one after the pack is what corrects it.
     #[test]
     fn composite_globals_name_the_atlas_the_pack_grew_to() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass_font(160);
         let mut grid = Grid::new(2, 4);
         grid.set_text_runs(vec![ascii_burst_run()]);
 
@@ -8092,9 +7989,7 @@ mod tests {
     /// run.
     #[test]
     fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(6, 20);
         let overlay = |left| Overlay {
             top: 0,
@@ -8216,9 +8111,7 @@ mod tests {
     /// small and would otherwise pass.
     #[test]
     fn an_overlay_taller_than_its_box_builds_only_the_visible_window() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
 
         let lines = |count: usize| {
             (0..count)
@@ -8320,9 +8213,7 @@ mod tests {
 
     #[test]
     fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let mut grid = Grid::new(6, 20);
         grid.set_overlays(vec![Overlay {
             top: 0,
@@ -8425,9 +8316,7 @@ mod tests {
     #[test]
     #[ignore = "timing benchmark; run with: cargo test -p stoatty_render --lib -- --ignored caches"]
     fn caching_skips_reshaping_clean_rows() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let (rows, cols) = (50, 200);
         let mut grid = Grid::new(rows, cols);
         for row in 0..rows {
@@ -8490,9 +8379,7 @@ mod tests {
     #[test]
     #[ignore = "timing benchmark; run with: cargo test -p stoatty_render --lib -- --ignored prepare_skips_unchanged_grid"]
     fn prepare_skips_unchanged_grid() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let (rows, cols) = (50, 200);
         let mut grid = Grid::new(rows, cols);
         for row in 0..rows {
@@ -8570,9 +8457,7 @@ mod tests {
     #[test]
     #[ignore = "timing measurement; run with: cargo test -p stoatty_render --lib -- --ignored cache_lookup_cost"]
     fn cache_lookup_cost() {
-        let Some((device, queue, mut pass)) = headless_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = headless_text_pass();
         let (rows, cols) = (50, 200);
         let mut grid = Grid::new(rows, cols);
         for row in 0..rows {
@@ -8736,9 +8621,7 @@ mod tests {
     /// rather than something scaled with the display.
     #[test]
     fn merging_the_scan_holds_the_text_band_and_drops_the_shaped_runs() {
-        let Some((device, queue, mut pass)) = bundled_text_pass() else {
-            return;
-        };
+        let (device, queue, mut pass) = bundled_text_pass();
         rasterize_rows(&mut pass, &device, &queue, &["hello"]);
         let band = pass.text_band();
 

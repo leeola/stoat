@@ -7,12 +7,13 @@
 //! once with partial damage (the incremental path) and once with full damage,
 //! and asserts the two frames are pixel-identical. The edit also recolours one
 //! border row, marked via the separate decoration-damage signal, so the same
-//! comparison covers the border pass's per-row rebuild. Skips when no GPU adapter
-//! is present, so a GPU-less CI stays green.
+//! comparison covers the border pass's per-row rebuild.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{whole_row, Border, BorderEdge, BorderStyle, Grid, Rgb, UnderlineStyle},
@@ -27,10 +28,7 @@ use wgpu::{
 
 #[test]
 fn patched_rows_match_a_full_rebuild() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("damaged_rows_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;

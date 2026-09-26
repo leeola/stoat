@@ -491,7 +491,7 @@ mod tests {
     use super::{
         build_panel_instances, build_panel_instances_into, style_code, PanelInstance, PanelPass,
     };
-    use crate::{gpu::headless_device, render::CellMetrics};
+    use crate::{render::CellMetrics, test_support::require_headless_device};
     use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
     use wgpu::{
         naga::{
@@ -662,10 +662,7 @@ mod tests {
     /// own color and lets the ground behind show through.
     #[test]
     fn a_stroke_over_a_shadow_covers_more_than_either() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("panel composite test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let metrics = CellMetrics {
             font_size: 10.0,
@@ -729,10 +726,7 @@ mod tests {
     /// composite it covers both of the pixels this reads.
     #[test]
     fn a_box_fill_covers_the_pixel_inside_its_edge_whole() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("panel fill ramp test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let metrics = CellMetrics {
             font_size: 10.0,
@@ -780,10 +774,7 @@ mod tests {
     /// than the same style drew with a shadow behind it.
     #[test]
     fn a_frame_band_sits_inside_the_box_edge() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("panel frame band test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let metrics = CellMetrics {
             font_size: 10.0,
@@ -826,10 +817,7 @@ mod tests {
     /// box it frames doubles, so the frame reads half as heavy on a 2x display.
     #[test]
     fn a_heavy_stroke_doubles_its_width_at_twice_the_density() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("panel weight test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let mut grid = Grid::new(4, 4);
         grid.set_panels(vec![Panel {

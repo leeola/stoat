@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::{
-    gpu::headless_device,
     render::{sketch::rough::COMPONENT_GAP, HostRide},
+    test_support::require_headless_device,
 };
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
@@ -734,10 +734,7 @@ fn render_red(
 /// box slides off it. Only a rendered image separates the two.
 #[test]
 fn a_ridden_mark_paints_at_its_hosts_shift() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch ride test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     const SHIFT: usize = 8;
 
     let filled = SketchShape::Rect {
@@ -789,10 +786,7 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
 /// past the arc its outline strokes, and it still reaches its straight edges.
 #[test]
 fn a_rounded_fill_leaves_its_corners_clear() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch rounded fill test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     let filled = |id: u32, x: i16, radius: u8| {
         let mut mark = sketch(
             id,
@@ -840,10 +834,7 @@ fn a_rounded_fill_leaves_its_corners_clear() {
 /// Without that the reveal is decorative rather than real.
 #[test]
 fn a_reveal_of_zero_paints_nothing_and_one_paints_the_mark() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch reveal test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     let list = [sketch(
         1,
         SketchShape::Ellipse {
@@ -866,10 +857,7 @@ fn a_reveal_of_zero_paints_nothing_and_one_paints_the_mark() {
 /// one does not, because a partial stroke is a prefix of the complete one.
 #[test]
 fn a_half_reveal_paints_a_prefix_of_the_whole() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch prefix test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     let list = [sketch(
         1,
         SketchShape::Ellipse {
@@ -914,10 +902,7 @@ fn a_half_reveal_paints_a_prefix_of_the_whole() {
 /// and alpha composited to. One unit of slack covers the target's rounding.
 #[test]
 fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch opacity test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     const ALPHA: u8 = 128;
 
     let mut list = [sketch(
@@ -950,10 +935,7 @@ fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
 /// ink over the same box, and only the gaps between the lines tell them apart.
 #[test]
 fn a_hatched_box_leaves_gaps_between_its_lines() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch hatch test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let filled = |style| {
         [sketch(
@@ -1007,10 +989,7 @@ fn a_hatched_box_leaves_gaps_between_its_lines() {
 /// what shows it holds.
 #[test]
 fn a_growing_stroke_never_outpaints_the_finished_one() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch joint test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     let list = [sketch(
         1,
         SketchShape::Ellipse {
@@ -1053,10 +1032,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
 /// identically, which is the jump this rules out.
 #[test]
 fn the_pen_tip_advances_inside_one_segment() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("sketch pen-tip test: no wgpu adapter, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     // A long straight connector flattens to eight even segments, so a pair of
     // fractions an eighth apart share one. A generated curve's segments are far
     // too short to tell the fraction from the count.

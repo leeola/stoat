@@ -6,15 +6,13 @@
 //! grid with an unfilled panel (higher `seq`, the upper box) over a full-width
 //! bar, a run-background rect, and an icon (lower `seq`, the chrome beneath),
 //! renders one frame, and reads the pixels back to assert each primitive is
-//! discarded inside the box rect while still painting outside it. Skips when no
-//! GPU adapter is present, so a GPU-less CI stays green.
+//! discarded inside the box rect while still painting outside it.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{
-        build_font_system, headless_device, FontConfig, Frame, HostRide, PoolComposite, Renderer,
-        Scroll,
-    },
+    gpu::{build_font_system, FontConfig, Frame, HostRide, PoolComposite, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Polyline, Rgb, TextRun},
@@ -29,10 +27,7 @@ use wgpu::{
 
 #[test]
 fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("occlusion_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -254,13 +249,10 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
 /// the whole surface. With `occludable` true the pool's cells are discarded
 /// inside the box rect, so the box shows there while the pool paints outside it.
 /// With `occludable` false the pool paints everywhere, the accepted glide-frame
-/// bleed for a pool that is a box's own content. Skips without a GPU adapter.
+/// bleed for a pool that is a box's own content. Fails without a GPU adapter.
 #[test]
 fn a_box_occludes_the_pool_composite_beneath_it() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("occlusion_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -416,10 +408,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
 /// from under it.
 #[test]
 fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("occlusion_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -633,10 +622,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
 /// hole in the pool at a place nothing covers, for every frame of the glide.
 #[test]
 fn a_box_riding_a_pool_stops_occluding_it() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("occlusion_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;

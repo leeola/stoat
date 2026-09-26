@@ -4,12 +4,13 @@
 //! own interior with the drop shadow. This renders one such panel over a
 //! non-black clear off-screen and reads the pixels back, asserting the panel's
 //! interior center keeps the clear color while a pixel just past the box's
-//! bottom-right edge is darkened by the shadow. Skips when no GPU adapter is
-//! present so a GPU-less CI stays green.
+//! bottom-right edge is darkened by the shadow.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
@@ -45,20 +46,16 @@ impl Rendered {
 
 /// Render the panel `build` produces (given the grid size) over the clear and
 /// read the pixels back.
-fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Option<Rendered> {
+fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Rendered {
     render_scene(1.0, |grid, rows, cols| {
         grid.set_panels(vec![build(rows, cols)]);
     })
 }
 
 /// Render the chrome `build` puts on the grid over the clear at `scale_factor`,
-/// and read the pixels back. `None` when no GPU adapter is present so a GPU-less
-/// CI stays green.
-fn render_scene(
-    scale_factor: f32,
-    build: impl FnOnce(&mut Grid, usize, usize),
-) -> Option<Rendered> {
-    let (device, queue) = headless_device()?;
+/// and read the pixels back.
+fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) -> Rendered {
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
@@ -131,20 +128,20 @@ fn render_scene(
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
-    Some(Rendered {
+    Rendered {
         pixels,
         width,
         cell,
         rows,
         cols,
-    })
+    }
 }
 
 #[test]
 fn unfilled_panel_shadow_stays_outside_the_box() {
     // A panel inset one cell from the top-left, leaving a couple cells of margin
     // at the bottom-right for the [5,7]px shadow to fall into.
-    let Some(r) = render_panel(|rows, cols| Panel {
+    let r = render_panel(|rows, cols| Panel {
         top: 1,
         left: 1,
         width: cols as u16 - 3,
@@ -158,10 +155,7 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         above_pools: false,
         anchor: None,
         seq: 0,
-    }) else {
-        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
-        return;
-    };
+    });
 
     let box_left = 1.0 * r.cell[0];
     let box_right = (1.0 + (r.cols as f32 - 3.0)) * r.cell[0];
@@ -210,7 +204,7 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
 #[test]
 fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
     let inset = 6u8;
-    let Some(r) = render_panel(|rows, cols| Panel {
+    let r = render_panel(|rows, cols| Panel {
         top: 1,
         left: 1,
         width: cols as u16 - 2,
@@ -225,10 +219,7 @@ fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
         above_pools: false,
         anchor: None,
         seq: 0,
-    }) else {
-        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
-        return;
-    };
+    });
 
     let box_left = 1.0 * r.cell[0];
     let box_right = (1.0 + (r.cols as f32 - 2.0)) * r.cell[0];
@@ -267,7 +258,7 @@ fn popover_chrome_scales_with_the_display() {
     const FILL: [u8; 3] = [20, 22, 30];
     const BORDER: [u8; 3] = [200, 100, 50];
 
-    let Some(r) = render_scene(2.0, |grid, _rows, _cols| {
+    let r = render_scene(2.0, |grid, _rows, _cols| {
         grid.set_overlays(vec![Overlay {
             top: 1,
             left: 1,
@@ -281,10 +272,7 @@ fn popover_chrome_scales_with_the_display() {
             bold: false,
             content: String::new(),
         }]);
-    }) else {
-        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
-        return;
-    };
+    });
 
     let box_top = r.cell[1];
     let box_bottom = 4.0 * r.cell[1];

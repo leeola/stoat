@@ -746,8 +746,8 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 mod tests {
     use super::{build_polyline_instances_into, PolylineInstance, PolylinePass};
     use crate::{
-        gpu::headless_device,
         render::{CellMetrics, PoolOccluders},
+        test_support::require_headless_device,
     };
     use stoatty_term::grid::{Grid, Polyline, Rgb};
     use wgpu::{
@@ -870,10 +870,7 @@ mod tests {
     /// moved, so a commit graph being scrolled past pays the uniform alone.
     #[test]
     fn the_live_pass_rebuilds_only_when_the_path_epoch_moves() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("polyline epoch test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = gate_pass(&device);
 
         let declared = [path(&[[0, 16], [0, 32]])];
@@ -915,10 +912,7 @@ mod tests {
     /// other for as long as they agreed.
     #[test]
     fn a_second_grid_holding_the_same_count_is_not_the_first() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("polyline grid-id test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = gate_pass(&device);
 
         // Every grid starts its counters at zero, so both stand at one after
@@ -1153,10 +1147,7 @@ mod tests {
     /// the unsplit run, so the two render identically or the joint beads.
     #[test]
     fn a_joint_blends_no_heavier_than_the_run_it_splits() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("polyline joint test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // An odd width puts the fringe on fractional coverage, where a second
         // blend shows. An even one saturates it and hides the bead.
@@ -1209,10 +1200,7 @@ mod tests {
     /// change built, which is the one part of that a test can observe.
     #[test]
     fn a_shift_only_composite_frame_rebuilds_no_segments() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("polyline composite test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = PolylinePass::new(
             &device,
             TextureFormat::Rgba8Unorm,

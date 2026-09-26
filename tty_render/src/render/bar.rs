@@ -533,8 +533,8 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 mod tests {
     use super::{build_bar_instances_into, BarInstance, BarPass};
     use crate::{
-        gpu::headless_device,
         render::{background::BackgroundPass, CellMetrics, PoolOccluders},
+        test_support::require_headless_device,
     };
     use stoatty_term::grid::{Bar, Grid, Rgb};
     use wgpu::{
@@ -651,10 +651,7 @@ mod tests {
     /// gutter's marks then read at different weights from row to row.
     #[test]
     fn a_thin_bar_holds_its_width_across_pixel_phases() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("bar width test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // A fractional cell is what puts the two bars on different sub-pixel
         // phases. Two sixteenths of it is 1.5625 pixels: rounding each edge on
@@ -691,10 +688,7 @@ mod tests {
     /// phase than the row it annotates and wobbles a pixel against it.
     #[test]
     fn a_gliding_bar_lands_on_the_row_it_annotates() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("bar glide test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         // The cell height must be fractional, or rounding is the identity and
         // either ordering agrees. Row 1 sits at 12.5 and the shift is a further
@@ -893,10 +887,7 @@ mod tests {
     /// change built, which is the one part of that a test can observe.
     #[test]
     fn a_shift_only_composite_frame_rebuilds_no_bars() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("bar composite test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let mut pass = BarPass::new(
             &device,
             TextureFormat::Rgba8Unorm,

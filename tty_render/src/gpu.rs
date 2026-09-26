@@ -2246,10 +2246,13 @@ fn rgb_to_color(rgb: Rgb) -> Color {
 
 /// Request a wgpu adapter and device with no surface, for off-screen rendering.
 ///
-/// `None` when no adapter is available, so a GPU-less caller (such as a test in
-/// headless CI) can skip rather than fail. Uses the same backends, power
-/// preference, and device descriptor as [`GpuContext::new`], so a caller reaches
-/// the adapter a launch reaches.
+/// `None` when no adapter answers. Uses the same backends, power preference,
+/// and device descriptor as [`GpuContext::new`], so a caller reaches the adapter
+/// a launch reaches.
+///
+/// A test takes its device from `test_support::require_headless_device`, which
+/// fails the test when no adapter answers rather than letting it pass having
+/// drawn nothing.
 pub fn headless_device() -> Option<(Device, Queue)> {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::PRIMARY,
@@ -2269,10 +2272,11 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, clamp_scissor, headless_device, needs_configure, surface_formats,
+        build_font_system, clamp_scissor, needs_configure, surface_formats,
         CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame, PoolComposite,
         Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat,
     };
+    use crate::test_support::require_headless_device;
     use stoatty_term::{
         grid::{Grid, Rgb},
         term::Damage,
@@ -2320,10 +2324,7 @@ mod tests {
     /// where its scissor says.
     #[test]
     fn one_pass_lands_the_live_grid_and_every_pool_in_its_own_region() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("single-pass frame test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let format = TextureFormat::Rgba8Unorm;
         let font_size = 30;
@@ -2481,10 +2482,7 @@ mod tests {
     /// cursor.
     #[test]
     fn a_deferred_panel_stroke_survives_the_pool_that_covers_its_cells() {
-        let Some((device, queue)) = headless_device() else {
-            eprintln!("deferred panel stroke test: no wgpu adapter available, skipping");
-            return;
-        };
+        let (device, queue) = require_headless_device();
 
         let format = TextureFormat::Rgba8Unorm;
         let font_size = 30;

@@ -4,11 +4,12 @@
 //! The `shader_is_valid_wgsl` unit tests validate WGSL in isolation but never
 //! build a pipeline, so a bind-group-layout-versus-shader mismatch (a uniform
 //! used in a stage the layout omits) only surfaces when a real device runs
-//! `create_render_pipeline`. This test reaches that path and the draw path,
-//! skipping when no GPU adapter is present so GPU-less CI stays green.
+//! `create_render_pipeline`. This test reaches that path and the draw path. It
+//! fails without a GPU adapter, since a test that draws nothing proves nothing.
 
-use stoatty_render::gpu::{
-    build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
+use stoatty_render::{
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{
@@ -26,10 +27,7 @@ use wgpu::{
 
 #[test]
 fn builds_passes_and_draws_a_frame_off_screen() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("headless_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let (width, height) = (256, 128);
@@ -242,10 +240,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
 /// the other's.
 #[test]
 fn two_renderers_on_one_device_draw_their_own_grids() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("headless_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let (width, height) = (128, 128);

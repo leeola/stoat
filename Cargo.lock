@@ -4281,6 +4281,7 @@ dependencies = [
  "raw-window-handle",
  "rustc-hash 2.1.2",
  "stoatty_protocol",
+ "stoatty_render",
  "stoatty_term",
  "swash",
  "sys-locale",

@@ -4,14 +4,16 @@
 //! The alpha rides a storage array the fragment stage indexes by a slot the
 //! instance carries. Every step of that stays right on the Rust side even when
 //! the shader ignores the array, so only reading the drawn pixels tells the two
-//! apart. Skips when no GPU adapter is present so a GPU-less CI stays green.
+//! apart.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
 };
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll, SketchReveal},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll, SketchReveal},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb, Sketch, TextRun},
@@ -32,10 +34,7 @@ const GROUND: Rgb = Rgb { r: 0, g: 0, b: 255 };
 /// which names a shape not yet recognizable.
 #[test]
 fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("follow_fade_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;

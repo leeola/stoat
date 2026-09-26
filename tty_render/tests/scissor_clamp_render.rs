@@ -6,13 +6,14 @@
 //! aborts the process when a scissor exceeds the render target, so the renderer
 //! clamps every caller-supplied scissor. This drives both entry points with a
 //! scissor twice the offscreen target's size inside a validation error scope and
-//! asserts no error is raised. Skips when no GPU adapter is present, so a
-//! GPU-less CI stays green.
+//! asserts no error is raised.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use futures::executor;
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -25,10 +26,7 @@ use wgpu::{
 
 #[test]
 fn oversized_scissors_are_clamped_not_validated() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("scissor_clamp_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;

@@ -10,13 +10,14 @@
 //! agreeing on where a row's bytes live.
 //!
 //! These render instances whose rows are far enough apart to read off the
-//! surface and assert each lands in its own band. Skips when no GPU adapter is
-//! present, so a GPU-less CI stays green.
+//! surface and assert each lands in its own band.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use std::ops::Range;
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{whole_row, Grid, Overlay, Rgb, TextRun, UnderlineStyle},
@@ -68,10 +69,7 @@ fn line_screen(top: u32) -> Grid {
 /// dropped the row term or folded every slot onto one row.
 #[test]
 fn an_underline_paints_on_the_row_its_slot_names() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("row_slot_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let color = Rgb::new(240, 40, 40);
     let mut grid = Grid::new(ROWS as usize, 8);
@@ -102,10 +100,7 @@ fn an_underline_paints_on_the_row_its_slot_names() {
 /// through the buffer once, so it has to receive them in slot order.
 #[test]
 fn a_scrolled_screen_keeps_every_row_where_the_shader_looks_for_it() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("row_slot_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let mut harness = Harness::new(&device, 8);
     harness.render(&device, &queue, &line_screen(0), &Damage::Full, 0);
@@ -151,10 +146,7 @@ fn a_scrolled_screen_keeps_every_row_where_the_shader_looks_for_it() {
 /// last one displaces nothing and would hide the omission.
 #[test]
 fn a_scroll_that_rebuilds_nothing_still_moves_the_rows_it_kept() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("row_slot_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     for settled in 0..ROWS {
         let mut harness = Harness::new(&device, 8);
@@ -221,10 +213,7 @@ fn a_scroll_that_rebuilds_nothing_still_moves_the_rows_it_kept() {
 /// at the grid height would fold a box's later lines back over its first.
 #[test]
 fn overlay_content_lines_do_not_wrap_at_the_grid_height() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("row_slot_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let content_fg = Rgb::new(20, 240, 60);
     let mut grid = Grid::new(ROWS as usize, 12);
@@ -259,10 +248,7 @@ fn overlay_content_lines_do_not_wrap_at_the_grid_height() {
 /// back to, which is most of the grid height away from where it was declared.
 #[test]
 fn a_pool_text_run_paints_on_its_own_row_after_the_live_grid_scrolls() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("row_slot_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let mut harness = Harness::new(&device, COLS as u32);
     harness.render(&device, &queue, &line_screen(0), &Damage::Full, 0);
@@ -338,10 +324,7 @@ fn varied_screen(top: u32) -> Grid {
 /// the live grid's too.
 #[test]
 fn a_scrolled_composite_paints_what_a_rebuilt_one_paints() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("row_slot_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let blank = Grid::new(ROWS as usize, COLS);
 

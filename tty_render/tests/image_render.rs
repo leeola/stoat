@@ -3,13 +3,14 @@
 //! The terminal has held decoded pixels and placements for several steps
 //! without anything drawing one, so the question this answers is whether the
 //! pass turns a placement into pixels at all, and whether its z-index puts it on
-//! the side of the text the client asked for. Skips when no GPU adapter is
-//! present so a GPU-less CI stays green.
+//! the side of the text the client asked for.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use std::sync::Arc;
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, ImageCrop, PlacedImage, Rgb},
@@ -54,10 +55,7 @@ fn placement(rgba: Arc<[u8]>, width: u32, height: u32, z: i32) -> PlacedImage {
 
 #[test]
 fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("image_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
@@ -183,10 +181,7 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
 /// under the ground rather than over it.
 #[test]
 fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("image_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
@@ -288,10 +283,7 @@ fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
 /// The pattern then breaks into noise that crawls as the image moves.
 #[test]
 fn a_downscaled_image_averages_rather_than_aliasing() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("image_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;

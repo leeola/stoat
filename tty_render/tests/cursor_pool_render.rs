@@ -7,12 +7,13 @@
 //! composites a gray pool over the whole grid, then draws the cursor into one
 //! cell, and reads the pixels back to assert that cell brightened (the cursor
 //! sits above the pool) while its neighbour did not. A second pass scissors the
-//! cursor to a band that excludes its cell and asserts it vanishes. Skips when
-//! no GPU adapter is present, so a GPU-less CI stays green.
+//! cursor to a band that excludes its cell and asserts it vanishes.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -27,10 +28,7 @@ use wgpu::{
 
 #[test]
 fn cursor_draws_over_pool_and_obeys_its_scissor() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("cursor_pool_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;

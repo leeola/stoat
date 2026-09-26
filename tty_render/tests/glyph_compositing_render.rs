@@ -7,12 +7,13 @@
 //! the glyph blends premultiplied over the magenta already in the framebuffer,
 //! its anti-aliased edges are white-over-magenta mixes -- red and blue pinned
 //! at full, green partial. A glyph that instead stamped its cell background
-//! would leave only flat gray edges and pure magenta, never such a mix. Skips
-//! when no GPU adapter is present so a GPU-less CI stays green.
+//! would leave only flat gray edges and pure magenta, never such a mix.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -27,10 +28,7 @@ use wgpu::{
 
 #[test]
 fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("glyph_compositing_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;

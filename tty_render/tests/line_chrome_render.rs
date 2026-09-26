@@ -4,12 +4,13 @@
 //! records before the text pass loses its lines wherever glyph ink reaches a
 //! cell edge. A full block is the adversarial case: it scales to the exact cell
 //! box, so it covers every pixel a border would occupy and leaves nothing of a
-//! border drawn beneath it. Skips when no GPU adapter is present so a GPU-less
-//! CI stays green.
+//! border drawn beneath it.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Border, BorderEdge, BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -24,10 +25,7 @@ use wgpu::{
 
 #[test]
 fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("line_chrome_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
@@ -149,10 +147,7 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
 /// edge it sits beside.
 #[test]
 fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("line_chrome_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
@@ -271,10 +266,7 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
 /// bleed past the cell's own corner.
 #[test]
 fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("line_chrome_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;

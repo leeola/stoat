@@ -3,14 +3,17 @@
 //!
 //! Renders a handful of off-screen frames against a real device, forcing the
 //! async readback to complete each frame, and asserts a nonzero GPU duration
-//! eventually lands. Skips when no adapter is present or the adapter lacks
-//! `TIMESTAMP_QUERY`, so GPU-less or older CI stays green.
+//! eventually lands.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
+//! Skips when the adapter lacks `TIMESTAMP_QUERY`, since an adapter without
+//! that capability is not a fault.
 
 #![cfg(feature = "perf")]
 
 use std::time::Duration;
-use stoatty_render::gpu::{
-    build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
+use stoatty_render::{
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -23,10 +26,7 @@ use wgpu::{
 
 #[test]
 fn timestamp_queries_yield_a_nonzero_gpu_duration() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("gpu_timing: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
     if !device.features().contains(Features::TIMESTAMP_QUERY) {
         eprintln!("gpu_timing: adapter lacks TIMESTAMP_QUERY, skipping");
         return;

@@ -806,7 +806,7 @@ mod tests {
         build_instances, build_row_instances, damaged_row_runs, row_slot, BackgroundPass,
         BgInstance, CursorState,
     };
-    use crate::{gpu::headless_device, render::CellMetrics};
+    use crate::{render::CellMetrics, test_support::require_headless_device};
     use std::ops::Range;
     use stoatty_term::{
         grid::{Flags, Grid, Rgb},
@@ -955,10 +955,7 @@ mod tests {
     /// matches what `vs_main` reads.
     #[test]
     fn the_pipeline_accepts_the_packed_instance_layout() {
-        let Some((device, _queue)) = headless_device() else {
-            eprintln!("background pipeline test: no wgpu adapter, skipping");
-            return;
-        };
+        let (device, _queue) = require_headless_device();
 
         BackgroundPass::new(
             &device,
@@ -1051,9 +1048,7 @@ mod tests {
     /// wrap included.
     #[test]
     fn a_rotated_flood_lands_every_row_where_the_shader_reads_it() {
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let (rows, cols) = (5, 3);
         let metrics = CellMetrics {
             font_size: 10.0,

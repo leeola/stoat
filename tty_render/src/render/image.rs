@@ -623,7 +623,7 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 #[cfg(test)]
 mod tests {
     use super::{crop_uv, ImagePass, TextureKey};
-    use crate::{gpu::headless_device, render::CellMetrics};
+    use crate::{render::CellMetrics, test_support::require_headless_device};
     use std::sync::Arc;
     use stoatty_term::grid::{ImageCrop, PlacedImage};
     use wgpu::{
@@ -734,9 +734,7 @@ mod tests {
         const HALF_RED: [u8; 4] = [128, 0, 0, 128];
         const QUARTER_RED: [u8; 4] = [64, 0, 0, 64];
 
-        let Some((device, queue)) = headless_device() else {
-            return;
-        };
+        let (device, queue) = require_headless_device();
         let metrics = CellMetrics {
             font_size: 10.0,
             width: 6.0,

@@ -11,6 +11,9 @@ workspace = true
 # Compile in per-frame CPU/GPU timing and the perf HUD. Off by default so
 # release builds carry no timing state or GPU timestamp features.
 perf = []
+# Expose the helpers the renderer's tests share. The crate's own integration
+# tests turn it on through the self dev-dependency below.
+test-support = []
 
 [dependencies]
 stoatty_protocol = { path = "../tty_protocol" }
@@ -30,6 +33,7 @@ rustc-hash.workspace = true
 
 [dev-dependencies]
 divan = "0.1"
+stoatty_render = { path = ".", features = ["test-support"] }
 
 [[bench]]
 name = "compose"

@@ -5,12 +5,13 @@
 //! showed. This renders a U+E0B0 separator off-screen and reads the pixels back,
 //! asserting the filled triangle spans the whole cell: the full-height left edge
 //! is the arrow colour, the apex reaches the right edge, and the empty top-right
-//! corner stays the background. Skips when no GPU adapter is present, so a
-//! GPU-less CI stays green.
+//! corner stays the background.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -25,10 +26,7 @@ use wgpu::{
 
 #[test]
 fn powerline_separator_fills_the_cell() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("powerline_render: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     // 4 * width must be a multiple of 256 for the texture-to-buffer copy.

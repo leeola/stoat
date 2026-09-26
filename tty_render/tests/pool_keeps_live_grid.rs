@@ -8,11 +8,12 @@
 //! renders the live grid again with no damage and reads back to confirm the
 //! glyph and the black background survive rather than the pool's gray and blank
 //! cells.
-//! Skips when no GPU adapter is present, so a GPU-less CI stays green.
+//! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
+    test_support::require_headless_device,
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -27,10 +28,7 @@ use wgpu::{
 
 #[test]
 fn pool_composite_keeps_live_instances() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -170,10 +168,7 @@ fn pool_composite_keeps_live_instances() {
 /// grid is ignored, and the live grid's black does not show through.
 #[test]
 fn shift_only_composite_reuses_prior_rows() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -312,10 +307,7 @@ fn shift_only_composite_reuses_prior_rows() {
 /// position is what keeps the survivors reading their own instances.
 #[test]
 fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -526,10 +518,7 @@ fn read_back(
 /// atlas rather than sampling the pre-grow region.
 #[test]
 fn pool_grow_heals_live_instances() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
@@ -668,10 +657,7 @@ fn pool_grow_heals_live_instances() {
 /// to another, is worth healing.
 #[test]
 fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 60;
@@ -779,10 +765,7 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
 /// the scissor would clip all of it away, leaving the live grid showing.
 #[test]
 fn a_region_sized_pool_draws_at_the_region_origin() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
-        return;
-    };
+    let (device, queue) = require_headless_device();
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
