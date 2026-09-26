@@ -413,6 +413,10 @@ impl LspHost for LocalLsp {
             .clone()
     }
 
+    fn pid(&self) -> Option<u32> {
+        self.child.lock().ok().map(|child| child.id())
+    }
+
     async fn initialize(&self, root_uri: Option<Uri>) -> io::Result<InitializeResult> {
         // root_uri is deprecated upstream in favor of workspace_folders, but it
         // is the field this trait's contract hands us and every server still

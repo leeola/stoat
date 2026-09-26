@@ -250,6 +250,16 @@ pub trait LspHost: Send + Sync {
         false
     }
 
+    /// The operating-system process id of a server that runs as a
+    /// child process.
+    ///
+    /// `None` for a server that runs in process, and for the test
+    /// fakes. The `lsp-status` query reports it, so that a caller finds
+    /// the process and confirms that a shutdown reaped it.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+
     /// Negotiated [`OffsetEncoding`] for `Position.character` width.
     /// Default impl reads from
     /// `capabilities().position_encoding`; absent or unrecognized

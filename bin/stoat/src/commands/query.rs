@@ -12,7 +12,7 @@ use stoat::{log, run, workspace::WorkspaceUid};
 /// print the JSON reply.
 #[derive(Subcommand, Debug)]
 pub enum QueryCommand {
-    /// LSP host liveness and the server's capabilities.
+    /// LSP host liveness, and each server's process id and capabilities.
     LspStatus {
         #[command(flatten)]
         socket: SocketArgs,

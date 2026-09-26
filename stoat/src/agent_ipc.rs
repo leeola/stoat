@@ -84,7 +84,8 @@ pub enum AgentControl {
 /// routed through [`AgentControl::OpenEditor`] and never appears here.
 #[derive(Debug, PartialEq)]
 pub enum AgentQuery {
-    /// LSP host liveness plus the server's serialized capabilities.
+    /// LSP host liveness, plus each server's name, process id, and serialized
+    /// capabilities.
     LspStatus,
     /// Diagnostics for `path`, or for every tracked path when `None`.
     Diagnostics { path: Option<PathBuf> },
@@ -311,7 +312,7 @@ pub(crate) fn answer_agent_query(
                 .map(|(name, host)| {
                     let capabilities =
                         serde_json::to_value(&*host.capabilities()).unwrap_or(Value::Null);
-                    json!({ "name": name, "capabilities": capabilities })
+                    json!({ "name": name, "pid": host.pid(), "capabilities": capabilities })
                 })
                 .collect();
             let _ = reply.send(json!({
@@ -403,15 +404,21 @@ mod tests {
         let value = rx.try_recv().expect("lsp-status reply");
 
         assert_eq!(value["active"], serde_json::json!(true));
-        let names: Vec<&str> = value["servers"]
+        let mut servers: Vec<(&str, &Value)> = value["servers"]
             .as_array()
             .expect("servers array")
             .iter()
-            .map(|s| s["name"].as_str().expect("server name"))
+            .map(|s| (s["name"].as_str().expect("server name"), &s["pid"]))
             .collect();
-        assert!(
-            names.contains(&"primary") && names.contains(&"secondary"),
-            "servers listed: {names:?}",
+        servers.sort_by_key(|(name, _)| *name);
+        assert_eq!(
+            servers,
+            [
+                ("default", &Value::Null),
+                ("primary", &Value::Null),
+                ("secondary", &Value::Null),
+            ],
+            "the harness's sole fake and both installed fakes, none with a pid",
         );
     }
 
