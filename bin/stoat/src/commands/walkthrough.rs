@@ -77,6 +77,12 @@ pub enum WalkthroughCommand {
         #[arg(long)]
         range: String,
 
+        /// Read the range from this commit's tree, and play the stop with the
+        /// commit checked out. Takes any revision `git rev-parse` accepts and
+        /// stores its full sha.
+        #[arg(long)]
+        commit: Option<String>,
+
         /// Short heading for the stop.
         #[arg(long)]
         title: Option<String>,
@@ -104,6 +110,16 @@ pub enum WalkthroughCommand {
         /// New range for the focus. Re-captures the snippet.
         #[arg(long)]
         range: Option<String>,
+
+        /// Move the stop onto this commit's tree. Takes any revision
+        /// `git rev-parse` accepts and stores its full sha. Re-captures the
+        /// snippet.
+        #[arg(long)]
+        commit: Option<String>,
+
+        /// Return the stop to the working tree. Re-captures the snippet.
+        #[arg(long, conflicts_with = "commit")]
+        no_commit: bool,
 
         #[arg(long)]
         title: Option<String>,
@@ -302,6 +318,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             slug,
             file,
             range,
+            commit,
             title,
             narration,
             before,
@@ -312,6 +329,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             &slug,
             &file,
             &range,
+            commit.as_deref(),
             title,
             narration.read(fs)?.unwrap_or_default(),
             before.as_deref(),
@@ -322,6 +340,8 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             stop,
             file,
             range,
+            commit,
+            no_commit,
             title,
             no_title,
             narration,
@@ -333,7 +353,8 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             &stop,
             file.as_deref(),
             range.as_deref(),
-            title_edit(title, no_title),
+            optional_edit(commit, no_commit),
+            optional_edit(title, no_title),
             narration.read(fs)?,
         ),
 
@@ -591,6 +612,10 @@ fn delete(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<String, Whatever> 
 }
 
 /// Add a stop focused on `range` of `file`, returning its new id.
+///
+/// A `commit` reads the range out of that commit's tree and stores the full
+/// sha it resolves to. A branch that moves later then leaves the stop on the
+/// commit it was written over.
 #[allow(clippy::too_many_arguments)]
 fn add_stop(
     fs: &dyn FsHost,
@@ -598,15 +623,17 @@ fn add_stop(
     slug: &str,
     file: &Path,
     range: &str,
+    commit: Option<&str>,
     title: Option<String>,
     narration: String,
     before: Option<&str>,
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
-    let focus = capture(fs, root, file, range)?;
+    let commit = commit.map(|rev| resolve_commit(root, rev)).transpose()?;
+    let focus = capture_at(fs, root, commit.as_deref(), file, parse_range(range)?)?;
 
     let id = walkthrough
-        .add_stop(title, narration, focus, None, before)
+        .add_stop(title, narration, focus, commit, before)
         .whatever_context("add the stop")?
         .id
         .clone();
@@ -617,10 +644,14 @@ fn add_stop(
 
 /// Change the stop `stop`, returning its id.
 ///
-/// The focus is re-captured only when `file` or `range` is given, each falling
-/// back to what the stop already holds. An edit that names neither leaves the
-/// captured snippet alone, so changing a title never re-baselines a range the
-/// author did not mention.
+/// The focus is re-captured only when `file`, `range`, or `commit` is given,
+/// each falling back to what the stop already holds. An edit that names none of
+/// them leaves the captured snippet alone, so changing a title never
+/// re-baselines a range the author did not mention.
+///
+/// `commit` edits the stop's commit in two layers. `Some(Some(rev))` moves the
+/// stop onto that commit's tree, and `Some(None)` returns it to the working
+/// tree. A re-capture with `None` reads wherever the stop already reads.
 #[allow(clippy::too_many_arguments)]
 fn edit_stop(
     fs: &dyn FsHost,
@@ -629,21 +660,31 @@ fn edit_stop(
     stop: &str,
     file: Option<&Path>,
     range: Option<&str>,
+    commit: Option<Option<String>>,
     title: Option<Option<String>>,
     narration: Option<String>,
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
+    let commit = match commit {
+        Some(Some(rev)) => Some(Some(resolve_commit(root, &rev)?)),
+        Some(None) => Some(None),
+        None => None,
+    };
 
-    let focus = match (file, range) {
-        (None, None) => None,
+    let focus = match (file, range, &commit) {
+        (None, None, None) => None,
         _ => {
-            let current = &find_stop(&walkthrough, stop)?.focus;
-            let file = file.map_or_else(|| root.join(&current.path), Path::to_path_buf);
+            let current = find_stop(&walkthrough, stop)?;
+            let at = match &commit {
+                Some(commit) => commit.as_deref(),
+                None => current.commit.as_deref(),
+            };
+            let file = file.map_or_else(|| root.join(&current.focus.path), Path::to_path_buf);
             let range = match range {
                 Some(text) => parse_range(text)?,
-                None => RangeSpec::Points(current.range),
+                None => RangeSpec::Points(current.focus.range),
             };
-            Some(capture_resolved(fs, root, &file, range)?)
+            Some(capture_at(fs, root, at, &file, range)?)
         },
     };
 
@@ -652,7 +693,7 @@ fn edit_stop(
             stop,
             StopEdit {
                 title,
-                commit: None,
+                commit,
                 narration,
                 focus,
             },
@@ -698,6 +739,9 @@ fn move_stop(
 ///
 /// An empty `narration` leaves the stop's own narration standing while the
 /// reader is on this annotation.
+///
+/// The range reads at the stop's commit, since the reader sees the annotation
+/// with that commit checked out.
 #[allow(clippy::too_many_arguments)]
 fn add_annotation(
     fs: &dyn FsHost,
@@ -711,11 +755,20 @@ fn add_annotation(
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
 
-    let target = match file {
-        Some(file) => file.to_path_buf(),
-        None => root.join(&find_stop(&walkthrough, stop)?.focus.path),
+    let captured = {
+        let owner = find_stop(&walkthrough, stop)?;
+        let target = match file {
+            Some(file) => file.to_path_buf(),
+            None => root.join(&owner.focus.path),
+        };
+        capture_at(
+            fs,
+            root,
+            owner.commit.as_deref(),
+            &target,
+            parse_range(range)?,
+        )?
     };
-    let captured = capture_resolved(fs, root, &target, parse_range(range)?)?;
     let path = file.is_some().then_some(captured.path);
 
     let id = walkthrough
@@ -743,7 +796,8 @@ fn add_annotation(
 /// re-baselines a range the author did not mention.
 ///
 /// A re-capture reads the file the annotation itself names, not the stop's
-/// focus, so a bare range edit on a cross-file annotation stays cross-file.
+/// focus, so a bare range edit on a cross-file annotation stays cross-file. It
+/// reads at the stop's commit, as [`add_annotation`] does.
 ///
 /// A file change with no range of its own carries the stored range over as the
 /// exact bytes it is, and fails when the new file is too short for it. Name a
@@ -772,12 +826,19 @@ fn edit_annotation(
                 None => RangeSpec::Points(stored.range),
             };
 
+            let owner = find_stop(&walkthrough, stop)?;
             let target = match (file, &stored.path) {
                 (Some(file), _) => file.to_path_buf(),
                 (None, Some(stored)) if !no_file => root.join(stored),
-                (None, _) => root.join(&find_stop(&walkthrough, stop)?.focus.path),
+                (None, _) => root.join(&owner.focus.path),
             };
-            Some(capture_resolved(fs, root, &target, range)?)
+            Some(capture_at(
+                fs,
+                root,
+                owner.commit.as_deref(),
+                &target,
+                range,
+            )?)
         },
     };
 
@@ -902,25 +963,27 @@ fn read_file(fs: &dyn FsHost, path: &Path) -> io::Result<String> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
 }
 
-/// The location `range` of `file` names, with the bytes it covers right now.
-fn capture(fs: &dyn FsHost, root: &Path, file: &Path, range: &str) -> Result<Location, Whatever> {
-    capture_resolved(fs, root, file, parse_range(range)?)
-}
-
-/// The location `spec` of `file` names, with the bytes it covers right now.
+/// The location `spec` of `file` names, with the bytes it covers at `commit`.
 ///
-/// `file` is canonicalized and required to sit inside the workspace, then
-/// stored relative to it. An absolute path in a stored walkthrough breaks the
-/// moment the repository is cloned somewhere else.
-fn capture_resolved(
+/// `None` reads the working tree. A commit reads `file` out of that commit's
+/// tree, whether or not the working tree still holds it.
+///
+/// `file` must sit inside the workspace, and the location stores it relative to
+/// the root. An absolute path in a stored walkthrough breaks the moment the
+/// repository is cloned somewhere else.
+fn capture_at(
     fs: &dyn FsHost,
     root: &Path,
+    commit: Option<&str>,
     file: &Path,
     spec: RangeSpec,
 ) -> Result<Location, Whatever> {
     let relative = within_workspace(fs, root, file)?;
-    let content = store::workspace_reader(fs, root)(&relative)
-        .with_whatever_context(|| format!("read {}", relative.display()))?;
+    let content =
+        store::reader(fs, root)(commit, &relative).with_whatever_context(|| match commit {
+            None => format!("cannot read {}", relative.display()),
+            Some(sha) => format!("cannot read {} at {sha:.7}", relative.display()),
+        })?;
 
     let range = resolve_range(spec, &content)?;
     let snippet = walkthrough::snippet_for(&content, range)
@@ -933,22 +996,54 @@ fn capture_resolved(
     })
 }
 
-/// `file` as a path relative to the workspace root.
+/// The full sha of the commit `rev` names, for a stop to store.
+fn resolve_commit(root: &Path, rev: &str) -> Result<String, Whatever> {
+    store::resolve_commit(root, rev).with_whatever_context(|| format!("no revision named {rev}"))
+}
+
+/// `file` as a path relative to the workspace root, whether or not it exists.
+///
+/// A commit's tree holds files the working tree has deleted or never had, so
+/// the file itself need not be on disk. This canonicalizes the nearest ancestor
+/// that exists and appends the rest as written. A relative `file` thus reads
+/// against the current directory with or without a commit, and a symlinked
+/// root still matches.
+///
+/// This refuses a `..` in the part that does not exist, since nothing on disk
+/// says where it leads.
 fn within_workspace(fs: &dyn FsHost, root: &Path, file: &Path) -> Result<PathBuf, Whatever> {
     let root = fs
         .canonicalize(root)
         .whatever_context(format!("resolve the workspace {}", root.display()))?;
-    let file = fs
-        .canonicalize(file)
-        .whatever_context(format!("resolve {}", file.display()))?;
 
-    file.strip_prefix(&root)
+    let mut existing = file;
+    let mut missing = Vec::new();
+    let resolved = loop {
+        let probe = match existing.as_os_str().is_empty() {
+            true => Path::new("."),
+            false => existing,
+        };
+        if let Ok(found) = fs.canonicalize(probe) {
+            break missing
+                .iter()
+                .rev()
+                .fold(found, |path, name| path.join(name));
+        }
+        let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else {
+            whatever!("resolve {}", file.display());
+        };
+        missing.push(name);
+        existing = parent;
+    };
+
+    resolved
+        .strip_prefix(&root)
         .ok()
         .map(Path::to_path_buf)
         .with_whatever_context(|| {
             format!(
                 "{} is outside the workspace {}",
-                file.display(),
+                resolved.display(),
                 root.display()
             )
         })
@@ -980,11 +1075,11 @@ fn find_annotation<'a>(
         .with_whatever_context(|| format!("no annotation '{annotation}' on stop '{stop}'"))
 }
 
-/// Which of `--title` and `--no-title` the caller gave, as the format layer's
-/// two-layer edit.
-fn title_edit(title: Option<String>, no_title: bool) -> Option<Option<String>> {
-    match (title, no_title) {
-        (Some(title), _) => Some(Some(title)),
+/// Which of a `--<field>` and `--no-<field>` pair the caller gave, as the format
+/// layer's two-layer edit of an optional field.
+fn optional_edit(value: Option<String>, clear: bool) -> Option<Option<String>> {
+    match (value, clear) {
+        (Some(value), _) => Some(Some(value)),
         (None, true) => Some(None),
         (None, false) => None,
     }
@@ -1025,16 +1120,18 @@ fn relative_path(root: &Path, slug: &str) -> String {
 mod tests {
     use super::{
         add_annotation, add_stop, check, delete, edit_annotation, edit_stop, list, move_stop, new,
-        parse_range, remove_annotation, remove_stop, show, Annotation, MoveArgs, Point, Range,
-        RangeSpec,
+        parse_range, remove_annotation, remove_stop, show, Annotation, Location, MoveArgs, Point,
+        Range, RangeSpec, Walkthrough,
     };
-    use git2::Repository;
+    use git2::{Commit, Repository, Signature};
     use std::path::{Path, PathBuf};
     use stoat::{host::LocalFs, walkthrough::store};
     use tempfile::TempDir;
 
     const SOURCE: &str = "use std::io;\nfn main() {\n    println!(\"hi\");\n}\n";
     const OTHER: &str = "fn helper() {}\nfn second() {}\n";
+    /// The line the second commit of [`committed_tour`] puts above [`SOURCE`].
+    const PREPENDED: &str = "// moved\n";
 
     /// A workspace holding one source file to focus stops on.
     fn workspace() -> TempDir {
@@ -1042,6 +1139,50 @@ mod tests {
         Repository::init(dir.path()).expect("init");
         std::fs::write(dir.path().join("main.rs"), SOURCE).expect("write");
         dir
+    }
+
+    /// A workspace with an empty `tour` whose `main.rs` reads [`SOURCE`] at the
+    /// first commit and [`PREPENDED`] above it at the second, which the working
+    /// tree also holds. Returns the first commit's full sha.
+    fn committed_tour() -> (TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sig = Signature::now("test", "t@t").expect("signature");
+        let commit = |content: &str, parents: &[&Commit<'_>]| {
+            std::fs::write(dir.path().join("main.rs"), content).expect("write");
+            let mut index = repo.index().expect("index");
+            index.add_path(Path::new("main.rs")).expect("add");
+            index.write().expect("write index");
+            let tree = repo
+                .find_tree(index.write_tree().expect("write tree"))
+                .expect("find tree");
+            repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, parents)
+                .expect("commit")
+        };
+
+        let first = commit(SOURCE, &[]);
+        let parent = repo.find_commit(first).expect("first commit");
+        commit(&format!("{PREPENDED}{SOURCE}"), &[&parent]);
+
+        new(&LocalFs, dir.path(), "tour", None).expect("new");
+        (dir, first.to_string())
+    }
+
+    /// Append a stop over `range` of `main.rs` read at `commit`, returning its
+    /// id or the command's error.
+    fn stop_at(dir: &TempDir, range: &str, commit: Option<&str>) -> Result<String, String> {
+        add_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            &dir.path().join("main.rs"),
+            range,
+            commit,
+            None,
+            String::new(),
+            None,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// A walkthrough with one stop over line 2 of `main.rs`.
@@ -1053,6 +1194,7 @@ mod tests {
             "tour",
             &dir.path().join("main.rs"),
             "2",
+            None,
             None,
             "the entry point".to_owned(),
             None,
@@ -1068,7 +1210,7 @@ mod tests {
         path
     }
 
-    fn stored(dir: &TempDir) -> stoat::walkthrough::Walkthrough {
+    fn stored(dir: &TempDir) -> Walkthrough {
         store::load(&LocalFs, dir.path(), "tour").expect("load")
     }
 
@@ -1138,6 +1280,7 @@ mod tests {
             "tour",
             &dir.path().join("main.rs"),
             "1",
+            None,
             Some("Imports".to_owned()),
             String::new(),
             None,
@@ -1167,6 +1310,7 @@ mod tests {
             "tour",
             &dir.path().join("main.rs"),
             "1",
+            None,
             None,
             String::new(),
             Some("s1"),
@@ -1198,6 +1342,7 @@ mod tests {
             "s1",
             None,
             None,
+            None,
             Some(Some("Named".to_owned())),
             None,
         )
@@ -1225,6 +1370,7 @@ mod tests {
             Some("1"),
             None,
             None,
+            None,
         )
         .expect("edit-stop");
 
@@ -1242,6 +1388,7 @@ mod tests {
                 "tour",
                 &dir.path().join("main.rs"),
                 "1",
+                None,
                 None,
                 String::new(),
                 None,
@@ -1694,6 +1841,7 @@ mod tests {
             &outside.path().join("other.rs"),
             "1",
             None,
+            None,
             String::new(),
             None,
         )
@@ -1883,6 +2031,7 @@ mod tests {
             &file,
             "1",
             None,
+            None,
             String::new(),
             None,
         )
@@ -1911,5 +2060,216 @@ mod tests {
         assert!(new(&LocalFs, dir.path(), "../escape", None).is_err());
         assert!(new(&LocalFs, dir.path(), "Upper", None).is_err());
         assert!(show(&LocalFs, Path::new("/nowhere"), "..").is_err());
+    }
+
+    /// A stop over history reads the tree it was written over, so the working
+    /// tree moving on does not move the snippet.
+    #[test]
+    fn add_stop_with_a_commit_captures_from_that_commits_tree() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "2", Some(first.as_str())).expect("add-stop");
+
+        let stop = &stored(&dir).stops[0];
+        assert_eq!(
+            (stop.commit.as_deref(), stop.focus.snippet.as_str()),
+            (Some(first.as_str()), "fn main() {"),
+            "line 2 of the first commit, where the working tree has the use line",
+        );
+    }
+
+    /// A stop stores the sha rather than the revision, so a branch that moves
+    /// later leaves the stop on the commit it was written over.
+    #[test]
+    fn add_stop_resolves_a_revision_expression_to_a_sha() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "2", Some("HEAD~1")).expect("add-stop");
+
+        assert_eq!(stored(&dir).stops[0].commit, Some(first));
+    }
+
+    #[test]
+    fn an_unknown_commit_fails_the_command() {
+        let (dir, _) = committed_tour();
+
+        assert_eq!(
+            (
+                stop_at(&dir, "2", Some("no-such-rev")),
+                stored(&dir).stops.len()
+            ),
+            (Err("no revision named no-such-rev".to_owned()), 0),
+        );
+    }
+
+    /// A tour over history visits files that later commits delete, so the
+    /// commit's tree is the only place the file must exist.
+    #[test]
+    fn a_commit_stops_file_need_not_exist_in_the_working_tree() {
+        let (dir, first) = committed_tour();
+        std::fs::remove_file(dir.path().join("main.rs")).expect("remove");
+
+        stop_at(&dir, "2", Some(first.as_str())).expect("add-stop");
+        assert_eq!(stored(&dir).stops[0].focus.snippet, "fn main() {");
+    }
+
+    #[test]
+    fn edit_stop_no_commit_recaptures_from_the_working_tree() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "2", Some(first.as_str())).expect("add-stop");
+
+        edit_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            None,
+            Some(None),
+            None,
+            None,
+        )
+        .expect("edit-stop");
+
+        let stop = &stored(&dir).stops[0];
+        assert_eq!(
+            (stop.commit.as_deref(), stop.focus.snippet.as_str()),
+            (None, "use std::io"),
+            "the stored 2:1-2:11 over the working tree's line 2",
+        );
+    }
+
+    #[test]
+    fn edit_stop_commit_recaptures_at_that_commit() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "3", None).expect("add-stop");
+
+        edit_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            None,
+            Some(Some(first.clone())),
+            None,
+            None,
+        )
+        .expect("edit-stop");
+
+        let stop = &stored(&dir).stops[0];
+        assert_eq!(
+            (stop.commit.as_deref(), stop.focus.snippet.as_str()),
+            (Some(first.as_str()), "    println"),
+            "the stored 3:1-3:11 over the first commit's line 3",
+        );
+    }
+
+    /// A range edit that names no commit keeps reading the commit the stop
+    /// already reads.
+    #[test]
+    fn a_range_edit_on_a_commit_stop_reads_its_commit() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "2", Some(first.as_str())).expect("add-stop");
+
+        edit_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            Some("3"),
+            None,
+            None,
+            None,
+        )
+        .expect("edit-stop");
+
+        let stop = &stored(&dir).stops[0];
+        assert_eq!(
+            (stop.commit.as_deref(), stop.focus.snippet.as_str()),
+            (Some(first.as_str()), "    println!(\"hi\");"),
+            "line 3 of the first commit, where the working tree has fn main",
+        );
+    }
+
+    /// An annotation shows while its stop's commit is checked out, so adding
+    /// and editing one both read that commit.
+    #[test]
+    fn an_annotation_on_a_commit_stop_reads_the_stops_commit() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "2", Some(first.as_str())).expect("add-stop");
+
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "1",
+            "l".to_owned(),
+            String::new(),
+        )
+        .expect("add-annotation");
+        let added = stored(&dir).stops[0].annotations[0].snippet.clone();
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            None,
+            false,
+            Some("2"),
+            None,
+            None,
+        )
+        .expect("edit-annotation");
+        let edited = stored(&dir).stops[0].annotations[0].snippet.clone();
+
+        assert_eq!(
+            (added.as_str(), edited.as_str()),
+            ("use std::io;", "fn main() {"),
+            "lines 1 and 2 of the first commit, not the working tree's",
+        );
+    }
+
+    /// A working tree that moved on is no drift for a stop over history.
+    #[test]
+    fn check_validates_a_commit_stop_against_its_commit() {
+        let (dir, first) = committed_tour();
+        stop_at(&dir, "2", Some(first.as_str())).expect("add-stop");
+        std::fs::write(dir.path().join("main.rs"), "rewritten\n").expect("rewrite");
+
+        assert_eq!(check(&LocalFs, dir.path(), None).expect("check"), [""; 0]);
+    }
+
+    /// A stop naming a commit the repository lacks, such as one pruned after a
+    /// rebase, has nothing to read.
+    #[test]
+    fn check_reports_a_commit_that_is_gone_as_an_error() {
+        let (dir, _) = committed_tour();
+        let mut tour = Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        let focus = Location {
+            path: PathBuf::from("main.rs"),
+            range: Range {
+                start: Point { line: 2, col: 1 },
+                end: Point { line: 2, col: 11 },
+            },
+            snippet: "fn main() {".to_owned(),
+        };
+        tour.add_stop(
+            None,
+            String::new(),
+            focus,
+            Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            None,
+        )
+        .expect("append");
+        store::save(&LocalFs, dir.path(), &tour).expect("save");
+
+        assert_eq!(
+            check(&LocalFs, dir.path(), None).expect("check"),
+            ["tour/s1: error: cannot read main.rs"],
+        );
     }
 }
