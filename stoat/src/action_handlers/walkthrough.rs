@@ -249,6 +249,13 @@ pub(super) fn arrive_at_commit(stoat: &mut Stoat, landed: &str) {
     // The jump's own latch check skips a buffer the pane already shows, and
     // the first landing finds the pane not yet latched.
     super::review::latch_diff_view(stoat);
+
+    // A key press follows the cursor after its handler runs, and a landing
+    // arrives from the git queue with no key behind it.
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
+        action_handlers::view::follow_jump(editor, scrolloff);
+    }
 }
 
 /// Close a tour over commits whose walk ended or never started.
@@ -2030,6 +2037,59 @@ mod tests {
                 Some(PathBuf::from("/repo/b.rs")),
                 Some("2/3: second @ b2c3d4e"),
             ),
+        );
+    }
+
+    /// A landing arrives with no key press behind it, so it follows the cursor
+    /// itself, and a stop far down its file lands on screen.
+    #[test]
+    fn a_landing_scrolls_a_distant_stop_into_view() {
+        let long: String = (1..=80).map(|n| format!("fn f{n}() {{}}\n")).collect();
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "feat: add long.rs", &[("long.rs", &long)]),
+                (
+                    "b2c3d4e5",
+                    "feat: add b.rs",
+                    &[("long.rs", &long), ("b.rs", SECOND)],
+                ),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "b2c3d4e5")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file("/repo/long.rs", &long);
+        h.fake_fs().insert_file("/repo/b.rs", SECOND);
+        store_tour(
+            &h,
+            "tour",
+            &[
+                (
+                    "top",
+                    Some("a1b2c3d4"),
+                    location("long.rs", 1, (1, 10), "fn f1() {}"),
+                ),
+                (
+                    "bottom",
+                    Some("b2c3d4e5"),
+                    location("long.rs", 70, (1, 11), "fn f70() {}"),
+                ),
+            ],
+        );
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        next(&mut h.stoat);
+        h.settle();
+        h.snapshot();
+        assert!(
+            h.rendered_text().contains("fn f70() {}"),
+            "the landed stop is on screen, got:\n{}",
+            h.rendered_text(),
         );
     }
 
