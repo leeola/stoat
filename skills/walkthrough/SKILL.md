@@ -26,6 +26,7 @@ the slug.
 | Stop | One focus range of one file, plus narration. Id `s1`, `s2`, ... |
 | Annotation | A labeled range, in that stop's focus file or in another, plus optional narration. Id `a1`, `a2`, ... |
 | Focus | Path, range, and the bytes the range covered when captured. |
+| Commit | Optional, per stop. The full sha that the stop's focus and annotations read against. The player checks it out. |
 
 Ids are stable handles. They are assigned once and never reused, so `s2` keeps
 meaning the same stop after you remove `s1`. Use them for every edit, move, and
@@ -66,6 +67,42 @@ Columns are easy to miscount. An out-of-range column is an error, not a silent
 clip, so a failed `add-annotation` usually means the count was off by a few.
 Prefer the whole-line forms unless the point you are making is genuinely
 sub-line, and count from the file rather than from memory.
+
+## Tours across commits
+
+A tour that explains a series of commits reads each stop against the tree it
+was written over. Give each such stop a commit. When the reader arrives at the
+stop, the player checks that commit out and shows the stop's file as a diff
+against the commit's parent.
+
+**Authoring.** `--commit` takes any revision that `git rev-parse` accepts, such
+as `HEAD~2` or a short sha, and stores the full sha. A branch that moves later
+does not move the stop. `--file` names a path in that commit's tree. The
+capture reads the file from the commit, not from the working tree, so a file
+that a later commit deleted is still a valid target. The annotations of a
+commit stop capture from the same commit.
+
+Put the stops in the order the commits land, oldest first. Two stops in a row
+on one commit step without a checkout. A step onto another commit waits for its
+checkout, then lands.
+
+**Playing.** The tour needs a clean tree, the same as `:git-review`. A tree
+with uncommitted changes refuses the tour. The player checks each stop's commit
+out detached, and the diff view shows what that commit changed in the stop's
+file. The status line names the commit as `@ <sha>`.
+
+- `d` ends the tour and returns HEAD to the branch or commit it started from.
+- `:review-done` does the same.
+- `Escape` leaves walkthrough mode only. The tour stays open, with its commit
+  checked out.
+
+A stop with no commit reads whatever the walk has checked out. Give every stop
+of a tour over history its commit.
+
+**Checking.** A commit never changes, so a commit stop never goes stale.
+`check` reports `error: cannot read <path>` when the commit is gone, such as a
+commit that a rebase dropped and `git gc` then removed. It reports the same
+when the commit's tree has no such path.
 
 ## Commands
 
@@ -116,16 +153,26 @@ EOF
 `--narration-file <path>` reads a file, and `-` reads stdin. It is exclusive
 with `--narration`.
 
+For a stop over history, name the commit it reads. See
+[Tours across commits](#tours-across-commits).
+
+```sh
+stoat walkthrough add-stop startup --file src/config.rs --range 12-20 --commit HEAD~2
+# s2
+```
+
 ```sh
 stoat walkthrough edit-stop startup s1 --title "Where it starts"
 stoat walkthrough edit-stop startup s1 --range 3-6      # re-captures the snippet
 stoat walkthrough edit-stop startup s1 --no-title       # drop the title
+stoat walkthrough edit-stop startup s2 --commit 3f9a2c1 # read another commit
+stoat walkthrough edit-stop startup s2 --no-commit      # back to the working tree
 stoat walkthrough remove-stop startup s1                # takes its annotations too
 ```
 
-`edit-stop` re-captures the focus snippet only when you pass `--file` or
-`--range`. A title-only or narration-only edit leaves the capture alone, so it
-never quietly makes a stale stop look current.
+`edit-stop` re-captures the focus snippet only when you pass `--file`,
+`--range`, `--commit`, or `--no-commit`. A title-only or narration-only edit
+leaves the capture alone, so it never quietly makes a stale stop look current.
 
 ```sh
 stoat walkthrough move-stop startup s3 --before s1
@@ -161,7 +208,8 @@ stoat walkthrough remove-annotation startup s1 a1
 
 The range is within `--file`, or within stop `s1`'s focus file when you omit it.
 As with `edit-stop`, only a `--file`, `--no-file`, or `--range` re-captures the
-snippet.
+snippet. When the stop names a commit, the annotation captures from that commit
+too, whichever file it names.
 
 `--narration` and `--narration-file` take the same text an `add-stop` takes,
 and an annotation with none leaves the stop's narration standing.
@@ -188,8 +236,9 @@ startup/s1/a1: error: cannot read src/main.rs
 
 - `stale`: the range still resolves but covers different bytes. Usually the
   code shifted. Re-point it with `edit-stop --range`, or re-capture it.
-- `error`: the file is gone, or the range no longer fits the file. The stop
-  needs a new `--file` or `--range`.
+- `error`: the file is gone, the range no longer fits the file, or a commit
+  stop's commit is gone. The stop needs a new `--file`, `--range`, or
+  `--commit`.
 
 Gate on the exit status, not on parsing the output.
 
@@ -199,6 +248,8 @@ Gate on the exit status, not on parsing the output.
   and it is a file listing.
 - **Stops go in reading order**, the order you would walk someone through,
   rather than the order the code appears in the file.
+- **Open each commit with a stop.** In a tour over history, give each commit a
+  first stop over the change that defines it, then the stops that explain it.
 - **Narration carries the why.** The reader can see the code. Tell them what it
   is for and what to notice.
 - **Annotate sparingly.** Add one only where a short label says something the
@@ -216,8 +267,8 @@ Gate on the exit status, not on parsing the output.
 
 ## What a walkthrough looks like
 
-Two stops over `src/main.rs`, with one annotation. This is what `show` prints,
-abridged after the first stop:
+Two stops over `src/main.rs`, with one annotation, the first read against a
+commit. This is what `show` prints, abridged after the first stop:
 
 ```json
 {
@@ -230,6 +281,7 @@ abridged after the first stop:
     {
       "id": "s1",
       "title": "Entry point",
+      "commit": "4d1e8c2b7a9f3e5d6c0b1a2f3e4d5c6b7a8f9e0d",
       "narration": "Execution begins here.",
       "focus": {
         "path": "src/main.rs",
@@ -258,3 +310,5 @@ abridged after the first stop:
 Every range carries the bytes it covered when captured. That is what `check`
 compares against, and it is why the commands capture snippets for you rather
 than trusting anything typed by hand.
+
+A stop that reads the working tree has no `commit` field at all.
