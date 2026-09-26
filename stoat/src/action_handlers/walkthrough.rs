@@ -1,7 +1,8 @@
 use crate::{
-    action_handlers::{self, read_string_via_host},
+    action_handlers::{self, read_string_via_host, review_walk::WalkLandingKind},
     app::{Stoat, UpdateEffect},
     code_index::{build, nav},
+    host::CommitInfo,
     render::{
         hover::{HoverFrame, HoverPopup},
         text::text_width,
@@ -41,6 +42,9 @@ struct Anchor {
 ///
 /// Any trail goes. The first stop follows nothing, so there is no pair of stops
 /// for a trail to connect yet.
+///
+/// A tour whose stops name commits plays as a review walk over those commits,
+/// and the first landing makes the jump. See [`open_commit_tour`].
 pub(crate) fn open(stoat: &mut Stoat, slug: &str) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
 
@@ -58,9 +62,77 @@ pub(crate) fn open(stoat: &mut Stoat, slug: &str) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
 
+    if run.spans_commits() {
+        return open_commit_tour(stoat, run, &git_root);
+    }
+
     stoat.active_workspace_mut().walkthrough = Some(run);
     clear_trail(stoat);
     jump_to_stop(stoat, None)
+}
+
+/// Play `run`, whose stops name commits, as a review walk over those commits.
+///
+/// The walk takes each commit once, in the order the stops first name them,
+/// which is the order a reader meets them. It checks the first one out, and
+/// that landing jumps to the stop, so nothing jumps here.
+///
+/// A tour that plays over its own walk hands HEAD back through that walk's
+/// return first, so the new walk records the ref the return restores. Any other
+/// open walk is the reader's own and refuses the tour. So does a commit the
+/// repository lacks. Each refusal keeps the tour that plays.
+fn open_commit_tour(stoat: &mut Stoat, run: WalkthroughRun, git_root: &Path) -> UpdateEffect {
+    let walking = stoat.active_workspace().review_walk.is_some();
+    let tour_walks = stoat
+        .active_workspace()
+        .walkthrough
+        .as_ref()
+        .is_some_and(WalkthroughRun::spans_commits);
+    if walking && !tour_walks {
+        stoat.set_status("a review walk is open; :review-done first");
+        return UpdateEffect::Redraw;
+    }
+
+    let Some((repo, workdir)) = stoat
+        .git_host
+        .discover(git_root)
+        .and_then(|repo| repo.workdir().map(|workdir| (repo, workdir)))
+    else {
+        stoat.set_status("not in a git repository");
+        return UpdateEffect::Redraw;
+    };
+    let mut commits: Vec<CommitInfo> = Vec::new();
+    for sha in run
+        .walkthrough
+        .stops
+        .iter()
+        .filter_map(|stop| stop.commit.as_deref())
+    {
+        if commits.iter().any(|commit| commit.sha == sha) {
+            continue;
+        }
+        let Some(commit) = repo.log_from(sha, 1).pop() else {
+            stoat.set_status(format!("commit {sha:.7} is not in this repository"));
+            return UpdateEffect::Redraw;
+        };
+        commits.push(commit);
+    }
+
+    if walking {
+        super::review_walk::review_done(stoat);
+        // A return still out refuses the end, and leaves this tour and its walk
+        // where they are.
+        if stoat.active_workspace().review_walk.is_some() {
+            return UpdateEffect::Redraw;
+        }
+    }
+
+    let first = commits[0].sha.clone();
+    stoat.active_workspace_mut().walkthrough = Some(run);
+    clear_trail(stoat);
+    super::review_walk::queue_walk_start(stoat, workdir, commits, WalkLandingKind::Walkthrough);
+    stoat.set_status(format!("checking out {first:.7}"));
+    UpdateEffect::Redraw
 }
 
 /// Step forward to the next stop.
@@ -130,16 +202,65 @@ pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The trail goes with it. It was laid between two stops of a tour that is
 /// over, and nothing else put it there.
+///
+/// A tour over commits ends its walk as well, which checks the ref the walk
+/// started from back out. The walk's end closes the tour.
 pub(crate) fn done(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.active_workspace().walkthrough.is_none() {
+    let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         stoat.set_status("no walkthrough is playing");
         return UpdateEffect::Redraw;
+    };
+    if run.spans_commits() && stoat.active_workspace().review_walk.is_some() {
+        return super::review_walk::review_done(stoat);
     }
 
     stoat.active_workspace_mut().walkthrough = None;
     clear_trail(stoat);
     stoat.set_status("walkthrough closed");
     UpdateEffect::Redraw
+}
+
+/// Put the reader on the current stop once the walk has checked `landed` out,
+/// with the stop's file showing its diff against the commit's parent.
+///
+/// When a step taken during the checkout moved the tour onto another commit,
+/// the walk's cursor follows the tour instead. The landing then queues the
+/// checkout for the cursor, so the reader arrives once, on the commit the stop
+/// names.
+///
+/// A stop that names no commit arrives on whatever the walk checked out.
+pub(super) fn arrive_at_commit(stoat: &mut Stoat, landed: &str) {
+    let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
+        return;
+    };
+    if run.current_commit().is_some_and(|commit| commit != landed) {
+        if let Some(index) = commit_index(stoat)
+            && let Some(walk) = stoat.active_workspace_mut().review_walk.as_mut()
+        {
+            walk.seek(index);
+        }
+        return;
+    }
+
+    match run.current_annotation().is_some() {
+        true => jump_to_annotation(stoat, None),
+        false => jump_to_stop(stoat, None),
+    };
+    // The jump's own latch check skips a buffer the pane already shows, and
+    // the first landing finds the pane not yet latched.
+    super::review::latch_diff_view(stoat);
+}
+
+/// Close a tour over commits whose walk ended or never started.
+///
+/// The slide, the trail, and the narration card go with it, since each
+/// describes a stop of a tour that has ended.
+pub(super) fn abandon_commit_tour(stoat: &mut Stoat) {
+    retire_slide(stoat);
+    clear_trail(stoat);
+    stoat.pending_hover = None;
+    stoat.active_workspace_mut().walkthrough = None;
+    stoat.set_status("walkthrough closed");
 }
 
 /// Raise the current stop's narration, reporting whether the stop's location
@@ -214,12 +335,16 @@ fn step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
     let from = current_anchor(run);
+    let from_commit = run.current_commit().map(str::to_owned);
 
     if !run.step(delta) {
         let end = if delta < 0 { "first" } else { "last" };
         stoat.set_status(format!("already on the {end} stop"));
         refresh_narration(stoat);
         return UpdateEffect::Redraw;
+    }
+    if let Some(effect) = cross_commit(stoat, from_commit.as_deref()) {
+        return effect;
     }
 
     let to = current_anchor(run_of(stoat));
@@ -286,6 +411,7 @@ fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     };
     let from = current_anchor(run);
     let from_stop = run.current_stop().id.clone();
+    let from_commit = run.current_commit().map(str::to_owned);
     let from_at = run.annotation_progress().map(|(at, _)| at - 1);
 
     if !run.step_linear(delta) {
@@ -293,6 +419,9 @@ fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         stoat.set_status(format!("already at the {end} of the tour"));
         refresh_narration(stoat);
         return UpdateEffect::Redraw;
+    }
+    if let Some(effect) = cross_commit(stoat, from_commit.as_deref()) {
+        return effect;
     }
 
     let to = current_anchor(run_of(stoat));
@@ -312,6 +441,41 @@ fn step_linear(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         true => jump_to_annotation(stoat, note),
         false => jump_to_stop(stoat, note),
     }
+}
+
+/// Hand a step that crossed onto another commit to the walk, whose landing
+/// jumps once that commit is checked out.
+///
+/// `None` when the step stayed on `from`'s commit, or landed on a stop that
+/// reads the working tree, so the caller jumps as usual.
+///
+/// Before the walk starts, the step only moves the tour. The walk's first
+/// landing then seeks the commit the tour stands on by that time.
+fn cross_commit(stoat: &mut Stoat, from: Option<&str>) -> Option<UpdateEffect> {
+    let commit = run_of(stoat).current_commit()?.to_owned();
+    if from == Some(commit.as_str()) {
+        return None;
+    }
+
+    retire_slide(stoat);
+    clear_trail(stoat);
+    stoat.set_status(format!("checking out {commit:.7}"));
+    Some(match commit_index(stoat) {
+        Some(index) => super::review_walk::walk_seek(stoat, index),
+        None => UpdateEffect::Redraw,
+    })
+}
+
+/// Where the walk holds the current stop's commit, or `None` when the stop
+/// reads the working tree or no walk has started yet.
+fn commit_index(stoat: &Stoat) -> Option<usize> {
+    let ws = stoat.active_workspace();
+    let commit = ws.walkthrough.as_ref()?.current_commit()?;
+    ws.review_walk
+        .as_ref()?
+        .commits
+        .iter()
+        .position(|walked| walked.sha == commit)
 }
 
 /// Retire the callouts a step within one slide leaves behind, and take back
@@ -422,6 +586,7 @@ fn jump_to_annotation(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
         return UpdateEffect::None;
     };
     let anchor = current_anchor(run);
+    let commit = commit_suffix(run);
 
     let Some(landed) = jump_to_range(stoat, &anchor.path, anchor.range, &anchor.snippet) else {
         return UpdateEffect::Redraw;
@@ -430,8 +595,10 @@ fn jump_to_annotation(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
 
     match (landed.drifted, note) {
         (true, _) => stoat.set_status(format!("{id} drifted from its capture")),
-        (false, Some(note)) => stoat.set_status(format!("{id} {at}/{count}: {label} ({note})")),
-        (false, None) => stoat.set_status(format!("{id} {at}/{count}: {label}")),
+        (false, Some(note)) => {
+            stoat.set_status(format!("{id} {at}/{count}: {label}{commit} ({note})"))
+        },
+        (false, None) => stoat.set_status(format!("{id} {at}/{count}: {label}{commit}")),
     }
     landed.effect
 }
@@ -449,6 +616,7 @@ fn jump_to_stop(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
     let (focus, id) = (stop.focus.clone(), stop.id.clone());
     let (at, stops) = run.progress();
     let title = stop_title(run);
+    let commit = commit_suffix(run);
 
     let Some(landed) = jump_to_range(stoat, &focus.path, focus.range, &focus.snippet) else {
         return UpdateEffect::Redraw;
@@ -457,10 +625,18 @@ fn jump_to_stop(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
 
     match (landed.drifted, note) {
         (true, _) => stoat.set_status(format!("stop {id} drifted from its capture")),
-        (false, Some(note)) => stoat.set_status(format!("{at}/{stops}: {title} ({note})")),
-        (false, None) => stoat.set_status(format!("{at}/{stops}: {title}")),
+        (false, Some(note)) => stoat.set_status(format!("{at}/{stops}: {title}{commit} ({note})")),
+        (false, None) => stoat.set_status(format!("{at}/{stops}: {title}{commit}")),
     }
     landed.effect
+}
+
+/// ` @ <short sha>` for a stop that reads against a commit, so the status says
+/// which commit the reader is on. Empty for a working-tree stop.
+fn commit_suffix(run: &WalkthroughRun) -> String {
+    run.current_commit()
+        .map(|sha| format!(" @ {sha:.7}"))
+        .unwrap_or_default()
 }
 
 /// Where a jump put the reader, and whether the code moved out from under it.
@@ -768,14 +944,22 @@ mod tests {
     use crate::{
         action_handlers,
         app::Stoat,
+        badge::BadgeSource,
         code_index::{build, nav},
+        git_jobs,
         host::FakeFs,
         render::hover::HoverFrame,
+        review_walk::ReturnRef,
         test_harness::TestHarness,
         walkthrough::{Location, Point, Range, Walkthrough},
+        workspace::diff::DiffBase,
     };
     use codegraph::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
-    use std::{ops::Range as ByteRange, path::PathBuf, sync::Arc};
+    use std::{
+        ops::Range as ByteRange,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use stoat_config::Settings;
     use stoat_language::SymbolKind;
     use stoat_scheduler::TestScheduler;
@@ -1655,6 +1839,506 @@ mod tests {
         assert!(
             h.stoat.active_workspace().walkthrough.is_some(),
             "escape leaves the mode, not the tour, so space W returns to it",
+        );
+    }
+
+    /// A repository of two commits with a three-stop tour over them. `s1` reads
+    /// `a1b2c3d4` over `a.rs` line 2, and `s2` and `s3` read `b2c3d4e5` over
+    /// `b.rs` line 1 and `a.rs` line 1.
+    ///
+    /// The fake host moves HEAD on a checkout without writing the tree, so the
+    /// tree is seeded once at the tip, where every stop reads what it captured.
+    fn commit_tour_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "feat: add a.rs", &[("a.rs", FIRST)]),
+                (
+                    "b2c3d4e5",
+                    "feat: add b.rs",
+                    &[("a.rs", FIRST), ("b.rs", SECOND)],
+                ),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "b2c3d4e5")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file("/repo/a.rs", FIRST);
+        h.fake_fs().insert_file("/repo/b.rs", SECOND);
+
+        store_tour(
+            &h,
+            "tour",
+            &[
+                (
+                    "first",
+                    Some("a1b2c3d4"),
+                    location("a.rs", 2, (1, 11), "fn two() {}"),
+                ),
+                (
+                    "second",
+                    Some("b2c3d4e5"),
+                    location("b.rs", 1, (1, 13), "fn three() {}"),
+                ),
+                (
+                    "third",
+                    Some("b2c3d4e5"),
+                    location("a.rs", 1, (1, 11), "fn one() {}"),
+                ),
+            ],
+        );
+        h
+    }
+
+    /// Store the tour `slug`, whose stops are `(title, commit, focus)`.
+    fn store_tour(h: &TestHarness, slug: &str, stops: &[(&str, Option<&str>, Location)]) {
+        let mut walkthrough = Walkthrough::new(slug.to_owned(), "Tour".to_owned(), None);
+        for (title, commit, focus) in stops {
+            walkthrough
+                .add_stop(
+                    Some((*title).to_owned()),
+                    String::new(),
+                    focus.clone(),
+                    commit.map(str::to_owned),
+                    None,
+                )
+                .expect("append");
+        }
+        h.fake_fs().insert_file(
+            format!("/repo/.stoat/walkthroughs/{slug}.json"),
+            serde_json::to_string(&walkthrough).expect("serialize"),
+        );
+    }
+
+    fn checkouts(h: &TestHarness) -> Vec<String> {
+        h.fake_git().checkouts(Path::new("/repo"))
+    }
+
+    fn walk_shas(h: &TestHarness) -> Vec<String> {
+        h.stoat
+            .active_workspace()
+            .review_walk
+            .as_ref()
+            .map(|walk| {
+                walk.commits
+                    .iter()
+                    .map(|commit| commit.sha.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The sha a revision base names, or `None` for the working tree's own base.
+    fn diff_base(h: &TestHarness) -> Option<Option<String>> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+            _ => None,
+        }
+    }
+
+    fn latched(h: &TestHarness) -> bool {
+        let panes = &h.stoat.active_workspace().panes;
+        panes.pane(panes.focus()).diff_mode
+    }
+
+    fn open_path(h: &TestHarness) -> Option<PathBuf> {
+        let id = h.stoat.focused_editor_ids()?.1;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .path_for(id)
+            .map(Path::to_path_buf)
+    }
+
+    fn status(h: &TestHarness) -> Option<&str> {
+        h.stoat.pending_message.as_deref()
+    }
+
+    fn tour_slug(h: &TestHarness) -> Option<&str> {
+        h.stoat
+            .active_workspace()
+            .walkthrough
+            .as_ref()
+            .map(|run| run.walkthrough.slug.as_str())
+    }
+
+    fn review_badge(h: &TestHarness) -> Option<String> {
+        let ws = h.stoat.active_workspace();
+        ws.badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|badge| badge.label.clone())
+    }
+
+    #[test]
+    fn opening_a_commit_tour_checks_out_the_first_stops_commit() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        assert_eq!(
+            (checkouts(&h), walk_shas(&h), diff_base(&h)),
+            (
+                vec!["detached:a1b2c3d4".to_owned()],
+                vec!["a1b2c3d4".to_owned(), "b2c3d4e5".to_owned()],
+                Some(None),
+            ),
+            "one walk over the tour's two commits, standing on the first",
+        );
+        assert_eq!(
+            (open_path(&h), latched(&h), status(&h)),
+            (
+                Some(PathBuf::from("/repo/a.rs")),
+                true,
+                Some("1/3: first @ a1b2c3d")
+            ),
+        );
+    }
+
+    /// The checkout runs off the loop, so the jump waits for its landing rather
+    /// than showing the stop over the last commit's tree.
+    #[test]
+    fn a_step_onto_another_commit_lands_after_its_checkout() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        next(&mut h.stoat);
+        assert_eq!(
+            (open_path(&h), status(&h)),
+            (
+                Some(PathBuf::from("/repo/a.rs")),
+                Some("checking out b2c3d4e")
+            ),
+            "nothing jumps before the landing",
+        );
+
+        h.settle();
+        assert_eq!(
+            (
+                checkouts(&h).last().cloned(),
+                diff_base(&h),
+                open_path(&h),
+                status(&h)
+            ),
+            (
+                Some("detached:b2c3d4e5".to_owned()),
+                Some(Some("a1b2c3d4".to_owned())),
+                Some(PathBuf::from("/repo/b.rs")),
+                Some("2/3: second @ b2c3d4e"),
+            ),
+        );
+    }
+
+    /// The point-by-point walk crosses commits the same way the stop walk does.
+    #[test]
+    fn a_linear_step_onto_another_commit_checks_it_out() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        forward(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            (checkouts(&h), open_path(&h), status(&h)),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_owned(),
+                    "detached:b2c3d4e5".to_owned()
+                ],
+                Some(PathBuf::from("/repo/b.rs")),
+                Some("2/3: second @ b2c3d4e"),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_step_within_one_commit_checks_out_nothing() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+        next(&mut h.stoat);
+        h.settle();
+
+        next(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            (checkouts(&h), open_path(&h), status(&h)),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_owned(),
+                    "detached:b2c3d4e5".to_owned()
+                ],
+                Some(PathBuf::from("/repo/a.rs")),
+                Some("3/3: third @ b2c3d4e"),
+            ),
+        );
+    }
+
+    #[test]
+    fn stepping_back_across_commits_checks_the_earlier_one_out_again() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+        next(&mut h.stoat);
+        h.settle();
+
+        prev(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            (checkouts(&h), diff_base(&h), open_path(&h), status(&h)),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_owned(),
+                    "detached:b2c3d4e5".to_owned(),
+                    "detached:a1b2c3d4".to_owned(),
+                ],
+                Some(None),
+                Some(PathBuf::from("/repo/a.rs")),
+                Some("1/3: first @ a1b2c3d"),
+            ),
+        );
+    }
+
+    #[test]
+    fn done_returns_head_and_closes_the_tour() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        done(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            (
+                checkouts(&h).last().cloned(),
+                walk_shas(&h),
+                tour_slug(&h),
+                diff_base(&h),
+                latched(&h)
+            ),
+            (Some("ref:main".to_owned()), Vec::new(), None, None, false),
+        );
+    }
+
+    #[test]
+    fn review_done_closes_a_commit_tour() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(
+            (checkouts(&h).last().cloned(), tour_slug(&h), status(&h)),
+            (
+                Some("ref:main".to_owned()),
+                None,
+                Some("walkthrough closed")
+            ),
+        );
+    }
+
+    /// A refused walk sends no landing, so a tour left to wait for one never
+    /// moves.
+    #[test]
+    fn a_dirty_tree_refuses_a_commit_tour() {
+        let mut h = commit_tour_harness();
+        h.fake_git()
+            .add_repo("/repo")
+            .modified("a.rs", FIRST, "fn edited() {}\n");
+
+        open(&mut h.stoat, "tour");
+        h.settle();
+        assert_eq!(
+            (checkouts(&h), tour_slug(&h), review_badge(&h)),
+            (Vec::new(), None, Some("uncommitted changes".to_owned())),
+        );
+    }
+
+    #[test]
+    fn a_tour_naming_an_unknown_commit_keeps_the_playing_tour() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+        store_tour(
+            &h,
+            "ghost",
+            &[(
+                "gone",
+                Some("deadbeef00"),
+                location("a.rs", 1, (1, 11), "fn one() {}"),
+            )],
+        );
+
+        open(&mut h.stoat, "ghost");
+        h.settle();
+        assert_eq!(
+            (
+                tour_slug(&h),
+                walk_shas(&h).len(),
+                checkouts(&h),
+                status(&h)
+            ),
+            (
+                Some("tour"),
+                2,
+                vec!["detached:a1b2c3d4".to_owned()],
+                Some("commit deadbee is not in this repository"),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_plain_tour_starts_no_walk() {
+        let mut h = commit_tour_harness();
+        store_tour(
+            &h,
+            "plain",
+            &[("here", None, location("a.rs", 2, (1, 11), "fn two() {}"))],
+        );
+
+        open(&mut h.stoat, "plain");
+        h.settle();
+        assert_eq!(
+            (checkouts(&h), walk_shas(&h), open_path(&h), status(&h)),
+            (
+                Vec::new(),
+                Vec::new(),
+                Some(PathBuf::from("/repo/a.rs")),
+                Some("1/1: here")
+            ),
+        );
+    }
+
+    /// The tour's walk waits behind another git job here, the way it waits
+    /// behind a slow return, so the tour closes before the walk's turn.
+    #[test]
+    fn a_tour_closed_before_its_checkout_starts_no_walk() {
+        let mut h = commit_tour_harness();
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+        open(&mut h.stoat, "tour");
+        done(&mut h.stoat);
+        h.settle();
+
+        assert_eq!(
+            (checkouts(&h), walk_shas(&h), tour_slug(&h)),
+            (Vec::new(), Vec::new(), None),
+        );
+    }
+
+    /// A step taken before the walk starts has no walk to seek. The first
+    /// landing finds the tour on another commit and follows it there, so the
+    /// reader arrives once, on the stop's own commit.
+    #[test]
+    fn a_step_before_the_first_checkout_lands_on_the_stops_commit() {
+        let mut h = commit_tour_harness();
+        git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
+        open(&mut h.stoat, "tour");
+        next(&mut h.stoat);
+        h.settle();
+
+        assert_eq!(
+            (checkouts(&h), diff_base(&h), open_path(&h), status(&h)),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_owned(),
+                    "detached:b2c3d4e5".to_owned()
+                ],
+                Some(Some("a1b2c3d4".to_owned())),
+                Some(PathBuf::from("/repo/b.rs")),
+                Some("2/3: second @ b2c3d4e"),
+            ),
+        );
+    }
+
+    /// A stop that names no commit reads whatever the walk has checked out, and
+    /// a step from it back onto that commit still lands, with nothing to check
+    /// out again.
+    #[test]
+    fn a_working_tree_stop_in_a_commit_tour_jumps_without_a_checkout() {
+        let mut h = commit_tour_harness();
+        store_tour(
+            &h,
+            "mixed",
+            &[
+                (
+                    "first",
+                    Some("a1b2c3d4"),
+                    location("a.rs", 2, (1, 11), "fn two() {}"),
+                ),
+                (
+                    "second",
+                    None,
+                    location("b.rs", 1, (1, 13), "fn three() {}"),
+                ),
+                (
+                    "third",
+                    Some("a1b2c3d4"),
+                    location("a.rs", 1, (1, 11), "fn one() {}"),
+                ),
+            ],
+        );
+        open(&mut h.stoat, "mixed");
+        h.settle();
+
+        next(&mut h.stoat);
+        let second = (open_path(&h), status(&h).map(str::to_owned));
+        next(&mut h.stoat);
+        h.settle();
+
+        assert_eq!(
+            (second, checkouts(&h), open_path(&h), status(&h)),
+            (
+                (
+                    Some(PathBuf::from("/repo/b.rs")),
+                    Some("2/3: second".to_owned())
+                ),
+                vec!["detached:a1b2c3d4".to_owned()],
+                Some(PathBuf::from("/repo/a.rs")),
+                Some("3/3: third @ a1b2c3d"),
+            ),
+        );
+    }
+
+    /// The first tour's walk hands HEAD back before the second starts, so the
+    /// second records the branch rather than the first tour's commit.
+    #[test]
+    fn opening_a_commit_tour_over_another_returns_the_first() {
+        let mut h = commit_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+        store_tour(
+            &h,
+            "later",
+            &[(
+                "again",
+                Some("a1b2c3d4"),
+                location("a.rs", 1, (1, 11), "fn one() {}"),
+            )],
+        );
+
+        open(&mut h.stoat, "later");
+        h.settle();
+        let return_ref = h
+            .stoat
+            .active_workspace()
+            .review_walk
+            .as_ref()
+            .map(|walk| walk.return_ref.clone());
+        assert_eq!(
+            (checkouts(&h), tour_slug(&h), return_ref),
+            (
+                vec![
+                    "detached:a1b2c3d4".to_owned(),
+                    "ref:main".to_owned(),
+                    "detached:a1b2c3d4".to_owned(),
+                ],
+                Some("later"),
+                Some(ReturnRef::Branch("main".to_owned())),
+            ),
         );
     }
 }

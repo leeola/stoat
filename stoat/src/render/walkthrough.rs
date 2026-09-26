@@ -1654,6 +1654,37 @@ mod tests {
         );
     }
 
+    /// The diff view paints the buffer in its right column, beside the base's
+    /// copy of each line. The slide measures from the column the render
+    /// recorded, so a mark starts on the glyph it names, not on the base's copy.
+    #[test]
+    fn a_mark_in_the_diff_view_starts_at_the_right_columns_glyph() {
+        let mut h = harness(&[]);
+        // Wide enough for the two-column diff layout.
+        h.resize(120, 24);
+        open(&mut h.stoat, "tour");
+        h.seed_current_diff_map("fn ONE() {}\nfn two() {}\nfn three() {}\n");
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("an editor has focus");
+        h.stoat.active_workspace_mut().editors[editor_id].set_diff_view(true);
+        h.snapshot();
+
+        let input = super::measure(&mut h.stoat).expect("the pane measures");
+        let focus = input.focus.expect("the focus is on screen");
+        let text = h.stoat.active_workspace().editors[editor_id]
+            .text_rect
+            .expect("the render records the text rect");
+        let buf = h.rendered_buffer();
+        let x = (text.x..buf.area.width)
+            .find(|&x| buf[(x, focus.rows[0])].symbol() == "f")
+            .expect("the focus line paints in the right column");
+
+        assert_eq!(
+            (focus.start_x, focus.end_x),
+            (x, x + 10),
+            "the mark covers columns 1 to 11 of the right column",
+        );
+    }
+
     /// A line ends one cell past its last glyph, so a box placed at the end
     /// sits beside the code rather than over it.
     #[test]

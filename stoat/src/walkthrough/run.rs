@@ -115,6 +115,21 @@ impl WalkthroughRun {
         self.current_stop().annotations.get(self.annotation_idx?)
     }
 
+    /// Whether any stop reads against a commit, which makes playing the tour a
+    /// walk over those commits.
+    pub(crate) fn spans_commits(&self) -> bool {
+        self.walkthrough
+            .stops
+            .iter()
+            .any(|stop| stop.commit.is_some())
+    }
+
+    /// The commit the current stop reads against, or `None` for the working
+    /// tree.
+    pub(crate) fn current_commit(&self) -> Option<&str> {
+        self.current_stop().commit.as_deref()
+    }
+
     /// Which stop of how many, counted the way a reader says it.
     pub(crate) fn progress(&self) -> (usize, usize) {
         (self.stop_idx + 1, self.walkthrough.stops.len())

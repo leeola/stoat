@@ -46,6 +46,18 @@ impl ReviewWalk {
         self.cursor = next;
         moved
     }
+
+    /// Put the cursor on commit `index`, clamped to the last commit. Returns
+    /// whether it moved.
+    ///
+    /// A walkthrough jumps between the commits its stops name rather than
+    /// stepping through them in order.
+    pub(crate) fn seek(&mut self, index: usize) -> bool {
+        let next = index.min(self.commits.len() - 1);
+        let moved = next != self.cursor;
+        self.cursor = next;
+        moved
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +104,17 @@ mod tests {
         assert!(w.step(1));
         assert!(!w.step(1), "already at the tip");
         assert_eq!(w.cursor, 1);
+    }
+
+    #[test]
+    fn seek_lands_on_the_named_commit_and_clamps() {
+        let mut w = walk(3);
+        assert!(w.seek(2));
+        assert_eq!(w.current().sha, "sha2");
+        assert!(!w.seek(2), "already there");
+        assert!(w.seek(0));
+        assert!(w.seek(9), "past the end clamps to the last commit");
+        assert_eq!(w.current().sha, "sha2");
     }
 
     #[test]

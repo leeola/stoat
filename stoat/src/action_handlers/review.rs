@@ -199,6 +199,29 @@ pub(super) fn enter_diff_view(stoat: &mut Stoat) {
     toggle_diff_view(stoat);
 }
 
+/// Arm the focused pane's diff latch, and show the diff where the reader stands.
+///
+/// Unlike [`toggle_diff_view`], this never crosses into another file or moves
+/// the cursor. A walkthrough stop over a file its commit did not touch must stay
+/// on that file, so a buffer with no hunks shows plain under the armed latch,
+/// the way a latched pane shows any clean file it navigates to.
+pub(super) fn latch_diff_view(stoat: &mut Stoat) {
+    {
+        let panes = &mut stoat.active_workspace_mut().panes;
+        let focus = panes.focus();
+        panes.pane_mut(focus).diff_mode = true;
+        panes.widen(focus);
+    }
+
+    let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
+        return;
+    };
+    let has_hunks = ensure_diff_map(stoat, editor_id, buffer_id);
+    if let Some(editor) = super::focused_editor_mut(stoat) {
+        editor.set_diff_view(has_hunks);
+    }
+}
+
 pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
     let latched = {
         let panes = &stoat.active_workspace().panes;

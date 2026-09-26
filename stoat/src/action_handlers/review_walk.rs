@@ -338,7 +338,7 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
     let mut commits = picker.commits[..=base_idx].to_vec();
     commits.reverse();
 
-    queue_walk_start(stoat, workdir, commits);
+    queue_walk_start(stoat, workdir, commits, WalkLandingKind::Walk);
     UpdateEffect::Redraw
 }
 
@@ -352,12 +352,41 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
 /// A refused start badges and leaves a base picker up, so the base the user
 /// picked is still selected when they come back to it. A walk started while
 /// this one waited keeps its place.
-fn queue_walk_start(stoat: &mut Stoat, workdir: PathBuf, commits: Vec<CommitInfo>) {
+///
+/// A walkthrough's walk, of `kind` [`WalkLandingKind::Walkthrough`], starts
+/// only while a tour that spans commits still plays. A refusal closes that
+/// tour, since no landing comes to carry it on.
+pub(super) fn queue_walk_start(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    commits: Vec<CommitInfo>,
+    kind: WalkLandingKind,
+) {
     let job = GitJob::new(Some(GitJobKey::WalkLanding), move |stoat: &mut Stoat| {
-        if stoat.active_workspace().review_walk.is_some() {
+        let tour = kind == WalkLandingKind::Walkthrough;
+        // A tour closed before this turn asked for nothing. Whatever tour plays
+        // at this turn is not the one that queued the walk.
+        if tour
+            && !stoat
+                .active_workspace()
+                .walkthrough
+                .as_ref()
+                .is_some_and(|run| run.spans_commits())
+        {
             return None;
         }
-        let return_ref = walk_return_ref(stoat, &workdir).ok()?;
+
+        let return_ref = if stoat.active_workspace().review_walk.is_some() {
+            None
+        } else {
+            walk_return_ref(stoat, &workdir).ok()
+        };
+        let Some(return_ref) = return_ref else {
+            if tour {
+                super::walkthrough::abandon_commit_tour(stoat);
+            }
+            return None;
+        };
 
         if stoat
             .commit_picker
@@ -374,7 +403,7 @@ fn queue_walk_start(stoat: &mut Stoat, workdir: PathBuf, commits: Vec<CommitInfo
         });
 
         let (workdir, sha, standing) = walk_position(stoat)?;
-        walk_checkout_work(stoat, WalkLandingKind::Walk, workdir, sha, standing)
+        walk_checkout_work(stoat, kind, workdir, sha, standing)
     });
     git_jobs::enqueue(stoat, job);
 }
@@ -419,7 +448,7 @@ pub(super) fn walk_one_commit(
     workdir: PathBuf,
     commit: CommitInfo,
 ) -> UpdateEffect {
-    queue_walk_start(stoat, workdir, vec![commit]);
+    queue_walk_start(stoat, workdir, vec![commit], WalkLandingKind::Walk);
     UpdateEffect::Redraw
 }
 
@@ -433,7 +462,7 @@ pub(super) fn walk_one_commit(
 /// The git work runs on the git queue, so this only queues it. A step taken
 /// while a checkout is out moves the cursor, and the landing queues again for
 /// where the cursor stands.
-fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
+fn walk_navigate_as(stoat: &mut Stoat, kind: WalkLandingKind) -> UpdateEffect {
     let Some((workdir, sha, standing)) = walk_position(stoat) else {
         return UpdateEffect::None;
     };
@@ -441,8 +470,22 @@ fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    queue_walk_landing(stoat, WalkLandingKind::Walk, workdir, sha, standing);
+    queue_walk_landing(stoat, kind, workdir, sha, standing);
     UpdateEffect::Redraw
+}
+
+/// Move the walk onto commit `index` and check it out, for a walkthrough stop
+/// that reads against that commit.
+///
+/// Queues the checkout even when the cursor already stands there, since the
+/// tour still needs a landing to arrive on. A landing over the commit already
+/// checked out skips the checkout itself.
+pub(super) fn walk_seek(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+    let Some(walk) = stoat.active_workspace_mut().review_walk.as_mut() else {
+        return UpdateEffect::None;
+    };
+    walk.seek(index);
+    walk_navigate_as(stoat, WalkLandingKind::Walkthrough)
 }
 
 pub(crate) fn review_next_commit(stoat: &mut Stoat) -> UpdateEffect {
@@ -460,7 +503,7 @@ fn walk_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     if !walk.step(delta) {
         return UpdateEffect::Redraw;
     }
-    walk_navigate(stoat)
+    walk_navigate_as(stoat, WalkLandingKind::Walk)
 }
 
 /// End the walk and queue the checkout that puts the working tree back where it
@@ -487,6 +530,15 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().ending_walk.is_some() {
         restore_walk(stoat, walk);
         return review_error(stoat, "the last walk is still returning", None);
+    }
+    // A tour that spans commits plays over this walk, so it ends with it.
+    if stoat
+        .active_workspace()
+        .walkthrough
+        .as_ref()
+        .is_some_and(|run| run.spans_commits())
+    {
+        super::walkthrough::abandon_commit_tour(stoat);
     }
     stoat.git_jobs.drop_queued(GitJobKey::WalkLanding);
     stoat.active_workspace_mut().ending_walk = Some(walk);
@@ -796,6 +848,20 @@ pub(super) enum WalkLandingKind {
     /// A rebase edit pause. The stepper wrote the commit a moment ago, so the
     /// checkout is unconditional and a failure is the rebase's to report.
     EditPause,
+    /// A walkthrough stop's commit. Guarded like a walk step, but its landing
+    /// hands the reader to the tour rather than to the commit's first changed
+    /// file, since the stop names the code to look at.
+    Walkthrough,
+}
+
+impl WalkLandingKind {
+    /// Whether the landing belongs to a review walk and follows its cursor.
+    ///
+    /// Those refuse to check out over tracked changes, apply nothing once the
+    /// walk has ended, and chase a cursor that moved on while they were out.
+    fn follows_walk(self) -> bool {
+        matches!(self, Self::Walk | Self::Walkthrough)
+    }
 }
 
 /// What one step's git work produced.
@@ -875,7 +941,7 @@ fn walk_landing(
     sha: &str,
 ) -> Result<WalkLanding, WalkFailure> {
     if repo.resolve_rev("HEAD").as_deref() != Some(sha) {
-        if kind == WalkLandingKind::Walk && repo.has_tracked_changes() {
+        if kind.follows_walk() && repo.has_tracked_changes() {
             return Err(WalkFailure::DirtyTree);
         }
         if let Err(err) = repo.checkout_detached(sha) {
@@ -901,14 +967,14 @@ fn land_walk_checkout(
     sha: &str,
     landed: Result<WalkLanding, WalkFailure>,
 ) {
-    if kind == WalkLandingKind::Walk && stoat.active_workspace().review_walk.is_none() {
+    if kind.follows_walk() && stoat.active_workspace().review_walk.is_none() {
         return;
     }
 
     match landed {
         Ok(landing) => {
             auto_reload::reload_clean_buffers(stoat);
-            land_walk(stoat, workdir, standing, landing);
+            land_walk(stoat, kind, workdir, standing, sha, landing);
         },
         Err(failure) => report_failure(stoat, kind, failure),
     }
@@ -916,26 +982,41 @@ fn land_walk_checkout(
     // The reader steps on while a checkout is out, so the cursor is sometimes
     // past the commit this landing describes. A checkout queued for where the
     // cursor stands now converges on it. An edit pause has no cursor to follow.
-    if kind == WalkLandingKind::Walk
+    if kind.follows_walk()
         && let Some((workdir, cursor_sha, standing)) = walk_position(stoat)
         && cursor_sha != sha
     {
-        queue_walk_landing(stoat, WalkLandingKind::Walk, workdir, cursor_sha, standing);
+        queue_walk_landing(stoat, kind, workdir, cursor_sha, standing);
     }
 }
 
-/// Show a landed commit: its parent becomes the diff base, and its first
-/// changed path becomes what is on screen.
+/// Show a landed commit, with its parent as the diff base and its first changed
+/// path on screen.
 ///
 /// The same three steps [`super::review::land_diff_on_commit`] takes, against
 /// values the job already read rather than reads made here.
-fn land_walk(stoat: &mut Stoat, workdir: &Path, standing: &str, landing: WalkLanding) {
+///
+/// A walkthrough's landing hands the screen to the tour instead, which opens
+/// the file its stop names on `sha`.
+fn land_walk(
+    stoat: &mut Stoat,
+    kind: WalkLandingKind,
+    workdir: &Path,
+    standing: &str,
+    sha: &str,
+    landing: WalkLanding,
+) {
     stoat
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::Rev {
             sha: landing.parent,
         }));
     super::review::emit_review_info_badge(stoat, standing);
+
+    if kind == WalkLandingKind::Walkthrough {
+        super::walkthrough::arrive_at_commit(stoat, sha);
+        return;
+    }
 
     // A commit that changed nothing has no file to open onto, so whatever the
     // last step showed stays up and only the base moves.
@@ -960,7 +1041,7 @@ fn report_failure(stoat: &mut Stoat, kind: WalkLandingKind, failure: WalkFailure
     };
 
     match kind {
-        WalkLandingKind::Walk => {
+        WalkLandingKind::Walk | WalkLandingKind::Walkthrough => {
             review_error(stoat, label, detail);
         },
         WalkLandingKind::EditPause => {
@@ -987,7 +1068,8 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        queue_walk_landing, walk_navigate, walk_one_commit, ReturnRef, ReviewWalk, WalkLandingKind,
+        queue_walk_landing, walk_navigate_as, walk_one_commit, ReturnRef, ReviewWalk,
+        WalkLandingKind,
     };
     use crate::{
         app::Stoat,
@@ -1908,7 +1990,7 @@ mod tests {
     fn seed_walk(h: &mut TestHarness, shas: &[&str]) {
         let walk = walk_over(h, shas);
         h.stoat.active_workspace_mut().review_walk = Some(walk);
-        walk_navigate(&mut h.stoat);
+        walk_navigate_as(&mut h.stoat, WalkLandingKind::Walk);
         h.settle();
     }
 
