@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     auto_reload,
+    badge::BadgeSource,
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
@@ -565,6 +566,9 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Leave the diff view once a walk's return lands, with every clean buffer
 /// re-read from the restored tree, or put the walk back if the return failed.
+///
+/// A return that lands takes the walk's badge down too. The badge names the
+/// commit the walk stood on, and the tree has left it.
 fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>) {
     if let Err(err) = restored {
         restore_walk(stoat, walk);
@@ -578,6 +582,10 @@ fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>
     // the commit, and the base must still name that commit's parent.
     stoat.active_workspace_mut().set_diff_base(None);
     super::review::exit_diff_view(stoat);
+    stoat
+        .active_workspace_mut()
+        .badges
+        .remove_by_source(BadgeSource::Review);
 }
 
 /// Put back a walk whose return did not happen.
@@ -2074,6 +2082,19 @@ mod tests {
             ),
             "the base tracks the commit but no view opened over it",
         );
+    }
+
+    /// The badge names the commit the walk stands on, so once the return lands
+    /// it names a tree nobody is on.
+    #[test]
+    fn review_done_takes_the_walks_badge_down() {
+        let mut h = harness();
+        start_walk(&mut h);
+        assert_eq!(review_badge(&h).as_deref(), Some("reviewing a1b2c3d (1/3)"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(review_badge(&h), None);
     }
 
     /// Ending the walk puts the diff back where the tree goes: off the commit
