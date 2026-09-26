@@ -14,6 +14,7 @@
 use git2::Repository;
 use serde_json::Value;
 use std::{
+    io,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -138,6 +139,30 @@ fn diagnostics_report_seeded_warning() {
             time::sleep(POLL_INTERVAL).await;
         }
     });
+}
+
+/// A session that ends reaps its language server, as the binary's quit does,
+/// so no rust-analyzer outlives the editor that started it.
+#[test]
+fn language_server_exits_with_the_session() {
+    require_rust_analyzer();
+    let (_dir, _root, mut harness) = fixture_harness("rust-lsp");
+    let pid = harness.run(|handle| async move {
+        handle
+            .send_keys(":o src/main.rs<Enter>")
+            .await
+            .expect("open src/main.rs");
+        await_server_pid(&handle, "rust-analyzer", Instant::now() + LSP_DEADLINE).await
+    });
+
+    // SAFETY: signal 0 delivers nothing. The call only checks that the pid
+    // names a process.
+    let signaled = unsafe { libc::kill(pid, 0) };
+    assert_eq!(
+        (signaled, io::Error::last_os_error().raw_os_error()),
+        (-1, Some(libc::ESRCH)),
+        "rust-analyzer (pid {pid}) outlives the session",
+    );
 }
 
 /// Materialize `name` into a fresh, canonicalized temp dir and open a harness on
@@ -687,6 +712,33 @@ async fn await_lsp_active(handle: &Handle, deadline: Instant) {
         assert!(
             Instant::now() < deadline,
             "rust-analyzer did not become active before the deadline",
+        );
+        time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The process id the server `name` reports once it is up.
+///
+/// Waits on the name rather than on `active`, because the in-process global
+/// servers come up first and report no pid.
+async fn await_server_pid(handle: &Handle, name: &str, deadline: Instant) -> libc::pid_t {
+    loop {
+        let status = handle
+            .query(&Query::LspStatus)
+            .await
+            .expect("lsp-status query");
+        let pid = status["servers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|server| server["name"] == name)
+            .and_then(|server| server["pid"].as_i64());
+        if let Some(pid) = pid {
+            return libc::pid_t::try_from(pid).expect("the pid fits a pid_t");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{name} reported no pid before the deadline (last status: {status})",
         );
         time::sleep(POLL_INTERVAL).await;
     }

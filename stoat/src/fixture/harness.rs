@@ -15,6 +15,7 @@
 use crate::{
     host::LocalFsWatcher,
     input_parse::{self, InputParseError, InputStep},
+    lsp::hosts,
     run,
     ui::RenderFrame,
     Settings, Stoat,
@@ -229,6 +230,9 @@ impl LiveHarness {
     /// When the script future finishes, the loop is shut down, so a script need
     /// not call [`Handle::shutdown`] itself. Panics if the event loop returns an
     /// error, or if called more than once.
+    ///
+    /// When the loop ends, the harness shuts the session's language servers down
+    /// and reaps them, as the binary does at quit. No server outlives the call.
     pub fn run<F, Fut, T>(&mut self, script: F) -> T
     where
         F: FnOnce(Handle) -> Fut,
@@ -261,6 +265,7 @@ impl LiveHarness {
                 output
             };
             let (run_result, output) = tokio::join!(stoat.run(event_rx, render_tx), driver);
+            hosts::shutdown_lsp(stoat).await;
             run_result.expect("stoat event loop returned an error");
             output
         })
