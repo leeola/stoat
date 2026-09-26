@@ -145,6 +145,8 @@ pub struct LiveHarness {
     stoat: Stoat,
     _scheduler: Arc<TokioScheduler>,
     rt: Runtime,
+    cols: u16,
+    rows: u16,
 }
 
 impl LiveHarness {
@@ -203,7 +205,21 @@ impl LiveHarness {
             stoat,
             _scheduler: scheduler,
             rt,
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
         })
+    }
+
+    /// Render frames at `cols` by `rows` rather than 80 by 24.
+    ///
+    /// The status bar gives its transient message only the width that its other
+    /// segments leave, and those segments change with the workspace name and
+    /// with what the repository holds. A script that reads a long message needs
+    /// a frame wide enough for all of them.
+    pub fn with_size(mut self, cols: u16, rows: u16) -> Self {
+        self.cols = cols;
+        self.rows = rows;
+        self
     }
 
     /// Run the event loop and `script` concurrently to completion, returning the
@@ -233,14 +249,13 @@ impl LiveHarness {
             socket_path: self.socket_path.clone(),
         };
         let auto_shutdown = self.shutdown.clone();
+        let resize = Event::Resize(self.cols, self.rows);
 
         let stoat = &mut self.stoat;
         let rt = &self.rt;
         rt.block_on(async move {
             let driver = async move {
-                handle
-                    .send_event(Event::Resize(DEFAULT_COLS, DEFAULT_ROWS))
-                    .ok();
+                handle.send_event(resize).ok();
                 let output = script(handle).await;
                 auto_shutdown.notify_one();
                 output

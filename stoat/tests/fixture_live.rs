@@ -338,6 +338,15 @@ fn head_of(root: &Path) -> String {
     }
 }
 
+/// A frame width at which a step's status message shows whole.
+///
+/// The drift fixture's unstaged edits give the status bar a repo segment, and
+/// the message gets only the width that segment, the workspace name, and the
+/// server badges leave. At 80 columns, how much of the message survives changes
+/// from run to run. The workspace name is random, and the segment changes width
+/// when the stop's diff lands, sometimes only after the message expires.
+const WIDE_COLS: u16 = 200;
+
 /// Drift is only ever reported against what is on screen, so the status line
 /// the reader sees is the thing worth pinning here. This walks the drifted
 /// fixture's tour and checks each stop reports what the edits did to it: two
@@ -349,16 +358,14 @@ fn head_of(root: &Path) -> String {
 /// reader steps onto it.
 #[test]
 fn walkthrough_drift_fixture_reports_drift_per_stop() {
-    let (_dir, _root, mut harness) = fixture_harness("walkthrough-drift");
+    let (_dir, _root, harness) = fixture_harness("walkthrough-drift");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     harness.run(|mut handle| async move {
         handle
             .send_keys(":walkthrough tour<Enter>")
             .await
             .expect("open the tour");
 
-        // The unstaged edits give the status line a repo segment, which cuts
-        // every message here short. Each predicate matches the part that
-        // survives rather than the whole of what is set.
         handle
             .await_frame(|text| text.contains("stop s1 drifted"), WALKTHROUGH_TIMEOUT)
             .await
