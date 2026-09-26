@@ -11,13 +11,20 @@
 //! The LSP tests require `rust-analyzer` on PATH and fail loudly if it is
 //! absent rather than skipping, since this tier is opt-in.
 
+use git2::Repository;
 use serde_json::Value;
-use std::{path::PathBuf, process::Command, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 use stoat::{
     fixture::{
         self,
         harness::{Handle, LiveHarness, Query},
     },
+    host::LocalFs,
+    walkthrough::store,
     Settings,
 };
 use tempfile::TempDir;
@@ -232,6 +239,103 @@ fn walkthrough_fixture_plays_its_whole_tour() {
 
         handle.send_keys("d").await.expect("end the tour");
     });
+}
+
+/// The commits fixture checks a commit out between stops, so this plays its
+/// tour and reads HEAD out of the repository at both ends. HEAD is detached at
+/// the first stop's commit while the tour plays, and back on `main` once it
+/// ends.
+///
+/// Each step still has to land on the code its stop names, read out of a
+/// checkout rather than a tree that never moves, and none of them reports
+/// drift.
+#[test]
+fn walkthrough_commits_fixture_checks_each_commit_out() {
+    let (_dir, root, mut harness) = fixture_harness("walkthrough-commits");
+    let tour = store::load(&LocalFs, &root, "tour").expect("the fixture commits its tour");
+    let first = tour.stops[0]
+        .commit
+        .clone()
+        .expect("the first stop names a commit");
+
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":walkthrough tour<Enter>")
+            .await
+            .expect("open the tour");
+        let frame = handle
+            .await_frame(
+                |text| text.contains("1/6") && text.contains("reviewing"),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the tour lands on its first stop once the checkout does");
+        assert!(
+            !frame.contains("drifted"),
+            "the first stop reads what it captured, got frame:\n{frame}",
+        );
+        assert_eq!(
+            head_of(&root),
+            first,
+            "HEAD is detached at the first stop's commit"
+        );
+
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("enter walkthrough mode");
+
+        // Two stops share each commit, so the steps alternate between a
+        // checkout and a jump within the tree already checked out. The mode's
+        // key-hint overlay covers each line past its first seventeen columns,
+        // so every landing text sits at the start of its line.
+        for (step, landing) in [
+            (2, "fn apply("),
+            (3, "\"verbose\""),
+            (4, "pub fn run"),
+            (5, "pub fn handle"),
+            (6, "fn main() {"),
+        ] {
+            handle.send_keys("n").await.expect("step to the next stop");
+            let frame = handle
+                .await_frame(
+                    |text| text.contains(&format!("{step}/6")) && text.contains(landing),
+                    WALKTHROUGH_TIMEOUT,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("stop {step} lands on {landing:?}"));
+            assert!(
+                !frame.contains("drifted"),
+                "stop {step} reads what it captured, got frame:\n{frame}",
+            );
+        }
+
+        handle.send_keys("d").await.expect("end the tour");
+        handle
+            .await_frame(|text| !text.contains("reviewing"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("ending the tour ends its walk");
+        assert_eq!(
+            head_of(&root),
+            "main",
+            "HEAD is back on the branch it started on"
+        );
+    });
+}
+
+/// The branch HEAD is on in the repository at `root`, or the sha it is
+/// detached at.
+fn head_of(root: &Path) -> String {
+    let repo = Repository::open(root).expect("the fixture is a repository");
+    let head = repo.head().expect("HEAD resolves");
+    match repo.head_detached().expect("HEAD is readable") {
+        true => head
+            .peel_to_commit()
+            .expect("HEAD names a commit")
+            .id()
+            .to_string(),
+        false => head.shorthand().expect("the branch has a name").to_owned(),
+    }
 }
 
 /// Drift is only ever reported against what is on screen, so the status line

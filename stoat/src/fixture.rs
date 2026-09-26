@@ -425,6 +425,11 @@ pub enum FixtureError {
 ///   [`crate::action_handlers::palette`]) and the badge naming the slug in play have a workspace to
 ///   read. Beside the six-stop baseline it stores a one-stop tour, a three-stop tour with no
 ///   annotations, and a tour with no stops, which loads and lists but never becomes a run.
+/// - `walkthrough-commits`: the `walkthrough` crate grown over three commits, the config and a
+///   `main` that only loads it first, then the server, then the handler and the full `main`, with a
+///   six-stop tour committed on top whose stops name those commits two by two. Playing it checks a
+///   commit out between stops, stays on one commit between the stops that share it, shows a file
+///   the second commit modified, and follows a cross-file annotation at the third.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -446,6 +451,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "walkthrough-trail" => walkthrough::trail::materialize(dest),
         "walkthrough-columns" => walkthrough::columns::materialize(dest),
         "walkthrough-catalog" => walkthrough::catalog::materialize(dest),
+        "walkthrough-commits" => walkthrough::commits::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
@@ -469,6 +475,9 @@ pub fn default_inputs(name: &str) -> Option<String> {
         "walkthrough-card" => walkthrough::card::build(),
         "walkthrough-trail" => walkthrough::trail::build(),
         "walkthrough-columns" => walkthrough::columns::build(),
+        // The script counts stops and annotations, so the commits the tour
+        // names make no difference to it.
+        "walkthrough-commits" => walkthrough::commits::build(&Default::default()),
         _ => return None,
     };
 
@@ -659,6 +668,17 @@ impl FixtureRepo {
         }
 
         Ok(self)
+    }
+
+    /// The full sha of the commit HEAD names, for a fixture that records one
+    /// of its own commits, such as a tour whose stops read them.
+    pub(in crate::fixture) fn head_sha(&self) -> Result<String, FixtureError> {
+        let commit = self
+            .repo
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .context(GitSnafu)?;
+        Ok(commit.id().to_string())
     }
 
     /// Write `content` to `name` and stage it, leaving a staged modification

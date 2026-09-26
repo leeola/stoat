@@ -80,6 +80,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "walkthrough-catalog",
         "the walkthrough crate with four stored tours, one of them empty",
     ),
+    (
+        "walkthrough-commits",
+        "the walkthrough crate grown over three commits, with a tour that checks each one out",
+    ),
 ];
 
 /// A clap value parser accepting only the [`FIXTURES`] names, so an unknown
