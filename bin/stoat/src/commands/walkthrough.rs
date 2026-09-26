@@ -606,7 +606,7 @@ fn add_stop(
     let focus = capture(fs, root, file, range)?;
 
     let id = walkthrough
-        .add_stop(title, narration, focus, before)
+        .add_stop(title, narration, focus, None, before)
         .whatever_context("add the stop")?
         .id
         .clone();
@@ -652,6 +652,7 @@ fn edit_stop(
             stop,
             StopEdit {
                 title,
+                commit: None,
                 narration,
                 focus,
             },
@@ -844,7 +845,7 @@ fn check(fs: &dyn FsHost, root: &Path, slug: Option<&str>) -> Result<Vec<String>
             .collect(),
     };
 
-    let read = store::workspace_reader(fs, root);
+    let read = store::reader(fs, root);
     let mut lines = Vec::new();
     for slug in slugs {
         let walkthrough = load(fs, root, &slug)?;

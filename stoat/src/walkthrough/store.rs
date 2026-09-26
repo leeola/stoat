@@ -15,7 +15,7 @@
 //! store never opens a real file.
 
 use crate::{host::FsHost, walkthrough::Walkthrough};
-use git2::Repository;
+use git2::{Oid, Repository};
 use snafu::{Location as ErrorLocation, OptionExt, ResultExt, Snafu};
 use std::{
     io,
@@ -217,6 +217,40 @@ pub fn workspace_reader<'a>(fs: &'a dyn FsHost, root: &Path) -> impl Fn(&Path) -
     }
 }
 
+/// A reader over `root`'s files at any commit, shaped for [`super::validate`].
+///
+/// A `None` commit reads the working tree the way [`workspace_reader`] does. A
+/// full sha reads the path out of that commit's tree, whether or not the
+/// working tree still holds the file, so a stop written over history reads the
+/// code it was captured from. A short sha or a branch name finds no commit,
+/// since [`resolve_commit`] turns those into the full sha a stop stores.
+///
+/// An unknown commit, a path the commit's tree lacks, content that is not
+/// UTF-8, and a path that leaves the workspace all read as `None`, the answer a
+/// missing file gives.
+pub fn reader(fs: &dyn FsHost, root: &Path) -> impl Fn(Option<&str>, &Path) -> Option<String> {
+    let workspace = workspace_reader(fs, root);
+    let root = root.to_path_buf();
+    move |commit: Option<&str>, relative: &Path| match commit {
+        None => workspace(relative),
+        Some(sha) => blob_at(&root, relative, sha),
+    }
+}
+
+/// The full sha of the commit `rev` names in `root`'s repository.
+///
+/// `rev` is any revision `git rev-parse` accepts, such as a short sha, a
+/// branch, or `HEAD~1`. A stop stores the sha rather than `rev`, so a branch
+/// that moves later leaves the stop on the commit it was written over.
+///
+/// `None` when no commit answers to `rev`, or when `root` is outside a
+/// repository.
+pub fn resolve_commit(root: &Path, rev: &str) -> Option<String> {
+    let repo = Repository::discover(root).ok()?;
+    let commit = repo.revparse_single(rev).ok()?.peel_to_commit().ok()?;
+    Some(commit.id().to_string())
+}
+
 /// The file at `path` as text.
 ///
 /// Content that is not UTF-8 comes back as an `InvalidData` io error rather
@@ -227,6 +261,25 @@ fn read_text(fs: &dyn FsHost, path: &Path) -> io::Result<String> {
     fs.read(path, &mut bytes)?;
     String::from_utf8(bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
+}
+
+/// The text of `relative` in the tree of the commit `sha`, or `None` when any
+/// step of the lookup fails.
+///
+/// `sha` names the commit exactly. `Oid::from_str` pads a short sha with zeros
+/// rather than resolving it, so only the full form that [`resolve_commit`]
+/// returns finds its commit.
+fn blob_at(root: &Path, relative: &Path, sha: &str) -> Option<String> {
+    if !stays_within(relative) {
+        return None;
+    }
+
+    let repo = Repository::discover(root).ok()?;
+    let commit = repo.find_commit(Oid::from_str(sha).ok()?).ok()?;
+    let entry = commit.tree().ok()?.get_path(relative).ok()?;
+    let blob = entry.to_object(&repo).ok()?.peel_to_blob().ok()?;
+
+    str::from_utf8(blob.content()).ok().map(str::to_owned)
 }
 
 /// Whether `path` names something inside the workspace it is resolved against.
@@ -279,8 +332,8 @@ fn head_commit(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete, head_commit, list, load, read_text, save, walkthroughs_dir, workspace_reader,
-        workspace_root, Summary,
+        delete, head_commit, list, load, read_text, reader, resolve_commit, save, walkthroughs_dir,
+        workspace_reader, workspace_root, Summary,
     };
     use crate::{
         host::{FsHost, LocalFs},
@@ -304,6 +357,7 @@ mod tests {
                     },
                     snippet: "x".to_owned(),
                 },
+                None,
                 None,
             )
             .expect("append needs no anchor");
@@ -544,5 +598,49 @@ mod tests {
             None,
             "and an absolute path, whatever it points at",
         );
+    }
+
+    #[test]
+    fn reader_reads_a_path_at_a_commit_and_the_working_tree_otherwise() {
+        let dir = repo_with_commit();
+        let head = head_commit(dir.path()).expect("the repo has a commit");
+        LocalFs
+            .write(&dir.path().join("a.rs"), b"moved on\n")
+            .expect("write");
+        let read = reader(&LocalFs, dir.path());
+        let a = Path::new("a.rs");
+
+        assert_eq!(read(Some(&head), a).as_deref(), Some("x\n"), "the commit's");
+        assert_eq!(read(None, a).as_deref(), Some("moved on\n"), "the tree's");
+        assert_eq!(
+            read(Some("1234567890abcdef1234567890abcdef12345678"), a),
+            None,
+            "an unknown commit reads None",
+        );
+        assert_eq!(read(Some(&head[..7]), a), None, "and so does a short sha");
+        assert_eq!(
+            read(Some(&head), Path::new("gone.rs")),
+            None,
+            "and so does a path the commit lacks",
+        );
+        assert_eq!(
+            read(Some(&head), Path::new("../a.rs")),
+            None,
+            "and one that climbs out",
+        );
+    }
+
+    #[test]
+    fn resolve_commit_accepts_head_and_refuses_an_unknown_revision() {
+        let dir = repo_with_commit();
+        let head = head_commit(dir.path()).expect("the repo has a commit");
+
+        assert_eq!(resolve_commit(dir.path(), "HEAD").as_ref(), Some(&head));
+        assert_eq!(
+            resolve_commit(dir.path(), &head[..7]).as_ref(),
+            Some(&head),
+            "a short sha resolves to the full one",
+        );
+        assert_eq!(resolve_commit(dir.path(), "no-such-branch"), None);
     }
 }

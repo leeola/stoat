@@ -353,6 +353,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
             NARRATION_MAIN.to_string(),
             super::location("src/main.rs", MAIN, super::line_of(MAIN, "fn main() {")),
             None,
+            None,
         )
         .expect("appending a stop cannot fail")
         .id
@@ -386,6 +387,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
                 CONFIG,
                 super::block_of(CONFIG, "pub fn load(path: &Path)", "    config"),
             ),
+            None,
             None,
         )
         .expect("appending a stop cannot fail")
@@ -432,6 +434,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
                 super::line_of(SERVER, "pub fn run(&mut self)"),
             ),
             None,
+            None,
         )
         .expect("appending a stop cannot fail")
         .id
@@ -455,6 +458,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
             super::line_of(SERVER, "fn dispatch(&mut self"),
         ),
         None,
+        None,
     )
     .expect("appending a stop cannot fail");
 
@@ -468,6 +472,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
                 HANDLER,
                 super::line_of(HANDLER, "pub fn handle(request: &Request)"),
             ),
+            None,
             None,
         )
         .expect("appending a stop cannot fail")
@@ -506,6 +511,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         String::new(),
         super::location("src/main.rs", MAIN, super::span_of(MAIN, "server.run()")),
         None,
+        None,
     )
     .expect("appending a stop cannot fail");
 
@@ -531,7 +537,7 @@ mod tests {
         super::materialize(dir.path()).unwrap();
 
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
-        let drift = walkthrough::validate(&tour, &store::workspace_reader(&LocalFs, dir.path()));
+        let drift = walkthrough::validate(&tour, &store::reader(&LocalFs, dir.path()));
         assert_eq!(
             drift,
             Vec::new(),

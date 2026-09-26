@@ -244,6 +244,7 @@ mod tests {
                         snippet: "x".to_owned(),
                     },
                     None,
+                    None,
                 )
                 .expect("append needs no anchor");
         }

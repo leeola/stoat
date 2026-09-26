@@ -406,6 +406,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         String::new(),
         super::location("src/main.rs", MAIN, super::line_of(MAIN, "fn main() {")),
         None,
+        None,
     )
     .expect("appending a stop cannot fail");
 
@@ -418,6 +419,7 @@ fn stop(tour: &mut Walkthrough, title: &str, narration: &str, range: Range) -> S
         Some(title.to_string()),
         narration.to_string(),
         super::location("src/report.rs", REPORT, range),
+        None,
         None,
     )
     .expect("appending a stop cannot fail")
@@ -457,7 +459,7 @@ mod tests {
         super::materialize(dir.path()).unwrap();
 
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
-        let drift = walkthrough::validate(&tour, &store::workspace_reader(&LocalFs, dir.path()));
+        let drift = walkthrough::validate(&tour, &store::reader(&LocalFs, dir.path()));
         assert_eq!(
             drift,
             Vec::new(),

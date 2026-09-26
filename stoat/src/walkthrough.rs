@@ -12,9 +12,14 @@
 //! say so. Comparing the captured snippet against what the file holds now turns
 //! that drift into a reported finding rather than a wrong tour.
 //!
-//! Nothing here touches the filesystem. [`validate`] takes a reader closure, so
-//! the whole module is exercised against in-memory content and the store layer
-//! owns the IO.
+//! A stop that names a commit reads its ranges against that commit's tree rather
+//! than the working tree. A tour over a series of commits thus checks each stop
+//! against the code it was written over. A commit's tree never changes, so such
+//! a stop never drifts. It fails to read only when the commit is gone.
+//!
+//! Nothing here touches the filesystem. [`validate`] takes a reader closure over
+//! a commit and a path, so the whole module is exercised against in-memory
+//! content and the store layer owns the IO, git included.
 
 use serde::{Deserialize, Serialize};
 use snafu::{Location as ErrorLocation, Snafu};
@@ -39,10 +44,12 @@ pub struct Walkthrough {
     /// Filename stem the walkthrough is stored and addressed under.
     pub slug: String,
     pub title: String,
-    /// Commit the stops were captured against, when the workspace had one.
+    /// Commit the working-tree stops were captured against, when the workspace
+    /// had one.
     ///
-    /// A reader that finds the repository on a different commit knows the tour
-    /// was written elsewhere before any snippet is compared.
+    /// A reader that finds the repository on a different commit knows those
+    /// stops were written elsewhere before any snippet is compared. A stop that
+    /// names its own commit in [`Stop::commit`] reads that commit instead.
     pub git_head: Option<String>,
     /// Id to assign the next stop, as `s<N>`.
     pub next_stop_id: u32,
@@ -57,6 +64,16 @@ pub struct Stop {
     /// `s<N>`, assigned once and never reused.
     pub id: String,
     pub title: Option<String>,
+    /// Full sha of the commit the focus and every annotation read against, or
+    /// `None` for the working tree.
+    ///
+    /// A stop with a commit plays with that commit checked out, so the code on
+    /// screen is the code the stop was written over.
+    ///
+    /// Absent from the stored form while `None`, so a working-tree stop writes
+    /// the same bytes it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// Markdown narration shown alongside the focused code.
     pub narration: String,
     /// The file and range this stop is about.
@@ -128,11 +145,13 @@ pub struct Point {
 /// Which stop names the field an edit leaves alone and which it replaces.
 ///
 /// Every field is `None` by default, so a caller sets only what it changes.
-/// [`Self::title`] nests two layers because a stop's title is itself optional:
-/// the outer `None` leaves the title untouched, and `Some(None)` clears it.
+/// [`Self::title`] and [`Self::commit`] nest two layers because a stop's title
+/// and commit are themselves optional. The outer `None` leaves the field
+/// untouched, and `Some(None)` clears it.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct StopEdit {
     pub title: Option<Option<String>>,
+    pub commit: Option<Option<String>>,
     pub narration: Option<String>,
     pub focus: Option<Location>,
 }
@@ -253,6 +272,7 @@ impl Walkthrough {
         title: Option<String>,
         narration: String,
         focus: Location,
+        commit: Option<String>,
         before: Option<&str>,
     ) -> Result<&Stop, WalkthroughError> {
         let at = match before {
@@ -263,6 +283,7 @@ impl Walkthrough {
         let stop = Stop {
             id: format!("s{}", self.next_stop_id),
             title,
+            commit,
             narration,
             focus,
             annotations: Vec::new(),
@@ -280,6 +301,9 @@ impl Walkthrough {
 
         if let Some(title) = edit.title {
             stop.title = title;
+        }
+        if let Some(commit) = edit.commit {
+            stop.commit = commit;
         }
         if let Some(narration) = edit.narration {
             stop.narration = narration;
@@ -446,9 +470,11 @@ pub fn snippet_for(content: &str, range: Range) -> Result<String, WalkthroughErr
 /// Every range in `walkthrough` whose file, bounds, or captured bytes no longer
 /// hold, in stop then annotation order.
 ///
-/// `read` returns a file's current content, or `None` when it is gone. Taking a
-/// reader rather than a path keeps this pure, so the same call validates a
-/// working tree, a commit, or a fixture.
+/// `read` takes a stop's commit, `None` for the working tree, and a path. It
+/// returns the file's content there, or `None` when the file is gone. Each
+/// stop reads at its own commit, so one call validates a tour over history
+/// against the trees it was written over. Taking a reader rather than a path
+/// keeps this pure, so the same call validates a repository or a fixture.
 ///
 /// A focus file that fails to read yields one finding for the stop, and none
 /// for the annotations that share it. Their ranges point into that same file,
@@ -458,11 +484,15 @@ pub fn snippet_for(content: &str, range: Range) -> Result<String, WalkthroughErr
 ///
 /// An empty result means every stop still points at what it was written
 /// against.
-pub fn validate(walkthrough: &Walkthrough, read: &dyn Fn(&Path) -> Option<String>) -> Vec<Finding> {
+pub fn validate(
+    walkthrough: &Walkthrough,
+    read: &dyn Fn(Option<&str>, &Path) -> Option<String>,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     for stop in &walkthrough.stops {
-        let focus = read(&stop.focus.path);
+        let commit = stop.commit.as_deref();
+        let focus = read(commit, &stop.focus.path);
 
         match &focus {
             Some(content) => {
@@ -484,7 +514,7 @@ pub fn validate(walkthrough: &Walkthrough, read: &dyn Fn(&Path) -> Option<String
 
         for annotation in &stop.annotations {
             let content = match &annotation.path {
-                Some(path) => match read(path) {
+                Some(path) => match read(commit, path) {
                     Some(content) => Cow::Owned(content),
                     None => {
                         findings.push(Finding {
@@ -616,6 +646,7 @@ mod tests {
                     format!("stop {index}"),
                     location(&format!("src/{index}.rs"), range((1, 1), (1, 1)), "x"),
                     None,
+                    None,
                 )
                 .expect("append needs no anchor");
         }
@@ -676,6 +707,37 @@ mod tests {
 
         let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.stops[0].annotations[0].path, None);
+    }
+
+    #[test]
+    fn a_commit_stop_round_trips_through_json() {
+        let mut walkthrough = with_stops(0);
+        walkthrough
+            .add_stop(
+                None,
+                "n".to_owned(),
+                location("a.rs", range((1, 1), (1, 1)), "x"),
+                Some("0123abcd".to_owned()),
+                None,
+            )
+            .expect("append needs no anchor");
+
+        let json = serde_json::to_string(&walkthrough).expect("serialize");
+        let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(parsed, walkthrough);
+        assert_eq!(parsed.stops[0].commit.as_deref(), Some("0123abcd"));
+    }
+
+    /// Every walkthrough stored before stops named commits must read back the
+    /// same, and keep writing the same bytes it always did.
+    #[test]
+    fn a_working_tree_stop_stores_no_commit() {
+        let json = serde_json::to_string(&with_stops(1)).expect("serialize");
+        assert!(!json.contains("\"commit\""), "the field is absent: {json}");
+
+        let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.stops[0].commit, None);
     }
 
     /// Every walkthrough stored before annotations carried narration must read
@@ -774,6 +836,7 @@ mod tests {
                 "third".to_owned(),
                 location("src/3.rs", range((1, 1), (1, 1)), "x"),
                 None,
+                None,
             )
             .expect("append needs no anchor");
         assert_eq!(added.id, "s3");
@@ -812,6 +875,7 @@ mod tests {
                 None,
                 "middle".to_owned(),
                 location("src/m.rs", range((1, 1), (1, 1)), "x"),
+                None,
                 Some("s2"),
             )
             .expect("s2 exists");
@@ -903,6 +967,34 @@ mod tests {
             (annotation.label.as_str(), annotation.snippet.as_str()),
             ("new", "x")
         );
+    }
+
+    #[test]
+    fn edit_stop_replaces_and_clears_the_commit() {
+        let mut walkthrough = with_stops(1);
+        let commit = |commit| StopEdit {
+            commit,
+            ..StopEdit::default()
+        };
+
+        walkthrough
+            .edit_stop("s1", commit(Some(Some("abc".to_owned()))))
+            .expect("s1 exists");
+        assert_eq!(walkthrough.stops[0].commit.as_deref(), Some("abc"));
+
+        walkthrough
+            .edit_stop("s1", commit(None))
+            .expect("s1 exists");
+        assert_eq!(
+            walkthrough.stops[0].commit.as_deref(),
+            Some("abc"),
+            "an outer None leaves it"
+        );
+
+        walkthrough
+            .edit_stop("s1", commit(Some(None)))
+            .expect("s1 exists");
+        assert_eq!(walkthrough.stops[0].commit, None, "an inner None clears it");
     }
 
     #[test]
@@ -1002,16 +1094,20 @@ mod tests {
         );
     }
 
-    fn reads(files: &[(&'static str, &'static str)]) -> impl Fn(&Path) -> Option<String> {
-        let files: Vec<(PathBuf, String)> = files
+    /// A reader answering each `(commit, path, content)` entry, `None` naming
+    /// the working tree.
+    fn reads(
+        files: &[(Option<&'static str>, &'static str, &'static str)],
+    ) -> impl Fn(Option<&str>, &Path) -> Option<String> {
+        let files: Vec<(Option<&'static str>, PathBuf, String)> = files
             .iter()
-            .map(|(path, content)| (PathBuf::from(path), (*content).to_owned()))
+            .map(|(commit, path, content)| (*commit, PathBuf::from(path), (*content).to_owned()))
             .collect();
-        move |path| {
+        move |commit, path| {
             files
                 .iter()
-                .find(|(known, _)| known == path)
-                .map(|(_, content)| content.clone())
+                .find(|(at, known, _)| *at == commit && known == path)
+                .map(|(_, _, content)| content.clone())
         }
     }
 
@@ -1023,6 +1119,7 @@ mod tests {
                 None,
                 "n".to_owned(),
                 location("a.rs", range((1, 1), (1, 3)), "one"),
+                None,
                 None,
             )
             .expect("append");
@@ -1037,7 +1134,7 @@ mod tests {
             )
             .expect("s1 exists");
 
-        let found = validate(&walkthrough, &reads(&[("a.rs", CONTENT)]));
+        let found = validate(&walkthrough, &reads(&[(None, "a.rs", CONTENT)]));
         assert_eq!(found, Vec::new());
     }
 
@@ -1049,6 +1146,7 @@ mod tests {
                 None,
                 "n".to_owned(),
                 location("gone.rs", range((1, 1), (1, 3)), "one"),
+                None,
                 None,
             )
             .expect("append");
@@ -1085,6 +1183,7 @@ mod tests {
                 "n".to_owned(),
                 location("a.rs", range((9, 1), (9, 1)), "one"),
                 None,
+                None,
             )
             .expect("append");
         walkthrough
@@ -1098,7 +1197,7 @@ mod tests {
             )
             .expect("s1 exists");
 
-        let found = validate(&walkthrough, &reads(&[("a.rs", CONTENT)]));
+        let found = validate(&walkthrough, &reads(&[(None, "a.rs", CONTENT)]));
         let seen: Vec<(&str, Option<&str>, FindingKind)> = found
             .iter()
             .map(|finding| {
@@ -1133,6 +1232,7 @@ mod tests {
                 "n".to_owned(),
                 location("a.rs", range((1, 1), (1, 3)), "one"),
                 None,
+                None,
             )
             .expect("append");
         walkthrough
@@ -1148,7 +1248,7 @@ mod tests {
 
         let found = validate(
             &walkthrough,
-            &reads(&[("a.rs", CONTENT), ("b.rs", "far\naway\n")]),
+            &reads(&[(None, "a.rs", CONTENT), (None, "b.rs", "far\naway\n")]),
         );
         assert_eq!(found, Vec::new(), "each range met its own file");
     }
@@ -1161,6 +1261,7 @@ mod tests {
                 None,
                 "n".to_owned(),
                 location("a.rs", range((1, 1), (1, 3)), "one"),
+                None,
                 None,
             )
             .expect("append");
@@ -1175,7 +1276,7 @@ mod tests {
             )
             .expect("s1 exists");
 
-        let found = validate(&walkthrough, &reads(&[("a.rs", CONTENT)]));
+        let found = validate(&walkthrough, &reads(&[(None, "a.rs", CONTENT)]));
         assert_eq!(
             found,
             vec![Finding {
@@ -1198,6 +1299,7 @@ mod tests {
                 None,
                 "n".to_owned(),
                 location("gone.rs", range((1, 1), (1, 3)), "one"),
+                None,
                 None,
             )
             .expect("append");
@@ -1222,7 +1324,7 @@ mod tests {
             )
             .expect("s1 exists");
 
-        let found = validate(&walkthrough, &reads(&[("a.rs", CONTENT)]));
+        let found = validate(&walkthrough, &reads(&[(None, "a.rs", CONTENT)]));
         let seen: Vec<(Option<&str>, FindingKind)> = found
             .iter()
             .map(|finding| (finding.annotation.as_deref(), finding.kind))
@@ -1231,6 +1333,59 @@ mod tests {
             seen,
             [(None, FindingKind::Error), (Some("a2"), FindingKind::Stale)],
             "a1 shares the unreadable focus, a2 has a file of its own",
+        );
+    }
+
+    /// A stop over history reads the tree it was written over, so a working
+    /// tree that moved on leaves it clean while the same range over the working
+    /// tree is stale.
+    #[test]
+    fn validate_reads_a_commit_stop_at_its_commit() {
+        let mut walkthrough = Walkthrough::new("t".to_owned(), "T".to_owned(), None);
+        for commit in [Some("abc".to_owned()), None] {
+            walkthrough
+                .add_stop(
+                    None,
+                    "n".to_owned(),
+                    location("a.rs", range((1, 1), (1, 3)), "one"),
+                    commit,
+                    None,
+                )
+                .expect("append");
+        }
+        walkthrough
+            .add_annotation(
+                "s1",
+                Some(PathBuf::from("b.rs")),
+                range((1, 1), (1, 3)),
+                "far".to_owned(),
+                "l".to_owned(),
+                String::new(),
+            )
+            .expect("s1 exists");
+
+        let found = validate(
+            &walkthrough,
+            &reads(&[
+                (Some("abc"), "a.rs", CONTENT),
+                (Some("abc"), "b.rs", "far\naway\n"),
+                (None, "a.rs", "ONE\n"),
+            ]),
+        );
+        let seen: Vec<(&str, Option<&str>, FindingKind)> = found
+            .iter()
+            .map(|finding| {
+                (
+                    finding.stop.as_str(),
+                    finding.annotation.as_deref(),
+                    finding.kind,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [("s2", None, FindingKind::Stale)],
+            "s1 and its annotation read at abc, s2 reads the working tree",
         );
     }
 }

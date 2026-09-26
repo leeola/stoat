@@ -178,6 +178,7 @@ mod tests {
                 String::new(),
                 location("src/main.rs", content, line_of(content, needle)),
                 None,
+                None,
             )
             .expect("the tour accepts a stop");
         }

@@ -820,6 +820,7 @@ mod tests {
                 NARRATION.to_owned(),
                 location("a.rs", 2, (1, 11), "fn two() {}"),
                 None,
+                None,
             )
             .expect("append");
         walkthrough
@@ -827,6 +828,7 @@ mod tests {
                 Some("second".to_owned()),
                 String::new(),
                 location("b.rs", 1, (1, 13), "fn three() {}"),
+                None,
                 None,
             )
             .expect("append");
@@ -1190,6 +1192,7 @@ mod tests {
                     String::new(),
                     location("a.rs", 2, cols, snippet),
                     None,
+                    None,
                 )
                 .expect("append");
         }
@@ -1524,6 +1527,7 @@ mod tests {
                 NARRATION.to_owned(),
                 location("a.rs", 2, (1, 11), "fn two() {}"),
                 None,
+                None,
             )
             .expect("append");
         walkthrough
@@ -1531,6 +1535,7 @@ mod tests {
                 Some("second".to_owned()),
                 "The **exit**.".to_owned(),
                 location("b.rs", 1, (1, 13), "fn three() {}"),
+                None,
                 None,
             )
             .expect("append");

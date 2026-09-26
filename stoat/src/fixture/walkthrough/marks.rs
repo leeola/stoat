@@ -304,6 +304,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
                 SEVERITY_ARMS[SEVERITY_ARMS.len() - 1],
             )),
             None,
+            None,
         )
         .expect("appending a stop cannot fail")
         .id
@@ -317,6 +318,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
             Some("Two on one row".to_string()),
             NARRATION_PAIR.to_string(),
             rules(super::line_of(RULES, "if !validate(")),
+            None,
             None,
         )
         .expect("appending a stop cannot fail")
@@ -347,6 +349,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
                 CODE_ARMS[CODE_ARMS.len() - 1],
             )),
             None,
+            None,
         )
         .expect("appending a stop cannot fail")
         .id
@@ -360,6 +363,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
             Some("A block annotation".to_string()),
             NARRATION_BLOCK.to_string(),
             rules(super::line_of(RULES, "findings.push(Finding {")),
+            None,
             None,
         )
         .expect("appending a stop cannot fail")
@@ -380,6 +384,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
             Some("No room".to_string()),
             NARRATION_NO_ROOM.to_string(),
             message(super::block_of(MESSAGE, MESSAGE_ARMS[0], MESSAGE_ARMS[1])),
+            None,
             None,
         )
         .expect("appending a stop cannot fail")
@@ -405,6 +410,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         NARRATION_WRAPPED.to_string(),
         message(super::line_of(MESSAGE, "pub const SUMMARY")),
         None,
+        None,
     )
     .expect("appending a stop cannot fail");
 
@@ -413,6 +419,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         NARRATION_EDGE.to_string(),
         rules(closing_of(RULES, "pub fn check(")),
         None,
+        None,
     )
     .expect("appending a stop cannot fail");
 
@@ -420,6 +427,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
         Some("The last line".to_string()),
         NARRATION_LAST.to_string(),
         rules(super::line_of(RULES, "pub const RULE_COUNT")),
+        None,
         None,
     )
     .expect("appending a stop cannot fail");
@@ -495,7 +503,7 @@ mod tests {
         super::materialize(dir.path()).unwrap();
 
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
-        let drift = walkthrough::validate(&tour, &store::workspace_reader(&LocalFs, dir.path()));
+        let drift = walkthrough::validate(&tour, &store::reader(&LocalFs, dir.path()));
         assert_eq!(
             drift,
             Vec::new(),

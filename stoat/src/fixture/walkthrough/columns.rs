@@ -173,6 +173,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
                 narration.to_string(),
                 super::location("src/i18n.rs", I18N, super::line_of(I18N, arm)),
                 None,
+                None,
             )
             .expect("appending a stop cannot fail")
             .id
@@ -193,6 +194,7 @@ pub(in crate::fixture) fn build() -> Walkthrough {
             Some("Wide labels".to_string()),
             NARRATION_WIDE.to_string(),
             super::location("src/i18n.rs", I18N, super::line_of(I18N, "match locale {")),
+            None,
             None,
         )
         .expect("appending a stop cannot fail")
@@ -241,7 +243,7 @@ mod tests {
         super::materialize(dir.path()).unwrap();
 
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
-        let drift = walkthrough::validate(&tour, &store::workspace_reader(&LocalFs, dir.path()));
+        let drift = walkthrough::validate(&tour, &store::reader(&LocalFs, dir.path()));
         assert_eq!(
             drift,
             Vec::new(),

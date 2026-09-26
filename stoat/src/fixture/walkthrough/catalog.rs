@@ -87,6 +87,7 @@ fn solo() -> Walkthrough {
             super::line_of(tour::MAIN, "fn main() {"),
         ),
         None,
+        None,
     )
     .expect("appending a stop cannot fail");
     tour
@@ -129,6 +130,7 @@ fn plain() -> Walkthrough {
                 narration.to_string(),
                 super::location(path, content, super::line_of(content, needle)),
                 None,
+                None,
             )
             .expect("appending a stop cannot fail");
     }
@@ -167,7 +169,7 @@ mod tests {
     fn catalog_tours_validate_against_the_committed_sources() {
         let dir = tempfile::tempdir().unwrap();
         super::materialize(dir.path()).unwrap();
-        let read = store::workspace_reader(&LocalFs, dir.path());
+        let read = store::reader(&LocalFs, dir.path());
 
         let drifted = store::list(&LocalFs, dir.path())
             .expect("the tours are committed")

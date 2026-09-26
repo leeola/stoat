@@ -108,7 +108,7 @@ mod tests {
         super::materialize(dir.path()).unwrap();
 
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
-        let findings = walkthrough::validate(&tour, &store::workspace_reader(&LocalFs, dir.path()));
+        let findings = walkthrough::validate(&tour, &store::reader(&LocalFs, dir.path()));
 
         assert_eq!(
             findings
@@ -133,7 +133,7 @@ mod tests {
         super::materialize(dir.path()).unwrap();
 
         let tour = store::load(&LocalFs, dir.path(), "tour").expect("the tour is committed");
-        let findings = walkthrough::validate(&tour, &store::workspace_reader(&LocalFs, dir.path()));
+        let findings = walkthrough::validate(&tour, &store::reader(&LocalFs, dir.path()));
 
         assert_eq!(
             findings

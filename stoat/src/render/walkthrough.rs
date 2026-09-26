@@ -1095,6 +1095,7 @@ mod tests {
                 "The **entry** point.".to_owned(),
                 location(2, (1, 11), "fn two() {}"),
                 None,
+                None,
             )
             .expect("append");
         walkthrough
@@ -1102,6 +1103,7 @@ mod tests {
                 Some("second".to_owned()),
                 "The **exit**.".to_owned(),
                 location(3, (1, 13), "fn three() {}"),
+                None,
                 None,
             )
             .expect("append");
@@ -1318,6 +1320,7 @@ mod tests {
                 Some("first".to_owned()),
                 "The **entry** point.".to_owned(),
                 location(2, (1, 11), "fn two() {}"),
+                None,
                 None,
             )
             .expect("append");
