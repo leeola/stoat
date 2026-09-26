@@ -65,6 +65,7 @@ pub struct TestHarness {
     pub(crate) fake_clipboard: Arc<crate::host::FakeClipboard>,
     pub(crate) fake_terminal: Arc<crate::host::FakeTerminalSession>,
     pub(crate) fake_terminal_host: Arc<crate::host::FakeTerminalHost>,
+    pub(crate) fake_shell: Arc<crate::host::FakeShell>,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,
@@ -109,6 +110,7 @@ impl TestHarness {
         let fake_terminal = Arc::new(crate::host::FakeTerminalSession::new());
         let fake_terminal_host =
             Arc::new(crate::host::FakeTerminalHost::new(fake_terminal.clone()));
+        let fake_shell = Arc::new(crate::host::FakeShell::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
         // Stands in for the ident handshake a real session runs, so tests and
@@ -124,6 +126,7 @@ impl TestHarness {
         stoat.set_lsp_host(fake_lsp.clone());
         stoat.set_clipboard_host(fake_clipboard.clone());
         stoat.terminal_host = fake_terminal_host.clone();
+        stoat.set_shell_host(fake_shell.clone());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
@@ -137,6 +140,7 @@ impl TestHarness {
             fake_clipboard,
             fake_terminal,
             fake_terminal_host,
+            fake_shell,
             frames: Vec::new(),
             last_buffer: None,
             step: 0,
@@ -294,6 +298,11 @@ impl TestHarness {
             alloc_ptr(&self.stoat.terminal_host),
             alloc_ptr(&self.fake_terminal_host),
             "TerminalHost was replaced during the test; real PTY spawns may have escaped"
+        );
+        assert_eq!(
+            alloc_ptr(&self.stoat.shell_host),
+            alloc_ptr(&self.fake_shell),
+            "ShellHost was replaced during the test; real shell commands may have escaped"
         );
     }
 
@@ -1466,6 +1475,14 @@ mod tests {
         let mut h = TestHarness::with_size(80, 24);
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.assert_no_real_io();
+    }
+
+    #[test]
+    #[should_panic(expected = "ShellHost was replaced")]
+    fn assert_no_real_io_panics_when_shell_host_swapped() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_shell_host(Arc::new(crate::host::LocalShell));
         h.assert_no_real_io();
     }
 

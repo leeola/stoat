@@ -328,12 +328,11 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     fn setup(h: &mut TestHarness, response: ShellOutput) -> Arc<FakeShell> {
-        let fake = Arc::new(FakeShell::new());
-        fake.set_response("TERM=dumb direnv export json", response);
-        h.stoat.set_shell_host(fake.clone());
+        h.fake_shell
+            .set_response("TERM=dumb direnv export json", response);
         h.stoat.set_env_auto_load(true);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/proj");
-        fake
+        h.fake_shell.clone()
     }
 
     fn out(stdout: &[u8], stderr: &[u8], exit_code: i32) -> ShellOutput {

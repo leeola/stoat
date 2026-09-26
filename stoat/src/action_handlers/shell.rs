@@ -439,10 +439,8 @@ mod tests {
     use std::sync::Arc;
     use stoat_action as action;
 
-    fn install_fake(h: &mut TestHarness) -> Arc<FakeShell> {
-        let fake = Arc::new(FakeShell::new());
-        h.stoat.set_shell_host(fake.clone());
-        fake
+    fn install_fake(h: &TestHarness) -> Arc<FakeShell> {
+        h.fake_shell.clone()
     }
 
     fn select_range(h: &mut TestHarness, start: usize, end: usize) {
@@ -491,7 +489,7 @@ mod tests {
     #[test]
     fn piped_pieces_survive_removing_the_primary_selection() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "tr a-z A-Z",
             ShellOutput {
@@ -550,7 +548,7 @@ mod tests {
     #[test]
     fn shell_pipe_replaces_selection_with_stdout() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "tr a-z A-Z",
             ShellOutput {
@@ -570,7 +568,7 @@ mod tests {
     #[test]
     fn shell_pipe_to_leaves_selection_unchanged() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         h.seed_focused_buffer("hello");
         select_range(&mut h, 0, 5);
         dispatch(&mut h.stoat, &action::ShellPipeTo);
@@ -584,7 +582,7 @@ mod tests {
     #[test]
     fn shell_insert_output_inserts_at_cursor() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "date",
             ShellOutput {
@@ -610,7 +608,7 @@ mod tests {
     #[test]
     fn insert_output_trims_against_the_first_selection() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "echo hi",
             ShellOutput {
@@ -635,7 +633,7 @@ mod tests {
     #[test]
     fn insert_output_lands_before_a_forward_selection() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "date",
             ShellOutput {
@@ -658,7 +656,7 @@ mod tests {
     #[test]
     fn insert_output_selects_its_output() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "date",
             ShellOutput {
@@ -685,7 +683,7 @@ mod tests {
     #[test]
     fn pipe_keeps_a_reversed_selection_reversed() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "tr a-z A-Z",
             ShellOutput {
@@ -711,7 +709,7 @@ mod tests {
     #[test]
     fn empty_output_collapses_the_selection() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "true",
             ShellOutput {
@@ -739,7 +737,7 @@ mod tests {
     #[test]
     fn pipe_keeps_the_primary_on_its_own_piece() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "tag",
             ShellOutput {
@@ -773,7 +771,7 @@ mod tests {
     #[test]
     fn shell_append_output_appends_after_selection() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "date",
             ShellOutput {
@@ -793,7 +791,7 @@ mod tests {
     #[test]
     fn shell_keep_pipe_filters_by_exit_code() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "grep -q '[0-9]'",
             ShellOutput {
@@ -828,7 +826,7 @@ mod tests {
     #[test]
     fn keep_pipe_drops_when_exit_nonzero() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         // Default fake response is exit 0 (keep). Programme a
         // non-zero exit so the filter drops the selection.
         fake.set_response(
@@ -858,7 +856,7 @@ mod tests {
     #[test]
     fn a_failing_pipe_leaves_the_buffer_untouched() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "false",
             ShellOutput {
@@ -885,7 +883,7 @@ mod tests {
     #[test]
     fn stderr_replaces_the_selection() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "noisy",
             ShellOutput {
@@ -912,7 +910,7 @@ mod tests {
     #[test]
     fn a_trailing_newline_the_selection_lacked_comes_off() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "wc -c",
             ShellOutput {
@@ -943,7 +941,7 @@ mod tests {
     #[test]
     fn keep_pipe_keeps_a_selection_whose_command_wrote_stderr() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response_for_stdin(
             "check",
             b"abc".to_vec(),
@@ -983,7 +981,7 @@ mod tests {
     #[test]
     fn keep_pipe_reports_no_selections_remaining() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "reject",
             ShellOutput {
@@ -1012,7 +1010,7 @@ mod tests {
     #[test]
     fn keep_pipe_promotes_the_survivor_after_the_primary() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         // The primary is the first selection and does not survive, so the
         // promotion has two survivors ahead of it to choose between. Added
         // last, so it holds the highest id and the two rules part company.
@@ -1057,7 +1055,7 @@ mod tests {
     #[test]
     fn pipe_undoes_as_one_step_and_restores_the_selections() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "tag",
             ShellOutput {
@@ -1101,7 +1099,7 @@ mod tests {
     #[test]
     fn the_bar_arms_the_pipe_in_normal_mode() {
         let mut h = Stoat::test();
-        install_fake(&mut h);
+        install_fake(&h);
         h.seed_focused_buffer("hello");
 
         h.type_keys("|");
@@ -1123,7 +1121,7 @@ mod tests {
             ("$", ShellAction::KeepPipe),
         ] {
             let mut h = Stoat::test();
-            install_fake(&mut h);
+            install_fake(&h);
             h.seed_focused_buffer("hello");
             h.type_keys("v");
             assert_eq!(h.stoat.focused_mode(), "select", "test setup: in select");
@@ -1142,7 +1140,7 @@ mod tests {
     #[test]
     fn a_shell_op_stays_in_select_mode() {
         let mut h = Stoat::test();
-        let fake = install_fake(&mut h);
+        let fake = install_fake(&h);
         fake.set_response(
             "tr a-z A-Z",
             ShellOutput {
@@ -1166,7 +1164,7 @@ mod tests {
     #[test]
     fn empty_command_keeps_state() {
         let mut h = Stoat::test();
-        install_fake(&mut h);
+        install_fake(&h);
         h.seed_focused_buffer("hello");
         select_range(&mut h, 0, 5);
         dispatch(&mut h.stoat, &action::ShellPipe);
@@ -1178,7 +1176,7 @@ mod tests {
     #[test]
     fn escape_cancels_input() {
         let mut h = Stoat::test();
-        install_fake(&mut h);
+        install_fake(&h);
         h.seed_focused_buffer("hello");
         select_range(&mut h, 0, 5);
         dispatch(&mut h.stoat, &action::ShellPipe);
