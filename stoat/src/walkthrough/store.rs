@@ -18,7 +18,7 @@ use crate::{host::FsHost, walkthrough::Walkthrough};
 use git2::{Oid, Repository};
 use snafu::{Location as ErrorLocation, OptionExt, ResultExt, Snafu};
 use std::{
-    io,
+    fs, io,
     path::{Component, Path, PathBuf},
 };
 
@@ -269,17 +269,40 @@ fn read_text(fs: &dyn FsHost, path: &Path) -> io::Result<String> {
 /// `sha` names the commit exactly. `Oid::from_str` pads a short sha with zeros
 /// rather than resolving it, so only the full form that [`resolve_commit`]
 /// returns finds its commit.
+///
+/// `relative` is relative to the workspace `root`, and a commit's tree is
+/// rooted at the repository, so a workspace below the working directory reads
+/// under its own path there.
 fn blob_at(root: &Path, relative: &Path, sha: &str) -> Option<String> {
     if !stays_within(relative) {
         return None;
     }
 
     let repo = Repository::discover(root).ok()?;
+    let in_tree = below_workdir(&repo, root)?.join(relative);
     let commit = repo.find_commit(Oid::from_str(sha).ok()?).ok()?;
-    let entry = commit.tree().ok()?.get_path(relative).ok()?;
+    let entry = commit.tree().ok()?.get_path(&in_tree).ok()?;
     let blob = entry.to_object(&repo).ok()?.peel_to_blob().ok()?;
 
     str::from_utf8(blob.content()).ok().map(str::to_owned)
+}
+
+/// Where `root` sits below `repo`'s working directory, empty when it is the
+/// working directory itself.
+///
+/// The repository reports its working directory with every symlink resolved,
+/// so `root` is canonicalized before the comparison. A root reached through a
+/// symlink names the same directory under another spelling. `None` for a bare
+/// repository, which has no working directory, and for a root outside it.
+///
+/// The canonicalization goes to the local filesystem rather than through
+/// [`FsHost`], because git2 opens the repository there. A path that another
+/// host resolves is not one the repository knows.
+fn below_workdir(repo: &Repository, root: &Path) -> Option<PathBuf> {
+    let root = fs::canonicalize(root).ok()?;
+    root.strip_prefix(repo.workdir()?)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 /// Whether `path` names something inside the workspace it is resolved against.
@@ -340,7 +363,10 @@ mod tests {
         walkthrough::{Location, Point, Range, Walkthrough},
     };
     use git2::{Repository, Signature};
-    use std::path::{Path, PathBuf};
+    use std::{
+        os::unix,
+        path::{Path, PathBuf},
+    };
     use tempfile::TempDir;
 
     fn tour(slug: &str, title: &str) -> Walkthrough {
@@ -366,14 +392,23 @@ mod tests {
 
     /// A repository with one commit, so `head_commit` has something to find.
     fn repo_with_commit() -> TempDir {
+        repo_with_files(&[("a.rs", "x\n")])
+    }
+
+    /// A repository with one commit holding `files`, each a path and its text.
+    fn repo_with_files(files: &[(&str, &str)]) -> TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = Repository::init(dir.path()).expect("init");
 
-        LocalFs
-            .write(&dir.path().join("a.rs"), b"x\n")
-            .expect("write");
         let mut index = repo.index().expect("index");
-        index.add_path(Path::new("a.rs")).expect("add");
+        for (path, text) in files {
+            let absolute = dir.path().join(path);
+            LocalFs
+                .create_dir_all(absolute.parent().expect("a file has a parent"))
+                .expect("mkdir");
+            LocalFs.write(&absolute, text.as_bytes()).expect("write");
+            index.add_path(Path::new(path)).expect("add");
+        }
         index.write().expect("write index");
         let tree = repo
             .find_tree(index.write_tree().expect("write tree"))
@@ -628,6 +663,31 @@ mod tests {
             None,
             "and one that climbs out",
         );
+    }
+
+    /// A workspace rooted below its repository's working directory stores its
+    /// paths relative to itself, while a commit's tree is rooted at the
+    /// repository. The same file name at both levels tells the two apart, and
+    /// a symlinked root names the working directory under another spelling.
+    #[test]
+    fn a_subdirectory_workspace_reads_its_own_file_at_a_commit() {
+        let dir = repo_with_files(&[("a.rs", "top\n"), ("sub/a.rs", "sub\n")]);
+        let head = head_commit(dir.path()).expect("the repo has a commit");
+        let sub = dir.path().join("sub");
+        let links = tempfile::tempdir().expect("tempdir");
+        let link = links.path().join("sub");
+        unix::fs::symlink(&sub, &link).expect("symlink");
+
+        for root in [&sub, &link] {
+            let read = reader(&LocalFs, root);
+            let a = Path::new("a.rs");
+            assert_eq!(
+                (read(Some(&head), a).as_deref(), read(None, a).as_deref()),
+                (Some("sub\n"), Some("sub\n")),
+                "the commit and the working tree agree through {}",
+                root.display(),
+            );
+        }
     }
 
     #[test]
