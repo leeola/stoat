@@ -896,13 +896,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // emit below holds that refill while the pool's scroll target rests,
         // deferring it until the target next moves.
         //
-        // Relative numbers reference the cursor's buffer line, which the
-        // wheel glide's cursor-follow drags every row. Holding the baked line
-        // steady through the glide keeps the page versions stable so the
-        // window does not refresh per dragged row. The settle emit recomputes
-        // the live line and refreshes the window once to match the repainted
-        // grid, as whole pages or as gutter runs.
-        let current_line = if editor.scroll_glide != ScrollGlide::None {
+        // Relative numbers reference the cursor's buffer line. The wheel
+        // glide's cursor-follow drags that line every row, so a wheel glide
+        // holds the baked line until the settle, which keeps the page versions
+        // stable instead of refreshing the window per dragged row. The settle
+        // emit recomputes the live line and refreshes the window once, as whole
+        // pages or as gutter runs. A page glide lands the cursor before it
+        // arms, so its pages carry the landed line and its settle has nothing
+        // to refresh.
+        let current_line = if editor.scroll_glide == ScrollGlide::Wheel {
             editor.pool_current_line
         } else {
             let line = (line_numbers == LineNumbers::Relative
@@ -5105,6 +5107,75 @@ mod tests {
             relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION),
             (Vec::new(), vec![0, 1, 2, 3, 4]),
             "the buffered pages keep their cells and take the new gutter runs"
+        );
+    }
+
+    /// A jump lands the cursor before it arms the page glide, so the pages the
+    /// glide fills already carry the landed line, and the settle has no gutter
+    /// runs to refresh.
+    #[test]
+    fn a_page_glide_fills_with_the_landed_line() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = Arc::new(rgb_diagnostic_theme());
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/landed");
+        let path = root.join("a.txt");
+        let body: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let _ = drain_apc(&mut rx);
+
+        // Two 10-row viewports down, inside the three a glide eases across
+        // rather than snaps, and inside the buffered window, so the settle
+        // meets pages the glide already holds.
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .viewport_rows = Some(10);
+        let landing = body.find("line 20\n").expect("line 20 exists");
+        h.stoat.collapse_focused_cursor_to(landing);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            assert!(view::follow_jump(editor, 3), "the jump moves the view");
+            assert_eq!(editor.scroll_glide, ScrollGlide::Page);
+        }
+        // Every frame of the glide emits, as the render loop does, so the window
+        // follows the glide and the pages it passes fill on the way.
+        emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let _ = drain_apc(&mut rx);
+        for _ in 0..1000 {
+            app::tick_animation(&mut h.stoat, 0.016);
+            if !app::animating(&h.stoat) {
+                break;
+            }
+            emit_smooth_scroll(&mut h.stoat);
+            h.settle();
+            let _ = drain_apc(&mut rx);
+        }
+        assert!(!app::animating(&h.stoat), "the glide settles");
+
+        // The first emit after the glide is the settle.
+        emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let redecorated: Vec<Command> = drain_apc(&mut rx)
+            .into_iter()
+            .filter(|command| matches!(command, Command::FillDecorations(_)))
+            .collect();
+        assert_eq!(
+            redecorated,
+            Vec::new(),
+            "the settle sends no decorations-only fill"
         );
     }
 
