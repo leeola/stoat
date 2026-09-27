@@ -385,6 +385,30 @@ impl Drop for CancelOnDrop<'_> {
     }
 }
 
+/// Kills the server and waits on it when a shutdown is dropped before its reap.
+///
+/// The quit bounds every server's shutdown together and drops whatever is
+/// still running when that bound passes. A stall of the run loop's thread
+/// spends that bound in one step, and the drop then comes before the
+/// shutdown's own kill. Without the kill here, the server outlives the quit,
+/// and once it exits nothing waits on it.
+struct ReapOnDrop<'a> {
+    child: &'a Mutex<Child>,
+    /// Cleared once the reap returns, since the child is then waited on.
+    armed: bool,
+}
+
+impl Drop for ReapOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut child = self.child.lock().expect("lsp child poisoned");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 /// A JSON-RPC message on its way out, serialized straight from the typed params.
 ///
 /// Building a [`Value`] tree first materializes the whole payload as a map of
@@ -436,6 +460,10 @@ impl LspHost for LocalLsp {
     }
 
     async fn shutdown(&self) -> io::Result<()> {
+        let mut guard = ReapOnDrop {
+            child: &self.child,
+            armed: true,
+        };
         let _ = tokio::time::timeout(
             SHUTDOWN_REQUEST_TIMEOUT,
             self.request::<_, Value>("shutdown", Value::Null),
@@ -443,6 +471,7 @@ impl LspHost for LocalLsp {
         .await;
         let _ = self.notify("exit", Value::Null);
         reap_child(&self.child, REAP_TIMEOUT, REAP_POLL).await;
+        guard.armed = false;
         Ok(())
     }
 
@@ -1338,12 +1367,13 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        client_capabilities, mpsc, reap_child, transcript_slug, transcript_stem, unbounded_channel,
-        wakes_for, write_framed, writer_loop, Arc, AtomicI64, AtomicUsize, Command, DiagnosticTag,
-        Duration, Envelope, FrameDecoder, HashSet, Instant, LocalLsp, Mutex, Ordering, PendingMap,
-        Receiver, Routed, ServerCapabilities, Stdio, TokioMutex, WRITE_STALL_THRESHOLD,
+        client_capabilities, io, mpsc, reap_child, transcript_slug, transcript_stem,
+        unbounded_channel, wakes_for, write_framed, writer_loop, Arc, AtomicI64, AtomicUsize,
+        Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant, LocalLsp,
+        Mutex, Ordering, PendingMap, Receiver, Routed, ServerCapabilities, Stdio, TokioMutex,
+        REAP_TIMEOUT, SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
     };
-    use crate::host::lsp::{IncomingRequest, LspNotification};
+    use crate::host::lsp::{IncomingRequest, LspHost, LspNotification};
     use serde_json::{json, Value};
 
     /// `body` framed the way the transport frames it on its way to the child.
@@ -1402,6 +1432,37 @@ mod tests {
         let exited = reap_child(&child, Duration::from_secs(5), Duration::from_millis(10)).await;
 
         assert!(exited, "the child went on its own inside the bound");
+    }
+
+    /// The quit bounds every shutdown together and drops one that overruns the
+    /// bound wherever it stands. A stall at quit spends that bound before the
+    /// shutdown reaches its own kill, and the shutdown must still end the
+    /// server and reap it.
+    ///
+    /// The first cut lands in the unanswered `shutdown` request. The second
+    /// lands in the reap's wait for an exit that the child never makes.
+    #[tokio::test]
+    async fn a_shutdown_cut_short_still_reaps_the_server() {
+        for cut_at in [
+            SHUTDOWN_REQUEST_TIMEOUT / 5,
+            SHUTDOWN_REQUEST_TIMEOUT + REAP_TIMEOUT / 2,
+        ] {
+            let (lsp, _writer_rx) = unanswered_transport();
+            let pid = libc::pid_t::try_from(lsp.child.lock().expect("child poisoned").id())
+                .expect("the pid fits a pid_t");
+
+            let cut = tokio::time::timeout(cut_at, lsp.shutdown()).await;
+            assert!(cut.is_err(), "nothing answers, so {cut_at:?} cuts in");
+
+            // SAFETY: signal 0 delivers nothing. The call only checks whether
+            // the pid names a process, which a zombie still does.
+            let signaled = unsafe { libc::kill(pid, 0) };
+            assert_eq!(
+                (signaled, io::Error::last_os_error().raw_os_error()),
+                (-1, Some(libc::ESRCH)),
+                "a shutdown dropped at {cut_at:?} kills the child and waits on it",
+            );
+        }
     }
 
     /// A transport whose outgoing frames the test reads.
@@ -1614,7 +1675,7 @@ mod tests {
         ];
         assert_eq!(
             kinds,
-            [std::io::ErrorKind::InvalidData; 2],
+            [io::ErrorKind::InvalidData; 2],
             "both sizes report the parse failure as invalid data",
         );
     }

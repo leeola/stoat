@@ -18,8 +18,12 @@ use futures::future;
 use std::{sync::Arc, time::Duration};
 
 /// Backstop on reaping every language server at quit, applied across all of
-/// them together. Exceeds what one host's own shutdown and reap bounds add up
-/// to, so this fires only for a host that hangs somewhere those do not cover.
+/// them together.
+///
+/// It exceeds what one host's own shutdown and reap bounds add up to. On a
+/// thread that runs on time, it fires only for a host that hangs where those
+/// bounds do not reach. A stall of the thread spends it in one step, and the
+/// host then kills its server at once, with no graceful exit.
 const SHUTDOWN_LSP_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// The single active language server, or a noop when none is up.
@@ -93,9 +97,9 @@ pub(crate) fn feature_hosts(
 /// and the test fake return immediately, so the call is unconditional.
 /// Errors are ignored, the process being on its way out regardless.
 ///
-/// [`SHUTDOWN_LSP_TIMEOUT`] is only a backstop against a host that hangs
-/// somewhere its own bounds do not cover. It has to exceed those bounds, or
-/// it cuts short the kill they exist to reach.
+/// [`SHUTDOWN_LSP_TIMEOUT`] bounds the graceful exits. When it passes, the
+/// call kills each server that still runs and waits on it, so no server
+/// outlives the call.
 pub async fn shutdown_lsp(stoat: &Stoat) {
     let hosts = stoat.lsp_registry.hosts();
     let reaps = future::join_all(hosts.iter().map(|host| host.shutdown()));
