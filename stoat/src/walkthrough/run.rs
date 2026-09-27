@@ -1,7 +1,10 @@
 use crate::{
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     render::walkthrough::SlideParts,
-    walkthrough::{Annotation, Stop, Walkthrough},
+    walkthrough::{
+        slide::{self, Slide, SlideInput},
+        Annotation, Stop, Walkthrough,
+    },
 };
 use std::{collections::HashMap, time::Instant};
 
@@ -38,6 +41,15 @@ pub(crate) struct WalkthroughRun {
     /// second tour opened while the first's strokes are still settling must not
     /// reuse its ids. A base per run is what keeps them apart.
     pub(crate) id_base: u32,
+    /// The input of the last layout and the slide it gave. See
+    /// [`Self::slide_for`].
+    last_layout: Option<(SlideInput, Slide)>,
+    /// How many times [`Self::slide_for`] has laid a stop out.
+    ///
+    /// A reuse and a layout give the same slide, so only a count tells them
+    /// apart.
+    #[cfg(test)]
+    pub(crate) layouts: usize,
 }
 
 /// Where walkthrough mark ids start.
@@ -83,7 +95,33 @@ impl WalkthroughRun {
             last_parts: SlideParts::default(),
             last_declared: HashMap::new(),
             id_base: ID_SPACE + (run << 16),
+            last_layout: None,
+            #[cfg(test)]
+            layouts: 0,
         })
+    }
+
+    /// The slide `input` lays out.
+    ///
+    /// A paint that changes nothing in the stop measures the same input as the
+    /// paint before it, and the layout of a crowded stop costs more than the
+    /// rest of the frame. So the last layout is kept and handed back while its
+    /// input holds. The input carries everything the layout reads, so equality
+    /// alone decides the reuse and nothing has to clear the record.
+    pub(crate) fn slide_for(&mut self, input: &SlideInput) -> Slide {
+        if let Some((held, slide)) = &self.last_layout
+            && held == input
+        {
+            return slide.clone();
+        }
+
+        let slide = slide::layout(input);
+        self.last_layout = Some((input.clone(), slide.clone()));
+        #[cfg(test)]
+        {
+            self.layouts += 1;
+        }
+        slide
     }
 
     /// The id of `part` for the stop the reader is on.

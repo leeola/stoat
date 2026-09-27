@@ -135,7 +135,10 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         ..input
     };
 
-    let slide = slide::layout(&input);
+    let slide = match stoat.active_workspace_mut().walkthrough.as_mut() {
+        Some(run) => run.slide_for(&input),
+        None => return,
+    };
 
     // The card is part of the slide, so it goes where the slide puts it. The
     // popup paints from its placement on the line after this one, and the size
@@ -1891,6 +1894,37 @@ mod tests {
             filled,
             vec![0, 2],
             "only the pages the two annotations light refill",
+        );
+    }
+
+    /// A paint that changes nothing in the stop reuses the layout of the paint
+    /// before it, and the paint after a step lays the stop out again.
+    #[test]
+    fn a_quiet_paint_lays_the_stop_out_once() {
+        let mut h = harness(&[(1, "one"), (3, "three")]);
+        open(&mut h.stoat, "tour");
+        let layouts = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .walkthrough
+                .as_ref()
+                .expect("a tour plays")
+                .layouts
+        };
+        // The pinned card settles into the size the next paint measures.
+        frame(&mut h);
+        frame(&mut h);
+
+        let settled = layouts(&h);
+        frame(&mut h);
+        frame(&mut h);
+        let quiet = layouts(&h);
+        reach(&mut h, 1);
+        frame(&mut h);
+        assert_eq!(
+            (quiet - settled, layouts(&h) - quiet),
+            (0, 1),
+            "(layouts over two quiet paints, layouts over the paint after a step)",
         );
     }
 
