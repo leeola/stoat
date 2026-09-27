@@ -33,6 +33,9 @@ struct Globals {
     // what puts its glyphs on the screen. Zero for every other draw.
     origin_cells: vec2<f32>,
     pad3: vec2<u32>,
+    // The pool regions the grid, region, and underline draws skip. Zero rects on
+    // every other draw.
+    cover: Cover,
 }
 
 @group(0) @binding(0)
@@ -40,7 +43,8 @@ var<uniform> globals: Globals;
 
 // The live modal boxes. Only the static globals bound for the text-run draws
 // carry a non-zero panel_count, so grid, region, overlay, and pool draws never
-// loop here.
+// loop here. The vertex stages of the grid, region, and underline draws read
+// them through under_pool.
 @group(0) @binding(1)
 var<storage, read> occluders: array<Occluder>;
 
@@ -157,6 +161,18 @@ fn vs_main(
 
     let quad = vec2<f32>(dim) / DIM_UNITS;
     let row_y = f32(slot_row(slot & FOLLOW_MASK)) * globals.cell_size.y;
+
+    // A glyph inside a pool region draws under that pool's opaque composite, so
+    // its quad goes outside clip space and rasterizes nothing. The rect comes
+    // from the instance alone, so the six vertices agree on the test.
+    let lo = pos + globals.origin_cells * globals.cell_size
+        + vec2<f32>(0.0, row_y + globals.scroll_y);
+    if under_pool(lo, lo + quad) {
+        var culled: VsOut;
+        culled.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return culled;
+    }
+
     let pixel = pos + corner * quad + globals.origin_cells * globals.cell_size
         + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
@@ -259,6 +275,17 @@ fn vs_underline(
     let corner = corners[vertex_index];
 
     let row_y = f32(slot_row(slot)) * globals.cell_size.y;
+
+    // An underline inside a pool region draws under that pool's composite, as a
+    // glyph does in vs_main.
+    let lo = cell_pos + globals.origin_cells * globals.cell_size
+        + vec2<f32>(0.0, row_y + globals.scroll_y);
+    if under_pool(lo, lo + globals.cell_size) {
+        var culled: UnderlineVsOut;
+        culled.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return culled;
+    }
+
     let pixel = cell_pos + corner * globals.cell_size
         + globals.origin_cells * globals.cell_size
         + vec2<f32>(0.0, row_y + globals.scroll_y);

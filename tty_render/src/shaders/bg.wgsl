@@ -29,19 +29,22 @@ struct Globals {
     cursor_color: vec4<f32>,
     // The packed cell color vs_main culls, being the color the frame cleared to.
     // Zero culls no cell, since every instance carries alpha 255. The padding
-    // rounds the struct to the 16-byte multiple the Rust side writes.
+    // matches the Rust side, which aligns cover to 16 bytes by hand.
     skip_color: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    // The pool regions the live cell fill skips. Zero rects on every other draw.
+    cover: Cover,
 }
 
 @group(0) @binding(0)
 var<uniform> globals: Globals;
 
-// The live modal boxes. Read only by the cell fragment shader on a pool
-// composite, where occlude_all is set, so a pooled cell inside any box is
-// discarded whatever its seq.
+// The modal boxes. A pool composite binds the pool list, which the cell
+// fragment shader reads with occlude_all set, so a pooled cell inside any box is
+// discarded whatever its seq. The live fill binds the live list, which vs_main
+// reads through under_pool.
 @group(0) @binding(1)
 var<storage, read> occluders: array<Occluder>;
 
@@ -110,6 +113,17 @@ fn vs_main(
     let slot_row = instance_index / globals.cols;
     let row = (slot_row + height - globals.row_offset % height) % height;
     let cell = vec2<f32>(f32(instance_index % globals.cols), f32(row));
+
+    // A cell inside a pool region draws under that pool's opaque composite, so
+    // its quad goes outside clip space too. The rect is the one the corners
+    // below snap to.
+    let scroll = vec2<f32>(0.0, globals.scroll_y);
+    let lo = round((cell + globals.origin_cells) * globals.cell_size) + scroll;
+    let hi = round((cell + globals.origin_cells + vec2<f32>(1.0, 1.0)) * globals.cell_size) + scroll;
+    if under_pool(lo, hi) {
+        out.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return out;
+    }
 
     // Snap each cell edge to a whole pixel so consecutive cells share an exact
     // integer boundary and each spans whole pixels, leaving no fractional sliver

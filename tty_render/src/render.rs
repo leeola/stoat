@@ -195,6 +195,66 @@ pub(crate) struct Occluder {
     _pad: u32,
 }
 
+/// The most pool regions one live draw skips.
+///
+/// A frame composites more pools than this only with many split panes and a
+/// box list gliding at once. The live grid under a pool past the cap draws, so
+/// the cap costs only the saving.
+pub(crate) const MAX_COVERED: usize = 8;
+
+/// The pool regions a live draw skips, carried in the globals the background
+/// and text vertex stages read.
+///
+/// A pool composite repaints its region opaque, so a live cell or glyph inside
+/// one shades pixels nobody sees. The vertex stage culls such a quad unless it
+/// meets one of the first [`Self::occluders`] bound occluders. An occludable
+/// pool discards its pixels under a panel, so the live grid shows there.
+///
+/// Laid out as the `Cover` struct in `shaders/cover.wgsl`, whose rect array
+/// holds [`MAX_COVERED`] entries.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug)]
+pub(crate) struct Cover {
+    /// Pixel rects `[x, y, width, height]`, each a pool scissor inset by a
+    /// pixel on every side.
+    rects: [[f32; 4]; MAX_COVERED],
+    count: u32,
+    occluders: u32,
+    _pad: [u32; 2],
+}
+
+impl Cover {
+    /// Culls nothing, for every draw that is not the live grid's own.
+    pub(crate) const NONE: Cover = Cover {
+        rects: [[0.0; 4]; MAX_COVERED],
+        count: 0,
+        occluders: 0,
+        _pad: [0; 2],
+    };
+
+    /// The first [`MAX_COVERED`] of the `covered` scissors, tested against the
+    /// first `occluders` occluders the draw binds.
+    ///
+    /// Each rect shrinks by a pixel on every side. A riding pool's scissor moves
+    /// by the unsnapped ride while its cells move by the snapped one, so the
+    /// scissor reaches up to a pixel past what the pool paints. A live quad in
+    /// that one-pixel strip keeps drawing.
+    pub(crate) fn new(covered: &[[u32; 4]], occluders: usize) -> Cover {
+        let mut cover = Cover::NONE;
+        for (rect, &[x, y, width, height]) in cover.rects.iter_mut().zip(covered) {
+            *rect = [
+                x as f32 + 1.0,
+                y as f32 + 1.0,
+                width.saturating_sub(2) as f32,
+                height.saturating_sub(2) as f32,
+            ];
+        }
+        cover.count = covered.len().min(MAX_COVERED) as u32;
+        cover.occluders = occluders as u32;
+        cover
+    }
+}
+
 /// One pool that glides this frame, for the components anchored to it.
 ///
 /// A panel, mark, or text run anchored to a pool is laid out by a live frame,
@@ -832,6 +892,18 @@ pub(crate) fn with_shadow(body: &str) -> String {
 }
 
 const SHADOW_WGSL: &str = include_str!("shaders/shadow.wgsl");
+
+/// Prepend the pool-cover test to a pass that draws the live grid.
+///
+/// The background and text passes cull the same quads by the same test, so one
+/// definition keeps them from drifting apart on what a pool covers. The test
+/// reads `globals.cover`, `globals.cell_size`, and `occluders`, which both of
+/// those passes declare.
+pub(crate) fn with_cover(body: &str) -> String {
+    format!("{COVER_WGSL}\n{body}")
+}
+
+const COVER_WGSL: &str = include_str!("shaders/cover.wgsl");
 
 /// The `[width, height]` of one cell, in pixels, for `font_size` at
 /// `scale_factor`.

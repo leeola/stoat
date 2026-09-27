@@ -28,7 +28,7 @@ use crate::{
         polyline::PolylinePass,
         sketch::SketchPass,
         text::{self, TextPass},
-        CellMetrics, Occluder, PoolOccluders,
+        CellMetrics, Occluder, PoolOccluders, MAX_COVERED,
     },
 };
 pub use cosmic_text::fontdb;
@@ -475,7 +475,7 @@ impl Renderer {
         grid: &Grid,
         frame: Frame<'_>,
     ) {
-        self.prepare_frame(device, queue, grid, &frame, &[]);
+        self.prepare_frame(device, queue, grid, &frame, &[], &[]);
         self.record_into(device, queue, view);
     }
 
@@ -521,7 +521,8 @@ impl Renderer {
         pools: &[PoolComposite<'_>],
         anchored: &[HostRide],
     ) {
-        self.prepare_frame(device, queue, grid, &frame, anchored);
+        let (covered, count) = covered_rects(pools, self.width, self.height);
+        self.prepare_frame(device, queue, grid, &frame, anchored, &covered[..count]);
 
         let panels = grid.panels();
         let riding = mem::take(&mut self.riding);
@@ -584,6 +585,10 @@ impl Renderer {
     /// grid and the pools before any of them draws, which is what lets the whole
     /// frame share one render pass. [`Self::record_frame`] issues the draws these
     /// buffers back, and must run before the next prepare overwrites them.
+    ///
+    /// `covered` holds the clamped scissors of the pools the frame composites,
+    /// from [`covered_rects`]. The live cells and glyphs inside them draw
+    /// nothing, since each pool repaints its region opaque.
     pub(crate) fn prepare_frame(
         &mut self,
         device: &Device,
@@ -591,7 +596,21 @@ impl Renderer {
         grid: &Grid,
         frame: &Frame<'_>,
         anchored: &[HostRide],
+        covered: &[[u32; 4]],
     ) {
+        // Built once here rather than per pass, since every pass that occludes
+        // derives the same list from the same panels. Built first, because the
+        // background pass reads it to keep the cells under a panel.
+        self.riding.clear();
+        self.riding.extend(anchored.iter().map(|ride| ride.host));
+        crate::render::build_occluders_into(
+            grid.panels(),
+            grid.sketches(),
+            &self.riding,
+            self.metrics.width,
+            &mut self.occluders,
+        );
+
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare(
             device,
@@ -606,6 +625,8 @@ impl Renderer {
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.damage,
             frame.scrolled_rows,
+            &self.occluders,
+            covered,
         );
         self.decoration.prepare(
             device,
@@ -616,17 +637,6 @@ impl Renderer {
             frame.decoration_damage,
             frame.scrolled_rows,
         );
-        // Built once here rather than per pass, since every pass that occludes
-        // derives the same list from the same panels.
-        self.riding.clear();
-        self.riding.extend(anchored.iter().map(|ride| ride.host));
-        crate::render::build_occluders_into(
-            grid.panels(),
-            grid.sketches(),
-            &self.riding,
-            self.metrics.width,
-            &mut self.occluders,
-        );
 
         self.text.prepare(
             device,
@@ -636,6 +646,7 @@ impl Renderer {
             frame,
             &self.occluders,
             anchored,
+            covered,
         );
         self.panel
             .prepare(device, queue, grid, anchored, resolution);
@@ -1294,6 +1305,28 @@ fn clamp_scissor(scissor: [u32; 4], width: u32, height: u32) -> Option<[u32; 4]>
     Some([x, y, w, h])
 }
 
+/// The scissors of the first [`MAX_COVERED`] `pools` that draw on a
+/// `width`x`height` render target, clamped to it, and how many there are.
+///
+/// These are the `covered` rects [`Renderer::prepare_frame`] takes. A stack
+/// array rather than a vector, so a gliding frame allocates nothing.
+fn covered_rects(
+    pools: &[PoolComposite<'_>],
+    width: u32,
+    height: u32,
+) -> ([[u32; 4]; MAX_COVERED], usize) {
+    let mut rects = [[0; 4]; MAX_COVERED];
+    let mut count = 0;
+    let drawn = pools
+        .iter()
+        .filter_map(|pool| clamp_scissor(pool.scissor, width, height));
+    for (rect, scissor) in rects.iter_mut().zip(drawn) {
+        *rect = scissor;
+        count += 1;
+    }
+    (rects, count)
+}
+
 /// The GPU swapchain wrapping a [`Renderer`] for an on-screen window.
 ///
 /// Holds the surface configuration so [`Self::resize`] and the surface-loss
@@ -1791,7 +1824,7 @@ impl GpuContext {
         // is still deciding to hand over a drawable. Nothing a prepare writes
         // needs the view.
         self.renderer
-            .prepare_frame(&self.device, &self.queue, grid, &frame, &[]);
+            .prepare_frame(&self.device, &self.queue, grid, &frame, &[], &[]);
         self.perf.mark_prepared();
 
         let surface_frame = match self.surface.get_current_texture() {
@@ -1816,7 +1849,7 @@ impl GpuContext {
             surface_frame.texture.height(),
         ) {
             self.renderer
-                .prepare_frame(&self.device, &self.queue, grid, &frame, &[]);
+                .prepare_frame(&self.device, &self.queue, grid, &frame, &[], &[]);
         }
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
@@ -2115,8 +2148,15 @@ impl GpuContext {
         pools: &[PoolComposite<'_>],
         anchored: &[HostRide],
     ) {
-        self.renderer
-            .prepare_frame(&self.device, &self.queue, live_grid, frame, anchored);
+        let (covered, count) = covered_rects(pools, self.renderer.width, self.renderer.height);
+        self.renderer.prepare_frame(
+            &self.device,
+            &self.queue,
+            live_grid,
+            frame,
+            anchored,
+            &covered[..count],
+        );
 
         let panels = live_grid.panels();
         let riding = mem::take(&mut self.renderer.riding);
@@ -2277,19 +2317,20 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, clamp_scissor, needs_configure, surface_formats,
+        build_font_system, clamp_scissor, covered_rects, needs_configure, surface_formats,
         CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame, PoolComposite,
-        Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat,
+        Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
     use crate::test_support::require_headless_device;
+    use std::iter;
     use stoatty_term::{
-        grid::{Grid, Rgb},
+        grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
         term::Damage,
     };
     use wgpu::{
-        BufferDescriptor, BufferUsages, Extent3d, MapMode, Origin3d, PollType, TexelCopyBufferInfo,
-        TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
-        TextureDimension, TextureUsages, TextureViewDescriptor,
+        BufferDescriptor, BufferUsages, Device, Extent3d, MapMode, Origin3d, PollType, Queue,
+        TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
+        TextureDescriptor, TextureDimension, TextureUsages, TextureViewDescriptor,
     };
 
     /// A second window builds its font system from what the first found rather
@@ -2428,7 +2469,8 @@ mod tests {
             },
         ];
 
-        renderer.prepare_frame(&device, &queue, &live, &frame, &[]);
+        let (covered, count) = covered_rects(&pools, width, height);
+        renderer.prepare_frame(&device, &queue, &live, &frame, &[], &covered[..count]);
         for (slot, pool) in pools.iter().enumerate() {
             renderer.prepare_pool(
                 &device,
@@ -2533,16 +2575,16 @@ mod tests {
         // A panel whose left edge falls inside the pool's band, so the composite
         // covers the cells the frame is drawn on.
         let mut live = Grid::new(rows, cols);
-        live.set_panels(vec![stoatty_term::grid::Panel {
+        live.set_panels(vec![Panel {
             top: 0,
             left: 2,
             width: 3,
             height: rows as u16,
-            style: stoatty_term::grid::BorderStyle::Heavy,
+            style: BorderStyle::Heavy,
             border: Rgb::new(255, 0, 0),
             corner_radius: 0,
             fill: None,
-            shadow: stoatty_term::grid::PanelShadow::None_,
+            shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
             anchor: None,
@@ -2575,7 +2617,7 @@ mod tests {
 
         // Covers the middle band, which the panel's left edge runs through.
         let scissor = [0, cell_h, width, cell_h * 2];
-        renderer.prepare_frame(&device, &queue, &live, &frame, &[]);
+        renderer.prepare_frame(&device, &queue, &live, &frame, &[], &[scissor]);
         renderer.prepare_pool(
             &device,
             &queue,
@@ -2623,13 +2665,263 @@ mod tests {
         );
     }
 
+    /// An occludable pool leaves the pixels under a panel to the live grid, so
+    /// the live cells a panel meets still draw inside the pool's region, while
+    /// the pool paints the rest of it.
+    #[test]
+    fn a_panel_over_a_pool_shows_the_live_cells_under_it() {
+        let (device, queue) = require_headless_device();
+        let (live_bg, cell_bg, pool_bg) = (
+            Rgb::new(0, 0, 90),
+            Rgb::new(0, 160, 0),
+            Rgb::new(80, 80, 80),
+        );
+        let (target, mut renderer) = readback_renderer(&device, live_bg);
+        let (rows, cols) = renderer.grid_size();
+
+        let mut live = filled_grid(rows, cols, cell_bg);
+        live.set_panels(vec![Panel {
+            top: 1,
+            left: 1,
+            width: 3,
+            height: 1,
+            style: BorderStyle::Light,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+            seq: 0,
+        }]);
+        let pool = filled_grid(rows, cols, pool_bg);
+        let pools = [whole_pool(&pool)];
+        let shot = draw_pooled(&device, &queue, &mut renderer, &target, &live, &pools);
+
+        let [w, h] = CELL;
+        let center = |row: u32, col: u32| pixel(&shot, col * w + w / 2, row * h + h / 2);
+        assert_eq!(
+            (center(1, 2), center(0, 5)),
+            ([0, 160, 0], [80, 80, 80]),
+            "the live cell shows inside the panel, and the pool paints outside it",
+        );
+    }
+
+    /// A live glyph, underline, and scroll-region glyph inside a pool's scissor
+    /// draw nothing, since the pool repaints them. The pool paints the same
+    /// pixels over them, its own glyph included, as over a blank grid.
+    #[test]
+    fn a_live_glyph_under_a_pool_draws_nothing() {
+        let (device, queue) = require_headless_device();
+        let (live_bg, pool_bg) = (Rgb::new(0, 0, 90), Rgb::new(80, 80, 80));
+        let (target, mut renderer) = readback_renderer(&device, live_bg);
+        let (rows, cols) = renderer.grid_size();
+
+        // One mark for each draw that culls, in the middle row so each lies a
+        // pixel clear of the scissor's inset edge.
+        let blank = filled_grid(rows, cols, live_bg);
+        let mut marked = filled_grid(rows, cols, live_bg);
+        marked.get_mut(1, 1).ch = 'M';
+        marked.get_mut(1, 3).underline = UnderlineStyle::Straight;
+        marked.get_mut(1, 5).ch = 'M';
+        marked.set_scroll_region(Some(ScrollRegion {
+            top: 1,
+            left: 5,
+            width: 1,
+            height: 1,
+            offset: 0,
+        }));
+        let mut pool = filled_grid(rows, cols, pool_bg);
+        pool.get_mut(1, 4).ch = 'W';
+
+        let marks = |shot: &[u8]| [1, 3, 5].map(|col| inked(shot, 1, col, [0, 0, 90]));
+        let uncovered = draw_covered(&device, &queue, &mut renderer, &target, &marked, &[]);
+        assert_eq!(
+            marks(&uncovered),
+            [true; 3],
+            "each mark draws with no pool over it"
+        );
+        let covered = draw_covered(&device, &queue, &mut renderer, &target, &marked, &[WHOLE]);
+        assert_eq!(marks(&covered), [false; 3], "and none draws under one");
+
+        let pools = [whole_pool(&pool)];
+        let over_blank = draw_pooled(&device, &queue, &mut renderer, &target, &blank, &pools);
+        let over_marks = draw_pooled(&device, &queue, &mut renderer, &target, &marked, &pools);
+        assert!(
+            inked(&over_blank, 1, 4, [80, 80, 80]),
+            "the pool's own glyph draws",
+        );
+        assert!(
+            over_marks == over_blank,
+            "the pool paints the same pixels over the marks as over a blank grid",
+        );
+    }
+
+    /// The cell a 30-pixel font lays out at scale 1, in pixels.
+    const CELL: [u32; 2] = [18, 36];
+
+    /// The readback target's size, 7 by 3 cells with two pixels to spare. Four
+    /// bytes a texel makes a row of this width exactly the 256-byte copy
+    /// alignment.
+    const TARGET_WIDTH: u32 = 128;
+    const TARGET_HEIGHT: u32 = 3 * CELL[1];
+
+    /// A pool scissor over the whole target.
+    const WHOLE: [u32; 4] = [0, 0, TARGET_WIDTH, TARGET_HEIGHT];
+
+    /// A renderer at a 30-pixel font over a [`TARGET_WIDTH`] by
+    /// [`TARGET_HEIGHT`] readback target, clearing each frame to `clear`.
+    fn readback_renderer(device: &Device, clear: Rgb) -> (Texture, Renderer) {
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("pool cover target"),
+            size: Extent3d {
+                width: TARGET_WIDTH,
+                height: TARGET_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let renderer = Renderer::new(
+            device,
+            TextureFormat::Rgba8Unorm,
+            [TARGET_WIDTH, TARGET_HEIGHT],
+            build_font_system(),
+            FontConfig {
+                size: 30,
+                scale_factor: 1.0,
+                family: &["JetBrains Mono".to_owned()],
+                ligatures: true,
+            },
+            clear,
+            Rgb::new(255, 255, 255),
+        );
+        (target, renderer)
+    }
+
+    /// A `rows` by `cols` grid with every cell's background `color`, and white
+    /// text and underlines.
+    fn filled_grid(rows: usize, cols: usize, color: Rgb) -> Grid {
+        let mut grid = Grid::new(rows, cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = grid.get_mut(row, col);
+                cell.bg = color;
+                cell.fg = Rgb::new(255, 255, 255);
+                cell.underline_color = Rgb::new(255, 255, 255);
+            }
+        }
+        grid
+    }
+
+    /// An occludable pool of `grid` over the whole target, which has just
+    /// composed its rows.
+    fn whole_pool(grid: &Grid) -> PoolComposite<'_> {
+        PoolComposite {
+            id: 3,
+            grid,
+            origin_cells: [0.0; 2],
+            scissor: WHOLE,
+            shift_rows: 0.0,
+            content_changed: true,
+            scrolled_rows: None,
+            occludable: true,
+        }
+    }
+
+    /// Draw `live` with `pools` composited over it, as
+    /// [`Renderer::render_pools_into`] does for a frame, and read it back.
+    fn draw_pooled(
+        device: &Device,
+        queue: &Queue,
+        renderer: &mut Renderer,
+        target: &Texture,
+        live: &Grid,
+        pools: &[PoolComposite<'_>],
+    ) -> Vec<u8> {
+        let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+        let view = target.create_view(&TextureViewDescriptor::default());
+        renderer.render_pools_into(
+            device,
+            queue,
+            &view,
+            live,
+            still_frame(&full, &none),
+            pools,
+            &[],
+        );
+        read_back(device, queue, target, TARGET_WIDTH, TARGET_HEIGHT)
+    }
+
+    /// Draw `live` alone under the pool scissors in `covered`, with no pool
+    /// drawn over it, and read it back.
+    fn draw_covered(
+        device: &Device,
+        queue: &Queue,
+        renderer: &mut Renderer,
+        target: &Texture,
+        live: &Grid,
+        covered: &[[u32; 4]],
+    ) -> Vec<u8> {
+        let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+        let view = target.create_view(&TextureViewDescriptor::default());
+        renderer.prepare_frame(
+            device,
+            queue,
+            live,
+            &still_frame(&full, &none),
+            &[],
+            covered,
+        );
+        renderer.record_into(device, queue, &view);
+        read_back(device, queue, target, TARGET_WIDTH, TARGET_HEIGHT)
+    }
+
+    /// A frame with no cursor, scroll, or marks, rebuilding what `damage` names.
+    fn still_frame<'a>(damage: &'a Damage, decoration_damage: &'a Damage) -> Frame<'a> {
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage,
+            decoration_damage,
+            scrolled_rows: 0,
+            sketch_reveals: &[],
+        }
+    }
+
+    /// The RGB of the pixel at `x`, `y` in a [`TARGET_WIDTH`]-wide readback.
+    fn pixel(shot: &[u8], x: u32, y: u32) -> [u8; 3] {
+        let at = ((y * TARGET_WIDTH + x) * 4) as usize;
+        [shot[at], shot[at + 1], shot[at + 2]]
+    }
+
+    /// Whether any pixel of the cell at `row` and `col` differs from `ground`.
+    fn inked(shot: &[u8], row: u32, col: u32, ground: [u8; 3]) -> bool {
+        let [w, h] = CELL;
+        (row * h..(row + 1) * h)
+            .flat_map(|y| (col * w..(col + 1) * w).map(move |x| (x, y)))
+            .any(|(x, y)| pixel(shot, x, y) != ground)
+    }
+
     /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
     /// with no padding, so the caller must size the texture so `4 * width` is
     /// 256-aligned.
     fn read_back(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        texture: &wgpu::Texture,
+        device: &Device,
+        queue: &Queue,
+        texture: &Texture,
         width: u32,
         height: u32,
     ) -> Vec<u8> {
@@ -2717,6 +3009,34 @@ mod tests {
             clamp_scissor([10, 10, 0, 20], 100, 100),
             None,
             "a zero-width input is empty"
+        );
+    }
+
+    /// The live grid skips what the first [`MAX_COVERED`] drawn pools cover. A
+    /// pool off the target draws nothing, so it covers nothing and takes no
+    /// place under the cap.
+    #[test]
+    fn covered_rects_clamp_the_drawn_pools_up_to_the_cap() {
+        let grid = Grid::new(1, 1);
+        let pool_at = |scissor| PoolComposite {
+            scissor,
+            ..whole_pool(&grid)
+        };
+        let lined_up = (0..MAX_COVERED as u32).map(|x| [x, 0, 1, 1]);
+        let pools: Vec<_> = [[90, 90, 20, 20], [100, 10, 20, 20]]
+            .into_iter()
+            .chain(lined_up.clone())
+            .map(pool_at)
+            .collect();
+
+        let (rects, count) = covered_rects(&pools, 100, 100);
+        assert_eq!(
+            rects[..count].to_vec(),
+            iter::once([90, 90, 10, 10])
+                .chain(lined_up.take(MAX_COVERED - 1))
+                .collect::<Vec<_>>(),
+            "the overhang is trimmed, the pool off the target is skipped, and the \
+             last pool is past the cap",
         );
     }
 

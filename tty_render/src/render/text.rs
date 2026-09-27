@@ -12,8 +12,8 @@ use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
         globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics, CompositeSlot,
-        CompositeSlots, Frame, GridVersion, HostRide, Occluder, OccluderBuffer, PoolOccluders,
-        SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder, OccluderBuffer,
+        PoolOccluders, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -247,8 +247,11 @@ struct TextGlobals {
     /// screen. Zero for every other draw, whose positions already start at the
     /// screen's own origin.
     origin_cells: [f32; 2],
-    /// Pads the struct to the 64-byte (16-aligned) size a uniform requires.
+    /// Puts [`Self::cover`] on the 16-byte boundary its rect array requires.
     _pad1: [u32; 2],
+    /// The pool regions the grid and region draws skip. Every other draw
+    /// carries [`Cover::NONE`], since a pool covers only the live grid.
+    cover: Cover,
 }
 
 /// How far one set of instances is rotated in the buffer holding it.
@@ -766,7 +769,10 @@ impl TextPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("text"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/text.wgsl")).into(),
+                crate::render::with_occlusion(&crate::render::with_cover(include_str!(
+                    "../shaders/text.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -790,7 +796,9 @@ impl TextPass {
                 },
                 BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
+                    // The fragment stages discard under a box, and the grid
+                    // vertex stages keep a quad under one.
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -1326,6 +1334,11 @@ impl TextPass {
     /// `occluders` are the live panels' rects, built once per frame and shared
     /// with the other passes that occlude.
     ///
+    /// `covered` holds the scissors of the pools composited over this frame, as
+    /// `[x, y, width, height]` in pixels. A grid, region, or underline quad
+    /// inside one draws nothing, since the pool repaints it, unless it meets one
+    /// of `occluders`.
+    ///
     /// Runs in two phases: every visible glyph is rasterized first (which may
     /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
     /// has reached its final size, so normalized coordinates stay valid.
@@ -1341,6 +1354,7 @@ impl TextPass {
         frame: &Frame<'_>,
         occluders: &[Occluder],
         anchored: &[HostRide],
+        covered: &[[u32; 4]],
     ) {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
@@ -1737,39 +1751,45 @@ impl TextPass {
         // and region draws carry grid rows and rotate with them. The
         // screen-anchored buffer carries rows its builders chose, including an
         // overlay's past the bottom of the screen, so it never wraps.
+        //
+        // The grid and region draws are the live grid a pool composites over,
+        // so they carry the cover. The screen-anchored draws carry none.
         let (mask_size, color_size) = self.atlas.texture_dims();
-        let globals_with = |scroll_y: f32, panel_count: u32, rotation: RowRotation| TextGlobals {
-            resolution,
-            cell_size,
-            atlas_size: [mask_size as f32, color_size as f32],
-            scroll_y,
-            panel_count,
-            occlude_all: 0,
-            row_offset: rotation.offset,
-            rows: rotation.rows as u32,
-            _pad0: 0,
-            origin_cells: [0.0; 2],
-            _pad1: [0; 2],
-        };
+        let globals_with =
+            |scroll_y: f32, panel_count: u32, rotation: RowRotation, cover: Cover| TextGlobals {
+                resolution,
+                cell_size,
+                atlas_size: [mask_size as f32, color_size as f32],
+                scroll_y,
+                panel_count,
+                occlude_all: 0,
+                row_offset: rotation.offset,
+                rows: rotation.rows as u32,
+                _pad0: 0,
+                origin_cells: [0.0; 2],
+                _pad1: [0; 2],
+                cover,
+            };
+        let cover = Cover::new(covered, occluders.len());
         crate::render::upload_globals(
             queue,
             &self.globals,
             0,
-            globals_with(grid_scroll_y, 0, grid_rotation),
+            globals_with(grid_scroll_y, 0, grid_rotation, cover),
             &mut self.last_globals,
         );
         crate::render::upload_globals(
             queue,
             &self.region_globals,
             0,
-            globals_with(region_scroll_y, 0, grid_rotation),
+            globals_with(region_scroll_y, 0, grid_rotation, cover),
             &mut self.last_region_globals,
         );
         crate::render::upload_globals(
             queue,
             &self.static_globals,
             0,
-            globals_with(0.0, panel_count, RowRotation::unrotated()),
+            globals_with(0.0, panel_count, RowRotation::unrotated(), Cover::NONE),
             &mut self.last_static_globals,
         );
     }
@@ -1857,6 +1877,7 @@ impl TextPass {
             _pad0: 0,
             origin_cells,
             _pad1: [0; 2],
+            cover: Cover::NONE,
         };
 
         // Ahead of the reuse return below, because a slot is the pool's position
@@ -5032,8 +5053,8 @@ mod tests {
 
     #[test]
     fn text_shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/text.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_occlusion(&crate::render::with_cover(
+            include_str!("../shaders/text.wgsl"),
         )))
         .expect("parse text.wgsl");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -5557,8 +5578,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/text.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_occlusion(&crate::render::with_cover(
+            include_str!("../shaders/text.wgsl"),
         )))
         .expect("parse text.wgsl");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -5568,8 +5589,8 @@ mod tests {
 
     #[test]
     fn bg_shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/bg.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_occlusion(&crate::render::with_cover(
+            include_str!("../shaders/bg.wgsl"),
         )))
         .expect("parse bg.wgsl");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -6541,6 +6562,7 @@ mod tests {
             &frame(&Damage::Full),
             &[],
             &[],
+            &[],
         );
 
         let mut second = build("aaaaaaaaaa");
@@ -6553,6 +6575,7 @@ mod tests {
             &second,
             resolution,
             &frame(&Damage::Partial(row_two)),
+            &[],
             &[],
             &[],
         );
@@ -6571,6 +6594,7 @@ mod tests {
             &second,
             resolution,
             &frame(&Damage::Full),
+            &[],
             &[],
             &[],
         );
@@ -6848,6 +6872,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
         );
 
         let rows_of = |globals: Option<TextGlobals>| globals.expect("globals written").rows;
@@ -6923,6 +6948,7 @@ mod tests {
             &frame(&Damage::Full, 0),
             &[],
             &[],
+            &[],
         );
         let mut last_row_only = vec![None; rows];
         last_row_only[rows - 1] = whole_row(20);
@@ -6934,6 +6960,7 @@ mod tests {
             &frame(&Damage::Partial(last_row_only), 1),
             &[],
             &[],
+            &[],
         );
         pass.prepare(
             &device,
@@ -6941,6 +6968,7 @@ mod tests {
             &screen(1, after),
             resolution,
             &frame(&Damage::Partial(vec![None; rows]), 0),
+            &[],
             &[],
             &[],
         );
@@ -6951,6 +6979,7 @@ mod tests {
             &screen(1, after),
             resolution,
             &frame(&Damage::Full, 0),
+            &[],
             &[],
             &[],
         );
@@ -7038,8 +7067,8 @@ mod tests {
         let frame = chrome_frame();
         let grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
         assert_eq!(
             (pass.run_builds, pass.overlay_builds),
             (1, 1),
@@ -7047,7 +7076,7 @@ mod tests {
         );
 
         let moved = chrome_grid(vec![chrome_run("xx")], vec![chrome_overlay("xx")]);
-        pass.prepare(&device, &queue, &moved, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &moved, resolution, &frame, &[], &[], &[]);
         assert_eq!(
             (pass.run_builds, pass.overlay_builds),
             (2, 2),
@@ -7072,7 +7101,7 @@ mod tests {
         let grid = chrome_grid(vec![anchored_run, fixed_run], Vec::new());
 
         // Nothing composites, so both runs draw with the rest.
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
         let settled = pass.text_run_count;
         assert!(settled > 0, "both runs build glyphs");
         assert!(pass.riding_runs.is_empty(), "and nothing rides");
@@ -7089,7 +7118,16 @@ mod tests {
             top_rows: 10.5,
             scissor: [0, 0, 40, 40],
         }];
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame,
+            &[],
+            &anchored,
+            &[],
+        );
 
         assert!(
             pass.text_run_count < settled,
@@ -7148,6 +7186,7 @@ mod tests {
             &chrome_frame(),
             &[],
             &elsewhere,
+            &[],
         );
 
         assert!(pass.riding_runs.is_empty(), "nothing rides");
@@ -7171,17 +7210,35 @@ mod tests {
             scissor: [0, 0, 40, 40],
         }];
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
         assert_eq!(pass.run_builds, 1, "a still frame reuses");
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame,
+            &[],
+            &anchored,
+            &[],
+        );
         assert_eq!(pass.run_builds, 2, "the glide starting rebuilds");
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &anchored);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame,
+            &[],
+            &anchored,
+            &[],
+        );
         assert_eq!(pass.run_builds, 2, "and mid-glide frames reuse again");
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
         assert_eq!(pass.run_builds, 3, "the glide ending rebuilds too");
     }
 
@@ -7208,7 +7265,7 @@ mod tests {
                 sketch_reveals: &reveals,
                 ..chrome_frame()
             };
-            pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+            pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
             pass.last_sketch_alpha.clone()
         };
 
@@ -7258,12 +7315,12 @@ mod tests {
         let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
         grid.set_sketches(vec![test_sketch(7), test_sketch(5)]);
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
         assert_eq!(pass.run_builds, 1, "an unchanged mark list reuses");
 
         grid.set_sketches(vec![test_sketch(5)]);
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
         assert_eq!(
             pass.run_builds, 2,
             "dropping the mark ahead of it moved every later slot",
@@ -7290,8 +7347,8 @@ mod tests {
             "the fixture needs two grids that agree on their count",
         );
 
-        pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[]);
-        pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[], &[]);
+        pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[], &[]);
         assert_eq!(
             pass.text_run_count, 8,
             "the second grid's runs are the ones drawn",
@@ -7317,9 +7374,9 @@ mod tests {
             "the fixture needs two grids that agree on their count",
         );
 
-        pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[], &[]);
         let one_glyph = pass.overlay_count;
-        pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[]);
+        pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[], &[]);
         assert_eq!(
             (one_glyph, pass.overlay_count),
             (1, 8),
@@ -7367,7 +7424,16 @@ mod tests {
             decoration_damage: &Damage::Full,
             ..frame
         };
-        pass.prepare(&device, &queue, &build(rect), resolution, &full, &[], &[]);
+        pass.prepare(
+            &device,
+            &queue,
+            &build(rect),
+            resolution,
+            &full,
+            &[],
+            &[],
+            &[],
+        );
         let split = (
             row_len(&pass.plain_row_instances),
             row_len(&pass.region_row_instances),
@@ -7383,6 +7449,7 @@ mod tests {
             &frame,
             &[],
             &[],
+            &[],
         );
         assert_eq!(
             (
@@ -7395,7 +7462,16 @@ mod tests {
 
         // A wider rectangle takes cells from the plain side.
         let wider = ScrollRegion { width: 5, ..rect };
-        pass.prepare(&device, &queue, &build(wider), resolution, &frame, &[], &[]);
+        pass.prepare(
+            &device,
+            &queue,
+            &build(wider),
+            resolution,
+            &frame,
+            &[],
+            &[],
+            &[],
+        );
         let resplit = (
             row_len(&pass.plain_row_instances),
             row_len(&pass.region_row_instances),
@@ -7451,6 +7527,7 @@ mod tests {
             &frame(&Damage::Full, 0),
             &[],
             &[],
+            &[],
         );
 
         let mut scrolled = Grid::new(rows, 20);
@@ -7465,6 +7542,7 @@ mod tests {
             &frame(&Damage::Partial(last_row_only), 1),
             &[],
             &[],
+            &[],
         );
         let rotated = pass.collect_grid_glyphs();
 
@@ -7476,6 +7554,7 @@ mod tests {
             &scrolled,
             resolution,
             &frame(&Damage::Full, 0),
+            &[],
             &[],
             &[],
         );
@@ -8034,6 +8113,7 @@ mod tests {
             &frame(&idle, &[0.0]),
             &[],
             &[],
+            &[],
         );
         assert_eq!(
             pass.overlay_count, 2,
@@ -8054,6 +8134,7 @@ mod tests {
             &frame(&idle, &[0.0]),
             &[],
             &[],
+            &[],
         );
         assert_eq!(
             pass.overlay_count, 2,
@@ -8067,6 +8148,7 @@ mod tests {
             &grid,
             resolution,
             &frame(&idle, &[0.5]),
+            &[],
             &[],
             &[],
         );
@@ -8087,6 +8169,7 @@ mod tests {
             &grid,
             resolution,
             &frame(&idle, &[0.0, 0.0]),
+            &[],
             &[],
             &[],
         );
@@ -8168,6 +8251,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&idle, &popovers),
+                &[],
                 &[],
                 &[],
             );
@@ -8263,6 +8347,7 @@ mod tests {
             &frame(&idle, &[0.0]),
             &[],
             &[],
+            &[],
         );
         let unscrolled = tops(&pass);
         assert_eq!(
@@ -8282,6 +8367,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&idle, &[scroll]),
+                &[],
                 &[],
                 &[],
             );
@@ -8416,6 +8502,7 @@ mod tests {
             &frame(&full_damage),
             &[],
             &[],
+            &[],
         );
 
         let iterations = 50;
@@ -8427,6 +8514,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&full_damage),
+                &[],
                 &[],
                 &[],
             );
@@ -8441,6 +8529,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(&idle_damage),
+                &[],
                 &[],
                 &[],
             );
@@ -8494,6 +8583,7 @@ mod tests {
             &frame(no_scroll, &Damage::Full),
             &[],
             &[],
+            &[],
         );
 
         // A changing scroll forces the full grid-glyph build -- every glyph's atlas
@@ -8515,6 +8605,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(scroll, &idle_damage),
+                &[],
                 &[],
                 &[],
             );

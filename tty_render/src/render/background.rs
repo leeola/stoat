@@ -11,8 +11,8 @@
 //! [`Cell`]: stoatty_term::grid::Cell
 
 use crate::render::{
-    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Occluder, PoolOccluders,
-    GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Cover, Occluder, OccluderBuffer,
+    PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -83,8 +83,8 @@ struct BgInstance {
 /// `scroll_y`, `panel_count`, `occlude_all`, and `cols` fill one 16-byte slot,
 /// and the rotation pair with its padding fills another, so `cursor_color` lands
 /// on the 16-byte offset the uniform layout requires. The `vec4` corner pairs
-/// already sit on 16-byte boundaries. `skip_color` and its padding fill the last
-/// slot, since a uniform's size is a whole number of 16-byte slots.
+/// already sit on 16-byte boundaries. `skip_color` and its padding fill one more
+/// slot, which puts [`Cover`] on the 16-byte boundary its rect array requires.
 ///
 /// Two pipelines share this uniform, so each write site zeroes the fields its own
 /// pipeline does not read. `panel_count` and `occlude_all` are non-zero only on an
@@ -125,6 +125,9 @@ struct Globals {
     /// it covers the live grid and must paint its default cells.
     skip_color: u32,
     _pad: [u32; 3],
+    /// The pool regions the live cell fill skips. A pool composite writes
+    /// [`Cover::NONE`], since its own cells are what covers the live grid.
+    cover: Cover,
 }
 
 /// The cursor block's eased corners and color for the frame.
@@ -142,10 +145,26 @@ pub struct CursorState {
 pub struct BackgroundPass {
     pipeline: RenderPipeline,
     globals: Buffer,
-    bind_group: BindGroup,
-    /// The group-0 layout the globals bind group uses, kept so the bind group
-    /// can be rebuilt when [`Self::occluders`] reallocates.
+    /// Binds [`Self::globals`] with [`Self::live_occluders`], for the live cell
+    /// fill and the cursor.
+    live_bind_group: BindGroup,
+    /// Binds [`Self::globals`] with [`Self::composite_occluders`], for the pool
+    /// composites.
+    composite_bind_group: BindGroup,
+    /// The group-0 layout both bind groups use, kept to rebuild a bind group
+    /// when its occluder buffer reallocates.
     bind_group_layout: BindGroupLayout,
+    /// The frame's live occluder list, which the live cell fill's vertex stage
+    /// reads so that a cell under a panel inside a pool region keeps drawing.
+    ///
+    /// A buffer apart from [`Self::composite_occluders`], which the pool
+    /// composites fill later in the same frame. A frame prepares every pass
+    /// before any draw, so with one shared buffer the live draw reads the pools'
+    /// list.
+    live_occluders: OccluderBuffer,
+    /// The occluders the pool composites read. The cell fragment shader
+    /// discards a page cell a box covers on an occludable pool composite.
+    composite_occluders: OccluderBuffer,
     instances: Buffer,
     capacity: usize,
     count: u32,
@@ -154,16 +173,6 @@ pub struct BackgroundPass {
     /// sibling's. Separate from [`Self::instances`] so a pool draw leaves the live
     /// grid's damage-tracked instances intact.
     composite_slots: CompositeSlots<CompositeSlot>,
-    /// One occluder per live panel at binding 1, read by the cell fragment
-    /// shader on an occludable pool composite to discard a page cell a box
-    /// covers. Unused by the live cell fill and the cursor, which leave the
-    /// panel count at zero.
-    occluders: Buffer,
-    /// The occluder list last written to [`Self::occluders`], so a frame whose
-    /// panels have not moved skips the upload. Panels change on layout events, not
-    /// per frame, so most frames match.
-    last_occluders: Vec<Occluder>,
-    occluder_capacity: usize,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
     /// The value last written to the cell slot, so an unchanged frame skips that
@@ -196,7 +205,10 @@ impl BackgroundPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("background"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/bg.wgsl")).into(),
+                crate::render::with_occlusion(&crate::render::with_cover(include_str!(
+                    "../shaders/bg.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -217,7 +229,9 @@ impl BackgroundPass {
                 },
                 BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
+                    // The composite's fragment stage discards under a box, and
+                    // the live fill's vertex stage keeps a cell under one.
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -273,23 +287,33 @@ impl BackgroundPass {
             mapped_at_creation: false,
         });
 
-        let occluders = alloc_occluders(device, INITIAL_CAPACITY);
-        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &occluders);
+        let live_occluders =
+            OccluderBuffer::new(device, "background live occluders", INITIAL_CAPACITY);
+        let live_bind_group =
+            make_bind_group(device, &bind_group_layout, &globals, &live_occluders.buffer);
+        let composite_occluders =
+            OccluderBuffer::new(device, "background composite occluders", INITIAL_CAPACITY);
+        let composite_bind_group = make_bind_group(
+            device,
+            &bind_group_layout,
+            &globals,
+            &composite_occluders.buffer,
+        );
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
 
         BackgroundPass {
             pipeline,
             globals,
-            bind_group,
+            live_bind_group,
+            composite_bind_group,
             bind_group_layout,
+            live_occluders,
+            composite_occluders,
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_slots: CompositeSlots::new(),
-            occluders,
-            last_occluders: Vec::new(),
-            occluder_capacity: INITIAL_CAPACITY,
             cursor_pipeline,
             cursor_visible: false,
             last_globals: None,
@@ -305,35 +329,6 @@ impl BackgroundPass {
         self.metrics = metrics;
     }
 
-    /// Upload the panel occluders, reallocating the buffer and rebuilding the
-    /// globals bind group when the panel count outgrows the current capacity.
-    ///
-    /// A list matching the one already in the buffer is not re-sent. Panels move on
-    /// layout events rather than per frame, so most frames land here, including the
-    /// idle ones a blinking cursor drives.
-    fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
-        if !crate::render::upload_needed(occluders, &self.last_occluders) {
-            return;
-        }
-
-        if occluders.len() > self.occluder_capacity {
-            self.occluder_capacity = occluders.len().next_power_of_two();
-            self.occluders = alloc_occluders(device, self.occluder_capacity);
-            self.bind_group = make_bind_group(
-                device,
-                &self.bind_group_layout,
-                &self.globals,
-                &self.occluders,
-            );
-        }
-        if !occluders.is_empty() {
-            queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
-        }
-
-        self.last_occluders.clear();
-        self.last_occluders.extend_from_slice(occluders);
-    }
-
     /// Upload the frame's uniform and per-cell instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `cursor` carries the
@@ -342,11 +337,16 @@ impl BackgroundPass {
     /// already painted it. `grid_scroll` shifts the whole grid up by that many
     /// rows.
     ///
+    /// `covered` holds the scissors of the pools composited over this frame, as
+    /// `[x, y, width, height]` in pixels. A cell inside one draws no quad, since
+    /// the pool repaints it, unless it meets one of `occluders`, the frame's live
+    /// list.
+    ///
     /// Reallocates the instance buffer only when the grid outgrows the current
     /// capacity. With partial `damage`, only the damaged rows' cells are rewritten.
     /// Adjacent damaged rows share a write.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
@@ -357,6 +357,8 @@ impl BackgroundPass {
         grid_scroll: f32,
         damage: &Damage,
         scrolled_rows: isize,
+        occluders: &[Occluder],
+        covered: &[[u32; 4]],
     ) {
         let cols = grid.cols();
         let rows = grid.rows();
@@ -405,6 +407,7 @@ impl BackgroundPass {
             ],
             skip_color: packed_color(clear),
             _pad: [0; 3],
+            cover: Cover::new(covered, occluders.len()),
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
         // The cursor reads its own slot, so a live frame seeds it here with the same
@@ -418,6 +421,15 @@ impl BackgroundPass {
             &mut self.last_cursor_globals,
         );
         self.cursor_visible = cursor.corners.is_some();
+
+        if self.live_occluders.upload(device, queue, occluders) {
+            self.live_bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.live_occluders.buffer,
+            );
+        }
 
         if full {
             self.scratch.clear();
@@ -502,7 +514,17 @@ impl BackgroundPass {
         pool: u32,
         slot: usize,
     ) {
-        self.upload_occluders(device, queue, occluders.all);
+        if self
+            .composite_occluders
+            .upload(device, queue, occluders.all)
+        {
+            self.composite_bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.composite_occluders.buffer,
+            );
+        }
         let (panel_count, occlude_all) = occluders.globals();
 
         let globals = Globals {
@@ -522,6 +544,7 @@ impl BackgroundPass {
             cursor_color: [0.0; 4],
             skip_color: 0,
             _pad: [0; 3],
+            cover: Cover::NONE,
         };
         queue.write_buffer(
             &self.globals,
@@ -587,6 +610,7 @@ impl BackgroundPass {
             ],
             skip_color: 0,
             _pad: [0; 3],
+            cover: Cover::NONE,
         };
         // The cursor's own slot, so this can run after the cell globals are placed
         // without disturbing them.
@@ -609,7 +633,7 @@ impl BackgroundPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[0]);
+        render_pass.set_bind_group(0, &self.live_bind_group, &[0]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..self.count);
     }
@@ -629,7 +653,7 @@ impl BackgroundPass {
         };
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[globals_offset(slot)]);
+        render_pass.set_bind_group(0, &self.composite_bind_group, &[globals_offset(slot)]);
         render_pass.set_vertex_buffer(0, target.instances.slice(..));
         render_pass.draw(0..6, 0..target.count);
     }
@@ -644,7 +668,7 @@ impl BackgroundPass {
         }
 
         render_pass.set_pipeline(&self.cursor_pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[CURSOR_GLOBALS_OFFSET]);
+        render_pass.set_bind_group(0, &self.live_bind_group, &[CURSOR_GLOBALS_OFFSET]);
         render_pass.draw(0..6, 0..1);
     }
 }
@@ -668,15 +692,6 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
         label: Some("background instances"),
         size: (capacity * size_of::<BgInstance>()) as u64,
         usage,
-        mapped_at_creation: false,
-    })
-}
-
-fn alloc_occluders(device: &Device, capacity: usize) -> Buffer {
-    device.create_buffer(&BufferDescriptor {
-        label: Some("background occluders"),
-        size: (capacity * size_of::<Occluder>()) as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }
@@ -842,12 +857,12 @@ mod tests {
         BgInstance, CursorState,
     };
     use crate::{
-        render::{CellMetrics, PoolOccluders},
+        render::{self, CellMetrics, Occluder, PoolOccluders},
         test_support::require_headless_device,
     };
     use std::ops::Range;
     use stoatty_term::{
-        grid::{Flags, Grid, Rgb},
+        grid::{BorderStyle, Flags, Grid, Panel, PanelShadow, Rgb},
         term::Damage,
     };
     use wgpu::{
@@ -924,9 +939,9 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
+        let module = wgsl::parse_str(&render::with_occlusion(&render::with_cover(include_str!(
             "../shaders/bg.wgsl"
-        )))
+        ))))
         .expect("parse bg.wgsl");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
@@ -1113,6 +1128,8 @@ mod tests {
                 0.0,
                 damage,
                 scrolled_rows,
+                &[],
+                &[],
             );
         };
 
@@ -1207,7 +1224,7 @@ mod tests {
         grid.get_mut(1, 2).bg = OTHER;
         let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
 
-        prepare_live(&device, &queue, &mut pass, &grid);
+        prepare_live(&device, &queue, &mut pass, &grid, &[], &[]);
         let rgba = render_rgba(&device, &queue, CLEARED, |render_pass| {
             pass.draw(render_pass)
         });
@@ -1225,6 +1242,45 @@ mod tests {
         );
     }
 
+    /// A live cell inside a pool's scissor draws no quad, since the pool
+    /// repaints it, while a cell a panel meets still draws, since an occludable
+    /// pool leaves the pixels under a panel to the live grid.
+    ///
+    /// The first scissor runs along cell edges. The one-pixel inset leaves each
+    /// of its cells a pixel short of it, so none of them is culled.
+    #[test]
+    fn a_live_cell_under_a_pool_draws_nothing_unless_a_panel_meets_it() {
+        let (device, queue) = require_headless_device();
+        let grid = filled_grid(OTHER);
+        let mut occluders = Vec::new();
+        render::build_occluders_into(
+            &[panel_at(2, 2)],
+            &[],
+            &[],
+            CELL_METRICS.width,
+            &mut occluders,
+        );
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+
+        let covered = [[0, 48, 64, 16], [15, 15, 34, 34]];
+        prepare_live(&device, &queue, &mut pass, &grid, &occluders, &covered);
+        let rgba = render_rgba(&device, &queue, CLEARED, |render_pass| {
+            pass.draw(render_pass)
+        });
+
+        let expected: Vec<[u8; 3]> = (0..CELLS * CELLS)
+            .map(|cell| match cell {
+                5 | 6 | 9 => rgb(CLEARED),
+                _ => rgb(OTHER),
+            })
+            .collect();
+        assert_eq!(
+            cell_centers(&rgba),
+            expected,
+            "the middle cells the panel misses show the clear, and every other cell paints",
+        );
+    }
+
     /// A pool composite covers the live grid under it, so it paints every cell,
     /// the cells of the clear color included, while the live frame skips them.
     #[test]
@@ -1233,7 +1289,7 @@ mod tests {
         let grid = filled_grid(SKIP);
         let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
 
-        prepare_live(&device, &queue, &mut pass, &grid);
+        prepare_live(&device, &queue, &mut pass, &grid, &[], &[]);
         pass.prepare_composite(
             &device,
             &queue,
@@ -1257,6 +1313,25 @@ mod tests {
         );
     }
 
+    /// A one-cell panel at `row` and `col`, with no fill and no shadow.
+    fn panel_at(row: u16, col: u16) -> Panel {
+        Panel {
+            top: row,
+            left: col,
+            width: 1,
+            height: 1,
+            style: BorderStyle::Light,
+            border: OTHER,
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+            seq: 0,
+        }
+    }
+
     /// A [`CELLS`]-square grid with every cell's background `color`.
     fn filled_grid(color: Rgb) -> Grid {
         let mut grid = Grid::new(CELLS, CELLS);
@@ -1269,8 +1344,15 @@ mod tests {
     }
 
     /// Upload `grid` as a whole live frame that skips [`SKIP`], with the cursor
-    /// hidden.
-    fn prepare_live(device: &Device, queue: &Queue, pass: &mut BackgroundPass, grid: &Grid) {
+    /// hidden, under the pools at `covered` and the panels in `occluders`.
+    fn prepare_live(
+        device: &Device,
+        queue: &Queue,
+        pass: &mut BackgroundPass,
+        grid: &Grid,
+        occluders: &[Occluder],
+        covered: &[[u32; 4]],
+    ) {
         let cursor = CursorState {
             corners: None,
             color: OTHER,
@@ -1285,6 +1367,8 @@ mod tests {
             0.0,
             &Damage::Full,
             0,
+            occluders,
+            covered,
         );
     }
 
