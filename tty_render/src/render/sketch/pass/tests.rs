@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     render::{self, sketch::rough::COMPONENT_GAP, HostRide},
-    test_support::require_headless_device,
+    test_support::{read_back, require_headless_device},
 };
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchPoint,
@@ -15,10 +15,9 @@ use wgpu::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
     },
-    Color, CommandEncoderDescriptor, Extent3d, LoadOp, MapMode, Operations, Origin3d, PollType,
-    RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TexelCopyBufferInfo,
-    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
+    Color, CommandEncoderDescriptor, Extent3d, LoadOp, Operations, RenderPassColorAttachment,
+    RenderPassDescriptor, StoreOp, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureViewDescriptor,
 };
 
 /// A reserved WGSL keyword, a type mismatch, or a stale binding fails at
@@ -1153,7 +1152,7 @@ fn render_red(
     progress: &[f32],
     anchored: &[HostRide],
     occluders: &[Occluder],
-) -> Option<Vec<u8>> {
+) -> Vec<u8> {
     let mut grid = Grid::new(16, 12);
     grid.set_sketches(sketches.to_vec());
 
@@ -1184,12 +1183,6 @@ fn render_red(
         view_formats: &[],
     });
     let view = target.create_view(&TextureViewDescriptor::default());
-    let readback = device.create_buffer(&BufferDescriptor {
-        label: Some("sketch readback"),
-        size: u64::from(TARGET) * u64::from(TARGET) * 4,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
     {
@@ -1212,36 +1205,15 @@ fn render_red(
         pass.draw(&mut render_pass);
         pass.draw_riding(&mut render_pass);
     }
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture: &target,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(TARGET * 4),
-                rows_per_image: None,
-            },
-        },
-        size,
-    );
     queue.submit(Some(encoder.finish()));
 
-    readback.slice(..).map_async(MapMode::Read, |_| {});
-    device.poll(PollType::wait_indefinitely()).ok()?;
-    let rgba = readback.slice(..).get_mapped_range().to_vec();
+    let rgba = read_back(device, queue, &target, TARGET, TARGET);
 
-    Some(
-        rgba.as_chunks::<4>()
-            .0
-            .iter()
-            .map(|texel| texel[0])
-            .collect(),
-    )
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|texel| texel[0])
+        .collect()
 }
 
 /// A run's tiles meet edge to edge, so a translucent stroke blends once where
@@ -1259,7 +1231,7 @@ fn a_translucent_stroke_blends_once_across_tile_edges() {
         },
     );
     line.command.style.alpha = 128;
-    let red = render_red(&device, &queue, &[line], &[1.0], &[], &[]).expect("readback");
+    let red = render_red(&device, &queue, &[line], &[1.0], &[], &[]);
 
     // The line's middle row, from inside the first tile past the tile edges at
     // 32, 64, and 96 pixels, clear of the round caps at either end.
@@ -1296,7 +1268,7 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
     // The mark's layout assumed a top SHIFT pixels past the host's eased top.
     ridden[0].command.anchor = Some((3, SHIFT as f32 / metrics().height));
 
-    let rest = render_red(&device, &queue, &plain, &[1.0], &[], &[]).expect("readback");
+    let rest = render_red(&device, &queue, &plain, &[1.0], &[], &[]);
     let carried = render_red(
         &device,
         &queue,
@@ -1308,8 +1280,7 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
             scissor: [0, 0, 64, 64],
         }],
         &[],
-    )
-    .expect("readback");
+    );
 
     assert!(rest.iter().any(|&byte| byte > 0), "the mark paints at rest");
 
@@ -1361,8 +1332,8 @@ fn a_later_filled_box_hides_the_stroke_beneath_it() {
     let mut occluders = Vec::new();
     render::build_occluders_into(&[modal], &[], &[], metrics().width, &mut occluders);
 
-    let open = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
-    let hidden = render_red(&device, &queue, &list, &[1.0], &[], &occluders).expect("readback");
+    let open = render_red(&device, &queue, &list, &[1.0], &[], &[]);
+    let hidden = render_red(&device, &queue, &list, &[1.0], &[], &occluders);
 
     let under_box = |at: usize| at as u32 % TARGET < 39;
     assert!(
@@ -1409,7 +1380,7 @@ fn a_rounded_fill_leaves_its_corners_clear() {
     // The square box spans x 8 to 40 and the rounded one x 64 to 96, both y 8
     // to 72.
     let list = [filled(1, 16, 0), filled(2, 128, 32)];
-    let red = render_red(&device, &queue, &list, &[1.0, 1.0], &[], &[]).expect("readback");
+    let red = render_red(&device, &queue, &list, &[1.0, 1.0], &[], &[]);
     let at = |x: usize, y: usize| red[y * TARGET as usize + x];
 
     assert_eq!(
@@ -1442,8 +1413,8 @@ fn a_reveal_of_zero_paints_nothing_and_one_paints_the_mark() {
         },
     )];
 
-    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
-    let none = render_red(&device, &queue, &list, &[0.0], &[], &[]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]);
+    let none = render_red(&device, &queue, &list, &[0.0], &[], &[]);
 
     assert!(whole.iter().any(|&byte| byte > 0), "a full reveal paints");
     assert!(
@@ -1465,8 +1436,8 @@ fn a_half_reveal_paints_a_prefix_of_the_whole() {
         },
     )];
 
-    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
-    let half = render_red(&device, &queue, &list, &[0.5], &[], &[]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]);
+    let half = render_red(&device, &queue, &list, &[0.5], &[], &[]);
 
     let lit = |ink: &[u8]| ink.iter().filter(|&&byte| byte > 0).count();
     assert!(lit(&half) > 0, "half a reveal paints something");
@@ -1513,7 +1484,7 @@ fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
     )];
     list[0].command.style.alpha = ALPHA;
 
-    let ink = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
+    let ink = render_red(&device, &queue, &list, &[1.0], &[], &[]);
 
     assert!(ink.iter().any(|&byte| byte > 0), "the dimmed mark paints");
     let over = ink
@@ -1558,8 +1529,7 @@ fn a_hatched_box_leaves_gaps_between_its_lines() {
         &[1.0],
         &[],
         &[],
-    )
-    .expect("readback");
+    );
     let hatched = render_red(
         &device,
         &queue,
@@ -1567,8 +1537,7 @@ fn a_hatched_box_leaves_gaps_between_its_lines() {
         &[1.0],
         &[],
         &[],
-    )
-    .expect("readback");
+    );
 
     let lit = |ink: &[u8]| ink.iter().filter(|&&byte| byte > 0).count();
     assert!(lit(&hatched) > 0, "the hatch paints");
@@ -1598,7 +1567,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
             fill: None,
         },
     )];
-    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]);
 
     assert!(
         whole.iter().any(|&byte| byte > 0 && byte < 255),
@@ -1607,7 +1576,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
 
     for step in 1..8 {
         let progress = step as f32 / 8.0;
-        let partial = render_red(&device, &queue, &list, &[progress], &[], &[]).expect("readback");
+        let partial = render_red(&device, &queue, &list, &[progress], &[], &[]);
 
         let brighter = partial
             .iter()
@@ -1687,7 +1656,6 @@ fn the_pen_tip_advances_inside_one_segment() {
 
     let lit = |progress: f32| {
         render_red(&device, &queue, &list, &[progress], &[], &[])
-            .expect("readback")
             .iter()
             .filter(|&&byte| byte > 0)
             .count()

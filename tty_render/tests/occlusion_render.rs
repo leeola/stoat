@@ -12,18 +12,13 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, HostRide, PoolComposite, Renderer, Scroll},
     render::cell_size,
-    test_support::require_headless_device,
+    test_support::{offscreen_target, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Polyline, Rgb, TextRun},
     term::Damage,
 };
-use wgpu::{
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
-    PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
-    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor,
-};
+use wgpu::TextureFormat;
 
 #[test]
 fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
@@ -41,21 +36,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
     let icon_color = Rgb::new(80, 80, 220);
     let border = Rgb::new(128, 128, 128);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("occlusion target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -264,21 +245,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
     let pool_bg = Rgb::new(240, 180, 20);
     let border = Rgb::new(128, 128, 128);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("pool occlusion target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -423,21 +390,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
     let pane_bg = Rgb::new(240, 180, 20);
     let border = Rgb::new(128, 128, 128);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("occlusion pool target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -634,21 +587,7 @@ fn a_box_riding_a_pool_stops_occluding_it() {
     let pool_bg = Rgb::new(240, 180, 20);
     let border = Rgb::new(128, 128, 128);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("riding occlusion target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -759,51 +698,4 @@ fn a_box_riding_a_pool_stops_occluding_it() {
         rgb(pool_bg),
         "and inside it too, since the rect the box declared is not where it is",
     );
-}
-
-/// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
-/// with no padding (the caller sizes the texture so `4 * width` is 256-aligned).
-fn read_back(
-    device: &Device,
-    queue: &Queue,
-    texture: &Texture,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("occlusion readback"),
-        size: u64::from(width * height * 4),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: None,
-            },
-        },
-        Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(encoder.finish()));
-
-    buffer.slice(..).map_async(MapMode::Read, |_| {});
-    device
-        .poll(PollType::wait_indefinitely())
-        .expect("poll readback");
-    buffer.slice(..).get_mapped_range().to_vec()
 }

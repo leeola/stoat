@@ -2322,16 +2322,15 @@ mod tests {
         CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame, PoolComposite,
         Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
-    use crate::test_support::require_headless_device;
+    use crate::test_support::{read_back, require_headless_device};
     use std::iter;
     use stoatty_term::{
         grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
         term::Damage,
     };
     use wgpu::{
-        BufferDescriptor, BufferUsages, Device, Extent3d, MapMode, Origin3d, PollType, Queue,
-        TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
-        TextureDescriptor, TextureDimension, TextureUsages, TextureViewDescriptor,
+        Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureUsages,
+        TextureViewDescriptor,
     };
 
     /// A second window builds its font system from what the first found rather
@@ -2914,54 +2913,6 @@ mod tests {
         (row * h..(row + 1) * h)
             .flat_map(|y| (col * w..(col + 1) * w).map(move |x| (x, y)))
             .any(|(x, y)| pixel(shot, x, y) != ground)
-    }
-
-    /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
-    /// with no padding, so the caller must size the texture so `4 * width` is
-    /// 256-aligned.
-    fn read_back(
-        device: &Device,
-        queue: &Queue,
-        texture: &Texture,
-        width: u32,
-        height: u32,
-    ) -> Vec<u8> {
-        let buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("single pass readback"),
-            size: u64::from(width * height * 4),
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-        encoder.copy_texture_to_buffer(
-            TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: Origin3d::ZERO,
-                aspect: TextureAspect::All,
-            },
-            TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(width * 4),
-                    rows_per_image: None,
-                },
-            },
-            Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(Some(encoder.finish()));
-
-        buffer.slice(..).map_async(MapMode::Read, |_| {});
-        device
-            .poll(PollType::wait_indefinitely())
-            .expect("poll readback");
-        buffer.slice(..).get_mapped_range().to_vec()
     }
 
     /// Reconfiguring reallocates the swapchain, and a window manager repeats

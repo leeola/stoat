@@ -10,18 +10,13 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
-    test_support::require_headless_device,
+    test_support::{offscreen_target, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
     term::Damage,
 };
-use wgpu::{
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
-    PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
-    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor,
-};
+use wgpu::TextureFormat;
 
 /// The surface (clear) color the panel is rendered over, so darkening or fill is
 /// measurable against a known non-black background.
@@ -63,21 +58,7 @@ fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) 
     let (width, height) = (256u32, (cell[1] * 8.0).round() as u32);
     let surface = Rgb::new(SURFACE[0], SURFACE[1], SURFACE[2]);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("panel target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -292,51 +273,4 @@ fn popover_chrome_scales_with_the_display() {
         below[0] + 3 < SURFACE[0],
         "the scaled blur still darkens 24 px past the box, got {below:?}"
     );
-}
-
-fn read_back(
-    device: &Device,
-    queue: &Queue,
-    texture: &Texture,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("panel shadow readback"),
-        size: u64::from(width * height * 4),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: None,
-            },
-        },
-        Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(encoder.finish()));
-
-    buffer.slice(..).map_async(MapMode::Read, |_| {});
-    device
-        .poll(PollType::wait_indefinitely())
-        .expect("poll readback");
-    let data = buffer.slice(..).get_mapped_range().to_vec();
-    buffer.unmap();
-    data
 }

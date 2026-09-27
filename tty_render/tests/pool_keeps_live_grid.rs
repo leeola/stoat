@@ -13,18 +13,13 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
-    test_support::require_headless_device,
+    test_support::{offscreen_target, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
 };
-use wgpu::{
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
-    PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
-    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor,
-};
+use wgpu::TextureFormat;
 
 #[test]
 fn pool_composite_keeps_live_instances() {
@@ -39,21 +34,7 @@ fn pool_composite_keeps_live_instances() {
     let white = Rgb::new(255, 255, 255);
     let gray = Rgb::new(80, 80, 80);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("pool keeps live target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -180,21 +161,7 @@ fn shift_only_composite_reuses_prior_rows() {
         Rgb::new(80, 80, 80),
     );
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("shift-only reuse target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -321,21 +288,7 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
         Rgb::new(0, 0, 200),
     );
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("pool reuse target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -462,53 +415,6 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     );
 }
 
-/// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
-/// with no padding (the caller sizes the texture so `4 * width` is 256-aligned).
-fn read_back(
-    device: &Device,
-    queue: &Queue,
-    texture: &Texture,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("pool keeps live readback"),
-        size: u64::from(width * height * 4),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: None,
-            },
-        },
-        Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(encoder.finish()));
-
-    buffer.slice(..).map_async(MapMode::Read, |_| {});
-    device
-        .poll(PollType::wait_indefinitely())
-        .expect("poll readback");
-    buffer.slice(..).get_mapped_range().to_vec()
-}
-
 /// A pool composite whose glyph burst grows the atlas heals the live grid's
 /// cached instances, so its glyph survives instead of freezing stale UVs.
 ///
@@ -530,21 +436,7 @@ fn pool_grow_heals_live_instances() {
     let black = Rgb::new(0, 0, 0);
     let white = Rgb::new(255, 255, 255);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("pool grow heals target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -668,21 +560,7 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
     let black = Rgb::new(0, 0, 0);
     let white = Rgb::new(255, 255, 255);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("content epoch target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (_target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -777,21 +655,7 @@ fn a_region_sized_pool_draws_at_the_region_origin() {
     let white = Rgb::new(255, 255, 255);
     let gray = Rgb::new(80, 80, 80);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("region origin target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,

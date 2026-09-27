@@ -501,18 +501,19 @@ mod tests {
     use super::{
         build_panel_instances, build_panel_instances_into, style_code, PanelInstance, PanelPass,
     };
-    use crate::{render::CellMetrics, test_support::require_headless_device};
+    use crate::{
+        render::CellMetrics,
+        test_support::{read_back, require_headless_device},
+    };
     use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
     use wgpu::{
         naga::{
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
-        MapMode, Operations, Origin3d, PollType, Queue, RenderPassColorAttachment,
-        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
-        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureUsages, TextureViewDescriptor,
+        Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp, Operations, Queue,
+        RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TextureDescriptor,
+        TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     };
 
     /// The square readback target's edge, in pixels. Four bytes a texel makes a
@@ -570,12 +571,6 @@ mod tests {
             view_formats: &[],
         });
         let view = target.create_view(&TextureViewDescriptor::default());
-        let readback = device.create_buffer(&BufferDescriptor {
-            label: Some("panel weight readback"),
-            size: u64::from(TARGET) * u64::from(TARGET) * 4,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
@@ -602,30 +597,9 @@ mod tests {
                 pass.draw_stroke(&mut render_pass);
             }
         }
-        encoder.copy_texture_to_buffer(
-            TexelCopyTextureInfo {
-                texture: &target,
-                mip_level: 0,
-                origin: Origin3d::ZERO,
-                aspect: TextureAspect::All,
-            },
-            TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(TARGET * 4),
-                    rows_per_image: None,
-                },
-            },
-            size,
-        );
         queue.submit(Some(encoder.finish()));
 
-        readback.slice(..).map_async(MapMode::Read, |_| {});
-        device
-            .poll(PollType::wait_indefinitely())
-            .expect("poll readback");
-        readback.slice(..).get_mapped_range().to_vec()
+        read_back(device, queue, &target, TARGET, TARGET)
     }
 
     /// The red the panels painted over black, one byte a pixel.

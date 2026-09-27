@@ -9,7 +9,7 @@
 
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
-    test_support::require_headless_device,
+    test_support::{offscreen_target, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{
@@ -18,12 +18,7 @@ use stoatty_term::{
     },
     term::Damage,
 };
-use wgpu::{
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
-    PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo,
-    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor,
-};
+use wgpu::{Device, Queue, TextureFormat};
 
 #[test]
 fn builds_passes_and_draws_a_frame_off_screen() {
@@ -32,21 +27,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
     let format = TextureFormat::Rgba8Unorm;
     let (width, height) = (256, 128);
 
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("headless target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
+    let (_target, view) = offscreen_target(&device, width, height);
 
     let mut renderer = Renderer::new(
         &device,
@@ -245,21 +226,7 @@ fn two_renderers_on_one_device_draw_their_own_grids() {
     let format = TextureFormat::Rgba8Unorm;
     let (width, height) = (128, 128);
     let build = |background: Rgb| {
-        let target = device.create_texture(&TextureDescriptor {
-            label: Some("shared device target"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&TextureViewDescriptor::default());
+        let (target, view) = offscreen_target(&device, width, height);
         let renderer = Renderer::new(
             &device,
             format,
@@ -335,51 +302,4 @@ fn render_blank(
             sketch_reveals: &[],
         },
     );
-}
-
-/// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
-/// with no padding (the caller sizes the texture so `4 * width` is 256-aligned).
-fn read_back(
-    device: &Device,
-    queue: &Queue,
-    texture: &wgpu::Texture,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("shared device readback"),
-        size: u64::from(width * height * 4),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: None,
-            },
-        },
-        Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(encoder.finish()));
-
-    buffer.slice(..).map_async(MapMode::Read, |_| {});
-    device
-        .poll(PollType::wait_indefinitely())
-        .expect("poll readback");
-    buffer.slice(..).get_mapped_range().to_vec()
 }

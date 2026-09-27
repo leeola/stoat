@@ -707,7 +707,7 @@ mod tests {
     use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
     use crate::{
         render::{panel_occluder, CellMetrics, Occluder},
-        test_support::require_headless_device,
+        test_support::{read_back, require_headless_device},
     };
     use std::collections::HashMap;
     use stoatty_term::grid::{
@@ -719,11 +719,9 @@ mod tests {
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
-        MapMode, Operations, Origin3d, PollType, Queue, RenderPassColorAttachment,
-        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
-        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureUsages, TextureViewDescriptor,
+        Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp, Operations, Queue,
+        RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TextureDescriptor,
+        TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     };
 
     /// The square readback target's edge, in pixels. Four bytes a texel makes a
@@ -1303,12 +1301,6 @@ mod tests {
             view_formats: &[],
         });
         let view = target.create_view(&TextureViewDescriptor::default());
-        let readback = device.create_buffer(&BufferDescriptor {
-            label: Some("minimap coverage readback"),
-            size: u64::from(TARGET) * u64::from(TARGET) * 4,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
@@ -1330,30 +1322,9 @@ mod tests {
             });
             pass.draw(&mut render_pass);
         }
-        encoder.copy_texture_to_buffer(
-            TexelCopyTextureInfo {
-                texture: &target,
-                mip_level: 0,
-                origin: Origin3d::ZERO,
-                aspect: TextureAspect::All,
-            },
-            TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(TARGET * 4),
-                    rows_per_image: None,
-                },
-            },
-            size,
-        );
         queue.submit(Some(encoder.finish()));
 
-        readback.slice(..).map_async(MapMode::Read, |_| {});
-        device
-            .poll(PollType::wait_indefinitely())
-            .expect("poll readback");
-        let rgba = readback.slice(..).get_mapped_range().to_vec();
+        let rgba = read_back(device, queue, &target, TARGET, TARGET);
 
         rgba.as_chunks::<4>()
             .0
