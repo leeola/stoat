@@ -11,9 +11,10 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics, CompositeSlot,
-        CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder, OccluderBuffer,
-        PoolOccluders, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        exposed_rows, globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics,
+        CompositeSlot, CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder,
+        OccluderBuffer, PoolOccluders, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        MAX_COMPOSITE_POOLS,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -3977,24 +3978,6 @@ fn instance_bytes<T>(capacity: usize) -> u64 {
     (capacity * size_of::<T>()) as u64
 }
 
-/// Rows a composite has to shape for itself after sliding its caches by `by`.
-///
-/// A slide keeps the rows it moved and empties the ones it carried past the end,
-/// and those emptied rows are what is left to shape. `None` keeps nothing, and a
-/// slide of at least the row count carries everything past the end, so both
-/// leave every row to shape.
-fn exposed_rows(by: Option<isize>, rows: usize) -> Range<usize> {
-    let Some(by) = by else {
-        return 0..rows;
-    };
-    let vacated = by.unsigned_abs().min(rows);
-    if by > 0 {
-        rows - vacated..rows
-    } else {
-        0..vacated
-    }
-}
-
 /// Empty buffers for a pool being composited for the first time.
 fn new_slot(device: &Device) -> TextCompositeSlot {
     TextCompositeSlot {
@@ -4870,12 +4853,12 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_underline_row, cell_box, cell_box_rect, cell_glyph_scale, cell_rect_scissor,
-        cursor_cell, exposed_rows, fill_cell_box, fit_glyph_box, follow_slot, font, glyph_origin,
-        grid_build, inset_scissor, is_cell_fill, overlay_content_cells, pack_dim, pack_fg,
-        region_split, row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build,
-        visible_lines, GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance,
-        RowRotation, RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance,
-        DIM_FRACTION_BITS, FOLLOW_SHIFT, KIND_COLOR, KIND_MASK, OVERLAY_RING_PX, STYLE_DOTTED,
+        cursor_cell, fill_cell_box, fit_glyph_box, follow_slot, font, glyph_origin, grid_build,
+        inset_scissor, is_cell_fill, overlay_content_cells, pack_dim, pack_fg, region_split,
+        row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines,
+        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation,
+        RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS,
+        FOLLOW_SHIFT, KIND_COLOR, KIND_MASK, OVERLAY_RING_PX, STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -7573,45 +7556,6 @@ mod tests {
                  the glyph a rebuild would put there",
             );
         }
-    }
-
-    /// Which rows a slide leaves for the composite to shape.
-    ///
-    /// The sibling comparison against a from-scratch build needs a device, so on
-    /// a machine without one it returns before asserting anything. This is the
-    /// same arithmetic with the device taken out of it, and it is where the
-    /// off-by-one lives. Naming one row too few leaves a stale row on screen,
-    /// and one too many gives back the saving.
-    #[test]
-    fn a_slide_leaves_the_rows_it_carried_past_the_end() {
-        assert_eq!(
-            exposed_rows(Some(1), 5),
-            4..5,
-            "one row down exposes the last"
-        );
-        assert_eq!(exposed_rows(Some(3), 5), 2..5, "three down exposes three");
-        assert_eq!(
-            exposed_rows(Some(-1), 5),
-            0..1,
-            "one row up exposes the first"
-        );
-        assert_eq!(exposed_rows(Some(-3), 5), 0..3, "three up exposes three");
-
-        assert_eq!(
-            exposed_rows(Some(5), 5),
-            0..5,
-            "a slide of the whole height keeps nothing",
-        );
-        assert_eq!(
-            exposed_rows(Some(9), 5),
-            0..5,
-            "and neither does a longer one",
-        );
-        assert_eq!(exposed_rows(Some(-9), 5), 0..5, "in either direction",);
-
-        assert_eq!(exposed_rows(None, 5), 0..5, "no slide shapes every row");
-        assert_eq!(exposed_rows(None, 0), 0..0, "an empty grid shapes nothing");
-        assert_eq!(exposed_rows(Some(1), 0), 0..0, "nor does sliding one");
     }
 
     /// A pool composited after a scroll holds what one built from scratch holds.

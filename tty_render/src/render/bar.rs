@@ -720,6 +720,7 @@ mod tests {
             shift_rows,
             [0.0; 2],
             true,
+            None,
             0,
             0,
         );

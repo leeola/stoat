@@ -1002,6 +1002,7 @@ impl Renderer {
             shift_rows,
             origin_cells,
             content_changed,
+            scrolled_rows,
             pool,
             slot,
         );

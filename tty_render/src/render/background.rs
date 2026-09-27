@@ -11,8 +11,8 @@
 //! [`Cell`]: stoatty_term::grid::Cell
 
 use crate::render::{
-    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Cover, Occluder, OccluderBuffer,
-    PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    exposed_rows, globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Cover, Occluder,
+    OccluderBuffer, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -172,7 +172,7 @@ pub struct BackgroundPass {
     /// slot per pool so a pool reusing last frame's instances cannot read a
     /// sibling's. Separate from [`Self::instances`] so a pool draw leaves the live
     /// grid's damage-tracked instances intact.
-    composite_slots: CompositeSlots<CompositeSlot>,
+    composite_slots: CompositeSlots<BackgroundSlot>,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
     /// The value last written to the cell slot, so an unchanged frame skips that
@@ -452,7 +452,7 @@ impl BackgroundPass {
         let Some(last_col) = cols.checked_sub(1) else {
             return;
         };
-        for (slot, run) in damaged_row_runs(damage, rows, self.row_offset) {
+        for (slot, run) in damaged_row_runs(|row| damage.is_dirty(row), rows, self.row_offset) {
             // Each write stages its bytes in a buffer of its own, which costs
             // more than a whole row of instances, so a run of rows goes up in
             // one write. A lone row is bounded by its damaged columns instead.
@@ -489,9 +489,14 @@ impl BackgroundPass {
     /// the globals slot the matching [`Self::draw_composite`] binds. The two differ
     /// because instances persist and globals do not.
     ///
-    /// `grid_scroll` shifts the grid up by that many rows. The pool grid changes
-    /// wholesale each frame, so every cell is rebuilt with no per-row damage
-    /// path. No cursor draws over a composite, so the shared globals carry none.
+    /// `grid_scroll` shifts the grid up by that many rows. No cursor draws over a
+    /// composite, so the shared globals carry none.
+    ///
+    /// `scrolled_rows` is how far the pool's content moved since the frame that
+    /// last composited it. When the pool's slot holds a grid of the same shape,
+    /// the move rotates the slot's instances and only the rows it exposed are
+    /// written, as the live pass does for a scroll. `None`, or a grid of another
+    /// shape, rebuilds every cell.
     ///
     /// The page cells are occluded against `occluders` with the seq test bypassed,
     /// so a pooled cell gliding beneath a modal is hidden by it. `occluders`
@@ -511,6 +516,7 @@ impl BackgroundPass {
         grid_scroll: f32,
         origin_cells: [f32; 2],
         content_changed: bool,
+        scrolled_rows: Option<isize>,
         pool: u32,
         slot: usize,
     ) {
@@ -527,6 +533,22 @@ impl BackgroundPass {
         }
         let (panel_count, occlude_all) = occluders.globals();
 
+        // The pool scrolls on its own clock, so its slot carries its own
+        // rotation. It is settled here, ahead of the globals write below,
+        // because the globals are what tell the shader which display row a slot
+        // holds.
+        let (rows, cols) = (grid.rows(), grid.cols());
+        let held = self.composite_slots.get(pool);
+        let held_offset = held.map_or(0, |held| held.row_offset);
+        let rotate_by = scrolled_rows.filter(|&by| by != 0).filter(|_| {
+            rows > 0 && held.is_some_and(|held| (held.rows, held.cols) == (rows, cols))
+        });
+        let row_offset = match (content_changed, rotate_by) {
+            (false, _) => held_offset,
+            (true, Some(by)) => (held_offset + by.rem_euclid(rows as isize) as u32) % rows as u32,
+            (true, None) => 0,
+        };
+
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
@@ -535,11 +557,9 @@ impl BackgroundPass {
             scroll_y: grid_scroll * self.metrics.height,
             panel_count,
             occlude_all,
-            cols: grid.cols() as u32,
-            // A pool composite builds its instances fresh into its own buffer, so
-            // they are never rotated.
-            row_offset: 0,
-            rows: grid.rows() as u32,
+            cols: cols as u32,
+            row_offset,
+            rows: rows as u32,
             origin_cells,
             cursor_color: [0.0; 4],
             skip_color: 0,
@@ -559,20 +579,47 @@ impl BackgroundPass {
             return;
         }
 
+        let target = self.composite_slots.entry(pool, || new_slot(device));
+        target.row_offset = row_offset;
+        if let Some(by) = rotate_by {
+            // The rows the scroll kept already sit where the advanced offset
+            // points, so only the rows it exposed are written.
+            let Some(last_col) = cols.checked_sub(1) else {
+                return;
+            };
+            let exposed = exposed_rows(Some(by), rows);
+            for (at, run) in damaged_row_runs(|row| exposed.contains(&row), rows, row_offset) {
+                self.scratch.clear();
+                for row in run {
+                    build_row_instances(grid, row, 0..=last_col, &mut self.scratch);
+                }
+                let offset = (at * cols * size_of::<BgInstance>()) as u64;
+                queue.write_buffer(
+                    &target.cells.instances,
+                    offset,
+                    bytemuck::cast_slice(&self.scratch),
+                );
+            }
+            return;
+        }
+
         self.scratch.clear();
         build_instances(grid, &mut self.scratch);
-
-        let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.count = self.scratch.len() as u32;
+        (target.rows, target.cols) = (rows, cols);
+        target.cells.count = self.scratch.len() as u32;
         if self.scratch.is_empty() {
             return;
         }
 
-        if self.scratch.len() > target.capacity {
-            target.capacity = self.scratch.len().next_power_of_two();
-            target.instances = alloc_instances(device, target.capacity);
+        if self.scratch.len() > target.cells.capacity {
+            target.cells.capacity = self.scratch.len().next_power_of_two();
+            target.cells.instances = alloc_instances(device, target.cells.capacity);
         }
-        queue.write_buffer(&target.instances, 0, bytemuck::cast_slice(&self.scratch));
+        queue.write_buffer(
+            &target.cells.instances,
+            0,
+            bytemuck::cast_slice(&self.scratch),
+        );
     }
 
     /// Upload the cursor block's corners and scroll offset, leaving the cell
@@ -648,14 +695,14 @@ impl BackgroundPass {
     /// `slot` must be the one that prepare was given, since it selects the globals
     /// the draw reads.
     pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32, slot: usize) {
-        let Some(target) = self.composite_slots.get(pool).filter(|s| s.count > 0) else {
+        let Some(target) = self.composite_slots.get(pool).filter(|s| s.cells.count > 0) else {
             return;
         };
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.composite_bind_group, &[globals_offset(slot)]);
-        render_pass.set_vertex_buffer(0, target.instances.slice(..));
-        render_pass.draw(0..6, 0..target.count);
+        render_pass.set_vertex_buffer(0, target.cells.instances.slice(..));
+        render_pass.draw(0..6, 0..target.cells.count);
     }
 
     /// Record the cursor-block draw into `render_pass`.
@@ -673,13 +720,34 @@ impl BackgroundPass {
     }
 }
 
+/// One pool's composite cell instances, with the rotation and the grid shape
+/// they were written at.
+///
+/// A glide crosses a row on most of its composited frames. A slot that knows
+/// its rotation advances it by the rows the pool scrolled and writes only the
+/// rows the scroll exposed, the way the live pass rotates its own buffer.
+struct BackgroundSlot {
+    cells: CompositeSlot,
+    /// Display row `r` lives at slot `(r + row_offset) % rows`.
+    row_offset: u32,
+    /// The grid shape [`Self::cells`] holds. A scroll carries rows only into a
+    /// buffer laid out for the same shape.
+    rows: usize,
+    cols: usize,
+}
+
 /// An empty composite slot at the initial capacity, for a pool being composited
 /// for the first time.
-fn new_slot(device: &Device) -> CompositeSlot {
-    CompositeSlot {
-        instances: alloc_instances(device, INITIAL_CAPACITY),
-        capacity: INITIAL_CAPACITY,
-        count: 0,
+fn new_slot(device: &Device) -> BackgroundSlot {
+    BackgroundSlot {
+        cells: CompositeSlot {
+            instances: alloc_instances(device, INITIAL_CAPACITY),
+            capacity: INITIAL_CAPACITY,
+            count: 0,
+        },
+        row_offset: 0,
+        rows: 0,
+        cols: 0,
     }
 }
 
@@ -781,20 +849,20 @@ fn row_slot(row: usize, row_offset: u32, rows: usize) -> usize {
     (row + row_offset as usize) % rows
 }
 
-/// The runs of damaged rows that fill consecutive buffer slots, each as its
-/// first slot and the display rows it covers.
+/// The runs of the rows `is_damaged` names that fill consecutive buffer slots,
+/// each as its first slot and the display rows it covers.
 ///
-/// A run ends at a clean row, and where the rotation wraps the next row's slot
-/// back to the start of the buffer. Each run is then one range of the buffer,
-/// which one write covers.
+/// A run ends at a row it does not name, and where the rotation wraps the next
+/// row's slot back to the start of the buffer. Each run is then one range of
+/// the buffer, which one write covers.
 fn damaged_row_runs(
-    damage: &Damage,
+    is_damaged: impl Fn(usize) -> bool,
     rows: usize,
     row_offset: u32,
 ) -> impl Iterator<Item = (usize, Range<usize>)> {
     let mut row = 0;
     iter::from_fn(move || {
-        while row < rows && !damage.is_dirty(row) {
+        while row < rows && !is_damaged(row) {
             row += 1;
         }
         if row == rows {
@@ -805,7 +873,7 @@ fn damaged_row_runs(
         let slot = row_slot(start, row_offset, rows);
         row += 1;
         while row < rows
-            && damage.is_dirty(row)
+            && is_damaged(row)
             && row_slot(row, row_offset, rows) == slot + (row - start)
         {
             row += 1;
@@ -1083,14 +1151,16 @@ mod tests {
     #[test]
     fn contiguous_damaged_rows_share_one_write() {
         let damage = partial(10, &[3, 4, 5, 6, 8]);
-        let runs: Vec<(usize, Range<usize>)> = damaged_row_runs(&damage, 10, 0).collect();
+        let runs: Vec<(usize, Range<usize>)> =
+            damaged_row_runs(|row| damage.is_dirty(row), 10, 0).collect();
         assert_eq!(runs, [(3, 3..7), (8, 8..9)], "a clean row ends a run");
     }
 
     #[test]
     fn a_run_splits_where_the_rotation_wraps() {
         let damage = partial(5, &[0, 1, 2, 3, 4]);
-        let runs: Vec<(usize, Range<usize>)> = damaged_row_runs(&damage, 5, 3).collect();
+        let runs: Vec<(usize, Range<usize>)> =
+            damaged_row_runs(|row| damage.is_dirty(row), 5, 3).collect();
         assert_eq!(
             runs,
             [(3, 0..2), (0, 2..5)],
@@ -1290,26 +1360,66 @@ mod tests {
         let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
 
         prepare_live(&device, &queue, &mut pass, &grid, &[], &[]);
-        pass.prepare_composite(
-            &device,
-            &queue,
-            &grid,
-            PoolOccluders::new(&[], 0, false),
-            [TARGET as f32; 2],
-            0.0,
-            [0.0; 2],
-            true,
-            1,
-            0,
-        );
-        let rgba = render_rgba(&device, &queue, CLEARED, |render_pass| {
-            pass.draw_composite(render_pass, 1, 0)
-        });
-
         assert_eq!(
-            cell_centers(&rgba),
+            composite_cells(&device, &queue, &mut pass, &grid, None, true),
             vec![rgb(SKIP); CELLS * CELLS],
             "every composite cell paints its own color",
+        );
+    }
+
+    /// A composite that scrolled draws what one built from scratch draws, which
+    /// is its grid's own colors. It rotates the rows the scroll kept and writes
+    /// the ones the scroll exposed, down and up and across the end of its
+    /// buffer. A frame that keeps its rows draws them at the rotation they sit
+    /// at. A grid of another shape rebuilds whatever the scroll says, and so does
+    /// a change that moved nothing.
+    #[test]
+    fn a_scrolled_composite_matches_one_built_from_scratch() {
+        let (device, queue) = require_headless_device();
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+        // Four rows, so three down keeps one row, two more writes rows that wrap
+        // the end of the buffer, and three up writes the top three, wrapping
+        // again.
+        let steps = [
+            (document_rows(0, 4), None, true),
+            (document_rows(3, 4), Some(3), true),
+            (document_rows(5, 4), Some(2), true),
+            (document_rows(2, 4), Some(-3), true),
+            (document_rows(2, 4), Some(0), false),
+            (document_rows(9, 3), Some(1), true),
+            (document_rows(1, 3), Some(0), true),
+        ];
+
+        let (drawn, built): (Vec<_>, Vec<_>) = steps
+            .iter()
+            .map(|(grid, scrolled, changed)| {
+                (
+                    composite_cells(&device, &queue, &mut pass, grid, *scrolled, *changed),
+                    grid_cells(grid),
+                )
+            })
+            .unzip();
+        assert_eq!(drawn, built, "each step draws its grid's own colors");
+    }
+
+    /// A scroll writes only the rows it exposed. A kept row stays as the earlier
+    /// composite wrote it, so a kept row that changed without a word to the pass
+    /// still draws its earlier colors.
+    #[test]
+    fn a_scrolled_composite_writes_only_the_rows_it_exposed() {
+        let (device, queue) = require_headless_device();
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+        composite_cells(&device, &queue, &mut pass, &document_rows(0, 4), None, true);
+
+        // One row down keeps display rows 0 to 2 and exposes row 3.
+        let mut repainted = document_rows(1, 4);
+        for col in 0..CELLS {
+            repainted.get_mut(0, col).bg = OTHER;
+        }
+        assert_eq!(
+            composite_cells(&device, &queue, &mut pass, &repainted, Some(1), true),
+            grid_cells(&document_rows(1, 4)),
+            "the kept row draws what the first composite wrote",
         );
     }
 
@@ -1341,6 +1451,61 @@ mod tests {
             }
         }
         grid
+    }
+
+    /// A [`CELLS`]-wide grid of `rows` rows whose row `r` holds document row
+    /// `top + r`, each cell colored by its document row and its column.
+    fn document_rows(top: u8, rows: usize) -> Grid {
+        let mut grid = Grid::new(rows, CELLS);
+        for row in 0..rows {
+            for col in 0..CELLS {
+                grid.get_mut(row, col).bg = Rgb::new(20 * (top + row as u8), 40 * col as u8, 7);
+            }
+        }
+        grid
+    }
+
+    /// The cell colors `pass` draws for `grid` composited as pool 1, whose
+    /// content moved `scrolled` rows since its last composite and whose rows
+    /// `changed` or held.
+    fn composite_cells(
+        device: &Device,
+        queue: &Queue,
+        pass: &mut BackgroundPass,
+        grid: &Grid,
+        scrolled: Option<isize>,
+        changed: bool,
+    ) -> Vec<[u8; 3]> {
+        pass.prepare_composite(
+            device,
+            queue,
+            grid,
+            PoolOccluders::new(&[], 0, false),
+            [TARGET as f32; 2],
+            0.0,
+            [0.0; 2],
+            changed,
+            scrolled,
+            1,
+            0,
+        );
+        cell_centers(&render_rgba(device, queue, CLEARED, |render_pass| {
+            pass.draw_composite(render_pass, 1, 0)
+        }))
+    }
+
+    /// The colors [`cell_centers`] reads where `grid` covers the target, and the
+    /// clear everywhere else.
+    fn grid_cells(grid: &Grid) -> Vec<[u8; 3]> {
+        (0..CELLS * CELLS)
+            .map(|cell| {
+                let (row, col) = (cell / CELLS, cell % CELLS);
+                match row < grid.rows() && col < grid.cols() {
+                    true => rgb(grid.get(row, col).bg),
+                    false => rgb(CLEARED),
+                }
+            })
+            .collect()
     }
 
     /// Upload `grid` as a whole live frame that skips [`SKIP`], with the cursor

@@ -595,6 +595,24 @@ pub(crate) fn rotate_row_cache<T>(cache: &mut [Vec<T>], by: isize, mut repair: i
     }
 }
 
+/// Rows a composite has to build for itself after it slides its rows by `by`.
+///
+/// A slide keeps the rows it moved and empties the ones it carried past the end,
+/// and those emptied rows are what is left to build. `None` keeps nothing, and a
+/// slide of at least the row count carries everything past the end, so both
+/// leave every row to build.
+pub(crate) fn exposed_rows(by: Option<isize>, rows: usize) -> Range<usize> {
+    let Some(by) = by else {
+        return 0..rows;
+    };
+    let vacated = by.unsigned_abs().min(rows);
+    if by > 0 {
+        rows - vacated..rows
+    } else {
+        0..vacated
+    }
+}
+
 /// The writes that carry a frame's changed rows into a per-row instance buffer,
 /// each an instance offset and the rows to send there.
 ///
@@ -947,9 +965,9 @@ pub(crate) fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> (usize
 #[cfg(test)]
 mod tests {
     use super::{
-        build_occluders_into, globals_offset, globals_upload_needed, grid_dims, grid_size,
-        pool_occluders_into, rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics,
-        CompositeSlots, Occluder, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        build_occluders_into, exposed_rows, globals_offset, globals_upload_needed, grid_dims,
+        grid_size, pool_occluders_into, rotate_row_cache, row_runs, row_uploads, upload_needed,
+        CellMetrics, CompositeSlots, Occluder, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
         MAX_COMPOSITE_POOLS,
     };
 
@@ -1713,5 +1731,44 @@ mod tests {
             (15.0, 9.0, 18.0),
             "the same 15 logical points at 1x render half the pixels"
         );
+    }
+
+    /// Which rows a slide leaves for a composite to build.
+    ///
+    /// The text and background passes each compare a scrolled composite with
+    /// one built from scratch, which needs a device. This is the same arithmetic
+    /// with the device taken out of it, and it is where the off-by-one lives.
+    /// Naming one row too few leaves a stale row on screen, and one too many
+    /// gives back the saving.
+    #[test]
+    fn a_slide_leaves_the_rows_it_carried_past_the_end() {
+        assert_eq!(
+            exposed_rows(Some(1), 5),
+            4..5,
+            "one row down exposes the last"
+        );
+        assert_eq!(exposed_rows(Some(3), 5), 2..5, "three down exposes three");
+        assert_eq!(
+            exposed_rows(Some(-1), 5),
+            0..1,
+            "one row up exposes the first"
+        );
+        assert_eq!(exposed_rows(Some(-3), 5), 0..3, "three up exposes three");
+
+        assert_eq!(
+            exposed_rows(Some(5), 5),
+            0..5,
+            "a slide of the whole height keeps nothing",
+        );
+        assert_eq!(
+            exposed_rows(Some(9), 5),
+            0..5,
+            "and neither does a longer one",
+        );
+        assert_eq!(exposed_rows(Some(-9), 5), 0..5, "in either direction",);
+
+        assert_eq!(exposed_rows(None, 5), 0..5, "no slide builds every row");
+        assert_eq!(exposed_rows(None, 0), 0..0, "an empty grid builds nothing");
+        assert_eq!(exposed_rows(Some(1), 0), 0..0, "nor does sliding one");
     }
 }
