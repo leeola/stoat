@@ -363,13 +363,13 @@ fn head_of(root: &Path) -> String {
     }
 }
 
-/// A frame width at which a step's status message shows whole.
+/// A frame width at which a status message shows whole.
 ///
-/// The drift fixture's unstaged edits give the status bar a repo segment, and
-/// the message gets only the width that segment, the workspace name, and the
-/// server badges leave. At 80 columns, how much of the message survives changes
-/// from run to run. The workspace name is random, and the segment changes width
-/// when the stop's diff lands, sometimes only after the message expires.
+/// The message gets only the width that the other status bar segments and the
+/// tour badge leave. At 80 columns, how much of it survives changes from run to
+/// run. The workspace name is random. A language server's diagnostic counts and
+/// a drifted fixture's repo segment come and go on their own schedule, and
+/// either sometimes stays until after the message expires.
 const WIDE_COLS: u16 = 200;
 
 /// Drift is only ever reported against what is on screen, so the status line
@@ -500,7 +500,8 @@ const TRAIL_SETTLE_BOUNCES: usize = 40;
 /// screen.
 #[test]
 fn walkthrough_trail_fixture_lays_a_trail_between_calling_stops() {
-    let (_dir, _root, mut harness) = fixture_harness("walkthrough-trail");
+    let (_dir, _root, harness) = fixture_harness("walkthrough-trail");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     harness.run(|mut handle| async move {
         handle
             .send_keys(":walkthrough tour<Enter>")
@@ -575,7 +576,8 @@ fn walkthrough_trail_fixture_lays_a_trail_between_calling_stops() {
 /// message a step reports says which tour is playing without moving anything.
 #[test]
 fn walkthrough_catalog_fixture_swaps_tours_mid_play() {
-    let (_dir, _root, mut harness) = fixture_harness("walkthrough-catalog");
+    let (_dir, _root, harness) = fixture_harness("walkthrough-catalog");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     harness.run(|mut handle| async move {
         handle
             .send_keys(":walkthrough tour<Enter>")

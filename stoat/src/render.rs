@@ -356,6 +356,10 @@ pub(crate) struct FrameCtx<'a> {
     /// status bar sits on that freed row flush against the band reclaims its
     /// width and runs edge to edge.
     pub(crate) minimap_band: Option<Rect>,
+    /// The span of the window's bottom row under a bottom-right badge's box,
+    /// from [`badges::bottom_right_cover`]. A status bar on that row keeps its
+    /// segments left of it, since the box paints over the bar.
+    pub(crate) badge_cover: Option<Rect>,
     /// Terminal cell the mouse last rested over, or `None` when it has not
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
@@ -629,6 +633,13 @@ pub(crate) fn frame(
 
     ws.layout(size);
 
+    // Synced ahead of the panes, because the bottom status rows lay their
+    // segments out around the badges' boxes before the badges paint.
+    badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
+    badges::sync_trail_badge(&mut ws.badges, ws.trail.as_ref());
+    badges::sync_walkthrough_badge(&mut ws.badges, ws.walkthrough.as_ref());
+    let badge_cover = badges::bottom_right_cover(&ws.badges, &stoat.badges, size);
+
     let screen = crate::keymap_state::view_predicate(ws);
 
     let overlay_pane = if matches!(
@@ -733,6 +744,7 @@ pub(crate) fn frame(
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         minimap_band: single_minimap_rect,
+        badge_cover,
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
         #[cfg(feature = "perf")]
@@ -950,9 +962,6 @@ pub(crate) fn frame(
         .1;
     let mode = stoat.frame_mode.as_str();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
-    badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
-    badges::sync_trail_badge(&mut ws.badges, ws.trail.as_ref());
-    badges::sync_walkthrough_badge(&mut ws.badges, ws.walkthrough.as_ref());
     badges::render_badges(
         &ws.badges,
         &stoat.badges,

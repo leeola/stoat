@@ -21,7 +21,10 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Pane, View},
     render::{
-        editor::editor_cursor_position, pane::pane_areas, undercurl::UndercurlBatch, FrameCtx,
+        editor::editor_cursor_position,
+        pane::{pane_areas, status_segments_area},
+        undercurl::UndercurlBatch,
+        FrameCtx,
     },
 };
 use ratatui::{
@@ -70,6 +73,10 @@ pub(crate) struct PaneCacheKey {
     /// single-minimap band. A layout change can move this without moving the
     /// pane's own rect.
     pub(crate) status_widened: bool,
+    /// How much of the status row its segments hold, which a bottom-right
+    /// badge over the row shortens. A badge that comes or goes moves nothing
+    /// else here.
+    pub(crate) status_segments_width: u16,
     /// The theme and the search query, neither of which passes through a
     /// display layer.
     pub(crate) paint_generation: u64,
@@ -265,6 +272,7 @@ pub(crate) fn pane_cache_key(
         area: pane.area,
         pane_index: pane.index as usize,
         status_widened: status.width > pane.area.width,
+        status_segments_width: status_segments_area(status, frame.badge_cover).width,
         paint_generation,
         inactive_dim_bits: frame.inactive_dim.to_bits(),
         line_numbers: frame.line_numbers,
@@ -312,6 +320,7 @@ mod tests {
             area: Rect::new(0, 0, 40, 10),
             pane_index: 0,
             status_widened: false,
+            status_segments_width: 40,
             paint_generation: 0,
             inactive_dim_bits: 0,
             line_numbers: LineNumbers::Off,
@@ -333,7 +342,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 16] = [
+        let moved: [(&str, PaneCacheKey); 17] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -380,6 +389,13 @@ mod tests {
                 "status_widened",
                 PaneCacheKey {
                     status_widened: true,
+                    ..base
+                },
+            ),
+            (
+                "status_segments_width",
+                PaneCacheKey {
+                    status_segments_width: 29,
                     ..base
                 },
             ),

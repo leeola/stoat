@@ -5,6 +5,7 @@ use crate::{
     apc_emit::{
         display_map_stamp, editor_page_content_version, osc_default_colors, window_content_version,
     },
+    badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
     display_map::{DisplayPoint, PaintVersion},
     host::FsEventKind,
@@ -3079,7 +3080,7 @@ fn async_session_restore_installs_into_a_fresh_workspace() {
         h.stoat
             .active_workspace()
             .badges
-            .find_by_source(crate::badge::BadgeSource::SessionRestore)
+            .find_by_source(BadgeSource::SessionRestore)
             .is_none(),
         "the restoring-session badge clears after the restore installs"
     );
@@ -3124,7 +3125,7 @@ fn async_session_restore_drops_when_the_target_was_edited() {
         h.stoat
             .active_workspace()
             .badges
-            .find_by_source(crate::badge::BadgeSource::SessionRestore)
+            .find_by_source(BadgeSource::SessionRestore)
             .is_none(),
         "the badge clears even when the restore is dropped"
     );
@@ -4620,6 +4621,45 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
     assert_eq!(replayed.0, repainted.0, "the cells match");
     assert_eq!(replayed.1, repainted.1, "the scene bytes match");
     assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+}
+
+/// A badge raised over an unfocused pane's status row moves that row's
+/// segments out from under the box, so the pane repaints rather than
+/// replaying a row whose segments the box now covers.
+#[test]
+fn a_badge_over_an_unfocused_status_row_repaints_it() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    h.type_action("FocusLeft()");
+    let _ = h.stoat.render();
+
+    let painted_before = h.stoat.pane_paints;
+    let _ = h.stoat.render();
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        1,
+        "with nothing moved, the unfocused right pane replays",
+    );
+
+    h.stoat.active_workspace_mut().badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: BadgeAnchor::BottomRight,
+        state: BadgeState::Complete,
+        label: "reviewing 1/3".to_owned(),
+        detail: None,
+    });
+    let painted_before = h.stoat.pane_paints;
+    let raised = frame_output(&mut h);
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        2,
+        "the badge over its status row repaints the unfocused pane",
+    );
+
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(raised.0, repainted.0, "the cells match");
+    assert_eq!(raised.1, repainted.1, "the scene bytes match");
 }
 
 /// A frame driven by background activity alone paints only the focused
@@ -6321,7 +6361,7 @@ fn a_stale_user_binding_falls_back_to_the_default() {
 
     let id = stoat
         .badges
-        .find_by_source(crate::badge::BadgeSource::ConfigActions)
+        .find_by_source(BadgeSource::ConfigActions)
         .expect("the badge still names the stale binding");
     assert_eq!(
         stoat.badges.get(id).expect("badge").label,
@@ -6432,7 +6472,7 @@ fn a_startup_config_binding_an_unknown_action_raises_a_badge() {
 
     let id = stoat
         .badges
-        .find_by_source(crate::badge::BadgeSource::ConfigActions)
+        .find_by_source(BadgeSource::ConfigActions)
         .expect("a stale binding raises a badge");
     assert_eq!(
         stoat.badges.get(id).expect("badge").label,
@@ -6459,7 +6499,7 @@ fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
     );
     let id = stoat
         .badges
-        .find_by_source(crate::badge::BadgeSource::ConfigActions)
+        .find_by_source(BadgeSource::ConfigActions)
         .expect("a stale binding raises a badge");
     assert_eq!(
         stoat.badges.get(id).expect("badge").label,
@@ -6468,9 +6508,7 @@ fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
 
     stoat.reload_user_config(DEFAULT_KEYMAP);
     assert_eq!(
-        stoat
-            .badges
-            .find_by_source(crate::badge::BadgeSource::ConfigActions),
+        stoat.badges.find_by_source(BadgeSource::ConfigActions),
         None,
         "a repaired config retires the badge",
     );

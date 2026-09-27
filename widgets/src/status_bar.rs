@@ -70,12 +70,29 @@ impl StatusBar<'_> {
     /// The caller passes the on-screen status [`Rect`]. [`TextRun`] and [`Bar`]
     /// offset by the area, so positions here are area-relative sixteenths.
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
-        let limit = cells::span_sixteenths(area.width);
+        self.draw_components_within(area, area.width, buf, scene);
+    }
+
+    /// Draw the bar across `area` with its segments inside the row's first
+    /// `segments_width` cells.
+    ///
+    /// The hairline still runs the whole row. The cells past `segments_width`
+    /// belong to something drawn over the bar, such as a badge box, and a
+    /// segment placed there sits under it. A width past the row's counts as
+    /// the row's.
+    pub fn draw_components_within(
+        &self,
+        area: Rect,
+        segments_width: u16,
+        buf: &mut Buffer,
+        scene: &mut ApcScene,
+    ) {
+        let limit = cells::span_sixteenths(segments_width.min(area.width));
 
         Bar {
             x: 0,
             y: 0,
-            width: limit,
+            width: cells::span_sixteenths(area.width),
             height: 1,
             color: self.separator,
         }
@@ -324,6 +341,97 @@ mod tests {
         assert!(
             contains(scene.buffer(), &run),
             "right box-less run at width*16 - advance"
+        );
+    }
+
+    /// A badge over the bar's right end owns the cells under it, so the right
+    /// run ends where the badge starts while the hairline still runs the row.
+    #[test]
+    fn right_segments_anchor_at_the_given_width() {
+        let right = [StatusSegment {
+            text: "xy",
+            fg: [1, 2, 3],
+            bg: [4, 5, 6],
+        }];
+        let status = StatusBar {
+            left: &[],
+            right: &right,
+            scale: 160,
+            separator: [60, 66, 77],
+            bg: [0, 0, 0],
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        status.draw_components_within(area, 8, &mut buf, &mut scene);
+
+        // The hairline spans 20 * 16 = 320. The segments end at 8 * 16 = 128,
+        // and advance("xy") = 20 starts the run at 108.
+        let hairline = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 1,
+            color: [60, 66, 77],
+        });
+        let run = encode_text_run(&TextRunCommand {
+            col: 108,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: None,
+            follow: 0,
+            anchor: None,
+            text: "xy".to_owned(),
+        });
+        assert!(
+            contains(scene.buffer(), &hairline),
+            "the hairline spans the whole row"
+        );
+        assert!(
+            contains(scene.buffer(), &run),
+            "the right run ends at the segments width"
+        );
+    }
+
+    /// The left run stops where the badge starts too, rather than at the row's
+    /// end under the badge.
+    #[test]
+    fn the_left_run_stops_at_the_given_width() {
+        let left = [StatusSegment {
+            text: "ABCDEFGHIJKLMN",
+            fg: [1, 2, 3],
+            bg: [4, 5, 6],
+        }];
+        let status = StatusBar {
+            left: &left,
+            right: &[],
+            scale: 160,
+            separator: [60, 66, 77],
+            bg: [0, 0, 0],
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        status.draw_components_within(area, 8, &mut buf, &mut scene);
+
+        // 8 * 16 = 128 sixteenths fit 12 glyphs at 10 each, so the run is cut
+        // there. The row's 320 holds all 14.
+        let cut = encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: None,
+            follow: 0,
+            anchor: None,
+            text: "ABCDEFGHIJKL".to_owned(),
+        });
+        assert!(
+            contains(scene.buffer(), &cut),
+            "the left run is cut at the segments width"
         );
     }
 

@@ -1,5 +1,9 @@
 use super::*;
-use crate::{action_handlers::movement, debounce};
+use crate::{
+    action_handlers::movement,
+    badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
+    debounce,
+};
 
 /// The rich review gutter engages only when every color resolves to RGB, so
 /// tests need a hex theme. The default theme uses named colors.
@@ -595,6 +599,97 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
         cmds.iter()
             .any(|c| matches!(c, Command::Bar(b) if b.height == 1)),
         "the status hairline emits as a one-sixteenth bar, got {cmds:?}"
+    );
+}
+
+/// A bottom-right badge's panel covers the status row's right end, so the
+/// rich bar's right segments end where the badge starts. The cursor position
+/// is the rightmost of them, and a run past that edge is one the panel hides.
+///
+/// A frame before the badge rises records the bar's encoded frame. The badge
+/// changes nothing else the bar draws from, so that record has to miss.
+#[test]
+fn rich_status_segments_end_where_a_corner_badge_starts() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
+
+    let root = PathBuf::from("/status");
+    let path = root.join("a.txt");
+    h.fake_fs().insert_file(&path, b"alpha\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+    drain_apc(&mut rx);
+
+    h.stoat.active_workspace_mut().badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: BadgeAnchor::BottomRight,
+        state: BadgeState::Complete,
+        label: "reviewing 1/3".to_owned(),
+        detail: None,
+    });
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+
+    // The 15-wide box sits one column in from the right edge of 80, so it
+    // starts at column 64. A glyph advances one cell under test.
+    let cmds = drain_apc(&mut rx);
+    let cursor_end = cmds.iter().find_map(|c| match c {
+        Command::TextRun(t) if t.text == " 1:1 " => Some(t.col + 16 * t.text.len() as i16),
+        _ => None,
+    });
+    assert_eq!(
+        cursor_end,
+        Some(64 * 16),
+        "the cursor position ends at the badge's left edge, got {cmds:?}"
+    );
+}
+
+/// The overlay screens' status row keeps its message clear of a bottom-right
+/// badge the same way a pane's row does.
+#[test]
+fn overlay_status_message_ends_where_a_corner_badge_starts() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+        PathBuf::from("/overlay"),
+        "onto".into(),
+        vec![],
+    ));
+    h.stoat.set_status("no stops");
+    h.stoat.active_workspace_mut().badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: BadgeAnchor::BottomRight,
+        state: BadgeState::Complete,
+        label: "reviewing 1/3".to_owned(),
+        detail: None,
+    });
+
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+
+    // The 15-wide box starts at column 64 of 80.
+    let cmds = drain_apc(&mut rx);
+    let message_end = cmds.iter().find_map(|c| match c {
+        Command::TextRun(t) if t.text == "no stops" => Some(t.col + 16 * t.text.len() as i16),
+        _ => None,
+    });
+    assert_eq!(
+        message_end,
+        Some(64 * 16),
+        "the message ends at the badge's left edge, got {cmds:?}"
     );
 }
 

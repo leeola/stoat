@@ -402,7 +402,8 @@ pub(crate) fn render_overlay_status(
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
-    let left = overlay_status_segments(is_focused, area, frame);
+    let segments = status_segments_area(area, frame.badge_cover);
+    let left = overlay_status_segments(is_focused, segments, frame);
     let mut right: Vec<StatusSeg> = Vec::new();
     if let Some(message) = frame.status_message {
         right.push((
@@ -410,7 +411,9 @@ pub(crate) fn render_overlay_status(
             status_message_style(base_style, frame.theme),
         ));
     }
-    render_status_segments(area, base_style, frame, &left, &right, buf, scene, None);
+    render_status_segments(
+        area, segments, base_style, frame, &left, &right, buf, scene, None,
+    );
 }
 
 /// Build the overlay status bar's left segments in paint order.
@@ -520,14 +523,39 @@ fn render_pane_status(
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
-    let (left, right) =
-        status_segments(view, is_focused, area, frame, editors, buffers, badge_rect);
+    let segments = status_segments_area(area, frame.badge_cover);
+    let (left, right) = status_segments(
+        view, is_focused, segments, frame, editors, buffers, badge_rect,
+    );
 
     let cache = match view {
         View::Editor(id) => editors.get_mut(*id).map(|e| &mut e.status_scene_cache),
         _ => None,
     };
-    render_status_segments(area, base_style, frame, &left, &right, buf, scene, cache);
+    render_status_segments(
+        area, segments, base_style, frame, &left, &right, buf, scene, cache,
+    );
+}
+
+/// The part of status row `row` that holds its segments, left of any badge
+/// box that paints over the row.
+///
+/// A bottom-right badge draws the lower edge of its box on the window's last
+/// row. A segment under the box is painted over, so the segments end where
+/// the box starts. When the box starts left of the row, the row holds no
+/// segments. The row's background and hairline still run the whole width.
+///
+/// Shared with the replay cache, whose key carries the width so a badge that
+/// comes or goes repaints the row.
+pub(crate) fn status_segments_area(row: Rect, cover: Option<Rect>) -> Rect {
+    let end = row.x + row.width;
+    match cover {
+        Some(cover) if cover.y == row.y && cover.x < end && cover.x + cover.width > row.x => Rect {
+            width: cover.x.saturating_sub(row.x),
+            ..row
+        },
+        _ => row,
+    }
 }
 
 /// Everything a detached pane's status bar draws, assembled but not yet
@@ -625,13 +653,17 @@ pub(crate) struct StatusSceneCache {
 /// any color outside RGB drops the whole bar to the cell fallback, so a foreign
 /// terminal and a theme without RGB status colors both keep the cell rendering.
 ///
-/// With a `cache`, a repaint whose segments, rect, and colors all hold splices
+/// The segments go inside `segments`, the part of the row `area` that
+/// [`status_segments_area`] leaves them, while the hairline runs all of `area`.
+///
+/// With a `cache`, a repaint whose segments, rects, and colors all hold splices
 /// the recorded frame. Splicing is only sound because
-/// [`StatusBar::draw_components`] reads nothing outside those, and writes
-/// nothing but the scene, so a skipped encode leaves no cell unpainted.
+/// [`StatusBar::draw_components_within`] reads nothing outside those, and
+/// writes nothing but the scene, so a skipped encode leaves no cell unpainted.
 #[allow(clippy::too_many_arguments)]
 fn render_status_segments(
     area: Rect,
+    segments: Rect,
     base_style: Style,
     frame: FrameCtx<'_>,
     left: &[StatusSeg],
@@ -648,11 +680,18 @@ fn render_status_segments(
     })();
 
     let Some((separator, base_bg)) = colors else {
-        paint_status_fallback(buf, area, left, right);
+        paint_status_fallback(buf, segments, left, right);
         return;
     };
 
-    let key = status_scene_key(area, base_style, left, right, (separator, base_bg));
+    let key = status_scene_key(
+        area,
+        segments.width,
+        base_style,
+        left,
+        right,
+        (separator, base_bg),
+    );
 
     if let Some(cache) = &cache
         && cache.key == Some(key)
@@ -665,7 +704,7 @@ fn render_status_segments(
         resolve_rich_segments(left, base_style).zip(resolve_rich_segments(right, base_style));
 
     let Some((left_rich, right_rich)) = rich else {
-        paint_status_fallback(buf, area, left, right);
+        paint_status_fallback(buf, segments, left, right);
         return;
     };
 
@@ -677,7 +716,7 @@ fn render_status_segments(
         separator,
         bg: base_bg,
     }
-    .draw_components(area, buf, scene);
+    .draw_components_within(area, segments.width, buf, scene);
 
     if let Some(cache) = cache {
         cache.bytes.clear();
@@ -694,6 +733,7 @@ fn render_status_segments(
 /// function of the pair hashed here.
 fn status_scene_key(
     area: Rect,
+    segments_width: u16,
     base_style: Style,
     left: &[StatusSeg],
     right: &[StatusSeg],
@@ -701,6 +741,7 @@ fn status_scene_key(
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (area.x, area.y, area.width, area.height).hash(&mut hasher);
+    segments_width.hash(&mut hasher);
     base_style.hash(&mut hasher);
     left.hash(&mut hasher);
     right.hash(&mut hasher);
@@ -743,7 +784,7 @@ pub(crate) fn render_tab_bar(
         })
         .collect();
 
-    render_status_segments(area, inactive, frame, &left, &[], buf, scene, None);
+    render_status_segments(area, area, inactive, frame, &left, &[], buf, scene, None);
 }
 
 /// One built status-bar segment pairing painted text with its cell style.
@@ -1475,6 +1516,7 @@ mod tests {
     use super::{diff_base_lead, focused_staged_label, status_filename};
     use crate::{
         action_handlers::dispatch,
+        agent_status::{AgentHookEvent, AgentStatus},
         buffer::{BufferId, TextBuffer},
         editor_state::EditorState,
         host::LspNotification,
@@ -2224,6 +2266,78 @@ mod tests {
             reverse.contains("?b"),
             "a reverse search prompts with its own sigil:\n{reverse}",
         );
+    }
+
+    /// A bottom-right badge draws the lower edge of its box on the status row,
+    /// and whatever the bar put under the box is painted over. A message loses
+    /// its end there, and the cursor position goes entirely.
+    ///
+    /// The agent badge is derived from the agent status as each frame starts,
+    /// so the first frame with it up has to clear the row already. One frame
+    /// is rendered for that reason.
+    ///
+    /// The check runs for the rich bar under stoatty and for the cell fallback
+    /// that a foreign terminal gets.
+    #[test]
+    fn the_right_segments_end_where_a_corner_badge_starts() {
+        for stoatty in [true, false] {
+            let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+            h.stoat.stoatty = stoatty;
+            h.seed_focused_buffer("hello");
+            h.snapshot();
+            h.stoat.set_status("walkthrough 'empty' has no stops");
+            let mut status = AgentStatus::new();
+            status.apply(AgentHookEvent::PreToolUse {
+                tool: "Bash".into(),
+            });
+            h.stoat.active_workspace_mut().agent = Some(status);
+
+            let buf = h.render_composited();
+
+            // The "claude: Bash" box is 14 wide and sits one column in from
+            // the right edge, so it starts at column 85.
+            let row = buf.area.height - 1;
+            let expected = "walkthrough 'empty' has no stops 1:1 ";
+            let start = 85 - expected.chars().count() as u16;
+            let beside_the_box: String = (start..85)
+                .map(|x| buf[(x, row)].symbol())
+                .collect::<String>()
+                .replace('─', " ");
+            assert_eq!(beside_the_box, expected, "stoatty {stoatty}");
+        }
+    }
+
+    /// A message longer than the room left of the badge is cut to that room.
+    /// Cut to the room the whole row gives, it runs back over the mode and
+    /// workspace segments in the cells, and the rich bar drops it for the
+    /// overlap.
+    #[test]
+    fn a_long_message_is_cut_where_the_badge_starts() {
+        for stoatty in [true, false] {
+            let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+            h.stoat.stoatty = stoatty;
+            h.seed_focused_buffer("hello");
+            h.snapshot();
+            h.stoat.set_status("walkthrough 'empty' has no stops");
+            let mut status = AgentStatus::new();
+            status.apply(AgentHookEvent::PreToolUse {
+                tool: "Bash".into(),
+            });
+            h.stoat.active_workspace_mut().agent = Some(status);
+
+            let buf = h.render_composited();
+
+            // The 14-wide box starts at column 45 of 60.
+            let row = buf.area.height - 1;
+            let left_of_the_box: String = (0..45)
+                .map(|x| buf[(x, row)].symbol())
+                .collect::<String>()
+                .replace('─', " ");
+            assert_eq!(
+                left_of_the_box, " NOR  (unnamed) [scratch] [+] walkthroug 1:1 ",
+                "stoatty {stoatty}",
+            );
+        }
     }
 
     #[test]

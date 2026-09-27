@@ -316,6 +316,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         minimap_enabled: false,
         minimap_chrome: None,
         minimap_band: None,
+        badge_cover: None,
         hover_cell: None,
         home: stoat.home.as_deref(),
         #[cfg(feature = "perf")]

@@ -26,73 +26,112 @@ pub(crate) fn render_badges(
     }
 
     for anchor in Anchor::ALL {
-        let tray = workspace.tray(anchor);
-        let visible: Vec<&Badge> = workspace
-            .at_anchor(anchor)
-            .chain(global.at_anchor(anchor))
-            .map(|(_, b)| b)
-            .take(tray.max_visible as usize)
-            .collect();
-        if visible.is_empty() {
-            continue;
-        }
-
-        let sizes: Vec<(u16, u16)> = visible.iter().map(|b| badge_size(b)).collect();
-        let (origin_x, origin_y) = anchor_origin(anchor, area);
-        let grows_left = matches!(
-            anchor,
-            Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight
-        );
-        let grows_up = matches!(
-            anchor,
-            Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight
-        );
-        let centered = matches!(anchor, Anchor::TopCenter | Anchor::BottomCenter);
-
-        let (mut cx, mut cy) = (origin_x, origin_y);
-
-        if centered && tray.stack == StackDirection::Horizontal {
-            let total_w: u16 =
-                sizes.iter().map(|(w, _)| w).sum::<u16>() + sizes.len().saturating_sub(1) as u16;
-            cx = origin_x.saturating_sub(total_w / 2);
-        }
-
-        for (i, badge) in visible.iter().enumerate() {
-            let (bw, bh) = sizes[i];
-
-            let draw_x = if grows_left {
-                cx.saturating_sub(bw)
-            } else if centered && tray.stack == StackDirection::Vertical {
-                cx.saturating_sub(bw / 2)
-            } else {
-                cx
-            };
-            let draw_y = if grows_up {
-                cy.saturating_sub(bh - 1)
-            } else {
-                cy
-            };
-
-            render_single_badge(badge, draw_x, draw_y, render_tick, theme, buf, scene);
-
-            match tray.stack {
-                StackDirection::Horizontal => {
-                    if grows_left {
-                        cx = cx.saturating_sub(bw + 1);
-                    } else {
-                        cx += bw + 1;
-                    }
-                },
-                StackDirection::Vertical => {
-                    if grows_up {
-                        cy = cy.saturating_sub(bh);
-                    } else {
-                        cy += bh;
-                    }
-                },
-            }
+        for (badge, rect) in placements(workspace, global, anchor, area) {
+            render_single_badge(badge, rect.x, rect.y, render_tick, theme, buf, scene);
         }
     }
+}
+
+/// The columns the bottom-right badges cover on `area`'s bottom row, as a
+/// one-row rect.
+///
+/// A bottom-right badge draws the lower edge of its box on the window's last
+/// row, which is where the bottom panes draw their status bars. A status bar
+/// keeps its segments left of this span, since the box paints over whatever
+/// the bar put there. `None` when no badge reaches the row.
+pub(crate) fn bottom_right_cover(
+    workspace: &BadgeTray,
+    global: &BadgeTray,
+    area: Rect,
+) -> Option<Rect> {
+    let row = area.y + area.height.checked_sub(1)?;
+    placements(workspace, global, Anchor::BottomRight, area)
+        .into_iter()
+        .map(|(_, rect)| rect)
+        .filter(|rect| rect.y <= row && row < rect.y + rect.height)
+        .reduce(Rect::union)
+        .map(|rect| Rect {
+            y: row,
+            height: 1,
+            ..rect
+        })
+}
+
+/// Where each visible badge at `anchor` draws inside `area`, in paint order.
+///
+/// [`render_badges`] paints from this and [`bottom_right_cover`] measures from
+/// it, so the columns a status bar keeps clear are the ones the badges fill.
+fn placements<'t>(
+    workspace: &'t BadgeTray,
+    global: &'t BadgeTray,
+    anchor: Anchor,
+    area: Rect,
+) -> Vec<(&'t Badge, Rect)> {
+    let tray = workspace.tray(anchor);
+    let mut placed: Vec<(&Badge, Rect)> = workspace
+        .at_anchor(anchor)
+        .chain(global.at_anchor(anchor))
+        .take(tray.max_visible as usize)
+        .map(|(_, badge)| {
+            let (width, height) = badge_size(badge);
+            (badge, Rect::new(0, 0, width, height))
+        })
+        .collect();
+
+    let (origin_x, origin_y) = anchor_origin(anchor, area);
+    let grows_left = matches!(
+        anchor,
+        Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight
+    );
+    let grows_up = matches!(
+        anchor,
+        Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight
+    );
+    let centered = matches!(anchor, Anchor::TopCenter | Anchor::BottomCenter);
+
+    let (mut cx, mut cy) = (origin_x, origin_y);
+
+    if centered && tray.stack == StackDirection::Horizontal {
+        let total_w: u16 = placed.iter().map(|(_, rect)| rect.width).sum::<u16>()
+            + placed.len().saturating_sub(1) as u16;
+        cx = origin_x.saturating_sub(total_w / 2);
+    }
+
+    for (_, rect) in &mut placed {
+        let (bw, bh) = (rect.width, rect.height);
+
+        rect.x = if grows_left {
+            cx.saturating_sub(bw)
+        } else if centered && tray.stack == StackDirection::Vertical {
+            cx.saturating_sub(bw / 2)
+        } else {
+            cx
+        };
+        rect.y = if grows_up {
+            cy.saturating_sub(bh - 1)
+        } else {
+            cy
+        };
+
+        match tray.stack {
+            StackDirection::Horizontal => {
+                if grows_left {
+                    cx = cx.saturating_sub(bw + 1);
+                } else {
+                    cx += bw + 1;
+                }
+            },
+            StackDirection::Vertical => {
+                if grows_up {
+                    cy = cy.saturating_sub(bh);
+                } else {
+                    cy += bh;
+                }
+            },
+        }
+    }
+
+    placed
 }
 
 /// Reflect the live [`AgentStatus`] into `tray` under [`BadgeSource::Agent`],
@@ -156,8 +195,8 @@ fn render_single_badge(
         // badges.
         //
         // The panel's seq occludes lower-seq main-pass runs and bars inside the
-        // rect, so a rich status bar's scaled text no longer draws through the
-        // badge's bottom row where the two overlap. That is accepted.
+        // rect. A status bar keeps its segments out of the badge's bottom row
+        // (see bottom_right_cover), so only its hairline runs under the panel.
         Some(border) => {
             Panel {
                 style: BorderStyle::Rounded,
@@ -476,6 +515,80 @@ mod tests {
             fallback.cell((0, 0)).unwrap().symbol(),
             "⣰",
             "and over the glyph corner it replaces"
+        );
+    }
+
+    fn corner_badge(label: &str) -> Badge {
+        Badge {
+            source: BadgeSource::Walkthrough,
+            anchor: Anchor::BottomRight,
+            state: BadgeState::Complete,
+            label: label.to_owned(),
+            detail: None,
+        }
+    }
+
+    /// A status bar clear of the cover has to be clear of the box itself, so
+    /// the cover is checked against the cells the box paints.
+    #[test]
+    fn the_cover_is_the_row_a_corner_badge_paints() {
+        let mut tray = BadgeTray::new();
+        tray.insert(corner_badge("tour 1/6"));
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_live(false);
+
+        render_badges(
+            &tray,
+            &BadgeTray::new(),
+            area,
+            0,
+            &rgb_badge_theme(),
+            &mut buf,
+            &mut scene,
+        );
+
+        let painted: Vec<u16> = (0..80).filter(|&x| buf[(x, 23)].symbol() != " ").collect();
+        assert_eq!(
+            bottom_right_cover(&tray, &BadgeTray::new(), area),
+            Some(Rect::new(69, 23, 10, 1)),
+            "a 10-wide box one column in from the right edge"
+        );
+        assert_eq!(painted, (69..79).collect::<Vec<_>>());
+    }
+
+    /// The tray stacks bottom-right badges upward, so only the lowest one's box
+    /// reaches the bottom row.
+    #[test]
+    fn only_the_lowest_stacked_badge_covers_the_bottom_row() {
+        let mut tray = BadgeTray::new();
+        tray.insert(corner_badge("ab"));
+        tray.insert(corner_badge("a longer label"));
+
+        let cover = bottom_right_cover(&tray, &BadgeTray::new(), Rect::new(0, 0, 80, 24));
+
+        assert_eq!(cover, Some(Rect::new(75, 23, 4, 1)));
+    }
+
+    #[test]
+    fn no_bottom_right_badge_covers_nothing() {
+        let mut tray = BadgeTray::new();
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            bottom_right_cover(&tray, &BadgeTray::new(), area),
+            None,
+            "an empty tray"
+        );
+
+        tray.insert(Badge {
+            anchor: Anchor::TopRight,
+            ..corner_badge("ab")
+        });
+        assert_eq!(
+            bottom_right_cover(&tray, &BadgeTray::new(), area),
+            None,
+            "a badge at another anchor"
         );
     }
 }
