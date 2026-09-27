@@ -19253,12 +19253,13 @@ mod tests {
         assert_ne!(
             base,
             lit(6),
-            "a walkthrough spotlight refills buffered pages"
+            "a walkthrough spotlight coming on refills buffered pages"
         );
-        assert_ne!(
+        assert_eq!(
             lit(6),
             lit(12),
-            "and so does the spotlight moving to another annotation"
+            "one moving to another annotation leaves the pool's version, since each \
+             page carries where it lights in its own"
         );
     }
 

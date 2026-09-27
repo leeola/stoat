@@ -20,7 +20,7 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionPopup,
     conflict_session::ConflictViewState,
-    display_map::{highlights::HighlightEndpoint, DisplaySnapshot},
+    display_map::{highlights::HighlightEndpoint, DisplayPoint, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
     render::{
@@ -324,12 +324,7 @@ fn light_page_range(
     snapshot: &DisplaySnapshot,
     spotlight: &Spotlight,
 ) {
-    let rope = snapshot.buffer_snapshot().rope();
-    let display = |offset: usize| snapshot.buffer_to_display(rope.offset_to_point(offset));
-    let (start, end) = (
-        display(*spotlight.range.start()),
-        display(*spotlight.range.end()),
-    );
+    let (start, end) = spotlight_display_span(snapshot, spotlight);
     let [r, g, b] = spotlight.color;
 
     let text_x = u32::from(area.x + gutter_w);
@@ -348,6 +343,22 @@ fn light_page_range(
             buf[(x as u16, y)].set_fg(Color::Rgb(r, g, b));
         }
     }
+}
+
+/// The display points of the first and last character `spotlight` lights.
+///
+/// A page lights the rows between the two, which is also what decides whether a
+/// spotlight move changes that page.
+pub(crate) fn spotlight_display_span(
+    snapshot: &DisplaySnapshot,
+    spotlight: &Spotlight,
+) -> (DisplayPoint, DisplayPoint) {
+    let rope = snapshot.buffer_snapshot().rope();
+    let display = |offset: usize| snapshot.buffer_to_display(rope.offset_to_point(offset));
+    (
+        display(*spotlight.range.start()),
+        display(*spotlight.range.end()),
+    )
 }
 
 /// The gutter inputs an off-run-loop editor page render needs to paint the

@@ -1021,8 +1021,10 @@ mod tests {
     use super::{sketch_corner_radius, Spotlight, EXIT_MS, SPOTLIGHT_DIM};
     use crate::{
         action_handlers::walkthrough::open,
-        app::Stoat,
+        apc_emit,
+        app::{self, Stoat},
         render::paint,
+        test_fixture::drain_apc,
         test_harness::TestHarness,
         theme::scope,
         walkthrough::{
@@ -1033,9 +1035,10 @@ mod tests {
     };
     use ratatui::style::Color;
     use std::{path::PathBuf, time::Duration};
+    use stoat_config::LineNumbers;
     use stoatty_protocol::command::{
-        self, Command, SketchCommand, SketchEnd, SketchPhase, SketchPoint, SketchShape,
-        SketchTiming,
+        self, Command, FillCommand, PoolRegionCommand, SketchCommand, SketchEnd, SketchPhase,
+        SketchPoint, SketchShape, SketchTiming, NON_PANE_POOL_BASE,
     };
 
     const CODE: &str = "fn one() {}\nfn two() {}\nfn three() {}\n";
@@ -1820,6 +1823,74 @@ mod tests {
             super::spotlight_of(&mut h.stoat),
             None,
             "and scrolled off the pane it lights neither",
+        );
+    }
+
+    /// A step between two annotations takes the spotlight off one page and puts
+    /// it on another, and changes nothing else a page paints. The emit that moves
+    /// the target refills those two pages and keeps the rest the terminal holds.
+    ///
+    /// Absolute numbers keep the cursor's landing out of the gutter, so the
+    /// spotlight is the only change.
+    #[test]
+    fn stepping_between_annotations_refills_only_the_pages_they_light() {
+        let filler: String = (4..=400).map(|n| format!("fn line_{n}() {{}}\n")).collect();
+        // Line 2 lies on page 0, and line 51 (row 50) on page 2 of any page 17
+        // to 25 rows tall.
+        let mut h = harness_over(&[(2, "near"), (51, "far")], &format!("{CODE}{filler}"));
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        open(&mut h.stoat, "tour");
+        // Stepped by key, so the view follows the cursor to each annotation the
+        // way it does for a reader.
+        h.type_keys("space W");
+        h.type_keys("a");
+        h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let height = drain_apc(&mut rx)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::PoolRegion(PoolRegionCommand { pool, height, .. })
+                    if pool < NON_PANE_POOL_BASE =>
+                {
+                    Some(u32::from(height))
+                },
+                _ => None,
+            })
+            .expect("the editor declares its pool");
+        assert!(
+            (2 * height..3 * height).contains(&50),
+            "row 50 lies on page 2 of a {height}-row page",
+        );
+
+        // The step's first emit holds, since its glide has not moved the target
+        // yet, and a held emit compares no page.
+        h.type_keys("a");
+        h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let _ = drain_apc(&mut rx);
+
+        app::tick_animation(&mut h.stoat, 0.016);
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let filled: Vec<u64> = drain_apc(&mut rx)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Fill(FillCommand { pool, index, .. }) if pool < NON_PANE_POOL_BASE => {
+                    Some(index)
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            filled,
+            vec![0, 2],
+            "only the pages the two annotations light refill",
         );
     }
 

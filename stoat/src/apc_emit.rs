@@ -15,7 +15,7 @@ use crate::{
     action_handlers::view,
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     commit_list::Preview,
-    display_map::{DisplaySnapshot, PaintVersion},
+    display_map::{DisplayPoint, DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, ScrollGlide},
     input_view::InputView,
     minimap::emit::minimap_view_window,
@@ -957,6 +957,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             theme_epoch,
             page_spotlight,
         );
+        // The spotlight recolors only the rows it lights, so where it falls is
+        // each page's own version. A diff-view page draws no spotlight.
+        let lit = page_spotlight
+            .filter(|_| !editor.diff_view)
+            .map(|spotlight| {
+                let snapshot = editor.display_map.snapshot();
+                (
+                    spotlight.color,
+                    crate::smooth_scroll::spotlight_display_span(&snapshot, spotlight),
+                )
+            });
         let Refill {
             entered,
             redecorated,
@@ -969,6 +980,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 cells: content_version,
                 decorations: decoration_version,
             },
+            |index| spotlight_page_version(lit, index, region.height),
             // Editor panes refill constantly at rest for the cursor line,
             // focus dim, and diagnostics, so they hold the window until the
             // glide starts.
@@ -2116,7 +2128,12 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// the gutter, a gutter-width or wrap-width change reflows the text, the
 /// cursor's buffer line moves under relative numbering, either of the diff
 /// view's dials moves, the theme changes every color on the page, or the
-/// walkthrough spotlight lights another annotation or goes out.
+/// walkthrough spotlight's dim comes on, goes out, or changes.
+///
+/// Where the spotlight lights is no part of this. It recolors only the rows it
+/// lights, so [`spotlight_page_version`] carries it in each page's own
+/// version, and a move between two annotations refills only the pages either
+/// one lights.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -2151,15 +2168,43 @@ pub(crate) fn editor_page_content_version(
     display_map_stamp(buffer_version, paint_version).hash(&mut hasher);
     theme_epoch.hash(&mut hasher);
     spotlight
-        .map(|spotlight| {
-            (
-                *spotlight.range.start(),
-                *spotlight.range.end(),
-                spotlight.color,
-                (spotlight.dim * 1000.0) as u32,
-            )
-        })
+        .map(|spotlight| (spotlight.dim * 1000.0) as u32)
         .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The cells version the walkthrough spotlight gives editor page `index` of a
+/// pool whose regions are `height` rows tall.
+///
+/// `lit` is the spotlight's color and display span. The version hashes the
+/// color with the part of the span the page holds, so a page the span misses
+/// answers 0, the same as a page with no spotlight at all.
+fn spotlight_page_version(
+    lit: Option<([u8; 3], (DisplayPoint, DisplayPoint))>,
+    index: u64,
+    height: u16,
+) -> u64 {
+    let Some((color, (start, end))) = lit else {
+        return 0;
+    };
+
+    let top_row = crate::smooth_scroll::page_top_row(index, height);
+    let page_end = top_row.saturating_add(u32::from(height));
+    if end.row < top_row || start.row >= page_end {
+        return 0;
+    }
+
+    let from = match start.row >= top_row {
+        true => (start.row, start.column),
+        false => (top_row, 0),
+    };
+    let to = match end.row < page_end {
+        true => (end.row, end.column),
+        false => (page_end, 0),
+    };
+
+    let mut hasher = DefaultHasher::new();
+    (color, from, to).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -5107,6 +5152,53 @@ mod tests {
             relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION),
             (Vec::new(), vec![0, 1, 2, 3, 4]),
             "the buffered pages keep their cells and take the new gutter runs"
+        );
+    }
+
+    /// A page's spotlight version covers only the part of the span on its own
+    /// rows. A move refills only the pages whose lit cells change, also when a
+    /// column moves on the first or last row of a page.
+    #[test]
+    fn a_spotlight_page_version_covers_only_its_own_rows() {
+        // Spans run [start row, start column, end row, end column] over 20-row
+        // pages, so row 19 ends page 0 and row 20 starts page 1.
+        let version = |span: [u32; 4], page: u64| {
+            let [start_row, start_column, end_row, end_column] = span;
+            let points = (
+                DisplayPoint::new(start_row, start_column),
+                DisplayPoint::new(end_row, end_column),
+            );
+            spotlight_page_version(Some(([1, 2, 3], points)), page, 20)
+        };
+        let refilled = |from: [u32; 4], to: [u32; 4]| -> Vec<u64> {
+            (0..3)
+                .filter(|&page| version(from, page) != version(to, page))
+                .collect()
+        };
+
+        for (from, to, pages, label) in [
+            ([5, 2, 30, 7], [5, 2, 35, 7], vec![1], "end in page 1"),
+            ([5, 2, 30, 7], [8, 2, 30, 7], vec![0], "start in page 0"),
+            ([20, 2, 30, 7], [20, 5, 30, 7], vec![1], "start on row 20"),
+            ([5, 2, 20, 7], [5, 2, 20, 9], vec![1], "end on row 20"),
+            ([5, 2, 19, 7], [5, 2, 19, 9], vec![0], "end on row 19"),
+            ([1, 0, 1, 9], [50, 0, 50, 9], vec![0, 2], "span on row 1"),
+        ] {
+            assert_eq!(refilled(from, to), pages, "the {label} moves");
+        }
+        let span = (DisplayPoint::new(5, 2), DisplayPoint::new(30, 7));
+        assert_ne!(
+            spotlight_page_version(Some(([1, 2, 3], span)), 0, 20),
+            spotlight_page_version(Some(([4, 5, 6], span)), 0, 20),
+            "the same span in another color refills its page",
+        );
+        assert_eq!(
+            (
+                version([5, 2, 30, 7], 2),
+                spotlight_page_version(None, 0, 20)
+            ),
+            (0, 0),
+            "(a page the span misses, a page with no spotlight)",
         );
     }
 

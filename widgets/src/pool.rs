@@ -117,6 +117,9 @@ struct PoolEmitState {
     content_version: u64,
     /// Decoration version last seen for this pool. See [`PageVersions`].
     decoration_version: u64,
+    /// The per-page cells version each requested page was filled at, as
+    /// `(page, version)`. See the `page_cells` of [`emit_pages_into`].
+    page_cells: Vec<(u64, u64)>,
 }
 
 /// The two versions a pool's buffered pages answer to.
@@ -135,8 +138,9 @@ pub struct PageVersions {
 /// The pages one [`emit_pages_into`] call leaves for its caller to render.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Refill {
-    /// Pages newly entering the buffered window, ascending, each owed a whole
-    /// fill.
+    /// Pages owed a whole fill, ascending. These are the pages newly entering
+    /// the buffered window and the buffered pages whose own cells version
+    /// moved.
     pub entered: Vec<u64>,
     /// Pages the window already buffers whose decorations changed, ascending,
     /// each owed a decorations-only fill.
@@ -332,6 +336,7 @@ pub fn emit_into(
         region,
         scroll_offset,
         versions,
+        |_| 0,
         hold_when_idle,
         render_page,
     )
@@ -347,12 +352,21 @@ pub fn emit_into(
 /// as decorations-only fills. A page entering the window this call is never
 /// listed there too, since its whole fill carries the decorations. The hold
 /// rule defers a decoration change the way it defers a cell change.
+///
+/// `page_cells` answers a cells version for each page on top of
+/// `versions.cells`, for content that changes on some pages and not others.
+/// An emit whose target moves refills a buffered page whose answer differs
+/// from the one its fill carried, and lists it in [`Refill::entered`]. A held
+/// emit compares nothing, so the change waits for the target to move like any
+/// other content change.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_pages_into(
     out: &mut Vec<u8>,
     state: &mut SmoothScrollState,
     region: PoolRegionCommand,
     scroll_offset: f32,
     versions: PageVersions,
+    page_cells: impl Fn(u64) -> u64,
     hold_when_idle: bool,
     mut render_page: impl FnMut(u64) -> Vec<u8>,
 ) -> Refill {
@@ -377,6 +391,7 @@ pub fn emit_pages_into(
         entry.region = Some(region);
         // A fresh region invalidates the pool's slot contents. Force a refill.
         entry.requested = None;
+        entry.page_cells.clear();
         entry.last_scroll_offset = None;
     }
 
@@ -388,6 +403,7 @@ pub fn emit_pages_into(
     if entry.content_version != effective_version {
         // The surface changed under the pool. The buffered pages are stale.
         entry.requested = None;
+        entry.page_cells.clear();
         entry.last_scroll_offset = None;
         entry.content_version = effective_version;
     }
@@ -422,7 +438,15 @@ pub fn emit_pages_into(
     let entered = if hold && region_changed && unsettled {
         Vec::new()
     } else {
-        refill(out, entry, pool, window.clone(), &mut render_page)
+        refill(
+            out,
+            entry,
+            pool,
+            window.clone(),
+            !hold,
+            &page_cells,
+            &mut render_page,
+        )
     };
 
     // A window page that did not enter was requested before, so it keeps its
@@ -460,7 +484,8 @@ pub fn emit_pages_into(
 ///
 /// Pages already covered by the previous window are not re-pushed, so a sub-page
 /// scroll that does not change the window enters no pages and a one-page step enters
-/// only the single page at the edge.
+/// only the single page at the edge. With `compare`, a covered page whose
+/// `page_cells` answer differs from the one its fill carried enters again.
 ///
 /// `render_page(index)` returning empty bytes requests the page without emitting a
 /// fill frame. A caller filling asynchronously uses that to mean "no synchronous
@@ -471,20 +496,31 @@ fn refill(
     entry: &mut PoolEmitState,
     pool: u32,
     window: Range<u64>,
+    compare: bool,
+    page_cells: &impl Fn(u64) -> u64,
     render_page: &mut impl FnMut(u64) -> Vec<u8>,
 ) -> Vec<u64> {
     let already = entry.requested.clone().unwrap_or(0..0);
     let mut entered = Vec::new();
     for index in window.clone() {
-        if already.contains(&index) {
+        let buffered = already.contains(&index);
+        if buffered && !compare {
             continue;
         }
+        let version = page_cells(index);
+        if buffered && entry.page_cells.contains(&(index, version)) {
+            continue;
+        }
+
         entered.push(index);
         let bytes = render_page(index);
         if !bytes.is_empty() {
             encode_fill_scope(out, pool, index, |out| out.extend_from_slice(&bytes));
         }
+        entry.page_cells.retain(|&(page, _)| page != index);
+        entry.page_cells.push((index, version));
     }
+    entry.page_cells.retain(|(page, _)| window.contains(page));
     entry.requested = Some(window);
     entered
 }
@@ -763,6 +799,7 @@ mod tests {
             region(1, 20),
             offset,
             versions,
+            |_| 0,
             true,
             |_| Vec::new(),
         )
@@ -829,6 +866,48 @@ mod tests {
             Vec::new()
         });
         assert_eq!(entered, vec![1, 2]);
+    }
+
+    /// A page whose own cells version moves refills alone once the target
+    /// moves, and the rest of the window keeps the pages the terminal holds.
+    #[test]
+    fn a_page_version_change_refills_only_that_page() {
+        let mut state = SmoothScrollState::default();
+        // Page 3's own version is `lit`, and every other page's is 0.
+        let emit = |state: &mut SmoothScrollState, offset: f32, lit: u64| {
+            emit_pages_into(
+                &mut Vec::new(),
+                state,
+                region(1, 20),
+                offset,
+                PageVersions::default(),
+                |page| if page == 3 { lit } else { 0 },
+                true,
+                |_| Vec::new(),
+            )
+            .entered
+        };
+
+        assert_eq!(
+            emit(&mut state, 40.0, 1),
+            (0..WINDOW_PAGES).collect::<Vec<_>>(),
+            "the first display fills the window",
+        );
+        assert_eq!(
+            emit(&mut state, 40.0, 2),
+            Vec::<u64>::new(),
+            "a held emit compares nothing",
+        );
+        assert_eq!(
+            emit(&mut state, 41.0, 2),
+            vec![3],
+            "the moving emit refills page 3 alone",
+        );
+        assert_eq!(
+            emit(&mut state, 42.0, 2),
+            Vec::<u64>::new(),
+            "and page 3 holds its refilled version after",
+        );
     }
 
     #[test]
@@ -1103,6 +1182,7 @@ mod tests {
             region(1, 20),
             0.0,
             first,
+            |_| 0,
             true,
             |_| b"page".to_vec(),
         );
@@ -1118,6 +1198,7 @@ mod tests {
             region(1, 20),
             1.0,
             moved,
+            |_| 0,
             true,
             |_| panic!("a decoration change must not refill a page"),
         );
@@ -1140,6 +1221,7 @@ mod tests {
             region(1, 20),
             2.0,
             moved,
+            |_| 0,
             true,
             |_| panic!("an unchanged version must not refill a page"),
         );
@@ -1159,6 +1241,7 @@ mod tests {
             region(1, 20),
             0.0,
             first,
+            |_| 0,
             true,
             |_| Vec::new(),
         );
@@ -1173,6 +1256,7 @@ mod tests {
             region(1, 20),
             1.0,
             both,
+            |_| 0,
             true,
             |_| Vec::new(),
         );
