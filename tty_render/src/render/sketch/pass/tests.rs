@@ -2,13 +2,14 @@
 
 use super::*;
 use crate::{
-    render::{sketch::rough::COMPONENT_GAP, HostRide},
+    render::{self, sketch::rough::COMPONENT_GAP, HostRide},
     test_support::require_headless_device,
 };
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
     SketchStyle, SketchTiming,
 };
+use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 use wgpu::{
     naga::{
         front::wgsl,
@@ -26,7 +27,7 @@ use wgpu::{
 /// everywhere.
 #[test]
 fn shader_is_valid_wgsl() {
-    let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
+    let module = wgsl::parse_str(&render::with_occlusion(include_str!(
         "../../../shaders/sketch.wgsl"
     )))
     .expect("parse sketch");
@@ -630,12 +631,16 @@ fn a_mark_whose_host_is_still_does_not_ride() {
 /// `anchored` names the compositing pools, so a mark riding one is held back
 /// from the base draw and recorded by the riding pass instead. A caller with no
 /// ride passes `&[]`.
+///
+/// `occluders` are the boxes that hide the marks declared before them. A caller
+/// with no box passes `&[]`.
 fn render_red(
     device: &Device,
     queue: &Queue,
     sketches: &[Sketch],
     progress: &[f32],
     anchored: &[HostRide],
+    occluders: &[Occluder],
 ) -> Option<Vec<u8>> {
     let mut grid = Grid::new(16, 12);
     grid.set_sketches(sketches.to_vec());
@@ -647,7 +652,7 @@ fn render_red(
         &grid,
         &reveals(sketches, progress),
         anchored,
-        &[],
+        occluders,
         [TARGET as f32, TARGET as f32],
     );
 
@@ -751,7 +756,7 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
     // The mark's layout assumed a top SHIFT pixels past the host's eased top.
     ridden[0].command.anchor = Some((3, SHIFT as f32 / metrics().height));
 
-    let rest = render_red(&device, &queue, &plain, &[1.0], &[]).expect("readback");
+    let rest = render_red(&device, &queue, &plain, &[1.0], &[], &[]).expect("readback");
     let carried = render_red(
         &device,
         &queue,
@@ -762,6 +767,7 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
             top_rows: 0.0,
             scissor: [0, 0, 64, 64],
         }],
+        &[],
     )
     .expect("readback");
 
@@ -779,6 +785,59 @@ fn a_ridden_mark_paints_at_its_hosts_shift() {
     assert_eq!(
         differs, None,
         "the ridden mark is the resting one moved down, first differing (x, y)",
+    );
+}
+
+/// A box declared after a mark hides the part of the mark beneath its body, so
+/// a stroke under a modal does not show through it.
+///
+/// The panel draws in its own pass, so here only the stroke's discard shows.
+/// The box spans the 40 columns at the left. Its outer half pixel stays standing
+/// for the box's own anti-aliased edge, so the stroke keeps column 39.
+#[test]
+fn a_later_filled_box_hides_the_stroke_beneath_it() {
+    let (device, queue) = require_headless_device();
+    let outline = SketchShape::Rect {
+        bounds: boxed(16, 16, 160, 64),
+        radius: 0,
+        fill: None,
+    };
+    let list = [sketch(1, outline)];
+    let modal = Panel {
+        top: 0,
+        left: 0,
+        width: 5,
+        height: 8,
+        style: BorderStyle::Light,
+        border: Rgb::new(0, 0, 255),
+        corner_radius: 0,
+        fill: Some(Rgb::new(0, 0, 255)),
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        anchor: None,
+        seq: 2,
+    };
+    let mut occluders = Vec::new();
+    render::build_occluders_into(&[modal], &[], &[], metrics().width, &mut occluders);
+
+    let open = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
+    let hidden = render_red(&device, &queue, &list, &[1.0], &[], &occluders).expect("readback");
+
+    let under_box = |at: usize| at as u32 % TARGET < 39;
+    assert!(
+        (0..open.len()).any(|at| under_box(at) && open[at] > 0),
+        "the stroke runs under the box",
+    );
+    let differs = hidden
+        .iter()
+        .enumerate()
+        .position(|(at, &red)| red != if under_box(at) { 0 } else { open[at] })
+        .map(|at| (at as u32 % TARGET, at as u32 / TARGET));
+    assert_eq!(
+        differs, None,
+        "the stroke draws nothing under the box and the same ink past it, first \
+         differing (x, y)",
     );
 }
 
@@ -810,7 +869,7 @@ fn a_rounded_fill_leaves_its_corners_clear() {
     // The square box spans x 8 to 40 and the rounded one x 64 to 96, both y 8
     // to 72.
     let list = [filled(1, 16, 0), filled(2, 128, 32)];
-    let red = render_red(&device, &queue, &list, &[1.0, 1.0], &[]).expect("readback");
+    let red = render_red(&device, &queue, &list, &[1.0, 1.0], &[], &[]).expect("readback");
     let at = |x: usize, y: usize| red[y * TARGET as usize + x];
 
     assert_eq!(
@@ -843,8 +902,8 @@ fn a_reveal_of_zero_paints_nothing_and_one_paints_the_mark() {
         },
     )];
 
-    let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
-    let none = render_red(&device, &queue, &list, &[0.0], &[]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
+    let none = render_red(&device, &queue, &list, &[0.0], &[], &[]).expect("readback");
 
     assert!(whole.iter().any(|&byte| byte > 0), "a full reveal paints");
     assert!(
@@ -866,8 +925,8 @@ fn a_half_reveal_paints_a_prefix_of_the_whole() {
         },
     )];
 
-    let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
-    let half = render_red(&device, &queue, &list, &[0.5], &[]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
+    let half = render_red(&device, &queue, &list, &[0.5], &[], &[]).expect("readback");
 
     let lit = |ink: &[u8]| ink.iter().filter(|&&byte| byte > 0).count();
     assert!(lit(&half) > 0, "half a reveal paints something");
@@ -914,7 +973,7 @@ fn a_dimmed_mark_paints_no_texel_past_its_own_alpha() {
     )];
     list[0].command.style.alpha = ALPHA;
 
-    let ink = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
+    let ink = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
 
     assert!(ink.iter().any(|&byte| byte > 0), "the dimmed mark paints");
     let over = ink
@@ -958,6 +1017,7 @@ fn a_hatched_box_leaves_gaps_between_its_lines() {
         &filled(SketchFillStyle::Solid),
         &[1.0],
         &[],
+        &[],
     )
     .expect("readback");
     let hatched = render_red(
@@ -965,6 +1025,7 @@ fn a_hatched_box_leaves_gaps_between_its_lines() {
         &queue,
         &filled(SketchFillStyle::Hachure),
         &[1.0],
+        &[],
         &[],
     )
     .expect("readback");
@@ -997,7 +1058,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
             fill: None,
         },
     )];
-    let whole = render_red(&device, &queue, &list, &[1.0], &[]).expect("readback");
+    let whole = render_red(&device, &queue, &list, &[1.0], &[], &[]).expect("readback");
 
     assert!(
         whole.iter().any(|&byte| byte > 0 && byte < 255),
@@ -1006,7 +1067,7 @@ fn a_growing_stroke_never_outpaints_the_finished_one() {
 
     for step in 1..8 {
         let progress = step as f32 / 8.0;
-        let partial = render_red(&device, &queue, &list, &[progress], &[]).expect("readback");
+        let partial = render_red(&device, &queue, &list, &[progress], &[], &[]).expect("readback");
 
         let brighter = partial
             .iter()
@@ -1085,7 +1146,7 @@ fn the_pen_tip_advances_inside_one_segment() {
     );
 
     let lit = |progress: f32| {
-        render_red(&device, &queue, &list, &[progress], &[])
+        render_red(&device, &queue, &list, &[progress], &[], &[])
             .expect("readback")
             .iter()
             .filter(|&&byte| byte > 0)

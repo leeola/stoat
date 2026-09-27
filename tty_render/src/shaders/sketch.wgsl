@@ -186,29 +186,10 @@ fn rounded_quad_sdf(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Discard where a box declared later (higher seq) covers this mark, so a
-    // sketch beneath a modal cannot show through it.
-    let frag = in.clip.xy;
-    for (var j = 0u; j < globals.panel_count; j = j + 1u) {
-        let o = occluders[j];
-        if o.seq > in.seq {
-            let sdf = occluder_sdf(
-                frag,
-                o.cell,
-                o.size,
-                globals.cell_size,
-                o.corner_radius,
-                o.inset_x
-            );
-            if sdf < -0.5 {
-                discard;
-            }
-        }
-    }
-
     // The points were generated at the mark's rest position, so a ridden mark
     // is measured against the fragment pulled back by the same shift its quad
     // was pushed forward by.
+    let frag = in.clip.xy;
     let at = frag - vec2<f32>(0.0, in.dy);
 
     var sdf: f32;
@@ -261,5 +242,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if alpha <= 0.0 {
         discard;
     }
+
+    // Discard where a box declared later (higher seq) covers this mark, so a
+    // sketch beneath a modal cannot show through it. The test runs after the
+    // coverage, because most of a mark's quad carries no ink and discards above
+    // without it.
+    for (var j = 0u; j < globals.panel_count; j = j + 1u) {
+        let o = occluders[j];
+        if o.seq > in.seq {
+            let box_sdf = occluder_sdf(
+                frag,
+                o.cell,
+                o.size,
+                globals.cell_size,
+                o.corner_radius,
+                o.inset_x
+            );
+            if box_sdf < -0.5 {
+                discard;
+            }
+        }
+    }
+
     return vec4<f32>(in.color.rgb, alpha);
 }
