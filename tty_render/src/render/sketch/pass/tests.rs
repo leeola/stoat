@@ -40,6 +40,10 @@ fn shader_is_valid_wgsl() {
 /// bytes for the copy to the readback buffer, which four bytes a texel makes 64.
 const TARGET: u32 = 128;
 
+/// A target larger than any mark the instance tests build, so no tile of one
+/// falls past its edge.
+const SCREEN: [f32; 2] = [4096.0, 4096.0];
+
 fn metrics() -> CellMetrics {
     CellMetrics {
         font_size: 16.0,
@@ -114,6 +118,7 @@ fn build_reveals(
         reveals,
         &[],
         metrics(),
+        SCREEN,
         &mut built,
         &mut spans,
         &mut riding,
@@ -155,15 +160,15 @@ fn every_stroke_names_its_own_span_of_the_shared_points() {
     assert_eq!(next as usize, points.len(), "the spans cover every point");
 }
 
-/// A mark draws as one instance naming one span per revealed chunk, and each
-/// span keeps its own box.
+/// Every tile of a mark's run names the whole run, one span per revealed chunk,
+/// and each span keeps its own box.
 ///
-/// The single instance is what blends the mark's overlapping strokes once. The
-/// per-span box is what keeps that from costing every fragment inside the
-/// mark's quad the distance field of every stroke the mark carries, which for a
-/// card is sixteen deep where one or two are near enough to paint.
+/// Naming the whole run is what blends the mark's overlapping strokes once.
+/// The per-span box is what keeps that from costing every fragment of a tile
+/// the distance field of every stroke the mark carries, which for a card is
+/// sixteen deep where one or two are near enough to paint.
 #[test]
-fn a_mark_draws_as_one_instance_of_per_chunk_spans() {
+fn a_marks_tiles_each_name_its_whole_run_of_spans() {
     let list = [sketch(
         1,
         SketchShape::Rect {
@@ -176,21 +181,20 @@ fn a_mark_draws_as_one_instance_of_per_chunk_spans() {
     )];
     let (built, spans) = build(&list, &[1.0]);
     let (_, geometry) = marks(&list);
+    let chunks = geometry[0]
+        .strokes
+        .iter()
+        .map(|stroke| stroke.chunks.len() as u32)
+        .sum();
 
-    let [mark] = built.as_slice() else {
-        panic!("one sketch draws one instance, got {}", built.len());
-    };
+    assert!(!built.is_empty(), "the outline draws");
     assert_eq!(
-        (mark.span_first, mark.span_count as usize),
-        (
-            0,
-            geometry[0]
-                .strokes
-                .iter()
-                .map(|stroke| stroke.chunks.len())
-                .sum()
-        ),
-        "the instance names one span per revealed chunk",
+        built
+            .iter()
+            .map(|tile| (tile.kind, tile.span_first, tile.span_count))
+            .collect::<Vec<_>>(),
+        vec![(KIND_STROKE_TILE, 0, chunks); built.len()],
+        "every tile names one span per revealed chunk",
     );
 
     // `rect` strokes each side twice, in order, so the top edge opens the run
@@ -200,15 +204,134 @@ fn a_mark_draws_as_one_instance_of_per_chunk_spans() {
         top[3] < bottom[1],
         "the top edge's span stops short of the bottom edge's, {top:?} against {bottom:?}",
     );
+}
+
+/// A run's tiles hold every pixel its revealed ink reaches, and no two tiles of
+/// one run overlap, so each pixel blends the run once.
+///
+/// The ellipse cuts into many chunks, and the hatched box carries two runs, so
+/// the check sees a long run and two runs of one mark.
+#[test]
+fn stroke_tiles_are_disjoint_and_cover_every_span() {
+    let hatched = SketchShape::Rect {
+        bounds: boxed(160, 96, 128, 96),
+        radius: 0,
+        fill: Some(SketchFill {
+            color: [0, 0, 255],
+            alpha: 128,
+            style: SketchFillStyle::Hachure,
+        }),
+    };
+    let ring = SketchShape::Ellipse {
+        bounds: boxed(64, 64, 256, 128),
+        fill: None,
+    };
+    let list = [sketch(1, ring), sketch(2, hatched)];
+    let (built, spans) = build(&list, &[1.0, 1.0]);
+
+    let mut runs: Vec<_> = built
+        .iter()
+        .map(|tile| (tile.span_first, tile.span_count, tile.half_width))
+        .collect();
+    runs.dedup();
+    let (mut overlapping, mut uncovered) = (Vec::new(), Vec::new());
+    for (first, count, half_width) in runs {
+        let tiles: Vec<[f32; 4]> = built
+            .iter()
+            .filter(|tile| tile.span_first == first)
+            .map(|tile| tile.bounds)
+            .collect();
+        for (at, a) in tiles.iter().enumerate() {
+            let overlaps = |b: &&[f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+            overlapping.extend(tiles[at + 1..].iter().filter(overlaps).map(|b| (*a, *b)));
+        }
+
+        // Every pixel center inside a span's box grown by the reach.
+        let reach = half_width + AA_MARGIN;
+        let centers = |lo: f32, hi: f32| {
+            ((lo - 0.5).ceil() as i32..=(hi - 0.5).floor() as i32).map(|at| at as f32 + 0.5)
+        };
+        for span in &spans[first as usize..(first + count) as usize] {
+            let [x0, y0, x1, y1] = span.bounds;
+            for y in centers(y0 - reach, y1 + reach) {
+                for x in centers(x0 - reach, x1 + reach) {
+                    let held = |t: &[f32; 4]| t[0] <= x && x < t[2] && t[1] <= y && y < t[3];
+                    if !tiles.iter().any(held) {
+                        uncovered.push([x, y]);
+                    }
+                }
+            }
+        }
+    }
     assert_eq!(
-        mark.bounds,
-        [
-            spans.iter().map(|s| s.bounds[0]).fold(f32::MAX, f32::min),
-            spans.iter().map(|s| s.bounds[1]).fold(f32::MAX, f32::min),
-            spans.iter().map(|s| s.bounds[2]).fold(f32::MIN, f32::max),
-            spans.iter().map(|s| s.bounds[3]).fold(f32::MIN, f32::max),
-        ],
-        "and its own box is their union, which is what the quad covers",
+        (overlapping, uncovered),
+        (Vec::new(), Vec::new()),
+        "(overlapping tile pairs, pixel centers no tile holds)",
+    );
+}
+
+/// A mark that reaches far past the target builds tiles only on it. One long
+/// line off the target otherwise builds a tile for every 32 pixels of its box.
+#[test]
+fn a_mark_past_the_target_builds_tiles_only_on_it() {
+    let list = [sketch(
+        1,
+        SketchShape::Line {
+            from: SketchEnd::Point { x: 16, y: 16 },
+            to: SketchEnd::Point { x: 32000, y: 16000 },
+            bend: 0,
+            heads: 0,
+        },
+    )];
+    let (_, geometry) = marks(&list);
+    let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
+    build_instances(
+        &list,
+        &geometry,
+        &reveals(&list, &[1.0]),
+        &[],
+        metrics(),
+        [128.0, 128.0],
+        &mut built,
+        &mut spans,
+        &mut riding,
+    );
+
+    assert!(!built.is_empty(), "the part on the target draws");
+    assert_eq!(
+        built
+            .iter()
+            .filter(|tile| tile.bounds[0] > 128.0 || tile.bounds[1] > 128.0)
+            .count(),
+        0,
+        "tiles that start past the target",
+    );
+}
+
+/// A hollow box shades the tiles along its outline and none of its interior,
+/// where one quad over the whole mark shades all of it.
+#[test]
+fn a_hollow_box_shades_under_half_its_area() {
+    // A 384-pixel square 48 pixels from the origin at the test metrics. Each
+    // side then runs along the middle of a tile row or column, so its wobble
+    // and reach stay inside that one tile.
+    let list = [sketch(
+        1,
+        SketchShape::Rect {
+            bounds: boxed(96, 48, 768, 384),
+            radius: 0,
+            fill: None,
+        },
+    )];
+
+    let shaded: f32 = instances(&list, &[1.0])
+        .iter()
+        .map(|tile| (tile.bounds[2] - tile.bounds[0]) * (tile.bounds[3] - tile.bounds[1]))
+        .sum();
+    let area = 384.0 * 384.0;
+    assert!(
+        shaded < area / 2.0,
+        "the stroke tiles shade {shaded} of the box's {area} pixels",
     );
 }
 
@@ -378,6 +501,7 @@ fn straight_stroke_spans(points: u32, revealed: f32) -> Vec<SpanInstance> {
         &reveals(&list, &[revealed]),
         &[],
         metrics(),
+        SCREEN,
         &mut built,
         &mut spans,
         &mut riding,
@@ -522,15 +646,16 @@ fn an_entrys_weight_and_opacity_reach_the_instance() {
         }],
     )
     .0;
-    let [mark] = eased.as_slice() else {
-        panic!("one sketch draws one instance, got {}", eased.len());
-    };
 
     let whole = instances(&list, &[1.0]);
+    assert!(!eased.is_empty(), "the eased mark draws");
     assert_eq!(
-        (mark.half_width, mark.color[3]),
-        (whole[0].half_width / 2.0, 0.25),
-        "the instance carries the entry's pair, not the command's",
+        eased
+            .iter()
+            .map(|tile| (tile.half_width, tile.color[3]))
+            .collect::<Vec<_>>(),
+        vec![(whole[0].half_width / 2.0, 0.25); eased.len()],
+        "every tile carries the entry's pair, not the command's",
     );
 }
 
@@ -538,7 +663,7 @@ fn an_entrys_weight_and_opacity_reach_the_instance() {
 /// before the outline so the reveal fills behind the pen.
 ///
 /// The two carry different weights and colors, so each run takes its own
-/// instance. A single instance would draw the hatch in the outline's color.
+/// tiles. One set of tiles for both draws the hatch in the outline's color.
 #[test]
 fn a_hatched_box_strokes_its_fill_before_its_outline() {
     let hatched = SketchShape::Rect {
@@ -553,17 +678,23 @@ fn a_hatched_box_strokes_its_fill_before_its_outline() {
     let list = [sketch(1, hatched)];
     let (built, _) = build(&list, &[1.0]);
 
-    let [fill, outline] = built.as_slice() else {
-        panic!("a hatched box draws a fill run and an outline, got {built:?}");
+    // Each run is its tiles in a row, all naming the same spans.
+    let mut runs: Vec<_> = built
+        .iter()
+        .map(|tile| (tile.kind, tile.span_first, tile.color, tile.half_width))
+        .collect();
+    runs.dedup();
+    let [fill, outline] = runs.as_slice() else {
+        panic!("a hatched box draws a fill run and an outline, got {runs:?}");
     };
     assert_eq!(
-        (fill.kind, fill.span_first, outline.kind),
-        (KIND_STROKE, 0, KIND_STROKE),
+        (fill.0, fill.1, outline.0),
+        (KIND_STROKE_TILE, 0, KIND_STROKE_TILE),
         "the fill strokes open the run, and no quad instance is built",
     );
     assert_eq!(
-        (fill.color, fill.half_width * 2.0),
-        ([0.0, 0.0, 1.0, 128.0 / 255.0], outline.half_width),
+        (fill.2, fill.3 * 2.0),
+        ([0.0, 0.0, 1.0, 128.0 / 255.0], outline.3),
         "and they carry the fill's color at half the outline's weight",
     );
 }
@@ -694,19 +825,20 @@ fn a_riding_mark_is_shifted_and_held_back() {
         &reveals(&list, &[1.0]),
         &anchored,
         metrics(),
+        SCREEN,
         &mut built,
         &mut spans,
         &mut riding,
     );
 
-    assert_eq!(riding.len(), built.len(), "every instance of it rides");
+    assert_eq!(
+        riding,
+        [(0..built.len() as u32, [0, 0, 40, 40])],
+        "every instance of it rides, as one run under its host's scissor",
+    );
     assert!(
         built.iter().all(|instance| instance.dy == -12.0),
         "each carries the shift from its own top row to the host's eased top",
-    );
-    assert!(
-        riding.iter().all(|&(_, scissor)| scissor == [0, 0, 40, 40]),
-        "and its host's scissor",
     );
 }
 
@@ -731,6 +863,7 @@ fn a_mark_whose_host_is_still_does_not_ride() {
         &reveals(&list, &[1.0]),
         &[],
         metrics(),
+        SCREEN,
         &mut built,
         &mut spans,
         &mut riding,
@@ -845,6 +978,34 @@ fn render_red(
             .map(|texel| texel[0])
             .collect(),
     )
+}
+
+/// A run's tiles meet edge to edge, so a translucent stroke blends once where
+/// two tiles meet rather than twice where their quads overlap.
+#[test]
+fn a_translucent_stroke_blends_once_across_tile_edges() {
+    let (device, queue) = require_headless_device();
+    let mut line = sketch(
+        1,
+        SketchShape::Line {
+            from: SketchEnd::Point { x: 16, y: 64 },
+            to: SketchEnd::Point { x: 240, y: 64 },
+            bend: 0,
+            heads: 0,
+        },
+    );
+    line.command.style.alpha = 128;
+    let red = render_red(&device, &queue, &[line], &[1.0], &[], &[]).expect("readback");
+
+    // The line's middle row, from inside the first tile past the tile edges at
+    // 32, 64, and 96 pixels, clear of the round caps at either end.
+    let along = &red[64 * TARGET as usize..][16..=112];
+    assert!(along[0] > 0, "the line paints");
+    assert_eq!(
+        along,
+        vec![along[0]; along.len()],
+        "every texel along the line blends once",
+    );
 }
 
 /// A ridden mark paints where its host carried it, not where it was generated.

@@ -67,10 +67,12 @@ struct Span {
 var<storage, read> spans: array<Span>;
 
 // Pixels the quad is grown by past the mark, giving the distance field room to
-// ramp coverage to zero instead of clipping the edge at the quad boundary.
+// ramp coverage to zero instead of clipping the edge at the quad boundary. The
+// pass grows the stroke tiles by the same margin, as its own AA_MARGIN.
 const AA_MARGIN: f32 = 1.0;
 
-const KIND_STROKE: u32 = 0u;
+const KIND_FILL: u32 = 1u;
+const KIND_STROKE_TILE: u32 = 2u;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -111,10 +113,14 @@ fn vs_main(
     let half_width_px = width_seq.x;
     let dy = width_seq.z;
 
-    // The quad bounds the whole mark rather than one stroke or one segment,
-    // because a wobbling path has no single direction to orient a tight box to.
-    // The distance field clips the corners the box adds anyway.
-    let reach = vec2<f32>(half_width_px + AA_MARGIN, half_width_px + AA_MARGIN);
+    // A fill's quad bounds its outer corners, grown by the reach so the distance
+    // field ramps its edge to zero inside the quad. A stroke tile is its quad as
+    // it is, because the pass picked the tiles against chunk boxes it already
+    // grew by the reach.
+    var reach = vec2<f32>(half_width_px + AA_MARGIN, half_width_px + AA_MARGIN);
+    if span.w == KIND_STROKE_TILE {
+        reach = vec2<f32>(0.0, 0.0);
+    }
     let shift = vec2<f32>(0.0, dy);
     let min_px = bounds.xy + shift - reach;
     let max_px = bounds.zw + shift + reach;
@@ -194,7 +200,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let at = frag - vec2<f32>(0.0, in.dy);
 
     var sdf: f32;
-    if in.kind == KIND_STROKE {
+    if in.kind != KIND_FILL {
         sdf = 1.0e9;
         let reach = in.half_width + AA_MARGIN;
 

@@ -15,7 +15,7 @@ use crate::render::{
     GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
-use std::mem;
+use std::{mem, ops::Range};
 use stoatty_protocol::command::{SketchFillStyle, SketchShape};
 use stoatty_term::grid::{Grid, Sketch};
 use wgpu::{
@@ -27,8 +27,8 @@ use wgpu::{
     ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
-/// Instance buffer capacity, in marks, allocated up front. Grows by doubling
-/// when a frame declares more.
+/// Instance buffer capacity, in instances, allocated up front. Grows by
+/// doubling when a frame builds more.
 const INITIAL_CAPACITY: usize = 64;
 
 /// Point buffer capacity, in points, allocated up front. A single wobbling
@@ -36,11 +36,25 @@ const INITIAL_CAPACITY: usize = 64;
 /// first grow.
 const INITIAL_POINTS: usize = 4096;
 
-/// The instance kind that strokes a revealed span of a path.
-const KIND_STROKE: u32 = 0;
-
 /// The instance kind that fills a convex quad with rounded corners.
 const KIND_FILL: u32 = 1;
+
+/// The instance kind that strokes the part of a run of spans inside one tile.
+const KIND_STROKE_TILE: u32 = 2;
+
+/// The edge of the square tiles a run of spans draws through, in physical
+/// pixels.
+///
+/// A hollow mark's quad is mostly interior, and every fragment of it walks the
+/// spans. Drawing only the tiles that meet the ink leaves the interior unshaded.
+const STROKE_TILE: f32 = 32.0;
+
+/// Pixels past the stroke's half width that a fragment still reads coverage in,
+/// the same margin as `AA_MARGIN` in sketch.wgsl.
+///
+/// The tiles have to reach as far as the distance field ramps, or the rim of
+/// the anti-aliased edge falls outside every tile.
+const AA_MARGIN: f32 = 1.0;
 
 /// Segments one span holds at most.
 ///
@@ -51,12 +65,17 @@ const CHUNK_SEGMENTS: u32 = 16;
 
 /// The per-mark instance data.
 ///
-/// One instance covers a whole mark rather than one stroke, because the target
-/// blends each instance over the last: a base pass and the overlay that doubles
-/// it run the same path a pixel apart, so two instances composite twice along
-/// their whole length and read as a dark core inside a paler halo. The
-/// reference strokes a whole path in one call for the same reason. Resolving
-/// every stroke inside one fragment blends the union once.
+/// A mark's strokes resolve together in each fragment rather than one instance
+/// per stroke, because the target blends each instance over the last: a base
+/// pass and the overlay that doubles it run the same path a pixel apart, so two
+/// instances composite twice along their whole length and read as a dark core
+/// inside a paler halo. The reference strokes a whole path in one call for the
+/// same reason. Resolving every stroke inside one fragment blends the union
+/// once.
+///
+/// A run of strokes draws as one tile instance per [`STROKE_TILE`] square its
+/// ink meets. Every tile names the whole run, and the tiles of a run never
+/// overlap, so each pixel still blends the union once.
 ///
 /// The strokes themselves ride [`SpanInstance`], which this names a run of,
 /// so the fragment stage still skips a chunk of stroke whose box is nowhere
@@ -69,9 +88,11 @@ const CHUNK_SEGMENTS: u32 = 16;
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
 struct SketchInstance {
-    /// The mark's bounding box in physical pixels, as `[min_x, min_y, max_x,
-    /// max_y]`, which the vertex stage grows by the stroke reach to size the
-    /// quad. For a stroke this is the union of the boxes its spans carry.
+    /// The quad's box in physical pixels, as `[min_x, min_y, max_x, max_y]`.
+    ///
+    /// A fill's box holds its outer corners, and the vertex stage grows it by
+    /// the reach. A stroke tile's box is the tile, which the vertex stage draws
+    /// as it is.
     bounds: [f32; 4],
     /// Straight color and alpha, the alpha already carrying a fill's fade.
     color: [f32; 4],
@@ -215,10 +236,10 @@ pub struct SketchPass {
     /// first frame must generate rather than trust a counter it never read.
     last_generated: Option<(GridVersion, CellMetrics)>,
     count: u32,
-    /// Instances of marks riding a compositing pool, each with its host's
-    /// scissor. Drawn after that pool's composite instead of with the rest, or
-    /// the composite paints over them.
-    riding: Vec<(u32, [u32; 4])>,
+    /// Runs of instances of marks riding a compositing pool, each with its
+    /// host's scissor. Drawn after that pool's composite instead of with the
+    /// rest, or the composite paints over them.
+    riding: Vec<(Range<u32>, [u32; 4])>,
     occluders: OccluderBuffer,
     /// The uniform last written, so an unchanged frame skips that write too.
     last_globals: Option<Globals>,
@@ -353,8 +374,8 @@ impl SketchPass {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Upload the frame's uniform, occluders, generated points, and one
-    /// instance per revealed stroke and fill.
+    /// Upload the frame's uniform, occluders, generated points, and instances:
+    /// one per fill, and one per tile a run of revealed strokes meets.
     ///
     /// `reveals` carries one entry per [`Grid::sketches`] entry, in order. A
     /// short slice leaves the marks past its end complete, at the style their
@@ -397,6 +418,7 @@ impl SketchPass {
             reveals,
             anchored,
             self.metrics,
+            resolution,
             &mut self.built,
             &mut self.built_spans,
             &mut self.riding,
@@ -442,14 +464,14 @@ impl SketchPass {
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
 
-        // A riding slot is skipped here and drawn by [`Self::draw_riding`] after
+        // A riding run is skipped here and drawn by [`Self::draw_riding`] after
         // the composites, so the base pass leaves a gap where it sits.
         let mut next = 0;
-        for &(index, _) in &self.riding {
-            if index > next {
-                render_pass.draw(0..6, next..index);
+        for (run, _) in &self.riding {
+            if run.start > next {
+                render_pass.draw(0..6, next..run.start);
             }
-            next = index + 1;
+            next = run.end;
         }
         if next < self.count {
             render_pass.draw(0..6, next..self.count);
@@ -469,12 +491,13 @@ impl SketchPass {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
-        for &(index, [x, y, w, h]) in &self.riding {
+        for (run, scissor) in &self.riding {
+            let [x, y, w, h] = *scissor;
             if w == 0 || h == 0 {
                 continue;
             }
             render_pass.set_scissor_rect(x, y, w, h);
-            render_pass.draw(0..6, index..index + 1);
+            render_pass.draw(0..6, run.clone());
         }
     }
 
@@ -524,26 +547,30 @@ impl SketchPass {
     }
 }
 
-/// Build one instance per mark, one span per revealed stroke, and one instance
-/// per faded fill.
+/// Build one span per revealed chunk, one tile instance per [`STROKE_TILE`]
+/// square a run of those spans meets, and one instance per faded fill.
 ///
 /// Runs every frame, because the reveal moves every frame while the geometry
 /// behind it does not. A stroke the reveal has not reached contributes no span
 /// at all, and a mark with no revealed stroke contributes no instance, rather
-/// than an empty one the GPU still rasterizes.
+/// than an empty one the GPU still rasterizes. The tiles follow the revealed
+/// chunks and this frame's weight, so a partial reveal shades only the tiles
+/// its ink has reached.
 ///
-/// A mark's strokes share one instance so the target blends their union once.
-/// Drawing each as its own instance composites the overlaps twice, which reads
-/// as a dark core inside a paler halo at any alpha below opaque.
+/// A run of a mark's strokes draws through tiles that never overlap, so the
+/// target blends their union once. Drawing each stroke as its own instance
+/// composites the overlaps twice, which reads as a dark core inside a paler
+/// halo at any alpha below opaque.
 ///
 /// The reveal walks the mark's units in declaration order rather than advancing
 /// every stroke at once. A mark whose strokes all grow together materializes;
 /// one whose units follow each other reads as being drawn. See [`unit_length`]
 /// for what a unit is.
 ///
-/// `riding` collects the slots of marks anchored to a pool compositing this
-/// frame, so [`SketchPass::draw`] skips them and [`SketchPass::draw_riding`]
-/// picks them up after that pool's composite.
+/// `resolution` bounds the tiles to the ones on the target. `riding` collects
+/// the runs of instances of marks anchored to a pool compositing this frame, so
+/// [`SketchPass::draw`] skips them and [`SketchPass::draw_riding`] picks them
+/// up after that pool's composite.
 #[allow(clippy::too_many_arguments)]
 fn build_instances(
     sketches: &[Sketch],
@@ -551,13 +578,15 @@ fn build_instances(
     reveals: &[SketchReveal],
     anchored: &[HostRide],
     metrics: CellMetrics,
+    resolution: [f32; 2],
     built: &mut Vec<SketchInstance>,
     spans: &mut Vec<SpanInstance>,
-    riding: &mut Vec<(u32, [u32; 4])>,
+    riding: &mut Vec<(Range<u32>, [u32; 4])>,
 ) {
     built.clear();
     spans.clear();
     riding.clear();
+    let mut tiles = Vec::new();
 
     for (index, sketch) in sketches.iter().enumerate() {
         let Some(mark) = geometry.get(index) else {
@@ -577,10 +606,25 @@ fn build_instances(
 
         let mut push = |instance: SketchInstance| {
             if let Some((_, scissor)) = ride {
-                riding.push((built.len() as u32, scissor));
+                let at = built.len() as u32;
+                match riding.last_mut() {
+                    Some((run, held)) if run.end == at && *held == scissor => run.end += 1,
+                    _ => riding.push((at..at + 1, scissor)),
+                }
             }
             built.push(instance);
         };
+
+        // The tiles on the target, in the unshifted coordinates the chunk boxes
+        // are in. A tile past the target draws nothing, and a chunk box far
+        // larger than the target, such as a long diagonal line's, holds a great
+        // many of them.
+        let on_target = [
+            0,
+            tile_of(-dy),
+            tile_of(resolution[0]),
+            tile_of(resolution[1] - dy),
+        ];
 
         if let Some((offset, quad_bounds, radius)) = mark.fill {
             let (color, alpha) = fill_style(&sketch.command.shape);
@@ -634,21 +678,19 @@ fn build_instances(
                     .filter(|&(_, (count, t))| count >= 2 || t > 0.0);
                 for (chunk, (count, t)) in reached {
                     // A mark's hatch and its outline differ in weight and color,
-                    // so each run of one kind takes its own instance. An
-                    // unhatched mark has a single run and so a single instance.
+                    // so each run of one kind takes its own tiles. An unhatched
+                    // mark has a single run.
                     match groups.last_mut() {
                         Some(last)
                             if (last.weight, last.color) == (stroke.weight, stroke.color) =>
                         {
                             last.count += 1;
-                            last.bounds = union(last.bounds, chunk.bounds);
                         },
                         _ => groups.push(SpanGroup {
                             weight: stroke.weight,
                             color: stroke.color,
                             first: spans.len() as u32,
                             count: 1,
-                            bounds: chunk.bounds,
                         }),
                     }
                     spans.push(SpanInstance {
@@ -663,42 +705,71 @@ fn build_instances(
         }
 
         for group in groups {
-            push(SketchInstance {
-                bounds: group.bounds,
-                color: match group.color {
-                    Some([r, g, b, a]) => rgba([r, g, b], f32::from(a) / 255.0),
-                    None => rgba(style.color, reveal.alpha),
-                },
-                half_width: half_width * group.weight,
-                _pad0: 0.0,
-                dy,
-                _pad1: 0.0,
-                span_first: group.first,
-                seq: sketch.seq,
-                span_count: group.count,
-                kind: KIND_STROKE,
-            });
+            let color = match group.color {
+                Some([r, g, b, a]) => rgba([r, g, b], f32::from(a) / 255.0),
+                None => rgba(style.color, reveal.alpha),
+            };
+            let half_width = half_width * group.weight;
+            let run = &spans[group.first as usize..(group.first + group.count) as usize];
+            stroke_tiles(run, half_width + AA_MARGIN, on_target, &mut tiles);
+
+            for &(row, col) in &tiles {
+                let (x, y) = (col as f32 * STROKE_TILE, row as f32 * STROKE_TILE);
+                push(SketchInstance {
+                    bounds: [x, y, x + STROKE_TILE, y + STROKE_TILE],
+                    color,
+                    half_width,
+                    _pad0: 0.0,
+                    dy,
+                    _pad1: 0.0,
+                    span_first: group.first,
+                    seq: sketch.seq,
+                    span_count: group.count,
+                    kind: KIND_STROKE_TILE,
+                });
+            }
         }
     }
 }
 
-/// A run of a mark's spans sharing one weight and color, which is one instance.
+/// A run of a mark's spans sharing one weight and color, which is one set of
+/// tiles.
 struct SpanGroup {
     weight: f32,
     color: Option<[u8; 4]>,
     first: u32,
     count: u32,
-    bounds: [f32; 4],
 }
 
-/// The smallest box holding both.
-fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    [
-        a[0].min(b[0]),
-        a[1].min(b[1]),
-        a[2].max(b[2]),
-        a[3].max(b[3]),
-    ]
+/// Collect into `tiles`, sorted and each once, the `(row, column)` of every
+/// [`STROKE_TILE`] tile that meets one of `run`'s chunk boxes grown by `reach`,
+/// within the `[min_col, min_row, max_col, max_row]` tiles `on_target`.
+///
+/// A pixel belongs to the tile its center falls in, so the tiles from the one
+/// holding a grown box's low edge to the one holding its high edge hold every
+/// pixel the box reaches.
+fn stroke_tiles(
+    run: &[SpanInstance],
+    reach: f32,
+    on_target: [i32; 4],
+    tiles: &mut Vec<(i32, i32)>,
+) {
+    tiles.clear();
+    let [min_col, min_row, max_col, max_row] = on_target;
+    for span in run {
+        let [x0, y0, x1, y1] = span.bounds;
+        let cols = tile_of(x0 - reach).max(min_col)..=tile_of(x1 + reach).min(max_col);
+        for row in tile_of(y0 - reach).max(min_row)..=tile_of(y1 + reach).min(max_row) {
+            tiles.extend(cols.clone().map(|col| (row, col)));
+        }
+    }
+    tiles.sort_unstable();
+    tiles.dedup();
+}
+
+/// The index of the [`STROKE_TILE`] tile holding the coordinate `at`.
+fn tile_of(at: f32) -> i32 {
+    (at / STROKE_TILE).floor() as i32
 }
 
 /// How far the pen travels through one unit of a mark.
