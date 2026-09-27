@@ -290,10 +290,12 @@ impl SmoothScrollState {
 /// forces the buffered window to refill so a stale page is never composited.
 /// Pass a constant for content that is stable while scrolling.
 ///
-/// `hold_when_idle` narrows a frame whose target did not move to the visible
-/// page and defers a content change until the target shifts. It suits a surface
-/// whose content churns while it rests, since a pool composites only while its
-/// eased offset moves.
+/// `hold_when_idle` defers a content change on a frame whose target did not
+/// move until the target shifts. It suits a surface whose content churns while
+/// it rests. A held frame keeps the page window the terminal holds when that
+/// window covers the pages a composite reads, which are the visible page and,
+/// on a rest between two rows, the page after it. Otherwise it asks for those
+/// pages alone.
 ///
 /// A held pool whose rectangle moves renders no page at all while the caller
 /// reports the geometry unsettled through
@@ -358,10 +360,10 @@ pub fn emit_pages_into(
     let unsettled = state.geometry_unsettled;
     let entry = state.pools.entry(pool).or_default();
 
-    // Pools composite only while the eased offset moves, so a content change seen
-    // while the target is stationary can wait for the next move. Holding keeps the
-    // stored version (suppressing the refill wipe) and narrows this emit to the
-    // visible page, deferring the full-window prefill until the target shifts.
+    // A content change seen while the target is stationary waits for the next
+    // move. Holding keeps the stored version, which suppresses the refill wipe,
+    // and keeps the window the terminal holds, so the next glide enters only the
+    // pages its window gains.
     //
     // Computed before the region and version wipes below reset last_scroll_offset,
     // so it reflects real scroll motion. A fresh entry has last_scroll_offset None,
@@ -397,10 +399,16 @@ pub fn emit_pages_into(
 
     let region_height = region.height.max(1) as u64;
     let page = scroll_offset.floor() as u64 / region_height;
-    let window = if hold {
-        page..page + 1
-    } else {
-        window_range(page)
+    // A composite reads `region.height + 1` rows from the floored top row, so a
+    // rest between two rows reads into the page after the visible one.
+    let needed = match scroll_offset.fract() == 0.0 {
+        true => page..page + 1,
+        false => page..page + 2,
+    };
+    let window = match (hold, &entry.requested) {
+        (true, Some(held)) if held.start <= needed.start && needed.end <= held.end => held.clone(),
+        (true, _) => needed,
+        (false, _) => window_range(page),
     };
 
     let prev = entry.requested.clone();
@@ -770,36 +778,57 @@ mod tests {
             Refill::default(),
             "a resting pool composites nothing, so the new runs can wait"
         );
-        // The rest narrowed the requested range to the visible page 2, so the
-        // move enters the rest of the window whole and redecorates page 2.
+        // The rest kept the window 0..5 the terminal holds, so the move enters
+        // nothing and redecorates the whole window.
         assert_eq!(
             emit_decorated(&mut state, 41.0, 1),
             Refill {
-                entered: vec![0, 1, 3, 4],
-                redecorated: vec![2],
+                entered: vec![],
+                redecorated: vec![0, 1, 2, 3, 4],
             }
         );
     }
 
     #[test]
-    fn moving_the_target_after_a_rest_reenters_the_deferred_window() {
+    fn moving_the_target_after_a_rest_enters_only_the_pages_the_window_gains() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
 
         emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, true, |_| {
             Vec::new()
         });
-        // Resting narrows the requested range to the visible page 2.
+        // Resting keeps the window 0..5 the terminal holds.
         emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, true, |_| {
             Vec::new()
         });
 
-        // Stepping to page 3 moves the target, refilling window 1..6 minus the
-        // page 2 that resting kept requested.
+        // Stepping to page 3 moves the window to 1..6, which gains only page 5.
         let moved = emit_into(&mut out, &mut state, region(1, 20), 60.0, 0, true, |_| {
             Vec::new()
         });
-        assert_eq!(moved, vec![1, 3, 4, 5]);
+        assert_eq!(moved, vec![5]);
+    }
+
+    /// A composite reads a row past the region, so a pool resting between two
+    /// rows reads into the page after the visible one. A new rectangle drops
+    /// the pages the terminal held, and the rest asks for both again.
+    #[test]
+    fn a_fractional_rest_refills_its_straddle_page_after_a_region_change() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        // The first display, then a rest, at 40.5 rows.
+        for _ in 0..2 {
+            emit_into(&mut out, &mut state, region(1, 20), 40.5, 0, true, |_| {
+                Vec::new()
+            });
+        }
+
+        // 40.5 rows over a 22-row region stands in page 1 and reads into page 2.
+        let entered = emit_into(&mut out, &mut state, region(1, 22), 40.5, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(entered, vec![1, 2]);
     }
 
     #[test]
