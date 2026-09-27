@@ -42,6 +42,13 @@ const KIND_STROKE: u32 = 0;
 /// The instance kind that fills a convex quad with rounded corners.
 const KIND_FILL: u32 = 1;
 
+/// Segments one span holds at most.
+///
+/// A fragment walks every segment of each span whose box reaches it, and a
+/// ring or a bowed path is one stroke around the whole shape. Cutting a stroke
+/// into chunks this long keeps the walk to the segments that pass nearby.
+const CHUNK_SEGMENTS: u32 = 16;
+
 /// The per-mark instance data.
 ///
 /// One instance covers a whole mark rather than one stroke, because the target
@@ -52,7 +59,8 @@ const KIND_FILL: u32 = 1;
 /// every stroke inside one fragment blends the union once.
 ///
 /// The strokes themselves ride [`SpanInstance`], which this names a run of,
-/// so the fragment stage still skips a stroke whose box is nowhere near it.
+/// so the fragment stage still skips a chunk of stroke whose box is nowhere
+/// near it.
 ///
 /// The points sit in a shared storage buffer the spans index, unlike a
 /// polyline's, which ride inline. That pass binds one group across the live
@@ -83,27 +91,27 @@ struct SketchInstance {
     /// tells the fragment stage to read.
     span_first: u32,
     seq: u32,
-    /// Revealed strokes this mark carries, or 0 for a fill.
+    /// Revealed spans this mark carries, or 0 for a fill.
     span_count: u32,
     kind: u32,
 }
 
-/// One revealed stroke of a mark, as the fragment stage reads it.
+/// One revealed chunk of a stroke, as the fragment stage reads it.
 ///
 /// Held apart from [`SketchInstance`] rather than inline, because a mark draws
-/// as one instance and carries however many strokes its shape generated. A
-/// card runs to sixteen.
+/// as one instance and carries however many chunks its strokes cut into. A
+/// card runs to sixteen strokes.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
 struct SpanInstance {
-    /// This stroke's own pixel box.
+    /// This chunk's own pixel box.
     ///
-    /// Per stroke rather than per mark, so a fragment runs the distance field
-    /// of the one or two strokes whose ink is near it instead of every stroke
-    /// the mark carries.
+    /// Per chunk rather than per mark or per stroke, so a fragment runs the
+    /// distance field of the few segments whose ink is near it instead of every
+    /// stroke the mark carries.
     bounds: [f32; 4],
     point_offset: u32,
-    /// Whole points of this stroke that are revealed.
+    /// Whole points of this chunk that are revealed.
     reveal_count: u32,
     /// How far along the segment after the revealed run the pen sits, so the
     /// stroke grows smoothly instead of snapping point to point.
@@ -134,18 +142,30 @@ struct StrokeSpan {
     /// recomputed because a reveal binary-searches it every frame.
     prefix: Vec<f32>,
     total: f32,
-    /// This stroke's own pixel box, which the vertex stage sizes its quad from.
+    /// The stroke cut into chunks of at most [`CHUNK_SEGMENTS`] segments, in
+    /// order along it.
     ///
-    /// Per stroke rather than per mark, so a fragment runs the distance field
-    /// of the one or two strokes whose ink is near it instead of every stroke
-    /// the mark carries.
-    bounds: [f32; 4],
+    /// A revealed chunk is one span, so a fragment walks the few segments near
+    /// it rather than the whole stroke, however long the stroke runs.
+    chunks: Vec<Chunk>,
     /// Multiplier on the mark's stroke weight, and the color to draw in.
     ///
     /// A hatch line is half weight in the fill's own color, so one mark carries
     /// strokes of two kinds. `None` takes the mark's own color.
     weight: f32,
     color: Option<[u8; 4]>,
+}
+
+/// A stretch of one stroke's points, which is one span once the pen reaches it.
+struct Chunk {
+    /// The chunk's first and last point, as indices into the stroke, inclusive.
+    /// Adjacent chunks share their boundary point, so no segment falls between
+    /// two chunks.
+    first: u32,
+    last: u32,
+    /// The pixel box of the chunk's points, which the vertex stage sizes its
+    /// quad from.
+    bounds: [f32; 4],
 }
 
 /// One sketch's generated geometry, as the frame reads it.
@@ -604,29 +624,41 @@ fn build_instances(
                     continue;
                 }
 
-                // A mark's hatch and its outline differ in weight and color, so
-                // each run of one kind takes its own instance. An unhatched mark
-                // has a single run and so a single instance.
-                match groups.last_mut() {
-                    Some(last) if (last.weight, last.color) == (stroke.weight, stroke.color) => {
-                        last.count += 1;
-                        last.bounds = union(last.bounds, stroke.bounds);
-                    },
-                    _ => groups.push(SpanGroup {
-                        weight: stroke.weight,
-                        color: stroke.color,
-                        first: spans.len() as u32,
-                        count: 1,
-                        bounds: stroke.bounds,
-                    }),
+                // The pen stands on this point of the stroke, reveal_t along the
+                // segment after it.
+                let pen = reveal_count - 1;
+                let reached = stroke
+                    .chunks
+                    .iter()
+                    .map_while(|chunk| Some((chunk, chunk_reveal(chunk, pen, reveal_t)?)))
+                    .filter(|&(_, (count, t))| count >= 2 || t > 0.0);
+                for (chunk, (count, t)) in reached {
+                    // A mark's hatch and its outline differ in weight and color,
+                    // so each run of one kind takes its own instance. An
+                    // unhatched mark has a single run and so a single instance.
+                    match groups.last_mut() {
+                        Some(last)
+                            if (last.weight, last.color) == (stroke.weight, stroke.color) =>
+                        {
+                            last.count += 1;
+                            last.bounds = union(last.bounds, chunk.bounds);
+                        },
+                        _ => groups.push(SpanGroup {
+                            weight: stroke.weight,
+                            color: stroke.color,
+                            first: spans.len() as u32,
+                            count: 1,
+                            bounds: chunk.bounds,
+                        }),
+                    }
+                    spans.push(SpanInstance {
+                        bounds: chunk.bounds,
+                        point_offset: stroke.point_offset + chunk.first,
+                        reveal_count: count,
+                        reveal_t: t,
+                        _pad: 0,
+                    });
                 }
-                spans.push(SpanInstance {
-                    bounds: stroke.bounds,
-                    point_offset: stroke.point_offset,
-                    reveal_count,
-                    reveal_t,
-                    _pad: 0,
-                });
             }
         }
 
@@ -716,7 +748,7 @@ fn generate_marks(
                 count: stroke.points.len() as u32,
                 total: stroke.lengths.last().copied().unwrap_or(0.0),
                 prefix: stroke.lengths.clone(),
-                bounds: points_bounds(&stroke.points),
+                chunks: stroke_chunks(&stroke.points),
                 weight: stroke.weight,
                 color: stroke.color,
             });
@@ -734,6 +766,24 @@ fn generate_marks(
     }
 
     points
+}
+
+/// Cut a stroke's points into chunks of at most [`CHUNK_SEGMENTS`] segments.
+///
+/// A stroke of fewer than two points has no segment, and so no chunk.
+fn stroke_chunks(points: &[[f32; 2]]) -> Vec<Chunk> {
+    let last_point = points.len().saturating_sub(1);
+    (0..last_point)
+        .step_by(CHUNK_SEGMENTS as usize)
+        .map(|first| {
+            let last = (first + CHUNK_SEGMENTS as usize).min(last_point);
+            Chunk {
+                first: first as u32,
+                last: last as u32,
+                bounds: points_bounds(&points[first..=last]),
+            }
+        })
+        .collect()
 }
 
 /// Where a mark rides, when its anchor names a pool compositing this frame.
@@ -832,6 +882,22 @@ fn reveal_at(stroke: &StrokeSpan, revealed: f32) -> (u32, f32) {
         false => 0.0,
     };
     (at as u32, t)
+}
+
+/// How much of `chunk` the pen has drawn, standing on the stroke's point `pen`
+/// with the tip `reveal_t` along the segment after it.
+///
+/// A chunk behind the pen is whole. The chunk the pen stands in carries the
+/// tip. A chunk ahead of the pen answers `None`, and so does every chunk after
+/// it.
+fn chunk_reveal(chunk: &Chunk, pen: u32, reveal_t: f32) -> Option<(u32, f32)> {
+    if chunk.last <= pen {
+        return Some((chunk.last - chunk.first + 1, 0.0));
+    }
+    if chunk.first <= pen {
+        return Some((pen - chunk.first + 1, reveal_t));
+    }
+    None
 }
 
 /// The classic smoothstep, easing a fill in over the back half of the reveal so

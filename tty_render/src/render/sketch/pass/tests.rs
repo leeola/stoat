@@ -155,7 +155,7 @@ fn every_stroke_names_its_own_span_of_the_shared_points() {
     assert_eq!(next as usize, points.len(), "the spans cover every point");
 }
 
-/// A mark draws as one instance naming one span per revealed stroke, and each
+/// A mark draws as one instance naming one span per revealed chunk, and each
 /// span keeps its own box.
 ///
 /// The single instance is what blends the mark's overlapping strokes once. The
@@ -163,7 +163,7 @@ fn every_stroke_names_its_own_span_of_the_shared_points() {
 /// mark's quad the distance field of every stroke the mark carries, which for a
 /// card is sixteen deep where one or two are near enough to paint.
 #[test]
-fn a_mark_draws_as_one_instance_of_per_stroke_spans() {
+fn a_mark_draws_as_one_instance_of_per_chunk_spans() {
     let list = [sketch(
         1,
         SketchShape::Rect {
@@ -182,8 +182,15 @@ fn a_mark_draws_as_one_instance_of_per_stroke_spans() {
     };
     assert_eq!(
         (mark.span_first, mark.span_count as usize),
-        (0, geometry[0].strokes.len()),
-        "the instance names one span per revealed stroke",
+        (
+            0,
+            geometry[0]
+                .strokes
+                .iter()
+                .map(|stroke| stroke.chunks.len())
+                .sum()
+        ),
+        "the instance names one span per revealed chunk",
     );
 
     // `rect` strokes each side twice, in order, so the top edge opens the run
@@ -252,7 +259,7 @@ fn the_reveal_lands_on_the_segment_holding_its_distance() {
         // an arc-length search from an index one.
         prefix: vec![0.0, 70.0, 80.0, 90.0, 100.0],
         total: 100.0,
-        bounds: [0.0; 4],
+        chunks: Vec::new(),
         weight: 1.0,
         color: None,
     };
@@ -275,6 +282,109 @@ fn the_reveal_lands_on_the_segment_holding_its_distance() {
     assert!((t - 0.5).abs() < 1e-5, "and is halfway through the next");
 }
 
+/// A stroke longer than one chunk draws as spans of at most [`CHUNK_SEGMENTS`]
+/// segments, each boxed on its own points. Adjacent spans share their boundary
+/// point, so no segment falls between two of them.
+#[test]
+fn a_long_stroke_splits_into_bounded_spans() {
+    let spans = straight_stroke_spans(100, 1.0);
+
+    let expected = [0, 16, 32, 48, 64, 80, 96].map(|first: u32| {
+        let last = (first + 16).min(99);
+        (
+            first,
+            last - first + 1,
+            0.0,
+            [first as f32, 0.0, last as f32, 0.0],
+        )
+    });
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| (
+                span.point_offset,
+                span.reveal_count,
+                span.reveal_t,
+                span.bounds
+            ))
+            .collect::<Vec<_>>(),
+        expected,
+        "(first point, points, tip, box) of each span",
+    );
+}
+
+/// A pen partway through a chunk draws the chunks behind it whole and its own
+/// chunk up to the tip, and nothing past it.
+///
+/// A pen that stands on a chunk's last point with no tip ahead draws none of
+/// the next chunk, so that chunk pushes no span.
+#[test]
+fn a_reveal_mid_chunk_emits_that_chunk_with_its_pen() {
+    let reached = |points: u32, revealed: f32| {
+        straight_stroke_spans(points, revealed)
+            .iter()
+            .map(|span| (span.point_offset, span.reveal_count, span.reveal_t))
+            .collect::<Vec<_>>()
+    };
+
+    // Three eighths of 99 one-pixel segments is 37.125, so the pen stands on
+    // point 37 with its tip an eighth of the way to point 38.
+    assert_eq!(
+        reached(100, 0.375),
+        [(0, 17, 0.0), (16, 17, 0.0), (32, 6, 0.125)],
+        "(first point, points, tip) with the pen in the third chunk",
+    );
+    // Half of 96 segments is 48, the point where the third chunk ends.
+    assert_eq!(
+        reached(97, 0.5),
+        [(0, 17, 0.0), (16, 17, 0.0), (32, 17, 0.0)],
+        "(first point, points, tip) with the pen on a chunk boundary",
+    );
+}
+
+/// The spans one mark builds when its only stroke runs straight along `points`
+/// points a pixel apart, revealed to `revealed`.
+///
+/// No generated shape gives a stroke this long with segments this even, so the
+/// stroke is built here and the counts it yields are exact.
+fn straight_stroke_spans(points: u32, revealed: f32) -> Vec<SpanInstance> {
+    let line: Vec<[f32; 2]> = (0..points).map(|x| [x as f32, 0.0]).collect();
+    let geometry = MarkGeometry {
+        strokes: vec![StrokeSpan {
+            point_offset: 0,
+            count: points,
+            prefix: (0..points).map(|x| x as f32).collect(),
+            total: (points - 1) as f32,
+            chunks: stroke_chunks(&line),
+            weight: 1.0,
+            color: None,
+        }],
+        fill: None,
+    };
+    let list = [sketch(
+        1,
+        SketchShape::Line {
+            from: SketchEnd::Point { x: 0, y: 0 },
+            to: SketchEnd::Point { x: 16, y: 0 },
+            bend: 0,
+            heads: 0,
+        },
+    )];
+
+    let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
+    build_instances(
+        &list,
+        &[geometry],
+        &reveals(&list, &[revealed]),
+        &[],
+        metrics(),
+        &mut built,
+        &mut spans,
+        &mut riding,
+    );
+    spans
+}
+
 /// How far the pen has come through each stroke at `progress`, in declaration
 /// order.
 ///
@@ -287,10 +397,14 @@ fn stroke_progress(sketches: &[Sketch], progress: f32) -> Vec<Option<bool>> {
         .strokes
         .iter()
         .map(|stroke| {
+            // A stroke's chunks push in order, so its last span is the one the
+            // pen reached, and the stroke is whole once that span ends on the
+            // stroke's own last point.
+            let end = stroke.point_offset + stroke.count;
             spans
                 .iter()
-                .find(|span| span.point_offset == stroke.point_offset)
-                .map(|span| span.reveal_count == stroke.count)
+                .rfind(|span| (stroke.point_offset..end).contains(&span.point_offset))
+                .map(|span| span.point_offset + span.reveal_count == end)
         })
         .collect()
 }
@@ -522,7 +636,8 @@ fn a_connector_ends_outside_the_component_it_names() {
     let leftmost = geometry[1]
         .strokes
         .iter()
-        .map(|stroke| stroke.bounds[0])
+        .flat_map(|stroke| &stroke.chunks)
+        .map(|chunk| chunk.bounds[0])
         .fold(f32::MAX, f32::min);
     assert!(
         leftmost >= target[2],

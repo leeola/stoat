@@ -47,20 +47,21 @@ var<storage, read> occluders: array<Occluder>;
 @group(0) @binding(2)
 var<storage, read> points: array<vec2<f32>>;
 
-// One revealed stroke. Its own box is here rather than on the instance so a
-// fragment skips the strokes whose ink is nowhere near it, which is what keeps
-// a per-mark quad from costing every fragment every stroke.
+// One revealed chunk of a stroke, which the pass caps at CHUNK_SEGMENTS
+// segments. Its own box is here rather than on the instance so a fragment skips
+// the chunks whose ink is nowhere near it, which is what keeps a per-mark quad
+// from costing every fragment every stroke.
 struct Span {
     bounds: vec4<f32>,
     point_offset: u32,
-    // Whole points of the stroke that are revealed. The pen sits between the
-    // last two, at reveal_t along that final segment.
+    // Whole points of the chunk that are revealed. The pen sits between the
+    // last of them and the stroke's next point, at reveal_t along that segment.
     reveal_count: u32,
     reveal_t: f32,
     pad: u32,
 }
 
-// One entry per revealed stroke, in mark order. An instance names its own run
+// One entry per revealed chunk, in mark order. An instance names its own run
 // with span_first and span_count.
 @group(0) @binding(3)
 var<storage, read> spans: array<Span>;
@@ -203,7 +204,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         for (var s = 0u; s < in.span_count; s = s + 1u) {
             let span = spans[in.span_first + s];
 
-            // A stroke whose own box does not reach this fragment cannot hold
+            // A chunk whose own box does not reach this fragment holds none of
             // the nearest ink, so its segments are never walked. Without this a
             // mark's quad costs every fragment every stroke the mark carries.
             if at.x < span.bounds.x - reach || at.x > span.bounds.z + reach
