@@ -69,10 +69,8 @@ struct VsOut {
     @location(10) @interpolate(flat) shadow_mode: f32,
 }
 
-@vertex
-fn vs_main(
-    @builtin(vertex_index) vertex_index: u32,
-    @builtin(instance_index) instance_index: u32,
+// One panel instance's vertex attributes, read by both vertex stages.
+struct PanelIn {
     @location(0) cell_pos: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) fill: vec3<f32>,
@@ -84,6 +82,76 @@ fn vs_main(
     @location(8) style: u32,
     @location(9) inset_x: f32,
     @location(10) shadow_mode: f32,
+}
+
+// The shadow, the fill, and the overhang band.
+//
+// The interior rectangle sits two pixels past the corner arcs, where the fill
+// alone reaches a pixel, so an unfilled panel leaves it out. An overhang casts
+// its band inside the bottom edge even with no fill, so the bottom inset also
+// clears the band.
+@vertex
+fn vs_under(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+    panel: PanelIn,
+) -> VsOut {
+    let radius = panel_radius(panel);
+    let side = radius + 2.0;
+    let bottom = select(side, max(radius, panel.shadow_margin) + 2.0, panel.shadow_mode > 1.5);
+    return panel_vertex(
+        vertex_index,
+        instance_index,
+        panel,
+        vec4<f32>(side, side, side, bottom),
+        panel.fill_flag > 0.5
+    );
+}
+
+// The frame stroke.
+//
+// The widest frame band ends three logical pixels in, so past that band and
+// the corner arcs the stroke is alpha 0 and the interior never draws.
+@vertex
+fn vs_stroke(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+    panel: PanelIn,
+) -> VsOut {
+    let side = max(panel_radius(panel), 3.0 * globals.scale_factor) + 2.0;
+    return panel_vertex(vertex_index, instance_index, panel, vec4<f32>(side), false);
+}
+
+// The corner radius the box draws with, held to its shorter half side, as
+// box_radius reads it back in the fragment stages.
+fn panel_radius(panel: PanelIn) -> f32 {
+    let half = vec2<f32>(
+        panel.size.x * globals.cell_size.x - 2.0 * panel.inset_x,
+        panel.size.y * globals.cell_size.y
+    ) * 0.5;
+    return min(panel.corner_radius, min(half.x, half.y));
+}
+
+// Vertex `vertex_index` of the five regions that tile a panel's
+// shadow-padded quad, six vertices each: the top band, the bottom band, the
+// left band, the right band, and last the interior rectangle.
+//
+// `inset` shrinks the box to the interior on the left, top, right, and bottom.
+// A box too small for it leaves the interior empty, and the bands meet rather
+// than cross. With `interior` false the interior quad lands outside clip space
+// and draws nothing.
+//
+// A vertex carries the quad_px that one quad over the whole padded rect gives
+// its position, so a fragment reads the same inputs in every region. Each
+// corner picks a region edge whole rather than interpolating to it, so two
+// regions that share an edge put it on the same bits and no pixel on it draws
+// twice or not at all.
+fn panel_vertex(
+    vertex_index: u32,
+    instance_index: u32,
+    panel: PanelIn,
+    inset: vec4<f32>,
+    interior: bool,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -93,40 +161,75 @@ fn vs_main(
         vec2<f32>(1.0, 0.0),
         vec2<f32>(1.0, 1.0)
     );
-    let corner = corners[vertex_index];
+    let corner = corners[vertex_index % 6u];
+    let region = vertex_index / 6u;
 
-    let box_min_px = cell_pos * globals.cell_size;
-    let box_size_px = size * globals.cell_size;
+    let box_min_px = panel.cell_pos * globals.cell_size;
+    let box_size_px = panel.size * globals.cell_size;
 
     // Expand the quad so the offset, blurred shadow is fully contained on every
     // side. The down-right edge must reach box + offset + margin, so pad by the
     // larger offset component plus the margin.
-    let pad = shadow_margin + max(abs(shadow_offset.x), abs(shadow_offset.y));
+    let pad = panel.shadow_margin + max(abs(panel.shadow_offset.x), abs(panel.shadow_offset.y));
     let quad_min_px = box_min_px - vec2<f32>(pad, pad);
     let quad_size_px = box_size_px + vec2<f32>(2.0 * pad, 2.0 * pad);
 
-    let pixel = quad_min_px + corner * quad_size_px;
+    // Shave inset_x off each x edge so the frame, fill, corners, and shadow all
+    // draw narrower than the cell rect; the quad still spans the full rect, so
+    // the inset strip rasterizes as transparent cells.
+    let box_min = vec2<f32>(pad + panel.inset_x, pad);
+    let box_max = vec2<f32>(pad + box_size_px.x - panel.inset_x, pad + box_size_px.y);
+
+    let inner_min = min(box_min + inset.xy, box_max);
+    let inner_max = max(box_max - inset.zw, inner_min);
+
+    var lo = inner_min;
+    var hi = inner_max;
+    switch region {
+        case 0u: {
+            lo = vec2<f32>(0.0, 0.0);
+            hi = vec2<f32>(quad_size_px.x, inner_min.y);
+        }
+        case 1u: {
+            lo = vec2<f32>(0.0, inner_max.y);
+            hi = quad_size_px;
+        }
+        case 2u: {
+            lo = vec2<f32>(0.0, inner_min.y);
+            hi = vec2<f32>(inner_min.x, inner_max.y);
+        }
+        case 3u: {
+            lo = vec2<f32>(inner_max.x, inner_min.y);
+            hi = vec2<f32>(quad_size_px.x, inner_max.y);
+        }
+        default: {}
+    }
+    let local = select(lo, hi, corner > vec2<f32>(0.5, 0.5));
+
+    var out: VsOut;
+    if region == 4u && !interior {
+        out.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return out;
+    }
+
+    let pixel = quad_min_px + local;
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
     );
 
-    var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.quad_px = corner * quad_size_px;
-    // Shave inset_x off each x edge so the frame, fill, corners, and shadow all
-    // draw narrower than the cell rect; the quad still spans the full rect, so
-    // the inset strip rasterizes as transparent cells.
-    out.box_min = vec2<f32>(pad + inset_x, pad);
-    out.box_max = vec2<f32>(pad + box_size_px.x - inset_x, pad + box_size_px.y);
-    out.shadow = vec3<f32>(shadow_offset.x, shadow_offset.y, shadow_margin);
-    out.fill = fill;
-    out.border = border;
-    out.corner_radius = corner_radius;
-    out.fill_flag = fill_flag;
-    out.style = style;
+    out.quad_px = local;
+    out.box_min = box_min;
+    out.box_max = box_max;
+    out.shadow = vec3<f32>(panel.shadow_offset.x, panel.shadow_offset.y, panel.shadow_margin);
+    out.fill = panel.fill;
+    out.border = panel.border;
+    out.corner_radius = panel.corner_radius;
+    out.fill_flag = panel.fill_flag;
+    out.style = panel.style;
     out.instance = instance_index;
-    out.shadow_mode = shadow_mode;
+    out.shadow_mode = panel.shadow_mode;
     return out;
 }
 

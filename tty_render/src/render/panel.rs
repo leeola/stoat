@@ -29,6 +29,14 @@ use wgpu::{
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 16;
 
+/// Vertices each panel draws per pass, six for each of four edge bands around
+/// an interior rectangle and six for that rectangle.
+///
+/// The interior is most of a modal's quad, and the stroke pass and an unfilled
+/// body paint nothing there. So those passes leave it out rather than launch a
+/// fragment for every pixel of it.
+const REGION_VERTICES: u32 = 30;
+
 /// Drop-shadow blur radius in logical pixels. The shadow's alpha fades to zero
 /// across this distance past the shadow rectangle.
 const SHADOW_MARGIN: f32 = 16.0;
@@ -155,15 +163,17 @@ impl PanelPass {
             immediate_size: 0,
         });
 
-        // One module, two fragment stages. The stroke draws separately from the
-        // rest so it can be recorded above the text the frame surrounds.
-        let build = |label: &str, entry: &str| {
+        // One module, two pairs of stages. The stroke draws separately from the
+        // rest, so the frame records above the text it surrounds. Each vertex
+        // stage leaves out the part of the box its fragment stage paints nothing
+        // over.
+        let build = |label: &str, vertex: &str, fragment: &str| {
             device.create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
                 vertex: VertexState {
                     module: &shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(vertex),
                     compilation_options: Default::default(),
                     buffers: &[VertexBufferLayout {
                         array_stride: size_of::<PanelInstance>() as u64,
@@ -185,7 +195,7 @@ impl PanelPass {
                 },
                 fragment: Some(FragmentState {
                     module: &shader,
-                    entry_point: Some(entry),
+                    entry_point: Some(fragment),
                     compilation_options: Default::default(),
                     targets: &[Some(ColorTargetState {
                         format,
@@ -200,8 +210,8 @@ impl PanelPass {
                 cache: None,
             })
         };
-        let pipeline_under = build("panel under", "fs_under");
-        let pipeline_stroke = build("panel stroke", "fs_stroke");
+        let pipeline_under = build("panel under", "vs_under", "fs_under");
+        let pipeline_stroke = build("panel stroke", "vs_stroke", "fs_stroke");
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("panel globals"),
@@ -338,12 +348,12 @@ impl PanelPass {
         let mut next = 0;
         for &(index, _) in &self.riding {
             if index > next {
-                render_pass.draw(0..6, next..index);
+                render_pass.draw(0..REGION_VERTICES, next..index);
             }
             next = index + 1;
         }
         if next < self.count {
-            render_pass.draw(0..6, next..self.count);
+            render_pass.draw(0..REGION_VERTICES, next..self.count);
         }
     }
 
@@ -375,7 +385,7 @@ impl PanelPass {
                 continue;
             }
             render_pass.set_scissor_rect(x, y, w, h);
-            render_pass.draw(0..6, index..index + 1);
+            render_pass.draw(0..REGION_VERTICES, index..index + 1);
         }
     }
 }
@@ -769,6 +779,9 @@ mod tests {
     /// stops at the box edge. An unfilled panel leaves the ground there as it
     /// was, and a filled one covers it with the fill whole.
     ///
+    /// A box too small for an interior rectangle gets its middle from the edge
+    /// bands, which meet there, so its fill covers that middle whole too.
+    ///
     /// An overhang is the exception. It casts its band onto the fill from inside
     /// the bottom edge, so a pixel just above that edge reads darker than the
     /// fill.
@@ -789,15 +802,16 @@ mod tests {
             a: 1.0,
         };
         let blue = Rgb::new(0, 0, 255);
-        // The box spans pixels 12 to 36 on each axis. Pixel (24, 24) sits twelve
-        // pixels inside every edge, and row 33 two and a half above the bottom.
-        let pixel = |fill, shadow, row: u32| {
+        // A two-cell box spans pixels 12 to 36 on each axis. Pixel (24, 24) sits
+        // twelve pixels inside every edge, and row 33 two and a half above the
+        // bottom. A one-cell box spans 12 to 24, so (18, 18) is its middle.
+        let pixel = |cells: u16, fill, shadow, (x, y): (u32, u32)| {
             let mut grid = Grid::new(4, 4);
             grid.set_panels(vec![Panel {
                 top: 1,
                 left: 1,
-                width: 2,
-                height: 2,
+                width: cells,
+                height: cells,
                 style: BorderStyle::Light,
                 border: Rgb::new(255, 0, 0),
                 corner_radius: 6,
@@ -809,22 +823,26 @@ mod tests {
                 seq: 0,
             }]);
             let rgba = render_rgba(&device, &queue, &grid, metrics, ground, Halves::Under);
-            let at = ((row * TARGET + 24) * 4) as usize;
+            let at = ((y * TARGET + x) * 4) as usize;
             [rgba[at], rgba[at + 1], rgba[at + 2]]
         };
 
         assert_eq!(
             (
-                pixel(None, PanelShadow::Drop, 24),
-                pixel(Some(blue), PanelShadow::Drop, 24)
+                pixel(2, None, PanelShadow::Drop, (24, 24)),
+                pixel(2, Some(blue), PanelShadow::Drop, (24, 24)),
+                pixel(1, Some(blue), PanelShadow::Drop, (18, 18)),
             ),
-            ([51, 153, 102], [0, 0, 255]),
-            "the ground shows through an unfilled interior, and a fill covers it whole",
+            ([51, 153, 102], [0, 0, 255], [0, 0, 255]),
+            "the ground shows through an unfilled interior, and a fill covers it whole, \
+             the one-cell box's middle included",
         );
-        let [_, _, overhung] = pixel(Some(blue), PanelShadow::Overhang, 33);
+        // The band lays 0.07 of black there, which is 237 of the fill's 255 blue,
+        // give or take the rounding a driver does.
+        let overhung = pixel(2, Some(blue), PanelShadow::Overhang, (24, 33));
         assert!(
-            overhung < 250,
-            "the overhang band darkens the fill above the bottom edge, got {overhung}",
+            matches!(overhung, [0, 0, 230..=245]),
+            "the overhang band darkens the fill above the bottom edge, got {overhung:?}",
         );
     }
 
