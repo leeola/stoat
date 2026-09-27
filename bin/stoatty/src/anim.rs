@@ -941,8 +941,8 @@ pub(crate) enum PoolStep {
     /// The target held steady long enough and the ease has arrived, so the pool
     /// hands its region back to the base grid and stops ticking.
     Settled,
-    /// Still gliding, but this frame's window is unbuffered with no held
-    /// composite, so the base grid shows through. The loop keeps ticking.
+    /// The target still moves, but this frame's window is unbuffered with no
+    /// held composite, so the base grid shows through. The loop keeps ticking.
     Degraded,
     /// Still gliding with a composite ready at [`ActivePool::frac`].
     Gliding(ActivePool),
@@ -1036,6 +1036,10 @@ impl PoolAnim {
 /// [`PoolStep::Resting`] instead, keeping the composite on screen at its
 /// fraction rather than snapping to the cell grid.
 ///
+/// An arrival with nothing composed answers [`PoolStep::Settled`] too. Nothing
+/// holds the region then, and the fill that composes it wakes the loop by
+/// itself.
+///
 /// The recompose is skipped while only the sub-cell fraction moves, so a
 /// settled or shift-only pool costs no projection.
 pub(crate) fn advance_pool_glide(
@@ -1124,9 +1128,14 @@ pub(crate) fn advance_pool_glide(
             content_changed: false,
             scrolled_rows: None,
         })
+    } else if arrived {
+        // Nothing is composed and nothing moves, so the region goes back to the
+        // base grid. The fill that composes it wakes the loop by itself, so the
+        // pool asks for no frame while it waits.
+        PoolStep::Settled
     } else {
-        // Nothing to hold on screen, so the loop keeps ticking until the app's
-        // fill lands, a rested target included.
+        // Nothing to hold on screen while the target still moves, so the loop
+        // keeps ticking until the app's fill lands.
         PoolStep::Degraded
     }
 }
@@ -1430,9 +1439,10 @@ mod tests {
         assert!((drifted.frac - 0.4).abs() < 1e-5, "got {}", drifted.frac);
     }
 
-    /// The base grid paints whole cells, so a target resting between two rows
-    /// cannot hand off: the region would snap by the fraction it rests on.
-    /// A target on a row boundary hands off exactly as it always has.
+    /// The base grid paints whole cells, so a composed target that rests between
+    /// two rows keeps its composite. A handoff there snaps the region by the
+    /// fraction it rests on. A target on a row boundary hands off, and so does a
+    /// rest with nothing composed.
     #[test]
     fn an_arrival_between_rows_rests_composited() {
         let arrive = |fraction: f32, buffered: bool| {
@@ -1462,9 +1472,28 @@ mod tests {
             "an arrival on a row boundary still hands the region back",
         );
         assert!(
-            matches!(arrive(0.3, false), PoolStep::Degraded),
-            "with nothing composed there is nothing to rest, so the loop keeps \
-             ticking until the fill lands",
+            matches!(arrive(0.3, false), PoolStep::Settled),
+            "with nothing composed the region goes back to the base, and the \
+             fill's own wake composes the rest",
+        );
+    }
+
+    /// A target that still moves keeps the loop ticking while nothing is
+    /// composed, so frames keep coming until the fill lands.
+    #[test]
+    fn an_unbuffered_glide_keeps_ticking() {
+        let (mut view, terminal) = gated_pool();
+        view.scroll_target = DocumentOffset {
+            page: 1,
+            fraction: 0.0,
+        };
+        let mut anim = PoolAnim::new(0.0);
+
+        let step = advance_pool_glide(&mut anim, &view, &terminal, None, Duration::from_millis(16));
+
+        assert!(
+            matches!(step, PoolStep::Degraded),
+            "a glide with nothing composed asks for the next frame",
         );
     }
 
