@@ -216,13 +216,24 @@ struct Coverage {
     overhang: f32,
 }
 
-fn coverage_of(in: VsOut) -> Coverage {
-    let p = in.quad_px;
+/// The corner radius the box draws with, held to its shorter half side.
+fn box_radius(in: VsOut) -> f32 {
+    let half = (in.box_max - in.box_min) * 0.5;
+    return min(in.corner_radius, min(half.x, half.y));
+}
 
+/// Signed distance in pixels from the fragment to the panel's rounded box,
+/// negative inside.
+fn box_distance(in: VsOut) -> f32 {
     let center = (in.box_min + in.box_max) * 0.5;
     let half = (in.box_max - in.box_min) * 0.5;
-    let radius = min(in.corner_radius, min(half.x, half.y));
-    let box_sdf = rounded_box_sdf(p - center, half, radius);
+    return rounded_box_sdf(in.quad_px - center, half, box_radius(in));
+}
+
+fn coverage_of(in: VsOut) -> Coverage {
+    let p = in.quad_px;
+    let radius = box_radius(in);
+    let box_sdf = box_distance(in);
 
     // Frame band inside the box edge, weighted by the border style.
     let stroke = line_coverage(in.style, -box_sdf);
@@ -282,6 +293,19 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.instance) {
         discard;
     }
+
+    // More than a pixel inside the edge, the interior coverage is whole, so the
+    // exterior shadow is zero and the fill alone reaches the pixel. These
+    // fragments return before coverage_of, which pays for the blur on every
+    // fragment it runs for, and a modal's box is most of its quad. An overhang
+    // (mode 2) casts its band inside the box, so it keeps the full path.
+    if box_distance(in) < -1.0 && in.shadow_mode < 1.5 {
+        if in.fill_flag <= 0.0 {
+            discard;
+        }
+        return unpremultiply(over(vec4<f32>(0.0), in.fill, in.fill_flag));
+    }
+
     let c = coverage_of(in);
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);

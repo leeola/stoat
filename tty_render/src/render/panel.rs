@@ -765,6 +765,69 @@ mod tests {
         );
     }
 
+    /// Deep inside its box a panel paints its fill alone, since the drop shadow
+    /// stops at the box edge. An unfilled panel leaves the ground there as it
+    /// was, and a filled one covers it with the fill whole.
+    ///
+    /// An overhang is the exception. It casts its band onto the fill from inside
+    /// the bottom edge, so a pixel just above that edge reads darker than the
+    /// fill.
+    #[test]
+    fn a_panel_interior_paints_the_fill_alone() {
+        let (device, queue) = require_headless_device();
+
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let ground = Color {
+            r: 51.0 / 255.0,
+            g: 153.0 / 255.0,
+            b: 102.0 / 255.0,
+            a: 1.0,
+        };
+        let blue = Rgb::new(0, 0, 255);
+        // The box spans pixels 12 to 36 on each axis. Pixel (24, 24) sits twelve
+        // pixels inside every edge, and row 33 two and a half above the bottom.
+        let pixel = |fill, shadow, row: u32| {
+            let mut grid = Grid::new(4, 4);
+            grid.set_panels(vec![Panel {
+                top: 1,
+                left: 1,
+                width: 2,
+                height: 2,
+                style: BorderStyle::Light,
+                border: Rgb::new(255, 0, 0),
+                corner_radius: 6,
+                fill,
+                shadow,
+                inset_x: 0,
+                above_pools: false,
+                anchor: None,
+                seq: 0,
+            }]);
+            let rgba = render_rgba(&device, &queue, &grid, metrics, ground, Halves::Under);
+            let at = ((row * TARGET + 24) * 4) as usize;
+            [rgba[at], rgba[at + 1], rgba[at + 2]]
+        };
+
+        assert_eq!(
+            (
+                pixel(None, PanelShadow::Drop, 24),
+                pixel(Some(blue), PanelShadow::Drop, 24)
+            ),
+            ([51, 153, 102], [0, 0, 255]),
+            "the ground shows through an unfilled interior, and a fill covers it whole",
+        );
+        let [_, _, overhung] = pixel(Some(blue), PanelShadow::Overhang, 33);
+        assert!(
+            overhung < 250,
+            "the overhang band darkens the fill above the bottom edge, got {overhung}",
+        );
+    }
+
     /// A frame is a band inside the box edge, so it lands on the same pixels
     /// whether or not a shadow pads the quad around it.
     ///
