@@ -285,7 +285,11 @@ pub struct Renderer {
     /// default cell background so the floored-grid gutter (the up-to-one-cell
     /// remainder on the right and bottom edges that no cell quad covers) stays
     /// indistinguishable from the grid.
-    clear_color: Color,
+    ///
+    /// The background pass skips every cell of this color, since the clear has
+    /// already painted it. The clear and the skip read this one value, so the
+    /// two always agree.
+    clear_rgb: Rgb,
     /// Cursor block color. The cursor pass applies its own blend alpha, so this
     /// is the opaque RGB only.
     cursor_color: Rgb,
@@ -328,7 +332,7 @@ impl Renderer {
         cursor: Rgb,
     ) -> Renderer {
         let metrics = CellMetrics::from_font_size(font.size, font.scale_factor);
-        let clear_color = rgb_to_color(background);
+        let clear_rgb = background;
 
         // Each pass parses and validates its WGSL and then waits on a driver
         // pipeline compile, and the passes share nothing but the device. Built
@@ -375,7 +379,7 @@ impl Renderer {
                 width: size[0],
                 height: size[1],
                 metrics,
-                clear_color,
+                clear_rgb,
                 cursor_color: cursor,
                 occluders: Vec::new(),
                 pool_occluders: Vec::new(),
@@ -450,7 +454,7 @@ impl Renderer {
     /// Every other color arrives per frame with the grid, so a theme change only
     /// has to reach these two to take effect on the next draw.
     pub fn set_theme_colors(&mut self, background: Rgb, cursor: Rgb) {
-        self.clear_color = rgb_to_color(background);
+        self.clear_rgb = background;
         self.cursor_color = cursor;
     }
 
@@ -598,6 +602,7 @@ impl Renderer {
                 corners: frame.cursor_corners,
                 color: self.cursor_color,
             },
+            self.clear_rgb,
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.damage,
             frame.scrolled_rows,
@@ -680,7 +685,7 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Clear(self.clear_color),
+                    load: LoadOp::Clear(rgb_to_color(self.clear_rgb)),
                     store: StoreOp::Store,
                 },
             })],

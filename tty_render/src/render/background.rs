@@ -52,15 +52,18 @@ const CURSOR_GLOBALS_OFFSET: u32 = (GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE) 
 /// cursor's.
 const BG_GLOBALS_SLOTS: usize = GLOBALS_SLOTS + 1;
 
-/// One grid cell's background color, as the bytes the GPU normalizes.
+/// One grid cell's background color, as the bytes the vertex stage unpacks.
 ///
 /// Carries no grid coordinate. The buffer is row-major over the grid and both
 /// draws bind it from instance zero, so the shader recovers the coordinate by
 /// dividing the instance index by the column count. A coordinate is the one
-/// thing in the stream the GPU can derive for free.
+/// thing in the stream the GPU derives for free.
 ///
 /// Deriving it is also what lets a scroll rotate the rows rather than rewrite
 /// them, since an instance says nothing about where it sits.
+///
+/// The vertex stage reads the four bytes as one `u32`, so it compares a cell
+/// against [`Globals::skip_color`] exactly before it unpacks the color.
 ///
 /// Alpha is always 255, since the cell fill is opaque. The field exists because
 /// a 3-byte vertex format is not one the GPU offers.
@@ -80,7 +83,8 @@ struct BgInstance {
 /// `scroll_y`, `panel_count`, `occlude_all`, and `cols` fill one 16-byte slot,
 /// and the rotation pair with its padding fills another, so `cursor_color` lands
 /// on the 16-byte offset the uniform layout requires. The `vec4` corner pairs
-/// already sit on 16-byte boundaries.
+/// already sit on 16-byte boundaries. `skip_color` and its padding fill the last
+/// slot, since a uniform's size is a whole number of 16-byte slots.
 ///
 /// Two pipelines share this uniform, so each write site zeroes the fields its own
 /// pipeline does not read. `panel_count` and `occlude_all` are non-zero only on an
@@ -112,6 +116,15 @@ struct Globals {
     /// for the live grid, which starts at the screen's own origin.
     origin_cells: [f32; 2],
     cursor_color: [f32; 4],
+    /// The packed cell color whose quad draws nothing, being the color the
+    /// frame cleared to.
+    ///
+    /// Such a cell repaints what the clear already painted, and on a screen of
+    /// blank cells that is most of the frame's fill. Zero culls no cell, since
+    /// every instance carries alpha 255. A pool composite writes zero, because
+    /// it covers the live grid and must paint its default cells.
+    skip_color: u32,
+    _pad: [u32; 3],
 }
 
 /// The cursor block's eased corners and color for the frame.
@@ -231,7 +244,7 @@ impl BackgroundPass {
                 buffers: &[VertexBufferLayout {
                     array_stride: size_of::<BgInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
-                    attributes: &vertex_attr_array![0 => Unorm8x4],
+                    attributes: &vertex_attr_array![0 => Uint32],
                 }],
             },
             fragment: Some(FragmentState {
@@ -324,8 +337,10 @@ impl BackgroundPass {
     /// Upload the frame's uniform and per-cell instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `cursor` carries the
-    /// cursor block's eased corners and color. `grid_scroll` shifts the whole
-    /// grid up by that many rows.
+    /// cursor block's eased corners and color. `clear` is the color the frame
+    /// cleared to, and a cell of that color draws no quad, since the clear has
+    /// already painted it. `grid_scroll` shifts the whole grid up by that many
+    /// rows.
     ///
     /// Reallocates the instance buffer only when the grid outgrows the current
     /// capacity. With partial `damage`, only the damaged rows' cells are rewritten.
@@ -338,6 +353,7 @@ impl BackgroundPass {
         grid: &Grid,
         resolution: [f32; 2],
         cursor: CursorState,
+        clear: Rgb,
         grid_scroll: f32,
         damage: &Damage,
         scrolled_rows: isize,
@@ -387,6 +403,8 @@ impl BackgroundPass {
                 cursor.color.b as f32 / 255.0,
                 CURSOR_ALPHA,
             ],
+            skip_color: packed_color(clear),
+            _pad: [0; 3],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
         // The cursor reads its own slot, so a live frame seeds it here with the same
@@ -502,6 +520,8 @@ impl BackgroundPass {
             rows: grid.rows() as u32,
             origin_cells,
             cursor_color: [0.0; 4],
+            skip_color: 0,
+            _pad: [0; 3],
         };
         queue.write_buffer(
             &self.globals,
@@ -565,6 +585,8 @@ impl BackgroundPass {
                 cursor.color.b as f32 / 255.0,
                 CURSOR_ALPHA,
             ],
+            skip_color: 0,
+            _pad: [0; 3],
         };
         // The cursor's own slot, so this can run after the cell globals are placed
         // without disturbing them.
@@ -795,9 +817,22 @@ fn build_row_instances(
     out.extend(columns.map(|col| {
         let (_, bg) = grid.get(row, col).draw_colors();
         BgInstance {
-            color: [bg.r, bg.g, bg.b, 255],
+            color: instance_bytes(bg),
         }
     }));
+}
+
+/// `rgb` as the opaque bytes of one [`BgInstance`].
+fn instance_bytes(rgb: Rgb) -> [u8; 4] {
+    [rgb.r, rgb.g, rgb.b, 255]
+}
+
+/// `rgb` as the `u32` the vertex stage reads from an instance of that color.
+///
+/// Built from [`instance_bytes`], so the skip compare and the instances always
+/// pack a color the same way. Vertex attributes are little-endian.
+fn packed_color(rgb: Rgb) -> u32 {
+    u32::from_le_bytes(instance_bytes(rgb))
 }
 
 #[cfg(test)]
@@ -806,7 +841,10 @@ mod tests {
         build_instances, build_row_instances, damaged_row_runs, row_slot, BackgroundPass,
         BgInstance, CursorState,
     };
-    use crate::{render::CellMetrics, test_support::require_headless_device};
+    use crate::{
+        render::{CellMetrics, PoolOccluders},
+        test_support::require_headless_device,
+    };
     use std::ops::Range;
     use stoatty_term::{
         grid::{Flags, Grid, Rgb},
@@ -817,8 +855,11 @@ mod tests {
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, MapMode, PollType, Queue,
-        TextureFormat,
+        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
+        MapMode, Operations, Origin3d, PollType, Queue, RenderPass, RenderPassColorAttachment,
+        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureViewDescriptor,
     };
 
     /// What `vs_main` computes from a slot, transcribed. A rotation is only
@@ -949,8 +990,8 @@ mod tests {
         );
     }
 
-    /// The instance stream declares one 4-byte `Unorm8x4` attribute where the
-    /// shader takes a `vec4<f32>`, an agreement only pipeline creation checks.
+    /// The instance stream declares one 4-byte `Uint32` attribute where the
+    /// shader takes a `u32`, an agreement only pipeline creation checks.
     /// Validating the WGSL alone would not catch a stride or format that no longer
     /// matches what `vs_main` reads.
     #[test]
@@ -1068,6 +1109,7 @@ mod tests {
                 grid,
                 [64.0, 64.0],
                 cursor,
+                SKIP,
                 0.0,
                 damage,
                 scrolled_rows,
@@ -1133,5 +1175,217 @@ mod tests {
             .expect("poll readback");
         let bytes = readback.slice(..).get_mapped_range().to_vec();
         bytes.as_chunks::<4>().0.to_vec()
+    }
+
+    /// The color a frame's cells skip, and the clear the readback tests set
+    /// apart from it. In a real frame the two are equal, so a skipped cell and
+    /// a painted one look the same. Apart, a skipped cell shows the clear.
+    const SKIP: Rgb = Rgb::new(10, 20, 30);
+    const CLEARED: Rgb = Rgb::new(250, 0, 250);
+    const OTHER: Rgb = Rgb::new(200, 100, 50);
+
+    /// The readback target's edge, in pixels. Four bytes a texel makes a row
+    /// exactly the 256-byte copy alignment, so the readback needs no stride
+    /// padding.
+    const TARGET: u32 = 64;
+
+    /// Sixteen-pixel cells, so a four-by-four grid covers [`TARGET`] exactly.
+    const CELLS: usize = 4;
+    const CELL_METRICS: CellMetrics = CellMetrics {
+        font_size: 10.0,
+        width: 16.0,
+        height: 16.0,
+        scale_factor: 1.0,
+    };
+
+    /// A cell of the skip color draws no quad, so the clear shows through it,
+    /// while a cell of any other color paints itself.
+    #[test]
+    fn a_cell_of_the_clear_color_draws_nothing() {
+        let (device, queue) = require_headless_device();
+        let mut grid = filled_grid(SKIP);
+        grid.get_mut(1, 2).bg = OTHER;
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+
+        prepare_live(&device, &queue, &mut pass, &grid);
+        let rgba = render_rgba(&device, &queue, CLEARED, |render_pass| {
+            pass.draw(render_pass)
+        });
+
+        let expected: Vec<[u8; 3]> = (0..CELLS * CELLS)
+            .map(|cell| match cell {
+                6 => rgb(OTHER),
+                _ => rgb(CLEARED),
+            })
+            .collect();
+        assert_eq!(
+            cell_centers(&rgba),
+            expected,
+            "only the cell of another color paints over the clear",
+        );
+    }
+
+    /// A pool composite covers the live grid under it, so it paints every cell,
+    /// the cells of the clear color included, while the live frame skips them.
+    #[test]
+    fn a_composite_paints_every_cell_of_the_clear_color() {
+        let (device, queue) = require_headless_device();
+        let grid = filled_grid(SKIP);
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+
+        prepare_live(&device, &queue, &mut pass, &grid);
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            PoolOccluders::new(&[], 0, false),
+            [TARGET as f32; 2],
+            0.0,
+            [0.0; 2],
+            true,
+            1,
+            0,
+        );
+        let rgba = render_rgba(&device, &queue, CLEARED, |render_pass| {
+            pass.draw_composite(render_pass, 1, 0)
+        });
+
+        assert_eq!(
+            cell_centers(&rgba),
+            vec![rgb(SKIP); CELLS * CELLS],
+            "every composite cell paints its own color",
+        );
+    }
+
+    /// A [`CELLS`]-square grid with every cell's background `color`.
+    fn filled_grid(color: Rgb) -> Grid {
+        let mut grid = Grid::new(CELLS, CELLS);
+        for row in 0..CELLS {
+            for col in 0..CELLS {
+                grid.get_mut(row, col).bg = color;
+            }
+        }
+        grid
+    }
+
+    /// Upload `grid` as a whole live frame that skips [`SKIP`], with the cursor
+    /// hidden.
+    fn prepare_live(device: &Device, queue: &Queue, pass: &mut BackgroundPass, grid: &Grid) {
+        let cursor = CursorState {
+            corners: None,
+            color: OTHER,
+        };
+        pass.prepare(
+            device,
+            queue,
+            grid,
+            [TARGET as f32; 2],
+            cursor,
+            SKIP,
+            0.0,
+            &Damage::Full,
+            0,
+        );
+    }
+
+    /// The color at the center of each cell, in row-major order.
+    fn cell_centers(rgba: &[u8]) -> Vec<[u8; 3]> {
+        let edge = TARGET as usize / CELLS;
+        (0..CELLS * CELLS)
+            .map(|cell| {
+                let (x, y) = (
+                    (cell % CELLS) * edge + edge / 2,
+                    (cell / CELLS) * edge + edge / 2,
+                );
+                let at = (y * TARGET as usize + x) * 4;
+                [rgba[at], rgba[at + 1], rgba[at + 2]]
+            })
+            .collect()
+    }
+
+    fn rgb(color: Rgb) -> [u8; 3] {
+        [color.r, color.g, color.b]
+    }
+
+    /// What `record` painted over a [`TARGET`]-square target cleared to `clear`,
+    /// read back as rgba texels.
+    fn render_rgba(
+        device: &Device,
+        queue: &Queue,
+        clear: Rgb,
+        record: impl FnOnce(&mut RenderPass<'_>),
+    ) -> Vec<u8> {
+        let size = Extent3d {
+            width: TARGET,
+            height: TARGET,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("background target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("background pixel readback"),
+            size: u64::from(TARGET) * u64::from(TARGET) * 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("background"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color {
+                            r: f64::from(clear.r) / 255.0,
+                            g: f64::from(clear.g) / 255.0,
+                            b: f64::from(clear.b) / 255.0,
+                            a: 1.0,
+                        }),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            record(&mut render_pass);
+        }
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TARGET * 4),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        readback.slice(..).get_mapped_range().to_vec()
     }
 }

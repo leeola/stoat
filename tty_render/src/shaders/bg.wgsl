@@ -27,6 +27,13 @@ struct Globals {
     // cursor_color 16-byte aligned.
     origin_cells: vec2<f32>,
     cursor_color: vec4<f32>,
+    // The packed cell color vs_main culls, being the color the frame cleared to.
+    // Zero culls no cell, since every instance carries alpha 255. The padding
+    // rounds the struct to the 16-byte multiple the Rust side writes.
+    skip_color: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0)
@@ -70,8 +77,19 @@ struct VsOut {
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
-    @location(0) color: vec4<f32>,
+    @location(0) packed: u32,
 ) -> VsOut {
+    var out: VsOut;
+
+    // A cell of the color the frame cleared to repaints what the clear already
+    // painted, so its quad goes outside clip space and rasterizes nothing. The
+    // compare reads the packed bits, so it is exact. A discard in fs_main would
+    // still pay for every fragment, and those fragments are the cost this saves.
+    if packed == globals.skip_color {
+        out.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return out;
+    }
+
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(1.0, 0.0),
@@ -104,9 +122,8 @@ fn vs_main(
         1.0 - pixel.y / globals.resolution.y * 2.0
     );
 
-    var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = color.rgb;
+    out.color = unpack4x8unorm(packed).rgb;
     return out;
 }
 
