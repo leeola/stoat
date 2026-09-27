@@ -751,6 +751,10 @@ pub(crate) fn project_frame(
     // base grid still holds it where the last live frame drew it, and no live
     // frame ships mid-glide, so without this its body stays put and tears
     // away from the shifted frame.
+    //
+    // The ride asks for no frame of its own. A host that moves asks for frames
+    // through its own glide, and a host at rest moves nothing that the ride
+    // follows.
     for &AnchorRide { pool: id, .. } in &rides {
         if active.iter().any(|tile| tile.id == id) {
             continue;
@@ -778,7 +782,6 @@ pub(crate) fn project_frame(
             continue;
         }
 
-        pool_easing = true;
         active.push(ActivePool {
             id,
             region: view.region,

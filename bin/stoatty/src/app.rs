@@ -4221,7 +4221,7 @@ mod tests {
     #[test]
     fn a_pool_away_from_its_target_glides() {
         let mut terminal = pooled_terminal(&[(1, 0, 4)]);
-        scroll_pool(&mut terminal, 1, 1);
+        scroll_pool(&mut terminal, 1, 1, 0);
         let mut frame = PoolFrame::default();
         frame.anims.insert(1, PoolAnim::new(0.0));
 
@@ -4243,7 +4243,7 @@ mod tests {
     #[test]
     fn an_anchored_pool_rides_a_gliding_host() {
         let mut terminal = anchored_terminal();
-        scroll_pool(&mut terminal, 1, 1);
+        scroll_pool(&mut terminal, 1, 1, 0);
         let mut frame = PoolFrame::default();
         frame.anims.insert(1, PoolAnim::new(0.0));
 
@@ -4303,6 +4303,49 @@ mod tests {
         );
     }
 
+    /// 0.375 pages in the protocol's 1/65536ths of a page. On a four-row pool
+    /// that is row 1.5, so a pool at rest there sits between two rows.
+    const BETWEEN_ROWS: u16 = 3 << 13;
+
+    /// A pool riding a host that rests between two rows composites beside it,
+    /// and neither asks for a frame, since nothing on screen moves.
+    #[test]
+    fn a_pool_riding_a_resting_host_asks_for_no_frame() {
+        let mut terminal = anchored_terminal();
+        scroll_pool(&mut terminal, 1, 0, BETWEEN_ROWS);
+        let mut frame = PoolFrame::default();
+
+        let projection = project(&mut terminal, &mut frame);
+
+        assert_eq!(
+            (
+                projection.pool_easing,
+                ride_ids(&projection),
+                active_ids(&projection)
+            ),
+            (false, vec![2], vec![1, 2]),
+            "the ride composites over the resting host with no frame request",
+        );
+    }
+
+    /// The same ride over a host that glides keeps the frames coming, from the
+    /// host's own motion.
+    #[test]
+    fn a_pool_riding_a_gliding_host_asks_for_frames() {
+        let mut terminal = anchored_terminal();
+        scroll_pool(&mut terminal, 1, 2, 0);
+        let mut frame = PoolFrame::default();
+        frame.anims.insert(1, PoolAnim::new(0.375));
+
+        let projection = project(&mut terminal, &mut frame);
+
+        assert_eq!(
+            (projection.pool_easing, ride_ids(&projection)),
+            (true, vec![2]),
+            "the gliding host asks for frames, and the ride holds",
+        );
+    }
+
     /// A terminal whose primary window holds each `(id, top, height)` pool at
     /// four columns wide, with the first pages filled so that a compose near
     /// the top is buffered.
@@ -4336,11 +4379,11 @@ mod tests {
         terminal
     }
 
-    fn scroll_pool(terminal: &mut Terminal, pool: u32, page: u64) {
+    fn scroll_pool(terminal: &mut Terminal, pool: u32, page: u64, fraction: u16) {
         terminal.advance(&encode_scroll(&ScrollCommand {
             pool,
             page,
-            fraction: 0,
+            fraction,
         }));
     }
 
@@ -4357,6 +4400,10 @@ mod tests {
 
     fn active_ids(projection: &FrameProjection) -> Vec<u32> {
         projection.active.iter().map(|pool| pool.id).collect()
+    }
+
+    fn ride_ids(projection: &FrameProjection) -> Vec<u32> {
+        projection.rides.iter().map(|ride| ride.pool).collect()
     }
 
     /// Every shift a glide ships moves the pool a whole number of pixels.
