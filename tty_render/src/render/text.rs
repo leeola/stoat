@@ -195,6 +195,40 @@ struct RidingRuns {
     rects: Range<u32>,
 }
 
+/// The text runs anchored to this frame's compositing hosts, built once per
+/// scene with no shift.
+///
+/// A glide moves where these runs draw and nothing else about them. The shift
+/// enters each instance after every snap, so a shift added to a built instance
+/// lands on the same pixels as a build at that shift. A glide frame therefore
+/// adds each group's shift to these instances instead of walking every
+/// character through the atlas again.
+#[derive(Default)]
+struct RidingBuild {
+    /// The runs and the mark list the instances were built against, or `None`
+    /// before the first build. See [`TextPass::last_text_runs`].
+    text_runs: Option<(GridVersion, u64)>,
+    /// The [`Atlas::content_epoch`] the instances resolved against.
+    atlas_epoch: u64,
+    glyphs: Vec<TextInstance>,
+    rects: Vec<RectInstance>,
+    /// Each host's runs, split where the top row their layouts assumed
+    /// changes, so one shift moves each group.
+    groups: Vec<RidingGroup>,
+    /// Each host's span of the instances, as the index of its ride and its
+    /// glyph and rect ranges. A host with nothing to draw has none.
+    hosts: Vec<(usize, Range<u32>, Range<u32>)>,
+}
+
+/// Runs of one host whose layouts assumed one top row, so one shift moves them.
+struct RidingGroup {
+    /// The index of the host's ride in the frame's anchored list.
+    ride: usize,
+    top_rows: f32,
+    glyphs: Range<u32>,
+    rects: Range<u32>,
+}
+
 /// Uniform shared by every instance: the surface resolution the vertex shader
 /// maps pixel coordinates through, and the cell box the underline pass draws in.
 #[repr(C)]
@@ -465,8 +499,11 @@ pub struct TextPass {
     riding_capacity: usize,
     riding_rects: Buffer,
     riding_rect_capacity: usize,
-    /// Where the riding instances are built each frame, held so a glide that
-    /// rebuilds them every frame allocates nothing.
+    /// The riding runs built for the scene, which each frame shifts into the
+    /// scratch below.
+    riding_build: RidingBuild,
+    /// Where each frame shifts the riding instances for upload, held so a glide
+    /// allocates nothing.
     riding_glyph_scratch: Vec<TextInstance>,
     riding_rect_scratch: Vec<RectInstance>,
     /// The occluders the composited pools read, bound by
@@ -508,6 +545,10 @@ pub struct TextPass {
     run_builds: usize,
     #[cfg(test)]
     overlay_builds: usize,
+    /// How many times this pass has built the riding runs. See
+    /// [`Self::run_builds`].
+    #[cfg(test)]
+    riding_builds: usize,
     /// The [`Atlas::content_epoch`] the cached grid-glyph instances were last
     /// built against. An eviction reuses a slot without moving the texture size,
     /// and one can come from any earlier pass, such as a pool composite between
@@ -1017,6 +1058,7 @@ impl TextPass {
                 instance_bytes::<RectInstance>(INITIAL_CAPACITY),
             ),
             riding_rect_capacity: INITIAL_CAPACITY,
+            riding_build: RidingBuild::default(),
             riding_glyph_scratch: Vec::new(),
             riding_rect_scratch: Vec::new(),
             composite_globals_bind_group,
@@ -1033,6 +1075,8 @@ impl TextPass {
             run_builds: 0,
             #[cfg(test)]
             overlay_builds: 0,
+            #[cfg(test)]
+            riding_builds: 0,
             // Never a real content epoch, so the first prepare always builds.
             grid_atlas_epoch: u64::MAX,
             overlay_instances,
@@ -1384,7 +1428,6 @@ impl TextPass {
             self.riding_hosts
                 .extend(anchored.iter().map(|ride| ride.host));
         }
-        self.build_riding_runs(device, queue, grid, anchored);
         let panel_count = occluders.len() as u32;
 
         // Each globals buffer carries its own scroll. The plain glyphs take the grid
@@ -1506,6 +1549,31 @@ impl TextPass {
                 self.run_builds += 1;
             }
         }
+
+        // The riding runs build against the base runs' key, read here after
+        // this frame's packing so an eviction that packing caused rebuilds
+        // them. A host that starts or stops gliding changes which runs ride.
+        // Every frame shifts the built runs by its own glide.
+        let riding_stale = self.riding_build.text_runs != Some(text_runs)
+            || self.atlas.content_epoch() != self.riding_build.atlas_epoch
+            || riding_changed;
+        if riding_stale {
+            let epoch_at_build = self.atlas.content_epoch();
+            self.build_riding_runs(device, queue, grid, anchored);
+            // When packing a riding glyph moves the UVs the build already
+            // emitted, a second pass reads them back final, as the base build
+            // does above.
+            if self.atlas.content_epoch() != epoch_at_build {
+                self.build_riding_runs(device, queue, grid, anchored);
+            }
+            self.riding_build.text_runs = Some(text_runs);
+            self.riding_build.atlas_epoch = self.atlas.content_epoch();
+            #[cfg(test)]
+            {
+                self.riding_builds += 1;
+            }
+        }
+        self.shift_riding_runs(device, queue, anchored);
 
         let region = grid.scroll_region();
 
@@ -2355,15 +2423,16 @@ impl TextPass {
         }
     }
 
-    /// Build and upload the runs anchored to a pool compositing this frame,
-    /// each shifted by its host's glide.
+    /// Build the runs anchored to a pool compositing this frame into
+    /// [`Self::riding_build`], unshifted.
     ///
-    /// Rebuilt every frame rather than cached, because the shift moves with the
-    /// glide while the base instances do not. The riding set is a label or two,
-    /// so the rebuild is cheap where rebuilding every run would not be.
+    /// A build walks every character of every riding run through the atlas, so
+    /// it runs only when the runs, the mark list, the atlas, or the riding hosts
+    /// moved. [`Self::shift_riding_runs`] moves the result every frame.
     ///
     /// Grouped by host so each one's instances are contiguous and its draw is a
-    /// single range under a single scissor.
+    /// single range under a single scissor, and within a host by the top row
+    /// each run's layout assumed, which decides its shift.
     fn build_riding_runs(
         &mut self,
         device: &Device,
@@ -2371,49 +2440,95 @@ impl TextPass {
         grid: &Grid,
         anchored: &[HostRide],
     ) {
-        self.riding_runs.clear();
+        let mut build = mem::take(&mut self.riding_build);
+        build.glyphs.clear();
+        build.rects.clear();
+        build.groups.clear();
+        build.hosts.clear();
+
+        for (index, ride) in anchored.iter().enumerate() {
+            let (glyph_start, rect_start) = (build.glyphs.len() as u32, build.rects.len() as u32);
+            for run in grid.text_runs() {
+                let Some((host, top_rows)) = run.anchor else {
+                    continue;
+                };
+                if host != ride.host {
+                    continue;
+                }
+
+                let (glyphs_from, rects_from) =
+                    (build.glyphs.len() as u32, build.rects.len() as u32);
+                let follow = follow_slot(grid, run.follow);
+                self.push_run_glyphs(device, queue, run, follow, [0.0; 2], 0, &mut build.glyphs);
+                if let Some(rect) = self.run_rect(grid, run) {
+                    build.rects.push(rect);
+                }
+
+                let (glyphs_to, rects_to) = (build.glyphs.len() as u32, build.rects.len() as u32);
+                match build.groups.last_mut() {
+                    Some(group) if group.ride == index && group.top_rows == top_rows => {
+                        group.glyphs.end = glyphs_to;
+                        group.rects.end = rects_to;
+                    },
+                    _ => build.groups.push(RidingGroup {
+                        ride: index,
+                        top_rows,
+                        glyphs: glyphs_from..glyphs_to,
+                        rects: rects_from..rects_to,
+                    }),
+                }
+            }
+
+            let (glyph_end, rect_end) = (build.glyphs.len() as u32, build.rects.len() as u32);
+            if glyph_end > glyph_start || rect_end > rect_start {
+                build
+                    .hosts
+                    .push((index, glyph_start..glyph_end, rect_start..rect_end));
+            }
+        }
+
+        self.riding_build = build;
+    }
+
+    /// Upload the riding runs, each group shifted by its host's glide this
+    /// frame, and name each host's span in [`Self::riding_runs`].
+    ///
+    /// Runs every frame, since the shift moves with the glide. The shift is
+    /// added after every snap, the way the bar pass orders its own glide, so a
+    /// following rect stays whole-pixel and the glide moves it. `anchored` must
+    /// list the hosts the build was given, in the same order.
+    fn shift_riding_runs(&mut self, device: &Device, queue: &Queue, anchored: &[HostRide]) {
         let mut glyphs = mem::take(&mut self.riding_glyph_scratch);
         let mut rects = mem::take(&mut self.riding_rect_scratch);
         glyphs.clear();
         rects.clear();
+        glyphs.extend_from_slice(&self.riding_build.glyphs);
+        rects.extend_from_slice(&self.riding_build.rects);
 
-        if !anchored.is_empty() {
-            for ride in anchored {
-                let (glyph_start, rect_start) = (glyphs.len() as u32, rects.len() as u32);
-                for run in grid.text_runs() {
-                    let Some((host, top_rows)) = run.anchor else {
-                        continue;
-                    };
-                    if host != ride.host {
-                        continue;
-                    }
-                    let dy_px = ride.shift_px(top_rows, self.metrics.height);
-                    let follow = follow_slot(grid, run.follow);
-                    self.push_run_glyphs(
-                        device,
-                        queue,
-                        run,
-                        follow,
-                        [0.0; 2],
-                        0,
-                        dy_px,
-                        &mut glyphs,
-                    );
-                    if let Some(rect) = self.run_rect(grid, run, dy_px) {
-                        rects.push(rect);
-                    }
-                }
-
-                let (glyph_end, rect_end) = (glyphs.len() as u32, rects.len() as u32);
-                if glyph_end > glyph_start || rect_end > rect_start {
-                    self.riding_runs.push(RidingRuns {
-                        scissor: ride.scissor,
-                        glyphs: glyph_start..glyph_end,
-                        rects: rect_start..rect_end,
-                    });
-                }
+        for group in &self.riding_build.groups {
+            let dy = anchored[group.ride].shift_px(group.top_rows, self.metrics.height);
+            let glyph_span = group.glyphs.start as usize..group.glyphs.end as usize;
+            for glyph in &mut glyphs[glyph_span] {
+                glyph.pos[1] += dy;
+            }
+            let rect_span = group.rects.start as usize..group.rects.end as usize;
+            for rect in &mut rects[rect_span] {
+                rect.pos[1] += dy;
             }
         }
+
+        self.riding_runs.clear();
+        self.riding_runs
+            .extend(
+                self.riding_build
+                    .hosts
+                    .iter()
+                    .map(|(ride, glyphs, rects)| RidingRuns {
+                        scissor: anchored[*ride].scissor,
+                        glyphs: glyphs.clone(),
+                        rects: rects.clone(),
+                    }),
+            );
 
         upload_instances(
             device,
@@ -2436,17 +2551,14 @@ impl TextPass {
         self.riding_rect_scratch = rects;
     }
 
-    /// One run's backing rect, shifted down by `dy` pixels, or `None` for a run
-    /// that carries no background or draws nothing.
+    /// One run's backing rect, or `None` for a run that carries no background or
+    /// draws nothing.
     ///
     /// Every edge snaps the way the run's glyph pen does (see [`snap_cell`]), so
     /// the rect's left edge lands on the pixel its first glyph starts on, and
     /// two runs at one column back the same pixels. Sizing from the raw product
     /// instead leaves each run's width to its own rounding.
-    ///
-    /// `dy` is added after the snap, the way the bar pass orders its own glide,
-    /// so a following rect stays whole-pixel and the glide moves it.
-    fn run_rect(&self, grid: &Grid, run: &TextRun, dy: f32) -> Option<RectInstance> {
+    fn run_rect(&self, grid: &Grid, run: &TextRun) -> Option<RectInstance> {
         let bg = run.bg?;
         let scale = f32::from(run.scale) / 256.0;
         if scale <= 0.0 {
@@ -2464,7 +2576,7 @@ impl TextPass {
         let top = snap_cell(row, 0.0, self.metrics.height);
         let bottom = snap_cell(row + 1.0, 0.0, self.metrics.height);
         Some(RectInstance {
-            pos: [left, top + dy],
+            pos: [left, top],
             dim: [right - left, bottom - top],
             color: rgb_f32(bg),
             seq: run.seq,
@@ -2472,10 +2584,10 @@ impl TextPass {
         })
     }
 
-    /// Append one run's glyph instances to `out`, shifted down by `dy` pixels.
+    /// Append one run's glyph instances to `out`.
     ///
-    /// Split out so the base build and the per-frame riding build share the
-    /// atlas walk. A non-positive scale draws nothing.
+    /// Split out so the base build and the riding build share the atlas walk. A
+    /// non-positive scale draws nothing.
     #[allow(clippy::too_many_arguments)]
     fn push_run_glyphs(
         &mut self,
@@ -2485,7 +2597,6 @@ impl TextPass {
         follow: u32,
         origin: [f32; 2],
         anchor: u32,
-        dy: f32,
         out: &mut Vec<TextInstance>,
     ) {
         let scale = f32::from(run.scale) / 256.0;
@@ -2524,7 +2635,7 @@ impl TextPass {
                 origin,
             );
             out.push(TextInstance {
-                pos: [pos[0], pos[1] + dy],
+                pos,
                 dim: pack_dim([info.size[0] as f32, info.size[1] as f32]),
                 texel_origin,
                 texel_size,
@@ -2585,7 +2696,7 @@ impl TextPass {
                 continue;
             }
             let follow = follow_slot(grid, run.follow);
-            self.push_run_glyphs(device, queue, run, follow, origin, anchor, 0.0, out);
+            self.push_run_glyphs(device, queue, run, follow, origin, anchor, out);
         }
     }
 
@@ -2617,7 +2728,7 @@ impl TextPass {
             }
             // A run on the live grid rides no glide, so it takes the same rect
             // as a riding one at rest.
-            if let Some(rect) = self.run_rect(grid, run, 0.0) {
+            if let Some(rect) = self.run_rect(grid, run) {
                 out.push(rect);
             }
         }
@@ -7143,6 +7254,144 @@ mod tests {
             riding - unshifted,
             -9.5,
             "the same run, shifted from its own top row to the host's eased top",
+        );
+    }
+
+    /// A glide moves where its riding runs draw and nothing else about them, so
+    /// a second glide frame shifts the runs the first one built instead of
+    /// walking their characters through the atlas again. New runs, or another
+    /// host gliding in the place of the first, build them again.
+    #[test]
+    fn a_second_glide_frame_rebuilds_no_riding_run() {
+        let (device, queue, mut pass) = headless_text_pass();
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+        // The run's layout put its host's top at row 10, on a 19-pixel cell.
+        let grid_of = |text: &str| {
+            let mut run = chrome_run(text);
+            run.anchor = Some((3, 10.0));
+            chrome_grid(vec![run], Vec::new())
+        };
+        let ride = |host, top_rows| {
+            [HostRide {
+                host,
+                top_rows,
+                scissor: [0, 0, 40, 40],
+            }]
+        };
+        let (grid, changed) = (grid_of("x"), grid_of("xx"));
+
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame,
+            &[],
+            &ride(3, 10.5),
+            &[],
+        );
+        let first = pass.riding_glyph_scratch[0].pos[1];
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame,
+            &[],
+            &ride(3, 10.25),
+            &[],
+        );
+        assert_eq!(
+            (
+                pass.riding_builds,
+                pass.riding_glyph_scratch[0].pos[1] - first
+            ),
+            (1, 4.75),
+            "(builds, shift gained) as the glide eases a quarter row further",
+        );
+
+        pass.prepare(
+            &device,
+            &queue,
+            &changed,
+            resolution,
+            &frame,
+            &[],
+            &ride(3, 10.25),
+            &[],
+        );
+        assert_eq!(pass.riding_builds, 2, "new runs build again");
+
+        pass.prepare(
+            &device,
+            &queue,
+            &changed,
+            resolution,
+            &frame,
+            &[],
+            &ride(9, 0.5),
+            &[],
+        );
+        assert_eq!(
+            (pass.riding_builds, pass.riding_runs.len()),
+            (3, 0),
+            "(builds, riding hosts) once another host glides in its place",
+        );
+    }
+
+    /// Each riding run shifts from the top row its own layout assumed to its own
+    /// host's eased top, whatever it shares with the run before it.
+    #[test]
+    fn each_riding_run_shifts_by_its_own_host_and_top_row() {
+        let (device, queue, mut pass) = headless_text_pass();
+        let resolution = [640.0, 480.0];
+        let frame = chrome_frame();
+        let anchored_run = |row: i16, host: u32, top_rows: f32| {
+            let mut run = chrome_run("x");
+            run.row = row * 16;
+            run.anchor = Some((host, top_rows));
+            run
+        };
+        // The second run shares a host with the first and a top row with the
+        // third, and a group that ignores either shifts it wrong.
+        let grid = chrome_grid(
+            vec![
+                anchored_run(0, 3, 10.0),
+                anchored_run(1, 3, 12.0),
+                anchored_run(2, 4, 12.0),
+            ],
+            Vec::new(),
+        );
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+        let unshifted: Vec<f32> = pass
+            .text_run_build_scratch
+            .iter()
+            .map(|glyph| glyph.pos[1])
+            .collect();
+        let rides = [(3, 10.5, 0), (4, 9.0, 40)].map(|(host, top_rows, left)| HostRide {
+            host,
+            top_rows,
+            scissor: [left, 0, 40, 40],
+        });
+        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &rides, &[]);
+
+        let shifts: Vec<f32> = pass
+            .riding_glyph_scratch
+            .iter()
+            .zip(&unshifted)
+            .map(|(glyph, y)| glyph.pos[1] - y)
+            .collect();
+        let spans: Vec<_> = pass
+            .riding_runs
+            .iter()
+            .map(|host| (host.scissor[0], host.glyphs.clone()))
+            .collect();
+        assert_eq!(
+            (shifts, spans),
+            (vec![-9.5, 28.5, 57.0], vec![(0, 0..2), (40, 2..3)]),
+            "(each run's shift on a 19-pixel cell, each host's clip and glyph span)",
         );
     }
 
