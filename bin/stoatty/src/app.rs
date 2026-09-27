@@ -3163,8 +3163,8 @@ fn aux_geometry_hash(pools: &[PoolView], rows: usize, cols: usize) -> u64 {
     hasher.finish()
 }
 
-/// Hash what [`compose_aux_grid`] holds: per pool in z-order, its content
-/// version and, for the ones no overlay covers, its scroll target.
+/// Hash what [`compose_aux_grid`] holds, which is the content version and the
+/// scroll target of each pool no overlay covers, in z-order.
 ///
 /// A move here leaves every rectangle where it was, so the compose overwrites
 /// the same rows in place and damages only the ones that came back different.
@@ -3172,22 +3172,26 @@ fn aux_geometry_hash(pools: &[PoolView], rows: usize, cols: usize) -> u64 {
 /// than the base.
 ///
 /// `covered` are the pools drawing a composite over their own region this
-/// frame, whose scroll target is left out. Such a pool hides the base beneath
-/// it whole, straddle row and all, so where the base holds it is not an input
-/// to anything on screen, and a glide moves that target on every tick.
+/// frame, whose content version and scroll target are left out. Such a pool
+/// hides the base beneath it whole, straddle row and all, so what the base
+/// holds there is not an input to anything on screen. A glide moves that
+/// target on every tick, and a fill that lands mid-glide moves that version.
 ///
-/// Entering and leaving that set is what a glide costs: one recompose as the
-/// pool takes a composite, which puts the base at the destination, and one as
-/// it settles and its target is read again, which catches the base up to where
-/// the glide actually landed. The ticks between read nothing and cost nothing.
+/// Entering and leaving that set is what a glide costs. One recompose comes as
+/// the pool takes a composite, which puts the base at the destination. The
+/// other comes as the pool settles and both inputs are read again, which
+/// catches the base up to where the glide landed and to the output that
+/// arrived under the composite. The ticks and fills between read nothing and
+/// cost nothing.
 ///
-/// A content version is read whatever the pool is doing, since output arriving
-/// mid-glide has to reach the base before a settle reveals it.
+/// The catch-up lands in the frame that reveals the base, because the settle
+/// takes the pool out of `covered` on that same frame. A pool whose composite
+/// fails draws none and stays out of `covered`, so its base follows its output.
 fn aux_content_hash(pools: &[PoolView], covered: &[ActivePool]) -> u64 {
     let mut hasher = FxHasher::default();
     for pool in pools {
-        pool.content_version.hash(&mut hasher);
         if !covered.iter().any(|tile| tile.id == pool.id) {
+            pool.content_version.hash(&mut hasher);
             pool.scroll_target.pages().to_bits().hash(&mut hasher);
         }
     }
@@ -3958,20 +3962,24 @@ mod tests {
         );
     }
 
-    /// Output arriving mid-glide has to reach the base before the settle reveals
-    /// it, so a content version is read whether an overlay covers the pool or
-    /// not.
+    /// Output arriving mid-glide lands under a composite that hides the base,
+    /// so the base takes it on the settle, in the frame that reveals it.
     #[test]
-    fn a_covered_pool_still_reads_its_content() {
+    fn a_covered_pool_s_output_reaches_the_base_as_it_settles() {
         let (pool, covered) = gliding_pool();
         let before = aux_content_hash(&[pool], &covered);
 
         let mut printed = pool;
         printed.content_version = pool.content_version + 1;
-        assert_ne!(
+        assert_eq!(
             aux_content_hash(&[printed], &covered),
             before,
-            "content arriving under an overlay still has to reach the base",
+            "content arriving under an overlay moves nothing",
+        );
+        assert_ne!(
+            aux_content_hash(&[printed], &[]),
+            aux_content_hash(&[pool], &[]),
+            "and the settle reads it, so the base catches up to the output",
         );
     }
 
