@@ -5202,12 +5202,17 @@ mod tests {
         );
     }
 
-    /// A jump lands the cursor before it arms the page glide, so the pages the
-    /// glide fills already carry the landed line, and the settle has no gutter
-    /// runs to refresh.
-    #[test]
-    fn a_page_glide_fills_with_the_landed_line() {
-        use stoatty_protocol::command::Command;
+    /// Rest the focused editor of a 400-line file with its top row on `start`,
+    /// then jump the cursor to `landing` and run the page glide frame by frame.
+    ///
+    /// Reports the page under the rest's top row, the pages the glide's frames
+    /// redecorated, and the pages its settle redecorated. The rich gutter is
+    /// on, so the jump's new relative-number line reaches the held pages as
+    /// decorations-only fills.
+    fn page_glide_redecorations(start: usize, landing: usize) -> (u64, Vec<u64>, Vec<u64>) {
+        use stoatty_protocol::command::{
+            Command, FillCommand, PoolRegionCommand, NON_PANE_POOL_BASE,
+        };
 
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_diagnostic_theme());
@@ -5224,28 +5229,56 @@ mod tests {
         h.settle();
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
+
+        let line = |n: usize| body.find(&format!("line {n}\n")).expect("the line exists");
+        h.stoat.collapse_focused_cursor_to(line(start));
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row = start as u32;
         emit_smooth_scroll(&mut h.stoat);
         h.settle();
-        let _ = drain_apc(&mut rx);
+        let height = drain_apc(&mut rx)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::PoolRegion(PoolRegionCommand { pool, height, .. })
+                    if pool < NON_PANE_POOL_BASE =>
+                {
+                    Some(u64::from(height))
+                },
+                _ => None,
+            })
+            .expect("the editor declares its pool");
 
         // Two 10-row viewports down, inside the three a glide eases across
-        // rather than snaps, and inside the buffered window, so the settle
-        // meets pages the glide already holds.
+        // rather than snaps.
         action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("focused editor")
             .viewport_rows = Some(10);
-        let landing = body.find("line 20\n").expect("line 20 exists");
-        h.stoat.collapse_focused_cursor_to(landing);
+        h.stoat.collapse_focused_cursor_to(line(landing));
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             assert!(view::follow_jump(editor, 3), "the jump moves the view");
             assert_eq!(editor.scroll_glide, ScrollGlide::Page);
         }
+
+        let redecorated = |commands: Vec<Command>| -> Vec<u64> {
+            commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::FillDecorations(FillCommand { pool, index, .. })
+                        if pool < NON_PANE_POOL_BASE =>
+                    {
+                        Some(index)
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
         // Every frame of the glide emits, as the render loop does, so the window
         // follows the glide and the pages it passes fill on the way.
         emit_smooth_scroll(&mut h.stoat);
         h.settle();
-        let _ = drain_apc(&mut rx);
+        let mut gliding = redecorated(drain_apc(&mut rx));
         for _ in 0..1000 {
             app::tick_animation(&mut h.stoat, 0.016);
             if !app::animating(&h.stoat) {
@@ -5253,21 +5286,41 @@ mod tests {
             }
             emit_smooth_scroll(&mut h.stoat);
             h.settle();
-            let _ = drain_apc(&mut rx);
+            gliding.extend(redecorated(drain_apc(&mut rx)));
         }
         assert!(!app::animating(&h.stoat), "the glide settles");
 
         // The first emit after the glide is the settle.
         emit_smooth_scroll(&mut h.stoat);
         h.settle();
-        let redecorated: Vec<Command> = drain_apc(&mut rx)
-            .into_iter()
-            .filter(|command| matches!(command, Command::FillDecorations(_)))
-            .collect();
+        (
+            start as u64 / height,
+            gliding,
+            redecorated(drain_apc(&mut rx)),
+        )
+    }
+
+    /// A jump lands the cursor before it arms the page glide, so the pages the
+    /// glide fills already carry the landed line. The held pages take the new
+    /// gutter runs as the glide starts, and the settle has none to refresh.
+    #[test]
+    fn a_page_glide_fills_with_the_landed_line() {
         assert_eq!(
-            redecorated,
-            Vec::new(),
-            "the settle sends no decorations-only fill"
+            page_glide_redecorations(0, 20),
+            (0, vec![0, 1, 2, 3, 4], Vec::new()),
+            "(page, glide redecorations, settle redecorations) from the top",
+        );
+    }
+
+    /// A glide down never composites the held pages above its start, so they
+    /// keep their old gutter runs until a move heads back up to them.
+    #[test]
+    fn a_page_glide_redecorates_no_page_above_its_start() {
+        let (page, gliding, settle) = page_glide_redecorations(200, 220);
+        assert_eq!(
+            (gliding, settle),
+            ((page..page + 3).collect(), Vec::new()),
+            "(glide redecorations, settle redecorations) from page {page}",
         );
     }
 

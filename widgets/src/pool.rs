@@ -115,20 +115,33 @@ struct PoolEmitState {
     /// different value the buffered pages are stale (the surface re-filtered or
     /// regenerated), so the window is refilled rather than composited as-is.
     content_version: u64,
-    /// Decoration version last seen for this pool. See [`PageVersions`].
-    decoration_version: u64,
-    /// The per-page cells version each requested page was filled at, as
-    /// `(page, version)`. See the `page_cells` of [`emit_pages_into`].
-    page_cells: Vec<(u64, u64)>,
+    /// What the slot of each requested page holds.
+    pages: Vec<PageStamp>,
+}
+
+/// The versions one requested page's slot holds, as the fills sent to it left
+/// them.
+///
+/// A whole fill sets both. A decorations-only fill sets the decorations, so a
+/// page that a move leaves behind keeps the version it holds until a later
+/// move heads toward it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PageStamp {
+    page: u64,
+    /// The `page_cells` answer of [`emit_pages_into`] that the page's whole
+    /// fill carried.
+    cells: u64,
+    /// The [`PageVersions::decorations`] that the page's latest fill carried.
+    decorations: u64,
 }
 
 /// The two versions a pool's buffered pages answer to.
 ///
 /// `cells` covers everything a page paints into its cells, and a change refills
 /// every buffered page. `decorations` covers only the text runs, bars, and
-/// polylines laid over those cells. A change of it alone re-sends just those for
-/// the pages the window already buffers, which costs far less than painting
-/// them again.
+/// polylines laid over those cells. A change of it alone re-sends just those,
+/// to the buffered pages a scroll composites or heads toward, which costs far
+/// less than painting them again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PageVersions {
     pub cells: u64,
@@ -142,8 +155,9 @@ pub struct Refill {
     /// the buffered window and the buffered pages whose own cells version
     /// moved.
     pub entered: Vec<u64>,
-    /// Pages the window already buffers whose decorations changed, ascending,
-    /// each owed a decorations-only fill.
+    /// Buffered pages owed a decorations-only fill, ascending. A page is listed
+    /// when its decorations changed and the move composites or heads toward
+    /// it.
     pub redecorated: Vec<u64>,
 }
 
@@ -347,11 +361,14 @@ pub fn emit_into(
 /// their cells.
 ///
 /// A change of `versions.cells` refills the window as a content version change
-/// does there. A change of `versions.decorations` alone lists every page the
-/// window already buffers in [`Refill::redecorated`], for the caller to send
-/// as decorations-only fills. A page entering the window this call is never
-/// listed there too, since its whole fill carries the decorations. The hold
-/// rule defers a decoration change the way it defers a cell change.
+/// does there. A change of `versions.decorations` alone lists buffered pages
+/// in [`Refill::redecorated`], for the caller to send as decorations-only
+/// fills. It lists only the pages the move composites or heads toward, from
+/// the pages under the last target onward in the direction the target moves.
+/// A page behind the move keeps its old decorations until a later move heads
+/// back toward it. A page entering the window this call is never listed there
+/// too, because its whole fill carries the decorations. The hold rule defers a
+/// decoration change the way it defers a cell change.
 ///
 /// `page_cells` answers a cells version for each page on top of
 /// `versions.cells`, for content that changes on some pages and not others.
@@ -382,7 +399,8 @@ pub fn emit_pages_into(
     // Computed before the region and version wipes below reset last_scroll_offset,
     // so it reflects real scroll motion. A fresh entry has last_scroll_offset None,
     // so its first display counts as scrolling and still prefills the whole window.
-    let scrolling = entry.last_scroll_offset != Some(scroll_offset);
+    let last_target = entry.last_scroll_offset;
+    let scrolling = last_target != Some(scroll_offset);
     let hold = hold_when_idle && !scrolling;
 
     let region_changed = entry.region != Some(region);
@@ -391,7 +409,7 @@ pub fn emit_pages_into(
         entry.region = Some(region);
         // A fresh region invalidates the pool's slot contents. Force a refill.
         entry.requested = None;
-        entry.page_cells.clear();
+        entry.pages.clear();
         entry.last_scroll_offset = None;
     }
 
@@ -403,15 +421,10 @@ pub fn emit_pages_into(
     if entry.content_version != effective_version {
         // The surface changed under the pool. The buffered pages are stale.
         entry.requested = None;
-        entry.page_cells.clear();
+        entry.pages.clear();
         entry.last_scroll_offset = None;
         entry.content_version = effective_version;
     }
-    let effective_decorations = if hold {
-        entry.decoration_version
-    } else {
-        versions.decorations
-    };
 
     let region_height = region.height.max(1) as u64;
     let page = scroll_offset.floor() as u64 / region_height;
@@ -444,18 +457,29 @@ pub fn emit_pages_into(
             pool,
             window.clone(),
             !hold,
-            &page_cells,
+            &|page| PageStamp {
+                page,
+                cells: page_cells(page),
+                decorations: versions.decorations,
+            },
             &mut render_page,
         )
     };
 
-    // A window page that did not enter was requested before, so it keeps its
-    // cells and needs only the new decorations. A cell change emptied the
-    // requested range above, so every page entered and none is listed here.
+    // A page that did not enter keeps its cells and needs only the new
+    // decorations. An entered page's fill carried them, so its stamp is
+    // current. A cell change emptied the requested range above, so every page
+    // entered and none is listed here.
     let mut redecorated = Vec::new();
-    if entry.decoration_version != effective_decorations {
-        redecorated = window.filter(|index| !entered.contains(index)).collect();
-        entry.decoration_version = effective_decorations;
+    if !hold {
+        let ahead = pages_ahead(window, last_target, scroll_offset, region_height);
+        for held in &mut entry.pages {
+            if ahead.contains(&held.page) && held.decorations != versions.decorations {
+                held.decorations = versions.decorations;
+                redecorated.push(held.page);
+            }
+        }
+        redecorated.sort_unstable();
     }
 
     // A jump whose new window does not overlap the old one is too far to ease
@@ -485,7 +509,8 @@ pub fn emit_pages_into(
 /// Pages already covered by the previous window are not re-pushed, so a sub-page
 /// scroll that does not change the window enters no pages and a one-page step enters
 /// only the single page at the edge. With `compare`, a covered page whose
-/// `page_cells` answer differs from the one its fill carried enters again.
+/// `stamp` cells differ from the ones its fill carried enters again. An entered
+/// page records its `stamp`.
 ///
 /// `render_page(index)` returning empty bytes requests the page without emitting a
 /// fill frame. A caller filling asynchronously uses that to mean "no synchronous
@@ -497,7 +522,7 @@ fn refill(
     pool: u32,
     window: Range<u64>,
     compare: bool,
-    page_cells: &impl Fn(u64) -> u64,
+    stamp: &impl Fn(u64) -> PageStamp,
     render_page: &mut impl FnMut(u64) -> Vec<u8>,
 ) -> Vec<u64> {
     let already = entry.requested.clone().unwrap_or(0..0);
@@ -507,8 +532,9 @@ fn refill(
         if buffered && !compare {
             continue;
         }
-        let version = page_cells(index);
-        if buffered && entry.page_cells.contains(&(index, version)) {
+        let fresh = stamp(index);
+        let unchanged = |held: &PageStamp| held.page == index && held.cells == fresh.cells;
+        if buffered && entry.pages.iter().any(unchanged) {
             continue;
         }
 
@@ -517,12 +543,41 @@ fn refill(
         if !bytes.is_empty() {
             encode_fill_scope(out, pool, index, |out| out.extend_from_slice(&bytes));
         }
-        entry.page_cells.retain(|&(page, _)| page != index);
-        entry.page_cells.push((index, version));
+        entry.pages.retain(|held| held.page != index);
+        entry.pages.push(fresh);
     }
-    entry.page_cells.retain(|(page, _)| window.contains(page));
+    entry.pages.retain(|held| window.contains(&held.page));
     entry.requested = Some(window);
     entered
+}
+
+/// The pages of `window` that a move of the scroll target from `from` to `to`
+/// composites or heads toward.
+///
+/// The terminal composites every row it eases through between the two
+/// targets, and a moving composite reads `region_height + 1` rows from its
+/// floored top row. The range therefore starts at the pages under those rows
+/// at `from` and runs to the window's edge in the direction of the move. A
+/// move without a direction, or a first target, covers the whole window.
+///
+/// A terminal that still trails an earlier target reads the page behind the
+/// range until it catches up, within a frame or two. A change that arrives
+/// while the pool moves therefore shows that page's older decorations for
+/// those frames. A jump from a still view starts with the terminal on the last
+/// target, so a page glide's change has no such page.
+fn pages_ahead(window: Range<u64>, from: Option<f32>, to: f32, region_height: u64) -> Range<u64> {
+    let Some(from) = from else {
+        return window;
+    };
+
+    let top = from.floor() as u64;
+    if to > from {
+        top / region_height..window.end
+    } else if to < from {
+        window.start..(top + region_height) / region_height + 1
+    } else {
+        window
+    }
 }
 
 /// The half-open page window centered on `page`, clamped at the content start.
@@ -816,13 +871,59 @@ mod tests {
             "a resting pool composites nothing, so the new runs can wait"
         );
         // The rest kept the window 0..5 the terminal holds, so the move enters
-        // nothing and redecorates the whole window.
+        // nothing. It moves down from page 2, so pages 0 and 1 above it keep
+        // their old runs.
         assert_eq!(
             emit_decorated(&mut state, 41.0, 1),
             Refill {
                 entered: vec![],
-                redecorated: vec![0, 1, 2, 3, 4],
+                redecorated: vec![2, 3, 4],
             }
+        );
+    }
+
+    /// A decoration change goes to the buffered pages a move composites or
+    /// heads toward, from the pages under the last target onward in the
+    /// direction the target moves. A page behind the move keeps its old
+    /// decorations until a move heads back toward it, and a page that took the
+    /// new ones takes nothing more.
+    #[test]
+    fn a_decoration_change_redecorates_only_the_pages_a_move_heads_toward() {
+        let mut state = SmoothScrollState::default();
+        let refills: Vec<(Vec<u64>, Vec<u64>)> = [
+            (100.0, 0),
+            (101.0, 1),
+            (100.0, 2),
+            (101.0, 2),
+            (140.0, 2),
+            (139.0, 3),
+            (138.0, 4),
+            (141.0, 5),
+            (142.0, 5),
+        ]
+        .into_iter()
+        .map(|(offset, decorations)| {
+            let refill = emit_decorated(&mut state, offset, decorations);
+            (refill.entered, refill.redecorated)
+        })
+        .collect();
+
+        assert_eq!(
+            refills,
+            [
+                ((3..8).collect(), vec![]),
+                (vec![], vec![5, 6, 7]),
+                (vec![], vec![3, 4, 5, 6]),
+                (vec![], vec![7]),
+                (vec![8, 9], vec![]),
+                (vec![4], vec![5, 6, 7, 8]),
+                (vec![], vec![4, 5, 6, 7]),
+                (vec![9], vec![6, 7, 8]),
+                (vec![], vec![]),
+            ],
+            "(entered, redecorated) per move of 20-row pages, down from page 5, \
+             up past its straddle row, down to the page left behind, a step to \
+             page 7, up across a page edge, up again, down from page 6, and on",
         );
     }
 
