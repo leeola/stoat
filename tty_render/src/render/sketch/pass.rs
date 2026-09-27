@@ -63,6 +63,17 @@ const AA_MARGIN: f32 = 1.0;
 /// into chunks this long keeps the walk to the segments that pass nearby.
 const CHUNK_SEGMENTS: u32 = 16;
 
+/// The geometry every sketch list generates within.
+///
+/// The walkthrough's largest marks take 16 spans for the card and 12 for the
+/// ring. A list budget of about 170 times its scene holds the point buffer to
+/// 2 MiB and the span buffer to 512 KiB.
+const BUDGET: Budget = Budget {
+    mark_spans: 64,
+    list_points: 262_144,
+    list_spans: 16_384,
+};
+
 /// The per-mark instance data.
 ///
 /// A mark's strokes resolve together in each fragment rather than one instance
@@ -189,6 +200,21 @@ struct Chunk {
     bounds: [f32; 4],
 }
 
+/// How much geometry one sketch list generates at most.
+///
+/// A frame carries up to 255 points a path and a list holds up to 4,096 marks,
+/// so a flood of zigzag paths or elbows generates points and spans past the
+/// device's buffer and storage binding limits, and the device's error handler
+/// panics the render thread. A mark over `mark_spans` generates nothing, and
+/// so does every mark from the first one that takes the list past
+/// `list_points` or `list_spans`.
+#[derive(Clone, Copy)]
+struct Budget {
+    mark_spans: usize,
+    list_points: usize,
+    list_spans: usize,
+}
+
 /// One sketch's generated geometry, as the frame reads it.
 struct MarkGeometry {
     strokes: Vec<StrokeSpan>,
@@ -244,6 +270,9 @@ pub struct SketchPass {
     /// The uniform last written, so an unchanged frame skips that write too.
     last_globals: Option<Globals>,
     metrics: CellMetrics,
+    /// Whether a mark dropped for the [`BUDGET`] has been reported, so a flood
+    /// logs once rather than on every regeneration.
+    warned_budget: bool,
 }
 
 impl SketchPass {
@@ -360,6 +389,7 @@ impl SketchPass {
             occluders,
             last_globals: None,
             metrics,
+            warned_budget: false,
         }
     }
 
@@ -513,7 +543,13 @@ impl SketchPass {
         }
         self.last_generated = Some(key);
 
-        let points = generate_marks(grid.sketches(), self.metrics, &mut self.geometry);
+        let points = generate_marks(
+            grid.sketches(),
+            self.metrics,
+            BUDGET,
+            &mut self.geometry,
+            &mut self.warned_budget,
+        );
 
         if points.is_empty() {
             return;
@@ -798,20 +834,69 @@ fn rgba(color: [u8; 3], alpha: f32) -> [f32; 4] {
 /// The points of every stroke and every fill land end to end in one buffer, and
 /// each record names its own span, because the pass binds a single arena that
 /// every instance indexes.
+///
+/// A mark past the `budget` gets empty geometry, which keeps `out` aligned
+/// with `sketches` and draws nothing. The first such mark is reported through
+/// `warned`, once.
 fn generate_marks(
     sketches: &[Sketch],
     metrics: CellMetrics,
+    budget: Budget,
     out: &mut Vec<MarkGeometry>,
+    warned: &mut bool,
 ) -> Vec<[f32; 2]> {
     out.clear();
     let mut points: Vec<[f32; 2]> = Vec::new();
+    let mut spans = 0;
+    let mut list_full = false;
 
     for sketch in sketches {
+        let empty = MarkGeometry {
+            strokes: Vec::new(),
+            fill: None,
+        };
+        if list_full {
+            out.push(empty);
+            continue;
+        }
+
         let resolve = |id: u32| component_bounds(sketches, id, metrics);
         let generated = rough::geometry(&sketch.command, metrics, &resolve);
+        let chunks: Vec<Vec<Chunk>> = generated
+            .strokes
+            .iter()
+            .map(|stroke| stroke_chunks(&stroke.points))
+            .collect();
+        let inset = generated
+            .fill
+            .map(|fill| rough::inset_quad(fill.corners, fill.radius));
+
+        let mark_spans: usize = chunks.iter().map(Vec::len).sum();
+        let mark_points = generated
+            .strokes
+            .iter()
+            .map(|stroke| stroke.points.len())
+            .sum::<usize>()
+            + inset.map_or(0, |quad| quad.len());
+
+        // A mark over its own cap is dropped alone. One that fills the list ends
+        // generation, since the newest marks are the ones a flood adds. Either
+        // is dropped whole rather than cut short, because part of a drawing
+        // points at the wrong thing, the same reason a connector to an unknown
+        // mark draws nothing.
+        let over_mark = mark_spans > budget.mark_spans;
+        let over_list = points.len() + mark_points > budget.list_points
+            || spans + mark_spans > budget.list_spans;
+        list_full = !over_mark && over_list;
+        if over_mark || list_full {
+            warn_over_budget(budget, warned);
+            out.push(empty);
+            continue;
+        }
+        spans += mark_spans;
 
         let mut strokes = Vec::with_capacity(generated.strokes.len());
-        for stroke in &generated.strokes {
+        for (stroke, chunks) in generated.strokes.iter().zip(chunks) {
             let point_offset = points.len() as u32;
             points.extend_from_slice(&stroke.points);
             strokes.push(StrokeSpan {
@@ -819,15 +904,15 @@ fn generate_marks(
                 count: stroke.points.len() as u32,
                 total: stroke.lengths.last().copied().unwrap_or(0.0),
                 prefix: stroke.lengths.clone(),
-                chunks: stroke_chunks(&stroke.points),
+                chunks,
                 weight: stroke.weight,
                 color: stroke.color,
             });
         }
 
-        let fill = generated.fill.map(|fill| {
+        let fill = generated.fill.zip(inset).map(|(fill, quad)| {
             let at = points.len() as u32;
-            points.extend_from_slice(&rough::inset_quad(fill.corners, fill.radius));
+            points.extend_from_slice(&quad);
             // The rounded shape reaches back out to the outer corners, so they
             // bound it rather than the inset quad the buffer holds.
             (at, points_bounds(&fill.corners), fill.radius)
@@ -837,6 +922,21 @@ fn generate_marks(
     }
 
     points
+}
+
+/// Report the first mark dropped for `budget`, the first time `warned` sees
+/// one.
+fn warn_over_budget(budget: Budget, warned: &mut bool) {
+    if *warned {
+        return;
+    }
+    *warned = true;
+    tracing::warn!(
+        mark_spans = budget.mark_spans,
+        list_points = budget.list_points,
+        list_spans = budget.list_spans,
+        "sketch geometry over its budget, dropping marks",
+    );
 }
 
 /// Cut a stroke's points into chunks of at most [`CHUNK_SEGMENTS`] segments.

@@ -6,8 +6,8 @@ use crate::{
     test_support::require_headless_device,
 };
 use stoatty_protocol::command::{
-    SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchSide,
-    SketchStyle, SketchTiming,
+    SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchPoint,
+    SketchSide, SketchStyle, SketchTiming,
 };
 use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 use wgpu::{
@@ -84,7 +84,7 @@ fn boxed(x: i16, y: i16, w: u16, h: u16) -> SketchBounds {
 /// The strokes and their shared points for one mark list at one cell size.
 fn marks(sketches: &[Sketch]) -> (Vec<[f32; 2]>, Vec<MarkGeometry>) {
     let mut geometry = Vec::new();
-    let points = generate_marks(sketches, metrics(), &mut geometry);
+    let points = generate_marks(sketches, metrics(), BUDGET, &mut geometry, &mut false);
     (points, geometry)
 }
 
@@ -158,6 +158,164 @@ fn every_stroke_names_its_own_span_of_the_shared_points() {
         next += stroke.count;
     }
     assert_eq!(next as usize, points.len(), "the spans cover every point");
+}
+
+/// A mark past the span cap generates nothing and draws nothing, while the
+/// marks around it draw as ever, and the drop is reported.
+#[test]
+fn a_mark_past_the_span_cap_builds_nothing() {
+    // As many points as a path frame carries, a cell's width apart, swinging
+    // four rows up and down at each one.
+    let zigzag = SketchShape::Path {
+        points: (0..255)
+            .map(|at| SketchPoint {
+                x: at * 16,
+                y: (at % 2) * 64,
+            })
+            .collect(),
+    };
+    let unbounded = Budget {
+        mark_spans: usize::MAX,
+        ..BUDGET
+    };
+    let mut uncapped = Vec::new();
+    generate_marks(
+        &[sketch(2, zigzag.clone())],
+        metrics(),
+        unbounded,
+        &mut uncapped,
+        &mut false,
+    );
+    let zigzag_spans: usize = uncapped[0].strokes.iter().map(|s| s.chunks.len()).sum();
+    assert!(
+        zigzag_spans > BUDGET.mark_spans,
+        "uncapped, the zigzag takes {zigzag_spans} spans",
+    );
+
+    let list = [
+        sketch(
+            1,
+            SketchShape::Rect {
+                bounds: boxed(0, 0, 64, 64),
+                radius: 0,
+                fill: None,
+            },
+        ),
+        sketch(2, zigzag),
+        sketch(
+            3,
+            SketchShape::Ellipse {
+                bounds: boxed(0, 128, 64, 32),
+                fill: None,
+            },
+        ),
+    ];
+    let (mut geometry, mut warned) = (Vec::new(), false);
+    generate_marks(&list, metrics(), BUDGET, &mut geometry, &mut warned);
+    assert_eq!(
+        (
+            geometry[1].strokes.len(),
+            geometry[1].fill.is_none(),
+            warned
+        ),
+        (0, true, true),
+        "(strokes, no fill, reported) for the zigzag",
+    );
+
+    let mut drawn: Vec<u32> = instances(&list, &[1.0; 3])
+        .iter()
+        .map(|instance| instance.seq)
+        .collect();
+    drawn.dedup();
+    assert_eq!(drawn, [1, 3], "the marks around it still draw");
+}
+
+/// The first mark that takes the list past its point or span budget generates
+/// nothing, and neither does any mark after it, however small. A mark over its
+/// own cap takes nothing from the list, so the marks after it still generate.
+#[test]
+fn generation_stops_at_the_list_point_and_span_caps() {
+    let rect = |x: i16| SketchShape::Rect {
+        bounds: boxed(x, 0, 64, 64),
+        radius: 0,
+        fill: None,
+    };
+    let ring = SketchShape::Ellipse {
+        bounds: boxed(0, 128, 1024, 512),
+        fill: None,
+    };
+    let dash = SketchShape::Line {
+        from: SketchEnd::Point { x: 0, y: 320 },
+        to: SketchEnd::Point { x: 64, y: 320 },
+        bend: 0,
+        heads: 0,
+    };
+    let list = [
+        sketch(1, rect(0)),
+        sketch(2, rect(128)),
+        sketch(3, ring),
+        sketch(4, dash),
+    ];
+
+    let unbounded = Budget {
+        mark_spans: usize::MAX,
+        list_points: usize::MAX,
+        list_spans: usize::MAX,
+    };
+    let generate = |budget: Budget| {
+        let mut geometry = Vec::new();
+        generate_marks(&list, metrics(), budget, &mut geometry, &mut false);
+        geometry
+    };
+    // Each mark's own (points, spans), none of them filled.
+    let sizes: Vec<(usize, usize)> = generate(unbounded)
+        .iter()
+        .map(|mark| {
+            let points = mark.strokes.iter().map(|s| s.count as usize).sum();
+            (points, mark.strokes.iter().map(|s| s.chunks.len()).sum())
+        })
+        .collect();
+    let [a, b, ring, dash] = sizes.as_slice() else {
+        panic!("four marks generate four entries, got {sizes:?}");
+    };
+    let others = a.1.max(b.1).max(dash.1);
+    assert!(
+        ring.0 > dash.0 && ring.1 > others,
+        "the ring outgrows the others, {sizes:?}",
+    );
+
+    // Each budget holds the first two marks and the dash, but not the ring.
+    let drawn = |budget: Budget| {
+        generate(budget)
+            .iter()
+            .map(|mark| !mark.strokes.is_empty())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        drawn(Budget {
+            list_points: a.0 + b.0 + dash.0,
+            ..unbounded
+        }),
+        [true, true, false, false],
+        "a point budget the ring passes",
+    );
+    assert_eq!(
+        drawn(Budget {
+            list_spans: a.1 + b.1 + dash.1,
+            ..unbounded
+        }),
+        [true, true, false, false],
+        "a span budget the ring passes",
+    );
+    assert_eq!(
+        drawn(Budget {
+            mark_spans: others,
+            list_spans: a.1 + b.1 + dash.1,
+            ..unbounded
+        }),
+        [true, true, false, true],
+        "a ring over its own cap is dropped alone, though it passes the span budget too",
+    );
 }
 
 /// Every tile of a mark's run names the whole run, one span per revealed chunk,
