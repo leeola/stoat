@@ -14,7 +14,7 @@ use std::{
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
 use stoatty_render::gpu::{HostRide, SketchReveal};
 use stoatty_term::{
-    grid::{Grid, Overlay, PoolRegion, Rgb, Sketch},
+    grid::{self, Grid, Overlay, PoolRegion, Rgb, Sketch},
     term::{Cursor, CursorShape, Damage, PoolView, Terminal},
 };
 
@@ -874,13 +874,17 @@ pub(crate) struct PoolAnim {
     /// region plus one straddle row. Reused across frames.
     pub(crate) document_grid: Grid,
     /// The integer document top row [`Self::document_grid`] was last composed
-    /// at. With [`Self::last_version`] and [`Self::last_region_dims`] unchanged,
-    /// the composed rows are identical this frame and only the sub-cell fraction
-    /// moved, so the recompose is skipped. `None` until the first composed frame.
+    /// at. While no page under those rows changes and [`Self::last_region_dims`]
+    /// holds, the composed rows still describe the document. A frame at the
+    /// same top then skips the recompose, and a frame at another top carries
+    /// the rows it keeps. `None` until the first composed frame.
     pub(crate) last_top: Option<i64>,
-    /// The pool content-version the grids were last composed at, so a fill that
-    /// committed since forces a recompose even when the top row held steady.
-    pub(crate) last_version: Option<u64>,
+    /// The [`grid::page_stamp_now`] read when the grids were last composed.
+    ///
+    /// A page under the composed rows whose stamp passes it changed since,
+    /// which forces a recompose even when the top row held steady. A fill on
+    /// any other page leaves the composed rows as they are.
+    pub(crate) last_stamp: Option<u64>,
     /// The region dimensions (width, height) last composed at, so a resize that
     /// reshapes the grids forces a recompose.
     pub(crate) last_region_dims: Option<(u16, u16)>,
@@ -907,7 +911,7 @@ impl PoolAnim {
             target_stable_for: HANDOFF_STABLE_TIME,
             document_grid: Grid::new(0, 0),
             last_top: None,
-            last_version: None,
+            last_stamp: None,
             last_region_dims: None,
             last_buffered: false,
             held_frac: None,
@@ -933,8 +937,8 @@ pub(crate) struct ActivePool {
     /// composite can slide its per-row caches by this and re-shape only what the
     /// move exposed.
     ///
-    /// `None` when nothing can be carried. The first frame of a glide, a content
-    /// version bump, and a resize each leave the previous rows describing
+    /// `None` when no row carries. The first frame of a glide, a changed page
+    /// under the previous rows, and a resize each leave those rows describing
     /// something else.
     pub(crate) scrolled_rows: Option<isize>,
 }
@@ -968,7 +972,8 @@ pub(crate) struct ComposeGate {
     pub(crate) frac: f32,
     /// Integer top document row the composed rows start at.
     top: i64,
-    version: Option<u64>,
+    /// The [`grid::page_stamp_now`] read with this frame's pages.
+    stamp: u64,
     region_dims: (u16, u16),
     /// Whether the rows have to be composed again.
     pub(crate) content_changed: bool,
@@ -979,10 +984,15 @@ pub(crate) struct ComposeGate {
 
 /// Whether `anim`'s composed rows still describe the pool at `scroll`.
 ///
-/// The rows rest on the integer top document row, the pooled page bytes, and
+/// The rows rest on the integer top document row, the pages under them, and
 /// the region size, and on nothing else. While all three hold, the offset moved
 /// only within a cell, so last frame's composite still describes the content
 /// and neither the projection here nor the copy downstream has to run.
+///
+/// A move to another top row carries the rows it keeps while no page under the
+/// last composed rows changed. A fill on another page, such as the page a glide
+/// buffers two pages ahead, leaves the carry, because the rows the move exposes
+/// are shaped fresh either way.
 ///
 /// Both the glide and a pool riding someone else's glide ask this, since a ride
 /// moves none of the three either.
@@ -995,19 +1005,30 @@ pub(crate) fn compose_gate(
     let page_rows = (pool.region.height as f32).max(1.0);
     let doc_rows = scroll * page_rows;
     let top = doc_rows.floor() as i64;
-    let version = terminal.pool_content_version(pool.id);
+    let stamp = grid::page_stamp_now();
     let region_dims = (pool.region.width, pool.region.height);
 
-    let carries = anim.last_version == version && anim.last_region_dims == Some(region_dims);
+    // A composite holds the region's rows plus the straddle row. A window the
+    // pool no longer buffers answers no stamp, so nothing it held carries.
+    let composed_rows = usize::from(pool.region.height) + 1;
+    let carries = anim.last_region_dims == Some(region_dims)
+        && anim
+            .last_top
+            .zip(anim.last_stamp)
+            .is_some_and(|(last_top, last_stamp)| {
+                terminal
+                    .pool_window_stamp(pool.id, last_top, composed_rows)
+                    .is_some_and(|newest| newest <= last_stamp)
+            });
     ComposeGate {
         frac: doc_rows - top as f32,
         top,
-        version,
+        stamp,
         region_dims,
         content_changed: !carries || anim.last_top != Some(top),
-        // The distance from where the rows were to where they land. A version
-        // bump or a resize means the rows describe something else, so nothing
-        // carries.
+        // The distance from where the rows were to where they land. A changed
+        // page under them or a resize means the rows describe something else,
+        // so nothing carries.
         scrolled_rows: match anim.last_top {
             Some(last) if carries => isize::try_from(top - last).ok(),
             _ => None,
@@ -1019,7 +1040,7 @@ impl PoolAnim {
     /// Record what `gate` read, so the next frame compares against this one.
     pub(crate) fn record_compose(&mut self, gate: &ComposeGate, buffered: bool) {
         self.last_top = Some(gate.top);
-        self.last_version = gate.version;
+        self.last_stamp = Some(gate.stamp);
         self.last_region_dims = Some(gate.region_dims);
         self.last_buffered = buffered;
     }
@@ -1421,12 +1442,21 @@ mod tests {
         (view, terminal)
     }
 
+    /// [`gated_pool`] with its first two pages filled, so a compose at the top
+    /// of the document has every row it reads, the straddle row included.
+    fn buffered_pool() -> (PoolView, Terminal) {
+        let (view, mut terminal) = gated_pool();
+        fill_page(&mut terminal, 1, 0, b"row");
+        fill_page(&mut terminal, 1, 1, b"row");
+        (view, terminal)
+    }
+
     /// The composed rows rest on the top row, the page bytes, and the region
     /// size. A glide between two frames moves none of those while it advances
     /// within one cell, and a ride moves none of them at all.
     #[test]
     fn a_move_inside_one_cell_composes_nothing_again() {
-        let (view, terminal) = gated_pool();
+        let (view, terminal) = buffered_pool();
         let mut anim = PoolAnim::new(0.0);
 
         // Eight rows to a page, so both of these rest on top row 2 and differ
@@ -1502,7 +1532,7 @@ mod tests {
 
     #[test]
     fn each_of_the_three_inputs_moving_composes_again() {
-        let (view, mut terminal) = gated_pool();
+        let (view, mut terminal) = buffered_pool();
         let mut anim = PoolAnim::new(0.0);
         anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
 
@@ -1523,6 +1553,45 @@ mod tests {
         assert_eq!(
             refilled.scrolled_rows, None,
             "and nothing of the old rows carries",
+        );
+    }
+
+    /// A fill on a page outside the composed rows, such as the page a glide
+    /// buffers two pages ahead, leaves those rows as they were, so the next
+    /// move carries them. A fill under them does not.
+    #[test]
+    fn a_fill_off_the_composed_window_keeps_the_carry() {
+        let (view, mut terminal) = buffered_pool();
+        let mut anim = PoolAnim::new(0.0);
+        anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
+        // Eight rows to a page, so the nine rows composed at the top read page
+        // 0 and the straddle row on page 1, and an eighth of a page is one row.
+        let moved = |terminal: &Terminal| compose_gate(&anim, &view, terminal, 0.125).scrolled_rows;
+
+        fill_page(&mut terminal, 1, 2, b"ahead");
+        assert_eq!(
+            moved(&terminal),
+            Some(1),
+            "page 2 is past the composed rows"
+        );
+        fill_page(&mut terminal, 1, 1, b"straddle");
+        assert_eq!(moved(&terminal), None, "page 1 holds the straddle row");
+    }
+
+    /// A viewport resize empties the pool's pages and leaves its region as it
+    /// is, so no page is under the composed rows any more.
+    #[test]
+    fn an_emptied_pool_composes_again_at_the_same_top() {
+        let (view, mut terminal) = buffered_pool();
+        let mut anim = PoolAnim::new(0.0);
+        anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
+
+        terminal.resize(9, 4);
+        let gate = compose_gate(&anim, &view, &terminal, 0.0);
+        assert_eq!(
+            (gate.content_changed, gate.scrolled_rows),
+            (true, None),
+            "(composes again, carries nothing)",
         );
     }
 

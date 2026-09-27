@@ -2131,6 +2131,17 @@ impl Terminal {
         Some(self.pools.get(&id)?.content_version)
     }
 
+    /// The newest page stamp under the `rows` document rows from `top` in pool
+    /// `id`, or `None` for an unknown pool or a row with no buffered page.
+    ///
+    /// A caller that composed those rows and recorded [`grid::page_stamp_now`]
+    /// with them keeps them while this answers at or below the record. A fill
+    /// elsewhere in the pool, such as the page a glide buffers ahead of itself,
+    /// leaves the answer as it was. See [`PagePool::window_stamp`].
+    pub fn pool_window_stamp(&self, id: u32, top: i64, rows: usize) -> Option<u64> {
+        self.pools.get(&id)?.page_pool.window_stamp(top, rows)
+    }
+
     /// Compose pool `id`'s visible region into `out` at the eased page offset,
     /// or `None` to fall back to the live grid.
     ///
@@ -6579,6 +6590,30 @@ mod tests {
             "no cells to draw over, so nothing moved"
         );
         assert!(terminal.pools[&2].page_pool.page_decorations(3).is_none());
+    }
+
+    /// The window stamp moves with what page 0 draws, through a whole fill and
+    /// a decorations-only one alike, and a repeat of either leaves it.
+    #[test]
+    fn a_window_stamp_moves_only_when_its_page_draws_something_else() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+        let stamp = |terminal: &Terminal| terminal.pool_window_stamp(2, 0, 1);
+        assert_eq!(stamp(&terminal), None, "page 0 unbuffered");
+
+        refill(&mut terminal, 0, b"hi");
+        let filled = stamp(&terminal).expect("page 0 buffered");
+        refill(&mut terminal, 0, b"hi");
+        assert_eq!(stamp(&terminal), Some(filled), "the same cells");
+
+        redecorate(&mut terminal, 0, &["2"], b"");
+        let redecorated = stamp(&terminal).expect("page 0 buffered");
+        redecorate(&mut terminal, 0, &["2"], b"");
+        assert_eq!(
+            (redecorated > filled, stamp(&terminal)),
+            (true, Some(redecorated)),
+            "(a new run moves it, the same run again leaves it)",
+        );
     }
 
     /// The scope parks the context it borrowed without resetting it, so a byte

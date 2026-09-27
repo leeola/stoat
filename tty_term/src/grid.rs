@@ -37,6 +37,14 @@ pub use stoatty_protocol::command::{LineSummary, MinimapRun};
 /// two counts happen to meet. The id is what tells them apart.
 static NEXT_GRID_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Hands out the stamps of [`PagePool`] pages, one per change to what a page
+/// slot draws, for the life of the process.
+///
+/// Stamps are unique across every pool. A renderer keeps its record for a pool
+/// id across a redeclaration of that pool, which starts the pool's own counts
+/// again, so a stamp it saw before must never come back.
+static NEXT_PAGE_STAMP: AtomicU64 = AtomicU64::new(0);
+
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
 /// Stoatty's central render model: the terminal driver writes parsed content
@@ -1037,6 +1045,20 @@ pub(crate) fn splice_summaries(
     store.splice(start..end, lines.iter().cloned());
 }
 
+/// The newest stamp any [`PagePool`] page took.
+///
+/// A renderer records this with a composite. A page whose
+/// [`PagePool::window_stamp`] passes the record changed after that composite,
+/// and one at or below it did not.
+pub fn page_stamp_now() -> u64 {
+    NEXT_PAGE_STAMP.load(Ordering::Relaxed)
+}
+
+/// Take a stamp newer than every stamp taken before it.
+fn next_page_stamp() -> u64 {
+    NEXT_PAGE_STAMP.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// A bounded, recycled pool of viewport-sized content pages for smooth
 /// scrolling.
 ///
@@ -1068,6 +1090,7 @@ impl PagePool {
         let pages = (0..capacity.max(1))
             .map(|_| Page {
                 index: None,
+                stamp: 0,
                 refilled: false,
                 cleared_changed: false,
                 decorations_changed: false,
@@ -1118,10 +1141,16 @@ impl PagePool {
     /// A caller watching one version refills every buffered page when it moves,
     /// and most of those repaint the same bytes. Reporting that as a change
     /// costs a recompose of everything the pool feeds.
+    ///
+    /// A change gives the slot a new stamp. See [`Self::window_stamp`].
     pub fn content_changed(&mut self, index: u64, cells_changed: bool) -> bool {
-        let page = &self.pages[self.slot(index)];
+        let slot = self.slot(index);
+        let page = &mut self.pages[slot];
         let same =
             page.refilled && !page.cleared_changed && !cells_changed && !page.decorations_changed;
+        if !same {
+            page.stamp = next_page_stamp();
+        }
         !same
     }
 
@@ -1183,7 +1212,7 @@ impl PagePool {
     ///
     /// The terminal writes this when a `fill_decorations` scope commits. A page
     /// not in the pool's window has no cells to draw the runs over, so this
-    /// drops them and reports no change.
+    /// drops them and reports no change. A change gives the slot a new stamp.
     pub fn redecorate(
         &mut self,
         index: u64,
@@ -1195,7 +1224,38 @@ impl PagePool {
             return false;
         }
         self.set_decorations(index, text_runs, bars, polylines);
-        self.pages[self.slot(index)].decorations_changed
+
+        let slot = self.slot(index);
+        let page = &mut self.pages[slot];
+        if page.decorations_changed {
+            page.stamp = next_page_stamp();
+        }
+        page.decorations_changed
+    }
+
+    /// The newest stamp among the pages that hold the `rows` document rows from
+    /// `top`, or `None` when one of those rows has no buffered page.
+    ///
+    /// A composite of those rows stays true while this answers at or below the
+    /// [`page_stamp_now`] recorded with it, whatever the pool's other pages do.
+    /// `None` covers the rows [`Self::compose`] refuses, a negative `top`
+    /// included, and a window that [`Self::invalidate`] or [`Self::rebuild`]
+    /// emptied.
+    pub fn window_stamp(&self, top: i64, rows: usize) -> Option<u64> {
+        let page_rows = match self.pages.first() {
+            Some(page) if page.grid.rows() > 0 => page.grid.rows() as u64,
+            _ => return None,
+        };
+        let top = u64::try_from(top).ok()?;
+        let pages = match rows {
+            0 => 0..0,
+            rows => top / page_rows..(top + rows as u64 - 1) / page_rows + 1,
+        };
+
+        pages.into_iter().try_fold(0, |newest, index| {
+            let page = &self.pages[self.slot(index)];
+            (page.index == Some(index)).then_some(newest.max(page.stamp))
+        })
     }
 
     /// The page-targeted decorations buffered for document page `index`, or
@@ -1333,6 +1393,9 @@ impl DocumentOffset {
 /// across pages.
 struct Page {
     index: Option<u64>,
+    /// The stamp of the last change to what this slot draws, from
+    /// [`NEXT_PAGE_STAMP`]. See [`PagePool::window_stamp`].
+    stamp: u64,
     /// Whether the fill now open recycled this slot onto the page it already
     /// held, so a commit tells a refill from a slide onto a new page.
     ///
@@ -2325,6 +2388,45 @@ mod tests {
         assert!(
             !pool.content_changed(0, false),
             "a clear over cells already blank reports nothing",
+        );
+    }
+
+    /// A composite stays true while no page under it changes, so the stamp a
+    /// window answers moves only with the pages that hold its rows.
+    #[test]
+    fn window_stamp_answers_the_newest_stamp_of_the_pages_it_reads() {
+        // Two rows to a page, so rows 0 to 2 and rows 1 to 3 both read pages 0
+        // and 1, and the second window ends on the edge of page 2.
+        let mut pool = PagePool::new(2, 3, 4);
+        let paint = |pool: &mut PagePool, index: u64, ch: char| {
+            let held = pool.page(index).map(|grid| grid.get(0, 0).ch);
+            pool.fill(index, 2, 3).get_mut(0, 0).ch = ch;
+            pool.content_changed(index, held != Some(ch));
+        };
+        let windows = |pool: &PagePool| (pool.window_stamp(0, 3), pool.window_stamp(1, 3));
+        assert_eq!(windows(&pool), (None, None), "no page buffered");
+
+        paint(&mut pool, 0, 'a');
+        paint(&mut pool, 1, 'b');
+        let filled = windows(&pool);
+        paint(&mut pool, 2, 'c');
+        paint(&mut pool, 1, 'b');
+        assert_eq!(
+            windows(&pool),
+            filled,
+            "a change to page 2 and an identical refill of page 1",
+        );
+
+        paint(&mut pool, 1, 'z');
+        let (straddling, edged) = windows(&pool);
+        assert!(
+            straddling > filled.0 && edged > filled.1,
+            "a change to page 1, under both windows",
+        );
+        assert_eq!(
+            (pool.window_stamp(-1, 3), pool.window_stamp(4, 3)),
+            (None, None),
+            "(a window above the first row, a window over the unbuffered page 3)",
         );
     }
 
