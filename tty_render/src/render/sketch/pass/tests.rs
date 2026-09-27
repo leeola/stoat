@@ -957,6 +957,112 @@ fn a_connector_to_a_missing_component_draws_nothing() {
     assert!(geometry[0].strokes.is_empty());
 }
 
+/// A frame's marks stop at 32 screens of fragment work. The marks that fit draw
+/// whole, and neither the first mark past the budget nor any after it draws.
+///
+/// The marks ride, so the riding run the cut mark joined gives its instances
+/// back too.
+#[test]
+fn the_instance_budget_stops_at_32_screens() {
+    const RESOLUTION: [f32; 2] = [1200.0, 720.0];
+    const SCISSOR: [u32; 4] = [0, 0, 1200, 720];
+    // Nearly the whole target, 64 pixels in from each edge at the test metrics,
+    // so every tile of the outline lies whole on the target.
+    let ellipse = |id: u32| {
+        let mut mark = sketch(
+            id,
+            SketchShape::Ellipse {
+                bounds: boxed(128, 64, 2144, 592),
+                fill: None,
+            },
+        );
+        mark.command.anchor = Some((3, 0.0));
+        mark
+    };
+    let list: Vec<Sketch> = (1..=100).map(ellipse).collect();
+    let anchored = [HostRide {
+        host: 3,
+        top_rows: 0.0,
+        scissor: SCISSOR,
+    }];
+    let built_for = |sketches: &[Sketch]| {
+        let (_, geometry) = marks(sketches);
+        let (mut built, mut spans, mut riding) = (Vec::new(), Vec::new(), Vec::new());
+        let cut = build_instances(
+            sketches,
+            &geometry,
+            &reveals(sketches, &[]),
+            &anchored,
+            metrics(),
+            RESOLUTION,
+            &mut built,
+            &mut spans,
+            &mut riding,
+        );
+        (built, spans.len(), riding, cut)
+    };
+
+    // A mark's work is its whole tiles, each testing every span of the run.
+    let (one, one_spans, _, _) = built_for(&list[..1]);
+    assert!(!one.is_empty(), "one ellipse draws");
+    let work: f32 = one
+        .iter()
+        .map(|tile| STROKE_TILE * STROKE_TILE * tile.span_count as f32)
+        .sum();
+    let fits = (32.0 * RESOLUTION[0] * RESOLUTION[1] / work) as u32;
+    assert!((1..100).contains(&fits), "{fits} of the ellipses fit");
+
+    let (built, spans, riding, cut) = built_for(&list);
+    let mut drawn: Vec<(u32, usize)> = Vec::new();
+    for tile in &built {
+        match drawn.last_mut() {
+            Some((seq, count)) if *seq == tile.seq => *count += 1,
+            _ => drawn.push((tile.seq, 1)),
+        }
+    }
+    assert_eq!(
+        (drawn, spans, riding, cut),
+        (
+            (1..=fits).map(|seq| (seq, one.len())).collect(),
+            fits as usize * one_spans,
+            vec![(0..fits * one.len() as u32, SCISSOR)],
+            true,
+        ),
+        "(seq and instances of each mark that draws, spans, riding runs, cut)",
+    );
+}
+
+/// A fill's work is its quad grown by the reach, shifted by the ride, and
+/// clipped to the target, once a pixel. A tile's work is the tile times the
+/// spans each of its pixels tests.
+#[test]
+fn fragment_work_counts_the_quad_the_vertex_stage_draws() {
+    let fill = SketchInstance {
+        bounds: [-10.0, 0.0, 10.0, 10.0],
+        half_width: 2.0,
+        dy: 5.0,
+        kind: KIND_FILL,
+        ..SketchInstance::zeroed()
+    };
+    let tile = SketchInstance {
+        bounds: [32.0, 32.0, 64.0, 64.0],
+        span_count: 3,
+        kind: KIND_STROKE_TILE,
+        ..SketchInstance::zeroed()
+    };
+
+    // The fill reaches 3 pixels out, so its quad runs from -13 to 13 across and
+    // from 2 to 18 down once shifted, of which 13 by 16 lies on the target.
+    assert_eq!(
+        (
+            fragment_work(&fill, [100.0, 100.0]),
+            fragment_work(&tile, [100.0, 100.0]),
+        ),
+        (13.0 * 16.0, 32.0 * 32.0 * 3.0),
+        "(fill, tile)",
+    );
+}
+
 /// A mark anchored to a compositing pool is held back from the base draw and
 /// carries its host's shift, or the composite paints over it.
 #[test]

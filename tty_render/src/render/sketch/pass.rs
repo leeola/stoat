@@ -63,6 +63,15 @@ const AA_MARGIN: f32 = 1.0;
 /// into chunks this long keeps the walk to the segments that pass nearby.
 const CHUNK_SEGMENTS: u32 = 16;
 
+/// Screens of fragment work one frame's marks spend at most.
+///
+/// Each fragment of a stroke tile box-tests every span of its run, so a pixel
+/// counts once per span it tests, and a fill's pixel counts once. The
+/// walkthrough's realistic and heavy scenes at 3840x2160 spend under 4 screens.
+/// Without a bound, 4,096 marks at the largest bounds a frame allows cover the
+/// screen many times over and stall the GPU.
+const FRAME_WORK_SCREENS: f32 = 32.0;
+
 /// The geometry every sketch list generates within.
 ///
 /// The walkthrough's largest marks take 16 spans for the card and 12 for the
@@ -273,6 +282,9 @@ pub struct SketchPass {
     /// Whether a mark dropped for the [`BUDGET`] has been reported, so a flood
     /// logs once rather than on every regeneration.
     warned_budget: bool,
+    /// Whether a frame cut short by [`FRAME_WORK_SCREENS`] has been reported,
+    /// so a flood logs once rather than on every frame.
+    warned_work: bool,
 }
 
 impl SketchPass {
@@ -390,6 +402,7 @@ impl SketchPass {
             last_globals: None,
             metrics,
             warned_budget: false,
+            warned_work: false,
         }
     }
 
@@ -442,7 +455,7 @@ impl SketchPass {
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         self.regenerate(device, queue, grid);
-        build_instances(
+        let cut = build_instances(
             grid.sketches(),
             &self.geometry,
             reveals,
@@ -453,6 +466,13 @@ impl SketchPass {
             &mut self.built_spans,
             &mut self.riding,
         );
+        if cut && !self.warned_work {
+            self.warned_work = true;
+            tracing::warn!(
+                screens = FRAME_WORK_SCREENS,
+                "sketch marks over the frame's fragment budget, dropping",
+            );
+        }
         self.count = self.built.len() as u32;
 
         if self.built.is_empty() {
@@ -603,10 +623,14 @@ impl SketchPass {
 /// one whose units follow each other reads as being drawn. See [`unit_length`]
 /// for what a unit is.
 ///
-/// `resolution` bounds the tiles to the ones on the target. `riding` collects
-/// the runs of instances of marks anchored to a pool compositing this frame, so
-/// [`SketchPass::draw`] skips them and [`SketchPass::draw_riding`] picks them
-/// up after that pool's composite.
+/// `resolution` bounds the tiles to the ones on the target, and the frame's
+/// work to [`FRAME_WORK_SCREENS`] of it. The first mark past that budget builds
+/// nothing, and neither does any mark after it, so no mark draws in part.
+/// Returns whether the budget cut the frame.
+///
+/// `riding` collects the runs of instances of marks anchored to a pool
+/// compositing this frame, so [`SketchPass::draw`] skips them and
+/// [`SketchPass::draw_riding`] picks them up after that pool's composite.
 #[allow(clippy::too_many_arguments)]
 fn build_instances(
     sketches: &[Sketch],
@@ -618,16 +642,19 @@ fn build_instances(
     built: &mut Vec<SketchInstance>,
     spans: &mut Vec<SpanInstance>,
     riding: &mut Vec<(Range<u32>, [u32; 4])>,
-) {
+) -> bool {
     built.clear();
     spans.clear();
     riding.clear();
     let mut tiles = Vec::new();
+    let budget = FRAME_WORK_SCREENS * resolution[0] * resolution[1];
+    let mut work = 0.0;
 
     for (index, sketch) in sketches.iter().enumerate() {
         let Some(mark) = geometry.get(index) else {
             continue;
         };
+        let (built_at, spans_at) = (built.len(), spans.len());
         // Past the slice's end a mark is whole, at the style its command
         // declares, which is what a caller with no clock relies on.
         let style = &sketch.command.style;
@@ -765,6 +792,47 @@ fn build_instances(
                 });
             }
         }
+
+        work += built[built_at..]
+            .iter()
+            .map(|instance| fragment_work(instance, resolution))
+            .sum::<f32>();
+        if work > budget {
+            built.truncate(built_at);
+            spans.truncate(spans_at);
+            truncate_riding(riding, built_at as u32);
+            return true;
+        }
+    }
+    false
+}
+
+/// The fragment work `instance` costs on a `resolution` target.
+///
+/// The work is the pixels of the quad the vertex stage draws, shifted by the
+/// ride and clipped to the target, times the spans each pixel tests. A fill's
+/// quad grows by its reach and tests no span, so its pixels count once.
+fn fragment_work(instance: &SketchInstance, resolution: [f32; 2]) -> f32 {
+    let reach = match instance.kind {
+        KIND_STROKE_TILE => 0.0,
+        _ => instance.half_width + AA_MARGIN,
+    };
+    let [x0, y0, x1, y1] = instance.bounds;
+    let (top, bottom) = (y0 - reach + instance.dy, y1 + reach + instance.dy);
+    let width = (x1 + reach).min(resolution[0]) - (x0 - reach).max(0.0);
+    let height = bottom.min(resolution[1]) - top.max(0.0);
+    width.max(0.0) * height.max(0.0) * instance.span_count.max(1) as f32
+}
+
+/// Drop from `riding` every instance at or past `len`.
+///
+/// A mark the fragment budget cuts takes back the instances it pushed. A run
+/// that started before the mark and took its first instances keeps only the
+/// instances before `len`.
+fn truncate_riding(riding: &mut Vec<(Range<u32>, [u32; 4])>, len: u32) {
+    riding.retain(|(run, _)| run.start < len);
+    if let Some((run, _)) = riding.last_mut() {
+        run.end = run.end.min(len);
     }
 }
 
