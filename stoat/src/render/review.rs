@@ -594,6 +594,14 @@ pub(crate) fn paint_diff_rows(
         .unwrap_or_default();
 
     let mut base_line = base_line_at(snapshot, scroll_row);
+    // A moved-away seam's base lines take no row, so the walk adds them when it
+    // reaches the buffer row the seam sits before. `base_line_at` already
+    // counted the seams above the first visible buffer row.
+    let seams: Vec<(u32, u32)> = snapshot
+        .diff_map()
+        .map(|dm| dm.moved_away_seams().collect())
+        .unwrap_or_default();
+    let mut seam_cursor = 0;
     let row_endpoints = match endpoint_cache {
         Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
         None => snapshot.highlighted_endpoints(scroll_row..end_row),
@@ -654,6 +662,14 @@ pub(crate) fn paint_diff_rows(
                 base_line += 1;
             },
             DiffRowKind::BufferRow { buffer_row } => {
+                while let Some(&(row, lines)) = seams.get(seam_cursor)
+                    && row <= buffer_row
+                {
+                    if row == buffer_row {
+                        base_line += lines;
+                    }
+                    seam_cursor += 1;
+                }
                 draw_diff_num(
                     &mut rich,
                     buf,
@@ -1317,12 +1333,18 @@ fn paint_base_side(
 /// base line. So the base line count is `scroll_row` minus the changed buffer
 /// rows above, which the diff map answers in one seek rather than a per-row
 /// walk from the document start.
+///
+/// A moved-away seam removed base lines that take no row at all, so the
+/// seams above the top add their lines on top of that count.
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
     let buffer_rows_above = snapshot.buffer_rows_above(scroll_row);
-    let changed = snapshot.diff_map().map_or(0, |dm| {
-        dm.rows_without_base_before(buffer_rows_above, snapshot.pairs_modified_hunks())
+    let (changed, seams) = snapshot.diff_map().map_or((0, 0), |dm| {
+        (
+            dm.rows_without_base_before(buffer_rows_above, snapshot.pairs_modified_hunks()),
+            dm.seam_base_lines_in(0..buffer_rows_above),
+        )
     });
-    scroll_row.saturating_sub(changed)
+    scroll_row.saturating_sub(changed) + seams
 }
 
 /// Paint one display row's syntax-highlighted chunks into a column starting at
@@ -1956,13 +1978,17 @@ mod tests {
         // The per-row walk, kept as the correctness oracle. A row carries a base
         // line when the left column paints one on it: every block row, every
         // unchanged row, and, where the layout pairs, a modified row still
-        // inside its hunk's base text.
+        // inside its hunk's base text. A moved-away seam's lines come before the
+        // buffer row it sits at, with no row of their own.
         fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             let mut base_line = 0;
             for row in 0..scroll_row {
                 match snapshot.classify_row(row) {
                     BlockRowKind::Block { .. } => base_line += 1,
                     BlockRowKind::BufferRow { buffer_row } => {
+                        base_line += snapshot
+                            .diff_map()
+                            .map_or(0, |dm| dm.seam_base_lines_in(buffer_row..buffer_row + 1));
                         let status = snapshot.line_diff_status(buffer_row);
                         let paired = snapshot.pairs_modified_hunks()
                             && status == DiffStatus::Modified
@@ -1982,6 +2008,16 @@ mod tests {
                 }
             }
             base_line
+        }
+
+        fn assert_agrees(snapshot: &DisplaySnapshot, fixture: &str) {
+            for row in 0..snapshot.line_count() {
+                assert_eq!(
+                    base_line_at(snapshot, row),
+                    reference(snapshot, row),
+                    "base_line_at disagrees with the walk at row {row} for {fixture}"
+                );
+            }
         }
 
         // Each fixture is (base HEAD, buffer). Together they span a mid-file
@@ -2012,14 +2048,7 @@ mod tests {
                     // row of its own, so a fixture it reaches is shorter.
                     true => saw_pairs |= total < stacked_rows,
                 }
-                for row in 0..total {
-                    assert_eq!(
-                        base_line_at(&snapshot, row),
-                        reference(&snapshot, row),
-                        "base_line_at disagrees with the walk at row {row}/{total} \
-                         for {base:?}->{text:?} paired={pair}"
-                    );
-                }
+                assert_agrees(&snapshot, &format!("{base:?}->{text:?} paired={pair}"));
             }
         }
         assert!(
@@ -2027,6 +2056,17 @@ mod tests {
             "fixtures must splice deleted-base block rows to exercise the block case"
         );
         assert!(saw_pairs, "and pair rows to exercise the paired case");
+
+        // No plain-text diff produces a move, so its seam and its moved-to row
+        // come from a hand-built map.
+        for pair in [false, true] {
+            let mut editor = moved_line_editor();
+            editor.display_map.set_pair_modified_hunks(pair);
+            assert_agrees(
+                &editor.display_map.snapshot(),
+                &format!("the moved line, paired={pair}"),
+            );
+        }
     }
 
     /// A diff-view editor over `text`, diffed against `base`, with the view and
@@ -2055,6 +2095,27 @@ mod tests {
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
         editor.set_diff_view(true);
         editor
+    }
+
+    /// A diff-view editor where line `b` moved below `d`, in the shape the tree
+    /// pass reports a move. A seam at row 1 still holds `b` in its base range,
+    /// and a moved-to hunk covers row 3.
+    fn moved_line_editor() -> EditorState {
+        let moved = |start: u32, end: u32| DiffHunk {
+            status: DiffHunkStatus::Moved,
+            buffer_start_line: start,
+            buffer_line_range: start..end,
+            base_byte_range: 2..4,
+            anchor_range: None,
+            token_detail: None,
+            unstaged_lines: Vec::new(),
+            marked_rows: Vec::new(),
+        };
+        let dm = DiffMap::from_hunks(
+            [moved(1, 1), moved(3, 4)],
+            Some(Arc::new("a\nb\nc\nd\ne\n".to_string())),
+        );
+        diff_editor_with_map("a\nc\nd\nb\ne\n", dm)
     }
 
     /// The tints [`rgb_diff_theme`] resolves to, for the row painters that take
@@ -2384,6 +2445,41 @@ mod tests {
             (buf[(7, 0)].symbol(), buf[(67, 0)].symbol()),
             ("│", "│"),
             "each side carries a gutter/code separator after its status column"
+        );
+    }
+
+    /// A move leaves the left column no row for the line it took away, so the
+    /// numbers jump past that line and every row below reads its own base line.
+    /// The moved-to row paints nothing on the left.
+    #[test]
+    fn diff_view_numbers_the_left_column_past_a_moved_away_line() {
+        let mut editor = moved_line_editor();
+        let area = Rect::new(0, 0, 120, 6);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            None,
+            DiffDials::shipped(),
+        );
+
+        let left_of = |right: &str| {
+            let y = (0..area.height)
+                .find(|&y| line_text(&buf, y, 68..120).trim() == right)
+                .unwrap_or_else(|| panic!("{right:?} rendered on the right"));
+            (
+                line_text(&buf, y, 0..7).trim().to_string(),
+                line_text(&buf, y, 8..59).trim().to_string(),
+            )
+        };
+        assert_eq!(
+            ["a", "c", "d", "b", "e"].map(left_of),
+            [("1", "a"), ("3", "c"), ("4", "d"), ("", ""), ("5", "e")]
+                .map(|(number, text)| (number.to_string(), text.to_string())),
+            "the left numbers skip the moved-away line 2, and the moved-to row is blank"
         );
     }
 

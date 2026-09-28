@@ -794,8 +794,9 @@ impl DiffMap {
     /// A row is base-present when the left column paints something on it: an
     /// unchanged row mirrors its base line, and a modified row is paired with
     /// one for as far as the hunk's base text reaches. Past that the hunk's
-    /// live rows outrun its base rows and the left column is blank, and an
-    /// added hunk has no base rows at all.
+    /// live rows outrun its base rows and the left column is blank. An added
+    /// hunk has no base rows at all, and a moved-to hunk paints none beside
+    /// its rows, since its base lines belong to the seam it left.
     ///
     /// Lets the diff view map a viewport top to its base line. A hunk walk
     /// rather than a tree dimension, since the count depends on each hunk's
@@ -812,15 +813,43 @@ impl DiffMap {
                     .min(buffer_row)
                     .saturating_sub(hunk.buffer_start_line);
                 match hunk.status {
-                    DiffHunkStatus::Added => rows,
+                    DiffHunkStatus::Added | DiffHunkStatus::Moved => rows,
                     DiffHunkStatus::Modified if pair_modified => {
                         rows.saturating_sub(self.base_line_count(hunk))
                     },
                     DiffHunkStatus::Modified => rows,
-                    DiffHunkStatus::Deleted | DiffHunkStatus::Moved => 0,
+                    DiffHunkStatus::Deleted => 0,
                 }
             })
             .sum()
+    }
+
+    /// Base lines that the moved-away seams at buffer rows in `rows` removed.
+    ///
+    /// The left column paints no row for a seam, so a count of the base lines
+    /// above a row adds these to the lines its rows show.
+    pub(crate) fn seam_base_lines_in(&self, rows: Range<u32>) -> u32 {
+        self.moved_away_seams()
+            .filter(|(row, _)| rows.contains(row))
+            .map(|(_, lines)| lines)
+            .sum()
+    }
+
+    /// Every moved-away seam as the buffer row it sits before and the base
+    /// lines it removed, in row order.
+    ///
+    /// A move leaves a seam where its lines left. The seam is a `Moved` hunk
+    /// with no live rows, and its base range still holds the lines. The
+    /// moved-to hunk carries the rows and the origin chip, so the seam's lines
+    /// take no row on the left, and the left column's line count jumps past
+    /// them.
+    pub(crate) fn moved_away_seams(&self) -> impl Iterator<Item = (u32, u32)> {
+        self.hunks
+            .iter()
+            .filter(|hunk| {
+                hunk.status == DiffHunkStatus::Moved && hunk.buffer_line_range.is_empty()
+            })
+            .map(|hunk| (hunk.buffer_start_line, self.base_line_count(hunk)))
     }
 
     /// One base line's text, with its trailing newline excluded.
@@ -2593,27 +2622,45 @@ mod tests {
     }
 
     /// The count the diff view maps a viewport top through. A row is
-    /// base-present while its hunk's base rows reach it, so an added hunk's
-    /// rows all count and a modified hunk's only past its paired prefix.
+    /// base-present while its hunk's base rows reach it, so the rows of an
+    /// added hunk and of a moved-to hunk all count, and a modified hunk's only
+    /// past its paired prefix.
     #[test]
-    fn rows_without_base_counts_added_and_unpaired_modified_rows() {
+    fn rows_without_base_counts_added_moved_and_unpaired_modified_rows() {
         let base = "a\n";
+        let moved_to = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            ..added_hunk(3..5)
+        };
         let dm = DiffMap::from_hunks(
-            [added_hunk(1..3), modified_hunk(5..8, 0..2)],
+            [added_hunk(1..3), moved_to, modified_hunk(5..8, 0..2)],
             Some(Arc::new(base.to_string())),
         );
 
         assert_eq!(
-            dm.rows_without_base_before(5, true),
-            2,
-            "the added hunk's rows"
+            [3, 6, 7, 9].map(|row| dm.rows_without_base_before(row, true)),
+            [2, 4, 5, 6],
+            "the added hunk's two rows, then the moved-to hunk's two, then the \
+             modified hunk's rows past its one paired row"
         );
+    }
+
+    /// A seam counts the base lines it removed once its own row is in the
+    /// range, since those lines come before that row.
+    #[test]
+    fn seam_base_lines_in_counts_moved_away_lines() {
+        let seam = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            base_byte_range: 2..4,
+            ..added_hunk(1..1)
+        };
+        let dm = DiffMap::from_hunks([seam], Some(Arc::new("a\nb\nc\nd\n".to_string())));
+
         assert_eq!(
-            dm.rows_without_base_before(7, true),
-            3,
-            "and the modified hunk's second row, its first being paired",
+            (dm.seam_base_lines_in(0..1), dm.seam_base_lines_in(0..2)),
+            (0, 1),
+            "the seam at row 1 adds its one line once row 1 is in the range"
         );
-        assert_eq!(dm.rows_without_base_before(9, true), 4, "and its third");
     }
 
     /// The count read from the line-start table agrees with a walk of the
