@@ -3,6 +3,7 @@ use super::{
     TEXT_SCALE_COMPACT,
 };
 use crate::{
+    app::Stoat,
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, BlockRowKind,
@@ -112,6 +113,46 @@ pub(crate) fn diff_tint_amount(level: i8) -> f32 {
     0.5 * f32::from(level.clamp(0, DIFF_TINT_MAX))
 }
 
+/// The diff view's paint dials, resolved from their session levels for one
+/// paint.
+///
+/// Every painter of a diff row reads each dial, so the dials travel as one
+/// value. A further dial is then one more field rather than one more argument
+/// on each painter.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct DiffDials {
+    /// Multiplier on how far unchanged syntax recedes, per
+    /// [`diff_soften_scale`]. `1.0` paints the shipped fractions and `0.0`
+    /// turns softening off.
+    pub(crate) soften_scale: f32,
+    /// Fraction a changed row shifts toward its status color, per
+    /// [`diff_tint_amount`]. `0.0` paints the syntax color untouched and `1.0`
+    /// replaces it.
+    pub(crate) tint_amount: f32,
+}
+
+impl DiffDials {
+    /// Resolves the dials at the session's [`Stoat::diff_soften`] and
+    /// [`Stoat::diff_tint`] levels.
+    pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
+        Self {
+            soften_scale: diff_soften_scale(stoat.diff_soften),
+            tint_amount: diff_tint_amount(stoat.diff_tint),
+        }
+    }
+
+    /// The dials a fresh session paints with.
+    ///
+    /// A modal preview and a plain pane paint with these too, because no dial
+    /// turns there.
+    pub(crate) fn shipped() -> Self {
+        Self {
+            soften_scale: 1.0,
+            tint_amount: 0.0,
+        }
+    }
+}
+
 /// Paint an editor as a side-by-side diff, with base (HEAD) text on the left and
 /// the live syntax-highlighted buffer on the right, row-aligned through the
 /// display map's deleted-block splicing.
@@ -133,8 +174,7 @@ pub(crate) fn render_diff_view(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
-    soften_scale: f32,
-    tint_amount: f32,
+    dials: DiffDials,
 ) {
     let stoatty = scene.is_some();
     let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
@@ -160,8 +200,7 @@ pub(crate) fn render_diff_view(
         buf,
         scene,
         0.0,
-        soften_scale,
-        tint_amount,
+        dials,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
     );
@@ -500,8 +539,7 @@ pub(crate) fn paint_diff_rows(
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
     dim: f32,
-    soften_scale: f32,
-    tint_amount: f32,
+    dials: DiffDials,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
 ) {
@@ -606,8 +644,7 @@ pub(crate) fn paint_diff_rows(
                     tints.as_ref(),
                     (del_style, dim_style),
                     theme,
-                    soften_scale,
-                    tint_amount,
+                    dials,
                 );
                 base_line += 1;
             },
@@ -655,8 +692,7 @@ pub(crate) fn paint_diff_rows(
                     tints.as_ref(),
                     soften_row,
                     soften_gaps,
-                    soften_scale,
-                    tint_amount,
+                    dials,
                     tint_row,
                     &mut row_cursor,
                 );
@@ -725,8 +761,7 @@ pub(crate) fn paint_diff_rows(
                         tints.as_ref(),
                         soften_row,
                         None,
-                        soften_scale,
-                        tint_amount,
+                        dials,
                         None,
                     );
                     base_line += 1;
@@ -749,8 +784,7 @@ pub(crate) fn paint_diff_rows(
                         tints.as_ref(),
                         (del_style, dim_style),
                         theme,
-                        soften_scale,
-                        tint_amount,
+                        dials,
                     );
                     base_line += 1;
                 }
@@ -1032,9 +1066,9 @@ fn gap_style(
 ///
 /// `tint_row` shifts every char outside a change span toward the row's own
 /// status color per [`tint_style`], so a whole line reads deleted or moved
-/// rather than only the chars the refinement matched. `tint_amount` shifts the
-/// chars inside a change span toward their span kind's color instead, which is
-/// what keeps a replaced run legible against the row around it. An amount of
+/// rather than only the chars the refinement matched. `dials.tint_amount` shifts
+/// the chars inside a change span toward their span kind's color instead, which
+/// is what keeps a replaced run legible against the row around it. An amount of
 /// zero leaves both inert, so the dial's off position paints exactly the colors
 /// from before it.
 ///
@@ -1044,8 +1078,8 @@ fn gap_style(
 ///
 /// A changed char whose color lands too near the background is then lifted per
 /// [`brighten_style`], so a muted one still stands off the context receding
-/// behind it. The lift rides on the softening, so a zero `soften_scale` turns
-/// it off with everything else.
+/// behind it. The lift rides on the softening, so a zero `dials.soften_scale`
+/// turns it off with everything else.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_base_row(
     buf: &mut Buffer,
@@ -1059,8 +1093,7 @@ pub(crate) fn paint_base_row(
     tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
-    soften_scale: f32,
-    tint_amount: f32,
+    dials: DiffDials,
     tint_row: Option<Color>,
 ) {
     debug_assert!(
@@ -1073,10 +1106,10 @@ pub(crate) fn paint_base_row(
     );
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
-    let span_tints = tints.filter(|_| tint_amount > 0.0);
+    let span_tints = tints.filter(|_| dials.tint_amount > 0.0);
     // Only a changed char lifts, and only against a receding surround: with
     // softening off nothing recedes, so nothing has to stand off it.
-    let lift_bg = tints.map(|t| t.bg).filter(|_| soften_scale > 0.0);
+    let lift_bg = tints.map(|t| t.bg).filter(|_| dials.soften_scale > 0.0);
     let mut token_cursor = 0;
     let mut span_cursor = 0;
     paint_style_runs(buf, start_x, y, text, max_cols, |byte_idx| {
@@ -1090,13 +1123,17 @@ pub(crate) fn paint_base_row(
             Some((range, hs)) if range.start <= byte_idx => hs.to_ratatui_style(),
             _ => fallback,
         };
-        if let Some(bg) = soften_row.filter(|_| soften_scale > 0.0) {
-            style = soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP));
+        if let Some(bg) = soften_row.filter(|_| dials.soften_scale > 0.0) {
+            style = soften_style(
+                style,
+                bg,
+                (CONTEXT_SOFTEN * dials.soften_scale).min(SOFTEN_CAP),
+            );
         }
         // Unfiltered, because the gray answers the tint dial rather than the
         // soften one, so it holds with softening turned off.
         if soften_row.is_some() {
-            style = desaturate_style(style, tint_amount);
+            style = desaturate_style(style, dials.tint_amount);
         }
 
         while change_spans
@@ -1107,7 +1144,7 @@ pub(crate) fn paint_base_row(
         }
         match change_spans.get(span_cursor) {
             Some((range, kind, prose)) if range.start <= byte_idx => {
-                let tint = span_tints.map(|t| (span_tint_color(t, kind, true), tint_amount));
+                let tint = span_tints.map(|t| (span_tint_color(t, kind, true), dials.tint_amount));
                 style = mark_span(style, kind, *prose, tints.is_some(), tint);
                 if let Some(bg) = lift_bg {
                     style = brighten_style(style, bg);
@@ -1117,9 +1154,9 @@ pub(crate) fn paint_base_row(
                 style = gap_style(
                     style,
                     tint_row,
-                    tint_amount,
+                    dials.tint_amount,
                     soften_gaps,
-                    soften_scale,
+                    dials.soften_scale,
                     lift_bg,
                 );
             },
@@ -1203,8 +1240,7 @@ fn paint_base_side(
     tints: Option<&DiffTints>,
     styles: (Style, Style),
     theme: &crate::theme::Theme,
-    soften_scale: f32,
-    tint_amount: f32,
+    dials: DiffDials,
 ) {
     use crate::theme::scope as s;
     let (num_x, status_x, text_x, content_w) = columns;
@@ -1251,8 +1287,7 @@ fn paint_base_side(
         tints,
         None,
         tints.map(|t| t.bg),
-        soften_scale,
-        tint_amount,
+        dials,
         tint_row,
     );
 
@@ -1305,7 +1340,7 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 ///
 /// `tint_row` shifts every cell outside a change span toward the row's own
 /// status color per [`tint_style`], so a whole line reads added, modified, or
-/// moved rather than only the cells the refinement matched. `tint_amount`
+/// moved rather than only the cells the refinement matched. `dials.tint_amount`
 /// shifts the cells inside a change span toward their span kind's color
 /// instead, which is what keeps a replaced run legible against the row around
 /// it. An amount of zero leaves both inert, so the dial's off position paints
@@ -1317,8 +1352,8 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 ///
 /// A changed cell whose color lands too near the background is then lifted per
 /// [`brighten_style`], so a muted one still stands off the context receding
-/// behind it. The lift rides on the softening, so a zero `soften_scale` turns
-/// it off with everything else.
+/// behind it. The lift rides on the softening, so a zero `dials.soften_scale`
+/// turns it off with everything else.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
@@ -1333,8 +1368,7 @@ pub(crate) fn paint_highlighted_row(
     tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
-    soften_scale: f32,
-    tint_amount: f32,
+    dials: DiffDials,
     tint_row: Option<Color>,
     row_cursor: &mut RowHighlightCursor,
 ) {
@@ -1344,10 +1378,10 @@ pub(crate) fn paint_highlighted_row(
     );
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
-    let span_tints = tints.filter(|_| tint_amount > 0.0);
+    let span_tints = tints.filter(|_| dials.tint_amount > 0.0);
     // Only a changed cell lifts, and only against a receding surround: with
     // softening off nothing recedes, so nothing has to stand off it.
-    let lift_bg = tints.map(|t| t.bg).filter(|_| soften_scale > 0.0);
+    let lift_bg = tints.map(|t| t.bg).filter(|_| dials.soften_scale > 0.0);
     let mut col = 0usize;
     let mut span_cursor = 0;
     for chunk in snapshot.row_chunks(display_row, row_cursor) {
@@ -1360,14 +1394,18 @@ pub(crate) fn paint_highlighted_row(
                 .map(|hs| hs.to_ratatui_style())
                 .unwrap_or(fallback_style)
         };
-        let style = match soften_row.filter(|_| soften_scale > 0.0) {
-            Some(bg) => soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP)),
+        let style = match soften_row.filter(|_| dials.soften_scale > 0.0) {
+            Some(bg) => soften_style(
+                style,
+                bg,
+                (CONTEXT_SOFTEN * dials.soften_scale).min(SOFTEN_CAP),
+            ),
             None => style,
         };
         // Unfiltered, because the gray answers the tint dial rather than the
         // soften one, so it holds with softening turned off.
         let style = match soften_row.is_some() {
-            true => desaturate_style(style, tint_amount),
+            true => desaturate_style(style, dials.tint_amount),
             false => style,
         };
         // Resolved per chunk rather than per cell, because a chunk's cells
@@ -1375,9 +1413,9 @@ pub(crate) fn paint_highlighted_row(
         let gap_style = gap_style(
             style,
             tint_row,
-            tint_amount,
+            dials.tint_amount,
             soften_gaps,
-            soften_scale,
+            dials.soften_scale,
             lift_bg,
         );
 
@@ -1397,7 +1435,8 @@ pub(crate) fn paint_highlighted_row(
             }
             let cell_style = match change_spans.get(span_cursor) {
                 Some((range, kind, prose)) if range.start <= col => {
-                    let tint = span_tints.map(|t| (span_tint_color(t, kind, false), tint_amount));
+                    let tint =
+                        span_tints.map(|t| (span_tint_color(t, kind, false), dials.tint_amount));
                     let marked = mark_span(style, kind, *prose, tints.is_some(), tint);
                     match lift_bg {
                         Some(bg) => brighten_style(marked, bg),
@@ -2077,8 +2116,7 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         // The right buffer status column follows its five-cell number gutter, so
@@ -2150,8 +2188,7 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
@@ -2191,8 +2228,7 @@ mod tests {
             &theme,
             &mut rich_buf,
             Some(&mut scene),
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         assert!(
@@ -2258,8 +2294,7 @@ mod tests {
             &theme,
             &mut ascii_buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
@@ -2297,8 +2332,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         // Width 120 is wide enough for the two-column layout. Left text spans
@@ -2362,8 +2396,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         let left = |y| line_text(&buf, y, 8..59);
@@ -2425,8 +2458,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         let left = |y| line_text(&buf, y, 8..59);
@@ -2470,8 +2502,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         // The gutter/code separator is painted at col 7, but a unified view has
@@ -3058,8 +3089,7 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         // At this sub-threshold width the diff is unified, so the moved buffer
@@ -3173,8 +3203,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         let row = buffer_text(&buf, 1);
@@ -3203,8 +3232,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
         );
 
         let row = buffer_text(&buf, 1);
@@ -3236,8 +3264,7 @@ mod tests {
             Some(&rgb_tints()),
             None,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             None,
         );
 
@@ -3275,8 +3302,10 @@ mod tests {
                 Some(&tints),
                 None,
                 None,
-                soften_scale,
-                0.0,
+                DiffDials {
+                    soften_scale,
+                    ..DiffDials::shipped()
+                },
                 None,
             );
             buf[(0, 0)].style().fg
@@ -3330,8 +3359,7 @@ mod tests {
             Some(&tints),
             None,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             Some(tints.deleted),
         );
 
@@ -3364,8 +3392,10 @@ mod tests {
             Some(&tints),
             None,
             None,
-            1.0,
-            1.0,
+            DiffDials {
+                tint_amount: 1.0,
+                ..DiffDials::shipped()
+            },
             None,
         );
 
@@ -3403,8 +3433,7 @@ mod tests {
             Some(&tints),
             None,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             None,
         );
 
@@ -3450,8 +3479,10 @@ mod tests {
                 Some(&tints),
                 None,
                 None,
-                0.0,
-                amount,
+                DiffDials {
+                    soften_scale: 0.0,
+                    tint_amount: amount,
+                },
                 None,
             );
             [0u16, 3, 6].map(|x| buf[(x, 0)].style().fg)
@@ -3508,8 +3539,10 @@ mod tests {
                 Some(&tints),
                 Some(tints.bg),
                 None,
-                0.0,
-                amount,
+                DiffDials {
+                    soften_scale: 0.0,
+                    tint_amount: amount,
+                },
                 None,
             );
             buf[(0, 0)].style().fg
@@ -3552,8 +3585,10 @@ mod tests {
                 Some(&tints),
                 None,
                 soften_gaps,
-                0.0,
-                1.0,
+                DiffDials {
+                    soften_scale: 0.0,
+                    tint_amount: 1.0,
+                },
                 tint_row,
             );
             buf[(2, 0)].style().fg
@@ -3600,8 +3635,10 @@ mod tests {
                 Some(&tints),
                 None,
                 None,
-                0.0,
-                amount,
+                DiffDials {
+                    soften_scale: 0.0,
+                    tint_amount: amount,
+                },
                 Some(tints.deleted),
             );
             [0u16, 3, 6].map(|x| buf[(x, 0)].style().fg)
@@ -3658,8 +3695,10 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            0.0,
-            1.0,
+            DiffDials {
+                soften_scale: 0.0,
+                tint_amount: 1.0,
+            },
         );
 
         let rx = right_text_x(area);
@@ -3682,8 +3721,10 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            0.0,
-            1.0,
+            DiffDials {
+                soften_scale: 0.0,
+                tint_amount: 1.0,
+            },
         );
 
         let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
@@ -3720,8 +3761,10 @@ mod tests {
             &theme,
             &mut buf,
             None,
-            0.0,
-            1.0,
+            DiffDials {
+                soften_scale: 0.0,
+                tint_amount: 1.0,
+            },
         );
 
         let row = (0..area.height)
@@ -3774,8 +3817,10 @@ mod tests {
                 Some(&rgb_tints()),
                 Some(bg),
                 None,
-                scale,
-                0.0,
+                DiffDials {
+                    soften_scale: scale,
+                    ..DiffDials::shipped()
+                },
                 None,
             );
             (buf[(0, 0)].style().fg, buf[(0, 0)].modifier)
@@ -3814,8 +3859,7 @@ mod tests {
             None,
             None,
             None,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             None,
         );
 

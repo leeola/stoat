@@ -14,7 +14,7 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         paint::{dim_rgb, style_rgb},
-        review::render_diff_view,
+        review::{render_diff_view, DiffDials},
         undercurl::UndercurlBatch,
     },
 };
@@ -122,8 +122,7 @@ pub(crate) fn render_editor(
         0.0,
         // Not a pane, so it never paints the diff view the scale and the tint
         // apply to.
-        1.0,
-        0.0,
+        DiffDials::shipped(),
         WrapMode::None,
         80,
     );
@@ -149,8 +148,7 @@ pub(crate) fn render_editor_with_overlay(
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut UndercurlBatch>,
     dim: f32,
-    soften_scale: f32,
-    tint_amount: f32,
+    dials: DiffDials,
     wrap: WrapMode,
     wrap_column: u32,
 ) {
@@ -161,16 +159,7 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
-        render_diff_view(
-            editor,
-            inner,
-            fallback_style,
-            theme,
-            buf,
-            scene,
-            soften_scale,
-            tint_amount,
-        );
+        render_diff_view(editor, inner, fallback_style, theme, buf, scene, dials);
         return;
     }
 
@@ -2578,6 +2567,7 @@ mod tests {
     use super::RowSeverity;
     use crate::{
         action_handlers::{self, dispatch},
+        render::review::DiffDials,
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
@@ -2838,8 +2828,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -2941,8 +2930,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -3018,8 +3006,7 @@ mod tests {
                 None,
                 None,
                 0.0,
-                1.0,
-                0.0,
+                DiffDials::shipped(),
                 WrapMode::None,
                 80,
             );
@@ -3115,8 +3102,7 @@ mod tests {
                 None,
                 None,
                 0.0,
-                1.0,
-                0.0,
+                DiffDials::shipped(),
                 WrapMode::None,
                 80,
             );
@@ -3487,8 +3473,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -3576,8 +3561,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -3617,8 +3601,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -3755,8 +3738,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             wrap,
             wrap_column,
         );
@@ -3921,8 +3903,7 @@ mod tests {
                 None,
                 None,
                 0.0,
-                1.0,
-                0.0,
+                DiffDials::shipped(),
                 WrapMode::EditorWidth,
                 80,
             );
@@ -3968,8 +3949,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             wrap,
             80,
         );
@@ -4131,8 +4111,7 @@ mod tests {
             Some(&mut scene),
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -4213,8 +4192,7 @@ mod tests {
             Some(&mut scene),
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -4317,8 +4295,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -4368,8 +4345,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -4482,8 +4458,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );
@@ -4672,8 +4647,7 @@ mod tests {
             None,
             None,
             0.0,
-            1.0,
-            0.0,
+            DiffDials::shipped(),
             WrapMode::None,
             80,
         );

@@ -42,7 +42,7 @@ pub(crate) mod undercurl;
 pub(crate) mod walkthrough;
 pub(crate) mod workspace_picker;
 
-use self::undercurl::UndercurlBatch;
+use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
     action_handlers::search::{self, SearchPrompt},
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
@@ -331,16 +331,10 @@ pub(crate) struct FrameCtx<'a> {
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
-    /// Multiplier the diff view applies to how far it recedes unchanged syntax,
-    /// resolved from [`crate::app::Stoat::diff_soften`] per
-    /// [`review::diff_soften_scale`]. `1.0` paints the shipped
-    /// fractions and `0.0` disables softening. Read only by diff-view panes.
-    pub(crate) diff_soften_scale: f32,
-    /// Fraction the diff view shifts a changed row toward its status color,
-    /// resolved from [`crate::app::Stoat::diff_tint`] per
-    /// [`review::diff_tint_amount`]. `0.0` paints the syntax color untouched
-    /// and `1.0` replaces it. Read only by diff-view panes.
-    pub(crate) diff_tint_amount: f32,
+    /// The diff view's soften and tint dials, resolved from
+    /// [`crate::app::Stoat::diff_soften`] and [`crate::app::Stoat::diff_tint`]
+    /// per [`DiffDials::from_stoat`]. Read only by diff-view panes.
+    pub(crate) diff_dials: DiffDials,
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.
     pub(crate) images_capable: bool,
@@ -625,8 +619,9 @@ pub(crate) fn frame(
     // Resolved here for the same reason. It reads the whole &Stoat, where the
     // search query it travels with is read below through a disjoint field.
     let search_smart_case = search::smart_case(stoat);
-    // Resolved here for the same reason. The constructor reads the whole
-    // &Stoat, and the dials are three separate fields on it.
+    // Resolved here for the same reason. Both constructors read the whole
+    // &Stoat, and the dials are separate fields on it.
+    let diff_dials = DiffDials::from_stoat(stoat);
     let preview_dials = commits::PreviewDials::from_stoat(stoat);
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
@@ -738,8 +733,7 @@ pub(crate) fn frame(
         wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         inactive_dim,
-        diff_soften_scale: review::diff_soften_scale(stoat.diff_soften),
-        diff_tint_amount: review::diff_tint_amount(stoat.diff_tint),
+        diff_dials,
         images_capable: stoat.stoatty && stoat.stoatty_protocol >= 2,
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,

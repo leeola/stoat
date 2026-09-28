@@ -7,7 +7,7 @@ use crate::{
         paint::{
             dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
         },
-        review::{paint_highlighted_row, render_review_cursor},
+        review::{paint_highlighted_row, render_review_cursor, DiffDials},
     },
     review::ReviewSide,
 };
@@ -301,9 +301,9 @@ fn paint_conflict_rows(
                     None,
                     None,
                     None,
-                    // This row softens nothing, so the scale it takes never applies.
-                    1.0,
-                    0.0,
+                    // This row softens and tints nothing, so the dials it takes
+                    // never apply.
+                    DiffDials::shipped(),
                     None,
                     &mut row_cursor,
                 );

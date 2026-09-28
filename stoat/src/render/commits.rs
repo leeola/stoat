@@ -9,8 +9,7 @@ use crate::{
         paint::{render_empty_num, render_side_num, render_side_text},
         pane::render_overlay_status,
         review::{
-            diff_soften_scale, diff_tint_amount, paint_base_row, resolve_diff_tints, DiffColumns,
-            DiffLayout, DiffTints,
+            paint_base_row, resolve_diff_tints, DiffColumns, DiffDials, DiffLayout, DiffTints,
         },
         text::{truncate_to_cols, write_str},
         FrameCtx,
@@ -366,16 +365,14 @@ pub(crate) fn preview_row_count(doc: &DiffDocument) -> usize {
 /// thing.
 #[derive(Copy, Clone)]
 pub(crate) struct PreviewDials {
-    soften_scale: f32,
-    tint_amount: f32,
+    paint: DiffDials,
     syntax: bool,
 }
 
 impl PreviewDials {
     pub(crate) fn from_stoat(stoat: &crate::app::Stoat) -> Self {
         Self {
-            soften_scale: diff_soften_scale(stoat.diff_soften),
-            tint_amount: diff_tint_amount(stoat.diff_tint),
+            paint: DiffDials::from_stoat(stoat),
             syntax: stoat.diff_syntax,
         }
     }
@@ -385,8 +382,7 @@ impl PreviewDials {
     #[cfg(test)]
     fn shipped() -> Self {
         Self {
-            soften_scale: 1.0,
-            tint_amount: 0.0,
+            paint: DiffDials::shipped(),
             syntax: true,
         }
     }
@@ -488,8 +484,7 @@ fn paint_preview_side(
         Some(tints),
         soften_row,
         soften_gaps,
-        dials.soften_scale,
-        dials.tint_amount,
+        dials.paint,
         tint_row,
     );
 }
@@ -755,7 +750,7 @@ mod tests {
         display_map::highlights::HighlightStyle,
         render::{
             paint::{dim_rgb, luma},
-            review::{CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
+            review::{DiffDials, CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
         },
         review::ReviewFileInput,
         review_session::DiffDocument,
@@ -1021,7 +1016,10 @@ mod tests {
     fn a_stepped_tint_drains_the_color_out_of_a_context_token() {
         let session = session("ctx\nold\n", "ctx\nnew\n", true);
         let dials = PreviewDials {
-            tint_amount: 0.5,
+            paint: DiffDials {
+                tint_amount: 0.5,
+                ..DiffDials::shipped()
+            },
             ..PreviewDials::shipped()
         };
         let buf = rendered_with(&session, &rgb_theme(), dials);
@@ -1042,7 +1040,10 @@ mod tests {
     fn a_stepped_soften_recedes_a_context_token_further() {
         let session = session("ctx\nold\n", "ctx\nnew\n", true);
         let dials = PreviewDials {
-            soften_scale: 2.0,
+            paint: DiffDials {
+                soften_scale: 2.0,
+                ..DiffDials::shipped()
+            },
             ..PreviewDials::shipped()
         };
         let buf = rendered_with(&session, &rgb_theme(), dials);
@@ -1091,7 +1092,10 @@ mod tests {
     fn a_full_tint_takes_each_changed_side_to_its_own_status_color() {
         let session = session("ctx\nold tail\n", "ctx\nnew tail\n", true);
         let dials = PreviewDials {
-            tint_amount: 1.0,
+            paint: DiffDials {
+                tint_amount: 1.0,
+                ..DiffDials::shipped()
+            },
             ..PreviewDials::shipped()
         };
         let buf = rendered_with(&session, &rgb_theme(), dials);
