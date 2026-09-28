@@ -132,16 +132,21 @@ pub(crate) struct DiffDials {
     /// Whether every change span bolds, whatever its kind. Off leaves bold to a
     /// prose replacement alone, per [`mark_span`].
     pub(crate) bold: bool,
+    /// Whether every change span underlines, whatever the theme. Off leaves the
+    /// underline to a theme that does not blend, per [`mark_span`].
+    pub(crate) underline: bool,
 }
 
 impl DiffDials {
     /// Resolves the dials from the session's [`Stoat::diff_soften`] and
-    /// [`Stoat::diff_tint`] levels and its [`Stoat::diff_bold`] flag.
+    /// [`Stoat::diff_tint`] levels and its [`Stoat::diff_bold`] and
+    /// [`Stoat::diff_underline`] flags.
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         Self {
             soften_scale: diff_soften_scale(stoat.diff_soften),
             tint_amount: diff_tint_amount(stoat.diff_tint),
             bold: stoat.diff_bold,
+            underline: stoat.diff_underline,
         }
     }
 
@@ -154,6 +159,7 @@ impl DiffDials {
             soften_scale: 1.0,
             tint_amount: 0.0,
             bold: false,
+            underline: false,
         }
     }
 }
@@ -897,7 +903,8 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 /// char. With `bold` set, every span of any kind bolds.
 ///
 /// A theme that cannot blend has no receding to lead against, so it underlines
-/// the span, which is the only mark left to it.
+/// the span, which is the only mark left to it. With `underline` set, every
+/// theme underlines the span.
 ///
 /// `tint` carries the span's status color and the dial amount, and is `None`
 /// where the dial is off. It is what makes a changed char's own color say
@@ -911,10 +918,11 @@ fn mark_span(
     kind: &ChangeKind,
     prose: bool,
     bold: bool,
+    underline: bool,
     rgb: bool,
     tint: Option<(Color, f32)>,
 ) -> Style {
-    let style = match rgb {
+    let style = match rgb && !underline {
         true => style,
         false => style.add_modifier(Modifier::UNDERLINED),
     };
@@ -1185,7 +1193,15 @@ pub(crate) fn paint_base_row(
         match change_spans.get(span_cursor) {
             Some((range, kind, prose)) if range.start <= byte_idx => {
                 let tint = span_tints.map(|t| (span_tint_color(t, kind, true), dials.tint_amount));
-                style = mark_span(style, kind, *prose, dials.bold, tints.is_some(), tint);
+                style = mark_span(
+                    style,
+                    kind,
+                    *prose,
+                    dials.bold,
+                    dials.underline,
+                    tints.is_some(),
+                    tint,
+                );
                 if let Some(bg) = lift_bg {
                     style = brighten_style(style, bg);
                 }
@@ -1520,7 +1536,15 @@ pub(crate) fn paint_highlighted_row(
                 Some((range, kind, prose)) if range.start <= col => {
                     let tint =
                         span_tints.map(|t| (span_tint_color(t, kind, false), dials.tint_amount));
-                    let marked = mark_span(style, kind, *prose, dials.bold, tints.is_some(), tint);
+                    let marked = mark_span(
+                        style,
+                        kind,
+                        *prose,
+                        dials.bold,
+                        dials.underline,
+                        tints.is_some(),
+                        tint,
+                    );
                     match lift_bg {
                         Some(bg) => brighten_style(marked, bg),
                         None => marked,
@@ -3004,35 +3028,16 @@ mod tests {
     /// code rename that the prose rule leaves plain, and nothing else of the row.
     #[test]
     fn the_bold_dial_bolds_a_code_change_span() {
-        // The harness diffs a `.rs` file, so the rename refines as code. A
-        // plain-text editor refines as prose, which bolds whatever the dial says.
-        let mut h = diff_harness("fn alpha() {}\n", "fn beta() {}\n");
-        let theme = Arc::clone(&h.stoat.theme);
-        let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        let area = Rect::new(0, 0, 120, 4);
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-
-        let mut bold_on_the_changed_row = |dials: DiffDials| {
-            let mut buf = Buffer::empty(area);
-            render_diff_view(editor, area, fallback, &theme, &mut buf, None, dials);
-            let row = (0..area.height)
-                .find(|&y| buffer_text(&buf, y).contains("beta"))
-                .expect("the renamed line renders");
-            let bold = |cols: std::ops::Range<u16>| {
-                cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
-                    .map(|x| buf[(x, row)].symbol().to_string())
-                    .collect::<String>()
-            };
-            (bold(68..area.width), bold(8..59))
-        };
-
         assert_eq!(
             (
-                bold_on_the_changed_row(DiffDials::shipped()),
-                bold_on_the_changed_row(DiffDials {
-                    bold: true,
-                    ..DiffDials::shipped()
-                }),
+                renamed_row_cells_with(DiffDials::shipped(), Modifier::BOLD),
+                renamed_row_cells_with(
+                    DiffDials {
+                        bold: true,
+                        ..DiffDials::shipped()
+                    },
+                    Modifier::BOLD,
+                ),
             ),
             (
                 (String::new(), String::new()),
@@ -3040,6 +3045,55 @@ mod tests {
             ),
             "the dial alone bolds the rename, in each column and on nothing else"
         );
+    }
+
+    /// On a theme that blends, only the receding marks a change span. The
+    /// underline dial adds an underline to every span there, and to nothing
+    /// else of the row.
+    #[test]
+    fn the_underline_dial_underlines_a_change_span_on_an_rgb_theme() {
+        assert_eq!(
+            (
+                renamed_row_cells_with(DiffDials::shipped(), Modifier::UNDERLINED),
+                renamed_row_cells_with(
+                    DiffDials {
+                        underline: true,
+                        ..DiffDials::shipped()
+                    },
+                    Modifier::UNDERLINED,
+                ),
+            ),
+            (
+                (String::new(), String::new()),
+                ("beta".to_string(), "alpha".to_string()),
+            ),
+            "the dial alone underlines the rename, in each column and on nothing else"
+        );
+    }
+
+    /// The glyphs that carry `modifier` on the changed row of an `alpha` to
+    /// `beta` rename, right column then left, painted with `dials`.
+    ///
+    /// The harness diffs a `.rs` file, so the rename refines as code. A
+    /// plain-text editor refines as prose, which bolds whatever the dial says.
+    fn renamed_row_cells_with(dials: DiffDials, modifier: Modifier) -> (String, String) {
+        let mut h = diff_harness("fn alpha() {}\n", "fn beta() {}\n");
+        let theme = Arc::clone(&h.stoat.theme);
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let area = Rect::new(0, 0, 120, 4);
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let mut buf = Buffer::empty(area);
+        render_diff_view(editor, area, fallback, &theme, &mut buf, None, dials);
+
+        let row = (0..area.height)
+            .find(|&y| buffer_text(&buf, y).contains("beta"))
+            .expect("the renamed line renders");
+        let marked = |cols: std::ops::Range<u16>| {
+            cols.filter(|&x| buf[(x, row)].modifier.contains(modifier))
+                .map(|x| buf[(x, row)].symbol().to_string())
+                .collect::<String>()
+        };
+        (marked(68..area.width), marked(8..59))
     }
 
     /// A theme that cannot blend has no receding to lead a change with, so the

@@ -1559,6 +1559,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             stoat.diff_tint.hash(&mut hasher);
             stoat.diff_syntax.hash(&mut hasher);
             stoat.diff_bold.hash(&mut hasher);
+            stoat.diff_underline.hash(&mut hasher);
             hasher.finish()
         };
         let dials = crate::render::commits::PreviewDials::from_stoat(stoat);
@@ -2154,6 +2155,7 @@ pub(crate) fn editor_page_content_version(
     ((dials.soften_scale * 1000.0) as u32).hash(&mut hasher);
     ((dials.tint_amount * 1000.0) as u32).hash(&mut hasher);
     dials.bold.hash(&mut hasher);
+    dials.underline.hash(&mut hasher);
     // A typed character and a fold both change page pixels and reach nothing
     // else here, so without the mapping stamp a file outside git (diff_version
     // stuck at 0) with no diagnostics glides pre-edit text.

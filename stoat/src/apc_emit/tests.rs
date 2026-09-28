@@ -2672,6 +2672,13 @@ fn a_diff_bold_toggle_reenters_the_pool_pages() {
     pool_reenters_after(|stoat| stoat.diff_bold = true);
 }
 
+/// The underline dial marks every change span, so a toggle has to re-enter the
+/// buffered pages rather than let them glide the marks from before it.
+#[test]
+fn a_diff_underline_toggle_reenters_the_pool_pages() {
+    pool_reenters_after(|stoat| stoat.diff_underline = true);
+}
+
 #[test]
 fn emit_after_edit_reenters_pool_pages() {
     use stoatty_protocol::command::{Command, FillCommand};

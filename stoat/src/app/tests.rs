@@ -402,11 +402,17 @@ fn row_colors(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str
         .len()
 }
 
-/// The glyphs of the bold cells in `cols` on the row holding `text`.
-fn bold_glyphs(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str) -> String {
+/// The glyphs of the cells in `cols` that carry `modifier`, on the row holding
+/// `text`.
+fn glyphs_with(
+    h: &crate::test_harness::TestHarness,
+    cols: Range<u16>,
+    text: &str,
+    modifier: Modifier,
+) -> String {
     let buf = h.rendered_buffer();
     let row = row_holding(buf, cols.clone(), text);
-    cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+    cols.filter(|&x| buf[(x, row)].modifier.contains(modifier))
         .map(|x| buf[(x, row)].symbol().to_string())
         .collect()
 }
@@ -665,6 +671,8 @@ fn the_in_band_super_digits_step_the_tint_dial() {
     assert!(!h.stoat.diff_syntax, "super-8 flips the syntax coloring");
     h.stoat.update(inband_chord('7'));
     assert!(h.stoat.diff_bold, "super-7 flips the bold");
+    h.stoat.update(inband_chord('6'));
+    assert!(h.stoat.diff_underline, "super-6 flips the underline");
 
     h.stoat.diff_tint = 2;
     action_handlers::focused_editor_mut(&mut h.stoat)
@@ -674,10 +682,16 @@ fn the_in_band_super_digits_step_the_tint_dial() {
     h.stoat.update(inband_chord('9'));
     h.stoat.update(inband_chord('8'));
     h.stoat.update(inband_chord('7'));
+    h.stoat.update(inband_chord('6'));
 
     assert_eq!(
-        (h.stoat.diff_tint, h.stoat.diff_syntax, h.stoat.diff_bold),
-        (2, false, true),
+        (
+            h.stoat.diff_tint,
+            h.stoat.diff_syntax,
+            h.stoat.diff_bold,
+            h.stoat.diff_underline,
+        ),
+        (2, false, true, true),
         "off the diff view the in-band digits leave every dial alone",
     );
 }
@@ -711,7 +725,10 @@ fn the_syntax_chord_outside_the_diff_view_changes_nothing() {
 fn the_seven_chord_bolds_every_change_span() {
     let mut h = diff_syntax_harness();
     assert_eq!(
-        (h.stoat.diff_bold, bold_glyphs(&h, 68..120, "fn new")),
+        (
+            h.stoat.diff_bold,
+            glyphs_with(&h, 68..120, "fn new", Modifier::BOLD)
+        ),
         (false, String::new()),
         "a session opens with the bold off, and a code change carries none"
     );
@@ -720,9 +737,9 @@ fn the_seven_chord_bolds_every_change_span() {
     h.snapshot();
     assert_eq!(
         (
-            bold_glyphs(&h, 68..120, "fn new"),
-            bold_glyphs(&h, 8..59, "fn old"),
-            bold_glyphs(&h, 68..120, "fn keep"),
+            glyphs_with(&h, 68..120, "fn new", Modifier::BOLD),
+            glyphs_with(&h, 8..59, "fn old", Modifier::BOLD),
+            glyphs_with(&h, 68..120, "fn keep", Modifier::BOLD),
         ),
         ("new".to_string(), "old".to_string(), String::new()),
         "each column bolds its changed word, and the context row stays plain"
@@ -731,7 +748,10 @@ fn the_seven_chord_bolds_every_change_span() {
     h.stoat.handle_window_ipc(chord('7'));
     h.snapshot();
     assert_eq!(
-        (h.stoat.diff_bold, bold_glyphs(&h, 68..120, "fn new")),
+        (
+            h.stoat.diff_bold,
+            glyphs_with(&h, 68..120, "fn new", Modifier::BOLD)
+        ),
         (false, String::new()),
         "a second chord clears it"
     );
@@ -748,6 +768,64 @@ fn the_bold_chord_outside_the_diff_view_changes_nothing() {
 
     assert_eq!(
         (h.stoat.handle_window_ipc(chord('7')), h.stoat.diff_bold),
+        (UpdateEffect::None, false),
+        "a chord over a plain pane leaves the flag and the frame alone"
+    );
+}
+
+/// An underline marks a change span on every theme, whether it blends or not,
+/// so the chord underlines every span in both columns and nothing around them.
+#[test]
+fn the_six_chord_underlines_every_change_span() {
+    let mut h = diff_syntax_harness();
+    assert_eq!(
+        (
+            h.stoat.diff_underline,
+            glyphs_with(&h, 68..120, "fn new", Modifier::UNDERLINED),
+        ),
+        (false, String::new()),
+        "a session opens with the underline off, and a blending theme draws none"
+    );
+
+    assert_eq!(h.stoat.handle_window_ipc(chord('6')), UpdateEffect::Redraw);
+    h.snapshot();
+    assert_eq!(
+        (
+            glyphs_with(&h, 68..120, "fn new", Modifier::UNDERLINED),
+            glyphs_with(&h, 8..59, "fn old", Modifier::UNDERLINED),
+            glyphs_with(&h, 68..120, "fn keep", Modifier::UNDERLINED),
+        ),
+        ("new".to_string(), "old".to_string(), String::new()),
+        "each column underlines its changed word, and the context row stays plain"
+    );
+
+    h.stoat.handle_window_ipc(chord('6'));
+    h.snapshot();
+    assert_eq!(
+        (
+            h.stoat.diff_underline,
+            glyphs_with(&h, 68..120, "fn new", Modifier::UNDERLINED),
+        ),
+        (false, String::new()),
+        "a second chord clears it"
+    );
+}
+
+/// The terminal forwards the chord on the zoom claim rather than on what is
+/// on screen, so the underline flag defends its own scope as the syntax flag
+/// does.
+#[test]
+fn the_underline_chord_outside_the_diff_view_changes_nothing() {
+    let mut h = diff_syntax_harness();
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("editor")
+        .set_diff_view(false);
+
+    assert_eq!(
+        (
+            h.stoat.handle_window_ipc(chord('6')),
+            h.stoat.diff_underline
+        ),
         (UpdateEffect::None, false),
         "a chord over a plain pane leaves the flag and the frame alone"
     );
