@@ -757,8 +757,20 @@ pub(crate) fn paint_diff_rows(
                 // replaced, painted as a removed row rather than a mirror. A
                 // row past its hunk's base rows has nothing on the left.
                 if status == DiffStatus::Unchanged {
-                    line_buf.clear();
-                    snapshot.write_display_line(&mut line_buf, display_row);
+                    // The base line's own bytes, which its token spans index.
+                    // The display line carries the live row's inlay hints and
+                    // expanded tabs, which belong to the right column alone.
+                    let text = match snapshot
+                        .diff_map()
+                        .and_then(|dm| dm.base_line_text(base_line))
+                    {
+                        Some(text) => text,
+                        None => {
+                            line_buf.clear();
+                            snapshot.write_display_line(&mut line_buf, display_row);
+                            line_buf.as_str()
+                        },
+                    };
                     draw_diff_num(
                         &mut rich,
                         buf,
@@ -774,7 +786,7 @@ pub(crate) fn paint_diff_rows(
                         buf,
                         left_text_x,
                         y,
-                        &line_buf,
+                        text,
                         left_content_w,
                         snapshot.tab_snapshot().tab_size(),
                         token_spans,
@@ -1865,11 +1877,13 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         diff_map::{ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
+        display_map::InlayKind,
         theme::Theme,
     };
     use std::sync::{Arc, RwLock};
     use stoat_language::structural_diff;
     use stoat_scheduler::{Executor, TestScheduler};
+    use stoat_text::Bias;
 
     fn buffer_text(buf: &Buffer, y: u16) -> String {
         (buf.area.x..buf.area.x + buf.area.width)
@@ -3231,6 +3245,47 @@ mod tests {
         assert!(
             (7..59).all(|x| buf[(x, row)].bg == canvas),
             "an unchanged mirrored base row paints no background of its own"
+        );
+    }
+
+    /// An unchanged row's left half paints the base line's own bytes, which are
+    /// what its token spans index. The live line's inlay hint belongs to the
+    /// right column alone, so it neither shows on the left nor shifts the
+    /// colors there.
+    #[test]
+    fn diff_view_mirrors_the_base_line_without_the_live_inlays() {
+        let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
+        let anchor = {
+            let snapshot = editor.display_map.buffer_snapshot();
+            snapshot.anchor_at(
+                snapshot.rope().point_to_offset(Point::new(0, 4)),
+                Bias::Right,
+            )
+        };
+        editor.display_map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+        );
+
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            None,
+            DiffDials::shipped(),
+        );
+
+        assert_eq!(
+            (
+                line_text(&buf, 0, 68..120).trim_end().to_string(),
+                line_text(&buf, 0, 8..59).trim_end().to_string(),
+            ),
+            ("keep: u32".to_string(), "keep".to_string()),
+            "the hint rides the live line on the right and stays off the mirrored base line"
         );
     }
 
