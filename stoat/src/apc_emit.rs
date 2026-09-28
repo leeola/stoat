@@ -1546,7 +1546,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         );
         // A different commit means a different diff, and a rebuilt session
         // changes its length, so both refill the pages. A dial step repaints
-        // every row it reaches, so the three dials ride the hash too.
+        // every row it reaches, so every dial rides the hash too.
         let content_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
@@ -1558,6 +1558,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             stoat.diff_soften.hash(&mut hasher);
             stoat.diff_tint.hash(&mut hasher);
             stoat.diff_syntax.hash(&mut hasher);
+            stoat.diff_bold.hash(&mut hasher);
             hasher.finish()
         };
         let dials = crate::render::commits::PreviewDials::from_stoat(stoat);
@@ -2117,7 +2118,7 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// A page stays cached while the surface scrolls, but must repaint when the
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
 /// the gutter, a gutter-width or wrap-width change reflows the text, the
-/// cursor's buffer line moves under relative numbering, either of the diff
+/// cursor's buffer line moves under relative numbering, any of the diff
 /// view's dials moves, the theme changes every color on the page, or the
 /// walkthrough spotlight's dim comes on, goes out, or changes.
 ///
@@ -2152,6 +2153,7 @@ pub(crate) fn editor_page_content_version(
     ((dim * 1000.0) as u32).hash(&mut hasher);
     ((dials.soften_scale * 1000.0) as u32).hash(&mut hasher);
     ((dials.tint_amount * 1000.0) as u32).hash(&mut hasher);
+    dials.bold.hash(&mut hasher);
     // A typed character and a fold both change page pixels and reach nothing
     // else here, so without the mapping stamp a file outside git (diff_version
     // stuck at 0) with no diagnostics glides pre-edit text.

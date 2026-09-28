@@ -331,9 +331,8 @@ pub(crate) struct FrameCtx<'a> {
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
-    /// The diff view's soften and tint dials, resolved from
-    /// [`crate::app::Stoat::diff_soften`] and [`crate::app::Stoat::diff_tint`]
-    /// per [`DiffDials::from_stoat`]. Read only by diff-view panes.
+    /// The diff view's paint dials, resolved from the session per
+    /// [`DiffDials::from_stoat`]. Read only by diff-view panes.
     pub(crate) diff_dials: DiffDials,
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.

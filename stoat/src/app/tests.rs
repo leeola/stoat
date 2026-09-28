@@ -20,6 +20,7 @@ use crate::{
     },
 };
 use crossterm::event::{MouseButton, MouseEventKind};
+use ratatui::style::Modifier;
 use std::{
     ops::Range,
     path::{Path, PathBuf},
@@ -394,19 +395,32 @@ fn glyph_fg(h: &crate::test_harness::TestHarness, text: &str, glyph: &str) -> St
 /// holding `text`, which is one color exactly where nothing colors tokens.
 fn row_colors(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str) -> usize {
     let buf = h.rendered_buffer();
+    let row = row_holding(buf, cols.clone(), text);
+    cols.filter(|&x| !buf[(x, row)].symbol().trim().is_empty())
+        .map(|x| format!("{:?}", buf[(x, row)].style().fg))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// The glyphs of the bold cells in `cols` on the row holding `text`.
+fn bold_glyphs(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str) -> String {
+    let buf = h.rendered_buffer();
+    let row = row_holding(buf, cols.clone(), text);
+    cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+        .map(|x| buf[(x, row)].symbol().to_string())
+        .collect()
+}
+
+/// The first row whose glyphs in `cols` contain `text`.
+fn row_holding(buf: &Buffer, cols: Range<u16>, text: &str) -> u16 {
     let line = |y: u16| -> String {
         cols.clone()
             .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
             .collect()
     };
-    let row = (0..buf.area.height)
+    (0..buf.area.height)
         .find(|&y| line(y).contains(text))
-        .unwrap_or_else(|| panic!("{text:?} rendered in cols {cols:?}"));
-    cols.clone()
-        .filter(|&x| !buf[(x, row)].symbol().trim().is_empty())
-        .map(|x| format!("{:?}", buf[(x, row)].style().fg))
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
+        .unwrap_or_else(|| panic!("{text:?} rendered in cols {cols:?}"))
 }
 
 /// With nothing over the panes the combo is a pane resize, so the focused
@@ -633,7 +647,7 @@ fn the_tint_and_syntax_chords_answer_on_the_commits_screen() {
 
 /// An in-band claim spells a chord as super plus the digit down the pty
 /// rather than as a socket event, so the two deliveries have to land the
-/// same three handlers.
+/// same handlers.
 #[test]
 fn the_in_band_super_digits_step_the_tint_dial() {
     let mut h = diff_syntax_harness();
@@ -649,6 +663,8 @@ fn the_in_band_super_digits_step_the_tint_dial() {
     assert_eq!(h.stoat.diff_tint, 0, "super-9 steps it back down");
     h.stoat.update(inband_chord('8'));
     assert!(!h.stoat.diff_syntax, "super-8 flips the syntax coloring");
+    h.stoat.update(inband_chord('7'));
+    assert!(h.stoat.diff_bold, "super-7 flips the bold");
 
     h.stoat.diff_tint = 2;
     action_handlers::focused_editor_mut(&mut h.stoat)
@@ -657,10 +673,11 @@ fn the_in_band_super_digits_step_the_tint_dial() {
     h.stoat.update(inband_chord('0'));
     h.stoat.update(inband_chord('9'));
     h.stoat.update(inband_chord('8'));
+    h.stoat.update(inband_chord('7'));
 
     assert_eq!(
-        (h.stoat.diff_tint, h.stoat.diff_syntax),
-        (2, false),
+        (h.stoat.diff_tint, h.stoat.diff_syntax, h.stoat.diff_bold),
+        (2, false, true),
         "off the diff view the in-band digits leave every dial alone",
     );
 }
@@ -683,6 +700,55 @@ fn the_syntax_chord_outside_the_diff_view_changes_nothing() {
     assert_eq!(
         (h.stoat.handle_window_ipc(chord('8')), h.stoat.diff_syntax),
         (UpdateEffect::None, true),
+        "a chord over a plain pane leaves the flag and the frame alone"
+    );
+}
+
+/// Weight marks a change span without spending the color that the tint and
+/// the syntax use, so the chord bolds every span of any kind in both columns
+/// and nothing around them.
+#[test]
+fn the_seven_chord_bolds_every_change_span() {
+    let mut h = diff_syntax_harness();
+    assert_eq!(
+        (h.stoat.diff_bold, bold_glyphs(&h, 68..120, "fn new")),
+        (false, String::new()),
+        "a session opens with the bold off, and a code change carries none"
+    );
+
+    assert_eq!(h.stoat.handle_window_ipc(chord('7')), UpdateEffect::Redraw);
+    h.snapshot();
+    assert_eq!(
+        (
+            bold_glyphs(&h, 68..120, "fn new"),
+            bold_glyphs(&h, 8..59, "fn old"),
+            bold_glyphs(&h, 68..120, "fn keep"),
+        ),
+        ("new".to_string(), "old".to_string(), String::new()),
+        "each column bolds its changed word, and the context row stays plain"
+    );
+
+    h.stoat.handle_window_ipc(chord('7'));
+    h.snapshot();
+    assert_eq!(
+        (h.stoat.diff_bold, bold_glyphs(&h, 68..120, "fn new")),
+        (false, String::new()),
+        "a second chord clears it"
+    );
+}
+
+/// The terminal forwards the chord on the zoom claim rather than on what is
+/// on screen, so the bold flag defends its own scope as the syntax flag does.
+#[test]
+fn the_bold_chord_outside_the_diff_view_changes_nothing() {
+    let mut h = diff_syntax_harness();
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("editor")
+        .set_diff_view(false);
+
+    assert_eq!(
+        (h.stoat.handle_window_ipc(chord('7')), h.stoat.diff_bold),
+        (UpdateEffect::None, false),
         "a chord over a plain pane leaves the flag and the frame alone"
     );
 }
@@ -712,15 +778,15 @@ fn a_plain_pane_keeps_its_color_while_the_diff_toggle_is_off() {
     );
 }
 
-/// A digit outside the three the diff view claims is a chord the terminal
-/// forwarded on the claim that nothing here answers, so it must not redraw
-/// or move any state.
+/// A digit the diff view does not claim is a chord the terminal forwarded
+/// on the claim that nothing here answers, so it must not redraw or move
+/// any state.
 #[test]
 fn an_unclaimed_digit_chord_is_a_no_op() {
     let mut h = diff_syntax_harness();
 
     assert_eq!(
-        (h.stoat.handle_window_ipc(chord('7')), h.stoat.diff_syntax),
+        (h.stoat.handle_window_ipc(chord('5')), h.stoat.diff_syntax),
         (UpdateEffect::None, true),
         "an unspoken-for digit changes nothing"
     );

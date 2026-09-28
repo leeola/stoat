@@ -2665,6 +2665,13 @@ fn a_diff_tint_step_reenters_the_pool_pages() {
     pool_reenters_after(|stoat| stoat.diff_tint = 2);
 }
 
+/// The bold dial reweights every change span, so a toggle has to re-enter the
+/// buffered pages rather than let them glide the weight from before it.
+#[test]
+fn a_diff_bold_toggle_reenters_the_pool_pages() {
+    pool_reenters_after(|stoat| stoat.diff_bold = true);
+}
+
 #[test]
 fn emit_after_edit_reenters_pool_pages() {
     use stoatty_protocol::command::{Command, FillCommand};

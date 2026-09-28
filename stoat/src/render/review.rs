@@ -129,15 +129,19 @@ pub(crate) struct DiffDials {
     /// [`diff_tint_amount`]. `0.0` paints the syntax color untouched and `1.0`
     /// replaces it.
     pub(crate) tint_amount: f32,
+    /// Whether every change span bolds, whatever its kind. Off leaves bold to a
+    /// prose replacement alone, per [`mark_span`].
+    pub(crate) bold: bool,
 }
 
 impl DiffDials {
-    /// Resolves the dials at the session's [`Stoat::diff_soften`] and
-    /// [`Stoat::diff_tint`] levels.
+    /// Resolves the dials from the session's [`Stoat::diff_soften`] and
+    /// [`Stoat::diff_tint`] levels and its [`Stoat::diff_bold`] flag.
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         Self {
             soften_scale: diff_soften_scale(stoat.diff_soften),
             tint_amount: diff_tint_amount(stoat.diff_tint),
+            bold: stoat.diff_bold,
         }
     }
 
@@ -149,6 +153,7 @@ impl DiffDials {
         Self {
             soften_scale: 1.0,
             tint_amount: 0.0,
+            bold: false,
         }
     }
 }
@@ -860,7 +865,7 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 /// to find a changed char inside a string or a comment, where the whole literal
 /// carries one color and no token boundary falls beside the edit. Only a
 /// replacement bolds, because that is the case the reader compares char by
-/// char.
+/// char. With `bold` set, every span of any kind bolds.
 ///
 /// A theme that cannot blend has no receding to lead against, so it underlines
 /// the span, which is the only mark left to it.
@@ -876,6 +881,7 @@ fn mark_span(
     style: Style,
     kind: &ChangeKind,
     prose: bool,
+    bold: bool,
     rgb: bool,
     tint: Option<(Color, f32)>,
 ) -> Style {
@@ -883,7 +889,7 @@ fn mark_span(
         true => style,
         false => style.add_modifier(Modifier::UNDERLINED),
     };
-    let style = match prose && matches!(kind, ChangeKind::Replaced) {
+    let style = match bold || (prose && matches!(kind, ChangeKind::Replaced)) {
         true => style.add_modifier(Modifier::BOLD),
         false => style,
     };
@@ -1145,7 +1151,7 @@ pub(crate) fn paint_base_row(
         match change_spans.get(span_cursor) {
             Some((range, kind, prose)) if range.start <= byte_idx => {
                 let tint = span_tints.map(|t| (span_tint_color(t, kind, true), dials.tint_amount));
-                style = mark_span(style, kind, *prose, tints.is_some(), tint);
+                style = mark_span(style, kind, *prose, dials.bold, tints.is_some(), tint);
                 if let Some(bg) = lift_bg {
                     style = brighten_style(style, bg);
                 }
@@ -1437,7 +1443,7 @@ pub(crate) fn paint_highlighted_row(
                 Some((range, kind, prose)) if range.start <= col => {
                     let tint =
                         span_tints.map(|t| (span_tint_color(t, kind, false), dials.tint_amount));
-                    let marked = mark_span(style, kind, *prose, tints.is_some(), tint);
+                    let marked = mark_span(style, kind, *prose, dials.bold, tints.is_some(), tint);
                     match lift_bg {
                         Some(bg) => brighten_style(marked, bg),
                         None => marked,
@@ -2841,6 +2847,48 @@ mod tests {
         assert_eq!(bold, "", "nothing on a code row bolds");
     }
 
+    /// The bold dial marks a change by weight whatever its kind, so it bolds the
+    /// code rename that the prose rule leaves plain, and nothing else of the row.
+    #[test]
+    fn the_bold_dial_bolds_a_code_change_span() {
+        // The harness diffs a `.rs` file, so the rename refines as code. A
+        // plain-text editor refines as prose, which bolds whatever the dial says.
+        let mut h = diff_harness("fn alpha() {}\n", "fn beta() {}\n");
+        let theme = Arc::clone(&h.stoat.theme);
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let area = Rect::new(0, 0, 120, 4);
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+
+        let mut bold_on_the_changed_row = |dials: DiffDials| {
+            let mut buf = Buffer::empty(area);
+            render_diff_view(editor, area, fallback, &theme, &mut buf, None, dials);
+            let row = (0..area.height)
+                .find(|&y| buffer_text(&buf, y).contains("beta"))
+                .expect("the renamed line renders");
+            let bold = |cols: std::ops::Range<u16>| {
+                cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+                    .map(|x| buf[(x, row)].symbol().to_string())
+                    .collect::<String>()
+            };
+            (bold(68..area.width), bold(8..59))
+        };
+
+        assert_eq!(
+            (
+                bold_on_the_changed_row(DiffDials::shipped()),
+                bold_on_the_changed_row(DiffDials {
+                    bold: true,
+                    ..DiffDials::shipped()
+                }),
+            ),
+            (
+                (String::new(), String::new()),
+                ("beta".to_string(), "alpha".to_string()),
+            ),
+            "the dial alone bolds the rename, in each column and on nothing else"
+        );
+    }
+
     /// A theme that cannot blend has no receding to lead a change with, so the
     /// view asks for the one mark left to it and underlines the changed chars.
     /// `paint_base_row_underlines_change_spans_on_a_theme_that_cannot_blend`
@@ -3482,6 +3530,7 @@ mod tests {
                 DiffDials {
                     soften_scale: 0.0,
                     tint_amount: amount,
+                    ..DiffDials::shipped()
                 },
                 None,
             );
@@ -3542,6 +3591,7 @@ mod tests {
                 DiffDials {
                     soften_scale: 0.0,
                     tint_amount: amount,
+                    ..DiffDials::shipped()
                 },
                 None,
             );
@@ -3588,6 +3638,7 @@ mod tests {
                 DiffDials {
                     soften_scale: 0.0,
                     tint_amount: 1.0,
+                    ..DiffDials::shipped()
                 },
                 tint_row,
             );
@@ -3638,6 +3689,7 @@ mod tests {
                 DiffDials {
                     soften_scale: 0.0,
                     tint_amount: amount,
+                    ..DiffDials::shipped()
                 },
                 Some(tints.deleted),
             );
@@ -3698,6 +3750,7 @@ mod tests {
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
+                ..DiffDials::shipped()
             },
         );
 
@@ -3724,6 +3777,7 @@ mod tests {
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
+                ..DiffDials::shipped()
             },
         );
 
@@ -3764,6 +3818,7 @@ mod tests {
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
+                ..DiffDials::shipped()
             },
         );
 

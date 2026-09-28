@@ -788,6 +788,19 @@ pub struct Stoat {
     /// Session-scoped and deliberately not persisted, for [`Self::diff_soften`]'s
     /// reason: it answers what is on screen right now.
     pub(crate) diff_syntax: bool,
+    /// Whether the diff view bolds every change span, in both of its columns.
+    ///
+    /// Off, only a prose replacement bolds, because there the receding alone
+    /// does not show which char changed. On, every span of any kind bolds on
+    /// any theme, so weight marks each change as well as the receding and the
+    /// tint do.
+    ///
+    /// The ctrl-7 chord is the only writer, and it answers only on a diff
+    /// surface.
+    ///
+    /// Session-scoped and deliberately not persisted, for the same reason as
+    /// [`Self::diff_soften`]. It answers what is on screen right now.
+    pub(crate) diff_bold: bool,
     /// Share of its body each modal's list pane takes, as a percentage, for the
     /// kinds whose list/preview separator the user has dragged. An absent kind
     /// sits at [`crate::render::picker::DEFAULT_LIST_PERCENT`].
@@ -2217,6 +2230,7 @@ impl Stoat {
             diff_soften: 0,
             diff_tint: 0,
             diff_syntax: true,
+            diff_bold: false,
             modal_split: std::collections::BTreeMap::new(),
             commits_split: None,
             command_palette: None,
@@ -2793,7 +2807,7 @@ impl Stoat {
             },
             WindowIpcEvent::Mouse { .. } => unreachable!("mouse events return above"),
             WindowIpcEvent::Zoom { .. } => unreachable!("zoom events return above"),
-            // Only `8`, `9` and `0` are spoken for, and each returns above.
+            // Only `7`, `8`, `9` and `0` are spoken for, and each returns above.
             // Another digit is a chord the terminal forwarded on the claim and
             // nothing here answers.
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
@@ -2852,6 +2866,7 @@ impl Stoat {
     /// pty, and the two must not drift apart.
     fn handle_chord(&mut self, ch: char) -> UpdateEffect {
         match ch {
+            '7' => self.handle_diff_bold_toggle(),
             '8' => self.handle_diff_syntax_toggle(),
             '9' => self.handle_diff_tint_step(-1),
             '0' => self.handle_diff_tint_step(1),
@@ -2878,8 +2893,21 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
+    /// Flip the bold of every change span on whichever diff surface is on
+    /// screen, or do nothing where none is.
+    ///
+    /// The chord arrives whatever is on screen, so the flag defends its own
+    /// scope exactly as [`Self::handle_diff_syntax_toggle`] does.
+    fn handle_diff_bold_toggle(&mut self) -> UpdateEffect {
+        if !self.on_a_diff_surface() {
+            return UpdateEffect::None;
+        }
+        self.diff_bold = !self.diff_bold;
+        UpdateEffect::Redraw
+    }
+
     /// Whether the screen in front of the reader paints diff rows, which is
-    /// what the three styling dials act on.
+    /// what the styling dials act on.
     ///
     /// The diff view and the commits screen qualify. A commit preview runs the
     /// diff view's own row painter, so a dial stepped on either shows on both.
@@ -4634,7 +4662,7 @@ impl Stoat {
         // not, and the keymap would resolve `=` or `-` to whatever the mode
         // binds, which in insert mode is typing the character.
         //
-        // Only the three digits the chord handler acts on. Any other
+        // Only the four digits the chord handler acts on. Any other
         // super-digit falls to the keymap, which binds none, so both deliveries
         // ignore it alike.
         //
@@ -4644,7 +4672,7 @@ impl Stoat {
             match key.code {
                 KeyCode::Char('=') => return self.handle_zoom_step(1),
                 KeyCode::Char('-') => return self.handle_zoom_step(-1),
-                KeyCode::Char(ch @ ('8' | '9' | '0')) => return self.handle_chord(ch),
+                KeyCode::Char(ch @ ('7' | '8' | '9' | '0')) => return self.handle_chord(ch),
                 _ => {},
             }
         }
