@@ -27,7 +27,9 @@ use std::{
         Arc,
     },
 };
-use stoat_language::{self as language, Language, SyntaxMapCapture, SyntaxSnapshot, SyntaxState};
+use stoat_language::{
+    self as language, HighlightId, Language, SyntaxMapCapture, SyntaxSnapshot, SyntaxState,
+};
 use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Bias, Rope};
 
@@ -453,39 +455,58 @@ impl Recaptured {
 
 /// The styled byte spans a merged capture list resolves to under `styles`.
 ///
-/// A capture reaches a theme key through its originating layer's
-/// `highlight_map()`, and a DEFAULT id means the active theme has no entry for
-/// it, so it carries no style and is dropped along with empty ranges. The
-/// captures' document order (start, Reverse(end), depth) is kept, so deeper
-/// injection layers land later and win under the display map's endpoint
-/// precedence.
+/// A DEFAULT id means the active theme has no entry for a capture, so it
+/// carries no style and is dropped. The order is [`capture_ids`]'s.
 fn styled_capture_spans(
     captures: Vec<SyntaxMapCapture<'_>>,
     styles: &SyntaxStyles,
 ) -> Vec<(Range<usize>, HighlightStyleId)> {
+    capture_ids(captures)
+        .filter_map(|(range, id)| Some((range, styles.id_for_highlight(id)?)))
+        .collect()
+}
+
+/// The highlight id of every non-empty capture in a merged capture list, before
+/// any theme resolves it.
+///
+/// The diff view's base text memoizes these across theme changes and resolves
+/// them per theme, where the buffer resolves its captures at once through
+/// [`styled_capture_spans`]. The order is [`capture_ids`]'s.
+pub(crate) fn capture_highlight_ids(
+    captures: Vec<SyntaxMapCapture<'_>>,
+) -> Vec<(Range<usize>, HighlightId)> {
+    capture_ids(captures).collect()
+}
+
+/// Each non-empty capture's byte range and the highlight id its layer's
+/// language gives it.
+///
+/// A capture reaches a theme key through its originating layer's
+/// `highlight_map()`. The captures' document order (start, Reverse(end), depth)
+/// is kept, so deeper injection layers land later and win under the display
+/// map's endpoint precedence.
+fn capture_ids(
+    captures: Vec<SyntaxMapCapture<'_>>,
+) -> impl Iterator<Item = (Range<usize>, HighlightId)> {
     // highlight_map() clones a locked map, so memoize it per layer language. A
     // parse reaches two or three languages, and scanning that many pointers
     // costs less than hashing a key for every capture in the file.
     let mut highlight_maps: Vec<(*const Language, _)> = Vec::new();
-    captures
-        .into_iter()
-        .filter_map(|cap| {
-            let range = cap.node.byte_range();
-            if range.start == range.end {
-                return None;
-            }
-            let key = cap.language as *const Language;
-            let ix = match highlight_maps.iter().position(|(lang, _)| *lang == key) {
-                Some(ix) => ix,
-                None => {
-                    highlight_maps.push((key, cap.language.highlight_map()));
-                    highlight_maps.len() - 1
-                },
-            };
-            let style_id = styles.id_for_highlight(highlight_maps[ix].1.get(cap.index))?;
-            Some((range, style_id))
-        })
-        .collect()
+    captures.into_iter().filter_map(move |cap| {
+        let range = cap.node.byte_range();
+        if range.start == range.end {
+            return None;
+        }
+        let key = cap.language as *const Language;
+        let ix = match highlight_maps.iter().position(|(lang, _)| *lang == key) {
+            Some(ix) => ix,
+            None => {
+                highlight_maps.push((key, cap.language.highlight_map()));
+                highlight_maps.len() - 1
+            },
+        };
+        Some((range, highlight_maps[ix].1.get(cap.index)))
+    })
 }
 
 /// Anchor a whole span list with two cursor walks rather than a root descent

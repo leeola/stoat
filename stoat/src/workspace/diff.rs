@@ -25,6 +25,7 @@ use crate::{
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
     pane::View,
+    syntax_parse,
 };
 use codegraph::FileId;
 use std::{
@@ -39,10 +40,11 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_language::{
-    extract_highlights, structural_diff, structural_diff::TreeCache, HighlightSpan, Language,
-    LanguageRegistry, Tree,
+    structural_diff, structural_diff::TreeCache, HighlightId, Language, LanguageRegistry,
+    SyntaxMap, Tree,
 };
 use stoat_scheduler::{Executor, Task};
+use stoat_text::Rope;
 use tokio::sync::Notify;
 
 /// How long a buffer must hold one version before its diff is recomputed.
@@ -702,10 +704,10 @@ const BASE_HIGHLIGHT_MEMO_CAPACITY: usize = 64;
 /// bucket.
 #[derive(Default)]
 pub(crate) struct BaseHighlightMemo {
-    /// Tree-sitter highlight spans for a base text, keyed by its content hash
-    /// and language name, so an unchanged base is parsed once across edits.
-    /// Theme-independent.
-    parses: VecDeque<(ParseKey, Arc<Vec<HighlightSpan>>)>,
+    /// Highlight ids over every layer of a base text's parse, keyed by its
+    /// content hash and language name, so an unchanged base is parsed once
+    /// across edits. Theme-independent.
+    parses: VecDeque<(ParseKey, Arc<HighlightIds>)>,
     /// Those spans resolved to styles and split per base line. Keyed
     /// additionally by the [`SyntaxStyles`] generation, since the resolution is
     /// what the theme changes.
@@ -714,6 +716,10 @@ pub(crate) struct BaseHighlightMemo {
 
 /// A base text and the language that parsed it.
 type ParseKey = (ContentHash, String);
+
+/// Each capture's byte range in a base text and its highlight id, before a
+/// theme resolves the id to a style.
+type HighlightIds = Vec<(Range<usize>, HighlightId)>;
 
 /// A [`ParseKey`] and the [`SyntaxStyles`] generation its spans resolved under.
 type BucketKey = (ContentHash, String, u64);
@@ -726,11 +732,11 @@ impl BaseHighlightMemo {
         (self.parses.len(), self.buckets.len())
     }
 
-    fn get_parse(&self, key: &ParseKey) -> Option<Arc<Vec<HighlightSpan>>> {
+    fn get_parse(&self, key: &ParseKey) -> Option<Arc<HighlightIds>> {
         entry_of(&self.parses, key)
     }
 
-    fn insert_parse(&mut self, key: ParseKey, spans: Arc<Vec<HighlightSpan>>) {
+    fn insert_parse(&mut self, key: ParseKey, spans: Arc<HighlightIds>) {
         insert_bounded(&mut self.parses, key, spans);
     }
 
@@ -1019,7 +1025,7 @@ pub(crate) fn compute_base_highlights(
         None => {
             let parsed = Arc::new(
                 structural_diff::parse_memoized(language, base_text, tree_memo)
-                    .map(|tree| extract_highlights(language, &tree, base_text))
+                    .map(|tree| layered_highlight_ids(language, &tree, base_text))
                     .unwrap_or_default(),
             );
             let mut guard = cache.lock().expect("base highlight cache poisoned");
@@ -1038,14 +1044,35 @@ pub(crate) fn compute_base_highlights(
     bucketed
 }
 
-/// Resolve highlight spans to styles and bucket them per base line as line-local
+/// Highlight ids over every layer of `base_text`'s parse, host and injections
+/// alike, which is how the buffer's own highlights read its text.
+///
+/// `tree` is the host parse, reused as the host layer, so only the injected
+/// layers parse here. A reparse that gives up yields no ids, which paints the
+/// base text plain.
+fn layered_highlight_ids(language: &Arc<Language>, tree: &Tree, base_text: &str) -> HighlightIds {
+    let rope = Rope::from(base_text);
+    let mut map = SyntaxMap::default();
+    if map
+        .reparse(&rope, language.clone(), 0, Some(tree), None)
+        .is_none()
+    {
+        return Vec::new();
+    }
+    syntax_parse::capture_highlight_ids(
+        map.snapshot()
+            .captures(0..rope.len(), &rope, |l| Some(l.highlight_query())),
+    )
+}
+
+/// Resolve highlight ids to styles and bucket them per base line as line-local
 /// byte ranges. A span crossing a newline is clipped to each line it touches.
 ///
 /// Each line comes out as disjoint, start-sorted runs per [`flatten_line_spans`].
 /// The left column's painter answers the first span still open at a byte, so an
 /// overlap left in place hands every token the least specific capture over it.
 fn bucket_base_highlights(
-    spans: &[HighlightSpan],
+    spans: &[(Range<usize>, HighlightId)],
     base_text: &str,
     syntax_styles: &SyntaxStyles,
 ) -> BaseHighlights {
@@ -1053,24 +1080,19 @@ fn bucket_base_highlights(
     let line_of = |byte: usize| starts.partition_point(|&s| s <= byte).saturating_sub(1);
 
     let mut per_line: BaseHighlights = vec![Vec::new(); starts.len()];
-    for span in spans {
-        let Some(style_id) = syntax_styles.id_for_highlight(span.id) else {
+    for (range, id) in spans {
+        let Some(style_id) = syntax_styles.id_for_highlight(*id) else {
             continue;
         };
         let style = syntax_styles.interner[style_id].clone();
 
-        let first = line_of(span.byte_range.start);
-        let last = line_of(
-            span.byte_range
-                .end
-                .saturating_sub(1)
-                .max(span.byte_range.start),
-        );
+        let first = line_of(range.start);
+        let last = line_of(range.end.saturating_sub(1).max(range.start));
         for line in first..=last {
             let line_start = starts[line];
             let line_end = starts.get(line + 1).copied().unwrap_or(base_text.len());
-            let s = span.byte_range.start.max(line_start) - line_start;
-            let e = span.byte_range.end.min(line_end) - line_start;
+            let s = range.start.max(line_start) - line_start;
+            let e = range.end.min(line_end) - line_start;
             if s < e {
                 per_line[line].push((s..e, style.clone()));
             }
@@ -1226,7 +1248,7 @@ mod tests {
     use crate::{
         app,
         buffer::BufferId,
-        diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
+        diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap},
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
         pane::View,
@@ -1608,30 +1630,15 @@ mod tests {
     /// plain comment color.
     #[test]
     fn base_highlights_let_the_later_capture_win() {
-        let theme = {
-            let (config, errors) = stoat_config::parse(
-                r##"theme t {
-                    syntax.variable.fg = "#010101";
-                    syntax.function.fg = "#020202";
-                    syntax.comment.fg = "#030303";
-                    syntax.comment.doc.fg = "#040404";
-                }"##,
-            );
-            assert!(errors.is_empty(), "parse errors: {errors:?}");
-            Theme::from_config(&config.expect("a theme config"), "t").expect("a theme")
-        };
-        let styles = SyntaxStyles::from_theme(&theme);
-        let registry = LanguageRegistry::standard();
-        app::install_highlight_maps(&registry, &styles);
-        let language = registry.for_path(Path::new("a.rs")).expect("rust language");
-        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
-
-        let lines = compute_base_highlights(
+        let lines = themed_base_highlights(
+            "a.rs",
+            r##"theme t {
+                syntax.variable.fg = "#010101";
+                syntax.function.fg = "#020202";
+                syntax.comment.fg = "#030303";
+                syntax.comment.doc.fg = "#040404";
+            }"##,
             "/// doc\nfn main() {\n    foo();\n}\n",
-            &language,
-            &styles,
-            &cache,
-            None,
         );
         let fg_at = |line: usize, byte: usize| {
             lines[line]
@@ -1655,6 +1662,47 @@ mod tests {
                 .all(|pair| pair[0].0.end <= pair[1].0.start)),
             "every line's runs are disjoint and start-sorted, got {lines:?}"
         );
+    }
+
+    /// A fenced block in removed markdown takes its own language's colors on
+    /// the left, as the right column paints the same block through its
+    /// injection layer.
+    #[test]
+    fn base_highlights_color_an_injected_fenced_block() {
+        let lines = themed_base_highlights(
+            "a.md",
+            r##"theme t {
+                syntax.keyword.fg = "#050505";
+            }"##,
+            "```rust\nfn main() {}\n```\n",
+        );
+
+        assert_eq!(
+            lines[1]
+                .iter()
+                .find(|(range, _)| range.contains(&0))
+                .map(|(range, style)| (range.clone(), style.foreground)),
+            Some((0..2, Some(Color::Rgb(5, 5, 5)))),
+            "the fenced `fn` paints as a rust keyword, got {:?}",
+            lines[1]
+        );
+    }
+
+    /// The base highlights of `text` in the language `path` selects, under a
+    /// theme parsed from `theme_src`, with every standard language's highlight
+    /// map pointed at that theme.
+    fn themed_base_highlights(path: &str, theme_src: &str, text: &str) -> Arc<BaseHighlights> {
+        let (config, errors) = stoat_config::parse(theme_src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("a theme config"), "t").expect("a theme");
+        let styles = SyntaxStyles::from_theme(&theme);
+        let registry = LanguageRegistry::standard();
+        app::install_highlight_maps(&registry, &styles);
+        let language = registry
+            .for_path(Path::new(path))
+            .expect("a bundled language");
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+        compute_base_highlights(text, &language, &styles, &cache, None)
     }
 
     fn input(base: &str, buffer: &str) -> ReviewFileInput {
