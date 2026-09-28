@@ -143,66 +143,81 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
 
     let mut spawned = false;
     for (id, path, mode) in paths {
-        let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
-            continue;
-        };
-        let (dirty, version, rope) = {
-            let guard = buffer.read().expect("buffer poisoned");
-            (
-                guard.dirty,
-                guard.snapshot.version,
-                guard.snapshot.visible_text.clone(),
-            )
-        };
-        if dirty {
-            continue;
-        }
-        let Some(mtime) = stoat
-            .fs_host
-            .metadata(&path)
-            .ok()
-            .flatten()
-            .map(|m| m.modified)
-        else {
-            continue;
-        };
-        if stoat.active_workspace().buffers.disk_mtime(id) == Some(mtime) {
-            continue;
-        }
-        // One read per file at a time. A poll landing while the last one is
-        // still out reads the same bytes a second time, and the install keeps
-        // only the one the buffer has not moved past.
-        if stoat.pending_auto_reloads.iter().any(|p| p.id == id) {
-            continue;
-        }
+        spawned |= stat_and_read_buffer(stoat, id, &path, mode);
+    }
+    spawned
+}
 
-        let result: Arc<Mutex<Option<AutoReloadResult>>> = Arc::new(Mutex::new(None));
-        let task = {
-            let result = result.clone();
-            let fs_host = stoat.fs_host.clone();
-            let redraw = stoat.redraw_notify.clone();
-            let path = path.clone();
-            stoat.executor.spawn_blocking(move || {
-                let outcome = read_and_compare(&*fs_host, &path, &rope);
-                *result.lock().expect("pending reload mutex") = Some(AutoReloadResult {
-                    id,
-                    mode,
-                    mtime,
-                    version,
-                    outcome,
-                });
-                redraw.notify_one();
-            })
-        };
-        stoat.pending_auto_reloads.push(PendingAutoReload {
-            id,
-            _task: task,
-            result,
-        });
-        spawned = true;
+/// Stat buffer `id`'s file at `path` and, when its mtime moved, read and compare
+/// it on the blocking pool for [`pump_auto_reload_install`] to apply under
+/// `mode`.
+///
+/// A dirty buffer, a file whose mtime has not moved, and a file whose last read
+/// is still out start nothing, so in-memory edits are never clobbered and one
+/// file costs one read at a time. Returns whether a read was spawned.
+pub(crate) fn stat_and_read_buffer(
+    stoat: &mut Stoat,
+    id: BufferId,
+    path: &Path,
+    mode: AutoReloadMode,
+) -> bool {
+    let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
+        return false;
+    };
+    let (dirty, version, rope) = {
+        let guard = buffer.read().expect("buffer poisoned");
+        (
+            guard.dirty,
+            guard.snapshot.version,
+            guard.snapshot.visible_text.clone(),
+        )
+    };
+    if dirty {
+        return false;
+    }
+    let Some(mtime) = stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .map(|m| m.modified)
+    else {
+        return false;
+    };
+    if stoat.active_workspace().buffers.disk_mtime(id) == Some(mtime) {
+        return false;
+    }
+    // One read per file at a time. A poll landing while the last one is
+    // still out reads the same bytes a second time, and the install keeps
+    // only the one the buffer has not moved past.
+    if stoat.pending_auto_reloads.iter().any(|p| p.id == id) {
+        return false;
     }
 
-    spawned
+    let result: Arc<Mutex<Option<AutoReloadResult>>> = Arc::new(Mutex::new(None));
+    let task = {
+        let result = result.clone();
+        let fs_host = stoat.fs_host.clone();
+        let redraw = stoat.redraw_notify.clone();
+        let path = path.to_path_buf();
+        stoat.executor.spawn_blocking(move || {
+            let outcome = read_and_compare(&*fs_host, &path, &rope);
+            *result.lock().expect("pending reload mutex") = Some(AutoReloadResult {
+                id,
+                mode,
+                mtime,
+                version,
+                outcome,
+            });
+            redraw.notify_one();
+        })
+    };
+    stoat.pending_auto_reloads.push(PendingAutoReload {
+        id,
+        _task: task,
+        result,
+    });
+    true
 }
 
 /// Read `path` and work out the edit that brings `old` up to it.

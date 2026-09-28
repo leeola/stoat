@@ -1030,7 +1030,7 @@ fn land_walk(
     // last step showed stays up and only the base moves.
     if let Some(rel_path) = landing.first_path {
         super::file::open_file(stoat, &workdir.join(rel_path));
-        super::review::enter_diff_view(stoat);
+        super::review::reopen_diff_view(stoat);
     }
 }
 

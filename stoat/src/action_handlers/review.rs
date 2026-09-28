@@ -130,7 +130,7 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::Memory { files: base_texts }));
     super::file::open_file(stoat, &first);
-    enter_diff_view(stoat);
+    reopen_diff_view(stoat);
     stoat.set_status("agent edits: save accepts, :reload rejects");
 }
 
@@ -183,7 +183,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     // Turned on rather than toggled. Naming a revision asks to look at it, so a
     // second `:diff <rev>` re-targets the view rather than closing it; only the
     // bare command closes.
-    enter_diff_view(stoat);
+    reopen_diff_view(stoat);
     UpdateEffect::Redraw
 }
 
@@ -194,7 +194,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
 /// caller arrives with a base it just installed, and the exit half leaves a
 /// base alone by design, so the round trip re-reads the new base rather than
 /// dropping it.
-pub(super) fn enter_diff_view(stoat: &mut Stoat) {
+pub(super) fn reopen_diff_view(stoat: &mut Stoat) {
     exit_diff_view(stoat);
     toggle_diff_view(stoat);
 }
@@ -219,6 +219,33 @@ pub(super) fn latch_diff_view(stoat: &mut Stoat) {
     let has_hunks = ensure_diff_map(stoat, editor_id, buffer_id);
     if let Some(editor) = super::focused_editor_mut(stoat) {
         editor.set_diff_view(has_hunks);
+    }
+}
+
+/// Turn the diff view on for the focused editor where it stands.
+///
+/// Sets the editor's flag, latches the focused pane and widens it, and builds
+/// the diff map the view reads. The cursor stays where it is, and the jump to
+/// the first change is what [`toggle_diff_view`] adds on top of this. A caller
+/// that places the cursor itself calls this rather than the toggle.
+///
+/// See also:
+/// - [`exit_diff_view`], the exit half, which undoes every piece of this.
+pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return;
+    };
+    editor.set_diff_view(true);
+
+    // Give the diff its own full width. An unwidenable layout stays put and
+    // rides the unified fallback.
+    let panes = &mut stoat.active_workspace_mut().panes;
+    let focus = panes.focus();
+    panes.pane_mut(focus).diff_mode = true;
+    panes.widen(focus);
+
+    if let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() {
+        ensure_diff_map(stoat, editor_id, buffer_id);
     }
 }
 
@@ -260,35 +287,20 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
 /// the cursor untouched.
 ///
 /// See also:
+/// - [`enter_diff_view`], the entry half, which turns the view on where the reader stands.
 /// - [`exit_diff_view`], the exit half, which other screens reuse.
 pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     let origin = super::jump::live_entry(stoat);
-    let Some(buffer_id) = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id) else {
+    if super::focused_editor_mut(stoat).is_none() {
         return;
-    };
+    }
 
     if exit_diff_view(stoat) {
         stoat.active_workspace_mut().set_diff_base(None);
         return;
     }
 
-    {
-        let Some(editor) = super::focused_editor_mut(stoat) else {
-            return;
-        };
-        editor.set_diff_view(true);
-
-        // Give the diff its own full width. An unwidenable layout stays put and
-        // rides the unified fallback.
-        let panes = &mut stoat.active_workspace_mut().panes;
-        let focus = panes.focus();
-        panes.pane_mut(focus).diff_mode = true;
-        panes.widen(focus);
-    }
-
-    if let Some((editor_id, _)) = stoat.focused_editor_ids() {
-        ensure_diff_map(stoat, editor_id, buffer_id);
-    }
+    enter_diff_view(stoat);
 
     let jumped = super::focused_editor_mut(stoat).is_some_and(|editor| {
         let display_snapshot = editor.display_map.snapshot();
