@@ -46,6 +46,12 @@ pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use tokio::sync::Notify;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
 
+/// Columns a tab runs to in every editor's display map.
+///
+/// A painter that expands tabs outside a display map, such as a commit
+/// preview's base text, reads this so its columns match an editor's.
+pub(crate) const DEFAULT_TAB_SIZE: u32 = 4;
+
 /// Shared empty text-highlight map, used as the `unwrap_or` fallback when an
 /// endpoint build carries no text highlights. Every live caller passes its own
 /// highlights, so this only spares the per-frame chunk path a throwaway
@@ -249,7 +255,9 @@ impl DisplayMap {
         let version = buffer_snapshot.version();
         let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).expect("non-zero literal"));
+        let mut tab_map = TabMap::new(
+            std::num::NonZeroU32::new(DEFAULT_TAB_SIZE).expect("DEFAULT_TAB_SIZE is non-zero"),
+        );
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None, executor, redraw);
         let block_map = BlockMap::new();

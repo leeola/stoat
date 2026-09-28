@@ -6,7 +6,7 @@ use crate::{
     app::Stoat,
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus},
     display_map::{
-        highlights::HighlightStyle, syntax_theme::DiffTheme, BlockRowKind,
+        display_width, highlights::HighlightStyle, syntax_theme::DiffTheme, BlockRowKind,
         CachedHighlightEndpoints, DisplaySnapshot, RowHighlightCursor,
     },
     editor_state::EditorState,
@@ -776,6 +776,7 @@ pub(crate) fn paint_diff_rows(
                         y,
                         &line_buf,
                         left_content_w,
+                        snapshot.tab_snapshot().tab_size(),
                         token_spans,
                         dim_style,
                         &[],
@@ -1102,6 +1103,10 @@ fn gap_style(
 /// [`brighten_style`], so a muted one still stands off the context receding
 /// behind it. The lift rides on the softening, so a zero `dials.soften_scale`
 /// turns it off with everything else.
+///
+/// A tab runs to its next stop every `tab_size` columns, as the right column
+/// expands it, so a tab-indented base line keeps its indentation. The spaces a
+/// tab expands to take the tab's own style.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_base_row(
     buf: &mut Buffer,
@@ -1109,6 +1114,7 @@ pub(crate) fn paint_base_row(
     y: u16,
     text: &str,
     max_cols: usize,
+    tab_size: u32,
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
@@ -1134,7 +1140,7 @@ pub(crate) fn paint_base_row(
     let lift_bg = tints.map(|t| t.bg).filter(|_| dials.soften_scale > 0.0);
     let mut token_cursor = 0;
     let mut span_cursor = 0;
-    paint_style_runs(buf, start_x, y, text, max_cols, |byte_idx| {
+    let mut style_at = |byte_idx: usize| {
         while token_spans
             .get(token_cursor)
             .is_some_and(|(r, _)| r.end <= byte_idx)
@@ -1185,7 +1191,43 @@ pub(crate) fn paint_base_row(
         }
 
         style
+    };
+
+    if !text.contains('\t') {
+        paint_style_runs(buf, start_x, y, text, max_cols, style_at);
+        return;
+    }
+    let (expanded, source) = expand_tabs(text, tab_size);
+    paint_style_runs(buf, start_x, y, &expanded, max_cols, |byte_idx| {
+        style_at(source[byte_idx])
     });
+}
+
+/// `text` with each tab expanded to its next stop, and the byte of `text` each
+/// expanded byte came from.
+///
+/// The stop rule is the display map's own, a tab running to the next multiple
+/// of `tab_size` columns, without the cap past which the display map expands a
+/// tab to one column. Every space a tab becomes maps to the tab's byte, so the
+/// mapped offsets never decrease and a monotonic span cursor still walks them.
+fn expand_tabs(text: &str, tab_size: u32) -> (String, Vec<usize>) {
+    let mut expanded = String::with_capacity(text.len());
+    let mut source = Vec::with_capacity(text.len());
+    let mut column = 0u32;
+    for (byte_idx, ch) in text.char_indices() {
+        if ch == '\t' {
+            let width = tab_size - column % tab_size;
+            for _ in 0..width {
+                expanded.push(' ');
+            }
+            column += width;
+        } else {
+            expanded.push(ch);
+            column += display_width(ch);
+        }
+        source.resize(expanded.len(), byte_idx);
+    }
+    (expanded, source)
 }
 
 /// The base line's syntax spans, empty where the editor paints no syntax color.
@@ -1303,6 +1345,7 @@ fn paint_base_side(
         y,
         text,
         content_w,
+        snapshot.tab_snapshot().tab_size(),
         token_spans,
         del_style,
         changes,
@@ -3402,6 +3445,7 @@ mod tests {
             0,
             "abcdefgh",
             8,
+            4,
             &[],
             Style::default(),
             &change_spans,
@@ -3419,6 +3463,67 @@ mod tests {
                 "col {x} carries neither a background nor an underline",
             );
         }
+    }
+
+    /// A tab runs to its next stop, as the right column expands it, so a
+    /// tab-indented base line keeps its indentation. The spaces take the tab's
+    /// own style, and the text after them keeps its token's.
+    #[test]
+    fn paint_base_row_expands_a_tab_to_its_stop() {
+        let (plain, token) = (Color::Rgb(9, 9, 9), Color::Rgb(1, 2, 3));
+        let paint = |text: &str, token_spans: &[(std::ops::Range<usize>, HighlightStyle)]| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+            paint_base_row(
+                &mut buf,
+                0,
+                0,
+                text,
+                10,
+                4,
+                token_spans,
+                Style::default().fg(plain),
+                &[],
+                None,
+                None,
+                None,
+                DiffDials::shipped(),
+                None,
+            );
+            buf
+        };
+
+        let leading = paint(
+            "\tfoo",
+            &[(
+                1..4,
+                HighlightStyle {
+                    foreground: Some(token),
+                    ..HighlightStyle::default()
+                },
+            )],
+        );
+        assert_eq!(
+            (0..7)
+                .map(|x| (leading[(x, 0)].symbol(), leading[(x, 0)].fg))
+                .collect::<Vec<_>>(),
+            [
+                (" ", plain),
+                (" ", plain),
+                (" ", plain),
+                (" ", plain),
+                ("f", token),
+                ("o", token),
+                ("o", token),
+            ],
+            "a leading tab fills four cells in the fallback style, then foo keeps its token"
+        );
+
+        let inner = paint("ab\tc", &[]);
+        assert_eq!(
+            line_text(&inner, 0, 0..5),
+            "ab  c",
+            "a tab after two columns runs only to the stop at column four"
+        );
     }
 
     /// A palette is free to put a color near its own background, and receding
@@ -3439,6 +3544,7 @@ mod tests {
                 0,
                 0,
                 "abcd",
+                4,
                 4,
                 &[],
                 Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
@@ -3497,6 +3603,7 @@ mod tests {
             0,
             "abcd",
             4,
+            4,
             &[],
             Style::default().fg(Color::Rgb(faint[0], faint[1], faint[2])),
             &[],
@@ -3529,6 +3636,7 @@ mod tests {
             0,
             0,
             "abcd",
+            4,
             4,
             &[],
             Style::default().fg(Color::Rgb(200, 100, 50)),
@@ -3570,6 +3678,7 @@ mod tests {
             0,
             0,
             "abcd",
+            4,
             4,
             &[],
             Style::default().fg(Color::Rgb(faint[0], faint[1], faint[2])),
@@ -3617,6 +3726,7 @@ mod tests {
                 0,
                 "abcdefgh",
                 8,
+                4,
                 &[],
                 Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
                 &change_spans,
@@ -3678,6 +3788,7 @@ mod tests {
                 0,
                 "word",
                 4,
+                4,
                 &[],
                 Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
                 &[],
@@ -3724,6 +3835,7 @@ mod tests {
                 0,
                 0,
                 "word",
+                4,
                 4,
                 &[],
                 Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
@@ -3776,6 +3888,7 @@ mod tests {
                 0,
                 "abcdefgh",
                 8,
+                4,
                 &[],
                 Style::default().fg(Color::Rgb(fg[0], fg[1], fg[2])),
                 &change_spans,
@@ -3962,6 +4075,7 @@ mod tests {
                 0,
                 "word",
                 4,
+                4,
                 &[],
                 bold,
                 &[],
@@ -4004,6 +4118,7 @@ mod tests {
             0,
             "abcdefgh",
             8,
+            4,
             &[],
             Style::default(),
             &change_spans,

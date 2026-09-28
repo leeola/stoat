@@ -2,6 +2,7 @@ use crate::{
     app::{SeparatorAxis, SplitSeparator},
     commit_list::{CommitListState, Preview},
     diff_map::{BaseHighlights, ChangeKind},
+    display_map::DEFAULT_TAB_SIZE,
     host::{CommitFileChange, CommitFileChangeKind},
     pane::Pane,
     render::{
@@ -478,6 +479,7 @@ fn paint_preview_side(
         y,
         &side.text,
         width,
+        DEFAULT_TAB_SIZE,
         token_spans,
         Style::default(),
         spans,
