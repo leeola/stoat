@@ -22,13 +22,13 @@ use crate::{
         changes_to_hunks, line_starts, mark_staged, merge_structural_detail, BaseHighlights,
         DiffHunk, DiffHunkStatus, DiffMap,
     },
-    display_map::syntax_theme::SyntaxStyles,
+    display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
     pane::View,
 };
 use codegraph::FileId;
 use std::{
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, VecDeque},
     future::Future,
     ops::Range,
@@ -1040,6 +1040,10 @@ pub(crate) fn compute_base_highlights(
 
 /// Resolve highlight spans to styles and bucket them per base line as line-local
 /// byte ranges. A span crossing a newline is clipped to each line it touches.
+///
+/// Each line comes out as disjoint, start-sorted runs per [`flatten_line_spans`].
+/// The left column's painter answers the first span still open at a byte, so an
+/// overlap left in place hands every token the least specific capture over it.
 fn bucket_base_highlights(
     spans: &[HighlightSpan],
     base_text: &str,
@@ -1072,7 +1076,64 @@ fn bucket_base_highlights(
             }
         }
     }
+
+    for spans in &mut per_line {
+        flatten_line_spans(spans);
+    }
     per_line
+}
+
+/// Flatten one line's overlapping spans into disjoint, start-sorted runs, each
+/// styled the way the right column styles the same bytes.
+///
+/// The spans sort into the order
+/// [`SyntaxSnapshot::captures`](stoat_language::SyntaxSnapshot::captures) gives
+/// the right column. Document order comes first, and the outer of two spans at
+/// one start comes before the inner. The sort is stable, so spans over the same
+/// bytes keep the query's pattern order.
+///
+/// A run between two span boundaries merges the open spans' styles in that
+/// order, which is how
+/// [`highlighted_chunks`](crate::display_map::highlights::highlighted_chunks)
+/// merges the right column's open tokens. A later, more specific capture
+/// therefore overrides the fields it sets and keeps the rest.
+fn flatten_line_spans(spans: &mut Vec<(Range<usize>, HighlightStyle)>) {
+    if spans.len() < 2 {
+        return;
+    }
+    spans.sort_by_key(|(range, _)| (range.start, Reverse(range.end)));
+
+    let mut bounds: Vec<usize> = spans
+        .iter()
+        .flat_map(|(range, _)| [range.start, range.end])
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = 0;
+    let mut runs = Vec::with_capacity(spans.len());
+    for pair in bounds.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        open.retain(|&i| spans[i].0.end > start);
+        while spans
+            .get(next)
+            .is_some_and(|(range, _)| range.start == start)
+        {
+            open.push(next);
+            next += 1;
+        }
+        if open.is_empty() {
+            continue;
+        }
+
+        let mut style = HighlightStyle::default();
+        for &i in &open {
+            style.merge(&spans[i].1);
+        }
+        runs.push((start..end, style));
+    }
+    *spans = runs;
 }
 
 /// The working-tree byte ranges a file's hunks cover, diffing its HEAD text
@@ -1163,6 +1224,7 @@ mod tests {
         DiffBaseText, DIFF_SETTLE,
     };
     use crate::{
+        app,
         buffer::BufferId,
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
         display_map::syntax_theme::SyntaxStyles,
@@ -1173,6 +1235,7 @@ mod tests {
         theme::Theme,
         workspace::Workspace,
     };
+    use ratatui::style::Color;
     use std::{
         collections::HashMap,
         ops::Range,
@@ -1536,6 +1599,61 @@ mod tests {
         assert_eq!(
             *first, *third,
             "and the miss is conservative: the same theme resolves the same way",
+        );
+    }
+
+    /// Two captures over one token resolve to the later, more specific one, as
+    /// the right column resolves them. Otherwise every identifier on the left
+    /// takes the query's leading `@variable` color, and a doc comment takes the
+    /// plain comment color.
+    #[test]
+    fn base_highlights_let_the_later_capture_win() {
+        let theme = {
+            let (config, errors) = stoat_config::parse(
+                r##"theme t {
+                    syntax.variable.fg = "#010101";
+                    syntax.function.fg = "#020202";
+                    syntax.comment.fg = "#030303";
+                    syntax.comment.doc.fg = "#040404";
+                }"##,
+            );
+            assert!(errors.is_empty(), "parse errors: {errors:?}");
+            Theme::from_config(&config.expect("a theme config"), "t").expect("a theme")
+        };
+        let styles = SyntaxStyles::from_theme(&theme);
+        let registry = LanguageRegistry::standard();
+        app::install_highlight_maps(&registry, &styles);
+        let language = registry.for_path(Path::new("a.rs")).expect("rust language");
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+
+        let lines = compute_base_highlights(
+            "/// doc\nfn main() {\n    foo();\n}\n",
+            &language,
+            &styles,
+            &cache,
+            None,
+        );
+        let fg_at = |line: usize, byte: usize| {
+            lines[line]
+                .iter()
+                .find(|(range, _)| range.contains(&byte))
+                .and_then(|(_, style)| style.foreground)
+        };
+
+        assert_eq!(
+            (fg_at(2, 4), fg_at(2, 6), fg_at(0, 0)),
+            (
+                Some(Color::Rgb(2, 2, 2)),
+                Some(Color::Rgb(2, 2, 2)),
+                Some(Color::Rgb(4, 4, 4)),
+            ),
+            "the call paints as a function and the doc comment as a doc comment"
+        );
+        assert!(
+            lines.iter().all(|spans| spans
+                .windows(2)
+                .all(|pair| pair[0].0.end <= pair[1].0.start)),
+            "every line's runs are disjoint and start-sorted, got {lines:?}"
         );
     }
 
