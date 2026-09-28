@@ -2963,10 +2963,10 @@ impl Stoat {
     ///
     /// The keymap resolves first and the jumplist is what an unbound button
     /// falls back to, so a mode that binds the button speaks for it. That is
-    /// what lets a pinned `space_goto` walk hunks on these buttons exactly as
-    /// its n and p arms do. Bound actions run with `dismisses_pinned` false,
-    /// as a wheel binding does, so the press repeats under a pin instead of
-    /// releasing it.
+    /// what lets a pinned `space_goto` walk hunks on these buttons, back as
+    /// its n arm and forward as its p arm. Bound actions run with
+    /// `dismisses_pinned` false, as a wheel binding does, so the press repeats
+    /// under a pin instead of releasing it.
     ///
     /// These buttons reach stoat only over the window socket, since no in-band
     /// terminal encoding carries them, so this runs before the window's pane

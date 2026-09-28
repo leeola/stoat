@@ -2178,15 +2178,15 @@ mod tests {
                 bound(&normal, SideButton::Back),
             ),
             (
-                Some("GotoNextChange".to_string()),
                 Some("GotoPrevChange".to_string()),
                 Some("GotoNextChange".to_string()),
                 Some("GotoPrevChange".to_string()),
+                Some("GotoNextChange".to_string()),
                 None,
                 None,
             ),
-            "both chords bind the buttons to their own n and p hops, and no \
-             other mode binds them"
+            "both chords bind forward to their p hop and back to their n hop, \
+             and no other mode binds them"
         );
     }
 

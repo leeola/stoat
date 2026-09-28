@@ -1149,7 +1149,7 @@ fn window_ipc_side_buttons_walk_the_jumplist() {
 
 /// The buttons resolve the keymap before the jumplist, so a mode that
 /// binds them speaks for the press. The pinned goto chord is the shipped
-/// case, where they walk hunks exactly as its n and p arms do.
+/// case, where they walk hunks back as its n arm and forward as its p arm.
 #[test]
 fn window_ipc_side_buttons_walk_changes_in_a_pinned_goto_chord() {
     use crate::test_harness::TestHarness;
@@ -1179,16 +1179,16 @@ fn window_ipc_side_buttons_walk_changes_in_a_pinned_goto_chord() {
 
     assert_eq!(
         (
-            press(&mut h, IpcMouseButton::Forward),
-            press(&mut h, IpcMouseButton::Forward),
             press(&mut h, IpcMouseButton::Back),
+            press(&mut h, IpcMouseButton::Back),
+            press(&mut h, IpcMouseButton::Forward),
         ),
         (
             (2, "space_goto".to_string()),
             (8, "space_goto".to_string()),
             (2, "space_goto".to_string()),
         ),
-        "forward walks to each hunk and back returns, with the pin holding throughout"
+        "back walks down to each hunk and forward returns up, with the pin holding throughout"
     );
 }
 
