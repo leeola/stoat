@@ -19,7 +19,11 @@ use crate::{
 use lsp_types::{HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::{
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::UnixListener,
@@ -117,6 +121,45 @@ enum AgentRequest {
     Hover { path: PathBuf, line: u32, col: u32 },
 }
 
+/// The socket file a hook server bound, removed when the server stops.
+///
+/// The server stops when its accept loop ends or when the runtime drops its
+/// task at exit, and the file goes either way. Two sessions that share a
+/// workspace uid bind the same path, and the later bind replaces the file. The
+/// guard removes the path only while it still names the file this server
+/// bound, so the exit of the earlier session leaves the later one's socket.
+struct BoundSocket {
+    path: PathBuf,
+    /// Device, inode, and change time of the bound file. A file system reuses a
+    /// freed inode, so the inode alone does not tell a successor's socket from
+    /// this one.
+    identity: Option<(u64, u64, i64, i64)>,
+}
+
+impl BoundSocket {
+    fn new(path: PathBuf) -> Self {
+        let identity = Self::identity_of(&path);
+        Self { path, identity }
+    }
+
+    fn identity_of(path: &Path) -> Option<(u64, u64, i64, i64)> {
+        let meta = fs::symlink_metadata(path).ok()?;
+        Some((meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()))
+    }
+}
+
+// The socket file is the endpoint the listener bound, not the user-file IO that
+// FsHost abstracts. No fake host holds a bound socket, so the guard removes the
+// real file.
+#[allow(clippy::disallowed_methods)]
+impl Drop for BoundSocket {
+    fn drop(&mut self) {
+        if self.identity.is_some() && Self::identity_of(&self.path) == self.identity {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Bind the per-session socket at `socket_path` and forward decoded hook events
 /// to `tx` and decoded control requests to `control_tx`, until the listener
 /// fails or the receiver is dropped.
@@ -124,6 +167,10 @@ enum AgentRequest {
 /// Spawned on the render process's executor. A stale socket file at the path is
 /// removed before binding. Bind and accept failures are logged and stop the
 /// server, leaving the app running without hook status for that session.
+///
+/// The server removes its socket file when it stops, which includes the drop
+/// of its task when the runtime shuts down at exit. A file that a later session
+/// bound at the same path stays.
 pub async fn serve_agent_hooks(
     socket_path: PathBuf,
     uid: WorkspaceUid,
@@ -142,6 +189,7 @@ pub async fn serve_agent_hooks(
             return;
         },
     };
+    let _bound = BoundSocket::new(socket_path);
 
     loop {
         match listener.accept().await {
@@ -385,6 +433,8 @@ mod tests {
         test_fixture::{install_two_servers, open_buffer, seed},
         test_harness::TestHarness,
     };
+    use std::time::Duration;
+    use tokio::{sync::mpsc::Receiver, task::JoinHandle, time::Instant};
 
     #[test]
     fn lsp_status_lists_each_running_server() {
@@ -906,5 +956,62 @@ mod tests {
         drop(client_write);
         drop(replies);
         conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stopped_server_removes_its_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.sock");
+        let (server, _events, _controls) = serve_at(&path).await;
+
+        server.abort();
+        let _ = server.await;
+
+        assert!(!path.exists(), "the socket outlives its server");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_server_keeps_a_socket_bound_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.sock");
+        let (server, _events, _controls) = serve_at(&path).await;
+
+        // A rename keeps the served file's inode in use, so the successor's
+        // socket gets a different inode.
+        tokio::fs::rename(&path, dir.path().join("displaced.sock"))
+            .await
+            .unwrap();
+        let _successor = UnixListener::bind(&path).unwrap();
+        server.abort();
+        let _ = server.await;
+
+        assert!(
+            path.exists(),
+            "the stopped server removed its successor's socket"
+        );
+    }
+
+    /// Serve hooks at `path` on a task, and wait until the server binds it.
+    ///
+    /// The receivers come back with the task, because a server stops after its
+    /// next connection once its event receiver is gone.
+    async fn serve_at(
+        path: &Path,
+    ) -> (JoinHandle<()>, Receiver<AgentEvent>, Receiver<AgentControl>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let (control_tx, control_rx) = tokio::sync::mpsc::channel(8);
+        let server = tokio::spawn(serve_agent_hooks(
+            path.to_path_buf(),
+            WorkspaceUid(1),
+            tx,
+            control_tx,
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "the server never bound {path:?}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        (server, rx, control_rx)
     }
 }
