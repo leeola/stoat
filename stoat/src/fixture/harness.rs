@@ -33,6 +33,7 @@ use std::{
     time::Duration,
 };
 use stoat_scheduler::TokioScheduler;
+use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -143,6 +144,10 @@ pub struct LiveHarness {
     render_rx: watch::Receiver<Option<RenderFrame>>,
     shutdown: Arc<Notify>,
     socket_path: PathBuf,
+    /// The directory that holds the session agent socket, in place of the real
+    /// state directory. The harness holds it, so the directory and the socket
+    /// go when the harness drops.
+    _socket_dir: TempDir,
     stoat: Stoat,
     _scheduler: Arc<TokioScheduler>,
     rt: Runtime,
@@ -181,7 +186,8 @@ impl LiveHarness {
         }
 
         let uid = stoat.active_workspace().uid();
-        stoat.set_agent_socket_dir(stoat_log::state_dir().context(SessionSocketSnafu)?);
+        let socket_dir = tempfile::tempdir().context(SessionSocketSnafu)?;
+        stoat.set_agent_socket_dir(socket_dir.path().to_path_buf());
         stoat.set_serve_agent_sockets(true);
         {
             // Enter the runtime so the socket-serving task the call spawns has a
@@ -189,7 +195,7 @@ impl LiveHarness {
             let _guard = rt.enter();
             stoat.serve_term_session(uid).context(SessionSocketSnafu)?;
         }
-        let socket_path = run::agent_socket_path(uid).context(SessionSocketSnafu)?;
+        let socket_path = run::agent_socket_path_in(socket_dir.path(), uid);
 
         // Unbounded to match the terminal front-end, where a bound would park
         // the sender whenever the app stalls with the queue full. A driving
@@ -206,6 +212,7 @@ impl LiveHarness {
             render_rx,
             shutdown,
             socket_path,
+            _socket_dir: socket_dir,
             stoat,
             _scheduler: scheduler,
             rt,
@@ -405,15 +412,37 @@ mod tests {
 
     #[test]
     fn renders_a_frame_over_the_channels() {
-        let dir = tempfile::tempdir().unwrap();
-        materialize("basic-diff", dir.path()).unwrap();
-
-        let mut harness = LiveHarness::open(dir.path(), Settings::default()).unwrap();
+        let (_dir, mut harness) = basic_diff_harness();
         harness.run(|mut handle| async move {
             handle
                 .await_frame(|_| true, Duration::from_secs(5))
                 .await
                 .expect("the harness should render at least one frame");
         });
+    }
+
+    #[test]
+    fn the_agent_socket_goes_with_the_harness() {
+        let (_dir, mut harness) = basic_diff_harness();
+        let socket = harness.socket_path.clone();
+        harness.run(|handle| async move {
+            handle
+                .query(&Query::LspStatus)
+                .await
+                .expect("the session socket answers");
+        });
+
+        drop(harness);
+        assert!(
+            !socket.exists(),
+            "the socket outlives its harness at {socket:?}"
+        );
+    }
+
+    fn basic_diff_harness() -> (TempDir, LiveHarness) {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("basic-diff", dir.path()).unwrap();
+        let harness = LiveHarness::open(dir.path(), Settings::default()).unwrap();
+        (dir, harness)
     }
 }
