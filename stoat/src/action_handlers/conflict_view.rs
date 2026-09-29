@@ -1191,6 +1191,7 @@ fn padding_block(placement: BlockPlacement, height: u32) -> BlockProperties {
         render: Arc::new(move |_ctx| vec![Line::raw(String::new()); height as usize]),
         diff_status: None,
         priority: 0,
+        first_segment: 0,
     }
 }
 

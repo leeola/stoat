@@ -87,6 +87,27 @@ fn buffer_row_patch(
     patch
 }
 
+/// Rows buffer row `row` takes in `wrap_snapshot`, the rows a paired base line
+/// has beside it before it overflows.
+///
+/// Counted to the next line's first wrap row rather than from this line's end,
+/// so rows that trailing inlay hints wrap onto count too. `buffer_rows` is the
+/// buffer's line count.
+fn live_line_rows(wrap_snapshot: &WrapSnapshot, row: u32, buffer_rows: u32) -> u32 {
+    let first_wrap_row = |row: u32| {
+        let tabs = wrap_snapshot.tab_snapshot();
+        let folds = tabs.fold_snapshot();
+        let inlay = folds.inlay_snapshot().to_inlay_point(Point::new(row, 0));
+        let tab = tabs.to_tab_point(folds.to_fold_point(inlay, Bias::Right));
+        wrap_snapshot.to_wrap_point(tab).row()
+    };
+    let end = match row + 1 < buffer_rows {
+        true => first_wrap_row(row + 1),
+        false => wrap_snapshot.line_count(),
+    };
+    end.saturating_sub(first_wrap_row(row)).max(1)
+}
+
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisplayPoint {
     pub row: u32,
@@ -232,6 +253,9 @@ pub struct DisplayMap {
     /// The wrap geometry the standing blocks broke their base lines under, so a
     /// width change re-splices them even when the diff version is unchanged.
     last_wrap_geometry: Option<WrapGeometry>,
+    /// The wrap snapshot version at the last block refresh, so a rewrap that
+    /// moves a paired live line's row count re-checks the blocks.
+    last_wrap_version: u64,
     cached_snapshot: Option<DisplaySnapshot>,
     /// Set when any highlight collection is mutated. Checked inside
     /// [`DisplayMap::snapshot`] so a single rebuild
@@ -299,6 +323,7 @@ impl DisplayMap {
             last_pair_modified_hunks: false,
             last_show_deleted_blocks: false,
             last_wrap_geometry: None,
+            last_wrap_version: 0,
             cached_snapshot: None,
             highlights_dirty: false,
             settings_generation: 0,
@@ -723,6 +748,7 @@ impl DisplayMap {
         signature: Vec<DeletedBlockKey>,
         diff_map: Option<&DiffMap>,
         wrap: Option<WrapGeometry>,
+        live_rows: &dyn Fn(u32) -> u32,
     ) {
         let mut standing: HashMap<DeletedBlockKey, Vec<CustomBlockId>> = self
             .inserted_diff_block_signature
@@ -733,7 +759,7 @@ impl DisplayMap {
         // Built in the same order as the signature, since both walk one filtered
         // pass over the hunks.
         let groups = match diff_map.filter(|_| self.show_deleted_blocks) {
-            Some(dm) => dm.deleted_blocks(self.pair_modified_hunks, wrap),
+            Some(dm) => dm.deleted_blocks(self.pair_modified_hunks, wrap, live_rows),
             None => Vec::new(),
         };
 
@@ -849,15 +875,23 @@ impl DisplayMap {
         // width while a deferred rewrap runs. Base lines break at the same
         // width as the live rows beside them, and the landing rewrap moves it.
         let wrap = WrapGeometry::of(&wrap_snapshot);
+        // A rewrap changes how many rows a paired live line takes, and with it
+        // where the base line beside it overflows, while no hunk moves.
+        let wrap_version = wrap_snapshot.version();
         if diff_version != self.last_diff_version
             || self.show_deleted_blocks != self.last_show_deleted_blocks
             || self.pair_modified_hunks != self.last_pair_modified_hunks
             || wrap != self.last_wrap_geometry
+            || wrap_version != self.last_wrap_version
         {
+            let buffer_rows = buffer_snapshot.line_count();
+            let live_rows = |row| live_line_rows(&wrap_snapshot, row, buffer_rows);
             let signature = if self.show_deleted_blocks {
                 diff_map
                     .as_ref()
-                    .map(|dm| dm.deleted_block_signature(self.pair_modified_hunks, wrap))
+                    .map(|dm| {
+                        dm.deleted_block_signature(self.pair_modified_hunks, wrap, &live_rows)
+                    })
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -867,13 +901,14 @@ impl DisplayMap {
             // re-splicing them only mints new ids for identical content while
             // forcing the transform tree to be patched around them.
             if signature != self.inserted_diff_block_signature {
-                self.resplice_diff_blocks(signature, diff_map.as_ref(), wrap);
+                self.resplice_diff_blocks(signature, diff_map.as_ref(), wrap, &live_rows);
             }
 
             self.last_diff_version = diff_version;
             self.last_show_deleted_blocks = self.show_deleted_blocks;
             self.last_pair_modified_hunks = self.pair_modified_hunks;
             self.last_wrap_geometry = wrap;
+            self.last_wrap_version = wrap_version;
         }
         let block_snapshot = self
             .block_map

@@ -245,7 +245,9 @@ const DIFF_TWO_COLUMN_MIN: u16 = 100;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DiffRowKind {
     /// A row of a spliced block. A deleted base line is a block of its own, so
-    /// `segment` is which of its wrapped rows this is, zero for the first.
+    /// `segment` is which of its wrapped rows this is, zero for the first. A
+    /// paired base line's overflow block carries on past the segments its live
+    /// line showed, so its rows start past zero.
     Block {
         segment: u32,
     },
@@ -357,8 +359,8 @@ fn build_diff_row_states(
     let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
     rows.map(|display_row| {
         let kind = match snapshot.classify_row(display_row) {
-            BlockRowKind::Block { line_index, .. } => DiffRowKind::Block {
-                segment: line_index,
+            BlockRowKind::Block { block, line_index } => DiffRowKind::Block {
+                segment: block.0.first_segment + line_index,
             },
             BlockRowKind::BufferRow { buffer_row } => DiffRowKind::BufferRow { buffer_row },
         };
@@ -877,11 +879,21 @@ pub(crate) fn paint_diff_rows(
                     if !continuation {
                         base_line += 1;
                     }
-                } else if row_state.paired && !continuation {
+                } else if row_state.paired {
+                    // The base line breaks beside its live line, a segment per
+                    // live row. A row past its last segment shows nothing, and
+                    // segments past the live rows sit in an overflow block below.
+                    let line_base = base_line.saturating_sub(u32::from(continuation));
                     let text = snapshot
                         .diff_map()
-                        .and_then(|dm| dm.base_line_text(base_line))
+                        .and_then(|dm| dm.base_line_text(line_base))
                         .unwrap_or("");
+                    let line_row = match continuation {
+                        true => {
+                            display_row - snapshot.buffer_to_display(Point::new(buffer_row, 0)).row
+                        },
+                        false => 0,
+                    };
                     paint_base_side(
                         snapshot,
                         &mut rich,
@@ -890,15 +902,17 @@ pub(crate) fn paint_diff_rows(
                         inner,
                         (left_num_x, status_left_x, left_text_x, left_content_w),
                         y,
-                        base_line,
-                        BaseRow::whole(text),
+                        line_base,
+                        BaseRow::segment(snapshot, text, line_row),
                         &base_changes,
                         tints.as_ref(),
                         (del_style, dim_style),
                         theme,
                         dials,
                     );
-                    base_line += 1;
+                    if !continuation {
+                        base_line += 1;
+                    }
                 }
             },
         }
@@ -2311,11 +2325,12 @@ mod tests {
     fn base_line_at_matches_the_reference_walk() {
         // The per-row walk, kept as the correctness oracle. A row carries a base
         // line when the left column paints one on it: the first row of every
-        // block, every unchanged row, and, where the layout pairs, a modified row
-        // still inside its hunk's base text. A moved-away seam's lines come
-        // before the buffer row it sits at, with no row of their own. A soft-wrap
-        // continuation, of a block or of a live line, belongs to the line its
-        // first row counted.
+        // block that opens a line, every unchanged row, and, where the layout
+        // pairs, a modified row still inside its hunk's base text. A moved-away
+        // seam's lines come before the buffer row it sits at, with no row of
+        // their own. A soft-wrap continuation, of a block or of a live line, and
+        // a paired line's overflow block belong to the line its first row
+        // counted.
         fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             let mut base_line = 0;
             for row in 0..scroll_row {
@@ -2323,8 +2338,8 @@ mod tests {
                     continue;
                 }
                 match snapshot.classify_row(row) {
-                    BlockRowKind::Block { line_index, .. } => {
-                        base_line += u32::from(line_index == 0)
+                    BlockRowKind::Block { block, line_index } => {
+                        base_line += u32::from(block.0.first_segment + line_index == 0)
                     },
                     BlockRowKind::BufferRow { buffer_row } => {
                         base_line += snapshot
@@ -2376,6 +2391,10 @@ mod tests {
                 "keep\nthe quick brown fox jumps over the dog\nold text long enough to wrap\na removed line long enough to wrap\ntail\n",
                 "keep\nthe quick brown fox jumps over the dog\nnew text long enough to wrap around\ntail\nan added line long enough to wrap\n",
             ),
+            (
+                "keep\nthe old line is much longer than the new one\ntail\n",
+                "keep\nthe new line\ntail\n",
+            ),
         ];
         // Both layouts, since pairing changes which rows carry a base line and
         // which of them block.
@@ -2383,6 +2402,7 @@ mod tests {
         let mut saw_pairs = false;
         let mut saw_wraps = false;
         let mut saw_block_wraps = false;
+        let mut saw_overflow = false;
         for (base, text) in fixtures {
             let mut stacked_rows = 0;
             for pair in [false, true] {
@@ -2397,6 +2417,12 @@ mod tests {
                     matches!(
                         snapshot.classify_row(row),
                         BlockRowKind::Block { line_index, .. } if line_index > 0
+                    )
+                });
+                saw_overflow |= (0..total).any(|row| {
+                    matches!(
+                        snapshot.classify_row(row),
+                        BlockRowKind::Block { block, .. } if block.0.first_segment > 0
                     )
                 });
                 match pair {
@@ -2420,6 +2446,10 @@ mod tests {
         assert!(
             saw_block_wraps,
             "and wrap a removed line to exercise a block's continuation"
+        );
+        assert!(
+            saw_overflow,
+            "and outrun a live line with its paired base line to exercise an overflow block"
         );
 
         // No plain-text diff produces a move, so its seam and its moved-to row
@@ -3388,6 +3418,98 @@ mod tests {
             rows(&h, 8..54),
             ["a".repeat(40), "b".repeat(7)],
             "the standing block grows a row at the narrower width",
+        );
+    }
+
+    /// A modified line and its base both outrun the columns, so each wraps
+    /// beside the other row for row, with the numbers on the first row alone.
+    #[test]
+    fn a_paired_base_line_wraps_beside_its_live_line() {
+        let live = format!("{} {}", "c".repeat(45), "d".repeat(44));
+        let h = diff_harness(
+            &format!("keep\n{}\ntail\n", long_line(45, 44)),
+            &format!("keep\n{live}\ntail\n"),
+        );
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 8..59, &"a".repeat(45));
+        assert_eq!(
+            (y..y + 3)
+                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .collect::<Vec<_>>(),
+            [
+                ["2".into(), "a".repeat(45), "2".into(), "c".repeat(45)],
+                [String::new(), "b".repeat(44), String::new(), "d".repeat(44)],
+                ["3".into(), "tail".into(), "3".into(), "tail".into()],
+            ],
+            "the base fits beside the live rows, so no block row follows",
+        );
+    }
+
+    /// The base breaks into three segments beside a live line of one row, so
+    /// its last two sit in block rows below that live row.
+    #[test]
+    fn a_taller_base_line_pads_below_its_live_row() {
+        let base = format!("{} {} {}", "a".repeat(45), "b".repeat(45), "c".repeat(20));
+        let h = diff_harness(
+            &format!("keep\n{base}\ntail\n"),
+            &format!("keep\n{}\ntail\n", "x".repeat(40)),
+        );
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 8..59, &"a".repeat(45));
+        assert_eq!(
+            (y..y + 4)
+                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .collect::<Vec<_>>(),
+            [
+                ["2".into(), "a".repeat(45), "2".into(), "x".repeat(40)],
+                [String::new(), "b".repeat(45), String::new(), String::new()],
+                [String::new(), "c".repeat(20), String::new(), String::new()],
+                ["3".into(), "tail".into(), "3".into(), "tail".into()],
+            ],
+        );
+    }
+
+    /// A base of three segments beside a live line of two rows overflows by
+    /// one, and that block row follows the live line's last row.
+    #[test]
+    fn a_base_line_overflows_below_the_last_row_of_a_wrapped_live_line() {
+        let base = format!("{} {} {}", "p".repeat(45), "q".repeat(45), "r".repeat(20));
+        let h = diff_harness(
+            &format!("keep\n{base}\ntail\n"),
+            &format!("keep\n{}\ntail\n", long_line(45, 44)),
+        );
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 8..59, &"p".repeat(45));
+        assert_eq!(
+            (y..y + 4)
+                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .collect::<Vec<_>>(),
+            [
+                ["2".into(), "p".repeat(45), "2".into(), "a".repeat(45)],
+                [String::new(), "q".repeat(45), String::new(), "b".repeat(44)],
+                [String::new(), "r".repeat(20), String::new(), String::new()],
+                ["3".into(), "tail".into(), "3".into(), "tail".into()],
+            ],
+        );
+    }
+
+    #[test]
+    fn a_shorter_base_line_leaves_the_live_continuation_blank_on_the_left() {
+        let h = diff_harness(
+            &format!("keep\n{}\ntail\n", "x".repeat(40)),
+            &format!("keep\n{}\ntail\n", long_line(45, 44)),
+        );
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        assert_eq!(
+            (y..y + 3)
+                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .collect::<Vec<_>>(),
+            [
+                ["2".into(), "x".repeat(40), "2".into(), "a".repeat(45)],
+                [String::new(), String::new(), String::new(), "b".repeat(44)],
+                ["3".into(), "tail".into(), "3".into(), "tail".into()],
+            ],
         );
     }
 

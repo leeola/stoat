@@ -164,6 +164,13 @@ pub struct BlockProperties {
     pub render: RenderBlock,
     pub diff_status: Option<DiffHunkStatus>,
     pub priority: usize,
+    /// Which row of its line the block's first row shows, zero for a block
+    /// that opens a line of its own.
+    ///
+    /// Nonzero for a block that carries on a line shown above it, such as the
+    /// rows of a diff view's base line that its paired live line has no rows
+    /// left for. Such a block opens no line, so a count of lines skips it.
+    pub first_segment: u32,
 }
 
 impl std::fmt::Debug for BlockProperties {
@@ -187,6 +194,7 @@ impl BlockProperties {
             render: Arc::new(move |_ctx| lines.iter().map(|l| Line::raw(l.clone())).collect()),
             diff_status: None,
             priority: 0,
+            first_segment: 0,
         }
     }
 
@@ -203,6 +211,7 @@ impl BlockProperties {
             render: Arc::new(move |_ctx| (0..line_count).map(|i| Line::raw(get_line(i))).collect()),
             diff_status: None,
             priority: 0,
+            first_segment: 0,
         }
     }
 }
@@ -216,6 +225,8 @@ pub struct CustomBlock {
     pub diff_status: Option<DiffHunkStatus>,
     pub style: BlockStyle,
     pub priority: usize,
+    /// See [`BlockProperties::first_segment`].
+    pub first_segment: u32,
     /// Memoized default-context render, filled on first line access.
     ///
     /// The per-row line accessors render with the constant
@@ -324,7 +335,8 @@ impl Block {
 pub struct TransformSummary {
     pub input_rows: u32,
     pub output_rows: u32,
-    /// Blocks the transforms hold, one per block transform.
+    /// Blocks the transforms hold that open a line of their own, one per such
+    /// block transform. See [`BlockProperties::first_segment`].
     pub blocks: u32,
 }
 
@@ -650,6 +662,7 @@ impl BlockMap {
                 diff_status: props.diff_status,
                 style: props.style,
                 priority: props.priority,
+                first_segment: props.first_segment,
                 rendered: OnceLock::new(),
             });
             self.touched_placements.push(block.placement);
@@ -760,6 +773,7 @@ impl BlockMap {
                 diff_status: block.diff_status,
                 style: block.style,
                 priority: block.priority,
+                first_segment: block.first_segment,
                 // The closures behind this memo are pure over what they captured
                 // at construction, so moving the block does not stale it.
                 rendered: block.rendered.clone(),
@@ -1063,10 +1077,13 @@ impl BlockSnapshot {
         }
     }
 
-    /// Blocks whose first row sits above display row `display_row`.
+    /// Blocks that open a line of their own and whose first row sits above
+    /// display row `display_row`.
     ///
     /// A block `display_row` falls inside counts when the row is not the
-    /// block's first. One seek, since the transforms count their blocks.
+    /// block's first. A block that carries on a line shown above it never
+    /// counts, see [`BlockProperties::first_segment`]. One seek, since the
+    /// transforms count their blocks.
     pub fn blocks_above(&self, display_row: u32) -> u32 {
         let target = OutputRow(display_row + 1);
         let mut cursor = self
@@ -1075,8 +1092,11 @@ impl BlockSnapshot {
         cursor.seek(&target, Bias::Left);
 
         let Dimensions(output_start, blocks, _) = cursor.start();
-        let inside_below_first =
-            cursor.item().is_some_and(|t| t.block.is_some()) && display_row > output_start.0;
+        let inside_below_first = cursor.item().is_some_and(|t| {
+            t.block
+                .as_ref()
+                .is_some_and(|block| block.0.first_segment == 0)
+        }) && display_row > output_start.0;
         blocks.0 + u32::from(inside_below_first)
     }
 
@@ -1915,7 +1935,7 @@ fn sync_incremental(
                     summary: TransformSummary {
                         input_rows,
                         output_rows: block.height(),
-                        blocks: 1,
+                        blocks: u32::from(block.0.first_segment == 0),
                     },
                     block: Some(block.clone()),
                 },
@@ -2024,7 +2044,7 @@ fn build_transforms(
                 summary: TransformSummary {
                     input_rows,
                     output_rows: block.height(),
-                    blocks: 1,
+                    blocks: u32::from(block.0.first_segment == 0),
                 },
                 block: Some(block.clone()),
             },
@@ -2434,6 +2454,7 @@ mod tests {
             diff_status: props.diff_status,
             style: props.style,
             priority: props.priority,
+            first_segment: props.first_segment,
             rendered: OnceLock::new(),
         }));
 
@@ -2627,6 +2648,7 @@ mod tests {
             diff_status: None,
             style: BlockStyle::Fixed,
             priority: 0,
+            first_segment: 0,
             rendered: OnceLock::new(),
         }));
 
