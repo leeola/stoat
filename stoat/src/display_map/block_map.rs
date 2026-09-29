@@ -323,12 +323,15 @@ impl Block {
 pub struct TransformSummary {
     pub input_rows: u32,
     pub output_rows: u32,
+    /// Blocks the transforms hold, one per block transform.
+    pub blocks: u32,
 }
 
 impl ContextLessSummary for TransformSummary {
     fn add_summary(&mut self, other: &Self) {
         self.input_rows += other.input_rows;
         self.output_rows += other.output_rows;
+        self.blocks += other.blocks;
     }
 }
 
@@ -366,6 +369,18 @@ impl<'a> Dimension<'a, TransformSummary> for OutputRow {
     }
     fn add_summary(&mut self, summary: &'a TransformSummary, _cx: ()) {
         self.0 += summary.output_rows;
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BlockCount(u32);
+
+impl<'a> Dimension<'a, TransformSummary> for BlockCount {
+    fn zero(_cx: ()) -> Self {
+        BlockCount(0)
+    }
+    fn add_summary(&mut self, summary: &'a TransformSummary, _cx: ()) {
+        self.0 += summary.blocks;
     }
 }
 
@@ -1045,6 +1060,23 @@ impl BlockSnapshot {
             Some(transform) if transform.block.is_some() => input_start.0,
             _ => input_start.0 + rows_into_transform,
         }
+    }
+
+    /// Blocks whose first row sits above display row `display_row`.
+    ///
+    /// A block `display_row` falls inside counts when the row is not the
+    /// block's first. One seek, since the transforms count their blocks.
+    pub fn blocks_above(&self, display_row: u32) -> u32 {
+        let target = OutputRow(display_row + 1);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<OutputRow, BlockCount>>(());
+        cursor.seek(&target, Bias::Left);
+
+        let Dimensions(output_start, blocks, _) = cursor.start();
+        let inside_below_first =
+            cursor.item().is_some_and(|t| t.block.is_some()) && display_row > output_start.0;
+        blocks.0 + u32::from(inside_below_first)
     }
 
     /// Wrap row that block row `block_row` shows.
@@ -1863,6 +1895,7 @@ fn sync_incremental(
                     summary: TransformSummary {
                         input_rows,
                         output_rows: block.height(),
+                        blocks: 1,
                     },
                     block: Some(block.clone()),
                 },
@@ -1886,6 +1919,7 @@ fn sync_incremental(
                 summary: TransformSummary {
                     input_rows: wrap_line_count,
                     output_rows: wrap_line_count,
+                    blocks: 0,
                 },
                 block: None,
             },
@@ -1923,6 +1957,7 @@ fn build_transforms(
                     summary: TransformSummary {
                         input_rows: wrap_line_count,
                         output_rows: wrap_line_count,
+                        blocks: 0,
                     },
                     block: None,
                 },
@@ -1969,6 +2004,7 @@ fn build_transforms(
                 summary: TransformSummary {
                     input_rows,
                     output_rows: block.height(),
+                    blocks: 1,
                 },
                 block: Some(block.clone()),
             },
@@ -2042,6 +2078,7 @@ fn push_isomorphic(transforms: &mut SumTree<Transform>, rows: u32) {
                 summary: TransformSummary {
                     input_rows: rows,
                     output_rows: rows,
+                    blocks: 0,
                 },
                 block: None,
             },

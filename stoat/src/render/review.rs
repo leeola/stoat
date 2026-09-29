@@ -238,14 +238,20 @@ const DIFF_TWO_COLUMN_MIN: u16 = 100;
 
 /// What one display row is, without borrowing the snapshot it came from.
 ///
-/// [`BlockRowKind`] holds a reference to the block a row belongs to, which is
-/// why it cannot be kept across frames. Neither the diff body nor the conflict
-/// body reads that block, so only the discriminant and the buffer row survive
-/// here.
+/// [`BlockRowKind`] holds a reference to the block a row belongs to, which ties
+/// it to one snapshot and keeps it out of a cache that spans frames. Neither the
+/// diff body nor the conflict body reads that block, so only the discriminant,
+/// the block row's offset, and the buffer row survive here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DiffRowKind {
-    Block,
-    BufferRow { buffer_row: u32 },
+    /// A row of a spliced block. A deleted base line is a block of its own, so
+    /// `segment` is which of its wrapped rows this is, zero for the first.
+    Block {
+        segment: u32,
+    },
+    BufferRow {
+        buffer_row: u32,
+    },
 }
 
 /// One display row's derived state, as the diff and conflict bodies read it.
@@ -351,18 +357,23 @@ fn build_diff_row_states(
     let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
     rows.map(|display_row| {
         let kind = match snapshot.classify_row(display_row) {
-            BlockRowKind::Block { .. } => DiffRowKind::Block,
+            BlockRowKind::Block { line_index, .. } => DiffRowKind::Block {
+                segment: line_index,
+            },
             BlockRowKind::BufferRow { buffer_row } => DiffRowKind::BufferRow { buffer_row },
         };
-        let DiffRowKind::BufferRow { buffer_row } = kind else {
-            return DiffRowState {
-                kind,
-                status: DiffStatus::Unchanged,
-                staged: None,
-                paired: false,
-                continuation: false,
-                change_spans: Vec::new(),
-            };
+        let buffer_row = match kind {
+            DiffRowKind::BufferRow { buffer_row } => buffer_row,
+            DiffRowKind::Block { segment } => {
+                return DiffRowState {
+                    kind,
+                    status: DiffStatus::Unchanged,
+                    staged: None,
+                    paired: false,
+                    continuation: segment > 0,
+                    change_spans: Vec::new(),
+                };
+            },
         };
         let mut change_spans = Vec::new();
         // A refined hunk narrows the change to the rows its runs name, so a row
@@ -669,9 +680,16 @@ pub(crate) fn paint_diff_rows(
 
         let row_state = &row_states[(display_row - scroll_row) as usize];
         match row_state.kind {
-            DiffRowKind::Block => {
-                line_buf.clear();
-                snapshot.write_display_line(&mut line_buf, display_row);
+            DiffRowKind::Block { segment } => {
+                // A block holds one base line, a row per wrapped segment of it.
+                // The line's first row already stepped past it, so a
+                // continuation reads the line before the counter.
+                let continuation = row_state.continuation;
+                let line_base = base_line.saturating_sub(u32::from(continuation));
+                let text = snapshot
+                    .diff_map()
+                    .and_then(|dm| dm.base_line_text(line_base))
+                    .unwrap_or("");
                 paint_base_side(
                     snapshot,
                     &mut rich,
@@ -680,15 +698,17 @@ pub(crate) fn paint_diff_rows(
                     inner,
                     (left_num_x, status_left_x, left_text_x, left_content_w),
                     y,
-                    base_line,
-                    &line_buf,
+                    line_base,
+                    BaseRow::segment(snapshot, text, segment),
                     &base_changes,
                     tints.as_ref(),
                     (del_style, dim_style),
                     theme,
                     dials,
                 );
-                base_line += 1;
+                if !continuation {
+                    base_line += 1;
+                }
             },
             DiffRowKind::BufferRow { buffer_row } => {
                 // A continuation belongs to the line its first row numbered and
@@ -871,7 +891,7 @@ pub(crate) fn paint_diff_rows(
                         (left_num_x, status_left_x, left_text_x, left_content_w),
                         y,
                         base_line,
-                        text,
+                        BaseRow::whole(text),
                         &base_changes,
                         tints.as_ref(),
                         (del_style, dim_style),
@@ -1408,8 +1428,61 @@ fn paint_status_bars(
     }
 }
 
-/// Paint one base line into the left column: its number, its text under the
-/// removed style with the base change-span washes, and its staged status.
+/// The part of a base line one left-column row shows.
+struct BaseRow<'a> {
+    /// The whole base line, which its token and change spans index.
+    text: &'a str,
+    /// The bytes of `text` this row shows.
+    window: std::ops::Range<usize>,
+    /// Columns the row's text starts past, nonzero on a wrapped continuation.
+    indent: usize,
+    /// Whether this is the line's first row, the one that takes its number and
+    /// its status bar.
+    first: bool,
+}
+
+impl<'a> BaseRow<'a> {
+    /// All of `text` on one row.
+    fn whole(text: &'a str) -> Self {
+        Self {
+            text,
+            window: 0..text.len(),
+            indent: 0,
+            first: true,
+        }
+    }
+
+    /// Row `segment` of `text`, broken by the geometry `snapshot` wraps by,
+    /// which is the geometry the block rows of a base line broke by.
+    ///
+    /// A segment past the last one the geometry gives shows nothing, which
+    /// happens only if the blocks and the snapshot disagree on the geometry.
+    /// Without a geometry a base line is one row.
+    fn segment(snapshot: &DisplaySnapshot, text: &'a str, segment: u32) -> Self {
+        let Some(wrap) = snapshot.wrap_geometry() else {
+            return Self::whole(text);
+        };
+        let (windows, indent) = wrap.windows(text);
+        Self {
+            text,
+            window: windows
+                .get(segment as usize)
+                .cloned()
+                .unwrap_or(text.len()..text.len()),
+            indent: match segment {
+                0 => 0,
+                _ => indent as usize,
+            },
+            first: segment == 0,
+        }
+    }
+}
+
+/// Paint one row of a base line into the left column.
+///
+/// The row takes its part of the line's text under the removed style with the
+/// base change-span washes. The line's first row also takes the line number and
+/// the staged status.
 ///
 /// Both sides of the diff reach here. A block row is a base line with no live
 /// row beside it, and a paired modified row is one that has both, so the two
@@ -1428,7 +1501,7 @@ fn paint_base_side(
     columns: (u16, u16, u16, usize),
     y: u16,
     base_line: u32,
-    text: &str,
+    row: BaseRow<'_>,
     base_changes: &crate::diff_map::BaseChangeSpans,
     tints: Option<&DiffTints>,
     styles: (Style, Style),
@@ -1439,16 +1512,18 @@ fn paint_base_side(
     let (num_x, status_x, text_x, content_w) = columns;
     let (del_style, dim_style) = styles;
 
-    draw_diff_num(
-        rich,
-        buf,
-        num_text,
-        inner,
-        num_x,
-        y,
-        base_line + 1,
-        dim_style,
-    );
+    if row.first {
+        draw_diff_num(
+            rich,
+            buf,
+            num_text,
+            inner,
+            num_x,
+            y,
+            base_line + 1,
+            dim_style,
+        );
+    }
 
     let token_spans = base_token_spans(snapshot, base_line);
     let changes = base_changes
@@ -1468,12 +1543,13 @@ fn paint_base_side(
         true => tints.map(|t| t.moved),
         false => tints.map(|t| t.deleted),
     };
-    paint_base_row(
+    paint_base_segment(
         buf,
-        text_x,
+        text_x + row.indent as u16,
         y,
-        text,
-        content_w,
+        row.text,
+        row.window,
+        content_w.saturating_sub(row.indent),
         snapshot.tab_snapshot().tab_size(),
         token_spans,
         del_style,
@@ -1485,7 +1561,9 @@ fn paint_base_side(
         tint_row,
     );
 
-    if let Some(staged) = staged {
+    if row.first
+        && let Some(staged) = staged
+    {
         let change_scope = if changes
             .iter()
             .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
@@ -1500,14 +1578,18 @@ fn paint_base_side(
 
 /// Base lines the rows above the viewport step past (display row `scroll_row`).
 ///
-/// A block row steps one base line, and so does the first row of an unchanged
-/// line and of a paired modified one. A changed line's first row and every
-/// soft-wrap continuation step none. So the count is `scroll_row` minus the
-/// continuations and the changed first rows above, which the wrap map and the
-/// diff map answer in a seek each rather than a per-row walk from the top.
+/// Each block holds one base line, and the block's first row steps past it.
+/// The first row of an unchanged line steps past its base line, and so does the
+/// first row of a paired modified one. A changed line's first row and every
+/// soft-wrap continuation, in a block or in the live text, step none.
+///
+/// So the count is the blocks whose first row is above, plus the live lines
+/// whose first row is above, less those with no base line beside them. The
+/// block map, the wrap map, and the diff map each answer their part without a
+/// per-row walk from the top.
 ///
 /// A continuation top row counts its own line's first row, which is above it.
-/// That is the base line the row mirrors, one less than the value returned.
+/// That is the base line the row shows, one less than the value returned.
 ///
 /// A moved-away seam removed base lines that take no row at all, so the
 /// seams above the top add their lines on top of that count.
@@ -1528,14 +1610,13 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
                 + 1
         },
     };
-    let continuations = wrap_rows_above - lines_above;
     let (changed, seams) = snapshot.diff_map().map_or((0, 0), |dm| {
         (
             dm.rows_without_base_before(lines_above, snapshot.pairs_modified_hunks()),
             dm.seam_base_lines_in(0..lines_above),
         )
     });
-    scroll_row.saturating_sub(changed + continuations) + seams
+    snapshot.blocks_above(scroll_row) + lines_above.saturating_sub(changed) + seams
 }
 
 /// Byte span of its buffer line that `display_row` shows.
@@ -2229,11 +2310,12 @@ mod tests {
     #[test]
     fn base_line_at_matches_the_reference_walk() {
         // The per-row walk, kept as the correctness oracle. A row carries a base
-        // line when the left column paints one on it: every block row, every
-        // unchanged row, and, where the layout pairs, a modified row still
-        // inside its hunk's base text. A moved-away seam's lines come before the
-        // buffer row it sits at, with no row of their own. A soft-wrap
-        // continuation belongs to the line its first row counted.
+        // line when the left column paints one on it: the first row of every
+        // block, every unchanged row, and, where the layout pairs, a modified row
+        // still inside its hunk's base text. A moved-away seam's lines come
+        // before the buffer row it sits at, with no row of their own. A soft-wrap
+        // continuation, of a block or of a live line, belongs to the line its
+        // first row counted.
         fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             let mut base_line = 0;
             for row in 0..scroll_row {
@@ -2241,7 +2323,9 @@ mod tests {
                     continue;
                 }
                 match snapshot.classify_row(row) {
-                    BlockRowKind::Block { .. } => base_line += 1,
+                    BlockRowKind::Block { line_index, .. } => {
+                        base_line += u32::from(line_index == 0)
+                    },
                     BlockRowKind::BufferRow { buffer_row } => {
                         base_line += snapshot
                             .diff_map()
@@ -2281,14 +2365,15 @@ mod tests {
         // modification with deletion, a deletion at the top, consecutive changes,
         // and a deletion at the tail, so the display carries added, deleted, and
         // modified hunks with deleted-base block rows spliced in. The last one's
-        // unchanged, modified, and added lines outrun the 20-column wrap width.
+        // unchanged, modified, added, and removed lines outrun the 20-column
+        // wrap width.
         let fixtures = [
             ("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nB\nc\nd\nINS\ng\nh\n"),
             ("x\ny\nz\nw\n", "z\nw\n"),
             ("1\n2\n3\n4\n5\n", "1\nTWO\nTHREE\n5\n"),
             ("p\nq\nr\ns\nt\n", "p\nq\nr\n"),
             (
-                "keep\nthe quick brown fox jumps over the dog\nold text long enough to wrap\ngone\ntail\n",
+                "keep\nthe quick brown fox jumps over the dog\nold text long enough to wrap\na removed line long enough to wrap\ntail\n",
                 "keep\nthe quick brown fox jumps over the dog\nnew text long enough to wrap around\ntail\nan added line long enough to wrap\n",
             ),
         ];
@@ -2297,6 +2382,7 @@ mod tests {
         let mut saw_blocks = false;
         let mut saw_pairs = false;
         let mut saw_wraps = false;
+        let mut saw_block_wraps = false;
         for (base, text) in fixtures {
             let mut stacked_rows = 0;
             for pair in [false, true] {
@@ -2307,6 +2393,12 @@ mod tests {
                 let total = snapshot.line_count();
                 saw_blocks |= total > snapshot.buffer_line_count();
                 saw_wraps |= (0..total).any(|row| snapshot.is_wrap_continuation(row));
+                saw_block_wraps |= (0..total).any(|row| {
+                    matches!(
+                        snapshot.classify_row(row),
+                        BlockRowKind::Block { line_index, .. } if line_index > 0
+                    )
+                });
                 match pair {
                     false => stacked_rows = total,
                     // Pairing puts a base row beside a live one rather than on a
@@ -2324,6 +2416,10 @@ mod tests {
         assert!(
             saw_wraps,
             "and wrap lines to exercise the continuation case"
+        );
+        assert!(
+            saw_block_wraps,
+            "and wrap a removed line to exercise a block's continuation"
         );
 
         // No plain-text diff produces a move, so its seam and its moved-to row
@@ -3162,6 +3258,31 @@ mod tests {
         );
     }
 
+    /// A removed line's block takes the bar on its first row alone, as a live
+    /// line does. The left status column sits at x 5 at width 120.
+    #[test]
+    fn a_block_continuation_takes_no_status_bar() {
+        let base = format!("keep\n{}\n", long_line(45, 44));
+        let mut editor = diff_editor_staged(&base, &base, "keep\n");
+        editor.display_map.set_wrap_width(Some(51));
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            None,
+            DiffDials::shipped(),
+        );
+
+        assert_eq!(
+            (0..3).map(|y| buf[(5, y)].symbol()).collect::<Vec<_>>(),
+            [" ", "▎", " "],
+        );
+    }
+
     #[test]
     fn the_review_cursor_lands_on_the_wrapped_segment() {
         let long = long_line(45, 44);
@@ -3203,6 +3324,49 @@ mod tests {
                 ["3".to_string(), "tail".to_string()],
             ],
             "the line keeps one row, cut at the column edge",
+        );
+    }
+
+    /// The removed line's block takes a row per segment, and only its first row
+    /// takes the base number, so the context below it reads line 3.
+    #[test]
+    fn a_removed_long_line_spans_two_block_rows() {
+        let long = long_line(45, 44);
+        let h = diff_harness(&format!("keep\n{long}\ntail\n"), "keep\ntail\n");
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 8..59, &"a".repeat(45));
+        assert_eq!(
+            (y..y + 3)
+                .map(|y| cells(buf, y, [0..5, 8..59]))
+                .collect::<Vec<_>>(),
+            [
+                ["2".to_string(), "a".repeat(45)],
+                [String::new(), "b".repeat(44)],
+                ["3".to_string(), "tail".to_string()],
+            ],
+        );
+    }
+
+    /// At 120 columns the base text wraps at 51 and the line fits. At 110 it
+    /// wraps at 46, and both widths keep the two columns, so the wrap width
+    /// alone is what moves.
+    #[test]
+    fn a_resize_resplits_the_standing_blocks() {
+        let long = long_line(40, 7);
+        let mut h = diff_harness(&format!("keep\n{long}\ntail\n"), "keep\ntail\n");
+        let rows = |h: &crate::test_harness::TestHarness, cols: std::ops::Range<u16>| {
+            let buf = h.rendered_buffer();
+            let y = row_holding(buf, cols.clone(), &"a".repeat(40));
+            [y, y + 1].map(|y| line_text(buf, y, cols.clone()).trim().to_string())
+        };
+        assert_eq!(rows(&h, 8..59), [long.clone(), "tail".to_string()]);
+
+        h.resize(110, 10);
+        h.snapshot();
+        assert_eq!(
+            rows(&h, 8..54),
+            ["a".repeat(40), "b".repeat(7)],
+            "the standing block grows a row at the narrower width",
         );
     }
 

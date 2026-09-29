@@ -12,7 +12,7 @@ mod wrap_map;
 
 use crate::{
     buffer::BufferId,
-    diff_map::{DiffHunkStatus, DiffMap, TokenDetail},
+    diff_map::{DeletedBlockKey, DiffMap, TokenDetail},
     host::DiffStatus,
     multi_buffer::{MultiBuffer, MultiBufferSnapshot},
 };
@@ -44,6 +44,7 @@ use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use tokio::sync::Notify;
+pub(crate) use wrap_map::WrapGeometry;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
 
 /// Columns a tab runs to in every editor's display map.
@@ -190,13 +191,16 @@ pub struct DisplayMap {
     /// current version, so an unchanged version guarantees every crease is
     /// already resolved and a re-sync would reproduce the same offsets.
     last_crease_sync_version: u64,
-    inserted_diff_block_ids: Vec<CustomBlockId>,
+    /// The blocks standing for each hunk in
+    /// [`Self::inserted_diff_block_signature`], one per base line the hunk
+    /// blocks.
+    inserted_diff_block_ids: Vec<Vec<CustomBlockId>>,
     /// The hunks the currently installed deleted-line blocks were built from.
     ///
     /// A diff recompute stamps a new version even when it found exactly the
     /// same hunks, so the version alone cannot say whether the blocks need
     /// replacing. This can, and a refresh that matches it does nothing.
-    inserted_diff_block_signature: Vec<(DiffHunkStatus, u32, u32, Range<usize>)>,
+    inserted_diff_block_signature: Vec<DeletedBlockKey>,
     /// Ids of the spacer blocks the conflict view installs to pad a picked
     /// chunk whose center shrank below its taller side, tracked so each refresh
     /// replaces the previous set rather than stacking duplicates.
@@ -225,6 +229,9 @@ pub struct DisplayMap {
     /// The `show_deleted_blocks` value applied at the last block re-splice, so a
     /// mid-session toggle re-splices even when the diff version is unchanged.
     last_show_deleted_blocks: bool,
+    /// The wrap geometry the standing blocks broke their base lines under, so a
+    /// width change re-splices them even when the diff version is unchanged.
+    last_wrap_geometry: Option<WrapGeometry>,
     cached_snapshot: Option<DisplaySnapshot>,
     /// Set when any highlight collection is mutated. Checked inside
     /// [`DisplayMap::snapshot`] so a single rebuild
@@ -291,6 +298,7 @@ impl DisplayMap {
             pair_modified_hunks: false,
             last_pair_modified_hunks: false,
             last_show_deleted_blocks: false,
+            last_wrap_geometry: None,
             cached_snapshot: None,
             highlights_dirty: false,
             settings_generation: 0,
@@ -701,17 +709,22 @@ impl DisplayMap {
     }
 
     /// Bring the installed deleted-line blocks in line with `signature`,
-    /// keeping the block already standing for each hunk that survived.
+    /// keeping the blocks already standing for each hunk that survived.
     ///
-    /// Most refreshes change one hunk out of many, and replacing the whole set
-    /// would mark every one of their rows for rebuild and hand back fresh ids
-    /// for blocks that never moved.
+    /// Most refreshes change one hunk out of many. Replacing the whole set marks
+    /// every one of their rows for rebuild and hands back fresh ids for blocks
+    /// that never moved.
+    ///
+    /// A hunk's blocks, one per base line, stand or go together. They are
+    /// inserted in one call, so their ids ascend in base-line order, which is
+    /// the order the block map renders blocks that share a placement in.
     fn resplice_diff_blocks(
         &mut self,
-        signature: Vec<(DiffHunkStatus, u32, u32, Range<usize>)>,
+        signature: Vec<DeletedBlockKey>,
         diff_map: Option<&DiffMap>,
+        wrap: Option<WrapGeometry>,
     ) {
-        let mut standing: HashMap<(DiffHunkStatus, u32, u32, Range<usize>), CustomBlockId> = self
+        let mut standing: HashMap<DeletedBlockKey, Vec<CustomBlockId>> = self
             .inserted_diff_block_signature
             .drain(..)
             .zip(self.inserted_diff_block_ids.drain(..))
@@ -719,31 +732,30 @@ impl DisplayMap {
 
         // Built in the same order as the signature, since both walk one filtered
         // pass over the hunks.
-        let props = match diff_map.filter(|_| self.show_deleted_blocks) {
-            Some(dm) => dm.deleted_blocks(self.pair_modified_hunks),
+        let groups = match diff_map.filter(|_| self.show_deleted_blocks) {
+            Some(dm) => dm.deleted_blocks(self.pair_modified_hunks, wrap),
             None => Vec::new(),
         };
 
-        let mut ids: Vec<Option<CustomBlockId>> = Vec::with_capacity(signature.len());
+        let mut ids: Vec<Option<Vec<CustomBlockId>>> = Vec::with_capacity(signature.len());
         let mut fresh_props = Vec::new();
         let mut fresh_slots = Vec::new();
         for (slot, key) in signature.iter().enumerate() {
             match standing.remove(key) {
-                Some(id) => ids.push(Some(id)),
+                Some(group) => ids.push(Some(group)),
                 None => {
                     ids.push(None);
-                    fresh_slots.push(slot);
-                    fresh_props.push(props[slot].clone());
+                    fresh_slots.push((slot, groups[slot].len()));
+                    fresh_props.extend(groups[slot].iter().cloned());
                 },
             }
         }
 
-        self.block_map.remove(&standing.into_values().collect());
-        for (slot, id) in fresh_slots
-            .into_iter()
-            .zip(self.block_map.insert(fresh_props))
-        {
-            ids[slot] = Some(id);
+        self.block_map
+            .remove(&standing.into_values().flatten().collect());
+        let mut inserted = self.block_map.insert(fresh_props).into_iter();
+        for (slot, len) in fresh_slots {
+            ids[slot] = Some(inserted.by_ref().take(len).collect());
         }
 
         self.inserted_diff_block_ids = ids.into_iter().flatten().collect();
@@ -833,29 +845,35 @@ impl DisplayMap {
         } = self.sync_through_wrap();
         let diff_map = buffer_snapshot.diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
+        // The width the synced rows actually wrap at, which lags the wanted
+        // width while a deferred rewrap runs. Base lines break at the same
+        // width as the live rows beside them, and the landing rewrap moves it.
+        let wrap = WrapGeometry::of(&wrap_snapshot);
         if diff_version != self.last_diff_version
             || self.show_deleted_blocks != self.last_show_deleted_blocks
             || self.pair_modified_hunks != self.last_pair_modified_hunks
+            || wrap != self.last_wrap_geometry
         {
             let signature = if self.show_deleted_blocks {
                 diff_map
                     .as_ref()
-                    .map(|dm| dm.deleted_block_signature(self.pair_modified_hunks))
+                    .map(|dm| dm.deleted_block_signature(self.pair_modified_hunks, wrap))
                     .unwrap_or_default()
             } else {
                 Vec::new()
             };
 
             // A recompute that found the same hunks yields the same blocks, and
-            // re-splicing them would only mint new ids for identical content
-            // while forcing the transform tree to be patched around them.
+            // re-splicing them only mints new ids for identical content while
+            // forcing the transform tree to be patched around them.
             if signature != self.inserted_diff_block_signature {
-                self.resplice_diff_blocks(signature, diff_map.as_ref());
+                self.resplice_diff_blocks(signature, diff_map.as_ref(), wrap);
             }
 
             self.last_diff_version = diff_version;
             self.last_show_deleted_blocks = self.show_deleted_blocks;
             self.last_pair_modified_hunks = self.pair_modified_hunks;
+            self.last_wrap_geometry = wrap;
         }
         let block_snapshot = self
             .block_map
@@ -1344,6 +1362,16 @@ impl DisplaySnapshot {
 
     pub fn buffer_rows_above(&self, display_row: u32) -> u32 {
         self.block_snapshot.buffer_rows_above(display_row)
+    }
+
+    pub fn blocks_above(&self, display_row: u32) -> u32 {
+        self.block_snapshot.blocks_above(display_row)
+    }
+
+    /// The geometry this snapshot's rows wrap by, or `None` while wrapping is
+    /// off.
+    pub(crate) fn wrap_geometry(&self) -> Option<WrapGeometry> {
+        WrapGeometry::of(self.wrap_snapshot())
     }
 
     pub fn clip_point(&self, point: DisplayPoint, bias: Bias) -> DisplayPoint {

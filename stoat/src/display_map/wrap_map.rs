@@ -970,6 +970,75 @@ fn compute_wrap_columns(
     (breaks, indent)
 }
 
+/// The width a wrap snapshot breaks its lines at, and the tab rule its columns
+/// count by.
+///
+/// Text the wrap map does not hold, such as a base line the diff view shows in
+/// a block, breaks by this so it breaks where the same text breaks as a live
+/// line beside it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub(crate) struct WrapGeometry {
+    pub(crate) width: u32,
+    pub(crate) tab_size: u32,
+    pub(crate) max_expansion_column: u32,
+}
+
+impl WrapGeometry {
+    /// The geometry `snapshot` wraps by, or `None` while wrapping is off.
+    pub(crate) fn of(snapshot: &WrapSnapshot) -> Option<Self> {
+        let tabs = snapshot.tab_snapshot();
+        snapshot.wrap_width().map(|width| Self {
+            width,
+            tab_size: tabs.tab_size(),
+            max_expansion_column: tabs.max_expansion_column(),
+        })
+    }
+
+    /// The byte span of each row `line` breaks into, and the columns a
+    /// continuation row is indented by.
+    ///
+    /// A line that fits answers one span over all of it and no indent.
+    ///
+    /// See also:
+    /// - [`compute_wrap_columns`] for the rule itself, in tab columns.
+    pub(crate) fn windows(&self, line: &str) -> (Vec<Range<usize>>, u32) {
+        let char_width = |ch: char, column: u32| match ch {
+            '\t' if column >= self.max_expansion_column => 1,
+            '\t' => self.tab_size - column % self.tab_size,
+            _ => super::display_width(ch),
+        };
+        let tab_line_len = line
+            .chars()
+            .fold(0, |column, ch| column + char_width(ch, column));
+        let (breaks, indent) = compute_wrap_columns(
+            line.chars(),
+            tab_line_len,
+            self.width,
+            self.tab_size,
+            self.max_expansion_column,
+        );
+        // The first break is the line's own start. Every other break falls
+        // between two chars, so the walk meets each one at the boundary it
+        // names.
+        let mut windows = Vec::with_capacity(breaks.len().max(1));
+        let mut next_break = breaks.iter().skip(1).peekable();
+        let mut start = 0;
+        let mut column = 0;
+        for (byte, ch) in line.char_indices() {
+            if next_break.next_if(|&&at| column >= at).is_some() {
+                windows.push(start..byte);
+                start = byte;
+            }
+            column += char_width(ch, column);
+        }
+        windows.push(start..line.len());
+        match windows.len() {
+            1 => (windows, 0),
+            _ => (windows, indent),
+        }
+    }
+}
+
 impl WrapSnapshot {
     /// Cheap approximation: replaces edited regions with 1:1 identity transforms
     /// (no wrapping). Fast but inaccurate -- sets `interpolated = true`.
@@ -1715,7 +1784,7 @@ fn transform_sub_row_len(transform: &Transform, sub_idx: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{WrapMap, WrapPoint, WrapRowKind};
+    use super::{WrapGeometry, WrapMap, WrapPoint, WrapRowKind};
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
@@ -2082,6 +2151,27 @@ mod tests {
         assert_eq!(snap.line_len(0), 6);
         assert_eq!(snap.line_len(1), 6);
         assert_eq!(snap.line_len(2), 3);
+    }
+
+    fn geometry(width: u32) -> WrapGeometry {
+        WrapGeometry {
+            width,
+            tab_size: 4,
+            max_expansion_column: u32::MAX,
+        }
+    }
+
+    #[test]
+    fn wrap_windows_break_at_a_word_and_indent_the_continuation() {
+        assert_eq!(geometry(8).windows("  hello world"), (vec![0..8, 8..13], 2));
+    }
+
+    #[test]
+    fn wrap_windows_hard_wrap_a_word_longer_than_the_width() {
+        assert_eq!(
+            geometry(4).windows("abcdefghij"),
+            (vec![0..4, 4..8, 8..10], 0)
+        );
     }
 
     #[test]

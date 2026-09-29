@@ -308,7 +308,7 @@ fn paint_conflict_rows(
                     &mut row_cursor,
                 );
             },
-            crate::render::review::DiffRowKind::Block => {
+            crate::render::review::DiffRowKind::Block { .. } => {
                 render_empty_num(buf, cols.center_num_x, y, dim);
             },
         }

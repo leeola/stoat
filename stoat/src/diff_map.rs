@@ -1,6 +1,8 @@
 use crate::{
     buffer::TextBufferSnapshot,
-    display_map::{highlights::HighlightStyle, BlockPlacement, BlockProperties, BlockStyle},
+    display_map::{
+        highlights::HighlightStyle, BlockPlacement, BlockProperties, BlockStyle, WrapGeometry,
+    },
     host::DiffStatus,
     multi_buffer::MultiBufferSnapshot,
 };
@@ -16,6 +18,10 @@ use std::{
 use stoat_text::{Anchor, Bias, ContextLessSummary, Dimension, Item, Point, SeekTarget, SumTree};
 
 static DIFF_MAP_VERSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+/// One hunk's entry in [`DiffMap::deleted_block_signature`]: its status, live
+/// start and end rows, base bytes, and the wrap geometry its lines broke under.
+pub(crate) type DeletedBlockKey = (DiffHunkStatus, u32, u32, Range<usize>, Option<WrapGeometry>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DiffHunkStatus {
@@ -890,22 +896,24 @@ impl DiffMap {
         newlines + u32::from(text.as_bytes()[range.end - 1] != b'\n')
     }
 
-    /// What [`Self::deleted_blocks`] would produce, reduced to what tells one
+    /// The output of [`Self::deleted_blocks`], reduced to what tells one
     /// refresh's set apart from the next.
     ///
     /// A diff recompute stamps a new version whether or not any hunk moved, so
     /// a caller that re-splices on the version alone re-splices constantly.
     /// Comparing the blocks themselves is not open to it, since
-    /// [`BlockProperties`] carries a render closure. These four fields are
+    /// [`BlockProperties`] carries a render closure. These five fields are
     /// every input the blocks are built from, so equal signatures mean an
     /// identical set. The live range's end is among them because a Modified
     /// hunk pairs its base rows against its live ones, so a hunk that kept its
     /// start and its base bytes still blocks differently once its live row
-    /// count moves.
-    pub fn deleted_block_signature(
+    /// count moves. The wrap geometry is among them because it decides how
+    /// many rows each base line breaks into.
+    pub(crate) fn deleted_block_signature(
         &self,
         pair_modified: bool,
-    ) -> Vec<(DiffHunkStatus, u32, u32, Range<usize>)> {
+        wrap: Option<WrapGeometry>,
+    ) -> Vec<DeletedBlockKey> {
         if self.base_text.is_none() {
             return Vec::new();
         }
@@ -916,6 +924,7 @@ impl DiffMap {
                     hunk.buffer_start_line,
                     hunk.buffer_line_range.end,
                     hunk.base_byte_range.clone(),
+                    wrap,
                 )
             })
             .collect()
@@ -965,7 +974,18 @@ impl DiffMap {
     ///
     /// A Deleted hunk has no live rows to pair with, so all of it blocks, above
     /// the row it was deleted before.
-    pub fn deleted_blocks(&self, pair_modified: bool) -> Vec<BlockProperties> {
+    ///
+    /// Each base line is a block of its own, and the blocks come grouped by
+    /// hunk in the order [`Self::deleted_block_signature`] lists the hunks.
+    /// Under `wrap`, a line wider than the width takes a row per segment,
+    /// broken where the same text breaks as a live line, with each
+    /// continuation indented as a live continuation is. A block's row offset
+    /// then tells its base line's first row from a continuation.
+    pub(crate) fn deleted_blocks(
+        &self,
+        pair_modified: bool,
+        wrap: Option<WrapGeometry>,
+    ) -> Vec<Vec<BlockProperties>> {
         let base_text = match &self.base_text {
             Some(t) => t,
             None => return Vec::new(),
@@ -974,24 +994,23 @@ impl DiffMap {
         self.deleted_block_hunks(pair_modified)
             .map(|hunk| {
                 let paired = self.paired_rows(hunk, pair_modified);
-                let content = &base_text[hunk.base_byte_range.clone()];
-                let lines: Vec<String> = content
-                    .lines()
-                    .skip(paired as usize)
-                    .map(String::from)
-                    .collect();
-
                 let placement_line = match hunk.status {
                     DiffHunkStatus::Modified if paired > 0 => hunk.buffer_line_range.end - 1,
                     _ => hunk.buffer_start_line.saturating_sub(1),
                 };
-                let mut props = BlockProperties::from_text(
-                    BlockPlacement::Below(placement_line),
-                    lines,
-                    BlockStyle::Fixed,
-                );
-                props.diff_status = Some(hunk.status);
-                props
+                base_text[hunk.base_byte_range.clone()]
+                    .lines()
+                    .skip(paired as usize)
+                    .map(|line| {
+                        let mut props = BlockProperties::from_text(
+                            BlockPlacement::Below(placement_line),
+                            line_segments(line, wrap),
+                            BlockStyle::Fixed,
+                        );
+                        props.diff_status = Some(hunk.status);
+                        props
+                    })
+                    .collect()
             })
             .collect()
     }
@@ -1141,6 +1160,23 @@ impl DiffMap {
         self.base_staged = Arc::new(compute_base_staged(&self.hunks, self.base_text.as_ref()));
         self.version = Self::next_version();
     }
+}
+
+/// The rows a deleted base line takes in its block, broken under `wrap` with
+/// each continuation indented as a live continuation is.
+fn line_segments(line: &str, wrap: Option<WrapGeometry>) -> Vec<String> {
+    let Some(wrap) = wrap else {
+        return vec![line.to_string()];
+    };
+    let (windows, indent) = wrap.windows(line);
+    windows
+        .into_iter()
+        .enumerate()
+        .map(|(row, window)| match row {
+            0 => line[window].to_string(),
+            _ => format!("{}{}", " ".repeat(indent as usize), &line[window]),
+        })
+        .collect()
 }
 
 /// Convert a structural-diff change list into [`DiffHunk`]s.
@@ -1771,7 +1807,10 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
-    use crate::{display_map::BlockPlacement, host::DiffStatus};
+    use crate::{
+        display_map::{BlockPlacement, BlockProperties, WrapGeometry},
+        host::DiffStatus,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -2536,7 +2575,7 @@ mod tests {
         assert!(!dm.has_deletion_after(0, true));
         assert!(dm.is_empty());
         assert_eq!(dm.total_deleted_lines(), 0);
-        assert!(dm.deleted_blocks(true).is_empty());
+        assert!(dm.deleted_blocks(true, None).is_empty());
     }
 
     #[test]
@@ -2549,7 +2588,7 @@ mod tests {
         assert_eq!(dm.status_for_line(7), DiffStatus::Added);
         assert_eq!(dm.status_for_line(8), DiffStatus::Unchanged);
         assert!(!dm.has_deletion_after(4, true));
-        assert!(dm.deleted_blocks(true).is_empty());
+        assert!(dm.deleted_blocks(true, None).is_empty());
     }
 
     #[test]
@@ -2562,20 +2601,53 @@ mod tests {
         assert!(!dm.has_deletion_after(1, true));
         assert!(!dm.has_deletion_after(3, true));
 
-        let blocks = dm.deleted_blocks(true);
+        let blocks = dm.deleted_blocks(true, None).concat();
         assert_eq!(blocks.len(), 1);
+        assert_eq!(block_rows(&blocks[0]), ["deleted line"]);
+        assert_eq!(dm.total_deleted_lines(), 1);
+    }
+
+    /// The rows `block` paints, as text.
+    fn block_rows(block: &BlockProperties) -> Vec<String> {
         let ctx = crate::display_map::BlockContext {
             block_id: crate::display_map::BlockId::Custom(crate::display_map::CustomBlockId(0)),
             max_width: 80,
-            height: blocks[0].height.unwrap_or(0),
+            height: block.height.unwrap_or(0),
             selected: false,
             anchor_row: 0,
             diff_status: None,
             buffer_snapshot: &crate::multi_buffer::MultiBufferSnapshot::empty(),
         };
-        let lines = (blocks[0].render)(&ctx);
-        assert_eq!(lines[0].to_string(), "deleted line");
-        assert_eq!(dm.total_deleted_lines(), 1);
+        (block.render)(&ctx)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// A deleted line wider than the wrap width takes a row per segment, and
+    /// each base line is a block of its own, so a block's first row is its
+    /// line's first row.
+    #[test]
+    fn a_wrapped_deletion_blocks_each_line_by_itself() {
+        let base = "alpha beta gamma delta\nshort\n";
+        let dm = DiffMap::from_hunks(
+            [deleted_hunk(2, 0..base.len())],
+            Some(Arc::new(base.to_string())),
+        );
+        let wrap = WrapGeometry {
+            width: 12,
+            tab_size: 4,
+            max_expansion_column: u32::MAX,
+        };
+
+        let groups = dm.deleted_blocks(true, Some(wrap));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.iter().map(block_rows).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            [vec![vec!["alpha beta ", "gamma delta"], vec!["short"]]],
+        );
     }
 
     #[test]
@@ -2593,7 +2665,7 @@ mod tests {
 
         // One base line against two live rows, so the base row pairs with the
         // first of them and nothing is left to block.
-        assert_eq!(dm.deleted_blocks(true).len(), 0);
+        assert_eq!(dm.deleted_blocks(true, None).len(), 0);
         assert!(!dm.has_deletion_after(2, true));
         assert!(!dm.has_deletion_after(4, true));
     }
@@ -2609,12 +2681,23 @@ mod tests {
             Some(Arc::new(base.to_string())),
         );
 
-        let blocks = dm.deleted_blocks(true);
-        assert_eq!(blocks.len(), 1, "the two base rows past the live one block");
+        let groups = dm.deleted_blocks(true, None);
         assert_eq!(
-            (blocks[0].placement, blocks[0].height),
-            (BlockPlacement::Below(3), Some(2)),
-            "and hang off the hunk's last live row",
+            groups
+                .iter()
+                .map(|group| {
+                    group
+                        .iter()
+                        .map(|block| (block.placement, block.height))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            [vec![
+                (BlockPlacement::Below(3), Some(1)),
+                (BlockPlacement::Below(3), Some(1)),
+            ]],
+            "the two base rows past the live one block, a row each, and hang off \
+             the hunk's last live row",
         );
 
         assert!(dm.has_deletion_after(3, true), "the block sits below row 3");
@@ -2711,7 +2794,7 @@ mod tests {
 
         // The deleted hunk blocks whole; the modified one's single base line
         // pairs with the first of its two live rows.
-        assert_eq!(dm.deleted_blocks(true).len(), 1);
+        assert_eq!(dm.deleted_blocks(true, None).len(), 1);
     }
 
     #[test]
