@@ -134,15 +134,6 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
     stoat.set_status("agent edits: save accepts, :reload rejects");
 }
 
-/// Leave the diff view, reporting whether there was one to leave.
-///
-/// Clears the focused editor's flag, the focused pane's latch, and the widen
-/// the view took, which is every piece of state entering it set. Returns false
-/// and touches nothing when no editor is focused or neither half is set, so a
-/// caller can offer the exit unconditionally.
-///
-/// Either half being set counts as on, so this leaves a latched pane showing a
-/// clean file as readily as a diff itself.
 /// Open the diff against `rev`, or toggle the working-tree diff when `None`.
 ///
 /// A revision points the whole workspace at that commit, so every buffer diffs
@@ -249,6 +240,15 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
     }
 }
 
+/// Leave the diff view, reporting whether there was one to leave.
+///
+/// Clears the focused editor's flag, the focused pane's latch, and the widen
+/// the view took, which is every piece of state entering it set. Returns false
+/// and touches nothing when no editor is focused or neither half is set, so a
+/// caller can offer the exit unconditionally.
+///
+/// Either half being set counts as on, so this leaves a latched pane showing a
+/// clean file as readily as a diff itself.
 pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
     let latched = {
         let panes = &stoat.active_workspace().panes;
