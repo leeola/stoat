@@ -1224,8 +1224,10 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
         vec![(hint_at, ": u32".to_string(), InlayKind::Hint)],
     );
     display_map.fold(vec![Point::new(3, 12)..Point::new(3, 24)]);
+    // Near anchors past row 1's first sub-row, where Below anchors past all of
+    // them, so only Near puts the block inside the wrapped line's run.
     display_map.insert_blocks(vec![BlockProperties::from_text(
-        BlockPlacement::Below(1),
+        BlockPlacement::Near(1),
         vec!["a block row".to_string(), "and another".to_string()],
         BlockStyle::Fixed,
     )]);
@@ -1259,7 +1261,7 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
             r#""\n""#,
             r#""1; }""#,
             r#""\n""#,
-            // Row 1's first sub-row, then the block splitting it.
+            // Row 1's first sub-row, then the block near it splitting it.
             r#""    indented ""#,
             r#""\n""#,
             r#""a block row""#,

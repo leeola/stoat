@@ -2,6 +2,7 @@ use super::{
     fold_map::FoldPointCursor,
     highlights::Chunk,
     inlay_map::InlayPointCursor,
+    tab_map::TabPoint,
     wrap_map::{WrapPoint, WrapPointCursor, WrapSnapshot},
 };
 use crate::{diff_map::DiffHunkStatus, multi_buffer::MultiBufferSnapshot};
@@ -1549,8 +1550,22 @@ fn resolve_block_placement(
      -> u32 {
         let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0));
         let fold_point = fold_cursor.map(inlay_point, Bias::Right);
-        let tab_point = super::tab_map::TabPoint::new(fold_point.row(), fold_point.column());
+        let tab_point = TabPoint::new(fold_point.row(), fold_point.column());
         wrap_cursor.map(tab_point).row()
+    };
+
+    // The next tab row's first wrap row is the row past every wrap row of this
+    // one. One past this row's own first wrap row splits a soft-wrapped line
+    // and puts the block between its first row and its continuations.
+    let map_row_after = |buffer_row: u32,
+                         inlay_cursor: &mut InlayPointCursor<'_>,
+                         fold_cursor: &mut FoldPointCursor<'_>,
+                         wrap_cursor: &mut WrapPointCursor<'_>|
+     -> u32 {
+        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0));
+        let fold_point = fold_cursor.map(inlay_point, Bias::Right);
+        let next_row = TabPoint::new(fold_point.row() + 1, 0);
+        wrap_cursor.map(next_row).row()
     };
 
     let placement = block.placement();
@@ -1559,7 +1574,7 @@ fn resolve_block_placement(
             ResolvedPlacement::Above(map_row(row, inlay_cursor, fold_cursor, wrap_cursor))
         },
         BlockPlacement::Below(row) => {
-            ResolvedPlacement::Below(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
+            ResolvedPlacement::Below(map_row_after(row, inlay_cursor, fold_cursor, wrap_cursor))
         },
         BlockPlacement::Near(row) => {
             ResolvedPlacement::Near(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
@@ -1579,16 +1594,21 @@ fn resolve_block_placement(
 /// The wrap rows a placement's block occupies, matching where
 /// [`resolve_block_placement`] puts it.
 ///
-/// A `Below` or `Near` block anchors the row after the one it names, so an edit
-/// marking the named row alone would leave the block out of the region it
-/// rebuilds and the block would be dropped rather than replaced.
+/// A `Below` or `Near` block anchors a row past the one it names, so an edit
+/// marking the named row alone leaves the block out of the region it rebuilds,
+/// and the block is dropped rather than replaced. A `Below` block anchors the
+/// row past every wrap row of the line it names.
 fn placement_wrap_rows(placement: &BlockPlacement, wrap_snapshot: &WrapSnapshot) -> Range<u32> {
     match placement {
         BlockPlacement::Above(row) => {
             let wrap_row = buffer_row_to_wrap_row(*row, wrap_snapshot);
             wrap_row..wrap_row + 1
         },
-        BlockPlacement::Below(row) | BlockPlacement::Near(row) => {
+        BlockPlacement::Below(row) => {
+            let wrap_row = wrap_row_after_buffer_row(*row, wrap_snapshot);
+            wrap_row..wrap_row + 1
+        },
+        BlockPlacement::Near(row) => {
             let wrap_row = buffer_row_to_wrap_row(*row, wrap_snapshot) + 1;
             wrap_row..wrap_row + 1
         },
@@ -2053,6 +2073,23 @@ fn buffer_row_to_wrap_row(buffer_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 
         .to_fold_point(inlay_point, Bias::Left);
     let tab_point = wrap_snapshot.tab_snapshot().to_tab_point(fold_point);
     wrap_snapshot.to_wrap_point(tab_point).row()
+}
+
+/// The wrap row just past every wrap row of buffer row `buffer_row`, where a
+/// block placed below it sits.
+///
+/// That is the first wrap row of the next tab row, one past the end when the
+/// row is the last.
+fn wrap_row_after_buffer_row(buffer_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
+    let inlay_point = wrap_snapshot
+        .fold_snapshot()
+        .inlay_snapshot()
+        .to_inlay_point(Point::new(buffer_row, 0));
+    let fold_point = wrap_snapshot
+        .fold_snapshot()
+        .to_fold_point(inlay_point, Bias::Left);
+    let next_row = TabPoint::new(fold_point.row() + 1, 0);
+    wrap_snapshot.to_wrap_point(next_row).row()
 }
 
 fn push_isomorphic(transforms: &mut SumTree<Transform>, rows: u32) {

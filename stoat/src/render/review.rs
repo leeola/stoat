@@ -3347,6 +3347,27 @@ mod tests {
         );
     }
 
+    /// A removed line's block hangs below every row of the line above it, so a
+    /// wrapped line above a deletion stays whole.
+    #[test]
+    fn a_removed_line_below_a_wrapped_line_follows_its_last_row() {
+        let long = long_line(45, 44);
+        let h = diff_harness(&format!("{long}\ngone\ntail\n"), &format!("{long}\ntail\n"));
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        assert_eq!(
+            (y..y + 4)
+                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .collect::<Vec<_>>(),
+            [
+                ["1".into(), "a".repeat(45), "1".into(), "a".repeat(45)],
+                [String::new(), "b".repeat(44), String::new(), "b".repeat(44)],
+                ["2".into(), "gone".into(), String::new(), String::new()],
+                ["3".into(), "tail".into(), "2".into(), "tail".into()],
+            ],
+        );
+    }
+
     /// At 120 columns the base text wraps at 51 and the line fits. At 110 it
     /// wraps at 46, and both widths keep the two columns, so the wrap width
     /// alone is what moves.
