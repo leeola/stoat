@@ -612,23 +612,36 @@ impl Workspace {
         self.uid
     }
 
-    /// True when this workspace is structurally indistinguishable from the
-    /// state produced by [`Self::new`]: one empty scratch buffer, one editor,
-    /// one un-split pane, and no auxiliary state (docks,
-    /// commits, rebase, runs). Used by [`crate::app::Stoat::save_workspace`]
-    /// to skip persisting workspaces the user opened but never used, so the
-    /// on-disk directory does not fill up with empty session files now that
-    /// each launch without `--continue` spawns a fresh workspace.
+    /// True when the user did nothing in this workspace.
+    ///
+    /// Such a workspace has one tab with one un-split pane on an empty scratch
+    /// buffer. It has no file buffer and no auxiliary state (docks, commits,
+    /// rebase, runs, terminals). [`crate::app::Stoat::save_workspace`] skips
+    /// it, so the state directory does not fill with empty session files.
+    ///
+    /// An open transient input, such as a picker, the palette, or a prompt,
+    /// does not count. It owns an editor and a scratch buffer outside the pane
+    /// tree, so a quit while one is open writes no session file.
     pub(crate) fn is_fresh(&self) -> bool {
+        let Some((_, pane)) = self.panes.split_panes().next() else {
+            return false;
+        };
+        let View::Editor(eid) = pane.view else {
+            return false;
+        };
+        let Some(editor) = self.editors.get(eid) else {
+            return false;
+        };
+
         self.commits.is_none()
             && self.rebase.is_none()
             && self.rebase_active.is_none()
             && self.runs.is_empty()
             && self.terms.is_empty()
             && self.docks.is_empty()
-            && self.editors.len() == 1
+            && self.tabs.len() == 1
             && self.panes.split_panes().count() == 1
-            && self.buffers.only_empty_scratch()
+            && self.buffers.is_untouched_scratch(editor.buffer_id)
     }
 
     /// Clear the preview buffer's syntax and cancel any in-flight parse for it.

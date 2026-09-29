@@ -3146,6 +3146,57 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_tab_breaks_freshness() {
+        let mut h = Stoat::test();
+        h.type_action("NewTab()");
+        assert!(!h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn a_file_buffer_behind_a_closed_pane_breaks_freshness() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.fake_fs.insert_file("/work/note.txt", b"hello");
+        h.stoat.open_file(Path::new("/work/note.txt"));
+        h.type_action("ClosePane()");
+        assert!(!h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn an_open_workspace_picker_keeps_a_workspace_fresh() {
+        let mut h = Stoat::test();
+        workspace::open_workspace_picker(&mut h.stoat);
+        assert!(h.stoat.workspace_picker.is_some(), "the picker is open");
+        assert!(h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn typing_in_a_picker_filter_keeps_a_workspace_fresh() {
+        let mut h = Stoat::test();
+        workspace::open_workspace_picker(&mut h.stoat);
+        h.type_text("abc");
+        assert!(h.stoat.workspace_picker.is_some(), "the picker is open");
+        assert!(h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn an_open_palette_keeps_a_workspace_fresh() {
+        let mut h = Stoat::test();
+        h.type_keys(":");
+        assert!(h.stoat.command_palette.is_some(), "the palette is open");
+        assert!(h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn a_file_open_behind_a_picker_breaks_freshness() {
+        let mut h = Stoat::test();
+        h.fake_fs.insert_file("/work/note.txt", b"hello");
+        h.stoat.open_file(Path::new("/work/note.txt"));
+        workspace::open_workspace_picker(&mut h.stoat);
+        assert!(!h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
     fn close_workspace_switches_to_sibling() {
         let mut h = Stoat::test();
         let first = h.stoat.active_workspace;

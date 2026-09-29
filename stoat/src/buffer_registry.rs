@@ -167,20 +167,22 @@ impl BufferRegistry {
         self.buffers.len()
     }
 
-    /// True when the registry holds exactly one buffer, that buffer has no
-    /// backing file path, and its text is empty. This is the state left by a
-    /// new scratch that nothing has edited since. Used by
-    /// [`crate::workspace::Workspace::is_fresh`] to decide whether a workspace
-    /// is worth persisting.
+    /// True when buffer `id` is an empty scratch and the registry holds no file
+    /// buffer.
+    ///
+    /// Any file buffer makes this false, also one that no pane shows. A file
+    /// buffer shows that the user opened a file, and a later pane close does
+    /// not undo that. [`crate::workspace::Workspace::is_fresh`] reads this to
+    /// decide whether a workspace needs a saved session.
     ///
     /// A lone newline counts too. [`Self::new_scratch`] seeded one for a time,
     /// so workspaces persisted during that period still read as fresh rather
     /// than being kept forever over a character nobody typed.
-    pub(crate) fn only_empty_scratch(&self) -> bool {
-        if self.buffers.len() != 1 || !self.path_to_id.is_empty() {
+    pub(crate) fn is_untouched_scratch(&self, id: BufferId) -> bool {
+        if !self.path_to_id.is_empty() {
             return false;
         }
-        let Some(entry) = self.buffers.values().next() else {
+        let Some(entry) = self.buffers.get(&id) else {
             return false;
         };
         if entry.path.is_some() {
