@@ -2,11 +2,15 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
-use stoat::{log, run, workspace::WorkspaceUid};
+use stoat::{
+    host::{FsHost, LocalFs},
+    log, run,
+    workspace::WorkspaceUid,
+};
 
 /// Subcommands that interrogate a live session over its per-session socket and
 /// print the JSON reply.
@@ -93,7 +97,7 @@ pub fn run(sub: QueryCommand) -> Result<(), Whatever> {
 ///
 /// `--socket` wins as an explicit path. Otherwise a `--session` uid maps to its
 /// [`run::agent_socket_path`]. With neither, the state directory is scanned for a
-/// sole `agent-*.sock`.
+/// sole live `agent-*.sock`.
 fn resolve_socket_path(args: &SocketArgs) -> Result<PathBuf, Whatever> {
     if let Some(socket) = &args.socket {
         return Ok(socket.clone());
@@ -105,24 +109,41 @@ fn resolve_socket_path(args: &SocketArgs) -> Result<PathBuf, Whatever> {
     find_sole_socket()
 }
 
-/// Locate the one live session socket when neither `--socket` nor `--session`
-/// pins it down.
-///
-/// Scans [`log::state_dir`] for `agent-*.sock`. A single match is used. Zero or
-/// several is an error naming the candidates, so the caller can disambiguate.
+/// Locate the one live session socket in [`log::state_dir`] when neither
+/// `--socket` nor `--session` pins it down.
 fn find_sole_socket() -> Result<PathBuf, Whatever> {
     let dir = log::state_dir().whatever_context("resolve state directory")?;
-    let entries = std::fs::read_dir(&dir).whatever_context(format!("scan {}", dir.display()))?;
+    sole_live_socket(&dir, &LocalFs)
+}
+
+/// The one live `agent-*.sock` in `dir`.
+///
+/// A session that ends normally removes its socket, but a session that a signal
+/// kills leaves it behind. A candidate that refuses a connection has no session
+/// behind it, so this removes it through `fs` and skips it. Any other connect
+/// failure skips the candidate and keeps the file, since nothing proves it dead.
+///
+/// Zero or several live sockets is an error that names the candidates. The
+/// caller then picks one with `--session` or `--socket`.
+fn sole_live_socket(dir: &Path, fs: &dyn FsHost) -> Result<PathBuf, Whatever> {
+    let entries = fs
+        .list_dir(dir)
+        .whatever_context(format!("scan {}", dir.display()))?;
 
     let mut sockets = Vec::new();
     for entry in entries {
-        let path = entry.whatever_context("read directory entry")?.path();
-        let is_socket = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("agent-") && name.ends_with(".sock"));
-        if is_socket {
-            sockets.push(path);
+        if !(entry.name.starts_with("agent-") && entry.name.ends_with(".sock")) {
+            continue;
+        }
+        let path = dir.join(entry.name.as_str());
+
+        // A live session reads the probe as a connection that closes at once.
+        match UnixStream::connect(&path) {
+            Ok(_) => sockets.push(path),
+            Err(err) if err.kind() == ErrorKind::ConnectionRefused => {
+                let _ = fs.remove_file(&path);
+            },
+            Err(_) => {},
         }
     }
 
@@ -169,6 +190,7 @@ fn query(socket_path: &Path, request: &QueryRequest) -> Result<String, Whatever>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
 
     fn wire(request: &QueryRequest) -> String {
         serde_json::to_string(request).unwrap()
@@ -214,5 +236,36 @@ mod tests {
         assert_eq!(parse_session_uid("abcd").unwrap(), WorkspaceUid(0xABCD));
         assert_eq!(parse_session_uid("0xabcd").unwrap(), WorkspaceUid(0xABCD));
         assert!(parse_session_uid("nothex").is_err());
+    }
+
+    #[test]
+    fn a_dead_socket_beside_the_live_one_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("agent-1.sock");
+        let dead = dir.path().join("agent-2.sock");
+        let _listener = UnixListener::bind(&live).unwrap();
+        drop(UnixListener::bind(&dead).unwrap());
+
+        assert_eq!(sole_live_socket(dir.path(), &LocalFs).unwrap(), live);
+        assert!(!dead.exists(), "the dead socket stays in the state dir");
+    }
+
+    #[test]
+    fn two_live_sockets_are_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let sockets = [
+            dir.path().join("agent-1.sock"),
+            dir.path().join("agent-2.sock"),
+        ];
+        let _listeners = sockets
+            .each_ref()
+            .map(|path| UnixListener::bind(path).unwrap());
+
+        assert_eq!(
+            sole_live_socket(dir.path(), &LocalFs)
+                .unwrap_err()
+                .to_string(),
+            format!("multiple session sockets, pass --session or --socket: {sockets:?}"),
+        );
     }
 }
