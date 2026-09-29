@@ -1203,12 +1203,6 @@ fn wheel_binding(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     Some(stoat.run_bound_actions(&actions, None, false))
 }
 
-/// Scrolls the pane under the wheel pointer.
-///
-/// A `View::Editor` split pane gets inertial velocity, so a notch starts
-/// or accelerates a momentum glide. A `View::Run` pane (split or dock) does
-/// plain stepped scrolling of its output, three rows per notch, clamped to
-/// the top. Anything else drops the event.
 /// Scroll the open modal's preview pane one wheel step.
 ///
 /// Each modal holds its preview differently. Most back it with a real editor
