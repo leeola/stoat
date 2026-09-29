@@ -900,19 +900,19 @@ mod tests {
     }
 
     #[test]
-    fn help_detail_lists_the_auto_reload_binding_and_condition() {
+    fn help_detail_lists_the_follow_changes_binding_and_condition() {
         let mut h = crate::Stoat::test();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         send_key(&mut h, keys::key(KeyCode::BackTab));
-        type_str(&mut h, "AutoReload");
+        type_str(&mut h, "FollowChanges");
 
         let content = h.snapshot().content.clone();
         assert!(
-            content.contains("AutoReload(follow)"),
-            "detail names the follow action sequence:\n{content}"
+            content.contains("FollowChanges, SetMode(normal)"),
+            "detail names the whole action sequence:\n{content}"
         );
         assert!(
-            content.contains("mode == space_buffer"),
+            content.contains("mode == space_git"),
             "detail shows the binding's condition:\n{content}"
         );
     }

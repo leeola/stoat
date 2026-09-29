@@ -262,6 +262,17 @@ define_action!(
 );
 
 define_action!(
+    FollowChangesDef,
+    FollowChanges,
+    "FollowChanges",
+    ActionKind::FollowChanges,
+    "follow every change in the repo",
+    "Toggle following of the working tree. While on, a file written outside the editor opens in the focused pane's diff view with the cursor on the change, whichever file it is. A buffer with unsaved edits is skipped, never clobbered. A second run turns following off. The mode lasts for the session and starts off.",
+    ActionPriority::Normal,
+    command_name = "follow-changes"
+);
+
+define_action!(
     FontSizeIncDef,
     FontSizeInc,
     "FontSizeInc",

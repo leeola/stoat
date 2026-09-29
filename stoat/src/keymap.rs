@@ -2816,41 +2816,6 @@ mod tests {
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
-    /// Follow watches one file's edits land, which is what the diff view's
-    /// live column is for, so the key is bound only there. Elsewhere in the
-    /// chord `R` stays free.
-    #[test]
-    fn the_git_chord_binds_follow_only_on_the_diff_view() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
-        let keymap = Keymap::compile(&config);
-
-        let git = TestState::new().set("mode", StateValue::String("space_git".into()));
-        let in_diff = TestState::new()
-            .set("mode", StateValue::String("space_git".into()))
-            .set("view", StateValue::String("diff".into()));
-
-        let bound = keymap
-            .lookup(&in_diff, &key_event(KeyCode::Char('R'), KeyModifiers::NONE))
-            .expect("R is bound in the git chord on the diff view");
-        assert_eq!(
-            (
-                bound.len(),
-                bound[0].name.as_str(),
-                &bound[0].args[0].value,
-                bound[1].name.as_str(),
-            ),
-            (2, "AutoReload", &Value::Ident("follow".into()), "SetMode"),
-            "follow runs first, and the switch a pin drops rides behind it",
-        );
-
-        assert!(
-            keymap
-                .lookup(&git, &key_event(KeyCode::Char('R'), KeyModifiers::NONE))
-                .is_none(),
-            "off the diff view the chord leaves R unbound",
-        );
-    }
-
     /// The pinned twin of `space G G`, spelled with the doubled letter the
     /// same way.
     #[test]
@@ -2976,20 +2941,19 @@ mod tests {
     }
 
     #[test]
-    fn space_buffer_binds_f_to_auto_reload_follow() {
+    fn the_git_chord_binds_f_to_follow_changes() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let space_buffer = TestState::new().set("mode", StateValue::String("space_buffer".into()));
+        let space_git = TestState::new().set("mode", StateValue::String("space_git".into()));
         let f = keymap
             .lookup(
-                &space_buffer,
+                &space_git,
                 &key_event(KeyCode::Char('f'), KeyModifiers::NONE),
             )
-            .expect("f is bound in space_buffer");
-        assert_eq!(f[0].name, "AutoReload");
-        assert_eq!(f[0].args[0].value, Value::Ident("follow".into()));
-        assert_eq!(f[1].name, "SetMode");
+            .expect("f is bound in space_git");
+        let names: Vec<&str> = f.iter().map(|action| action.name.as_str()).collect();
+        assert_eq!(names, ["FollowChanges", "SetMode"]);
     }
 
     #[test]

@@ -64,7 +64,7 @@ use crate::{
             YankMainToClipboard, YankToClipboard,
         },
         file::{
-            AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll,
+            AutoReload, AutoReloadConfig, FollowChanges, FontSizeDec, FontSizeInc, ForceReloadAll,
             ForceReloadBuffer, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ReloadAll,
             ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
@@ -512,6 +512,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ForceReloadBuffer::DEF, |_| Ok(Box::new(ForceReloadBuffer)));
     add(ReloadAll::DEF, |_| Ok(Box::new(ReloadAll)));
     add(ForceReloadAll::DEF, |_| Ok(Box::new(ForceReloadAll)));
+    add(FollowChanges::DEF, |_| Ok(Box::new(FollowChanges)));
     add(FontSizeInc::DEF, |_| Ok(Box::new(FontSizeInc)));
     add(FontSizeDec::DEF, |_| Ok(Box::new(FontSizeDec)));
     add(OpenConfig::DEF, |params| {
@@ -1338,6 +1339,7 @@ mod tests {
         "ForceReloadBuffer",
         "ReloadAll",
         "ForceReloadAll",
+        "FollowChanges",
     ];
 
     #[test]
@@ -1845,7 +1847,8 @@ mod tests {
         // + 1 Ssh.
         // + 1 Mosh.
         // + 2 CommitsDetailDown/CommitsDetailUp.
-        assert_eq!(all().count(), 422);
+        // + 1 FollowChanges.
+        assert_eq!(all().count(), 423);
     }
 
     #[test]

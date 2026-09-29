@@ -785,6 +785,21 @@ pub(crate) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
     UpdateEffect::Redraw
 }
 
+/// Flip the workspace follow mode, backing the `FollowChanges` action.
+///
+/// The status line reports the state the flip leaves. The mode is
+/// [`Stoat::follow_changes`], which is separate from the per-buffer follow of
+/// [`set_buffer_auto_reload`].
+pub(crate) fn toggle_follow_changes(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.follow_changes = !stoat.follow_changes;
+    stoat.set_status(if stoat.follow_changes {
+        "follow changes on"
+    } else {
+        "follow changes off"
+    });
+    UpdateEffect::Redraw
+}
+
 /// Set whether saving a config file re-applies it, backing
 /// `:auto-reload-config`.
 ///

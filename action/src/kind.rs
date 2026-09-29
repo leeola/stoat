@@ -179,6 +179,7 @@ action_kinds! {
     ForceReloadBuffer,
     ReloadAll,
     ForceReloadAll,
+    FollowChanges,
     AcceptCompletion,
     SmartTab,
     InsertTab,

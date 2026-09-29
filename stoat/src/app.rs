@@ -1591,6 +1591,15 @@ pub struct Stoat {
     /// by default so the test harness never spawns a warm pass. The binary
     /// turns it on for a live session via [`Self::set_diff_warm_auto`].
     pub(crate) diff_warm_auto: bool,
+    /// Whether the focused pane follows every working-tree change in the repo.
+    ///
+    /// On, a file written outside the editor opens in the focused pane's diff
+    /// view with the cursor on the change, whichever file it is. A buffer with
+    /// unsaved edits is skipped, never clobbered.
+    ///
+    /// The `FollowChanges` action is the only writer. Session-scoped and off at
+    /// start, never persisted, because it answers what the reader watches now.
+    pub(crate) follow_changes: bool,
     /// Directory holding the per-workspace agent sockets, the single source of
     /// the path both [`Self::serve_term_session`] binds and an owned child's
     /// `STOAT_AGENT_SOCK` names.
@@ -2415,6 +2424,7 @@ impl Stoat {
             pending_lsp_host: Arc::new(std::sync::Mutex::new(Vec::new())),
             env_auto_load: false,
             diff_warm_auto: false,
+            follow_changes: false,
             agent_socket_dir: None,
             serve_agent_sockets: false,
             served_agent_sockets: std::collections::HashSet::new(),

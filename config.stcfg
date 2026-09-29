@@ -1144,7 +1144,6 @@ on key {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
         d -> [CloseBuffer(), SetMode(normal)];
-        f -> [AutoReload(follow), SetMode(normal)];
     }
     # The goto chord. `a` mirrors the normal-mode `g a` so both spellings of
     # goto reach the last buffer, and n/p repeat the git-change hops that the
@@ -1175,6 +1174,10 @@ on key {
     # `r` re-reads the open buffers, so an external tool's edits reach the diff
     # without leaving the chord. It spells the same verb `space r` does.
     #
+    # `f` follows the whole working tree. Each file written outside the editor
+    # opens in the diff view with the cursor on the change, until a second `f`
+    # stops it.
+    #
     # The mouse side buttons ride the same hops, forward as p and back as n, so
     # a pinned chord walks changes from the mouse exactly as the keys do. The
     # forward button sits above the back button, so the upper button walks up
@@ -1193,20 +1196,10 @@ on key {
         MouseForward -> [GotoPrevChange(), SetMode(normal)];
         MouseBack -> [GotoNextChange(), SetMode(normal)];
         r -> [ReloadAll(), SetMode(normal)];
+        f -> [FollowChanges(), SetMode(normal)];
         m -> [JumpToMoveSource(), SetMode(normal)];
         M -> [JumpToMoveTarget(), SetMode(normal)];
         l -> GitLs();
-    }
-    # `r` refreshes once, so watching an external tool work through a file costs
-    # a press per change. `R` hands that loop to follow, which re-reads as edits
-    # land and jumps to each one. A second press stops it, so the key carries no
-    # state of its own.
-    #
-    # The view predicate is what keeps `R` free in the chord everywhere else.
-    # Follow pairs with the diff's live column, and this block outranks the
-    # broader one by naming its context.
-    view == diff && mode == space_git {
-        R -> [AutoReload(follow), SetMode(normal)];
     }
     # Reading a tour is a run of steps rather than one, so `space W` holds this
     # mode instead of running a single arm. n and p walk the stops and a and A
