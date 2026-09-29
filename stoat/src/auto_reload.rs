@@ -20,14 +20,18 @@
 use crate::{
     action_handlers::{
         file::{display_name, open_file},
-        focused_editor_mut, read_string_via_host,
+        focused_editor_mut, jump, movement, read_string_via_host, review,
         view::ensure_cursor_in_view,
     },
     app::{Stoat, UpdateEffect},
-    buffer::BufferId,
+    buffer::{BufferId, SharedBuffer},
+    buffer_lifecycle,
     buffer_registry::AutoReloadMode,
+    debounce::FS_WATCH_DEBOUNCE,
     editor_state::{EditorId, EditorState},
+    keymap_state,
     lsp::sync,
+    pane::{FocusTarget, PaneId, View},
 };
 use std::{
     ops::Range,
@@ -391,6 +395,11 @@ pub(crate) fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
             }
         }
         if mode == AutoReloadMode::Follow {
+            if stoat.follow_changes {
+                show_followed_buffer(stoat, id, buffer);
+            }
+
+            let ws = stoat.active_workspace_mut();
             let follow_editors: Vec<EditorId> = ws
                 .editors
                 .iter()
@@ -408,6 +417,24 @@ pub(crate) fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
         sync::notify_buffer_changes_pending(stoat);
     }
     changed || status_set
+}
+
+/// Bring buffer `id` to the pane a followed write lands in, with the diff view
+/// on, for a reload made while [`Stoat::follow_changes`] is on.
+///
+/// The install's follow collapse then puts the cursor on what the reload
+/// changed. The pane's outgoing position goes on its jumplist first, so a
+/// backward jump returns the reader to where the follow found them.
+fn show_followed_buffer(stoat: &mut Stoat, id: BufferId, buffer: SharedBuffer) {
+    let Some(target) = follow_target(stoat) else {
+        return;
+    };
+    let workspace = stoat.active_workspace;
+    let executor = stoat.executor.clone();
+
+    jump::record_pane_switch(stoat, workspace, target, id);
+    buffer_lifecycle::show_buffer_in_pane(stoat, workspace, target, id, buffer, executor);
+    review::enter_diff_view(stoat);
 }
 
 /// Re-read the focused buffer's backing file from disk, backing `:reload` and
@@ -790,14 +817,117 @@ pub(crate) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
 /// The status line reports the state the flip leaves. The mode is
 /// [`Stoat::follow_changes`], which is separate from the per-buffer follow of
 /// [`set_buffer_auto_reload`].
+///
+/// Turning the mode off drops a write still waiting on its window, so nothing
+/// lands after the reader stops following.
 pub(crate) fn toggle_follow_changes(stoat: &mut Stoat) -> UpdateEffect {
     stoat.follow_changes = !stoat.follow_changes;
+    if !stoat.follow_changes {
+        stoat.follow_pending = None;
+        stoat.follow_timer = None;
+    }
+
     stoat.set_status(if stoat.follow_changes {
         "follow changes on"
     } else {
         "follow changes off"
     });
     UpdateEffect::Redraw
+}
+
+/// Hold `path`, a working-tree file written outside the editor, for the follow
+/// window.
+///
+/// The window opens on the first write of a burst and closes a fixed
+/// [`FS_WATCH_DEBOUNCE`] later. Each write replaces the held path, so the
+/// window lands the last file the burst wrote.
+pub(crate) fn note_followed_change(stoat: &mut Stoat, path: PathBuf) {
+    stoat.follow_pending = Some(path);
+    if stoat.follow_timer.is_some() {
+        return;
+    }
+
+    let executor = stoat.executor.clone();
+    let tx = stoat.follow_tx.clone();
+    let redraw = stoat.redraw_notify.clone();
+    stoat.follow_timer = Some(stoat.executor.spawn_with_redraw(redraw, async move {
+        executor.timer(FS_WATCH_DEBOUNCE).await;
+        let _ = tx.send(()).await;
+    }));
+}
+
+/// Land the held path once its follow window closes, and report whether the
+/// reader sees anything move.
+///
+/// Answers `false` until the window's timer fires, and when the path lands
+/// nowhere. See [`follow_change_now`] for where a path lands.
+pub(crate) fn drain_followed_change(stoat: &mut Stoat) -> bool {
+    if stoat.follow_rx.try_recv().is_err() {
+        return false;
+    }
+    stoat.follow_timer = None;
+
+    let Some(path) = stoat.follow_pending.take() else {
+        return false;
+    };
+    follow_change_now(stoat, &path)
+}
+
+/// Land a followed write to `path` in the focused pane's diff view, and report
+/// whether anything moved.
+///
+/// When the file has an open buffer, the buffer reads the file again, and
+/// [`pump_auto_reload_install`] brings the buffer to the pane with the cursor on
+/// what the write changed. A buffer with unsaved edits, or one whose file mtime
+/// did not move, starts nothing.
+///
+/// A file with no buffer opens in the pane on its first change stop, because
+/// the diff against its base is the only record of what changed in it.
+fn follow_change_now(stoat: &mut Stoat, path: &Path) -> bool {
+    let Some(target) = follow_target(stoat) else {
+        return false;
+    };
+
+    if let Some(id) = stoat.active_workspace().buffers.id_for_path(path) {
+        return stat_and_read_buffer(stoat, id, path, AutoReloadMode::Follow);
+    }
+
+    // An open of a missing path makes an empty buffer. A save that writes a
+    // temp file and renames it over its target leaves exactly such a path
+    // behind by the time the window closes.
+    let is_file = stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .is_some_and(|meta| !meta.is_dir);
+    if !is_file {
+        return false;
+    }
+
+    buffer_lifecycle::open_file_in_pane(stoat, target, path);
+    review::enter_diff_view(stoat);
+    movement::goto_first_change(stoat);
+    true
+}
+
+/// The split pane a followed write lands in, or `None` while the reader works
+/// somewhere follow must leave alone.
+///
+/// Follow reuses the focused editor. An open modal, a focused dock, and a
+/// focused pane that shows an agent, a terminal, or an image all answer `None`,
+/// because taking any of them over hides what the reader works in.
+fn follow_target(stoat: &Stoat) -> Option<PaneId> {
+    if keymap_state::active_modal(stoat).is_some() {
+        return None;
+    }
+
+    let ws = stoat.active_workspace();
+    if ws.focus != FocusTarget::SplitPane {
+        return None;
+    }
+    let pane = ws.panes.focus();
+    matches!(ws.panes.pane(pane).view, View::Editor(_)).then_some(pane)
 }
 
 /// Set whether saving a config file re-applies it, backing
@@ -959,16 +1089,19 @@ fn editor_cursor_row(editor: &mut EditorState) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, open_log_buffer, open_logs,
-        pump_auto_reload, pump_auto_reload_install, reload_all, reload_focused, session_log_path,
-        set_auto_reload_config, set_buffer_auto_reload, target_log_stem,
+        collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, follow_change_now,
+        open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install, reload_all,
+        reload_focused, session_log_path, set_auto_reload_config, set_buffer_auto_reload,
+        target_log_stem, toggle_follow_changes,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
         app::UpdateEffect,
         buffer::BufferId,
         buffer_registry::AutoReloadMode,
-        host::FsHost,
+        debounce::{self, FS_WATCH_DEBOUNCE},
+        host::{FsEventKind, FsHost},
+        pane::View,
         test_harness::{editor, TestHarness},
         Stoat,
     };
@@ -1370,6 +1503,167 @@ mod tests {
             2,
             "follow jumps the cursor to the start of the appended content"
         );
+    }
+
+    /// A repo where `a.rs` and `b.rs` both differ from HEAD on their second
+    /// row, with follow on and `a.rs` open in the focused pane.
+    fn follow_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("a.rs", "a\nb\nc\n", "a\nB\nc\n"),
+                ("b.rs", "x\ny\nz\n", "x\nY\nz\n"),
+            ],
+        );
+        h.open_file(Path::new("/repo/a.rs"));
+        h.stoat.follow_changes = true;
+        h
+    }
+
+    /// The focused buffer's path, whether its editor shows the diff view, and
+    /// its cursor row, which together say where a follow left the reader.
+    fn landing(h: &mut TestHarness) -> (PathBuf, bool, u32) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let (id, diff_view, row) = (
+            editor.buffer_id,
+            editor.diff_view,
+            editor_cursor_row(editor),
+        );
+        let path = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .path_for(id)
+            .expect("path");
+        (path.to_path_buf(), diff_view, row)
+    }
+
+    /// Report a `kind` event on `path` and drain it, as the run loop does when
+    /// the watch wakes it.
+    fn watched_write(h: &mut TestHarness, path: &str, kind: FsEventKind) {
+        h.fake_fs_watcher().inject(Path::new(path), kind);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+    }
+
+    #[test]
+    fn follow_changes_opens_an_unopened_file_in_the_diff_view() {
+        let mut h = follow_harness();
+        assert!(follow_change_now(&mut h.stoat, Path::new("/repo/b.rs")));
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
+    }
+
+    #[test]
+    fn follow_changes_brings_an_open_buffer_to_the_focused_pane() {
+        let mut h = follow_harness();
+        h.open_file(Path::new("/repo/b.rs"));
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+
+        assert!(follow_change_now(&mut h.stoat, Path::new("/repo/a.rs")));
+        h.run_until_parked();
+        pump_auto_reload_install(&mut h.stoat);
+
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/a.rs"), true, 2));
+        assert!(
+            !editor::focused_dirty(&h.stoat),
+            "a followed reload stays clean"
+        );
+    }
+
+    #[test]
+    fn follow_changes_skips_a_dirty_buffer() {
+        let mut h = follow_harness();
+        let a = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(a)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.open_file(Path::new("/repo/b.rs"));
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+
+        assert!(!follow_change_now(&mut h.stoat, Path::new("/repo/a.rs")));
+        h.settle();
+        assert_eq!(
+            (landing(&mut h), buffer_text(&h, a)),
+            (
+                (PathBuf::from("/repo/b.rs"), false, 0),
+                "xa\nB\nc\n".to_string()
+            ),
+        );
+    }
+
+    #[test]
+    fn a_watched_write_follows_once_its_window_closes() {
+        let mut h = follow_harness();
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        assert_eq!(
+            landing(&mut h),
+            (PathBuf::from("/repo/a.rs"), false, 0),
+            "nothing lands while the window is open"
+        );
+
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
+    }
+
+    #[test]
+    fn a_save_renamed_over_its_target_follows_the_target() {
+        let mut h = follow_harness();
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Renamed);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
+    }
+
+    #[test]
+    fn a_file_gone_before_the_drain_leaves_the_write_before_it() {
+        let mut h = follow_harness();
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        watched_write(&mut h, "/repo/.lock", FsEventKind::Created);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
+    }
+
+    #[test]
+    fn follow_changes_skips_a_path_that_is_gone() {
+        let mut h = follow_harness();
+        assert!(!follow_change_now(&mut h.stoat, Path::new("/repo/gone.rs")));
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/a.rs"), false, 0));
+    }
+
+    #[test]
+    fn follow_changes_off_ignores_writes() {
+        let mut h = follow_harness();
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        toggle_follow_changes(&mut h.stoat);
+        assert_eq!(
+            (
+                h.stoat.follow_pending.clone(),
+                h.stoat.follow_timer.is_some()
+            ),
+            (None, false),
+            "turning follow off drops the write still in its window"
+        );
+
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/a.rs"), false, 0));
+    }
+
+    #[test]
+    fn follow_changes_leaves_a_pane_without_an_editor_alone() {
+        let mut h = follow_harness();
+        let focus = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(focus).view = View::Label("agent".into());
+
+        assert!(!follow_change_now(&mut h.stoat, Path::new("/repo/b.rs")));
+        assert!(matches!(
+            h.stoat.active_workspace().panes.pane(focus).view,
+            View::Label(_)
+        ));
     }
 
     #[test]

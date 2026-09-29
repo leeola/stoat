@@ -1540,6 +1540,23 @@ pub struct Stoat {
     /// fires, so the signal only has to say that it fired.
     pub(crate) index_external_edit_tx: Sender<()>,
     pub(crate) index_external_edit_rx: Receiver<()>,
+    /// The last working-tree path a write reached while [`Self::follow_changes`]
+    /// is on, waiting for [`Self::follow_timer`] to close its window.
+    ///
+    /// One slot rather than a set. The pane shows one file at a time, so a burst
+    /// of writes follows the last path it wrote, and the diff view's n and p walk
+    /// the rest.
+    pub(crate) follow_pending: Option<PathBuf>,
+    /// The debounce timer covering [`Self::follow_pending`].
+    ///
+    /// Armed when the slot fills from empty, so the window closes a fixed
+    /// [`debounce::FS_WATCH_DEBOUNCE`] after a burst starts, for the reason
+    /// [`Self::index_external_edit_timer`] gives.
+    pub(crate) follow_timer: Option<stoat_scheduler::Task<()>>,
+    /// Channel [`Self::follow_timer`] signals when its window closes, waking
+    /// [`crate::auto_reload::drain_followed_change`].
+    pub(crate) follow_tx: Sender<()>,
+    pub(crate) follow_rx: Receiver<()>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
@@ -2225,6 +2242,7 @@ impl Stoat {
         let (workspace_autosave_tx, workspace_autosave_rx) = tokio::sync::mpsc::channel(256);
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
+        let (follow_tx, follow_rx) = tokio::sync::mpsc::channel(256);
         let (auto_reload_tx, auto_reload_rx) = tokio::sync::mpsc::channel(1);
         // Dropped at once, leaving the channel closed until `set_stoatty_rx`
         // installs the UI thread's end. Closed is the truthful state for a
@@ -2414,6 +2432,10 @@ impl Stoat {
             ignored_dir_cache: std::collections::HashMap::new(),
             index_external_edit_tx,
             index_external_edit_rx,
+            follow_pending: None,
+            follow_timer: None,
+            follow_tx,
+            follow_rx,
             git_host: Arc::new(LocalGit::new()),
             env_host,
             home,
@@ -7777,6 +7799,7 @@ impl Stoat {
         action_handlers::picker::sync_diagnostics_picker(self);
         action_handlers::picker::sync_jumplist_picker(self);
 
+        let followed_change = crate::auto_reload::drain_followed_change(self);
         let auto_reload = crate::auto_reload::pump_auto_reload_install(self);
 
         let format_on_save = action_handlers::file::pump_format_on_save(self);
@@ -7794,6 +7817,7 @@ impl Stoat {
             || conflict_file
             || diff_nav_jump
             || lsp
+            || followed_change
             || auto_reload
             || format_on_save
             || pending_save

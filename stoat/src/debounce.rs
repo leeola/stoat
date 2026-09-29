@@ -14,6 +14,7 @@
 use crate::{
     action_handlers,
     app::Stoat,
+    auto_reload,
     host::{FsEventKind, FsMetadata, GitRepo},
 };
 use std::{
@@ -131,7 +132,9 @@ impl PathEdit {
 /// [`FsWatchHost`], routing each to the debounce its path calls for.
 ///
 /// A `.git` write goes to [`arm_diff_refresh_debounce`] and a working-tree file
-/// to [`arm_index_external_edit_debounce`]. Neither does the work here. Each
+/// to [`arm_index_external_edit_debounce`]. While [`Stoat::follow_changes`] is
+/// on, a written working-tree file also goes to
+/// [`auto_reload::note_followed_change`]. None of them does the work here. Each
 /// arms a timer whose drain lands on the main loop later.
 ///
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
@@ -191,6 +194,26 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         // that a rebuild drops.
         if !in_git_dir && parent_dir_ignored(stoat, &path, &git_root, &mut repo) {
             continue;
+        }
+
+        // A save that writes a temp file and renames it over its target reaches
+        // the watcher as a rename onto the path. The stat tells that
+        // destination from the source the rename left.
+        if stoat.follow_changes
+            && !in_git_dir
+            && path.starts_with(&git_root)
+            && matches!(
+                kind,
+                FsEventKind::Modified | FsEventKind::Created | FsEventKind::Renamed
+            )
+            && stoat
+                .fs_host
+                .metadata(&path)
+                .ok()
+                .flatten()
+                .is_some_and(|meta| !meta.is_dir)
+        {
+            auto_reload::note_followed_change(stoat, path.clone());
         }
 
         // Past the ignored-directory filter, so what is left is a real

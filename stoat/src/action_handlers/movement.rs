@@ -4305,7 +4305,7 @@ fn live_hunk_rows(
         .unwrap_or_default()
 }
 
-pub(super) fn goto_first_change(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn goto_first_change(stoat: &mut Stoat) -> UpdateEffect {
     goto_edge_change(stoat, false)
 }
 
