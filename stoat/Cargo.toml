@@ -49,7 +49,6 @@ snafu = { workspace = true }
 percent-encoding.workspace = true
 portable-pty.workspace = true
 libc.workspace = true
-signal-hook.workspace = true
 memchr.workspace = true
 smallvec.workspace = true
 vte.workspace = true

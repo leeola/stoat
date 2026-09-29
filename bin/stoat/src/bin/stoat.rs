@@ -27,6 +27,14 @@ const CLIENT_LOG_STEM: &str = "stoat-cli";
 const CLIENT_LOG_MAX: u64 = 4 * 1024 * 1024;
 
 fn main() {
+    // First, because a thread inherits the signal mask of the thread that
+    // spawns it. A thread spawned before this call keeps SIGWINCH unblocked, so
+    // the kernel hands the signal to it and crossterm's handler runs there.
+    if let Err(e) = stoat::tty::block_resize_signal() {
+        eprintln!("Failed to block the resize signal: {e}");
+        std::process::exit(1);
+    }
+
     let args = stoat_bin::commands::default::Args::parse();
 
     // A bare file open from a stoat terminal pane goes to the parent instance

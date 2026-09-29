@@ -28,7 +28,8 @@ use crossterm::{
 };
 use futures::FutureExt;
 use ratatui::buffer::Buffer;
-use signal_hook::low_level::pipe;
+#[cfg(feature = "perf")]
+use std::time::Instant;
 use std::{
     backtrace::Backtrace,
     io::{self, PipeReader, Read, Write},
@@ -36,7 +37,7 @@ use std::{
     panic,
     sync::{Arc, Once},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use stoatty_protocol::{
     command::{self, HelloCommand},
@@ -173,10 +174,10 @@ async fn run(
         slot,
         ui_rx,
     } = channels;
-    // Registered before the size is read, so a resize at any later point leaves
-    // its byte for the input thread, one during the handshake included. Nothing
-    // else reports that one, since crossterm starts watching only on its first
-    // read.
+    // Started before the size is read, so a resize at any later point leaves
+    // its byte for the input thread, one during the handshake included.
+    // crossterm never reports a resize, because every thread blocks the signal
+    // and this pipe's thread takes it.
     let winch = resize_signal_pipe()?;
     // Main thread needs terminal dimensions before it can render the first frame
     let size = terminal.size()?;
@@ -456,17 +457,9 @@ fn tty_cell_pixels() -> Option<(u16, u16)> {
 /// How long a raw read waits before the loop takes another turn.
 ///
 /// The tick that polls the window size while a remote session owns fd 0, since
-/// crossterm reports no resize while nothing parses it. The idle wait needs no
-/// interval of its own, since it parks on the slot's wake pipe beside fd 0.
+/// the raw read watches fd 0 alone and no resize wakes it. The idle wait needs
+/// no interval of its own, since it parks on the slot's wake pipe beside fd 0.
 const INPUT_POLL: Duration = Duration::from_millis(50);
-
-/// Longest wait for crossterm's own report of a resize that woke the idle wait.
-///
-/// One signal handler writes crossterm's pipe and this thread's, so the report
-/// is normally ready at once. The bound covers a wake with no report left to
-/// come. crossterm gave that report already, or it started watching after the
-/// signal and never saw one.
-const RESIZE_DRAIN: Duration = Duration::from_millis(50);
 
 /// What ended an idle wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,12 +502,13 @@ struct InputChannels<'a> {
 ///
 /// - Idle: `poll` then `read` an event and send it, as a normal session does. An idle wait blocks
 ///   on `wait_idle` rather than spinning, so a session with nobody typing costs nothing. A resize
-///   that ends the wait has crossterm's report of it read at once, before a key joins it.
+///   that ends the wait sends the window's size at once. crossterm reports none, since the process
+///   takes SIGWINCH itself.
 /// - Pending: acknowledge that fd 0 is no longer parsed, then buffer raw bytes. The app spawns ssh
 ///   on that ack, so anything typed in between is the user's and is handed to the session once it
 ///   exists.
-/// - Active: write every raw byte to the session, and poll the window size, because crossterm
-///   reports no resize while nothing parses fd 0.
+/// - Active: write every raw byte to the session, and poll the window size, because the raw read
+///   watches fd 0 alone.
 /// - Handshake: identify the terminal that just attached and report it, then go idle. The probe
 ///   reads raw fd 0, so it belongs on this thread and nowhere else.
 ///
@@ -579,14 +573,13 @@ fn forward_input(
                         Ok(IdleWake::Slot) => continue,
                         Ok(IdleWake::Input) => {},
                         Ok(IdleWake::Resize) => {
-                            let forwarded = forward_resize(
-                                event_tx,
-                                cell_pixels_tx,
-                                &mut poll,
-                                &mut read,
-                                &mut winsize,
-                            );
-                            if !forwarded {
+                            if let Some(ws) = winsize()
+                                && !forward_event(
+                                    event_tx,
+                                    cell_pixels_tx,
+                                    Event::Resize(ws.ws_col, ws.ws_row),
+                                )
+                            {
                                 return;
                             }
                             continue;
@@ -663,10 +656,9 @@ fn forward_input(
 /// No timeout, so an idle session costs no wakes at all, and an arm is seen the
 /// moment the app writes its byte rather than up to a poll interval later.
 ///
-/// `winch` is the read end of [`resize_signal_pipe`]. The kernel delivers
-/// SIGWINCH to one thread of the process, and rarely to this one, so the signal
-/// alone leaves this wait parked. The byte its handler writes ends it. A signal
-/// that does interrupt the wait reads as input.
+/// `winch` is the read end of [`resize_signal_pipe`]. Every thread blocks
+/// SIGWINCH and that pipe's thread takes it, so only the byte it writes ends
+/// the wait. Another signal that interrupts the wait reads as input.
 ///
 /// The pipes are checked ahead of fd 0, so a wake that has one of them ready
 /// reports that one whatever fd 0 holds.
@@ -714,14 +706,27 @@ fn wait_idle(wake: &PipeReader, winch: &UnixStream) -> io::Result<IdleWake> {
     Ok(IdleWake::Input)
 }
 
-/// Register a socket that receives a byte on every SIGWINCH, and return its
-/// read end for [`wait_idle`].
+/// Start the thread that takes SIGWINCH, and return the read end of the socket
+/// it writes one byte on per signal, for [`wait_idle`].
 ///
-/// The registration chains beside crossterm's own through signal-hook's
-/// registry, so crossterm still reports every resize.
+/// One thread per process, because [`spawn`] runs once. The thread feeds the
+/// pipe during the handshake too, before crossterm's first read. It ends on the
+/// first signal after the reader drops, when its write fails.
 fn resize_signal_pipe() -> io::Result<UnixStream> {
-    let (reader, writer) = UnixStream::pair()?;
-    pipe::register(libc::SIGWINCH, writer)?;
+    let (reader, mut writer) = UnixStream::pair()?;
+
+    thread::Builder::new()
+        .name("winch".to_owned())
+        .spawn(move || {
+            // sigwait needs the signal blocked on the calling thread. The block
+            // here keeps that true for a caller of `spawn` that did not block
+            // it in main.
+            if tty::block_resize_signal().is_err() {
+                return;
+            }
+            while tty::wait_resize_signal().is_ok() && writer.write_all(&[0]).is_ok() {}
+        })?;
+
     Ok(reader)
 }
 
@@ -741,59 +746,6 @@ fn forward_event(
         let _ = cell_pixels_tx.send(tty_cell_pixels());
     }
     event_tx.send(event).is_ok()
-}
-
-/// Forward crossterm's report of the resize that woke the idle wait, and every
-/// event it returns ahead of that report.
-///
-/// crossterm reads a resize from a signal pipe of its own, and its reader drops
-/// the tty's readiness when that pipe and fd 0 turn ready in one wake. It
-/// returns the resize and leaves the key bytes unread until more input arrives.
-/// Taking the report as soon as the signal lands keeps the two apart.
-///
-/// A report that does not come within [`RESIZE_DRAIN`] went out earlier, was
-/// for a signal from before crossterm started watching, or was lost to a key
-/// that shared its wake. The window's own size goes out then, so the app lays
-/// out against the grid it has in every case.
-///
-/// Returns false when a read fails or the app is gone.
-fn forward_resize(
-    event_tx: &UnboundedSender<Event>,
-    cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
-    poll: &mut impl FnMut(Duration) -> io::Result<bool>,
-    read: &mut impl FnMut() -> io::Result<Event>,
-    winsize: &mut impl FnMut() -> Option<libc::winsize>,
-) -> bool {
-    // FIXME: A key that lands between the signal and crossterm's poll below
-    // still shares the resize's wake, and it waits for the next input.
-    let deadline = Instant::now() + RESIZE_DRAIN;
-    loop {
-        match poll(deadline.saturating_duration_since(Instant::now())) {
-            Ok(true) => {},
-            Ok(false) => break,
-            Err(_) => return false,
-        }
-        let Ok(event) = read() else {
-            return false;
-        };
-
-        let reported = matches!(event, Event::Resize(..));
-        if !forward_event(event_tx, cell_pixels_tx, event) {
-            return false;
-        }
-        if reported {
-            return true;
-        }
-    }
-
-    match winsize() {
-        Some(ws) => forward_event(
-            event_tx,
-            cell_pixels_tx,
-            Event::Resize(ws.ws_col, ws.ws_row),
-        ),
-        None => true,
-    }
 }
 
 /// Write `first`, then every APC byte batch already queued on `apc_rx`, to
@@ -1127,9 +1079,9 @@ mod tests {
         );
     }
 
-    /// The kernel hands SIGWINCH to one thread of the process, and rarely to
-    /// the input thread, so the byte the handler writes is what ends an idle
-    /// wait. A burst of signals ends one wait, not one wait each.
+    /// Every thread blocks SIGWINCH and the resize pipe's thread takes it, so
+    /// the byte that thread writes is what ends an idle wait. A burst of
+    /// signals ends one wait, not one wait each.
     #[test]
     fn an_idle_wait_ends_on_the_resize_pipe_and_drains_it() {
         let (slot, _ack_rx) = PassthroughSlot::new();
@@ -1144,18 +1096,19 @@ mod tests {
         );
     }
 
-    /// Run one idle pass that a resize ends, with `held` the events crossterm
-    /// has for it, and return what reached the app.
+    /// Run one idle pass that a resize ends, with `arriving` the events
+    /// crossterm holds once the resize wakes the pass, and return what reached
+    /// the app.
     ///
     /// The zero-wait poll finds nothing, so the pass parks and the resize wakes
     /// it. The next wait ends the loop.
-    fn after_a_resize_wake(held: Vec<Event>) -> Vec<Event> {
+    fn after_a_resize_wake(arriving: Vec<Event>) -> Vec<Event> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stoatty_tx, _stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
         let (slot, _ack_rx) = PassthroughSlot::new();
-        let held = RefCell::new(VecDeque::from(held));
-        let mut wakes = [IdleWake::Resize].into_iter();
+        let held = RefCell::new(VecDeque::new());
+        let mut arriving = Some(arriving);
         let eof = || io::Error::from(io::ErrorKind::UnexpectedEof);
 
         forward_input(
@@ -1165,7 +1118,7 @@ mod tests {
                 stoatty_tx: &stoatty_tx,
                 slot: &slot,
             },
-            |wait| Ok(!wait.is_zero() && !held.borrow().is_empty()),
+            |_| Ok(!held.borrow().is_empty()),
             || held.borrow_mut().pop_front().ok_or_else(eof),
             |_, _| Ok(0),
             || {
@@ -1177,7 +1130,11 @@ mod tests {
                 })
             },
             || (None, Vec::new()),
-            || wakes.next().ok_or_else(eof),
+            || {
+                let events = arriving.take().ok_or_else(eof)?;
+                held.borrow_mut().extend(events);
+                Ok(IdleWake::Resize)
+            },
         );
 
         let mut got = Vec::new();
@@ -1187,28 +1144,24 @@ mod tests {
         got
     }
 
-    /// crossterm reads a resize from a signal pipe of its own, and it drops the
-    /// tty's readiness when a key turns ready in the same wake, which leaves the
-    /// key unread until more input comes. A resize wake takes crossterm's
-    /// report at once, so the report never waits for a key to pair with.
+    /// crossterm never reports a resize, since the process takes SIGWINCH
+    /// itself, so a resize wake sends the window's own size. Input that
+    /// crossterm already holds follows on the next turn.
     #[test]
-    fn a_resize_wake_forwards_crossterm_s_report_of_it() {
+    fn a_resize_wake_sends_the_window_size_ahead_of_held_input() {
         let key = Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        let reported = Event::Resize(96, 14);
 
         assert_eq!(
             [
-                after_a_resize_wake(vec![reported.clone()]),
-                after_a_resize_wake(vec![key.clone(), reported.clone()]),
+                after_a_resize_wake(vec![key.clone()]),
                 after_a_resize_wake(Vec::new()),
             ],
             [
-                vec![reported.clone()],
-                vec![key, reported],
-                vec![Event::Resize(90, 10)],
+                vec![Event::Resize(90, 10), key],
+                vec![Event::Resize(90, 10)]
             ],
-            "the report alone, then a key crossterm read first ahead of it, then \
-             the window's own size when crossterm has no report",
+            "the window's size, then a key crossterm holds, and the size alone \
+             when crossterm holds nothing",
         );
     }
 

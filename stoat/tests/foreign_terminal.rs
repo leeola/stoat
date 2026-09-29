@@ -13,8 +13,8 @@
 //! the layers composing in a real process. A session that never hears from a
 //! stoatty must put nothing but its detection probe on the wire, however the
 //! handshake, the emit gate, and the render branches each behave in isolation.
-//! And input after a resize depends on which thread the kernel hands the signal
-//! to, which no unit test controls.
+//! And input after a resize depends on the real binary, which blocks SIGWINCH
+//! on every thread and takes it on one. No unit test controls that.
 
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::{
@@ -286,12 +286,11 @@ fn a_foreign_terminal_receives_nothing_but_the_hello_probe() {
 /// A resize repaints the screen on its own, and a key typed after it reaches the
 /// app on its own, each with no later key to carry it.
 ///
-/// The kernel hands SIGWINCH to one thread of the process, and rarely to the
-/// input thread. crossterm reads the resize from a signal pipe of its own, and
-/// it drops the tty's readiness when that pipe and a key turn ready in one
-/// wake. So the input thread has to take each resize before a key arrives. The
-/// cursor position at the right end of the bar shows the repaint, and the
-/// follow toggle's report shows the key.
+/// The process blocks SIGWINCH on every thread, and one thread takes it and
+/// writes the input thread's resize pipe. crossterm never sees the signal, so a
+/// key that turns ready with a resize reads like any other. The cursor position
+/// at the right end of the bar shows the repaint, and the follow toggle's
+/// report shows the key.
 #[test]
 fn a_resize_and_the_key_after_it_land_without_another_key() {
     let mut session = Session::start(120, 40);
@@ -322,9 +321,9 @@ fn a_resize_and_the_key_after_it_land_without_another_key() {
 /// screen once the session starts reading.
 ///
 /// A tiling window manager resizes a new terminal as it opens, so the first
-/// resize often lands inside the handshake. crossterm starts watching for a
-/// resize only on its first read, which comes after, so the session's own pipe
-/// is what keeps this one.
+/// resize often lands inside the handshake. The thread that takes SIGWINCH
+/// writes the input thread's pipe during the handshake too, and the byte waits
+/// there until the session starts reading.
 #[test]
 fn a_resize_during_the_handshake_repaints_after_it() {
     let mut session = Session::spawn(120, 40);
