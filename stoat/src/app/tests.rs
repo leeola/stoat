@@ -2238,7 +2238,7 @@ fn index_build_watches_the_repo_root_off_the_render_thread() {
 }
 
 #[test]
-fn persistence_disabled_index_build_registers_no_watch() {
+fn a_persistence_disabled_index_build_still_watches_the_repo_root() {
     use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
 
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
@@ -2263,8 +2263,8 @@ fn persistence_disabled_index_build_registers_no_watch() {
     scheduler.run_until_parked();
 
     assert!(
-        !watcher.is_watching(&git_root),
-        "a persistence-disabled build registers no fs-watch"
+        watcher.is_watching(&git_root),
+        "the watch reads no state, so disabled persistence keeps it"
     );
 }
 

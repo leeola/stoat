@@ -3999,17 +3999,19 @@ impl Stoat {
             return;
         }
         let index_dir = self.index_dir_for_build(&git_root);
-        if !self.persistence_disabled {
-            // The walk reads the tree, which is what blocks the runtime thread
-            // before the first frame on a large repo. Run it on the blocking
-            // pool so startup stays interactive.
-            let watcher = self.fs_watch_host.clone();
-            let fs = self.fs_host.clone();
-            let root = git_root.clone();
-            self.executor
-                .spawn_blocking(move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &root))
-                .detach();
-        }
+
+        // The walk reads the tree, which is what blocks the runtime thread
+        // before the first frame on a large repo. Run it on the blocking
+        // pool so startup stays interactive.
+        self.executor
+            .spawn_blocking({
+                let watcher = self.fs_watch_host.clone();
+                let fs = self.fs_host.clone();
+                let root = git_root.clone();
+                move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &root)
+            })
+            .detach();
+
         let handles = crate::code_index::build::IndexBuild {
             fs: self.fs_host.clone(),
             languages: self.language_registry.clone(),
