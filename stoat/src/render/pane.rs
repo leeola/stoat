@@ -961,6 +961,12 @@ fn status_segments(
                 right_anchor = start;
             }
         }
+        // A status message answers what the reader just did and expires after a
+        // few seconds, while the staged summary stays on the bar. The summary
+        // takes a place only where the room left of it holds the whole message,
+        // because a cut drops the message's tail, such as the on or off of a
+        // toggle report.
+        let message_chars = frame.status_message.map_or(0, |m| m.chars().count());
         if let Some(text) = focused_staged_label(
             frame.diff_base,
             frame.repo_change_counts,
@@ -969,7 +975,7 @@ fn status_segments(
         ) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
-            if start >= cursor {
+            if start >= cursor && usize::from(start - cursor) >= message_chars {
                 right.push((text, base_style));
                 right_anchor = start;
             }
@@ -1514,7 +1520,7 @@ fn render_image_pane(
 mod tests {
     use super::{diff_base_lead, focused_staged_label, status_filename};
     use crate::{
-        action_handlers::dispatch,
+        action_handlers::{dispatch, focused_editor_mut},
         agent_status::{AgentHookEvent, AgentStatus},
         buffer::{BufferId, TextBuffer},
         editor_state::EditorState,
@@ -2166,6 +2172,42 @@ mod tests {
                 .contains("repo 1 staged / 1 unstaged · file 1/1"),
             "statusline reports the repo's files and the focused file's hunks:\n{rendered}"
         );
+    }
+
+    /// A status message reports what the reader just did and leaves after a
+    /// few seconds, while the staged summary stays. So the summary gives way
+    /// while a message it leaves no room for is up. The two follow reports
+    /// differ only in their last word, which a cut to the leftover room drops.
+    #[test]
+    fn the_staged_summary_gives_way_to_a_message_it_leaves_no_room_for() {
+        for stoatty in [true, false] {
+            let mut h = crate::test_harness::TestHarness::with_size(94, 12);
+            h.stoat.stoatty = stoatty;
+            h.stage_index_scenario(
+                "/repo",
+                &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
+            );
+            h.stoat.set_diff_warm_auto(true);
+            h.open_file(Path::new("/repo/f.txt"));
+            h.settle_diff_jobs();
+            focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .set_diff_view(true);
+
+            let mut bar = |message: &str| {
+                h.stoat.set_status(message);
+                let row = bar_row(&h.render_composited()).replace('─', " ");
+                row.split_whitespace().collect::<Vec<_>>().join(" ")
+            };
+            assert_eq!(
+                [bar("saved"), bar("follow changes off")],
+                [
+                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · hunk -/2 1:1",
+                    "NOR repo diff f.txt follow changes off 1:1",
+                ],
+                "stoatty {stoatty}",
+            );
+        }
     }
 
     /// Recording takes every keypress until it is toggled off, and the status
