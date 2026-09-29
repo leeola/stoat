@@ -166,6 +166,9 @@ impl LiveHarness {
         let scheduler = Arc::new(TokioScheduler::new(rt.handle().clone()));
 
         let mut stoat = Stoat::new(scheduler.executor(), settings, root.to_path_buf());
+        // The harness roots at a temporary repository, so a saved session of it
+        // belongs to nobody.
+        stoat.persistence_disabled = true;
         stoat.set_lsp_auto_spawn(true);
         stoat.set_diff_warm_auto(true);
         match LocalFsWatcher::new() {
