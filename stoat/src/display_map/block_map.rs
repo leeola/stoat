@@ -1027,8 +1027,9 @@ impl BlockSnapshot {
     ///
     /// Counts the input rows the transforms consume before `display_row`. A
     /// block transform consumes no input, so a display row inside a block
-    /// returns the input rows before the block. With no soft-wrap or folds
-    /// active (the diff view's case) input rows equal buffer rows. Mirrors
+    /// returns the input rows before the block. Input rows are wrap rows, so a
+    /// soft-wrapped line counts once per row it wraps to, and only with no
+    /// soft-wrap or folds active do they equal buffer rows. Mirrors
     /// [`Self::classify_row`]'s seek.
     pub fn buffer_rows_above(&self, display_row: u32) -> u32 {
         let target = OutputRow(display_row + 1);

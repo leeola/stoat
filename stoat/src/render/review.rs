@@ -7,7 +7,7 @@ use crate::{
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus},
     display_map::{
         display_width, highlights::HighlightStyle, syntax_theme::DiffTheme, BlockRowKind,
-        CachedHighlightEndpoints, DisplaySnapshot, RowHighlightCursor,
+        CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot, RowHighlightCursor, WrapPoint,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -19,6 +19,7 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::{
+    cmp::Ordering,
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
 };
@@ -174,6 +175,10 @@ impl DiffDials {
 /// mirrors unchanged lines dimmed. Added and modified new lines leave it blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
 ///
+/// Both columns soft-wrap at the narrower one's width, which the caller sets on
+/// the display map. A continuation row carries text alone, with no number, no
+/// status glyph, and no base line of its own.
+///
 /// Lays its columns out per [`DiffLayout::DIFF_VIEW`]. When a `scene` is
 /// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
 /// components, otherwise it falls back to the ASCII gutter.
@@ -256,9 +261,17 @@ pub(crate) struct DiffRowState {
     /// every other status: an unchanged row mirrors its own base line by a
     /// different route, and an added one has no base row at all.
     pub(crate) paired: bool,
+    /// Whether this row is a soft-wrap continuation of the buffer row above.
+    ///
+    /// A continuation carries the row's text and nothing else: no line number,
+    /// no status glyph, and no base line of its own.
+    pub(crate) continuation: bool,
     /// Display-column ranges to mark, each with its kind and its
     /// [`crate::diff_map::ChangeSpan::prose`] flag. Empty for a row no hunk
     /// refines.
+    ///
+    /// Only the part of each span that falls on this display row, so a wrapped
+    /// line's rows each mark their own cells.
     pub(crate) change_spans: Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
 }
 
@@ -279,11 +292,16 @@ pub(crate) struct DiffRowCache {
 /// A change to any of these misses and rebuilds. The theme, the tints and the
 /// column geometry are deliberately absent, none of them reaching the state
 /// being cached.
+///
+/// The wrap version is separate from the map version because a width change
+/// moves no fold, yet it moves which rows are continuations and where each
+/// change span falls.
 fn diff_row_key(
     scroll_row: u32,
     visible: u32,
     buffer_version: u64,
     map_version: usize,
+    wrap_version: u64,
     diff_version: usize,
     paired: bool,
 ) -> u64 {
@@ -292,6 +310,7 @@ fn diff_row_key(
     visible.hash(&mut hasher);
     buffer_version.hash(&mut hasher);
     map_version.hash(&mut hasher);
+    wrap_version.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     paired.hash(&mut hasher);
     hasher.finish()
@@ -312,6 +331,7 @@ pub(crate) fn diff_row_states<'c>(
         rows.end - rows.start,
         snapshot.buffer_snapshot().version(),
         snapshot.version(),
+        snapshot.wrap_snapshot().version(),
         snapshot.diff_map().map_or(0, |dm| dm.version()),
         snapshot.pairs_modified_hunks(),
     );
@@ -340,6 +360,7 @@ fn build_diff_row_states(
                 status: DiffStatus::Unchanged,
                 staged: None,
                 paired: false,
+                continuation: false,
                 change_spans: Vec::new(),
             };
         };
@@ -348,6 +369,7 @@ fn build_diff_row_states(
         // inside one that names none has nothing to bar.
         let marked = write_buffer_row_change_spans(
             snapshot,
+            display_row,
             buffer_row,
             &mut hunk_scratch,
             &mut change_spans,
@@ -356,6 +378,7 @@ fn build_diff_row_states(
         DiffRowState {
             kind,
             status,
+            continuation: snapshot.is_wrap_continuation(display_row),
             paired: status == DiffStatus::Modified
                 && paired_with_base(snapshot, buffer_row, &mut hunk_scratch),
             staged: marked
@@ -668,24 +691,32 @@ pub(crate) fn paint_diff_rows(
                 base_line += 1;
             },
             DiffRowKind::BufferRow { buffer_row } => {
-                while let Some(&(row, lines)) = seams.get(seam_cursor)
-                    && row <= buffer_row
-                {
-                    if row == buffer_row {
-                        base_line += lines;
+                // A continuation belongs to the line its first row numbered and
+                // counted, so it paints text alone. `base_line_at` counts a
+                // continuation top row's seams, so the walk skips them here.
+                let continuation = row_state.continuation;
+                let last_row = display_row + 1 >= total_rows
+                    || !snapshot.is_wrap_continuation(display_row + 1);
+                if !continuation {
+                    while let Some(&(row, lines)) = seams.get(seam_cursor)
+                        && row <= buffer_row
+                    {
+                        if row == buffer_row {
+                            base_line += lines;
+                        }
+                        seam_cursor += 1;
                     }
-                    seam_cursor += 1;
+                    draw_diff_num(
+                        &mut rich,
+                        buf,
+                        &mut num_text,
+                        inner,
+                        right_num_x,
+                        y,
+                        buffer_row + 1,
+                        dim_style,
+                    );
                 }
-                draw_diff_num(
-                    &mut rich,
-                    buf,
-                    &mut num_text,
-                    inner,
-                    right_num_x,
-                    y,
-                    buffer_row + 1,
-                    dim_style,
-                );
                 let changes = &row_state.change_spans;
                 let staged = row_state.staged;
                 let status = row_state.status;
@@ -723,7 +754,10 @@ pub(crate) fn paint_diff_rows(
                     tint_row,
                     &mut row_cursor,
                 );
+                // The chip follows the line's text, which a wrapped line ends
+                // on its last row.
                 if status == DiffStatus::Moved
+                    && last_row
                     && let Some((path, line)) =
                         move_chip_source(snapshot, buffer_row, &mut hunk_scratch)
                 {
@@ -740,7 +774,7 @@ pub(crate) fn paint_diff_rows(
                         theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC),
                     );
                 }
-                if let Some(staged) = staged {
+                if !continuation && let Some(staged) = staged {
                     let change_scope = match status {
                         DiffStatus::Added => s::DIFF_ADDED,
                         DiffStatus::Modified => s::DIFF_MODIFIED,
@@ -763,37 +797,53 @@ pub(crate) fn paint_diff_rows(
                 // replaced, painted as a removed row rather than a mirror. A
                 // row past its hunk's base rows has nothing on the left.
                 if status == DiffStatus::Unchanged {
+                    // The line's first row already stepped past its base line,
+                    // so a continuation mirrors the one before.
+                    let line_base = base_line.saturating_sub(u32::from(continuation));
                     // The base line's own bytes, which its token spans index.
                     // The display line carries the live row's inlay hints and
                     // expanded tabs, which belong to the right column alone.
-                    let text = match snapshot
+                    let (text, window, indent) = match snapshot
                         .diff_map()
-                        .and_then(|dm| dm.base_line_text(base_line))
+                        .and_then(|dm| dm.base_line_text(line_base))
                     {
-                        Some(text) => text,
+                        Some(text) => (
+                            text,
+                            mirror_window(
+                                snapshot,
+                                display_row,
+                                continuation,
+                                last_row,
+                                text.len(),
+                            ),
+                            snapshot.soft_wrap_indent(display_row) as usize,
+                        ),
                         None => {
                             line_buf.clear();
                             snapshot.write_display_line(&mut line_buf, display_row);
-                            line_buf.as_str()
+                            (line_buf.as_str(), 0..line_buf.len(), 0)
                         },
                     };
-                    draw_diff_num(
-                        &mut rich,
+                    if !continuation {
+                        draw_diff_num(
+                            &mut rich,
+                            buf,
+                            &mut num_text,
+                            inner,
+                            left_num_x,
+                            y,
+                            line_base + 1,
+                            dim_style,
+                        );
+                    }
+                    let token_spans = base_token_spans(snapshot, line_base);
+                    paint_base_segment(
                         buf,
-                        &mut num_text,
-                        inner,
-                        left_num_x,
-                        y,
-                        base_line + 1,
-                        dim_style,
-                    );
-                    let token_spans = base_token_spans(snapshot, base_line);
-                    paint_base_row(
-                        buf,
-                        left_text_x,
+                        left_text_x + indent as u16,
                         y,
                         text,
-                        left_content_w,
+                        window,
+                        left_content_w.saturating_sub(indent),
                         snapshot.tab_snapshot().tab_size(),
                         token_spans,
                         dim_style,
@@ -804,8 +854,10 @@ pub(crate) fn paint_diff_rows(
                         dials,
                         None,
                     );
-                    base_line += 1;
-                } else if row_state.paired {
+                    if !continuation {
+                        base_line += 1;
+                    }
+                } else if row_state.paired && !continuation {
                     let text = snapshot
                         .diff_map()
                         .and_then(|dm| dm.base_line_text(base_line))
@@ -1144,6 +1196,50 @@ pub(crate) fn paint_base_row(
     dials: DiffDials,
     tint_row: Option<Color>,
 ) {
+    paint_base_segment(
+        buf,
+        start_x,
+        y,
+        text,
+        0..text.len(),
+        max_cols,
+        tab_size,
+        token_spans,
+        fallback,
+        change_spans,
+        tints,
+        soften_row,
+        soften_gaps,
+        dials,
+        tint_row,
+    );
+}
+
+/// Paint the bytes `window` of base line `text` into a column row, styled as
+/// [`paint_base_row`] styles a whole line.
+///
+/// A soft-wrapped line shows one segment per row. Tabs expand to stops counted
+/// from the line's start rather than the window's, so a segment keeps the
+/// columns the whole line gives its tabs, as the right column's segments do.
+/// `token_spans` and `change_spans` index the whole line.
+#[allow(clippy::too_many_arguments)]
+fn paint_base_segment(
+    buf: &mut Buffer,
+    start_x: u16,
+    y: u16,
+    text: &str,
+    window: std::ops::Range<usize>,
+    max_cols: usize,
+    tab_size: u32,
+    token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
+    fallback: Style,
+    change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
+    tints: Option<&DiffTints>,
+    soften_row: Option<[u8; 3]>,
+    soften_gaps: Option<[u8; 3]>,
+    dials: DiffDials,
+    tint_row: Option<Color>,
+) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
         "token_spans must be start-sorted for the monotonic cursor"
@@ -1222,12 +1318,17 @@ pub(crate) fn paint_base_row(
     };
 
     if !text.contains('\t') {
-        paint_style_runs(buf, start_x, y, text, max_cols, style_at);
+        let start = window.start;
+        paint_style_runs(buf, start_x, y, &text[window], max_cols, |byte_idx| {
+            style_at(start + byte_idx)
+        });
         return;
     }
     let (expanded, source) = expand_tabs(text, tab_size);
-    paint_style_runs(buf, start_x, y, &expanded, max_cols, |byte_idx| {
-        style_at(source[byte_idx])
+    let from = source.partition_point(|&byte| byte < window.start);
+    let to = source.partition_point(|&byte| byte < window.end);
+    paint_style_runs(buf, start_x, y, &expanded[from..to], max_cols, |byte_idx| {
+        style_at(source[from + byte_idx])
     });
 }
 
@@ -1397,25 +1498,76 @@ fn paint_base_side(
     }
 }
 
-/// Base-file line number at the top of the viewport (display row `scroll_row`).
+/// Base lines the rows above the viewport step past (display row `scroll_row`).
 ///
-/// Every display row above `scroll_row` is base-present (a deleted-base block
-/// row or an unchanged buffer row) except changed buffer rows, which have no
-/// base line. So the base line count is `scroll_row` minus the changed buffer
-/// rows above, which the diff map answers in one seek rather than a per-row
-/// walk from the document start.
+/// A block row steps one base line, and so does the first row of an unchanged
+/// line and of a paired modified one. A changed line's first row and every
+/// soft-wrap continuation step none. So the count is `scroll_row` minus the
+/// continuations and the changed first rows above, which the wrap map and the
+/// diff map answer in a seek each rather than a per-row walk from the top.
+///
+/// A continuation top row counts its own line's first row, which is above it.
+/// That is the base line the row mirrors, one less than the value returned.
 ///
 /// A moved-away seam removed base lines that take no row at all, so the
 /// seams above the top add their lines on top of that count.
+///
+/// The wrap map's rows map to buffer rows because the diff view holds no
+/// folds, which is what makes a tab row a buffer row.
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
-    let buffer_rows_above = snapshot.buffer_rows_above(scroll_row);
+    let wrap_rows_above = snapshot.buffer_rows_above(scroll_row);
+    // One past the line of the last wrap row above, which counts a continuation
+    // top row's own line and never asks for a wrap row past the end.
+    let lines_above = match wrap_rows_above {
+        0 => 0,
+        rows => {
+            snapshot
+                .wrap_snapshot()
+                .to_tab_point(WrapPoint::new(rows - 1, 0))
+                .row()
+                + 1
+        },
+    };
+    let continuations = wrap_rows_above - lines_above;
     let (changed, seams) = snapshot.diff_map().map_or((0, 0), |dm| {
         (
-            dm.rows_without_base_before(buffer_rows_above, snapshot.pairs_modified_hunks()),
-            dm.seam_base_lines_in(0..buffer_rows_above),
+            dm.rows_without_base_before(lines_above, snapshot.pairs_modified_hunks()),
+            dm.seam_base_lines_in(0..lines_above),
         )
     });
-    scroll_row.saturating_sub(changed) + seams
+    scroll_row.saturating_sub(changed + continuations) + seams
+}
+
+/// Byte span of its buffer line that `display_row` shows.
+///
+/// An unchanged row's base line and live line are the same bytes, so the left
+/// column mirrors a row by painting the bytes the right column shows on it. A
+/// row whose line does not wrap answers the whole line.
+///
+/// `continuation` is whether the row continues the one above, and `last_row`
+/// whether no row continues it below.
+fn mirror_window(
+    snapshot: &DisplaySnapshot,
+    display_row: u32,
+    continuation: bool,
+    last_row: bool,
+    line_len: usize,
+) -> std::ops::Range<usize> {
+    let text_start = |row: u32| {
+        snapshot
+            .display_to_buffer(DisplayPoint::new(row, snapshot.soft_wrap_indent(row)))
+            .map_or(0, |point| point.column as usize)
+            .min(line_len)
+    };
+    let start = match continuation {
+        true => text_start(display_row),
+        false => 0,
+    };
+    let end = match last_row {
+        true => line_len,
+        false => text_start(display_row + 1),
+    };
+    start..end.max(start)
 }
 
 /// Paint one display row's syntax-highlighted chunks into a column starting at
@@ -1558,13 +1710,19 @@ pub(crate) fn paint_highlighted_row(
     }
 }
 
-/// Write into `out` the display-column ranges to wash on buffer `buffer_row` in
-/// the diff view's right column, each tagged with its [`ChangeKind`], taken from
-/// the buffer spans of any hunk covering the row.
+/// Write into `out` the display-column ranges to wash on `display_row`, one of
+/// the rows buffer `buffer_row` shows in the diff view's right column, each
+/// tagged with its [`ChangeKind`], taken from the buffer spans of any hunk
+/// covering the row.
 ///
 /// The token detail's byte ranges are absolute buffer offsets. Each is clamped
 /// to the row and mapped through [`DisplaySnapshot::buffer_to_display`], so tab
 /// expansion in the painted chunks stays aligned.
+///
+/// A soft-wrapped line spreads a span over several display rows, so each row
+/// takes only its own part of it. A part that continues from the row above
+/// starts past the continuation's indent, and one that runs on below ends at
+/// the row's end.
 ///
 /// Both vectors belong to the caller and are reused across the rows of one
 /// paint, so each is cleared before being filled. A row no hunk refines leaves
@@ -1576,6 +1734,7 @@ pub(crate) fn paint_highlighted_row(
 /// than `out` being non-empty, so the bars and the gutter cannot disagree.
 fn write_buffer_row_change_spans<'a>(
     snapshot: &'a DisplaySnapshot,
+    display_row: u32,
     buffer_row: u32,
     hunks: &mut Vec<&'a DiffHunk>,
     out: &mut Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
@@ -1598,6 +1757,8 @@ fn write_buffer_row_change_spans<'a>(
     let rope = buffer_snapshot.rope();
     let line_start = rope.point_to_offset(Point::new(buffer_row, 0));
     let line_end = line_start + rope.line_len(buffer_row) as usize;
+    let row_start = snapshot.soft_wrap_indent(display_row) as usize;
+    let row_end = snapshot.line_len(display_row) as usize;
 
     for hunk in hunks.iter() {
         let Some(detail) = &hunk.token_detail else {
@@ -1609,11 +1770,21 @@ fn write_buffer_row_change_spans<'a>(
             if start >= end {
                 continue;
             }
-            let start_col = snapshot
-                .buffer_to_display(rope.offset_to_point(start))
-                .column as usize;
-            let end_col = snapshot.buffer_to_display(rope.offset_to_point(end)).column as usize;
-            out.push((start_col..end_col, span.kind.clone(), span.prose));
+            let start = snapshot.buffer_to_display(rope.offset_to_point(start));
+            let end = snapshot.buffer_to_display(rope.offset_to_point(end));
+            let from = match start.row.cmp(&display_row) {
+                Ordering::Less => row_start,
+                Ordering::Equal => start.column as usize,
+                Ordering::Greater => continue,
+            };
+            let to = match end.row.cmp(&display_row) {
+                Ordering::Less => continue,
+                Ordering::Equal => end.column as usize,
+                Ordering::Greater => row_end,
+            };
+            if from < to {
+                out.push((from..to, span.kind.clone(), span.prose));
+            }
         }
     }
     // Spans arrive per hunk and are not otherwise ordered. Start-sorting them
@@ -2042,13 +2213,14 @@ mod tests {
         // one, so they are checked where the key is formed. Each is in it
         // because the rows go stale against it, and a key that dropped one would
         // keep painting the state from before that change.
-        let base = diff_row_key(3, 20, 7, 11, 13, true);
+        let base = diff_row_key(3, 20, 7, 11, 17, 13, true);
         for moved in [
-            diff_row_key(4, 20, 7, 11, 13, true),
-            diff_row_key(3, 21, 7, 11, 13, true),
-            diff_row_key(3, 20, 8, 11, 13, true),
-            diff_row_key(3, 20, 7, 12, 13, true),
-            diff_row_key(3, 20, 7, 11, 14, true),
+            diff_row_key(4, 20, 7, 11, 17, 13, true),
+            diff_row_key(3, 21, 7, 11, 17, 13, true),
+            diff_row_key(3, 20, 8, 11, 17, 13, true),
+            diff_row_key(3, 20, 7, 12, 17, 13, true),
+            diff_row_key(3, 20, 7, 11, 18, 13, true),
+            diff_row_key(3, 20, 7, 11, 17, 14, true),
         ] {
             assert_ne!(moved, base, "an input moved without changing the key");
         }
@@ -2060,10 +2232,14 @@ mod tests {
         // line when the left column paints one on it: every block row, every
         // unchanged row, and, where the layout pairs, a modified row still
         // inside its hunk's base text. A moved-away seam's lines come before the
-        // buffer row it sits at, with no row of their own.
+        // buffer row it sits at, with no row of their own. A soft-wrap
+        // continuation belongs to the line its first row counted.
         fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             let mut base_line = 0;
             for row in 0..scroll_row {
+                if snapshot.is_wrap_continuation(row) {
+                    continue;
+                }
                 match snapshot.classify_row(row) {
                     BlockRowKind::Block { .. } => base_line += 1,
                     BlockRowKind::BufferRow { buffer_row } => {
@@ -2104,25 +2280,33 @@ mod tests {
         // Each fixture is (base HEAD, buffer). Together they span a mid-file
         // modification with deletion, a deletion at the top, consecutive changes,
         // and a deletion at the tail, so the display carries added, deleted, and
-        // modified hunks with deleted-base block rows spliced in.
+        // modified hunks with deleted-base block rows spliced in. The last one's
+        // unchanged, modified, and added lines outrun the 20-column wrap width.
         let fixtures = [
             ("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nB\nc\nd\nINS\ng\nh\n"),
             ("x\ny\nz\nw\n", "z\nw\n"),
             ("1\n2\n3\n4\n5\n", "1\nTWO\nTHREE\n5\n"),
             ("p\nq\nr\ns\nt\n", "p\nq\nr\n"),
+            (
+                "keep\nthe quick brown fox jumps over the dog\nold text long enough to wrap\ngone\ntail\n",
+                "keep\nthe quick brown fox jumps over the dog\nnew text long enough to wrap around\ntail\nan added line long enough to wrap\n",
+            ),
         ];
         // Both layouts, since pairing changes which rows carry a base line and
         // which of them block.
         let mut saw_blocks = false;
         let mut saw_pairs = false;
+        let mut saw_wraps = false;
         for (base, text) in fixtures {
             let mut stacked_rows = 0;
             for pair in [false, true] {
                 let mut editor = diff_editor(base, text);
                 editor.display_map.set_pair_modified_hunks(pair);
+                editor.display_map.set_wrap_width(Some(20));
                 let snapshot = editor.display_map.snapshot();
                 let total = snapshot.line_count();
                 saw_blocks |= total > snapshot.buffer_line_count();
+                saw_wraps |= (0..total).any(|row| snapshot.is_wrap_continuation(row));
                 match pair {
                     false => stacked_rows = total,
                     // Pairing puts a base row beside a live one rather than on a
@@ -2137,6 +2321,10 @@ mod tests {
             "fixtures must splice deleted-base block rows to exercise the block case"
         );
         assert!(saw_pairs, "and pair rows to exercise the paired case");
+        assert!(
+            saw_wraps,
+            "and wrap lines to exercise the continuation case"
+        );
 
         // No plain-text diff produces a move, so its seam and its moved-to row
         // come from a hand-built map.
@@ -2821,9 +3009,19 @@ mod tests {
     /// Width 120 stays above the two-column threshold. Left text spans cols 7..59,
     /// the separator sits at col 59, right text spans cols 67..120.
     fn diff_harness(base: &str, buffer: &str) -> crate::test_harness::TestHarness {
+        diff_harness_sized(120, base, buffer)
+    }
+
+    /// [`diff_harness`] at `width` columns. Below [`DIFF_TWO_COLUMN_MIN`] both
+    /// sides share one column.
+    fn diff_harness_sized(
+        width: u16,
+        base: &str,
+        buffer: &str,
+    ) -> crate::test_harness::TestHarness {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
 
-        let mut h = TestHarness::with_size(120, 10);
+        let mut h = TestHarness::with_size(width, 10);
         // The wash scans below address fixed side-by-side columns, so the pane must
         // span the full width. The single-minimap strip would reserve the right
         // edge and shift the columns.
@@ -2843,6 +3041,184 @@ mod tests {
     fn line_text(buf: &Buffer, y: u16, cols: std::ops::Range<u16>) -> String {
         cols.map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
             .collect()
+    }
+
+    /// The first row whose glyphs across `cols` start with `needle`.
+    fn row_holding(buf: &Buffer, cols: std::ops::Range<u16>, needle: &str) -> u16 {
+        (0..buf.area.height)
+            .find(|&y| line_text(buf, y, cols.clone()).starts_with(needle))
+            .unwrap_or_else(|| panic!("no row across {cols:?} starts with {needle:?}"))
+    }
+
+    /// `a` a's, a space, then `b` b's: a line that wraps after the space when
+    /// the a's and the space fit the width and the whole line does not.
+    fn long_line(a: usize, b: usize) -> String {
+        format!("{} {}", "a".repeat(a), "b".repeat(b))
+    }
+
+    /// Row `y`'s trimmed glyphs across each of `cols`.
+    fn cells<const N: usize>(buf: &Buffer, y: u16, cols: [std::ops::Range<u16>; N]) -> [String; N] {
+        cols.map(|cols| line_text(buf, y, cols).trim().to_string())
+    }
+
+    /// At width 120 the right column wraps at 51, the narrower side's width,
+    /// and the tail's row takes no line number.
+    #[test]
+    fn a_long_live_line_wraps_into_the_right_column() {
+        let h = diff_harness("keep\n", &format!("keep\n{}\n", long_line(45, 44)));
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        assert_eq!(
+            [y, y + 1].map(|y| cells(buf, y, [60..65, 68..120])),
+            [
+                ["2".to_string(), "a".repeat(45)],
+                [String::new(), "b".repeat(44)],
+            ],
+        );
+    }
+
+    #[test]
+    fn an_unchanged_long_line_mirrors_its_wrapped_segments() {
+        let long = long_line(45, 44);
+        let h = diff_harness(&format!("{long}\nold\n"), &format!("{long}\nnew\n"));
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        assert_eq!(
+            [y, y + 1].map(|y| cells(buf, y, [8..59, 68..120])),
+            [
+                ["a".repeat(45), "a".repeat(45)],
+                ["b".repeat(44), "b".repeat(44)],
+            ],
+            "each left row holds the segment the right row beside it holds",
+        );
+    }
+
+    #[test]
+    fn a_wrapped_row_keeps_the_base_numbers_in_step() {
+        let long = long_line(45, 44);
+        let h = diff_harness(&format!("{long}\nold\n"), &format!("{long}\nnew\n"));
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        assert_eq!(
+            (y..y + 3)
+                .map(|y| cells(buf, y, [0..5, 8..59]))
+                .collect::<Vec<_>>(),
+            [
+                ["1".to_string(), "a".repeat(45)],
+                [String::new(), "b".repeat(44)],
+                ["2".to_string(), "old".to_string()],
+            ],
+            "the continuation takes no base line, so the paired row reads line 2",
+        );
+    }
+
+    /// The underline dial marks every span cell on any theme, which makes the
+    /// span's cells readable off the grid.
+    #[test]
+    fn a_change_span_on_a_continuation_row_marks_only_its_own_cells() {
+        let a = "a".repeat(40);
+        let mut h = diff_harness(
+            &format!("// {a} one two three\n"),
+            &format!("// {a} one TWO three\n"),
+        );
+        h.stoat.diff_underline = true;
+        h.snapshot();
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, "TWO three");
+        let underlined = |y| {
+            (68..120)
+                .filter(|&x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            [underlined(y - 1), underlined(y)],
+            [vec![], vec![68, 69, 70]]
+        );
+    }
+
+    /// The right status column sits at x 65 at width 120.
+    #[test]
+    fn a_continuation_row_takes_no_status_bar() {
+        let long = long_line(45, 44);
+        let text = format!("keep\n{long}\n");
+        let mut editor = diff_editor_staged("keep\n", &text, &text);
+        editor.display_map.set_wrap_width(Some(51));
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            None,
+            DiffDials::shipped(),
+        );
+
+        assert_eq!(
+            (0..3).map(|y| buf[(65, y)].symbol()).collect::<Vec<_>>(),
+            [" ", "▎", " "],
+            "the added line's first row carries the bar and its continuation none",
+        );
+    }
+
+    #[test]
+    fn the_review_cursor_lands_on_the_wrapped_segment() {
+        let long = long_line(45, 44);
+        let mut editor = diff_editor(&format!("{long}\n"), &format!("{long}\n"));
+        editor.display_map.set_wrap_width(Some(51));
+        crate::test_harness::editor::place_cursor(&mut editor, 0, 50);
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            Some(&mut ApcScene::new()),
+            DiffDials::shipped(),
+        );
+        assert_eq!(
+            editor.cursor_screen_cell,
+            Some((72, 1)),
+            "byte 50 is the fifth cell of the continuation row",
+        );
+    }
+
+    #[test]
+    fn the_wrap_override_turns_the_diff_view_wrap_off() {
+        let mut h = diff_harness("keep\n", &format!("keep\n{}\ntail\n", long_line(45, 44)));
+        h.stoat.toggle_wrap();
+        h.snapshot();
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        assert_eq!(
+            [y, y + 1].map(|y| cells(buf, y, [60..65, 68..120])),
+            [
+                [
+                    "2".to_string(),
+                    format!("{} {}", "a".repeat(45), "b".repeat(6))
+                ],
+                ["3".to_string(), "tail".to_string()],
+            ],
+            "the line keeps one row, cut at the column edge",
+        );
+    }
+
+    /// At width 80 both sides share one column 72 cells wide.
+    #[test]
+    fn a_narrow_diff_view_wraps_at_its_single_column() {
+        let h = diff_harness_sized(80, "keep\n", &format!("keep\n{}\n", long_line(65, 24)));
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 8..80, &"a".repeat(65));
+        assert_eq!(
+            [y, y + 1].map(|y| cells(buf, y, [0..5, 8..80])),
+            [
+                ["2".to_string(), "a".repeat(65)],
+                [String::new(), "b".repeat(24)],
+            ],
+        );
     }
 
     /// The changed word is marked by everything around it receding, not by a
@@ -3432,14 +3808,14 @@ mod tests {
         let mut hunks = Vec::new();
         let mut spans = Vec::new();
 
-        write_buffer_row_change_spans(&snapshot, 1, &mut hunks, &mut spans);
+        write_buffer_row_change_spans(&snapshot, 1, 1, &mut hunks, &mut spans);
         assert_eq!(
             spans,
             vec![(0..2, ChangeKind::Replaced, false)],
             "the modified row reports the span covering its changed bytes",
         );
 
-        write_buffer_row_change_spans(&snapshot, 2, &mut hunks, &mut spans);
+        write_buffer_row_change_spans(&snapshot, 2, 2, &mut hunks, &mut spans);
         assert_eq!(
             spans,
             Vec::new(),
@@ -3535,6 +3911,39 @@ mod tests {
         assert!(
             row.contains("<- 5") && !row.contains(':'),
             "an intra-file moved row shows a path-less chip; got {row:?}"
+        );
+    }
+
+    /// At a wrap width of one, every line spans two rows, and the moved line
+    /// `bb` sits on rows 2 and 3.
+    #[test]
+    fn a_wrapped_moved_line_carries_its_chip_on_its_last_row() {
+        use structural_diff::{MoveSource, Side};
+
+        let mut editor = moved_editor(MoveSource {
+            buffer: None,
+            side: Side::Lhs,
+            byte_range: 0..0,
+            line_range: 4..5,
+        });
+        editor.display_map.set_wrap_width(Some(1));
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            None,
+            DiffDials::shipped(),
+        );
+
+        assert_eq!(
+            (0..area.height)
+                .filter(|&y| buffer_text(&buf, y).contains("<- 5"))
+                .collect::<Vec<_>>(),
+            [3],
         );
     }
 

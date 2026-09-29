@@ -14,7 +14,7 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         paint::{dim_rgb, style_rgb},
-        review::{render_diff_view, DiffDials},
+        review::{render_diff_view, DiffColumns, DiffDials, DiffLayout},
         undercurl::UndercurlBatch,
     },
 };
@@ -158,7 +158,15 @@ pub(crate) fn render_editor_with_overlay(
     editor.text_rect = None;
 
     if editor.diff_view {
-        editor.display_map.set_wrap_width(None);
+        // Both columns wrap at the narrower one, so a mirrored segment always
+        // fits the side that shows it.
+        let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+        let text_width = cols.left_content_w.min(cols.right_content_w) as u32;
+        editor.display_map.set_wrap_width(wrap_width_for(
+            editor.wrap_override.unwrap_or(wrap),
+            text_width,
+            wrap_column,
+        ));
         render_diff_view(editor, inner, fallback_style, theme, buf, scene, dials);
         return;
     }
@@ -195,12 +203,11 @@ pub(crate) fn render_editor_with_overlay(
     };
     let text_width = after_gutter.saturating_sub(minimap_cols);
     // A per-editor ToggleWrap override wins over the frame's configured mode.
-    let wrap_width = match editor.wrap_override.unwrap_or(wrap) {
-        WrapMode::None => Some(MAX_UNWRAPPED_COLUMNS),
-        WrapMode::EditorWidth => Some(u32::from(text_width).max(1)),
-        WrapMode::Bounded => Some(u32::from(text_width).max(1).min(wrap_column)),
-    };
-    editor.display_map.set_wrap_width(wrap_width);
+    editor.display_map.set_wrap_width(wrap_width_for(
+        editor.wrap_override.unwrap_or(wrap),
+        u32::from(text_width),
+        wrap_column,
+    ));
 
     let snapshot = editor.display_map.snapshot();
     let visible_rows = inner.height as u32;
@@ -761,6 +768,19 @@ pub(crate) fn render_editor_with_overlay(
                 buf[(x, y)].set_char(ch).set_style(label_style);
             }
         }
+    }
+}
+
+/// The wrap width `mode` gives a text area `text_width` columns wide.
+///
+/// [`WrapMode::Bounded`] caps the width at `wrap_column`. [`WrapMode::None`]
+/// still answers a width, [`MAX_UNWRAPPED_COLUMNS`], which keeps a huge line's
+/// rows bounded.
+fn wrap_width_for(mode: WrapMode, text_width: u32, wrap_column: u32) -> Option<u32> {
+    match mode {
+        WrapMode::None => Some(MAX_UNWRAPPED_COLUMNS),
+        WrapMode::EditorWidth => Some(text_width.max(1)),
+        WrapMode::Bounded => Some(text_width.max(1).min(wrap_column)),
     }
 }
 
