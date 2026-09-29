@@ -94,12 +94,16 @@ impl Session {
         cmd.cwd(&root);
         // Whatever launched the test may itself be running under stoatty. Every
         // marker of that has to go, or the child inherits a claim no one will
-        // honor.
+        // honor. The XDG overrides go too, so config, data, and state resolve
+        // under the scratch home.
         for key in [
             "STOATTY",
             "STOATTY_VERSION",
             "STOATTY_LOG_ID",
             "STOATTY_WINDOW_SOCKET",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
         ] {
             cmd.env_remove(key);
         }
