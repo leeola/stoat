@@ -7,7 +7,7 @@
 //! whatever the model currently holds.
 
 use crate::{
-    action_handlers::{self, commits::CommitStep, rebase::RebaseMove},
+    action_handlers::{self, commits::CommitStep, diff_wheel, rebase::RebaseMove},
     app::{
         modal_split_percent, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
@@ -1418,6 +1418,10 @@ pub(crate) fn handle_mouse_scroll(
 /// moves its glide target, so it reports no redraw -- the frame tick eases and
 /// renders, and a trackpad flick of ~100 events must not repaint per event. A
 /// run pane scrolls by whole notches, so its share accrues on the session.
+///
+/// The focused editor in the diff view goes through
+/// [`diff_wheel::scroll_or_jump`] instead. It scrolls until the change under the
+/// reader passes the jump line, and then walks to the next change.
 pub(crate) fn scroll_view_at(
     stoat: &mut Stoat,
     view: View,
@@ -1426,6 +1430,18 @@ pub(crate) fn scroll_view_at(
 ) -> UpdateEffect {
     match view {
         View::Editor(id) => {
+            let focused_diff = stoat
+                .focused_editor_ids()
+                .is_some_and(|(focused, _)| focused == id)
+                && stoat
+                    .active_workspace()
+                    .editors
+                    .get(id)
+                    .is_some_and(|editor| editor.diff_view);
+            if focused_diff {
+                return diff_wheel::scroll_or_jump(stoat, id, lines);
+            }
+
             let Some(editor) = stoat.active_workspace_mut().editors.get_mut(id) else {
                 return UpdateEffect::None;
             };

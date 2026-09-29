@@ -383,6 +383,20 @@ const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4
 /// notch cadence runs near 150ms, so every intended gesture still lands.
 pub(crate) const WHEEL_BINDING_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(80);
 
+/// Wheel travel, in lines, that must accrue at an open jump line before a
+/// diff-view notch walks to the next change.
+///
+/// One plain-wheel notch is one line, so a trackpad's fractional reports add up
+/// to a deliberate notch, and a single pixel of travel never walks.
+pub(crate) const DIFF_WHEEL_JUMP_TRAVEL: f32 = 1.0;
+
+/// Shortest gap between two diff-view wheel walks.
+///
+/// A free-spinning wheel delivers a burst of notches. Dropping the walks inside
+/// this gap keeps one flick from walking a hundred changes, so a spin walks at
+/// most four a second.
+pub(crate) const DIFF_WHEEL_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Maximum index updates [`Stoat::drain_index_updates`] processes in one call.
 /// Bounds the graph work per event-loop turn so a large reindex burst cannot
 /// stall input. On hitting the cap the drain reschedules itself to finish the
@@ -1197,6 +1211,15 @@ pub struct Stoat {
     /// dropping every one of them. An editor pane never reads this: it consumes
     /// the fraction directly and rests between rows.
     pub(crate) wheel_line_remainder: f32,
+    /// Wheel travel accrued at an open diff-view jump line toward the next
+    /// walk, signed by direction.
+    ///
+    /// Travel the other way, a closed jump line, and a walk each clear it, so
+    /// only one notch's worth of travel in one direction walks.
+    pub(crate) diff_wheel_travel: f32,
+    /// When a diff-view wheel notch last walked to a change, on the scheduler
+    /// clock. A walk inside [`DIFF_WHEEL_COOLDOWN`] of this is dropped.
+    pub(crate) diff_wheel_last: Option<std::time::Instant>,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal mode; consumed once via
@@ -2367,6 +2390,8 @@ impl Stoat {
             walkthrough_exit_timer: None,
             wheel_binding_last: None,
             wheel_line_remainder: 0.0,
+            diff_wheel_travel: 0.0,
+            diff_wheel_last: None,
             pending_count: None,
             pending_find: None,
             pending_mark: None,

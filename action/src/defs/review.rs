@@ -21,7 +21,10 @@ define_action_def!(
      against the given revision. A revision points the whole workspace at \
      that commit, so every file diffs against it and the change list spans \
      everything committed since. Running it again closes the diff and \
-     returns to HEAD.",
+     returns to HEAD. While the diff is open, the plain wheel scrolls until \
+     the change under the cursor passes the editor.diff_wheel_jump line. \
+     The next notch then walks to the next change, and a notch up walks \
+     back.",
     ActionPriority::Common,
     params = DIFF_PARAMS
 );

@@ -127,6 +127,14 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "0",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("diff_wheel_jump")],
+            shape: ValueShape::Number,
+            doc: "Fraction of the pane height, from the top, a change must rise \
+                  past before a wheel notch in the diff view walks to the next \
+                  change. A notch up mirrors it from the bottom.",
+            default: "0.25",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("highlight_retention")],
             shape: ValueShape::Number,
             doc: "How many hidden buffers keep their full highlight state before \

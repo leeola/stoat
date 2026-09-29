@@ -216,6 +216,13 @@ on init {
     # 0 centers the hunk exactly.
     editor.jump_scrolloff = 0;
 
+    # Where the wheel in the diff view walks to the next change, as a fraction
+    # of the pane height from the top. A notch scrolls until the change has
+    # risen past this line, and the next notch walks to the next change. A
+    # notch up mirrors it from the bottom. 0 waits until the change has left
+    # the pane, and 0.5 walks once the change rises past the middle.
+    editor.diff_wheel_jump = 0.25;
+
     # How many hidden buffers keep their full highlight state before the
     # least-recently-shown are evicted. 0 drops state as soon as a buffer hides.
     editor.highlight_retention = 64;

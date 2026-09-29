@@ -119,6 +119,14 @@ pub struct Settings {
     /// A jump lands the reader somewhere new, so a few rows of where they came
     /// from stay on screen to say which way they moved.
     pub jump_scrolloff: Option<u32>,
+    /// Where the diff view's wheel walks to the next change, as a fraction of
+    /// the pane height from the top. `None` falls back to 0.25. Set via
+    /// `editor.diff_wheel_jump = 0.25;` in stcfg.
+    ///
+    /// A notch scrolls until the change's last row rises to this line, and the
+    /// next notch walks. A notch up mirrors the line from the bottom. The raw
+    /// value is stored here and clamped to 0.0..=0.5 at the consumer.
+    pub diff_wheel_jump: Option<f64>,
     /// How the editor gutter numbers lines. `None` falls back to
     /// [`LineNumbers::Relative`]. Set `editor.line_numbers = relative | absolute
     /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
@@ -306,6 +314,7 @@ impl Settings {
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
             jump_scrolloff: other.jump_scrolloff.or(self.jump_scrolloff),
+            diff_wheel_jump: other.diff_wheel_jump.or(self.diff_wheel_jump),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
             editor_auto_pairs: other.editor_auto_pairs.or(self.editor_auto_pairs),
@@ -401,6 +410,11 @@ impl Settings {
             ["editor", "jump_scrolloff"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.jump_scrolloff = Some(n as u32);
+                }
+            },
+            ["editor", "diff_wheel_jump"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.diff_wheel_jump = Some(n);
                 }
             },
             ["editor", "highlight_retention"] => {
@@ -628,6 +642,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -802,6 +817,17 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_diff_wheel_jump() {
+        let jump = |src: &str| Settings::from_config(&parse_ok(src)).diff_wheel_jump;
+        assert_eq!(
+            jump("on init { editor.diff_wheel_jump = 0.25; }"),
+            Some(0.25)
+        );
+        assert_eq!(jump("on init { editor.diff_wheel_jump = 0; }"), Some(0.0));
+        assert_eq!(jump("on init { }"), None, "absent falls back at consumer");
+    }
+
+    #[test]
     fn from_config_extracts_ssh_program() {
         let program = |src: &str| Settings::from_config(&parse_ok(src)).ssh_program;
         assert_eq!(
@@ -963,6 +989,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1008,6 +1035,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1062,6 +1090,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             jump_scrolloff: None,
+            diff_wheel_jump: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1099,6 +1128,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             jump_scrolloff: None,
+            diff_wheel_jump: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1138,6 +1168,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1180,6 +1211,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             jump_scrolloff: None,
+            diff_wheel_jump: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1220,6 +1252,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1273,6 +1306,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1318,6 +1352,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 jump_scrolloff: None,
+                diff_wheel_jump: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
                 editor_auto_pairs: None,
@@ -1360,6 +1395,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             jump_scrolloff: None,
+            diff_wheel_jump: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,
@@ -1397,6 +1433,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             jump_scrolloff: None,
+            diff_wheel_jump: None,
             editor_line_numbers: None,
             editor_minimap: None,
             editor_auto_pairs: None,

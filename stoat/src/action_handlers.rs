@@ -5,6 +5,7 @@ pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
 pub(crate) mod conflict_view;
+pub(crate) mod diff_wheel;
 pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;

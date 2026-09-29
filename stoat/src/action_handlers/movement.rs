@@ -4226,7 +4226,7 @@ fn landed_display_span(
 /// The span runs from the row it landed on through the row after the seam. The
 /// diff view's spliced block sits between those two buffer rows, so the mapped
 /// span covers the removed lines without this reading the block structure.
-fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32> {
+pub(super) fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32> {
     let display_row = |row: u32| snapshot.buffer_to_display(Point::new(row, 0)).row;
     match rows.is_empty() {
         true => display_row(rows.start.saturating_sub(1))..display_row(rows.start) + 1,
@@ -4236,6 +4236,47 @@ fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32
 
 /// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when the
 /// walk runs out of hunks before its first step.
+fn nth_hunk_rows(
+    hunk_rows: &[Range<u32>],
+    cursor_row: u32,
+    dir: ChangeDir,
+    count: usize,
+) -> Option<Range<u32>> {
+    let split = walk_split(hunk_rows, cursor_row, dir);
+    match dir {
+        ChangeDir::Next => {
+            let last = hunk_rows.len().checked_sub(1)?;
+            let idx = (split + count.saturating_sub(1)).min(last);
+            (idx >= split).then(|| hunk_rows[idx].clone())
+        },
+        ChangeDir::Prev => Some(hunk_rows[split.checked_sub(count.max(1))?].clone()),
+    }
+}
+
+/// The stop a walk in `dir` from `cursor_row` sets out from, or `None` when no
+/// stop sits on that side of the cursor.
+///
+/// It is the neighbor of the stop a one-step walk lands, on the cursor's side
+/// of the split. That makes it the change the cursor is on. Between changes,
+/// it is the nearest change behind the cursor in the walk's direction. The diff
+/// view's wheel reads it as the change the reader is on, so a wheel walk leaves
+/// the same stop a keyboard walk does.
+pub(super) fn departure_stop(
+    hunk_rows: &[Range<u32>],
+    cursor_row: u32,
+    dir: ChangeDir,
+) -> Option<&Range<u32>> {
+    let split = walk_split(hunk_rows, cursor_row, dir);
+    match dir {
+        ChangeDir::Next => hunk_rows.get(split.checked_sub(1)?),
+        ChangeDir::Prev => hunk_rows.get(split),
+    }
+}
+
+/// Index that splits `hunk_rows` at `cursor_row` for a walk in `dir`.
+///
+/// A forward walk takes the stops from the split on, and a backward walk takes
+/// the ones before it.
 ///
 /// The backward walk compares each hunk's end against the cursor rather than
 /// its start, which is what steps out of the hunk the cursor is already inside
@@ -4250,12 +4291,7 @@ fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32
 /// direction keeps are a run at one end, because the landing row rises across
 /// the list and so does the end row, which is what makes the split answer what
 /// a scan of every stop did.
-fn nth_hunk_rows(
-    hunk_rows: &[Range<u32>],
-    cursor_row: u32,
-    dir: ChangeDir,
-    count: usize,
-) -> Option<Range<u32>> {
+fn walk_split(hunk_rows: &[Range<u32>], cursor_row: u32, dir: ChangeDir) -> usize {
     debug_assert!(
         hunk_rows
             .windows(2)
@@ -4264,19 +4300,11 @@ fn nth_hunk_rows(
     );
 
     match dir {
-        ChangeDir::Next => {
-            let last = hunk_rows.len().checked_sub(1)?;
-            let first = hunk_rows.partition_point(|r| landing_row(r) <= cursor_row);
-            let idx = (first + count.saturating_sub(1)).min(last);
-            (idx >= first).then(|| hunk_rows[idx].clone())
-        },
-        ChangeDir::Prev => {
-            let end = hunk_rows.partition_point(|r| match r.is_empty() {
-                true => r.start.saturating_sub(1) < cursor_row,
-                false => r.end <= cursor_row,
-            });
-            Some(hunk_rows[end.checked_sub(count.max(1))?].clone())
-        },
+        ChangeDir::Next => hunk_rows.partition_point(|r| landing_row(r) <= cursor_row),
+        ChangeDir::Prev => hunk_rows.partition_point(|r| match r.is_empty() {
+            true => r.start.saturating_sub(1) < cursor_row,
+            false => r.end <= cursor_row,
+        }),
     }
 }
 
@@ -4295,7 +4323,7 @@ fn landing_row(rows: &Range<u32>) -> u32 {
 /// reaches the row the gutter paints its mark on. A refined hunk offers one
 /// stop per marked run, so a walk crosses the rows that changed rather than
 /// the block that holds them. A buffer with no diff map at all answers empty.
-fn live_hunk_rows(
+pub(super) fn live_hunk_rows(
     display_snapshot: &DisplaySnapshot,
     buffer_snapshot: &MultiBufferSnapshot,
 ) -> Vec<Range<u32>> {
