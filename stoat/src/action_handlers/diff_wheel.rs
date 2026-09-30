@@ -67,6 +67,21 @@ pub(crate) fn scroll_or_jump(stoat: &mut Stoat, editor_id: EditorId, lines: f32)
     movement::goto_change_impl(stoat, dir, 1)
 }
 
+/// Flip the diff view's wheel walk, backing the `DiffWheelWalk` action.
+///
+/// The status line reports the state the flip leaves. While the walk is off,
+/// the wheel scrolls the focused diff editor and never reaches
+/// [`scroll_or_jump`].
+pub(crate) fn toggle_walk(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.diff_wheel_walk = !stoat.diff_wheel_walk;
+    stoat.set_status(if stoat.diff_wheel_walk {
+        "wheel walk on"
+    } else {
+        "wheel walk off"
+    });
+    UpdateEffect::Redraw
+}
+
 /// Whether the change under the cursor has passed the jump line for `dir`, so
 /// that accrued travel walks rather than scrolls.
 ///
@@ -135,7 +150,7 @@ mod tests {
         Stoat,
     };
     use ratatui::layout::Rect;
-    use stoat_action::SplitRight;
+    use stoat_action::{DiffWheelWalk, SplitRight};
 
     /// Sixty lines with rows 10, 30, and 50 added over the base, landed on the
     /// change at row 10 in a twenty-row pane.
@@ -327,6 +342,30 @@ mod tests {
             editor.scroll_row as f32 + editor.scroll_frac,
             9.0,
             "a walk would move the focused pane, not the one under the pointer",
+        );
+    }
+
+    #[test]
+    fn with_the_walk_off_every_notch_scrolls() {
+        let (mut h, id) = diff_harness(true);
+        dispatch(&mut h.stoat, &DiffWheelWalk);
+        wheel(&mut h, id, &[1.0, 1.0, 1.0]);
+        assert_eq!(state(&mut h, id), (vec![(10, 0)], 9.0));
+    }
+
+    #[test]
+    fn a_second_toggle_turns_the_walk_back_on() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &DiffWheelWalk);
+        assert_eq!(
+            (h.stoat.diff_wheel_walk, h.stoat.pending_message.as_deref()),
+            (false, Some("wheel walk off"))
+        );
+
+        dispatch(&mut h.stoat, &DiffWheelWalk);
+        assert_eq!(
+            (h.stoat.diff_wheel_walk, h.stoat.pending_message.as_deref()),
+            (true, Some("wheel walk on"))
         );
     }
 }

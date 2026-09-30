@@ -647,6 +647,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendGotoColumn => movement::goto_column(stoat, true),
         ActionKind::GotoNextChange => movement::goto_change(stoat, movement::ChangeDir::Next),
         ActionKind::GotoPrevChange => movement::goto_change(stoat, movement::ChangeDir::Prev),
+        ActionKind::DiffWheelWalk => diff_wheel::toggle_walk(stoat),
         ActionKind::GotoNextParagraph => {
             movement::goto_paragraph(stoat, movement::ParaDir::Next, false)
         },

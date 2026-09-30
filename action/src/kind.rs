@@ -72,6 +72,7 @@ action_kinds! {
     OpenCommandPalette,
     OpenHelp,
     Diff,
+    DiffWheelWalk,
     Conflict,
     CloseConflict,
     ConflictPickOurs,

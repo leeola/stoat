@@ -1220,6 +1220,17 @@ pub struct Stoat {
     /// When a diff-view wheel notch last walked to a change, on the scheduler
     /// clock. A walk inside [`DIFF_WHEEL_COOLDOWN`] of this is dropped.
     pub(crate) diff_wheel_last: Option<std::time::Instant>,
+    /// Whether the plain wheel in the diff view walks from change to change.
+    ///
+    /// On, the wheel on the focused diff editor scrolls until the change under
+    /// the cursor passes the jump line, and the next notch walks to the next
+    /// change. Off, the wheel scrolls the pane as in any other editor. The
+    /// change keys and Alt-wheel walk either way.
+    ///
+    /// The `DiffWheelWalk` action is the only writer. Session-scoped and on at
+    /// start, never persisted, because it answers how the reader reads the
+    /// diff now.
+    pub(crate) diff_wheel_walk: bool,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal mode; consumed once via
@@ -2392,6 +2403,7 @@ impl Stoat {
             wheel_line_remainder: 0.0,
             diff_wheel_travel: 0.0,
             diff_wheel_last: None,
+            diff_wheel_walk: true,
             pending_count: None,
             pending_find: None,
             pending_mark: None,

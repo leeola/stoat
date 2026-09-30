@@ -1413,9 +1413,10 @@ pub(crate) fn handle_mouse_scroll(
 /// renders, and a trackpad flick of ~100 events must not repaint per event. A
 /// run pane scrolls by whole notches, so its share accrues on the session.
 ///
-/// The focused editor in the diff view goes through
-/// [`diff_wheel::scroll_or_jump`] instead. It scrolls until the change under the
-/// reader passes the jump line, and then walks to the next change.
+/// While [`Stoat::diff_wheel_walk`] is on, the focused editor in the diff view
+/// goes through [`diff_wheel::scroll_or_jump`] instead. It scrolls until the
+/// change under the reader passes the jump line, and then walks to the next
+/// change.
 pub(crate) fn scroll_view_at(
     stoat: &mut Stoat,
     view: View,
@@ -1432,7 +1433,7 @@ pub(crate) fn scroll_view_at(
                     .editors
                     .get(id)
                     .is_some_and(|editor| editor.diff_view);
-            if focused_diff {
+            if focused_diff && stoat.diff_wheel_walk {
                 return diff_wheel::scroll_or_jump(stoat, id, lines);
             }
 
