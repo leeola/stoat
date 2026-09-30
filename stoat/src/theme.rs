@@ -994,4 +994,17 @@ mod tests {
         colors.dedup();
         assert_eq!(colors.len(), declared, "no two slots share a color");
     }
+
+    /// A detached pane's badge paints in the focused bar's style on either bar,
+    /// so its digit reads only while that style sets two different colors.
+    #[test]
+    fn the_focused_status_bar_style_sets_two_distinct_colors() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        let style = theme.get(scope::UI_STATUSBAR_FOCUSED);
+        let (fg, bg) = (
+            style.fg.expect("a foreground"),
+            style.bg.expect("a background"),
+        );
+        assert_ne!(fg, bg, "the badge digit reads against its box");
+    }
 }

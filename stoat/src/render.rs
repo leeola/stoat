@@ -593,8 +593,8 @@ pub(crate) fn frame(
 
     let minimap_chrome = minimap_enabled.then(|| {
         let thumb = {
-            let sel = stoat.theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
-            let [r, g, b] = paint::style_rgb(sel.bg).unwrap_or([90, 90, 110]);
+            let bar = stoat.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
+            let [r, g, b] = paint::style_rgb(bar.bg).unwrap_or([90, 90, 110]);
             [r, g, b, 96]
         };
         let palette = stoat.minimap_class_table.palette();
@@ -1475,7 +1475,7 @@ fn render_pane_id_badges(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let accent = paint::style_rgb(theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg)
+    let accent = paint::style_rgb(theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED).bg)
         .unwrap_or([90, 90, 110]);
     let background =
         paint::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);

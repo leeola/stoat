@@ -574,8 +574,9 @@ pub(crate) struct PaneStatusCells {
 /// Assemble a detached pane's status bar for [`paint_pane_status_cells`].
 ///
 /// Shares [`status_segments`] with [`render_pane_status`], adding the numeric
-/// selection badge that only a detached pane needs, since it cannot host the
-/// primary scene's digit popover.
+/// pane badge that only a detached pane needs, since the primary scene's digit
+/// popover does not reach its window. The badge paints in the focused bar's
+/// style on either bar, so its digit reads against its box.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_status_cells(
     view: &View,
@@ -598,7 +599,7 @@ pub(crate) fn pane_status_cells(
     if let Some(digit) = badge {
         let badge_style = frame
             .theme
-            .get(crate::theme::scope::UI_SELECTION_EDITOR)
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
             .add_modifier(Modifier::BOLD);
         left.insert(0, (format!("[{digit}]"), badge_style));
     }
