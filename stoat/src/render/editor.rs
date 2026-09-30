@@ -2707,7 +2707,9 @@ mod tests {
     use super::RowSeverity;
     use crate::{
         action_handlers::{self, dispatch},
+        diff_map::{DiffHunkStatus, DiffMap, StagedMark},
         render::review::DiffDials,
+        theme::scope as s,
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
@@ -4597,10 +4599,11 @@ mod tests {
 
     /// Render the focused editor's gutter in fallback mode and return each
     /// visible row's leftmost mark glyph paired with whether it is dimmed.
-    /// The fallback gutter's per-row `(change glyph, staged glyph color)`, read
-    /// from the two diff cells right of the number. Uses the active theme so the
-    /// staged and unstaged scopes resolve to distinct colors.
-    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, Color)> {
+    /// The fallback gutter's per-row `(change glyph, staged glyph color, change
+    /// glyph color)`, read from the two diff cells right of the number. Uses
+    /// the active theme so the staged and unstaged scopes resolve to distinct
+    /// colors.
+    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, Color, Color)> {
         let theme = stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
@@ -4637,6 +4640,7 @@ mod tests {
                 (
                     buf[(change_x, y)].symbol().to_string(),
                     buf[(staged_x, y)].fg,
+                    buf[(change_x, y)].fg,
                 )
             })
             .collect()
@@ -4682,8 +4686,59 @@ mod tests {
 
         let cells = gutter_mark_cells(&mut h.stoat, 6);
         assert!(
-            cells.iter().any(|(mark, _)| mark == "▔"),
+            cells.iter().any(|(mark, ..)| mark == "▔"),
             "the row below the deleted line carries the seam mark: {cells:?}",
+        );
+    }
+
+    /// A staged mark is a change the index holds with no hunk over it. Its row
+    /// takes the change glyph in its kind's color and the staged glyph.
+    #[test]
+    fn gutter_marks_a_staged_change_with_no_hunk() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/staged-mark");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"a\nb\nc");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let mut dm = DiffMap::from_hunks([], Some(String::from("a\nb\nc").into()));
+        dm.set_staged_marks(vec![StagedMark {
+            status: DiffHunkStatus::Modified,
+            base_lines: 1..2,
+        }]);
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .diff_map = Some(dm);
+
+        let theme = h.stoat.theme.clone();
+        let color = |scope: &str| theme.get(scope).fg.expect("the theme sets it");
+        let cells = gutter_mark_cells(&mut h.stoat, 3);
+        assert_eq!(
+            cells[1],
+            (
+                "▎".to_string(),
+                color(s::DIFF_STAGED),
+                color(s::DIFF_MODIFIED)
+            ),
+            "row 1 takes the modified glyph and the staged glyph: {cells:?}",
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .map(|(glyph, ..)| glyph.as_str())
+                .collect::<Vec<_>>(),
+            [" ", "▎", " "],
+            "and no other row takes a mark",
         );
     }
 

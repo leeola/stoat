@@ -12,6 +12,7 @@ use crate::{
     },
     editor_state::EditorState,
     host::DiffStatus,
+    theme::scope as s,
 };
 use ratatui::{
     buffer::Buffer,
@@ -652,7 +653,6 @@ pub(crate) fn paint_diff_rows(
         sep_x,
     } = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
 
-    use crate::theme::scope as s;
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
@@ -839,6 +839,7 @@ pub(crate) fn paint_diff_rows(
                         y,
                         change_scope,
                         staged,
+                        false,
                         theme,
                     );
                 }
@@ -885,6 +886,22 @@ pub(crate) fn paint_diff_rows(
                             line_base + 1,
                             dim_style,
                         );
+                        if let Some(status) = snapshot
+                            .diff_map()
+                            .and_then(|dm| dm.staged_mark_at_base_line(line_base))
+                        {
+                            draw_diff_status(
+                                &mut rich,
+                                buf,
+                                inner,
+                                status_left_x,
+                                y,
+                                staged_mark_scope(status),
+                                true,
+                                status == DiffHunkStatus::Deleted,
+                                theme,
+                            );
+                        }
                     }
                     let token_spans = base_token_spans(snapshot, line_base);
                     paint_base_segment(
@@ -992,7 +1009,6 @@ pub(crate) struct DiffTints {
 /// unset takes that palette's default, which is a named color no tint can blend
 /// toward.
 pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
-    use crate::theme::scope as s;
     let bg = style_rgb(theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg))?;
     let status = DiffTheme::from_theme(theme);
     Some(DiffTints {
@@ -1415,20 +1431,24 @@ fn base_token_spans(
 /// The first cell carries the change-kind bar in `change_scope`. The second
 /// carries a staged-state bar scoped `diff.staged` when `staged` else
 /// `diff.unstaged`. Both use the `▎` bar, mirroring the editor gutter's two
-/// bars. The staged cell is skipped when it would fall outside the buffer.
+/// bars, except that a `seam` change cell takes the gutter's `▔` deletion
+/// mark. The staged cell is skipped when it falls outside the buffer.
 fn paint_status_bars(
     buf: &mut Buffer,
     x: u16,
     y: u16,
     change_scope: &str,
     staged: bool,
+    seam: bool,
     theme: &crate::theme::Theme,
 ) {
-    use crate::theme::scope as s;
     if x >= buf.area.x + buf.area.width {
         return;
     }
-    buf[(x, y)].set_char('▎').set_style(theme.get(change_scope));
+    let change_mark = if seam { '▔' } else { '▎' };
+    buf[(x, y)]
+        .set_char(change_mark)
+        .set_style(theme.get(change_scope));
     if x + 1 < buf.area.x + buf.area.width {
         let staged_scope = if staged {
             s::DIFF_STAGED
@@ -1521,7 +1541,6 @@ fn paint_base_side(
     theme: &crate::theme::Theme,
     dials: DiffDials,
 ) {
-    use crate::theme::scope as s;
     let (num_x, status_x, text_x, content_w) = columns;
     let (del_style, dim_style) = styles;
 
@@ -1574,18 +1593,51 @@ fn paint_base_side(
         tint_row,
     );
 
-    if row.first
-        && let Some(staged) = staged
-    {
-        let change_scope = if changes
-            .iter()
-            .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
-        {
-            s::DIFF_MOVED
-        } else {
-            s::DIFF_DELETED
-        };
-        draw_diff_status(rich, buf, inner, status_x, y, change_scope, staged, theme);
+    if !row.first {
+        return;
+    }
+    // The row is there for the removal, so the removal's status wins over a
+    // staged mark on the same base line.
+    match staged {
+        Some(staged) => {
+            let change_scope = if changes
+                .iter()
+                .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
+            {
+                s::DIFF_MOVED
+            } else {
+                s::DIFF_DELETED
+            };
+            draw_diff_status(
+                rich,
+                buf,
+                inner,
+                status_x,
+                y,
+                change_scope,
+                staged,
+                false,
+                theme,
+            );
+        },
+        None => {
+            if let Some(status) = snapshot
+                .diff_map()
+                .and_then(|dm| dm.staged_mark_at_base_line(base_line))
+            {
+                draw_diff_status(
+                    rich,
+                    buf,
+                    inner,
+                    status_x,
+                    y,
+                    staged_mark_scope(status),
+                    true,
+                    status == DiffHunkStatus::Deleted,
+                    theme,
+                );
+            }
+        },
     }
 }
 
@@ -1971,7 +2023,6 @@ fn resolve_diff_rich_colors(
     fallback_style: Style,
     dim_amount: f32,
 ) -> Option<DiffRichColors> {
-    use crate::theme::scope as s;
     let bg = fallback_style
         .bg
         .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg));
@@ -2035,6 +2086,8 @@ fn draw_diff_num(
 ///
 /// The bars follow the editor's rich gutter spacing, a five-sixteenth change bar
 /// at the status cell, then a five-sixteenth staged bar seven sixteenths later.
+/// A `seam` change bar is the short top-aligned bar the rich gutter draws for a
+/// deletion.
 #[allow(clippy::too_many_arguments)]
 fn draw_diff_status(
     rich: &mut Option<DiffRichGutter<'_>>,
@@ -2044,6 +2097,7 @@ fn draw_diff_status(
     y: u16,
     change_scope: &str,
     staged: bool,
+    seam: bool,
     theme: &crate::theme::Theme,
 ) {
     match rich {
@@ -2062,7 +2116,7 @@ fn draw_diff_status(
                 x: x0,
                 y: y0,
                 width: 5,
-                height: 16,
+                height: if seam { 6 } else { 16 },
                 color: change,
             }
             .render(inner, buf, &mut *rg.scene);
@@ -2075,7 +2129,17 @@ fn draw_diff_status(
             }
             .render(inner, buf, &mut *rg.scene);
         },
-        None => paint_status_bars(buf, status_x, y, change_scope, staged, theme),
+        None => paint_status_bars(buf, status_x, y, change_scope, staged, seam, theme),
+    }
+}
+
+/// The scope a staged mark of `status` paints its change bar in.
+fn staged_mark_scope(status: DiffHunkStatus) -> &'static str {
+    match status {
+        DiffHunkStatus::Added => s::DIFF_ADDED,
+        DiffHunkStatus::Modified => s::DIFF_MODIFIED,
+        DiffHunkStatus::Moved => s::DIFF_MOVED,
+        DiffHunkStatus::Deleted => s::DIFF_DELETED,
     }
 }
 
@@ -2122,7 +2186,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::{BufferId, TextBuffer},
-        diff_map::{ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
+        diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, StagedMark, TokenDetail},
         display_map::InlayKind,
         render::paint::FAINT_CONTRAST_FLOOR,
         theme::{
@@ -2571,6 +2635,122 @@ mod tests {
         assert!(
             staged_colors.contains(&unstaged_fg),
             "the unstaged hunk's bar uses the unstaged color: {staged_colors:?}"
+        );
+    }
+
+    /// A diff-view editor over `text` against `base`, with the changes `base`
+    /// holds over `from` as the map's staged marks.
+    fn diff_editor_with_staged_marks(from: &str, base: &str, text: &str) -> EditorState {
+        let mut dm = DiffMap::from_structural_changes(
+            structural_diff::diff(base, text),
+            Arc::new(base.to_string()),
+            text,
+        );
+        dm.set_staged_marks(
+            diff_map::changes_to_hunks(&structural_diff::diff(from, base).changes, from, base)
+                .into_iter()
+                .map(|hunk| StagedMark {
+                    status: hunk.status,
+                    base_lines: hunk.buffer_line_range,
+                })
+                .collect(),
+        );
+        diff_editor_with_map(text, dm)
+    }
+
+    /// Each row's left change cell, left staged cell, and right staged cell as
+    /// glyph and color, with `editor` painted 120 columns wide under
+    /// [`rgb_diff_theme`].
+    fn status_cells(editor: &mut EditorState) -> Vec<[(String, Color); 3]> {
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            true,
+            None,
+            None,
+            false,
+            None,
+            DiffDials::shipped(),
+        );
+
+        let columns = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let cell = |x: u16, y: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
+        (0..area.height)
+            .map(|y| {
+                [
+                    cell(columns.status_left_x, y),
+                    cell(columns.status_left_x + 1, y),
+                    cell(columns.status_right_x + 1, y),
+                ]
+            })
+            .collect()
+    }
+
+    /// A status glyph in `scope`'s color under [`rgb_diff_theme`].
+    fn glyph(mark: &str, scope: &str) -> (String, Color) {
+        let color = rgb_diff_theme().get(scope).fg.expect("the theme sets it");
+        (mark.to_string(), color)
+    }
+
+    /// The index changed line 1 from HEAD and the buffer changed line 3 from
+    /// the index. The left column marks the first beside its base line, and
+    /// the second stays an unstaged removal with no staged mark.
+    #[test]
+    fn diff_view_left_column_marks_what_the_index_staged() {
+        let cells = status_cells(&mut diff_editor_with_staged_marks(
+            "a\nb\nc\nd\n",
+            "a\nB\nc\nd\n",
+            "a\nB\nc\nD\n",
+        ));
+
+        assert_eq!(
+            cells[1][..2],
+            [glyph("▎", s::DIFF_MODIFIED), glyph("▎", s::DIFF_STAGED)],
+            "base line 1 takes the modified bar and the staged bar: {cells:?}",
+        );
+        assert_eq!(
+            cells[3],
+            [
+                glyph("▎", s::DIFF_DELETED),
+                glyph("▎", s::DIFF_UNSTAGED),
+                glyph("▎", s::DIFF_UNSTAGED),
+            ],
+            "the removed d beside the live D keeps the removal's bars: {cells:?}",
+        );
+    }
+
+    /// A staged deletion leaves no base line of its own, so it marks the base
+    /// line after the removed text the way the gutter marks a deletion.
+    #[test]
+    fn diff_view_left_column_marks_a_staged_deletion_as_a_seam() {
+        let cells = status_cells(&mut diff_editor_with_staged_marks(
+            "a\nx\nb\n",
+            "a\nb\n",
+            "a\nb\n",
+        ));
+        assert_eq!(
+            cells[1][..2],
+            [glyph("▔", s::DIFF_DELETED), glyph("▎", s::DIFF_STAGED)],
+            "the line after the removed text takes the deletion mark: {cells:?}",
+        );
+    }
+
+    /// A base line the buffer then changed again is a removed row with a staged
+    /// mark on it. The row is there for the removal, so it shows that status.
+    #[test]
+    fn diff_view_removed_row_keeps_its_status_over_a_staged_mark() {
+        let cells = status_cells(&mut diff_editor_with_staged_marks(
+            "a\nb\n", "a\nB\n", "a\nX\n",
+        ));
+        assert_eq!(
+            cells[1][..2],
+            [glyph("▎", s::DIFF_DELETED), glyph("▎", s::DIFF_UNSTAGED)],
+            "the removed B takes the unstaged removal's bars: {cells:?}",
         );
     }
 

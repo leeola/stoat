@@ -20,7 +20,7 @@ use crate::{
     diff_cache::ContentHash,
     diff_map::{
         changes_to_hunks, line_starts, mark_staged, merge_structural_detail, BaseHighlights,
-        DiffHunk, DiffHunkStatus, DiffMap,
+        DiffHunk, DiffHunkStatus, DiffMap, StagedMark,
     },
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
@@ -662,24 +662,43 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize
     ))
 }
 
-/// A file's HEAD and index blobs as git last reported them.
+/// The texts a file's diff measures its buffer against, as git last reported
+/// them.
 ///
-/// Neither can change without a write under `.git`, which is watched, so a
-/// diff recomputed for a keystroke can reuse what the last one read rather than
-/// taking the repo mutex and decompressing the same bytes again.
+/// Each of them changes only with a write under `.git`, which is watched. A
+/// diff recomputed for a keystroke therefore reuses what the last one read,
+/// rather than taking the repo mutex and decompressing the same bytes again.
 #[derive(Clone)]
 pub(super) struct DiffBaseText {
-    head: Arc<String>,
-    index: Arc<String>,
-    /// Fingerprints of the two blobs, taken once here.
+    /// The text the left column shows and the hunks describe.
+    base: Arc<String>,
+    /// The text a hunk must already sit in to read staged.
+    staged_text: Arc<String>,
+    /// The text behind the base. When present, the changes the base holds over
+    /// it become the map's staged marks.
+    staged_from: Option<Arc<String>>,
+    /// Fingerprints of `base` and `staged_text`, taken once here.
     ///
-    /// The index is usually a blob of its own that happens to hold HEAD's
-    /// bytes, and every recompute asks whether the two agree so it can reuse
-    /// one diff for both. Reading them to answer that costs a pass over the
-    /// file per settle, where a blob only changes when something writes under
-    /// `.git`.
-    head_hash: [u8; 32],
-    index_hash: [u8; 32],
+    /// The staged text is usually a blob of its own that holds the base's
+    /// bytes. Every recompute asks whether the two agree, to reuse one diff
+    /// for both. Reading them to answer that costs a pass over the file per
+    /// settle, where a blob only changes when something writes under `.git`.
+    base_hash: [u8; 32],
+    staged_hash: [u8; 32],
+}
+
+impl DiffBaseText {
+    fn new(base: Arc<String>, staged_text: Arc<String>, staged_from: Option<Arc<String>>) -> Self {
+        let base_hash = buffer_registry::fingerprint_bytes(&base);
+        let staged_hash = buffer_registry::fingerprint_bytes(&staged_text);
+        Self {
+            base,
+            staged_text,
+            staged_from,
+            base_hash,
+            staged_hash,
+        }
+    }
 }
 
 /// Base texts each layer holds before the oldest goes.
@@ -777,8 +796,12 @@ fn insert_bounded<K: PartialEq, V>(entries: &mut VecDeque<(K, V)>, key: K, value
 
 pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 
-/// Compute a buffer's [`DiffMap`] against `base_override`, or against the
-/// working tree's own HEAD-plus-index without one.
+/// Compute a buffer's [`DiffMap`] against the texts in `base`.
+///
+/// The hunks describe what the buffer changes from the base text, and a hunk
+/// reads staged when the staged text already holds it. With a `staged_from`
+/// text, the changes the base text holds over it become the map's staged
+/// marks.
 ///
 /// [`None`] when the file is outside a repo, or when an unoverridden base has
 /// no HEAD content to diff against.
@@ -806,21 +829,21 @@ pub(super) fn compute_diff_map(
     tree_memo: Option<&TreeCache>,
     buffer_tree: Option<&Tree>,
 ) -> Option<DiffMap> {
-    let base_text = &*base.head;
-    let index_text = &*base.index;
+    let base_text = &*base.base;
+    let staged_text = &*base.staged_text;
 
     let result = structural_diff::diff(base_text, buffer_text);
 
-    // Which buffer lines the index and the buffer disagree on, which is what
-    // marks a hunk staged. With nothing staged the index holds HEAD's bytes, so
-    // that question has the same answer as the diff just run, and converting
-    // one result twice beats diffing the file twice.
-    let index_changed: Vec<Range<u32>> = {
-        let hunks = if base.index_hash == base.head_hash {
+    // Which buffer lines the staged text and the buffer disagree on, which is
+    // what marks a hunk staged. With nothing staged the staged text holds the
+    // base's bytes, so that question has the same answer as the diff just run,
+    // and converting one result twice beats diffing the file twice.
+    let staged_changed: Vec<Range<u32>> = {
+        let hunks = if base.staged_hash == base.base_hash {
             changes_to_hunks(&result.changes, base_text, buffer_text)
         } else {
-            let index_result = structural_diff::diff(index_text, buffer_text);
-            changes_to_hunks(&index_result.changes, index_text, buffer_text)
+            let staged_result = structural_diff::diff(staged_text, buffer_text);
+            changes_to_hunks(&staged_result.changes, staged_text, buffer_text)
         };
         hunks
             .into_iter()
@@ -831,31 +854,42 @@ pub(super) fn compute_diff_map(
     // A whole-file removal is one change, not one per item the differ found
     // inside it. Left to the structural pass, a file holding two functions
     // tallies as two removals in the statusline.
-    let mut diff_map = if buffer_removed(buffer_text) && !base_text.is_empty() {
-        let anchor = 0..0;
-        // The removal is staged once the index side is gone too. The line
-        // differ answers this wrong. Against an empty index it reads the
-        // removed buffer's lone newline as an added line.
-        let unstaged_lines = match buffer_removed(index_text) {
-            true => Vec::new(),
-            false => vec![anchor.clone()],
-        };
-        DiffMap::from_hunks(
-            [DiffHunk {
-                status: DiffHunkStatus::Deleted,
-                buffer_start_line: 0,
-                buffer_line_range: anchor,
-                base_byte_range: 0..base_text.len(),
-                anchor_range: None,
-                token_detail: None,
-                unstaged_lines,
-                marked_rows: Vec::new(),
-            }],
-            Some(base.head.clone()),
-        )
+    let had_content = !base_text.is_empty()
+        || base
+            .staged_from
+            .as_deref()
+            .is_some_and(|from| !from.is_empty());
+    let mut diff_map = if buffer_removed(buffer_text) && had_content {
+        if base_text.is_empty() {
+            // The removal is already in the base, so the staged mark the
+            // text behind it yields below is all there is to show.
+            DiffMap::from_hunks([], Some(base.base.clone()))
+        } else {
+            let anchor = 0..0;
+            // The removal is staged once the staged side is gone too. The
+            // line differ answers this wrong. Against an empty staged text it
+            // reads the removed buffer's lone newline as an added line.
+            let unstaged_lines = match buffer_removed(staged_text) {
+                true => Vec::new(),
+                false => vec![anchor.clone()],
+            };
+            DiffMap::from_hunks(
+                [DiffHunk {
+                    status: DiffHunkStatus::Deleted,
+                    buffer_start_line: 0,
+                    buffer_line_range: anchor,
+                    base_byte_range: 0..base_text.len(),
+                    anchor_range: None,
+                    token_detail: None,
+                    unstaged_lines,
+                    marked_rows: Vec::new(),
+                }],
+                Some(base.base.clone()),
+            )
+        }
     } else {
         let mut hunks = changes_to_hunks(&result.changes, base_text, buffer_text);
-        mark_staged(&mut hunks, &index_changed);
+        mark_staged(&mut hunks, &staged_changed);
 
         // The tree pass answers only what the washes should mark. A parse
         // failure or a fall back to lines leaves the line pass's char-refined
@@ -873,8 +907,22 @@ pub(super) fn compute_diff_map(
         {
             merge_structural_detail(&mut hunks, &tree.changes, base_text, buffer_text);
         }
-        DiffMap::from_hunks(hunks, Some(base.head.clone()))
+        DiffMap::from_hunks(hunks, Some(base.base.clone()))
     };
+    if let Some(from) = &base.staged_from {
+        // The line pass alone. A mark paints whole lines, so the token detail
+        // the tree pass adds has nothing to refine.
+        let staged = structural_diff::diff(from, base_text);
+        diff_map.set_staged_marks(
+            changes_to_hunks(&staged.changes, from, base_text)
+                .into_iter()
+                .map(|hunk| StagedMark {
+                    status: hunk.status,
+                    base_lines: hunk.buffer_line_range,
+                })
+                .collect(),
+        );
+    }
     if let Some(language) = language {
         // The structural pass above parsed this exact base into `tree_memo`,
         // so the highlight parse is already paid for.
@@ -891,7 +939,7 @@ pub(super) fn compute_diff_map(
 
 /// Read the two blobs a diff measures `path` against, per the workspace's base.
 ///
-/// The head side is what the diff hunks describe. The index side is what marks
+/// The base side is what the diff hunks describe. The staged side is what marks
 /// them staged, being the content a hunk is already applied to.
 ///
 /// Under a [`DiffBase::Rev`] the rev is the review base and HEAD is the commit
@@ -910,7 +958,7 @@ fn resolve_base(
 ) -> Option<DiffBaseText> {
     let repo = git.discover(git_root)?;
 
-    let (head, index) = match base_override {
+    let (base, staged_text) = match base_override {
         Some(DiffBase::Rev { sha }) => {
             let rev = match sha {
                 Some(sha) => repo.content_at(sha, path).unwrap_or_default(),
@@ -927,15 +975,7 @@ fn resolve_base(
         },
         None => working_tree_base(&*repo, path)?,
     };
-
-    let head_hash = buffer_registry::fingerprint_bytes(&head);
-    let index_hash = buffer_registry::fingerprint_bytes(&index);
-    Some(DiffBaseText {
-        head,
-        index,
-        head_hash,
-        index_hash,
-    })
+    Some(DiffBaseText::new(base, staged_text, None))
 }
 
 /// The working tree's own base for `path`, as HEAD and the index.
@@ -1241,14 +1281,14 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        buffer_registry, changed_byte_ranges, compute_base_highlights, compute_diff_map,
-        repo_hunk_position, scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase,
-        DiffBaseText, DIFF_SETTLE,
+        changed_byte_ranges, compute_base_highlights, compute_diff_map, repo_hunk_position,
+        scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase, DiffBaseText,
+        DIFF_SETTLE,
     };
     use crate::{
         app,
         buffer::BufferId,
-        diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap},
+        diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, StagedMark},
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
         pane::View,
@@ -1480,6 +1520,11 @@ mod tests {
         assert!(!filed(&first), "and the oldest base is the one that went",);
     }
 
+    fn diff_base(base: &str, staged_text: &str, staged_from: Option<&str>) -> DiffBaseText {
+        let text = |text: &str| Arc::new(text.to_string());
+        DiffBaseText::new(text(base), text(staged_text), staged_from.map(text))
+    }
+
     /// A diff map parses its base for the structural pass and again for the
     /// left column's colors, which is 4 ms twice on a large file. One memo
     /// serves both, so the second pass finds the tree the first left.
@@ -1508,12 +1553,7 @@ mod tests {
             "the highlight parse goes through the shared memo",
         );
 
-        let base = DiffBaseText {
-            head: Arc::new(head.to_string()),
-            index: Arc::new(head.to_string()),
-            head_hash: buffer_registry::fingerprint_bytes(head),
-            index_hash: buffer_registry::fingerprint_bytes(head),
-        };
+        let base = diff_base(head, head, None);
         let whole_diff = TreeCache::default();
         compute_diff_map(
             buffer,
@@ -1548,12 +1588,7 @@ mod tests {
 
         let head = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
         let buffer = "fn main() {\n    let x = 41;\n    let y = 2;\n}\n";
-        let base = DiffBaseText {
-            head: Arc::new(head.to_string()),
-            index: Arc::new(head.to_string()),
-            head_hash: buffer_registry::fingerprint_bytes(head),
-            index_hash: buffer_registry::fingerprint_bytes(head),
-        };
+        let base = diff_base(head, head, None);
 
         let tree = parse(&language, buffer, None).expect("buffer parses");
         let hunks = |buffer_tree| {
@@ -1590,6 +1625,67 @@ mod tests {
             hunks(None),
             "a tree from another grammar is discarded, not diffed against",
         );
+    }
+
+    /// The map the line pass alone builds for `buffer` against `base`.
+    fn plain_diff(buffer: &str, base: &DiffBaseText) -> DiffMap {
+        compute_diff_map(
+            buffer,
+            None,
+            &SyntaxStyles::from_theme(&Theme::empty()),
+            &BaseHighlightCache::default(),
+            base,
+            None,
+            None,
+        )
+        .expect("a diff map")
+    }
+
+    /// The base holds one change over the text behind it and the buffer one
+    /// change over the base. The first is a staged mark and the second the
+    /// one unstaged hunk.
+    #[test]
+    fn a_staged_from_text_becomes_staged_marks() {
+        let dm = plain_diff(
+            "a\nB\nC\n",
+            &diff_base("a\nB\nc\n", "a\nB\nc\n", Some("a\nb\nc\n")),
+        );
+
+        assert_eq!(
+            dm.hunks()
+                .map(|hunk| (hunk.buffer_start_line, hunk.staged()))
+                .collect::<Vec<_>>(),
+            [(2, false)],
+            "the buffer's own change is the one hunk",
+        );
+        assert_eq!(
+            *dm.staged_marks,
+            [StagedMark {
+                status: DiffHunkStatus::Modified,
+                base_lines: 1..2,
+            }],
+            "the base's change over the text behind it",
+        );
+        assert_eq!(dm.staged_counts(), (1, 1), "the mark and the hunk");
+    }
+
+    /// A file removed in the index leaves an empty base with the file's text
+    /// behind it. The removal is already staged, so it is one staged mark and
+    /// no hunk.
+    #[test]
+    fn a_removal_already_in_the_index_is_one_staged_mark() {
+        let dm = plain_diff("\n", &diff_base("", "", Some("x\n")));
+
+        assert_eq!(dm.hunks().count(), 0, "no hunk");
+        assert_eq!(
+            *dm.staged_marks,
+            [StagedMark {
+                status: DiffHunkStatus::Deleted,
+                base_lines: 0..0,
+            }],
+            "the removal is one staged mark",
+        );
+        assert_eq!(dm.staged_counts(), (1, 0), "counted as staged");
     }
 
     /// Bucketing the base spans is O(spans) with a style clone per line each

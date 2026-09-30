@@ -186,6 +186,9 @@ impl DiffHunk {
 /// once rather than per row.
 pub struct LiveHunks<'a> {
     hunks: Vec<LiveHunk<'a>>,
+    /// The map's staged marks as the buffer rows they paint on now, sorted by
+    /// row, each with its mark's status.
+    staged: Vec<(Range<u32>, DiffHunkStatus)>,
 }
 
 /// One hunk as it sits in the buffer now.
@@ -202,8 +205,15 @@ impl<'a> LiveHunks<'a> {
     ///
     /// A refined hunk marks only the rows its spans touch, so a reindent whose
     /// real change is two tokens paints two marks rather than a hundred. A hunk
-    /// with no refinement marks its whole range.
+    /// with no refinement marks its whole range. A row no hunk marks answers
+    /// the staged mark on it, if any.
     pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+        self.hunk_mark_for_line(line)
+            .or_else(|| staged_row_mark(&self.staged, line))
+    }
+
+    /// The mark a hunk paints at buffer `line`, before the staged marks.
+    fn hunk_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
         let index = self
             .hunks
             .partition_point(|live| live.rows.start <= line)
@@ -262,6 +272,10 @@ impl<'a> LiveHunks<'a> {
     ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
     /// what a caller turns into a single-cell landing at the seam row.
+    ///
+    /// Each staged mark contributes its rows too, the way a staged hunk does
+    /// under a HEAD base, so `n`, `p`, and the wheel walk reach it and `u`
+    /// unstages it there.
     pub fn change_stops(&self) -> Vec<Range<u32>> {
         let mut stops = Vec::with_capacity(self.hunks.len());
         for live in &self.hunks {
@@ -279,6 +293,7 @@ impl<'a> LiveHunks<'a> {
                 false => stops.push(live.rows.clone()),
             }
         }
+        stops.extend(self.staged.iter().map(|(rows, _)| rows.clone()));
         stops.sort_by_key(|run| (run.start, run.end));
         stops
     }
@@ -360,6 +375,19 @@ pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind, b
 
 type BaseStaged = BTreeMap<u32, bool>;
 
+/// A change the base text holds over the text behind it, in base-line
+/// coordinates.
+///
+/// The working tree's own diff has these when its base is the index and the
+/// text behind it is HEAD, which makes each one a staged change. `base_lines`
+/// is empty for a deletion and sits at the base line after the removed text,
+/// the way a [`DiffHunkStatus::Deleted`] hunk's `buffer_line_range` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StagedMark {
+    pub(crate) status: DiffHunkStatus,
+    pub(crate) base_lines: Range<u32>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
@@ -381,15 +409,22 @@ pub struct DiffMap {
     /// [`Self::base_changes`], mapping each base line a hunk removed to that
     /// hunk's [`DiffHunk::staged`]. Added hunks contribute no base line.
     base_staged: Arc<BaseStaged>,
-    /// Hunks counted by staged state as `(staged, unstaged)`.
+    /// The changes the base text holds over the text behind it, sorted by
+    /// `base_lines`. Empty unless [`Self::set_staged_marks`] set them.
+    pub(crate) staged_marks: Arc<Vec<StagedMark>>,
+    /// [`Self::staged_marks`] as the stored buffer rows they paint on, each
+    /// with its mark's status, for the stored-coordinate lookups.
+    staged_rows: Arc<Vec<(Range<u32>, DiffHunkStatus)>>,
+    /// Hunks counted by staged state as `(staged, unstaged)`, with each staged
+    /// mark counted as a staged hunk.
     ///
     /// Kept rather than folded on demand because the status bar asks every
     /// frame while the answer moves only when the diff is rebuilt.
     ///
     /// [`Self::from_hunks`] is the only path that builds the tree outside
     /// tests, since a staging change re-runs the diff rather than editing the
-    /// hunks in place. Nothing else takes the tree mutably, so the count cannot
-    /// drift from it.
+    /// hunks in place. Nothing else takes the tree mutably, so the count stays
+    /// in step with it.
     staged_tally: (usize, usize),
     version: usize,
     /// What [`Self::live_hunks`] last resolved, so the four callers that ask
@@ -413,6 +448,8 @@ struct LiveRowsCache {
     rows: Vec<Range<u32>>,
     /// Indices into `rows`, ordered as the answer is.
     order: Vec<usize>,
+    /// The staged marks placed against `rows`.
+    staged: Vec<(Range<u32>, DiffHunkStatus)>,
 }
 
 impl DiffMap {
@@ -449,6 +486,8 @@ impl DiffMap {
             base_highlights: None,
             base_changes,
             base_staged,
+            staged_marks: Arc::default(),
+            staged_rows: Arc::default(),
             staged_tally,
             version: Self::next_version(),
             resolved_rows: Arc::new(Mutex::new(None)),
@@ -458,6 +497,48 @@ impl DiffMap {
     /// Attach base-text syntax highlights for the diff view's left column.
     pub fn set_base_highlights(&mut self, highlights: Arc<BaseHighlights>) {
         self.base_highlights = Some(highlights);
+    }
+
+    /// Set the changes the base text holds over the text behind it.
+    ///
+    /// Each mark counts as a staged hunk in [`Self::staged_counts`], since it is
+    /// a change already in the index. A second call replaces the first.
+    pub(crate) fn set_staged_marks(&mut self, mut marks: Vec<StagedMark>) {
+        marks.sort_by_key(|mark| (mark.base_lines.start, mark.base_lines.end));
+        self.staged_tally.0 = self.staged_tally.0 - self.staged_marks.len() + marks.len();
+        self.staged_marks = Arc::new(marks);
+        self.staged_rows = Arc::new(
+            self.staged_rows_at(self.hunks.iter().map(|hunk| hunk.buffer_line_range.clone())),
+        );
+    }
+
+    /// [`Self::staged_marks`] as buffer rows, against hunks that sit at
+    /// `hunk_rows`, one range per hunk in tree order.
+    ///
+    /// Empty when there are no marks, or no base text to place them against.
+    fn staged_rows_at(
+        &self,
+        hunk_rows: impl Iterator<Item = Range<u32>>,
+    ) -> Vec<(Range<u32>, DiffHunkStatus)> {
+        let Some(base_text) = &self.base_text else {
+            return Vec::new();
+        };
+        if self.staged_marks.is_empty() {
+            return Vec::new();
+        }
+
+        let hunks: Vec<(Range<u32>, Range<u32>)> = self
+            .hunks
+            .iter()
+            .zip(hunk_rows)
+            .map(|(hunk, rows)| {
+                (
+                    rows,
+                    hunk_base_lines(hunk, &self.base_line_starts, base_text),
+                )
+            })
+            .collect();
+        staged_mark_rows(&hunks, &self.staged_marks)
     }
 
     /// Pin every hunk's buffer rows to `snapshot`, so a later reader can find
@@ -600,6 +681,7 @@ impl DiffMap {
                         rows: held.rows[i].clone(),
                     })
                     .collect(),
+                staged: held.staged.clone(),
             };
         }
 
@@ -641,11 +723,13 @@ impl DiffMap {
         // An edit inside one hunk moves it past another only if the diff itself
         // is stale enough to have overlapping hunks, so this rarely reorders.
         order.sort_by_key(|&i| (rows[i].start, rows[i].end));
+        let staged = self.staged_rows_at(rows.iter().cloned());
 
         let held = cache.insert(LiveRowsCache {
             buffer_version,
             rows,
             order,
+            staged,
         });
         LiveHunks {
             hunks: held
@@ -656,6 +740,7 @@ impl DiffMap {
                     rows: held.rows[i].clone(),
                 })
                 .collect(),
+            staged: held.staged.clone(),
         }
     }
 
@@ -665,10 +750,12 @@ impl DiffMap {
 
     /// Whether `other` would decorate the buffer exactly as this map does.
     ///
-    /// Compares the hunks and the base text, which is everything rendering
-    /// reads. The base change spans, the staged map, and the staged tally are
-    /// all derived from those two at construction, and the base highlights from
-    /// the base text and the style table.
+    /// Compares the hunks, the base text, and the staged marks, which is
+    /// everything rendering reads. The base change spans, the staged map, the
+    /// staged rows, and the staged tally are all derived from those, and the
+    /// base highlights from the base text and the style table. The marks are
+    /// set after construction rather than derived, so they are compared on
+    /// their own.
     ///
     /// Deliberately not the version. A version is minted per construction, and
     /// preserving it across a recompute that changed nothing is the whole point
@@ -683,7 +770,9 @@ impl DiffMap {
             (None, None) => true,
             _ => false,
         };
-        same_base && self.hunks.iter().eq(other.hunks.iter())
+        same_base
+            && self.staged_marks == other.staged_marks
+            && self.hunks.iter().eq(other.hunks.iter())
     }
 
     pub fn base_text(&self) -> Option<&Arc<String>> {
@@ -711,18 +800,25 @@ impl DiffMap {
     }
 
     /// The diff mark to paint in the gutter for buffer `line`, or `None` when no
-    /// hunk touches it.
+    /// hunk or staged mark touches it.
     ///
     /// A row inside a hunk's `buffer_line_range` reports that hunk's status. A
     /// row a [`DiffHunkStatus::Deleted`] hunk anchors -- its removed content
     /// rendered just above -- reports `Deleted`, the deletion seam. The bool is
     /// the row's git-index staged state for a contained row, or the whole
-    /// hunk's for a deletion or move seam.
+    /// hunk's for a deletion or move seam. A row no hunk marks answers the
+    /// staged mark on it, if any.
     ///
     /// Reports whole hunk ranges. The live counterpart
     /// [`LiveHunks::gutter_mark_for_line`] narrows a refined hunk to the rows
     /// its runs name, which is what the render paths read.
     pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+        self.hunk_mark_for_line(line)
+            .or_else(|| staged_row_mark(&self.staged_rows, line))
+    }
+
+    /// The mark a hunk paints at buffer `line`, before the staged marks.
+    fn hunk_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
         let target = HunkKeyRef(Some(&line));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
         cursor.seek(&target, Bias::Right);
@@ -744,11 +840,12 @@ impl DiffMap {
     }
 
     /// The git-index staged state of the hunk containing `line`, or `None`
-    /// when no hunk covers it.
+    /// when no hunk or staged mark covers it.
     ///
     /// `Some(true)` marks a hunk already applied to the index, `Some(false)`
-    /// an unstaged one. Deletion hunks occupy no buffer rows, so no line
-    /// resolves to one here.
+    /// an unstaged one. A row no hunk covers answers `Some(true)` when a staged
+    /// mark covers it. Deletions occupy no buffer rows, so no line resolves to
+    /// one here.
     pub fn staged_for_line(&self, line: u32) -> Option<bool> {
         let target = HunkKeyRef(Some(&line));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
@@ -758,6 +855,14 @@ impl DiffMap {
             .item()
             .filter(|hunk| hunk.buffer_line_range.contains(&line))
             .map(|hunk| hunk.line_staged(line))
+            .or_else(|| {
+                let before = self
+                    .staged_rows
+                    .partition_point(|(rows, _)| rows.start <= line);
+                self.staged_rows[..before]
+                    .last()
+                    .and_then(|(rows, _)| rows.contains(&line).then_some(true))
+            })
     }
 
     /// Count hunks by staged state as `(staged, unstaged)` for a statusline.
@@ -1172,6 +1277,27 @@ impl DiffMap {
         self.base_staged.get(&line).copied()
     }
 
+    /// The status of the staged mark at base `line`, or `None` when no mark
+    /// covers it.
+    ///
+    /// What the diff view's left column marks at `line` beyond the removed rows
+    /// [`Self::base_line_staged`] covers. A deletion's empty mark answers at
+    /// the line it sits at, the line that followed the removed text.
+    pub(crate) fn staged_mark_at_base_line(&self, line: u32) -> Option<DiffHunkStatus> {
+        let end = self
+            .staged_marks
+            .partition_point(|mark| mark.base_lines.start <= line);
+        self.staged_marks[..end]
+            .iter()
+            .rev()
+            .take_while(|mark| mark.base_lines.end >= line)
+            .find(|mark| {
+                mark.base_lines.contains(&line)
+                    || (mark.base_lines.is_empty() && mark.base_lines.start == line)
+            })
+            .map(|mark| mark.status)
+    }
+
     pub fn total_deleted_lines(&self) -> u32 {
         let base_text = match &self.base_text {
             Some(t) => t,
@@ -1304,6 +1430,101 @@ pub(crate) fn mark_staged(hunks: &mut [DiffHunk], index_changed: &[Range<u32>]) 
         }
     }
 }
+
+/// Map `marks`, in base-line coordinates, onto the buffer rows they paint on.
+///
+/// `hunks` pairs each hunk's buffer rows with the base lines it replaced, in
+/// base order. A base line outside every hunk sits at the buffer row the hunks
+/// before it shift it to. A mark's lines inside a hunk's base range are
+/// dropped, because those rows differ from the base and the hunk's own mark is
+/// the truth there. An empty mark maps to the row its line shifts to, unless a
+/// hunk's base range holds that line.
+///
+/// The answer is sorted by row, with one range per unbroken run of a mark's
+/// rows.
+fn staged_mark_rows(
+    hunks: &[(Range<u32>, Range<u32>)],
+    marks: &[StagedMark],
+) -> Vec<(Range<u32>, DiffHunkStatus)> {
+    let mut out = Vec::with_capacity(marks.len());
+    let mut next = 0;
+    let mut delta: i64 = 0;
+
+    for mark in marks {
+        if mark.base_lines.is_empty() {
+            let line = mark.base_lines.start;
+            if !fold_to(hunks, line, &mut next, &mut delta) {
+                let row = shift(line, delta);
+                out.push((row..row, mark.status));
+            }
+            continue;
+        }
+
+        let mut run: Option<Range<u32>> = None;
+        for line in mark.base_lines.clone() {
+            if fold_to(hunks, line, &mut next, &mut delta) {
+                out.extend(run.take().map(|rows| (rows, mark.status)));
+                continue;
+            }
+            let row = shift(line, delta);
+            run = match run {
+                Some(rows) if rows.end == row => Some(rows.start..row + 1),
+                open => {
+                    out.extend(open.map(|rows| (rows, mark.status)));
+                    Some(row..row + 1)
+                },
+            };
+        }
+        out.extend(run.map(|rows| (rows, mark.status)));
+    }
+
+    out.sort_by_key(|(rows, _)| (rows.start, rows.end));
+    out
+}
+
+/// Fold every hunk from `next` that ends at or before base `line` into
+/// `delta`, the row shift those hunks put on the lines after them, and answer
+/// whether the first hunk left holds `line`.
+fn fold_to(
+    hunks: &[(Range<u32>, Range<u32>)],
+    line: u32,
+    next: &mut usize,
+    delta: &mut i64,
+) -> bool {
+    while let Some((rows, base)) = hunks.get(*next)
+        && base.end <= line
+    {
+        *delta += (i64::from(rows.end) - i64::from(rows.start))
+            - (i64::from(base.end) - i64::from(base.start));
+        *next += 1;
+    }
+    hunks
+        .get(*next)
+        .is_some_and(|(_, base)| base.contains(&line))
+}
+
+/// Base `line` as a buffer row, after the shift `delta` of the hunks above it.
+fn shift(line: u32, delta: i64) -> u32 {
+    (i64::from(line) + delta).max(0) as u32
+}
+
+/// The gutter mark that `rows`, staged marks as buffer rows sorted by row,
+/// holds at buffer `line`.
+///
+/// A range that holds `line` answers its status, and an empty range at `line`
+/// answers [`DiffHunkStatus::Deleted`], where a staged removal took its text.
+/// Both read staged.
+fn staged_row_mark(
+    rows: &[(Range<u32>, DiffHunkStatus)],
+    line: u32,
+) -> Option<(DiffHunkStatus, bool)> {
+    let (range, status) = rows[..rows.partition_point(|(range, _)| range.start <= line)].last()?;
+    if range.contains(&line) {
+        return Some((*status, true));
+    }
+    (range.is_empty() && range.start == line).then_some((DiffHunkStatus::Deleted, true))
+}
+
 /// Fold a structural diff's changes into hunks, in buffer-line order.
 ///
 /// Also reachable on its own for a caller that wants the hunks and nothing
@@ -1759,14 +1980,27 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
         if hunk.base_byte_range.is_empty() {
             continue;
         }
-        let start_line = line_of(&starts, hunk.base_byte_range.start);
-        let count = base_text[hunk.base_byte_range.clone()].lines().count() as u32;
         let staged = hunk.staged();
-        for line in start_line..start_line + count {
+        for line in hunk_base_lines(hunk, &starts, base_text) {
             out.insert(line, staged);
         }
     }
     out
+}
+
+/// The base lines `hunk` removed or replaced, against the [`line_starts`] of
+/// `base_text`.
+///
+/// Empty for a hunk that removed nothing, at the base line its added rows go
+/// before. The count comes from [`str::lines`] over the removed bytes, which
+/// hold the trailing newline, so it does not over-count at a newline boundary.
+fn hunk_base_lines(hunk: &DiffHunk, starts: &[usize], base_text: &str) -> Range<u32> {
+    let start = line_of(starts, hunk.base_byte_range.start);
+    if hunk.base_byte_range.is_empty() {
+        return start..start;
+    }
+    let count = base_text[hunk.base_byte_range.clone()].lines().count() as u32;
+    start..start + count
 }
 
 /// Distribute every hunk's base change spans across the base lines they cover,
@@ -1878,10 +2112,14 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
+    use super::{
+        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, StagedMark, TokenDetail,
+    };
     use crate::{
+        buffer::{BufferId, TextBuffer},
         display_map::{BlockPlacement, BlockProperties, WrapGeometry},
         host::DiffStatus,
+        multi_buffer::MultiBuffer,
     };
     use std::sync::Arc;
 
@@ -2243,6 +2481,193 @@ mod tests {
         });
         assert_eq!(dm.staged_counts(), (2, 1));
         assert_eq!(dm.staged_counts(), recount(&dm), "and still agrees");
+    }
+
+    fn mark(status: DiffHunkStatus, base_lines: std::ops::Range<u32>) -> StagedMark {
+        StagedMark { status, base_lines }
+    }
+
+    /// A map over `base` holding `hunks`, with `marks` as its staged marks.
+    fn staged_map(base: &str, hunks: Vec<DiffHunk>, marks: Vec<StagedMark>) -> DiffMap {
+        let mut dm = DiffMap::from_hunks(hunks, Some(Arc::new(base.to_string())));
+        dm.set_staged_marks(marks);
+        dm
+    }
+
+    fn buffer_holding(text: &str) -> MultiBuffer {
+        MultiBuffer::singleton(Arc::new(
+            TextBuffer::with_text(BufferId::new(0), text).into(),
+        ))
+    }
+
+    /// The gutter marks `dm` paints on `rows` of a buffer holding `text`,
+    /// checked to agree between the live and the stored lookups.
+    fn staged_gutter(
+        dm: &DiffMap,
+        text: &str,
+        rows: std::ops::Range<u32>,
+    ) -> Vec<Option<(DiffHunkStatus, bool)>> {
+        let multi = buffer_holding(text);
+        let snapshot = multi.snapshot();
+        let live = dm.live_hunks(&snapshot);
+        rows.map(|row| {
+            let mark = live.gutter_mark_for_line(row);
+            assert_eq!(
+                dm.gutter_mark_for_line(row),
+                mark,
+                "stored and live at row {row}"
+            );
+            mark
+        })
+        .collect()
+    }
+
+    /// A deletion's mark holds no base line, so it answers at the one line it
+    /// sits at, while a changed block answers across its lines.
+    #[test]
+    fn staged_marks_answer_by_base_line() {
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\nb4\n",
+            Vec::new(),
+            vec![
+                mark(DiffHunkStatus::Deleted, 3..3),
+                mark(DiffHunkStatus::Modified, 1..3),
+            ],
+        );
+        assert_eq!(
+            (0..5)
+                .map(|line| dm.staged_mark_at_base_line(line))
+                .collect::<Vec<_>>(),
+            [
+                None,
+                Some(DiffHunkStatus::Modified),
+                Some(DiffHunkStatus::Modified),
+                Some(DiffHunkStatus::Deleted),
+                None,
+            ],
+            "marks set out of order answer by base line",
+        );
+    }
+
+    /// A staged mark is a change already in the index, so the status bar
+    /// counts it with the staged hunks.
+    #[test]
+    fn staged_marks_count_as_staged_hunks() {
+        let mut dm = DiffMap::from_hunks(
+            [added_hunk(4..5)],
+            Some(Arc::new("b0\nb1\nb2\nb3\n".to_string())),
+        );
+        assert_eq!(dm.staged_counts(), (0, 1), "the unstaged hunk alone");
+
+        dm.set_staged_marks(vec![
+            mark(DiffHunkStatus::Modified, 0..1),
+            mark(DiffHunkStatus::Deleted, 2..2),
+        ]);
+        assert_eq!(dm.staged_counts(), (2, 1), "each mark counts as staged");
+
+        dm.set_staged_marks(vec![mark(DiffHunkStatus::Added, 3..4)]);
+        assert_eq!(
+            dm.staged_counts(),
+            (1, 1),
+            "a second set replaces the first"
+        );
+    }
+
+    /// Two rows added above base line 1 push every later base line two rows
+    /// down, so a mark on base line 3 paints on row 5.
+    #[test]
+    fn a_staged_mark_maps_past_an_added_hunk() {
+        let added = DiffHunk {
+            base_byte_range: 3..3,
+            ..added_hunk(1..3)
+        };
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\nb4\n",
+            vec![added],
+            vec![mark(DiffHunkStatus::Modified, 3..4)],
+        );
+        let text = "b0\nn1\nn2\nb1\nb2\nb3\nb4\n";
+
+        let unstaged_add = Some((DiffHunkStatus::Added, false));
+        assert_eq!(
+            staged_gutter(&dm, text, 0..7),
+            [
+                None,
+                unstaged_add,
+                unstaged_add,
+                None,
+                None,
+                Some((DiffHunkStatus::Modified, true)),
+                None,
+            ],
+            "the mark lands two rows below its base line",
+        );
+        assert_eq!(
+            (0..7)
+                .map(|row| dm.staged_for_line(row))
+                .collect::<Vec<_>>(),
+            [None, Some(false), Some(false), None, None, Some(true), None],
+            "and reads staged there",
+        );
+    }
+
+    /// Rows an unstaged hunk covers differ from the index, so the hunk's own
+    /// mark paints there and the staged mark keeps only the rows past it.
+    #[test]
+    fn a_staged_mark_under_an_unstaged_hunk_yields_to_it() {
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\n",
+            vec![modified_hunk(1..2, 3..6)],
+            vec![mark(DiffHunkStatus::Modified, 1..3)],
+        );
+        let text = "b0\nX1\nb2\nb3\n";
+        assert_eq!(
+            staged_gutter(&dm, text, 0..4),
+            [
+                None,
+                Some((DiffHunkStatus::Modified, false)),
+                Some((DiffHunkStatus::Modified, true)),
+                None,
+            ],
+            "the hunk holds row 1 and the mark keeps row 2",
+        );
+        assert_eq!(
+            dm.live_hunks(&buffer_holding(text).snapshot())
+                .change_stops(),
+            [1..2, 2..3],
+            "and the walk stops on the hunk, then on the rest of the mark",
+        );
+    }
+
+    /// A staged deletion took its lines out of the index, so it covers no row
+    /// and marks the row after the removed text.
+    #[test]
+    fn a_staged_deletion_maps_to_a_seam() {
+        let text = "b0\nb1\nb2\nb3\n";
+        let dm = staged_map(text, Vec::new(), vec![mark(DiffHunkStatus::Deleted, 2..2)]);
+        assert_eq!(
+            staged_gutter(&dm, text, 0..4),
+            [None, None, Some((DiffHunkStatus::Deleted, true)), None],
+            "the deletion marks row 2",
+        );
+        assert_eq!(dm.staged_for_line(2), None, "and covers no row to stage");
+    }
+
+    /// `n`, `p`, and the wheel walk stop on a staged mark the way they stop on
+    /// a hunk.
+    #[test]
+    fn change_stops_include_staged_marks() {
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\nb4\n",
+            vec![modified_hunk(1..2, 3..6)],
+            vec![mark(DiffHunkStatus::Modified, 4..5)],
+        );
+        assert_eq!(
+            dm.live_hunks(&buffer_holding("b0\nX1\nb2\nb3\nb4\n").snapshot())
+                .change_stops(),
+            [1..2, 4..5],
+            "the hunk, then the mark",
+        );
     }
 
     /// A row between two hunks answers the one before it rather than the one
