@@ -175,6 +175,8 @@ pub(crate) fn render_editor_with_overlay(
             theme,
             buf,
             is_focused,
+            search_query,
+            search_smart_case,
             scene,
             dials,
         );
@@ -453,82 +455,17 @@ pub(crate) fn render_editor_with_overlay(
         }
     }
 
-    if let Some(query) = search_query.filter(|q| !q.is_empty()) {
-        let version = buffer_snapshot.version();
-        let rope = buffer_snapshot.rope();
-        let stale = match &editor.search_match_cache {
-            Some(cache) => {
-                cache.version != version
-                    || cache.query != query
-                    || cache.visible != visible
-                    || cache.smart_case != search_smart_case
-            },
-            None => true,
-        };
-        if stale {
-            // Reuse the compiled regex while the query text and the case mode
-            // both hold, so only a new query or a flipped setting pays a fresh
-            // compile. A cached None from a failed compile is reused too, so an
-            // invalid query does not recompile every frame.
-            let (mut window, regex) = match editor.search_match_cache.take() {
-                Some(cache) if cache.query == query && cache.smart_case == search_smart_case => {
-                    (cache.window, cache.regex)
-                },
-                Some(cache) => (
-                    cache.window,
-                    crate::action_handlers::search::compile_search_regex(query, search_smart_case)
-                        .ok(),
-                ),
-                None => (
-                    String::new(),
-                    crate::action_handlers::search::compile_search_regex(query, search_smart_case)
-                        .ok(),
-                ),
-            };
-            window.clear();
-            for chunk in rope.chunks_in_range(visible.clone()) {
-                window.push_str(chunk);
-            }
-            let matches = match &regex {
-                Some(regex) => regex
-                    .find_iter(&window)
-                    .filter(|m| m.end() > m.start())
-                    .map(|m| (m.start() + visible.start, m.end() + visible.start))
-                    .collect(),
-                None => Vec::new(),
-            };
-            editor.search_match_cache = Some(SearchMatchCache {
-                version,
-                query: query.to_string(),
-                visible: visible.clone(),
-                smart_case: search_smart_case,
-                matches,
-                window,
-                regex,
-            });
-        }
-
-        let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
-        let cache = editor.search_match_cache.as_ref().expect("set above");
-        for &(match_start, match_end) in &cache.matches {
-            paint_offset_range(
-                rope,
-                &snapshot,
-                match_start..match_end,
-                None,
-                &mut |_, _, cell| {
-                    cell.set_style(match_style);
-                },
-                editor.scroll_row,
-                end_row,
-                inner,
-                right,
-                bottom,
-                buf,
-                None,
-            );
-        }
-    }
+    paint_search_matches(
+        editor,
+        &snapshot,
+        inner,
+        end_row,
+        &visible,
+        search_query,
+        search_smart_case,
+        theme,
+        buf,
+    );
 
     if !is_focused {
         return;
@@ -817,6 +754,106 @@ pub(crate) fn paint_selections(
     }
 
     editor.cursor_screen_cell = primary_cell;
+}
+
+/// Wash every match of `query` that reaches the display rows
+/// `scroll_row..end_row` into `inner`, in `ui.search.match`.
+///
+/// `visible` is the byte range of those rows, as [`visible_byte_range`] answers
+/// it. An absent or empty `query` paints nothing. The matches are cached on
+/// `editor`, so a frame with the buffer version, query, rows, and case mode of
+/// the one before it searches nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_search_matches(
+    editor: &mut EditorState,
+    snapshot: &DisplaySnapshot,
+    inner: Rect,
+    end_row: u32,
+    visible: &Range<usize>,
+    query: Option<&str>,
+    smart_case: bool,
+    theme: &Theme,
+    buf: &mut Buffer,
+) {
+    let Some(query) = query.filter(|q| !q.is_empty()) else {
+        return;
+    };
+    let right = inner.x + inner.width;
+    let bottom = inner.y + inner.height;
+    let buffer_snapshot = snapshot.buffer_snapshot();
+
+    let version = buffer_snapshot.version();
+    let rope = buffer_snapshot.rope();
+    let stale = match &editor.search_match_cache {
+        Some(cache) => {
+            cache.version != version
+                || cache.query != query
+                || cache.visible != *visible
+                || cache.smart_case != smart_case
+        },
+        None => true,
+    };
+    if stale {
+        // Reuse the compiled regex while the query text and the case mode
+        // both hold, so only a new query or a flipped setting pays a fresh
+        // compile. A cached None from a failed compile is reused too, so an
+        // invalid query does not recompile every frame.
+        let (mut window, regex) = match editor.search_match_cache.take() {
+            Some(cache) if cache.query == query && cache.smart_case == smart_case => {
+                (cache.window, cache.regex)
+            },
+            Some(cache) => (
+                cache.window,
+                crate::action_handlers::search::compile_search_regex(query, smart_case).ok(),
+            ),
+            None => (
+                String::new(),
+                crate::action_handlers::search::compile_search_regex(query, smart_case).ok(),
+            ),
+        };
+        window.clear();
+        for chunk in rope.chunks_in_range(visible.clone()) {
+            window.push_str(chunk);
+        }
+        let matches = match &regex {
+            Some(regex) => regex
+                .find_iter(&window)
+                .filter(|m| m.end() > m.start())
+                .map(|m| (m.start() + visible.start, m.end() + visible.start))
+                .collect(),
+            None => Vec::new(),
+        };
+        editor.search_match_cache = Some(SearchMatchCache {
+            version,
+            query: query.to_string(),
+            visible: visible.clone(),
+            smart_case,
+            matches,
+            window,
+            regex,
+        });
+    }
+
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let cache = editor.search_match_cache.as_ref().expect("set above");
+    for &(match_start, match_end) in &cache.matches {
+        paint_offset_range(
+            rope,
+            snapshot,
+            match_start..match_end,
+            None,
+            &mut |_, _, cell| {
+                cell.set_style(match_style);
+            },
+            editor.scroll_row,
+            end_row,
+            inner,
+            right,
+            bottom,
+            buf,
+            None,
+        );
+    }
 }
 
 /// The wrap width `mode` gives a text area `text_width` columns wide.

@@ -184,9 +184,10 @@ impl DiffDials {
 /// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
 /// components, otherwise it falls back to the ASCII gutter.
 ///
-/// A focused pane paints its selections and cursors over the right column as a
-/// plain pane paints them, through [`editor::paint_selections`]. An unfocused
-/// one paints neither.
+/// Search matches wash over the right column, and a focused pane paints its
+/// selections and cursors over them, as a plain pane does through
+/// [`editor::paint_search_matches`] and [`editor::paint_selections`]. An
+/// unfocused pane paints no selection or cursor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
@@ -195,6 +196,8 @@ pub(crate) fn render_diff_view(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     is_focused: bool,
+    search_query: Option<&str>,
+    search_smart_case: bool,
     scene: Option<&mut ApcScene>,
     dials: DiffDials,
 ) {
@@ -226,9 +229,6 @@ pub(crate) fn render_diff_view(
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
     );
-    if !is_focused {
-        return;
-    }
 
     let end_row = (editor.scroll_row + inner.height as u32).min(snapshot.line_count());
     let text = editor.text_rect.expect("set above");
@@ -238,6 +238,21 @@ pub(crate) fn render_diff_view(
         editor.scroll_row,
         end_row,
     );
+    editor::paint_search_matches(
+        editor,
+        &snapshot,
+        text,
+        end_row,
+        &visible,
+        search_query,
+        search_smart_case,
+        theme,
+        buf,
+    );
+    if !is_focused {
+        return;
+    }
+
     editor::paint_selections(
         editor, &snapshot, text, end_row, &visible, theme, buf, stoatty,
     );
@@ -2137,7 +2152,10 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         diff_map::{ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::InlayKind,
-        theme::{scope::UI_SELECTION_EDITOR, Theme},
+        theme::{
+            scope::{UI_SEARCH_MATCH, UI_SELECTION_EDITOR},
+            Theme,
+        },
     };
     use std::sync::{Arc, RwLock};
     use stoat_language::structural_diff;
@@ -2548,6 +2566,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -2621,6 +2641,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -2661,6 +2683,8 @@ mod tests {
             &theme,
             &mut rich_buf,
             true,
+            None,
+            false,
             Some(&mut scene),
             DiffDials::shipped(),
         );
@@ -2729,6 +2753,8 @@ mod tests {
             &mut ascii_buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
@@ -2767,6 +2793,8 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials::shipped(),
         );
@@ -2833,6 +2861,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -2868,6 +2898,8 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials::shipped(),
         );
@@ -2932,6 +2964,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -2976,6 +3010,8 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials::shipped(),
         );
@@ -3257,6 +3293,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -3284,6 +3322,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -3308,6 +3348,8 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
+            false,
             Some(&mut ApcScene::new()),
             DiffDials::shipped(),
         );
@@ -3364,6 +3406,33 @@ mod tests {
             wash_and_cursor_after("x"),
             ((68..81).collect(), vec![81]),
             "`x` washes the thirteen glyphs and puts the cursor on the newline",
+        );
+    }
+
+    /// A submitted search selects its match, and the selection paints over the
+    /// match wash, so `g k` moves the cursor off the match before the frame is
+    /// read.
+    #[test]
+    fn a_search_washes_its_match_in_the_live_column() {
+        let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
+        h.type_text("/other");
+        h.type_keys("enter g k");
+        h.snapshot();
+
+        let match_bg = h
+            .stoat
+            .theme
+            .get(UI_SEARCH_MATCH)
+            .bg
+            .expect("a search match background");
+        let buf = h.rendered_buffer();
+        let row = row_holding(buf, 68..buf.area.width, "fn other");
+        assert_eq!(
+            (0..buf.area.width)
+                .filter(|&x| buf[(x, row)].bg == match_bg)
+                .collect::<Vec<_>>(),
+            (71..76).collect::<Vec<_>>(),
+            "the wash covers `other` in the live column and nothing in the base column",
         );
     }
 
@@ -3796,7 +3865,9 @@ mod tests {
         let area = Rect::new(0, 0, 120, 4);
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
-        render_diff_view(editor, area, fallback, &theme, &mut buf, true, None, dials);
+        render_diff_view(
+            editor, area, fallback, &theme, &mut buf, true, None, false, None, dials,
+        );
 
         let row = (0..area.height)
             .find(|&y| buffer_text(&buf, y).contains("beta"))
@@ -4044,6 +4115,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -4099,6 +4172,8 @@ mod tests {
             &theme,
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials::shipped(),
         );
@@ -4215,6 +4290,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials::shipped(),
         );
 
@@ -4244,6 +4321,8 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials::shipped(),
         );
@@ -4277,6 +4356,8 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials::shipped(),
         );
@@ -4817,6 +4898,8 @@ mod tests {
             &mut buf,
             true,
             None,
+            false,
+            None,
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
@@ -4844,6 +4927,8 @@ mod tests {
             &theme,
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials {
                 soften_scale: 0.0,
@@ -4886,6 +4971,8 @@ mod tests {
             &theme,
             &mut buf,
             true,
+            None,
+            false,
             None,
             DiffDials {
                 soften_scale: 0.0,
