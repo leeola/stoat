@@ -21,6 +21,7 @@ use ratatui::{
 };
 use std::{
     cmp::Ordering,
+    collections::BTreeMap,
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
 };
@@ -185,9 +186,10 @@ impl DiffDials {
 /// components, otherwise it falls back to the ASCII gutter.
 ///
 /// Search matches wash over the right column, and a focused pane paints its
-/// selections and cursors over them, as a plain pane does through
-/// [`editor::paint_search_matches`] and [`editor::paint_selections`]. An
-/// unfocused pane paints no selection or cursor.
+/// selections, cursors, and goto-word labels over them, as a plain pane does
+/// through [`editor::paint_search_matches`], [`editor::paint_selections`], and
+/// [`editor::paint_goto_word_labels`]. An unfocused pane paints no selection,
+/// cursor, or label.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
@@ -196,6 +198,7 @@ pub(crate) fn render_diff_view(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     is_focused: bool,
+    goto_word_labels: Option<&BTreeMap<String, (usize, usize)>>,
     search_query: Option<&str>,
     search_smart_case: bool,
     scene: Option<&mut ApcScene>,
@@ -256,6 +259,17 @@ pub(crate) fn render_diff_view(
     editor::paint_selections(
         editor, &snapshot, text, end_row, &visible, theme, buf, stoatty,
     );
+    if let Some(labels) = goto_word_labels {
+        editor::paint_goto_word_labels(
+            labels,
+            &snapshot,
+            text,
+            editor.scroll_row,
+            end_row,
+            fallback_style,
+            buf,
+        );
+    }
 }
 
 /// Minimum inner width for the two-column diff layout. Below this each text
@@ -2566,6 +2580,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -2641,6 +2656,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -2683,6 +2699,7 @@ mod tests {
             &theme,
             &mut rich_buf,
             true,
+            None,
             None,
             false,
             Some(&mut scene),
@@ -2753,6 +2770,7 @@ mod tests {
             &mut ascii_buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -2793,6 +2811,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -2861,6 +2880,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -2898,6 +2918,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -2964,6 +2985,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -3010,6 +3032,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -3293,6 +3316,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -3322,6 +3346,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -3348,6 +3373,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
             None,
             false,
             Some(&mut ApcScene::new()),
@@ -3433,6 +3459,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             (71..76).collect::<Vec<_>>(),
             "the wash covers `other` in the live column and nothing in the base column",
+        );
+    }
+
+    /// Two words take one-letter labels, `a` for `fn` and `b` for `other`. A
+    /// label covers the first letter of its word, so the row is found by the
+    /// base text beside it.
+    #[test]
+    fn goto_word_labels_mark_each_word_of_the_live_column() {
+        let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
+        h.type_keys("g w");
+        h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let row = row_holding(buf, 8..59, "fn main");
+        let labels = (0..buf.area.width)
+            .filter(|&x| {
+                buf[(x, row)]
+                    .modifier
+                    .contains(Modifier::REVERSED | Modifier::BOLD)
+            })
+            .map(|x| (x, buf[(x, row)].symbol()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [(68, "a"), (71, "b")],
+            "each word of the live column carries its label, and the base column none",
         );
     }
 
@@ -3866,7 +3918,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            editor, area, fallback, &theme, &mut buf, true, None, false, None, dials,
+            editor, area, fallback, &theme, &mut buf, true, None, None, false, None, dials,
         );
 
         let row = (0..area.height)
@@ -4115,6 +4167,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -4172,6 +4225,7 @@ mod tests {
             &theme,
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -4290,6 +4344,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials::shipped(),
@@ -4321,6 +4376,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -4356,6 +4412,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -4898,6 +4955,7 @@ mod tests {
             &mut buf,
             true,
             None,
+            None,
             false,
             None,
             DiffDials {
@@ -4927,6 +4985,7 @@ mod tests {
             &theme,
             &mut buf,
             true,
+            None,
             None,
             false,
             None,
@@ -4971,6 +5030,7 @@ mod tests {
             &theme,
             &mut buf,
             true,
+            None,
             None,
             false,
             None,

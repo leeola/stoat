@@ -175,6 +175,7 @@ pub(crate) fn render_editor_with_overlay(
             theme,
             buf,
             is_focused,
+            goto_word_labels,
             search_query,
             search_smart_case,
             scene,
@@ -573,28 +574,15 @@ pub(crate) fn render_editor_with_overlay(
     }
 
     if let Some(labels) = goto_word_labels {
-        let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
-        // Drawn at the word's start, which is where the user reads the label
-        // against the word it names.
-        for (label, &(start, _)) in labels {
-            let rope = buffer_snapshot.rope();
-            if start > rope.len() {
-                continue;
-            }
-            let point = rope.offset_to_point(start);
-            let display = snapshot.buffer_to_display(point);
-            if display.row < editor.scroll_row || display.row >= end_row {
-                continue;
-            }
-            let y = inner.y + (display.row - editor.scroll_row) as u16;
-            for (i, ch) in label.chars().enumerate() {
-                let x = inner.x + display.column as u16 + i as u16;
-                if x >= right || y >= bottom {
-                    break;
-                }
-                buf[(x, y)].set_char(ch).set_style(label_style);
-            }
-        }
+        paint_goto_word_labels(
+            labels,
+            &snapshot,
+            inner,
+            editor.scroll_row,
+            end_row,
+            fallback_style,
+            buf,
+        );
     }
 }
 
@@ -853,6 +841,48 @@ pub(crate) fn paint_search_matches(
             buf,
             None,
         );
+    }
+}
+
+/// Draw each goto-word label over the start of the word it names, for the
+/// words on the display rows `scroll_row..end_row` of `inner`.
+///
+/// A label paints in `fallback_style`, reversed and bold, and stops at the right
+/// edge of `inner`.
+pub(crate) fn paint_goto_word_labels(
+    labels: &BTreeMap<String, (usize, usize)>,
+    snapshot: &DisplaySnapshot,
+    inner: Rect,
+    scroll_row: u32,
+    end_row: u32,
+    fallback_style: Style,
+    buf: &mut Buffer,
+) {
+    let right = inner.x + inner.width;
+    let bottom = inner.y + inner.height;
+    let buffer_snapshot = snapshot.buffer_snapshot();
+
+    let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    // Drawn at the word's start, which is where the user reads the label
+    // against the word it names.
+    for (label, &(start, _)) in labels {
+        let rope = buffer_snapshot.rope();
+        if start > rope.len() {
+            continue;
+        }
+        let point = rope.offset_to_point(start);
+        let display = snapshot.buffer_to_display(point);
+        if display.row < scroll_row || display.row >= end_row {
+            continue;
+        }
+        let y = inner.y + (display.row - scroll_row) as u16;
+        for (i, ch) in label.chars().enumerate() {
+            let x = inner.x + display.column as u16 + i as u16;
+            if x >= right || y >= bottom {
+                break;
+            }
+            buf[(x, y)].set_char(ch).set_style(label_style);
+        }
     }
 }
 
