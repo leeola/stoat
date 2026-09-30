@@ -442,20 +442,20 @@ pub(super) enum StageOutcome {
 /// Stage, unstage, or toggle the git-index state of the diff hunk under the
 /// cursor in the focused editor.
 ///
-/// The hunk is resolved by diffing the file's HEAD content against the live
-/// buffer and taking the one whose buffer rows hold the cursor, which is the
-/// rule the gutter marks by, so the staged unit is the one drawn there. The
-/// action works in any editor view on a git-tracked file. A missing repo, an
-/// untracked file, or a cursor on a row no hunk covers sets a status message
-/// and changes nothing.
+/// Staging diffs the git index against the live buffer and takes the hunk whose
+/// buffer rows hold the cursor, which is the rule the gutter marks by, so the
+/// staged unit is the one drawn there. Unstaging diffs the index against HEAD at
+/// the cursor's index row, and a toggle stages an unstaged hunk under the cursor
+/// and unstages a staged one. Each reads the index, so a hunk lands whatever the
+/// index holds above it.
+///
+/// The action works in any editor view on a git-tracked file. A missing repo, an
+/// untracked file, or a cursor on a row no hunk covers sets a status message and
+/// changes nothing.
 ///
 /// The press captures the cursor row, the text, and the review base. The diff
 /// and the write run as a queued git job, and the status and the gutter follow
 /// when the job lands.
-///
-/// [`HunkStage::Toggle`] has no staged-state signal to read yet, so it stages
-/// by applying the forward patch and, only when that fails because the hunk is
-/// already staged, unstages by applying the reverse patch.
 pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     queue_stage(stoat, mode, AmendUnit::Hunk)
 }
@@ -463,11 +463,11 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 /// Stage, unstage, or toggle the git-index state of only the cursor line's
 /// change, in the focused editor on any git-tracked file.
 ///
-/// Unlike [`stage_hunk`], the emitted patch is restricted to the cursor's line
-/// via [`line_restricted_rows`], and staging diffs the git index (not HEAD)
-/// against the live buffer so sequential single-line stages inside one hunk
-/// compose. A missing repo, an untracked file, or a cursor on no change sets a
-/// status message and changes nothing.
+/// The emitted patch is restricted to the cursor's line via
+/// [`line_restricted_rows`], and staging diffs the git index (not HEAD) against
+/// the live buffer, so sequential single-line stages inside one hunk compose. A
+/// missing repo, an untracked file, or a cursor on no change sets a status
+/// message and changes nothing.
 ///
 /// The index is not the only target. Under a review base the staged side is the
 /// checked-out commit, so the keys amend the cursor's line into or out of it
@@ -612,7 +612,9 @@ fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: Stag
 
 /// Apply the hunk under `cursor_row` to the index, on whatever thread calls.
 ///
-/// The hunk comes from the file's HEAD content diffed against `buffer_text`.
+/// Staging diffs the index against `buffer_text`, and unstaging diffs the index
+/// against HEAD, so the patch lands whatever the index holds above the hunk.
+/// See [`stage_hunk`].
 fn index_hunk(
     repo: &dyn GitRepo,
     path: &Path,
@@ -622,43 +624,84 @@ fn index_hunk(
     mode: HunkStage,
 ) -> StageOutcome {
     let nothing = || StageOutcome::Unchanged("no hunk under the cursor".to_string());
-    let Some(base_text) = repo.head_content(path) else {
+    let Some(head_text) = repo.head_content(path) else {
         return nothing();
     };
-    let hunks = line_hunks(&base_text, buffer_text);
+    let index_text = repo
+        .index_content(path)
+        .unwrap_or_else(|| head_text.clone());
+
+    let stage = || stage_hunk_patch(rel, &index_text, buffer_text, cursor_row);
+    let unstage = || unstage_hunk_patch(rel, &index_text, &head_text, buffer_text, cursor_row);
+    let patch_and_message = match mode {
+        HunkStage::Stage => stage().map(|patch| (patch, "staged hunk")),
+        HunkStage::Unstage => unstage().map(|patch| (patch, "unstaged hunk")),
+        HunkStage::Toggle => stage()
+            .map(|patch| (patch, "staged hunk"))
+            .or_else(|| unstage().map(|patch| (patch, "unstaged hunk"))),
+    };
+
+    let Some((patch, message)) = patch_and_message else {
+        return nothing();
+    };
+    match repo.apply_to_index(&patch) {
+        Ok(()) => StageOutcome::Staged(message),
+        Err(err) => StageOutcome::Unchanged(format!("could not update staging: {err}")),
+    }
+}
+
+/// Build the patch that stages the hunk under the cursor by diffing the git
+/// index against the live buffer.
+///
+/// `None` when the cursor sits on no index-vs-buffer hunk.
+fn stage_hunk_patch(
+    rel: &Path,
+    index_text: &str,
+    buffer_text: &str,
+    cursor_row: u32,
+) -> Option<String> {
+    let hunks = line_hunks(index_text, buffer_text);
 
     // Resolved by the gutter's own rule, so the staged unit is the one drawn
     // under the cursor. A zero-width range is a deletion or a move, which the
     // gutter marks at its anchor row.
-    let Some(k) = hunks.iter().position(|hunk| {
+    let k = hunks.iter().position(|hunk| {
         let rows = &hunk.buffer_line_range;
         match rows.is_empty() {
             true => rows.start == cursor_row,
             false => rows.contains(&cursor_row),
         }
-    }) else {
-        return nothing();
-    };
+    })?;
+    hunk_to_patch(rel, index_text, buffer_text, &hunks, k)
+}
 
-    let (Some(forward), Some(reverse)) = (
-        hunk_to_patch(rel, &base_text, buffer_text, &hunks, k, false),
-        hunk_to_patch(rel, &base_text, buffer_text, &hunks, k, true),
-    ) else {
-        return nothing();
-    };
+/// Build the patch that unstages the hunk under the cursor by reverting its
+/// index rows to HEAD.
+///
+/// The cursor row is a buffer coordinate, so it is first mapped to the index.
+/// Diffing the index against HEAD then expresses each staged change as index
+/// rows, and the patch reverts the one at the mapped row. `None` when that row
+/// carries no staged change.
+fn unstage_hunk_patch(
+    rel: &Path,
+    index_text: &str,
+    head_text: &str,
+    buffer_text: &str,
+    cursor_row: u32,
+) -> Option<String> {
+    let index_row = map_buffer_row_to_index(index_text, buffer_text, cursor_row);
+    let hunks = line_hunks(index_text, head_text);
 
-    let result = match mode {
-        HunkStage::Stage => repo.apply_to_index(&forward).map(|()| "staged hunk"),
-        HunkStage::Unstage => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
-        HunkStage::Toggle => match repo.apply_to_index(&forward) {
-            Ok(()) => Ok("staged hunk"),
-            Err(_) => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
-        },
-    };
-    match result {
-        Ok(message) => StageOutcome::Staged(message),
-        Err(err) => StageOutcome::Unchanged(format!("could not update staging: {err}")),
-    }
+    // A staged deletion reads as HEAD lines added over an empty index range,
+    // so an empty range matches the row it starts at.
+    let k = (0..hunks.len()).find(|&k| {
+        let rows = base_line_range(index_text, &hunks, k);
+        match rows.is_empty() {
+            true => rows.start == index_row,
+            false => rows.contains(&index_row),
+        }
+    })?;
+    hunk_to_patch(rel, index_text, head_text, &hunks, k)
 }
 
 /// Apply the cursor line's change to the index, on whatever thread calls.
@@ -927,6 +970,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
+    use stoat_action::Action;
     use stoat_language::{structural_diff::TreeCache, LanguageRegistry};
 
     /// The text of the buffer open at `path`, which lets a test read a proposal
@@ -1370,6 +1414,88 @@ mod tests {
         );
     }
 
+    /// HEAD of a file whose first hunk turns `b` into two lines.
+    const SHIFT_HEAD: &str = "a\nb\nc\nd\ne\nf\ng\nh\n";
+
+    /// The buffer over [`SHIFT_HEAD`]. Each row below the first hunk sits one
+    /// row lower than in HEAD, and row 7 holds the second hunk's `Y`.
+    const SHIFT_BUFFER: &str = "a\nZ1\nZ2\nc\nd\ne\nf\nY\nh\n";
+
+    /// The second hunk staged into an index that lacks the first. Both starts
+    /// name index row 4, where the context opens.
+    const SECOND_HUNK_STAGE: &str =
+        "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -4,5 +4,5 @@\n d\n e\n f\n-g\n+Y\n h\n";
+
+    /// The second hunk unstaged from an index that holds both. The first hunk
+    /// moved it down a row, so both starts name index row 5.
+    const SECOND_HUNK_UNSTAGE: &str =
+        "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -5,5 +5,5 @@\n d\n e\n f\n-Y\n+g\n h\n";
+
+    /// Press `action` on the second hunk of [`SHIFT_BUFFER`] over an index that
+    /// holds `index`, and return the one patch the press applied.
+    fn press_on_the_second_hunk(index: &str, action: &dyn Action) -> String {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(&workdir, &[("a.rs", SHIFT_HEAD, index, SHIFT_BUFFER)]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 7);
+
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        patches[0].clone()
+    }
+
+    /// libgit2 looks for a hunk exactly at its `+` start. With the first hunk
+    /// out of the index, the context opens at index row 4 but buffer row 5, and
+    /// the header names the index row on both sides.
+    #[test]
+    fn a_line_below_an_unstaged_hunk_stages_at_its_index_row() {
+        assert_eq!(
+            press_on_the_second_hunk(SHIFT_HEAD, &stoat_action::StageLine),
+            SECOND_HUNK_STAGE
+        );
+    }
+
+    /// The hunk key reads the index as the line key does, so it stages the same
+    /// patch.
+    #[test]
+    fn a_hunk_below_an_unstaged_hunk_stages_at_its_index_row() {
+        assert_eq!(
+            press_on_the_second_hunk(SHIFT_HEAD, &stoat_action::StageHunk),
+            SECOND_HUNK_STAGE
+        );
+    }
+
+    /// With the first hunk staged, the context opens at index row 5 as in the
+    /// buffer, one row lower than in HEAD. A patch diffed from HEAD names row 4
+    /// and misses it.
+    #[test]
+    fn a_hunk_below_a_staged_hunk_stages_at_its_index_row() {
+        assert_eq!(
+            press_on_the_second_hunk("a\nZ1\nZ2\nc\nd\ne\nf\ng\nh\n", &stoat_action::StageHunk),
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -5,5 +5,5 @@\n d\n e\n f\n-g\n+Y\n h\n",
+        );
+    }
+
+    #[test]
+    fn a_hunk_below_a_staged_hunk_unstages_at_its_index_row() {
+        assert_eq!(
+            press_on_the_second_hunk(SHIFT_BUFFER, &stoat_action::UnstageHunk),
+            SECOND_HUNK_UNSTAGE
+        );
+    }
+
+    #[test]
+    fn toggle_stage_hunk_unstages_a_staged_hunk() {
+        assert_eq!(
+            press_on_the_second_hunk(SHIFT_BUFFER, &stoat_action::ToggleStageHunk),
+            SECOND_HUNK_UNSTAGE
+        );
+    }
+
     /// A cursor on a plain context row stages nothing. The gutter is empty
     /// there, so reaching for the nearest hunk would stage a unit the user
     /// cannot see under the cursor.
@@ -1488,27 +1614,28 @@ mod tests {
     }
 
     #[test]
-    fn unstage_hunk_applies_the_reverse_patch() {
+    fn unstage_hunk_reverts_the_staged_hunk_to_head() {
         let mut h = TestHarness::with_size(80, 14);
-        let workdir = open_git_file_at_cursor(&mut h, 2);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(
+            &workdir,
+            &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n", "a\nb\nX\nd\n")],
+        );
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 2);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
         let patch = &patches[0];
-        assert!(
-            patch.contains("-X\n"),
-            "reverse removes the buffer line: {patch}"
-        );
-        assert!(
-            patch.contains("+c\n"),
-            "reverse restores the base line: {patch}"
-        );
+        assert!(patch.contains("-X\n"), "removes the staged line: {patch}");
+        assert!(patch.contains("+c\n"), "restores the HEAD line: {patch}");
     }
 
     #[test]
-    fn toggle_stage_hunk_stages_when_the_forward_patch_applies() {
+    fn toggle_stage_hunk_stages_an_unstaged_hunk() {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 2);
 
@@ -1518,7 +1645,7 @@ mod tests {
         assert_eq!(
             patches.len(),
             1,
-            "toggle stages via the forward patch: {patches:?}"
+            "toggle stages the unstaged hunk: {patches:?}"
         );
         assert!(patches[0].contains("-c\n") && patches[0].contains("+X\n"));
     }

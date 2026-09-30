@@ -135,25 +135,18 @@ pub(crate) fn hunk_rows(
 
 /// A standalone patch for line hunk `k`, keyed at `rel`.
 ///
-/// With `reverse` set the two sides swap, so applying the patch undoes the
-/// hunk. That is how a hunk is unstaged: libgit2's index apply has no reverse
-/// mode, so the reversal lives in the patch text.
+/// The patch turns the hunk's `base_text` lines into its `buffer_text` lines,
+/// and it applies where the hunk sits in `base_text`. An index write passes the
+/// index as the base, so the patch lands whatever the index holds above it.
 pub(crate) fn hunk_to_patch(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
     hunks: &[DiffHunk],
     k: usize,
-    reverse: bool,
 ) -> Option<String> {
     let rows = hunk_rows(base_text, buffer_text, hunks, k, HUNK_CONTEXT)?;
-    Some(match reverse {
-        true => {
-            let swapped: Vec<ReviewRow> = rows.iter().map(swap_row).collect();
-            rows_to_unified_diff(rel, buffer_text, base_text, &swapped)
-        },
-        false => rows_to_unified_diff(rel, base_text, buffer_text, &rows),
-    })
+    Some(rows_to_unified_diff(rel, base_text, buffer_text, &rows))
 }
 
 /// Lines the hunk covers on the base side.
@@ -221,23 +214,13 @@ pub(crate) fn line_restricted_rows(
     matched.then_some(out)
 }
 
-/// Swaps a row's two sides so a forward hunk emits as its reverse.
+/// The unified diff of `rows` as a one-hunk patch keyed at `rel`.
 ///
-/// Context rows carry identical text on both sides, so the swap only
-/// matters for [`ReviewRow::Changed`] rows, whose `-`/`+` roles flip.
-fn swap_row(row: &ReviewRow) -> ReviewRow {
-    match row {
-        ReviewRow::Context { left, right } => ReviewRow::Context {
-            left: right.clone(),
-            right: left.clone(),
-        },
-        ReviewRow::Changed { left, right } => ReviewRow::Changed {
-            left: right.clone(),
-            right: left.clone(),
-        },
-    }
-}
-
+/// The hunk's `+` start repeats its `-` start. libgit2's index apply places a
+/// hunk at exactly its `+` start, with no search. A one-hunk patch has no
+/// earlier hunk to shift the lines above it, so the `-` start is where the
+/// pre-image sits. A hunk with no `-` lines, the new-file form
+/// `@@ -0,0 +1,N @@`, keeps its own `+` start.
 pub(crate) fn rows_to_unified_diff(
     rel: &Path,
     base_text: &str,
@@ -247,7 +230,10 @@ pub(crate) fn rows_to_unified_diff(
     let rel_display = rel.display();
 
     let (base_start, base_count) = base_header(rows);
-    let (buffer_start, buffer_count) = buffer_header(rows);
+    let (buffer_start, buffer_count) = match buffer_header(rows) {
+        (_, count) if base_count > 0 => (base_start, count),
+        header => header,
+    };
 
     let base_total = line_count(base_text);
     let buffer_total = line_count(buffer_text);
@@ -418,6 +404,49 @@ fn touches_buffer_eof(side: &ReviewSide, buffer_total: u32) -> bool {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::host::{GitHost, GitRepo, LocalGit};
+    use git2::{Repository, Signature};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// A real repository whose HEAD and index hold `base` for `a.rs` and whose
+    /// working file holds `buffer`, with the host handle that writes its index.
+    fn index_repo(base: &str, buffer: &str) -> (TempDir, Repository, Arc<dyn GitRepo>) {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_path_buf();
+        let repo = Repository::init(&workdir).unwrap();
+
+        std::fs::write(workdir.join("a.rs"), base).unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("a.rs")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = Signature::now("test", "t@t").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
+                .unwrap();
+        }
+        std::fs::write(workdir.join("a.rs"), buffer).unwrap();
+
+        let host_repo = LocalGit::new().discover(&workdir).unwrap();
+        (dir, repo, host_repo)
+    }
+
+    /// The text of `a.rs` in `repo`'s index.
+    fn staged_text(repo: &Repository) -> String {
+        let mut index = repo.index().unwrap();
+        index.read(true).unwrap();
+        let entry = index.get_path(Path::new("a.rs"), 0).unwrap();
+        let blob = repo.find_blob(entry.id).unwrap();
+        std::str::from_utf8(blob.content()).unwrap().to_string()
+    }
+
+    /// The line hunks between `base` and `buffer`, as the staging keys read them.
+    fn hunks(base: &str, buffer: &str) -> Vec<DiffHunk> {
+        let result = stoat_language::structural_diff::diff(base, buffer);
+        crate::diff_map::changes_to_hunks(&result.changes, base, buffer)
+    }
 
     #[test]
     fn line_count_matches_split_lines() {
@@ -431,60 +460,57 @@ mod tests {
 
     /// The whole point of hunk-direct patches, checked against real libgit2:
     /// staging one of two nearby hunks moves that change into the index and
-    /// leaves the other alone, and the reverse patch takes it back out.
+    /// leaves the other alone, and an index-to-HEAD patch takes it back out.
     #[test]
     fn a_hunk_patch_stages_only_its_own_change() {
-        use crate::host::{GitHost, LocalGit};
-        use git2::{Repository, Signature};
-
         const BASE: &str = "a\nb\nc\nd\ne\nf\ng\nh\n";
         const BUFFER: &str = "a\nZ\nc\nd\ne\nf\nY\nh\n";
-
-        let dir = tempfile::tempdir().unwrap();
-        let workdir = dir.path().to_path_buf();
-        let repo = Repository::init(&workdir).unwrap();
-
-        std::fs::write(workdir.join("a.rs"), BASE).unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("a.rs")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = Signature::now("test", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
-            .unwrap();
-        std::fs::write(workdir.join("a.rs"), BUFFER).unwrap();
-
-        let hunks = {
-            let result = stoat_language::structural_diff::diff(BASE, BUFFER);
-            crate::diff_map::changes_to_hunks(&result.changes, BASE, BUFFER)
-        };
-        assert_eq!(hunks.len(), 2, "the file has two hunks to keep apart");
-
+        let (_dir, repo, host_repo) = index_repo(BASE, BUFFER);
         let rel = Path::new("a.rs");
-        let host_repo = LocalGit::new().discover(&workdir).unwrap();
-        let staged = |repo: &Repository| {
-            let mut index = repo.index().unwrap();
-            index.read(true).unwrap();
-            let entry = index.get_path(Path::new("a.rs"), 0).unwrap();
-            let blob = repo.find_blob(entry.id).unwrap();
-            std::str::from_utf8(blob.content()).unwrap().to_string()
-        };
 
-        let forward = hunk_to_patch(rel, BASE, BUFFER, &hunks, 0, false).expect("hunk 0 exists");
-        host_repo
-            .apply_to_index(&forward)
-            .expect("the hunk patch must apply to real libgit2");
+        let buffer_hunks = hunks(BASE, BUFFER);
         assert_eq!(
-            staged(&repo),
-            "a\nZ\nc\nd\ne\nf\ng\nh\n",
+            buffer_hunks.len(),
+            2,
+            "the file has two hunks to keep apart"
+        );
+        let stage = hunk_to_patch(rel, BASE, BUFFER, &buffer_hunks, 0).expect("hunk 0 exists");
+        host_repo
+            .apply_to_index(&stage)
+            .expect("the hunk patch must apply to real libgit2");
+        let staged = staged_text(&repo);
+        assert_eq!(
+            staged, "a\nZ\nc\nd\ne\nf\ng\nh\n",
             "the index carries the first change and not the second"
         );
 
-        let reverse = hunk_to_patch(rel, BASE, BUFFER, &hunks, 0, true).expect("hunk 0 exists");
+        let unstage =
+            hunk_to_patch(rel, &staged, BASE, &hunks(&staged, BASE), 0).expect("hunk 0 is staged");
         host_repo
-            .apply_to_index(&reverse)
-            .expect("the reverse patch must apply too");
-        assert_eq!(staged(&repo), BASE, "and the reverse takes it back out");
+            .apply_to_index(&unstage)
+            .expect("the unstage patch must apply too");
+        assert_eq!(
+            staged_text(&repo),
+            BASE,
+            "and the unstage takes it back out"
+        );
+    }
+
+    /// The first hunk adds a line and stays out of the index, so the second
+    /// sits one row higher in the index than in the buffer. libgit2 looks for
+    /// the hunk exactly at its `+` start, so that start has to name the index
+    /// row.
+    #[test]
+    fn a_hunk_below_an_unstaged_hunk_stages_first() {
+        const BASE: &str = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        const BUFFER: &str = "a\nZ1\nZ2\nc\nd\ne\nf\nY\nh\n";
+        let (_dir, repo, host_repo) = index_repo(BASE, BUFFER);
+
+        let patch = hunk_to_patch(Path::new("a.rs"), BASE, BUFFER, &hunks(BASE, BUFFER), 1)
+            .expect("hunk 1 exists");
+        host_repo
+            .apply_to_index(&patch)
+            .expect("the second hunk applies with the first unstaged");
+        assert_eq!(staged_text(&repo), "a\nb\nc\nd\ne\nf\nY\nh\n");
     }
 }
