@@ -1,6 +1,6 @@
 use super::{
     editor,
-    paint::{dim_rgb, luma, paint_style_runs, render_side_num, style_rgb},
+    paint::{brighten_style, dim_rgb, luma, paint_style_runs, render_side_num, style_rgb},
     TEXT_SCALE_COMPACT,
 };
 use crate::{
@@ -66,19 +66,6 @@ pub(crate) const DIFF_SOFTEN_MAX: i8 = 3;
 /// fraction of 1.0 blends a foreground into the background exactly, which
 /// leaves text nobody reads.
 const SOFTEN_CAP: f32 = 0.95;
-
-/// Luma distance from the background under which a changed char is lifted
-/// toward the theme's bright pole.
-///
-/// A palette is free to put a color near its own background. Onedark's comment
-/// gray sits about 0.215 from it, so a changed comment reads about as dim as
-/// the context receding behind it and the diff's own marking is lost. The floor
-/// is what puts a lower bound on how far a changed char stands off its
-/// background, whatever the palette chose.
-///
-/// Set above the muted range it exists to catch and below the ordinary syntax
-/// colors, which sit past it and so paint exactly as the theme wrote them.
-const FAINT_CONTRAST_FLOOR: f32 = 0.30;
 
 /// Multiplier `level` applies to [`CONTEXT_SOFTEN`] and [`MODIFIED_ROW_SOFTEN`].
 ///
@@ -1131,35 +1118,6 @@ fn desaturate_style(style: Style, amount: f32) -> Style {
     style.fg(Color::Rgb(r, g, b))
 }
 
-/// Lift `style`'s foreground away from `bg` when it sits too close to read.
-///
-/// A foreground already [`FAINT_CONTRAST_FLOOR`] or further from the background
-/// comes back untouched, which is every ordinary syntax color. A closer one
-/// blends toward the pole its background is furthest from, white on a dark
-/// theme and black on a light one, by the share of the floor it falls short.
-/// The blend is proportional, so a barely-faint color moves barely and one
-/// painted in the background color itself goes the whole way.
-///
-/// A non-RGB foreground has no channels to measure, so it comes back unchanged
-/// the way it does from every other blend here.
-fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
-    let Some(fg) = style_rgb(style.fg) else {
-        return style;
-    };
-    let distance = (luma(fg) - luma(bg)).abs();
-    if distance >= FAINT_CONTRAST_FLOOR {
-        return style;
-    }
-
-    let pole = match luma(bg) < 0.5 {
-        true => [255, 255, 255],
-        false => [0, 0, 0],
-    };
-    let share = (FAINT_CONTRAST_FLOOR - distance) / FAINT_CONTRAST_FLOOR;
-    let [r, g, b] = dim_rgb(fg, pole, share);
-    style.fg(Color::Rgb(r, g, b))
-}
-
 /// The status color a change span tints toward.
 ///
 /// `base_side` is what splits a novel span. The left column carries the base
@@ -2166,6 +2124,7 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         diff_map::{ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::InlayKind,
+        render::paint::FAINT_CONTRAST_FLOOR,
         theme::{
             scope::{UI_SEARCH_MATCH, UI_SELECTION_EDITOR},
             Theme,

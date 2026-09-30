@@ -157,7 +157,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.cursor`, `ui.cursor.input` -- the block cursor in a buffer and in an input
   field.
 - `ui.selection`, `ui.selection.editor`, `ui.selection.reversed` -- selected
-  ranges.
+  ranges. The editor lifts text under the `ui.selection.editor` wash toward
+  white or black when the two are close in brightness, so selected text stays
+  legible in a theme that pairs them.
 - `ui.search.match` -- search hits.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.

@@ -15,6 +15,20 @@ use ratatui::{
 };
 use std::fmt::Write;
 
+/// Luma distance from its field under which a faint foreground is lifted
+/// toward the pole the field is furthest from.
+///
+/// A palette is free to put a color near a field it paints on, such as the
+/// editor background, a diff row's tint, or the selection wash. Onedark's
+/// comment gray sits about 0.215 from its background, so a changed comment reads
+/// about as dim as the context receding behind it, and a wash in that gray hides
+/// a comment it covers. The floor puts a lower bound on how far text stands off
+/// its field, whatever the palette chose.
+///
+/// Set above the muted range it exists to catch and below the ordinary syntax
+/// colors, which sit past it and so paint exactly as the theme wrote them.
+pub(crate) const FAINT_CONTRAST_FLOOR: f32 = 0.30;
+
 /// Fill `cols` content cells from `start_x` with a background wash, leaving each
 /// symbol untouched so text painted afterward keeps the wash. Ratatui's
 /// `set_style` patches only the fields a style sets, and token styles set no
@@ -60,6 +74,35 @@ pub(crate) fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
 /// blue and the background can differ in every channel and still both look dark.
 pub(crate) fn luma(rgb: [u8; 3]) -> f32 {
     (0.299 * rgb[0] as f32 + 0.587 * rgb[1] as f32 + 0.114 * rgb[2] as f32) / 255.0
+}
+
+/// Lift `style`'s foreground away from `bg` when it sits too close to read.
+///
+/// A foreground already [`FAINT_CONTRAST_FLOOR`] or further from the background
+/// comes back untouched, which is every ordinary syntax color. A closer one
+/// blends toward the pole its background is furthest from, white on a dark
+/// field and black on a light one, by the share of the floor it falls short.
+/// The blend is proportional, so a barely-faint color moves barely and one
+/// painted in the background color itself goes the whole way.
+///
+/// A non-RGB foreground has no channels to measure, so it comes back unchanged
+/// the way it does from every other blend here.
+pub(crate) fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
+    let Some(fg) = style_rgb(style.fg) else {
+        return style;
+    };
+    let distance = (luma(fg) - luma(bg)).abs();
+    if distance >= FAINT_CONTRAST_FLOOR {
+        return style;
+    }
+
+    let pole = match luma(bg) < 0.5 {
+        true => [255, 255, 255],
+        false => [0, 0, 0],
+    };
+    let share = (FAINT_CONTRAST_FLOOR - distance) / FAINT_CONTRAST_FLOOR;
+    let [r, g, b] = dim_rgb(fg, pole, share);
+    style.fg(Color::Rgb(r, g, b))
 }
 
 /// Paint `num` right-aligned in the five-cell number field at `x`.
@@ -367,6 +410,17 @@ mod tests {
         assert!(
             (luma([128, 128, 128]) - 128.0 / 255.0).abs() < 1e-6,
             "a gray reads at its own level, since the weights sum to one",
+        );
+    }
+
+    /// A light field sits nearer white, so a foreground in its own color lifts
+    /// the whole way to the other pole.
+    #[test]
+    fn a_light_wash_lifts_a_faint_foreground_toward_black() {
+        let faint = Style::default().fg(Color::Rgb(0xe5, 0xe5, 0xe6));
+        assert_eq!(
+            brighten_style(faint, [0xe5, 0xe5, 0xe6]).fg,
+            Some(Color::Rgb(0, 0, 0)),
         );
     }
 }

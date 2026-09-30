@@ -13,7 +13,7 @@ use crate::{
     minimap::color_to_rgb,
     render::{
         conflict_view::render_conflict_view,
-        paint::{dim_rgb, style_rgb},
+        paint::{brighten_style, dim_rgb, style_rgb},
         review::{render_diff_view, DiffColumns, DiffDials, DiffLayout},
         undercurl::UndercurlBatch,
     },
@@ -590,8 +590,9 @@ pub(crate) fn render_editor_with_overlay(
 /// `scroll_row..end_row` into `inner`.
 ///
 /// Each selection's range washes in `ui.selection.editor`, and each cursor draws
-/// as a block over the whole character it covers. `visible` is the byte range of
-/// those rows, as [`visible_byte_range`] answers it.
+/// as a block over the whole character it covers. A foreground too close to the
+/// wash to read lifts toward white or black per [`brighten_style`]. `visible` is
+/// the byte range of those rows, as [`visible_byte_range`] answers it.
 ///
 /// With `delegates_cursor` the terminal draws the primary cursor, so its cell
 /// goes into [`EditorState::cursor_screen_cell`] and the pass paints no block
@@ -613,6 +614,7 @@ pub(crate) fn paint_selections(
     let buffer_snapshot = snapshot.buffer_snapshot();
 
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
+    let wash = style_rgb(selection_style.bg);
     let cursor_style = theme.cursor_style();
     let primary_id = editor.selections.newest_anchor().id;
     let mut primary_cell: Option<(u16, u16)> = None;
@@ -686,6 +688,9 @@ pub(crate) fn paint_selections(
                 Some(cursor),
                 &mut |_, _, cell| {
                     cell.set_style(selection_style);
+                    if let Some(bg) = wash {
+                        cell.set_style(brighten_style(cell.style(), bg));
+                    }
                 },
                 editor.scroll_row,
                 end_row,
@@ -2706,7 +2711,11 @@ mod tests {
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
-    use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier},
+    };
     use std::path::PathBuf;
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
     use stoat_config::{LineNumbers, WrapMode};
@@ -3570,19 +3579,16 @@ mod tests {
         );
     }
 
-    /// Render `content` with the whole first line selected, and hand back that
-    /// row's cells.
+    /// Render `content` in `theme` with the whole first line selected, and hand
+    /// back that row's cells.
     fn selected_first_row(
         h: &mut crate::test_harness::TestHarness,
         content: &str,
-    ) -> (
-        Vec<ratatui::buffer::Cell>,
-        std::sync::Arc<crate::theme::Theme>,
-    ) {
+        theme: &crate::theme::Theme,
+    ) -> Vec<ratatui::buffer::Cell> {
         open_search_buffer(h, content);
-        let theme = h.stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(theme);
 
         dispatch(&mut h.stoat, &ExtendToLineEnd);
 
@@ -3593,7 +3599,7 @@ mod tests {
             editor,
             area,
             fallback,
-            &theme,
+            theme,
             &chrome,
             &mut buf,
             true,
@@ -3612,14 +3618,14 @@ mod tests {
             WrapMode::None,
             80,
         );
-        let row = (0..area.width).map(|x| buf[(x, 0)].clone()).collect();
-        (row, theme)
+        (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
 
     #[test]
     fn a_selected_wide_glyph_is_washed_across_both_its_cells() {
         let mut h = Stoat::test();
-        let (row, theme) = selected_first_row(&mut h, "\u{6c49}\u{5b57}\u{4e00}\nx");
+        let theme = h.stoat.theme.clone();
+        let row = selected_first_row(&mut h, "\u{6c49}\u{5b57}\u{4e00}\nx", &theme);
         let sel_bg = theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg;
         assert!(sel_bg.is_some(), "the theme washes selections");
 
@@ -3638,13 +3644,40 @@ mod tests {
         // A tab is not two cells wide, it is however many reach the next stop,
         // so the count comes from the column advance rather than the character.
         let mut h = Stoat::test();
-        let (row, theme) = selected_first_row(&mut h, "\tx\ny");
+        let theme = h.stoat.theme.clone();
+        let row = selected_first_row(&mut h, "\tx\ny", &theme);
         let sel_bg = theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg;
 
         // The x carries the cursor and so is not washed, leaving the tab's own
         // four cells as what the selection covers.
         let washed: Vec<bool> = (0..4).map(|x| Some(row[x].bg) == sel_bg).collect();
         assert_eq!(washed, vec![true; 4], "every cell the tab spans");
+    }
+
+    /// A theme that paints text in `text` under a `#636d83` selection wash.
+    fn wash_theme(text: &str) -> crate::theme::Theme {
+        let src = format!(
+            r##"theme t {{ ui.text.fg = "{text}"; ui.selection.editor.bg = "#636d83"; }}"##
+        );
+        let (config, _) = stoat_config::parse(&src);
+        crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// Text in the wash's own color lifts the whole way to white, the pole a
+    /// dark wash is furthest from. The line-end extend leaves the cursor on the
+    /// `c`, so the wash covers the `a` and the `b`.
+    #[test]
+    fn a_selected_foreground_in_the_wash_color_lifts_to_the_far_pole() {
+        let mut h = Stoat::test();
+        let row = selected_first_row(&mut h, "abc\nx", &wash_theme("#636d83"));
+        assert_eq!([row[0].fg, row[1].fg], [Color::Rgb(255, 255, 255); 2]);
+    }
+
+    #[test]
+    fn a_selected_foreground_past_the_floor_keeps_its_color() {
+        let mut h = Stoat::test();
+        let row = selected_first_row(&mut h, "abc\nx", &wash_theme("#fafafa"));
+        assert_eq!([row[0].fg, row[1].fg], [Color::Rgb(0xfa, 0xfa, 0xfa); 2]);
     }
 
     #[test]
@@ -4567,7 +4600,7 @@ mod tests {
     /// The fallback gutter's per-row `(change glyph, staged glyph color)`, read
     /// from the two diff cells right of the number. Uses the active theme so the
     /// staged and unstaged scopes resolve to distinct colors.
-    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, ratatui::style::Color)> {
+    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, Color)> {
         let theme = stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
