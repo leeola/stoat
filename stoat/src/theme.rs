@@ -1029,4 +1029,24 @@ mod tests {
             "styles painting in the wash color"
         );
     }
+
+    /// The staged-state bar sits beside the change-kind bar, so a state that
+    /// shares a kind's color reads a staged added line as two green bars.
+    #[test]
+    fn the_staged_state_colors_differ_from_every_change_kind() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        let fg = |name: &str| theme.get(name).fg.expect(name);
+        let kinds = [
+            scope::DIFF_ADDED,
+            scope::DIFF_DELETED,
+            scope::DIFF_MODIFIED,
+            scope::DIFF_MOVED,
+        ]
+        .map(fg);
+        let clashes: Vec<&str> = [scope::DIFF_STAGED, scope::DIFF_UNSTAGED]
+            .into_iter()
+            .filter(|state| kinds.contains(&fg(state)))
+            .collect();
+        assert_eq!(clashes, Vec::<&str>::new(), "states in a change-kind color");
+    }
 }
