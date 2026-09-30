@@ -7,12 +7,13 @@ use crate::{
         paint::{
             dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
         },
-        review::{paint_highlighted_row, render_review_cursor, DiffDials},
+        review::{paint_highlighted_row, DiffDials},
     },
     review::ReviewSide,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::sync::Arc;
+use stoat_text::cursor_offset;
 
 /// At or above this inner width the ours and theirs columns keep a line-number
 /// gutter. Below it they drop it so their text has room to read.
@@ -136,7 +137,7 @@ pub(crate) fn render_conflict_view(
     editor.highlight_endpoint_cache = endpoint_cache;
     editor.diff_row_cache = row_cache;
 
-    render_review_cursor(
+    render_conflict_cursor(
         editor,
         &snapshot,
         inner,
@@ -145,6 +146,53 @@ pub(crate) fn render_conflict_view(
         buf,
         stoatty,
     );
+}
+
+/// Paint the primary selection's cursor over the merged center's text, or set
+/// the stoatty hardware cursor there. Skips a row scrolled out of view.
+///
+/// One cell for the newest cursor, and no selection wash as a plain pane paints,
+/// because the reader picks chunks in the center column rather than selecting
+/// text there.
+fn render_conflict_cursor(
+    editor: &mut EditorState,
+    snapshot: &DisplaySnapshot,
+    inner: Rect,
+    text_x: u16,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    stoatty: bool,
+) {
+    let cursor_style = theme.cursor_style();
+
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let sel = editor.selections.newest_anchor();
+    let cursor = cursor_offset(
+        rope,
+        buffer_snapshot.resolve_anchor(&sel.tail()),
+        buffer_snapshot.resolve_anchor(&sel.head()),
+    );
+    let display = snapshot.buffer_to_display(rope.offset_to_point(cursor));
+
+    let visible = inner.height as u32;
+    if display.row < editor.scroll_row || display.row >= editor.scroll_row + visible {
+        return;
+    }
+    let y = inner.y + (display.row - editor.scroll_row) as u16;
+    let x = text_x + display.column as u16;
+    if x >= inner.x + inner.width || y >= inner.y + inner.height {
+        return;
+    }
+
+    if stoatty {
+        editor.cursor_screen_cell = Some((x, y));
+    } else {
+        let cell = &mut buf[(x, y)];
+        let existing = cell.symbol().chars().next().unwrap_or(' ');
+        cell.set_char(if existing == '\0' { ' ' } else { existing });
+        cell.set_style(cursor_style);
+    }
 }
 
 /// Paint the three-column body -- ours, the merged center, and theirs -- for the

@@ -1,4 +1,5 @@
 use super::{
+    editor,
     paint::{dim_rgb, luma, paint_style_runs, render_side_num, style_rgb},
     TEXT_SCALE_COMPACT,
 };
@@ -23,7 +24,7 @@ use std::{
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
 };
-use stoat_text::{cursor_offset, Point};
+use stoat_text::Point;
 use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun},
@@ -182,6 +183,10 @@ impl DiffDials {
 /// Lays its columns out per [`DiffLayout::DIFF_VIEW`]. When a `scene` is
 /// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
 /// components, otherwise it falls back to the ASCII gutter.
+///
+/// A focused pane paints its selections and cursors over the right column as a
+/// plain pane paints them, through [`editor::paint_selections`]. An unfocused
+/// one paints neither.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
@@ -189,6 +194,7 @@ pub(crate) fn render_diff_view(
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    is_focused: bool,
     scene: Option<&mut ApcScene>,
     dials: DiffDials,
 ) {
@@ -220,14 +226,20 @@ pub(crate) fn render_diff_view(
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
     );
-    render_review_cursor(
-        editor,
+    if !is_focused {
+        return;
+    }
+
+    let end_row = (editor.scroll_row + inner.height as u32).min(snapshot.line_count());
+    let text = editor.text_rect.expect("set above");
+    let visible = editor::visible_byte_range(
         &snapshot,
-        inner,
-        cols.right_text_x,
-        theme,
-        buf,
-        stoatty,
+        snapshot.buffer_snapshot().rope(),
+        editor.scroll_row,
+        end_row,
+    );
+    editor::paint_selections(
+        editor, &snapshot, text, end_row, &visible, theme, buf, stoatty,
     );
 }
 
@@ -1935,49 +1947,6 @@ pub(crate) fn right_text_x(inner: Rect) -> u16 {
     DiffColumns::compute(inner, DiffLayout::DIFF_VIEW).right_text_x
 }
 
-/// Paint the primary selection's cursor over the right pane's text, or set the
-/// stoatty hardware cursor there. Skips a row scrolled out of view.
-pub(crate) fn render_review_cursor(
-    editor: &mut EditorState,
-    snapshot: &DisplaySnapshot,
-    inner: Rect,
-    text_x: u16,
-    theme: &crate::theme::Theme,
-    buf: &mut Buffer,
-    stoatty: bool,
-) {
-    let cursor_style = theme.cursor_style();
-
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let sel = editor.selections.newest_anchor();
-    let cursor = cursor_offset(
-        rope,
-        buffer_snapshot.resolve_anchor(&sel.tail()),
-        buffer_snapshot.resolve_anchor(&sel.head()),
-    );
-    let display = snapshot.buffer_to_display(rope.offset_to_point(cursor));
-
-    let visible = inner.height as u32;
-    if display.row < editor.scroll_row || display.row >= editor.scroll_row + visible {
-        return;
-    }
-    let y = inner.y + (display.row - editor.scroll_row) as u16;
-    let x = text_x + display.column as u16;
-    if x >= inner.x + inner.width || y >= inner.y + inner.height {
-        return;
-    }
-
-    if stoatty {
-        editor.cursor_screen_cell = Some((x, y));
-    } else {
-        let cell = &mut buf[(x, y)];
-        let existing = cell.symbol().chars().next().unwrap_or(' ');
-        cell.set_char(if existing == '\0' { ' ' } else { existing });
-        cell.set_style(cursor_style);
-    }
-}
-
 /// The RGB gutter colors the diff view's rich sub-cell components composite
 /// with, plus the reused scene they append into.
 struct DiffRichGutter<'a> {
@@ -2168,7 +2137,7 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         diff_map::{ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::InlayKind,
-        theme::Theme,
+        theme::{scope::UI_SELECTION_EDITOR, Theme},
     };
     use std::sync::{Arc, RwLock};
     use stoat_language::structural_diff;
@@ -2577,6 +2546,7 @@ mod tests {
             Style::default(),
             &theme,
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2649,6 +2619,7 @@ mod tests {
             Style::default(),
             &theme,
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2689,6 +2660,7 @@ mod tests {
             Style::default(),
             &theme,
             &mut rich_buf,
+            true,
             Some(&mut scene),
             DiffDials::shipped(),
         );
@@ -2755,6 +2727,7 @@ mod tests {
             Style::default(),
             &theme,
             &mut ascii_buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2793,6 +2766,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2857,6 +2831,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2892,6 +2867,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2954,6 +2930,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -2998,6 +2975,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -3277,6 +3255,7 @@ mod tests {
             Style::default(),
             &rgb_diff_theme(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -3303,6 +3282,7 @@ mod tests {
             Style::default(),
             &rgb_diff_theme(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -3327,6 +3307,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             Some(&mut ApcScene::new()),
             DiffDials::shipped(),
         );
@@ -3334,6 +3315,55 @@ mod tests {
             editor.cursor_screen_cell,
             Some((72, 1)),
             "byte 50 is the fifth cell of the continuation row",
+        );
+    }
+
+    /// Press `keys` on the refined `fn other() {}` line of a diff, and return the
+    /// row's columns in the selection wash and in the cursor block.
+    ///
+    /// stoatty draws the primary cursor itself, so the harness turns it off and
+    /// the cell fallback paints the block onto the grid. The shipped theme styles
+    /// no `ui.cursor`, so the block is reverse video.
+    fn wash_and_cursor_after(keys: &str) -> (Vec<u16>, Vec<u16>) {
+        let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
+        h.stoat.stoatty = false;
+        h.type_keys(keys);
+        h.snapshot();
+
+        let sel_bg = h
+            .stoat
+            .theme
+            .get(UI_SELECTION_EDITOR)
+            .bg
+            .expect("a selection background");
+        let buf = h.rendered_buffer();
+        let row = row_holding(buf, 68..buf.area.width, "fn other");
+        let washed = (0..buf.area.width)
+            .filter(|&x| buf[(x, row)].bg == sel_bg)
+            .collect();
+        let cursor = (0..buf.area.width)
+            .filter(|&x| buf[(x, row)].modifier.contains(Modifier::REVERSED))
+            .collect();
+        (washed, cursor)
+    }
+
+    #[test]
+    fn a_word_end_motion_washes_the_selected_word() {
+        assert_eq!(
+            wash_and_cursor_after("e"),
+            (vec![68], vec![69]),
+            "`e` selects `fn` with the cursor on the `n`",
+        );
+    }
+
+    /// The base text beside the line is not the buffer the selection belongs
+    /// to, so the wash stays on the live column.
+    #[test]
+    fn a_line_selection_washes_only_the_live_column() {
+        assert_eq!(
+            wash_and_cursor_after("x"),
+            ((68..81).collect(), vec![81]),
+            "`x` washes the thirteen glyphs and puts the cursor on the newline",
         );
     }
 
@@ -3766,7 +3796,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 4);
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
-        render_diff_view(editor, area, fallback, &theme, &mut buf, None, dials);
+        render_diff_view(editor, area, fallback, &theme, &mut buf, true, None, dials);
 
         let row = (0..area.height)
             .find(|&y| buffer_text(&buf, y).contains("beta"))
@@ -4012,6 +4042,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -4067,6 +4098,7 @@ mod tests {
             fallback,
             &theme,
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -4181,6 +4213,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -4210,6 +4243,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -4242,6 +4276,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
+            true,
             None,
             DiffDials::shipped(),
         );
@@ -4780,6 +4815,7 @@ mod tests {
             fallback,
             &theme,
             &mut buf,
+            true,
             None,
             DiffDials {
                 soften_scale: 0.0,
@@ -4807,6 +4843,7 @@ mod tests {
             fallback,
             &theme,
             &mut buf,
+            true,
             None,
             DiffDials {
                 soften_scale: 0.0,
@@ -4848,6 +4885,7 @@ mod tests {
             fallback,
             &theme,
             &mut buf,
+            true,
             None,
             DiffDials {
                 soften_scale: 0.0,

@@ -168,7 +168,16 @@ pub(crate) fn render_editor_with_overlay(
             text_width,
             wrap_column,
         ));
-        render_diff_view(editor, inner, fallback_style, theme, buf, scene, dials);
+        render_diff_view(
+            editor,
+            inner,
+            fallback_style,
+            theme,
+            buf,
+            is_focused,
+            scene,
+            dials,
+        );
         return;
     }
 
