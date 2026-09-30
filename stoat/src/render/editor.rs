@@ -17,6 +17,7 @@ use crate::{
         review::{render_diff_view, DiffColumns, DiffDials, DiffLayout},
         undercurl::UndercurlBatch,
     },
+    theme::Theme,
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
@@ -87,7 +88,7 @@ pub(crate) fn render_editor(
     editor: &mut EditorState,
     inner: Rect,
     fallback_style: Style,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     chrome: Option<&ResolvedChrome>,
     buf: &mut Buffer,
     is_focused: bool,
@@ -133,7 +134,7 @@ pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
     inner: Rect,
     fallback_style: Style,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     chrome: &ResolvedChrome,
     buf: &mut Buffer,
     is_focused: bool,
@@ -524,14 +525,163 @@ pub(crate) fn render_editor_with_overlay(
         return;
     }
 
+    // A scene means the terminal draws the primary cursor itself, so the pass
+    // records its cell and leaves it unpainted. Without one, as in an input view
+    // or dock, nothing downstream draws it, so the pass paints it.
+    paint_selections(
+        editor,
+        &snapshot,
+        inner,
+        end_row,
+        &visible,
+        theme,
+        buf,
+        scene.is_some(),
+    );
+
+    if let Some((path, set)) = diagnostic_info {
+        let rope = buffer_snapshot.rope();
+        build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor = cursor_offset(rope, tail_off, head_off);
+        let (cursor_diag, hover_diag) = match editor.diagnostic_span_cache.as_ref() {
+            Some(cache) => {
+                let hover = hover_cell.and_then(|(hx, hy)| {
+                    let col = hx.checked_sub(content_area.x)?;
+                    let row = hy.checked_sub(content_area.y)?;
+                    if col >= content_area.width || row >= content_area.height {
+                        return None;
+                    }
+                    let offset =
+                        display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
+                    diagnostic_at_offset(cache, offset, buffer_snapshot)
+                });
+                (diagnostic_at_offset(cache, cursor, buffer_snapshot), hover)
+            },
+            None => (None, None),
+        };
+
+        // The mouse hover wins over the cursor when both land in a span. The
+        // popover needs a scene plus the severity and background colors resolved
+        // to RGB, and its presence suppresses the same diagnostic's redundant
+        // EOL message.
+        let mut suppress = None;
+        if let Some(found) = hover_diag.or(cursor_diag) {
+            let bg = style_rgb(fallback_style.bg.or_else(|| {
+                theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|style| style.bg)
+            }));
+            if let (Some(scene), Some(colors), Some(bg)) = (scene, severity.as_ref(), bg) {
+                let diag = &set.get(path)[found.index];
+                let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+                // The span the query resolved, rather than the offset re-derived
+                // from this diagnostic's raw character column under its server's
+                // encoding.
+                let display = snapshot.buffer_to_display(rope.offset_to_point(found.start));
+                let rel_col = display.column.min(u32::from(content_area.width)) as u16;
+                let rel_row = display
+                    .row
+                    .saturating_sub(editor.scroll_row)
+                    .min(u32::from(content_area.height)) as u16;
+                let anchor_col = content_area
+                    .x
+                    .saturating_add(gutter_w)
+                    .saturating_add(rel_col);
+                let anchor_row = content_area.y.saturating_add(rel_row);
+                if render_diagnostic_popover(
+                    scene,
+                    buf,
+                    diag,
+                    severity_color(sev, colors),
+                    darken(bg),
+                    anchor_col,
+                    anchor_row,
+                    content_area,
+                    editor.cursor_screen_cell,
+                ) {
+                    suppress = Some(found.index);
+                }
+            }
+        }
+
+        if let Some(cache) = editor.diagnostic_span_cache.as_mut() {
+            paint_cursor_line_diagnostic(
+                cache,
+                set,
+                path,
+                rope,
+                &snapshot,
+                cursor,
+                suppress,
+                theme,
+                editor.scroll_row,
+                end_row,
+                inner,
+                right,
+                buf,
+            );
+        }
+    }
+
+    if let Some(labels) = goto_word_labels {
+        let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        // Drawn at the word's start, which is where the user reads the label
+        // against the word it names.
+        for (label, &(start, _)) in labels {
+            let rope = buffer_snapshot.rope();
+            if start > rope.len() {
+                continue;
+            }
+            let point = rope.offset_to_point(start);
+            let display = snapshot.buffer_to_display(point);
+            if display.row < editor.scroll_row || display.row >= end_row {
+                continue;
+            }
+            let y = inner.y + (display.row - editor.scroll_row) as u16;
+            for (i, ch) in label.chars().enumerate() {
+                let x = inner.x + display.column as u16 + i as u16;
+                if x >= right || y >= bottom {
+                    break;
+                }
+                buf[(x, y)].set_char(ch).set_style(label_style);
+            }
+        }
+    }
+}
+
+/// Paint every selection of `editor` that reaches the display rows
+/// `scroll_row..end_row` into `inner`.
+///
+/// Each selection's range washes in `ui.selection.editor`, and each cursor draws
+/// as a block over the whole character it covers. `visible` is the byte range of
+/// those rows, as [`visible_byte_range`] answers it.
+///
+/// With `delegates_cursor` the terminal draws the primary cursor, so its cell
+/// goes into [`EditorState::cursor_screen_cell`] and the pass paints no block
+/// there. Without it, or with the primary cursor off the rows,
+/// `cursor_screen_cell` ends `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_selections(
+    editor: &mut EditorState,
+    snapshot: &DisplaySnapshot,
+    inner: Rect,
+    end_row: u32,
+    visible: &Range<usize>,
+    theme: &Theme,
+    buf: &mut Buffer,
+    delegates_cursor: bool,
+) {
+    let right = inner.x + inner.width;
+    let bottom = inner.y + inner.height;
+    let buffer_snapshot = snapshot.buffer_snapshot();
+
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
     let cursor_style = theme.cursor_style();
     let primary_id = editor.selections.newest_anchor().id;
     let mut primary_cell: Option<(u16, u16)> = None;
-    // A scene means the terminal draws the primary cursor itself, so this pass
-    // records the cell and leaves it unpainted. Without one, as in an input view
-    // or dock, nothing downstream would draw it, so it is painted here.
-    let delegates_cursor = scene.is_some();
     let rope = buffer_snapshot.rope();
 
     // The selections that can reach the viewport. `disjoint` is start-sorted and
@@ -597,7 +747,7 @@ pub(crate) fn render_editor_with_overlay(
         if lo < hi {
             paint_offset_range(
                 rope,
-                &snapshot,
+                snapshot,
                 lo..hi,
                 Some(cursor),
                 &mut |_, _, cell| {
@@ -617,7 +767,7 @@ pub(crate) fn render_editor_with_overlay(
         // reordering one, so a cursor outside the visible bytes is on a row
         // outside the drawn ones. Answering that here is what keeps the descent
         // below off the cursors no frame can show.
-        if !cursor_reaches_viewport(cursor, &visible, rope.len()) {
+        if !cursor_reaches_viewport(cursor, visible, rope.len()) {
             continue;
         }
 
@@ -658,117 +808,6 @@ pub(crate) fn render_editor_with_overlay(
     }
 
     editor.cursor_screen_cell = primary_cell;
-
-    if let Some((path, set)) = diagnostic_info {
-        build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
-        let sel = editor.selections.newest_anchor();
-        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-        let cursor = cursor_offset(rope, tail_off, head_off);
-        let (cursor_diag, hover_diag) = match editor.diagnostic_span_cache.as_ref() {
-            Some(cache) => {
-                let hover = hover_cell.and_then(|(hx, hy)| {
-                    let col = hx.checked_sub(content_area.x)?;
-                    let row = hy.checked_sub(content_area.y)?;
-                    if col >= content_area.width || row >= content_area.height {
-                        return None;
-                    }
-                    let offset =
-                        display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
-                    diagnostic_at_offset(cache, offset, buffer_snapshot)
-                });
-                (diagnostic_at_offset(cache, cursor, buffer_snapshot), hover)
-            },
-            None => (None, None),
-        };
-
-        // The mouse hover wins over the cursor when both land in a span. The
-        // popover needs a scene plus the severity and background colors resolved
-        // to RGB, and its presence suppresses the same diagnostic's redundant
-        // EOL message.
-        let mut suppress = None;
-        if let Some(found) = hover_diag.or(cursor_diag) {
-            let bg = style_rgb(fallback_style.bg.or_else(|| {
-                theme
-                    .try_get(crate::theme::scope::UI_BACKGROUND)
-                    .and_then(|style| style.bg)
-            }));
-            if let (Some(scene), Some(colors), Some(bg)) = (scene, severity.as_ref(), bg) {
-                let diag = &set.get(path)[found.index];
-                let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
-                // The span the query resolved, rather than the offset re-derived
-                // from this diagnostic's raw character column under its server's
-                // encoding.
-                let display = snapshot.buffer_to_display(rope.offset_to_point(found.start));
-                let rel_col = display.column.min(u32::from(content_area.width)) as u16;
-                let rel_row = display
-                    .row
-                    .saturating_sub(editor.scroll_row)
-                    .min(u32::from(content_area.height)) as u16;
-                let anchor_col = content_area
-                    .x
-                    .saturating_add(gutter_w)
-                    .saturating_add(rel_col);
-                let anchor_row = content_area.y.saturating_add(rel_row);
-                if render_diagnostic_popover(
-                    scene,
-                    buf,
-                    diag,
-                    severity_color(sev, colors),
-                    darken(bg),
-                    anchor_col,
-                    anchor_row,
-                    content_area,
-                    primary_cell,
-                ) {
-                    suppress = Some(found.index);
-                }
-            }
-        }
-
-        if let Some(cache) = editor.diagnostic_span_cache.as_mut() {
-            paint_cursor_line_diagnostic(
-                cache,
-                set,
-                path,
-                rope,
-                &snapshot,
-                cursor,
-                suppress,
-                theme,
-                editor.scroll_row,
-                end_row,
-                inner,
-                right,
-                buf,
-            );
-        }
-    }
-
-    if let Some(labels) = goto_word_labels {
-        let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
-        // Drawn at the word's start, which is where the user reads the label
-        // against the word it names.
-        for (label, &(start, _)) in labels {
-            let rope = buffer_snapshot.rope();
-            if start > rope.len() {
-                continue;
-            }
-            let point = rope.offset_to_point(start);
-            let display = snapshot.buffer_to_display(point);
-            if display.row < editor.scroll_row || display.row >= end_row {
-                continue;
-            }
-            let y = inner.y + (display.row - editor.scroll_row) as u16;
-            for (i, ch) in label.chars().enumerate() {
-                let x = inner.x + display.column as u16 + i as u16;
-                if x >= right || y >= bottom {
-                    break;
-                }
-                buf[(x, y)].set_char(ch).set_style(label_style);
-            }
-        }
-    }
 }
 
 /// The wrap width `mode` gives a text area `text_width` columns wide.
@@ -1129,7 +1168,7 @@ impl SeverityColors {
 /// Extract every diagnostic-severity color as RGB, or `None` if any is missing
 /// or not an RGB color. A `None` here disables the sub-cell gutter for the whole
 /// frame, so it falls back to the ASCII glyphs rather than mixing the two.
-fn severity_colors(theme: &crate::theme::Theme) -> Option<SeverityColors> {
+fn severity_colors(theme: &Theme) -> Option<SeverityColors> {
     use crate::theme::scope as s;
     Some(SeverityColors {
         error: style_rgb(theme.get(s::UI_DIAGNOSTIC_ERROR).fg)?,
@@ -1165,7 +1204,7 @@ pub(crate) struct DiffMarkColors {
 }
 
 impl DiffMarkColors {
-    fn resolve(theme: &crate::theme::Theme) -> Self {
+    fn resolve(theme: &Theme) -> Self {
         use crate::theme::scope as s;
         let get = |scope| color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White));
         Self {
@@ -1231,7 +1270,7 @@ impl RichGutterColors {
 /// Mirrors the live gutter's rich gate so an off-run-loop page render and the
 /// live render agree on rich versus fallback for the same theme.
 pub(crate) fn resolve_rich_gutter(
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     fallback_style: Style,
 ) -> Option<RichGutterColors> {
     use crate::theme::scope as s;
@@ -1275,7 +1314,7 @@ pub(crate) struct ResolvedChrome {
 }
 
 impl ResolvedChrome {
-    pub(crate) fn resolve(theme: &crate::theme::Theme) -> Self {
+    pub(crate) fn resolve(theme: &Theme) -> Self {
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
         Self {
             rich_gutter: resolve_rich_gutter(theme, fallback_style),
@@ -1287,7 +1326,7 @@ impl ResolvedChrome {
 }
 
 /// The background the gutter fills, preferring the pane's own over the theme's.
-fn gutter_background(theme: &crate::theme::Theme, fallback_style: Style) -> Option<[u8; 3]> {
+fn gutter_background(theme: &Theme, fallback_style: Style) -> Option<[u8; 3]> {
     style_rgb(fallback_style.bg.or_else(|| {
         theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
@@ -1366,7 +1405,7 @@ fn paint_diagnostic_gutter(
     rows: &[(u16, DiagnosticSeverity)],
     x: u16,
     y: u16,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     buf: &mut Buffer,
 ) {
     for &(row_offset, sev) in rows {
@@ -1682,7 +1721,7 @@ fn draw_line_number_gutter(
     inner: Rect,
     end_row: u32,
     row_severity: &RowSeverity,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     chrome: &ResolvedChrome,
     current_line: Option<u32>,
     severity_version: u64,
@@ -1832,7 +1871,7 @@ pub(crate) fn draw_fallback_line_numbers(
     diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
     current_line: Option<u32>,
     inner: Rect,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     buf: &mut Buffer,
 ) -> u16 {
     use crate::theme::scope as s;
@@ -1920,7 +1959,7 @@ fn paint_diagnostic_spans(
     visible: Range<usize>,
     rope: &Rope,
     snapshot: &DisplaySnapshot,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     fallback_style: Style,
     scroll_row: u32,
     end_row: u32,
@@ -2064,7 +2103,7 @@ fn paint_cursor_line_diagnostic(
     snapshot: &DisplaySnapshot,
     cursor: usize,
     suppress: Option<usize>,
-    theme: &crate::theme::Theme,
+    theme: &Theme,
     scroll_row: u32,
     end_row: u32,
     inner: Rect,
@@ -2541,7 +2580,7 @@ fn cursor_reaches_viewport(cursor: usize, visible: &Range<usize>, rope_len: usiz
 ///
 /// Rows beyond the buffer resolve to the rope length, so the returned range is
 /// always valid to slice.
-fn visible_byte_range(
+pub(crate) fn visible_byte_range(
     snapshot: &DisplaySnapshot,
     rope: &Rope,
     scroll_row: u32,
