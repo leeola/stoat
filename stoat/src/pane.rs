@@ -181,17 +181,37 @@ pub struct Pane {
     /// [`Self::jumplist`], so a restored session starts unlatched.
     #[serde(skip)]
     pub(crate) diff_mode: bool,
-    /// The buffer this pane showed before its current one, for the alternating
-    /// switch [`crate::buffer_lifecycle::goto_last_accessed`] makes.
+    /// The buffers this pane has shown, oldest first and each once.
     ///
-    /// Per pane rather than per workspace, so each split alternates within the
-    /// pair it has actually shown. A workspace-wide most-recent list answers
-    /// with buffers the pane never displayed.
+    /// A buffer enters when the pane moves off it, and
+    /// [`goto_last_accessed`](crate::buffer_lifecycle::goto_last_accessed)
+    /// switches back to the most recent entry. A dropped scratch leaves an entry
+    /// for a buffer that no longer exists, and a buffer shown again keeps the
+    /// entry from its earlier visit. The switch passes over both.
+    ///
+    /// Per pane rather than per workspace, so each split switches back among
+    /// the buffers it has actually shown. A workspace-wide most-recent list
+    /// answers with buffers the pane never displayed.
     ///
     /// `serde(skip)`: navigation scratch like [`Self::jumplist`], so a restored
     /// session starts with nothing to switch back to.
     #[serde(skip)]
-    pub(crate) last_buffer: Option<BufferId>,
+    pub(crate) buffer_history: Vec<BufferId>,
+}
+
+impl Pane {
+    /// Move `id` to the tail of [`Self::buffer_history`], as the buffer the pane
+    /// showed most recently.
+    pub(crate) fn record_shown(&mut self, id: BufferId) {
+        self.buffer_history.retain(|shown| *shown != id);
+        self.buffer_history.push(id);
+    }
+
+    /// Drop `id`, a closed buffer, from the pane's buffer history and jumplist.
+    pub(crate) fn forget_buffer(&mut self, id: BufferId) {
+        self.buffer_history.retain(|shown| *shown != id);
+        self.jumplist.remove_buffer(id);
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -255,7 +275,7 @@ impl PaneTree {
             index: 0,
             jumplist: JumpList::default(),
             diff_mode: false,
-            last_buffer: None,
+            buffer_history: Vec::new(),
         });
 
         let root_id = nodes.insert(Node {
@@ -391,7 +411,7 @@ impl PaneTree {
             index: self.next_index,
             jumplist: JumpList::default(),
             diff_mode: false,
-            last_buffer: None,
+            buffer_history: Vec::new(),
         });
         self.next_index += 1;
 
@@ -661,7 +681,7 @@ impl PaneTree {
         std::mem::swap(&mut pa.view, &mut pb.view);
         std::mem::swap(&mut pa.prev_view, &mut pb.prev_view);
         std::mem::swap(&mut pa.jumplist, &mut pb.jumplist);
-        std::mem::swap(&mut pa.last_buffer, &mut pb.last_buffer);
+        std::mem::swap(&mut pa.buffer_history, &mut pb.buffer_history);
         std::mem::swap(&mut pa.diff_mode, &mut pb.diff_mode);
     }
 

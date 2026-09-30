@@ -408,7 +408,7 @@ pub(crate) fn show_buffer_in_pane(
 
     ws.panes.pane_mut(target).view = View::Editor(new_editor_id);
     if let Some(outgoing) = outgoing {
-        ws.panes.pane_mut(target).last_buffer = Some(outgoing);
+        ws.panes.pane_mut(target).record_shown(outgoing);
     }
 
     if let Some(old_id) = old {
@@ -437,8 +437,9 @@ pub(crate) fn show_buffer_in_pane(
 /// it leaves on the way out. The jump lands on the pane's jumplist first, so a
 /// backward jump reverses it like any cross-file open.
 ///
+/// The switch passes over a closed buffer to the one the pane showed before it.
 /// Sets a status message and moves nothing when the pane has shown no other
-/// buffer, or when that buffer has since been closed.
+/// buffer that is still open.
 pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
     let workspace = stoat.active_workspace;
     let resolved = {
@@ -447,18 +448,23 @@ pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
             FocusTarget::SplitPane => ws.panes.focus(),
             FocusTarget::Dock(_) => return UpdateEffect::None,
         };
-        let previous = ws
-            .panes
-            .pane(target)
-            .last_buffer
-            .and_then(|id| ws.buffers.get(id).map(|buffer| (id, buffer)));
+        let current = match ws.panes.pane(target).view {
+            View::Editor(eid) => ws.editors.get(eid).map(|editor| editor.buffer_id),
+            _ => None,
+        };
 
-        // A closed buffer never comes back, so drop the dangling id rather than
-        // resolving it again on every later press.
-        if previous.is_none() {
-            ws.panes.pane_mut(target).last_buffer = None;
+        // A closed buffer never comes back, and the pane's own buffer is no
+        // switch at all. Both leave the tail rather than resolve again on every
+        // later press.
+        let history = &mut ws.panes.pane_mut(target).buffer_history;
+        while let Some(&id) = history.last()
+            && (Some(id) == current || ws.buffers.get(id).is_none())
+        {
+            history.pop();
         }
-        previous.map(|(id, buffer)| (target, id, buffer))
+        history
+            .last()
+            .and_then(|&id| ws.buffers.get(id).map(|buffer| (target, id, buffer)))
     };
 
     let Some((target, buffer_id, buffer)) = resolved else {
@@ -517,12 +523,12 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         .active_workspace_mut()
         .release_buffer(buffer_id, path.as_deref());
 
-    // Purge the closed buffer from every pane's jumplist so a later walk can
-    // never resolve a stale entry into it.
+    // Purge the closed buffer from every pane's history and jumplist, so no
+    // later switch or walk resolves a stale entry into it.
     let ws = stoat.active_workspace_mut();
     for tree in ws.pane_trees_mut() {
         for pane_id in tree.split_pane_ids() {
-            tree.pane_mut(pane_id).jumplist.remove_buffer(buffer_id);
+            tree.pane_mut(pane_id).forget_buffer(buffer_id);
         }
     }
 
@@ -940,31 +946,39 @@ mod tests {
         );
     }
 
+    /// Open `name` under `/last-accessed` in the focused pane, returning its id.
+    fn open_named(h: &mut TestHarness, name: &str) -> BufferId {
+        let path = Path::new("/last-accessed").join(name);
+        h.fake_fs().insert_file(&path, name.as_bytes());
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/last-accessed");
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        focused_buffer_id(&mut h.stoat)
+    }
+
     /// Open `a.txt` then `b.txt` in the focused pane, returning both ids in
     /// open order. The pane ends on `b`, with `a` as the one to switch back to.
     fn open_two(h: &mut TestHarness) -> (BufferId, BufferId) {
-        let root = PathBuf::from("/last-accessed");
-        h.fake_fs().insert_file(root.join("a.txt"), b"a\n");
-        h.fake_fs().insert_file(root.join("b.txt"), b"b\n");
-        h.stoat.active_workspace_mut().git_root = root.clone();
+        (open_named(h, "a.txt"), open_named(h, "b.txt"))
+    }
 
+    /// Close `name`, a file already open under `/last-accessed`, from a second
+    /// pane, then focus back on the first.
+    ///
+    /// Closing acts on the focused buffer, so a pane never closes a buffer out
+    /// of its own history. The second pane closes it out from under the first.
+    fn close_from_a_split(h: &mut TestHarness, name: &str) {
+        dispatch(&mut h.stoat, &SplitRight);
         dispatch(
             &mut h.stoat,
             &OpenFile {
-                path: root.join("a.txt"),
+                path: Path::new("/last-accessed").join(name),
             },
         );
         h.settle();
-        let a = focused_buffer_id(&mut h.stoat);
-
-        dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("b.txt"),
-            },
-        );
+        dispatch(&mut h.stoat, &CloseBuffer);
         h.settle();
-        (a, focused_buffer_id(&mut h.stoat))
+        dispatch(&mut h.stoat, &FocusLeft);
     }
 
     #[test]
@@ -1012,20 +1026,7 @@ mod tests {
     fn goto_last_accessed_reports_when_the_previous_buffer_was_closed() {
         let mut h = Stoat::test();
         let (a, b) = open_two(&mut h);
-
-        // Closing acts on the focused buffer, so a pane never closes its own
-        // previous one. A second pane closes `a` out from under the first.
-        dispatch(&mut h.stoat, &SplitRight);
-        dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: PathBuf::from("/last-accessed/a.txt"),
-            },
-        );
-        h.settle();
-        dispatch(&mut h.stoat, &CloseBuffer);
-        h.settle();
-        dispatch(&mut h.stoat, &FocusLeft);
+        close_from_a_split(&mut h, "a.txt");
 
         dispatch(&mut h.stoat, &GotoLastAccessed);
         h.settle();
@@ -1040,10 +1041,47 @@ mod tests {
                     .active_workspace()
                     .panes
                     .pane(focused_pane)
-                    .last_buffer,
+                    .buffer_history
+                    .contains(&a),
             ),
-            (false, b, Some("no previously shown buffer"), None),
-            "a closed previous buffer reports, stays put, and drops the dangling id"
+            (false, b, Some("no previously shown buffer"), false),
+            "a closed previous buffer reports, stays put, and leaves no entry"
+        );
+    }
+
+    #[test]
+    fn goto_last_accessed_walks_past_a_closed_buffer() {
+        let mut h = Stoat::test();
+        let (a, _) = open_two(&mut h);
+        open_named(&mut h, "c.txt");
+        close_from_a_split(&mut h, "b.txt");
+
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+
+        assert_eq!(
+            focused_buffer_id(&mut h.stoat),
+            a,
+            "the switch passes over the closed b"
+        );
+    }
+
+    #[test]
+    fn goto_last_accessed_passes_over_the_buffer_it_shows() {
+        let mut h = Stoat::test();
+        let (a, _) = open_two(&mut h);
+        open_named(&mut h, "c.txt");
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+        close_from_a_split(&mut h, "c.txt");
+
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+
+        assert_eq!(
+            focused_buffer_id(&mut h.stoat),
+            a,
+            "the pane shows b, which holds the tail once c is gone"
         );
     }
 
