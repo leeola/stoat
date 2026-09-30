@@ -46,6 +46,7 @@ theme default_dark {
     let special = magenta;
     let muted   = dark_gray;
     let subtle  = "#333842";
+    let selection = "#3e4452";
     let dim     = gray;
     let text    = white;
 
@@ -53,7 +54,7 @@ theme default_dark {
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
     ui.selection = { fg: black, bg: accent };
-    ui.selection.editor = { bg: muted };
+    ui.selection.editor = { bg: selection };
     ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
     ui.search.match = { fg: black, bg: warning };
     ui.highlight.read = { bg: subtle };

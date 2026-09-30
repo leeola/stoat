@@ -1007,4 +1007,26 @@ mod tests {
         );
         assert_ne!(fg, bg, "the badge digit reads against its box");
     }
+
+    /// The editor's selection wash sits under every token it covers, so a
+    /// foreground in the wash's own color vanishes into it.
+    #[test]
+    fn no_shipped_style_paints_text_in_the_selection_wash_color() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        let wash = theme
+            .get(scope::UI_SELECTION_EDITOR)
+            .bg
+            .expect("a selection wash");
+        let hidden: Vec<&str> = theme
+            .styles
+            .iter()
+            .filter(|(_, style)| style.fg == Some(wash))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            hidden,
+            Vec::<&str>::new(),
+            "styles painting in the wash color"
+        );
+    }
 }
