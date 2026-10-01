@@ -2186,7 +2186,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::{BufferId, TextBuffer},
-        diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, StagedMark, TokenDetail},
+        diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::InlayKind,
         render::paint::FAINT_CONTRAST_FLOOR,
         theme::{
@@ -2646,15 +2646,7 @@ mod tests {
             Arc::new(base.to_string()),
             text,
         );
-        dm.set_staged_marks(
-            diff_map::changes_to_hunks(&structural_diff::diff(from, base).changes, from, base)
-                .into_iter()
-                .map(|hunk| StagedMark {
-                    status: hunk.status,
-                    base_lines: hunk.buffer_line_range,
-                })
-                .collect(),
-        );
+        dm.set_staged_marks(diff_map::staged_marks(from, base));
         diff_editor_with_map(text, dm)
     }
 

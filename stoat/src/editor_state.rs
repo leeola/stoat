@@ -129,10 +129,10 @@ pub(crate) struct EditorState {
     pub(crate) wrap_override: Option<WrapMode>,
     /// When set, `render_editor` paints this editor as a side-by-side diff: the
     /// right column is the normal syntax-highlighted buffer and the left column
-    /// shows the base (HEAD) text via the buffer's diff map. The buffer stays the
-    /// real editable buffer, so input handling is unchanged. Set through
-    /// [`Self::set_diff_view`], which also flips the display map's
-    /// deleted-block splicing.
+    /// shows the base text (the index, or the installed base) via the buffer's
+    /// diff map. The buffer stays the real editable buffer, so input handling
+    /// is unchanged. Set through [`Self::set_diff_view`], which also flips the
+    /// display map's deleted-block splicing.
     pub(crate) diff_view: bool,
     /// When set, this editor is the swapped-in center of the three-way conflict
     /// resolve view, carrying the render cache the three-column renderer paints

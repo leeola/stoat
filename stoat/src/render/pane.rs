@@ -1239,6 +1239,7 @@ fn staged_label_body(
 /// which base the hunks on screen were measured against.
 pub(crate) fn diff_base_lead(base: &DiffBase) -> String {
     match base {
+        DiffBase::Head => "diff vs HEAD".to_string(),
         DiffBase::Rev { sha: Some(sha) } => {
             let short: String = sha.chars().take(7).collect();
             format!("diff vs {short}")
@@ -2118,6 +2119,11 @@ mod tests {
 
     #[test]
     fn every_diff_base_names_itself() {
+        assert_eq!(
+            diff_base_lead(&DiffBase::Head),
+            "diff vs HEAD",
+            "the HEAD base names the commit it measures from"
+        );
         assert_eq!(
             diff_base_lead(&DiffBase::Rev {
                 sha: Some("abc1234def5678".into())

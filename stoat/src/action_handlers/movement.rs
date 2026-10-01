@@ -13,7 +13,10 @@ use crate::{
         anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
         ResolvedRead, SelectionsCollection, SpanLanding,
     },
-    workspace::{diff::DiffBase, Workspace},
+    workspace::{
+        diff::{self, DiffBase},
+        Workspace,
+    },
 };
 use std::{
     cmp::Ordering,
@@ -4452,13 +4455,13 @@ enum ChangedFileJump {
 /// hunk in `dir`.
 ///
 /// Returns as soon as the scan is armed. Listing the repo's changed files and
-/// diffing the target against HEAD are what the hop costs, and both would run
-/// on the thread that handled the key, so they run on a blocking one and
+/// diffing the target against its base are what the hop costs. Both are too
+/// slow for the thread that handled the key, so they run on a blocking one and
 /// [`pump_changed_file_jump`] opens the target when they land.
 ///
 /// Only tracked changed files (modifications, deletions, staged additions) are
-/// visited. Untracked working-tree files are excluded because they have no HEAD
-/// content, and so no diff to render.
+/// visited. Untracked working-tree files are excluded because neither HEAD nor
+/// the index holds them, and so they have no diff to render.
 fn goto_change_across_files(
     stoat: &mut Stoat,
     dir: ChangeDir,
@@ -4554,11 +4557,11 @@ fn files_with_hunks(
 /// Pick the changed file `dir` leads to from `current_path`, and the row in it
 /// to land on.
 ///
-/// The walk passes over any file that offers no row to land on -- a staged
-/// addition with no base blob, a file that reads as non-UTF8 -- and keeps
-/// going to the next one. An open of such a file puts the cursor at row 0
-/// with nothing under it, and from there the in-file walk finds no hunk and
-/// crosses out again on the very next press.
+/// The walk passes over any file that offers no row to land on -- a file that
+/// reads as non-UTF8, or one whose texts all agree -- and keeps going to the
+/// next one. An open of such a file puts the cursor at row 0 with nothing
+/// under it, and from there the in-file walk finds no hunk and crosses out
+/// again on the very next press.
 ///
 /// Runs off the UI thread, so it reads the target's working-tree side through
 /// `fs_host` rather than through any open buffer. For the file a hop is
@@ -4662,14 +4665,14 @@ fn scan_changed_file_jump(
     ChangedFileJump::NoMoreChanges
 }
 
-/// The landing row of `path`'s first (Next) or last (Prev) hunk against the
-/// workspace's diff base, paired with the rows that hunk occupies.
+/// The landing row of `path`'s first (Next) or last (Prev) change against the
+/// workspace's diff base, paired with the rows that change occupies.
 ///
-/// The base side mirrors the head side of `resolve_base`, so the row this
-/// lands on is one of the hunks the target's own diff map will show. Reading
-/// HEAD instead leaves a file committed on top of a review base looking
-/// clean, and the hop drops the cursor at the file top with no change under
-/// it.
+/// A change is a hunk, or a staged mark under the index base. The texts come
+/// from [`diff::base_texts`], which is what the target's own diff map reads,
+/// so the row this lands on is one of the stops that map offers. Reading HEAD
+/// instead leaves a file committed on top of a review base looking clean, and
+/// the hop drops the cursor at the file top with no change under it.
 ///
 /// The rows travel with the row because the hop's target is not open yet,
 /// which leaves nothing on the far side to look the chunk up from. An empty
@@ -4685,28 +4688,24 @@ fn first_hunk_stop(
     dir: ChangeDir,
     base_override: Option<&DiffBase>,
 ) -> Option<(u32, Range<u32>)> {
-    let base = match base_override {
-        Some(DiffBase::Rev { sha: Some(sha) }) => repo.content_at(sha, path).unwrap_or_default(),
-        Some(DiffBase::Rev { sha: None }) => String::new(),
-        Some(DiffBase::Memory { files }) => match files.get(path) {
-            Some(text) => text.to_string(),
-            None => head_or_moved_content(repo, path)?,
-        },
-        None => head_or_moved_content(repo, path)?,
-    };
+    let texts = diff::base_texts(repo, path, base_override)?;
+    let base = texts.base.as_str();
+    let behind = texts.staged_from.as_deref().map(String::as_str);
 
     let mut bytes = Vec::new();
     let Ok(()) = fs_host.read(path, &mut bytes) else {
         // The file is gone from the working tree. The diff map answers a
         // whole-file removal as one hunk anchored at row 0, not as one
-        // removal per item the differ finds inside it, so this answers the
-        // same shape rather than diffing against empty text.
-        return (!base.is_empty()).then_some((0, 0..0));
+        // removal per item the differ finds inside it, and a removal already
+        // in the base as one staged mark there. This answers the same shape
+        // rather than diffing against empty text.
+        let removed = !base.is_empty() || behind.is_some_and(|from| !from.is_empty());
+        return removed.then_some((0, 0..0));
     };
     let working = String::from_utf8(bytes).ok()?;
 
-    let result = structural_diff::diff(&base, &working);
-    let hunks = diff_map::changes_to_hunks(&result.changes, &base, &working);
+    let result = structural_diff::diff(base, &working);
+    let hunks = diff_map::changes_to_hunks(&result.changes, base, &working);
     // The file is not open, so there is no LiveHunks to read stops from. The
     // runs and buffer_start_line are both stored coordinates, which is the
     // space this answer travels in, so reading them here needs no shift.
@@ -4727,25 +4726,51 @@ fn first_hunk_stop(
                 .map_or(hunk.buffer_start_line, |run| run.start),
         }
     };
-    let (hunk, last) = match dir {
-        ChangeDir::Next => (hunks.first()?, false),
-        ChangeDir::Prev => (hunks.last()?, true),
-    };
-    Some((stop_row(hunk, last), hunk.buffer_line_range.clone()))
+    let hunk_stop = match dir {
+        ChangeDir::Next => hunks.first().map(|hunk| (hunk, false)),
+        ChangeDir::Prev => hunks.last().map(|hunk| (hunk, true)),
+    }
+    .map(|(hunk, last)| (stop_row(hunk, last), hunk.buffer_line_range.clone()));
+
+    let mark_stops = behind
+        .map(|from| staged_mark_stops(from, base, &hunks))
+        .unwrap_or_default();
+
+    let candidates = hunk_stop.into_iter().chain(mark_stops);
+    match dir {
+        ChangeDir::Next => candidates.min_by_key(|(row, _)| *row),
+        ChangeDir::Prev => candidates.max_by_key(|(row, _)| *row),
+    }
 }
 
-/// `path`'s base blob, read from the blob it was moved from when the move left
-/// nothing under the new path.
+/// The stops the staged marks `base` holds over `from` offer in the working
+/// text that `hunks` were diffed against.
 ///
-/// The head side of the workspace's own base resolution, which is what the
-/// target's diff map reads once the hop opens it. A read at the new path alone
-/// answers nothing for a move, which drops an edited move out of the walk.
-fn head_or_moved_content(repo: &dyn GitRepo, path: &Path) -> Option<String> {
-    if let Some(head) = repo.head_content(path) {
-        return Some(head);
-    }
-    let moved_from = repo.rename_source(path)?;
-    repo.head_content(&moved_from)
+/// A mark lands on its first row. An empty one is a staged deletion, which
+/// lands on the row above it the way a deletion hunk does.
+fn staged_mark_stops(
+    from: &str,
+    base: &str,
+    hunks: &[diff_map::DiffHunk],
+) -> Vec<(u32, Range<u32>)> {
+    let starts = diff_map::line_starts(base);
+    let placed: Vec<(Range<u32>, Range<u32>)> = hunks
+        .iter()
+        .map(|hunk| {
+            (
+                hunk.buffer_line_range.clone(),
+                diff_map::hunk_base_lines(hunk, &starts, base),
+            )
+        })
+        .collect();
+
+    diff_map::staged_mark_rows(&placed, &diff_map::staged_marks(from, base))
+        .into_iter()
+        .map(|(rows, _)| match rows.is_empty() {
+            true => (rows.start.saturating_sub(1), rows),
+            false => (rows.start, rows),
+        })
+        .collect()
 }
 
 /// Apply a landed changed-file hop, opening the target and landing on its hunk.

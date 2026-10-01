@@ -1182,6 +1182,8 @@ on key {
     # `r` re-reads the open buffers, so an external tool's edits reach the diff
     # without leaving the chord. It spells the same verb `space r` does.
     #
+    # `i` and `h` point the diff at the index or at HEAD.
+    #
     # `f` follows the whole working tree. Each file written outside the editor
     # opens in the diff view with the cursor on the change, until a second `f`
     # stops it.
@@ -1194,6 +1196,8 @@ on key {
         Escape -> SetMode(normal);
         G -> PinMode();
         d -> [Diff(), SetMode(normal)];
+        i -> [DiffAgainstIndex(), SetMode(normal)];
+        h -> [DiffAgainstHead(), SetMode(normal)];
         s -> [StageHunk(), SetMode(normal)];
         u -> [UnstageHunk(), SetMode(normal)];
         S -> [StageLine(), SetMode(normal)];

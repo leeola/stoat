@@ -57,7 +57,7 @@ pub(super) const REFUSED_BADGE: &str =
 pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
     let ws = stoat.active_workspace();
     let base_sha = match ws.diff_base() {
-        None => return AmendRoute::Index,
+        None | Some(DiffBase::Head) => return AmendRoute::Index,
         Some(DiffBase::Rev { sha }) => sha.clone(),
         // An agent's proposal sits under no commit, so there is nothing to
         // amend it into.

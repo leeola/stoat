@@ -1178,27 +1178,34 @@ impl DiffMap {
             .collect()
     }
 
-    /// How many hunks the map holds.
+    /// How many hunks the map holds, counting each run of staged-mark rows as
+    /// a staged hunk.
     ///
     /// The denominator of the status bar's position, and the live answer for
-    /// the focused file, which the repo-wide tally can lag by a keystroke.
+    /// the focused file, which the repo-wide tally lags by up to a keystroke.
+    /// The tally counts from HEAD, where a change the index holds is a hunk
+    /// like any other.
     pub fn hunk_count(&self) -> usize {
-        self.hunks.iter().count()
+        self.hunks.iter().count() + self.staged_rows.len()
     }
 
-    /// One-based position of the hunk at buffer `row` among this map's hunks,
-    /// or `None` when `row` sits before the first one.
+    /// One-based position of the hunk at buffer `row` among this map's hunks
+    /// and staged-mark runs, or `None` when `row` sits before the first one.
     ///
     /// A row between two hunks answers the one before it. A jump lands the
     /// cursor inside a hunk, so the previous hunk is where the walk stands
     /// until the next one is reached, and a position that blanked out between
-    /// hunks would flicker as the reader moved.
+    /// hunks flickers as the reader moves.
     pub fn hunk_index_at(&self, row: u32) -> Option<usize> {
-        let at_or_before = self
+        let hunks = self
             .hunks
             .iter()
             .take_while(|hunk| hunk.buffer_start_line <= row)
             .count();
+        let marks = self
+            .staged_rows
+            .partition_point(|(rows, _)| rows.start <= row);
+        let at_or_before = hunks + marks;
         (at_or_before > 0).then_some(at_or_before)
     }
 
@@ -1431,6 +1438,24 @@ pub(crate) fn mark_staged(hunks: &mut [DiffHunk], index_changed: &[Range<u32>]) 
     }
 }
 
+/// The staged marks `base` holds over `from`, the text behind it.
+///
+/// From the line pass alone. A mark paints whole lines, so the token detail the
+/// tree pass adds has nothing to refine.
+pub(crate) fn staged_marks(from: &str, base: &str) -> Vec<StagedMark> {
+    changes_to_hunks(
+        &stoat_language::structural_diff::diff(from, base).changes,
+        from,
+        base,
+    )
+    .into_iter()
+    .map(|hunk| StagedMark {
+        status: hunk.status,
+        base_lines: hunk.buffer_line_range,
+    })
+    .collect()
+}
+
 /// Map `marks`, in base-line coordinates, onto the buffer rows they paint on.
 ///
 /// `hunks` pairs each hunk's buffer rows with the base lines it replaced, in
@@ -1442,7 +1467,7 @@ pub(crate) fn mark_staged(hunks: &mut [DiffHunk], index_changed: &[Range<u32>]) 
 ///
 /// The answer is sorted by row, with one range per unbroken run of a mark's
 /// rows.
-fn staged_mark_rows(
+pub(crate) fn staged_mark_rows(
     hunks: &[(Range<u32>, Range<u32>)],
     marks: &[StagedMark],
 ) -> Vec<(Range<u32>, DiffHunkStatus)> {
@@ -1994,7 +2019,7 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
 /// Empty for a hunk that removed nothing, at the base line its added rows go
 /// before. The count comes from [`str::lines`] over the removed bytes, which
 /// hold the trailing newline, so it does not over-count at a newline boundary.
-fn hunk_base_lines(hunk: &DiffHunk, starts: &[usize], base_text: &str) -> Range<u32> {
+pub(crate) fn hunk_base_lines(hunk: &DiffHunk, starts: &[usize], base_text: &str) -> Range<u32> {
     let start = line_of(starts, hunk.base_byte_range.start);
     if hunk.base_byte_range.is_empty() {
         return start..start;
@@ -2651,6 +2676,23 @@ mod tests {
             "the deletion marks row 2",
         );
         assert_eq!(dm.staged_for_line(2), None, "and covers no row to stage");
+    }
+
+    /// The status bar's position counts a staged mark as a staged hunk, the way
+    /// the staged tally beside it does.
+    #[test]
+    fn staged_marks_count_in_the_hunk_position() {
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\n",
+            vec![modified_hunk(3..4, 9..12)],
+            vec![mark(DiffHunkStatus::Modified, 1..2)],
+        );
+        assert_eq!(dm.hunk_count(), 2, "the hunk and the mark");
+        assert_eq!(
+            (0..4).map(|row| dm.hunk_index_at(row)).collect::<Vec<_>>(),
+            [None, Some(1), Some(1), Some(2)],
+            "the mark on row 1 comes first, the hunk on row 3 second",
+        );
     }
 
     /// `n`, `p`, and the wheel walk stop on a staged mark the way they stop on

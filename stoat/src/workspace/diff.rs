@@ -19,8 +19,8 @@ use crate::{
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
     diff_map::{
-        changes_to_hunks, line_starts, mark_staged, merge_structural_detail, BaseHighlights,
-        DiffHunk, DiffHunkStatus, DiffMap, StagedMark,
+        changes_to_hunks, line_starts, mark_staged, merge_structural_detail, staged_marks,
+        BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap,
     },
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
@@ -77,18 +77,19 @@ pub(crate) struct ChangedRangesScan {
 }
 
 /// What a workspace's buffers diff against, when that is not the working
-/// tree's own HEAD-plus-index.
+/// tree's own base.
 ///
-/// Reviewing a commit checks it out and points the diff at the commit's
-/// parent, so the base moves off HEAD while the buffers stay the working
-/// tree. An agent's proposed edits have no commit behind them at all, so they
-/// carry their base as text.
-// `Memory` has no constructor outside tests yet: the agent-edit entry point is
-// the one that builds it, and it has not landed. `#[allow(dead_code)]` covers
-// that gap.
-#[allow(dead_code)]
+/// With no override the working tree diffs against its index, and the changes
+/// the index holds over HEAD are staged marks. Reviewing a commit checks it
+/// out and points the diff at the commit's parent, so the base moves off HEAD
+/// while the buffers stay the working tree. An agent's proposed edits have no
+/// commit behind them at all, so they carry their base as text.
 #[derive(Clone)]
 pub(crate) enum DiffBase {
+    /// The working tree against HEAD, with the index marking which hunks are
+    /// staged, for a reader who wants every change since the commit in the
+    /// right column.
+    Head,
     /// The tree at `sha`. `None` is the empty tree, which is what a root
     /// commit's parent amounts to.
     Rev { sha: Option<String> },
@@ -669,14 +670,14 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize
 /// diff recomputed for a keystroke therefore reuses what the last one read,
 /// rather than taking the repo mutex and decompressing the same bytes again.
 #[derive(Clone)]
-pub(super) struct DiffBaseText {
+pub(crate) struct DiffBaseText {
     /// The text the left column shows and the hunks describe.
-    base: Arc<String>,
+    pub(crate) base: Arc<String>,
     /// The text a hunk must already sit in to read staged.
     staged_text: Arc<String>,
     /// The text behind the base. When present, the changes the base holds over
     /// it become the map's staged marks.
-    staged_from: Option<Arc<String>>,
+    pub(crate) staged_from: Option<Arc<String>>,
     /// Fingerprints of `base` and `staged_text`, taken once here.
     ///
     /// The staged text is usually a blob of its own that holds the base's
@@ -803,11 +804,9 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// text, the changes the base text holds over it become the map's staged
 /// marks.
 ///
-/// [`None`] when the file is outside a repo, or when an unoverridden base has
-/// no HEAD content to diff against.
-///
-/// Both `discover` and `head_content` do git and filesystem IO, so this must
-/// run on a blocking thread.
+/// The tree pass and the base-text highlights cost the most. A caller on the
+/// UI thread passes no `language`, which skips both, so the line pass alone
+/// lands in one frame.
 ///
 /// Two differs answer two questions. The language-agnostic line pass owns the
 /// extents and the staged marks, matching [`changed_byte_ranges`], so the
@@ -910,18 +909,7 @@ pub(super) fn compute_diff_map(
         DiffMap::from_hunks(hunks, Some(base.base.clone()))
     };
     if let Some(from) = &base.staged_from {
-        // The line pass alone. A mark paints whole lines, so the token detail
-        // the tree pass adds has nothing to refine.
-        let staged = structural_diff::diff(from, base_text);
-        diff_map.set_staged_marks(
-            changes_to_hunks(&staged.changes, from, base_text)
-                .into_iter()
-                .map(|hunk| StagedMark {
-                    status: hunk.status,
-                    base_lines: hunk.buffer_line_range,
-                })
-                .collect(),
-        );
+        diff_map.set_staged_marks(staged_marks(from, base_text));
     }
     if let Some(language) = language {
         // The structural pass above parsed this exact base into `tree_memo`,
@@ -937,10 +925,32 @@ pub(super) fn compute_diff_map(
     Some(diff_map)
 }
 
-/// Read the two blobs a diff measures `path` against, per the workspace's base.
+/// Read the texts a diff measures `path` against from the repo `git_root` is
+/// in, per the workspace's base.
+///
+/// [`None`] when `git_root` is in no repo, or as [`base_texts`] answers.
+fn resolve_base(
+    git: &dyn GitHost,
+    git_root: &Path,
+    path: &Path,
+    base_override: Option<&DiffBase>,
+) -> Option<DiffBaseText> {
+    let repo = git.discover(git_root)?;
+    base_texts(&*repo, path, base_override)
+}
+
+/// The texts `path` diffs against under `base_override`.
 ///
 /// The base side is what the diff hunks describe. The staged side is what marks
 /// them staged, being the content a hunk is already applied to.
+///
+/// With no override the base is the index and HEAD sits behind it. The hunks
+/// are the working tree's unstaged edits, and the changes the index holds over
+/// HEAD become staged marks. Every hunk reads unstaged, because the staged side
+/// is the base itself.
+///
+/// Under [`DiffBase::Head`] the base is HEAD and the index marks which hunks are
+/// staged.
 ///
 /// Under a [`DiffBase::Rev`] the rev is the review base and HEAD is the commit
 /// checked out over it, so a hunk already in that commit reads staged and a
@@ -949,50 +959,68 @@ pub(super) fn compute_diff_map(
 /// diffs against nothing.
 ///
 /// Under a [`DiffBase::Memory`] both sides are the supplied text, which leaves
-/// every hunk unstaged. Nothing has applied an agent's proposal anywhere.
-fn resolve_base(
-    git: &dyn GitHost,
-    git_root: &Path,
+/// every hunk unstaged. Nothing has applied an agent's proposal anywhere. A path
+/// the map does not carry diffs against the working tree's own base.
+///
+/// [`None`] when the working tree carries no text for `path` in HEAD or the
+/// index, which is what leaves an untracked buffer without a diff map.
+pub(crate) fn base_texts(
+    repo: &dyn GitRepo,
     path: &Path,
     base_override: Option<&DiffBase>,
 ) -> Option<DiffBaseText> {
-    let repo = git.discover(git_root)?;
-
-    let (base, staged_text) = match base_override {
+    match base_override {
         Some(DiffBase::Rev { sha }) => {
             let rev = match sha {
                 Some(sha) => repo.content_at(sha, path).unwrap_or_default(),
                 None => String::new(),
             };
-            (
-                Arc::new(rev),
-                Arc::new(repo.head_content(path).unwrap_or_default()),
-            )
+            let head = repo.head_content(path).unwrap_or_default();
+            Some(DiffBaseText::new(Arc::new(rev), Arc::new(head), None))
+        },
+        Some(DiffBase::Head) => {
+            let (head, index) = working_tree_texts(repo, path)?;
+            Some(DiffBaseText::new(head, index, None))
         },
         Some(DiffBase::Memory { files }) => match files.get(path) {
-            Some(text) => (text.clone(), text.clone()),
-            None => working_tree_base(&*repo, path)?,
+            Some(text) => Some(DiffBaseText::new(text.clone(), text.clone(), None)),
+            None => index_base(repo, path),
         },
-        None => working_tree_base(&*repo, path)?,
-    };
-    Some(DiffBaseText::new(base, staged_text, None))
+        None => index_base(repo, path),
+    }
 }
 
-/// The working tree's own base for `path`, as HEAD and the index.
+/// The working tree's own base for `path`, the index with HEAD behind it.
+fn index_base(repo: &dyn GitRepo, path: &Path) -> Option<DiffBaseText> {
+    let (head, index) = working_tree_texts(repo, path)?;
+    Some(DiffBaseText::new(index.clone(), index, Some(head)))
+}
+
+/// HEAD's and the index's text for `path`, as `(head, index)`.
 ///
-/// [`None`] when HEAD carries no blob for the file and no move explains the
+/// A side with no blob reads as empty text. A tracked file with no index entry
+/// is staged for deletion, and a file added to the index has no HEAD blob yet.
+///
+/// A file with no HEAD blob is looked up as the new side of a move before it
+/// reads as added. `git mv` also puts the new path in the index, and a read of
+/// that alone shows every line as a staged addition.
+///
+/// [`None`] when neither side carries the file and no move explains the
 /// absence, which is what leaves an untracked buffer without a diff map.
-fn working_tree_base(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
-    let Some(head) = repo.head_content(path) else {
-        return moved_base(repo, path);
-    };
-    // A tracked file with no index entry is staged for deletion, so its index
-    // side is empty text. HEAD's bytes there mark the removal unstaged.
-    let index = repo.index_content(path).unwrap_or_default();
-    Some((Arc::new(head), Arc::new(index)))
+fn working_tree_texts(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
+    if let Some(head) = repo.head_content(path) {
+        let index = repo.index_content(path).unwrap_or_default();
+        return Some((Arc::new(head), Arc::new(index)));
+    }
+    if let Some(moved) = moved_base(repo, path) {
+        return Some(moved);
+    }
+    let index = repo.index_content(path)?;
+    Some((Arc::default(), Arc::new(index)))
 }
 
-/// The base for a moved `path`, read from the blob it was moved from.
+/// HEAD's and the index's text for a moved `path`, with HEAD read from the
+/// blob it was moved from.
 ///
 /// A move leaves no blob under the new path. A base read there alone shows
 /// every line as added, and the old path shows every line as deleted.
@@ -1952,6 +1980,35 @@ mod tests {
         );
     }
 
+    /// `git mv` also puts the new path in the index. The move still decides
+    /// the base, so the index's copy under the new path adds nothing staged.
+    #[test]
+    fn a_staged_rename_diffs_against_the_old_path() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_rename_scenario("/repo", "old.txt", "new.txt", "a\nb\n", "a\nb\n");
+        h.fake_git()
+            .add_repo("/repo")
+            .index_file("new.txt", "a\nb\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/new.txt"));
+        h.settle_diff_jobs();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        assert_eq!(
+            (hunk_flags(dm), dm.staged_counts()),
+            (Vec::new(), (0, 0)),
+            "a move edits no line, staged or not",
+        );
+    }
+
     #[test]
     fn a_moved_and_edited_buffer_shows_only_the_edit() {
         let mut h = TestHarness::with_size(80, 24);
@@ -2471,38 +2528,108 @@ mod tests {
         dm.base_text().expect("base text").to_string()
     }
 
-    #[test]
-    fn diff_job_marks_hunks_staged_from_the_index() {
+    /// The settled diff map of a file whose HEAD holds a/b/c/d, whose index
+    /// holds b->B, and whose working tree adds d->D, under `base`.
+    fn half_staged_map(base: Option<DiffBase>) -> DiffMap {
         let mut h = TestHarness::with_size(80, 24);
-        // HEAD a/b/c/d; working changes line 1 (b->B) and line 3 (d->D). The
-        // index holds only the line-1 change, so line 1 is staged, line 3 not.
         h.stage_index_scenario(
             "/repo",
             &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
         );
+        h.stoat.active_workspace_mut().set_diff_base(base);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/f.txt"));
         h.settle_diff_jobs();
 
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
         let ws = h.stoat.active_workspace();
-        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
-        };
-        let buffer_id = ws.editors[editor_id].buffer_id;
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let guard = buffer.read().expect("poisoned");
-        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        guard.diff_map.clone().expect("diff map populated")
+    }
 
-        let flags: Vec<(u32, bool)> = dm
-            .hunks_in_range(0..u32::MAX)
-            .iter()
+    /// Each hunk as `(buffer_start_line, staged)`.
+    fn hunk_flags(dm: &DiffMap) -> Vec<(u32, bool)> {
+        dm.hunks()
             .map(|hunk| (hunk.buffer_start_line, hunk.staged()))
-            .collect();
+            .collect()
+    }
+
+    /// The working tree diffs against its index by default. The index's own
+    /// change is a staged mark beside its base line, and the one hunk is the
+    /// working tree's edit.
+    #[test]
+    fn an_index_base_reads_the_index_hunk_as_a_staged_mark() {
+        let dm = half_staged_map(None);
+
         assert_eq!(
-            flags,
-            vec![(1, true), (3, false)],
-            "the index-staged line-1 hunk is staged, the line-3 hunk is not"
+            hunk_flags(&dm),
+            [(3, false)],
+            "the unstaged d->D hunk alone"
+        );
+        assert_eq!(
+            dm.staged_mark_at_base_line(1),
+            Some(DiffHunkStatus::Modified),
+            "b->B is a staged mark on base line 1",
+        );
+        assert_eq!(dm.staged_counts(), (1, 1), "the mark and the hunk");
+    }
+
+    /// The HEAD base shows every change since the commit as a hunk, and the
+    /// index marks the one it already holds.
+    #[test]
+    fn a_head_base_reads_index_hunks_staged_and_worktree_edits_unstaged() {
+        let dm = half_staged_map(Some(DiffBase::Head));
+
+        assert_eq!(
+            hunk_flags(&dm),
+            [(1, true), (3, false)],
+            "the index-staged line-1 hunk is staged, the line-3 hunk is not",
+        );
+        assert_eq!(
+            *dm.staged_marks,
+            Vec::<StagedMark>::new(),
+            "and no staged marks"
+        );
+    }
+
+    /// A file added to the index has no HEAD blob. It diffs against its index
+    /// text, and the whole of that text is a staged addition.
+    #[test]
+    fn a_file_added_to_the_index_diffs_against_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.index_file("new.rs", "x\n");
+            builder.unstaged_file("new.rs", "x\ny\n");
+        }
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/new.rs"));
+        h.settle_diff_jobs();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        assert_eq!(
+            base_text_of(&h, buffer_id),
+            "x\n",
+            "the index text is the base"
+        );
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        assert_eq!(hunk_flags(dm), [(1, false)], "the working tree's added y");
+        assert_eq!(
+            *dm.staged_marks,
+            [StagedMark {
+                status: DiffHunkStatus::Added,
+                base_lines: 0..1,
+            }],
+            "the index's x is a staged addition",
         );
     }
 
@@ -2626,6 +2753,23 @@ mod tests {
             diff_view_on(&mut h),
             "so hopping back to a modified file re-enters the diff"
         );
+    }
+
+    /// Under the index base a file whose every change is staged has marks and
+    /// no hunks, and its left column still has those marks to show.
+    #[test]
+    fn a_latched_pane_opens_a_file_with_only_staged_changes_as_a_diff() {
+        let mut h = latched_harness();
+        h.fake_fs()
+            .insert_file(Path::new("/repo/staged.rs"), b"fn new() {}\n");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.head_file("staged.rs", "fn old() {}\n");
+            builder.index_file("staged.rs", "fn new() {}\n");
+        }
+        h.open_file(Path::new("/repo/staged.rs"));
+
+        assert!(diff_view_on(&mut h), "the staged change opens the diff");
     }
 
     #[test]

@@ -149,7 +149,7 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     let Some(rev) = rev else {
         // The bare command also drops any base a revision left installed, so
-        // closing the diff always returns to the working tree's own HEAD.
+        // closing the diff always returns to the working tree's own base.
         toggle_diff_view(stoat);
         return UpdateEffect::Redraw;
     };
@@ -174,6 +174,32 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     // Turned on rather than toggled. Naming a revision asks to look at it, so a
     // second `:diff <rev>` re-targets the view rather than closing it; only the
     // bare command closes.
+    reopen_diff_view(stoat);
+    UpdateEffect::Redraw
+}
+
+/// Point every buffer's diff at `base` and show the diff view over it.
+///
+/// `None` is the index, the working tree's own base, and [`DiffBase::Head`] is
+/// HEAD. Any other installed base gives way to `base`, a revision or a commit
+/// review's included, but the checkout a review made stays where it is.
+///
+/// The base already installed with the view open costs nothing, not even a
+/// re-diff. With the view closed, the view opens over that base.
+pub(super) fn diff_against(stoat: &mut Stoat, base: Option<DiffBase>) -> UpdateEffect {
+    let same = matches!(
+        (stoat.active_workspace().diff_base(), &base),
+        (None, None) | (Some(DiffBase::Head), Some(DiffBase::Head))
+    );
+    let view_on = super::focused_editor_mut(stoat).is_some_and(|editor| editor.diff_view);
+    if same && view_on {
+        return UpdateEffect::Redraw;
+    }
+
+    if !same {
+        stoat.active_workspace_mut().set_diff_base(base);
+    }
+    // Turned on rather than toggled, as a named revision is.
     reopen_diff_view(stoat);
     UpdateEffect::Redraw
 }
@@ -355,7 +381,11 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
 }
 
 /// Make sure `editor_id`'s display map holds a current diff map for
-/// `buffer_id`, and report whether it found any hunk to show.
+/// `buffer_id`, and report whether it found any change to show.
+///
+/// A change is a hunk or a staged mark. Under the index base a file whose
+/// every change is staged has marks and no hunks, and its left column still
+/// has those marks to show.
 ///
 /// The editor is named rather than taken as the focused one, because the pane a
 /// navigation targets is not always the focused pane, and an answer from the
@@ -403,7 +433,10 @@ pub(crate) fn ensure_diff_map(stoat: &mut Stoat, editor_id: EditorId, buffer_id:
                 .display_map
                 .snapshot()
                 .diff_map()
-                .is_some_and(|diff_map| !diff_map.hunks_in_range(0..u32::MAX).is_empty())
+                .is_some_and(|diff_map| {
+                    !diff_map.hunks_in_range(0..u32::MAX).is_empty()
+                        || !diff_map.staged_marks.is_empty()
+                })
         })
 }
 
@@ -575,11 +608,12 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
 /// The commit `ws` reviews against, or `None` when no commit is the base.
 ///
 /// A root commit's base is `Some(None)`, the empty tree. A `Memory` base names
-/// no commit, so it reads as no base.
+/// no commit, so it reads as no base, and so does the HEAD base, which reviews
+/// nothing.
 fn review_rev(ws: &Workspace) -> Option<Option<String>> {
     match ws.diff_base() {
         Some(DiffBase::Rev { sha }) => Some(sha.clone()),
-        None | Some(DiffBase::Memory { .. }) => None,
+        None | Some(DiffBase::Head) | Some(DiffBase::Memory { .. }) => None,
     }
 }
 
@@ -1164,6 +1198,114 @@ mod tests {
         assert_eq!(
             diff_state(&h),
             (Some("base0".to_string()), true, Some(workdir.join("b.rs")),),
+        );
+    }
+
+    /// A repo whose `f.txt` has a staged change and an unstaged one, open in
+    /// the focused pane.
+    fn half_staged_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(80, 20);
+        h.stage_index_scenario(
+            "/repo",
+            &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/f.txt"));
+        h
+    }
+
+    /// Whether the base is HEAD, and whether the focused editor shows the diff.
+    fn head_base_and_view(h: &mut TestHarness) -> (bool, bool) {
+        let head = matches!(h.stoat.active_workspace().diff_base(), Some(DiffBase::Head));
+        let view = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .diff_view;
+        (head, view)
+    }
+
+    fn run(h: &mut TestHarness, action: &dyn Action) {
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+        h.settle();
+    }
+
+    #[test]
+    fn diff_against_head_installs_the_head_base_and_opens_the_view() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffAgainstHead);
+        assert_eq!(head_base_and_view(&mut h), (true, true));
+    }
+
+    /// The installed base with the view closed opens the view, which lands on
+    /// the first change. With the view already open it changes nothing, so a
+    /// second press leaves the cursor where the reader moved it.
+    #[test]
+    fn diff_against_the_installed_base_keeps_the_open_view() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffAgainstIndex);
+        assert_eq!(
+            (head_base_and_view(&mut h).1, review_cursor_row(&mut h)),
+            (true, 1),
+            "the view opens on the staged mark, the first change",
+        );
+
+        run(&mut h, &stoat_action::MoveDown);
+        run(&mut h, &stoat_action::MoveDown);
+        run(&mut h, &stoat_action::DiffAgainstIndex);
+        assert_eq!(
+            review_cursor_row(&mut h),
+            3,
+            "and a second press moves nothing"
+        );
+    }
+
+    #[test]
+    fn diff_against_index_returns_from_head_to_the_default_base() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffAgainstHead);
+        run(&mut h, &stoat_action::DiffAgainstIndex);
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().diff_base().is_none(),
+                head_base_and_view(&mut h).1
+            ),
+            (true, true),
+            "the index base with the view still open",
+        );
+    }
+
+    /// Closing the diff drops every installed base, the HEAD base included, so
+    /// the next diff reads the index again.
+    #[test]
+    fn a_bare_diff_close_after_head_drops_to_the_index() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffAgainstHead);
+        run(&mut h, &stoat_action::Diff { rev: None });
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().diff_base().is_none(),
+                head_base_and_view(&mut h).1
+            ),
+            (true, false),
+            "the view closes onto the index base",
+        );
+    }
+
+    #[test]
+    fn diff_against_head_under_a_review_drops_the_review_base() {
+        let mut h = half_staged_harness();
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Rev {
+                sha: Some("base0".into()),
+            }));
+        run(&mut h, &stoat_action::DiffAgainstHead);
+
+        assert_eq!(
+            head_base_and_view(&mut h),
+            (true, true),
+            "HEAD replaces the review base"
         );
     }
 

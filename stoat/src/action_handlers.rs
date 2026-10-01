@@ -48,6 +48,7 @@ use crate::{
     host::FsHost,
     jumplist::JumpList,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
+    workspace::diff::DiffBase,
 };
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::{
@@ -648,6 +649,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoNextChange => movement::goto_change(stoat, movement::ChangeDir::Next),
         ActionKind::GotoPrevChange => movement::goto_change(stoat, movement::ChangeDir::Prev),
         ActionKind::DiffWheelWalk => diff_wheel::toggle_walk(stoat),
+        ActionKind::DiffAgainstIndex => review::diff_against(stoat, None),
+        ActionKind::DiffAgainstHead => review::diff_against(stoat, Some(DiffBase::Head)),
         ActionKind::GotoNextParagraph => {
             movement::goto_paragraph(stoat, movement::ParaDir::Next, false)
         },

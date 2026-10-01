@@ -51,10 +51,13 @@ fn diff_view_shows_fixture_change() {
             .send_keys(":o staged.txt<Enter>")
             .await
             .expect("open staged.txt");
+        // The change sits in the index, which the default base already holds.
+        // Only the HEAD base shows it as a hunk with the committed line beside
+        // it.
         handle
-            .send_keys("<Space>d")
+            .send_keys("<Space>Gh")
             .await
-            .expect("toggle the diff view");
+            .expect("diff against HEAD");
 
         handle
             .await_frame(

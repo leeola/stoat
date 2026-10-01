@@ -211,32 +211,40 @@ fn next_change_walks_past_a_landing_free_file_to_the_one_beyond_it() {
 /// A file gone from the working tree diffs its base against nothing, which is
 /// a whole-file removal. A removal covers no rows, so the landing is the row
 /// above it, row 0 here. The file is reachable rather than skipped.
+///
+/// A staged removal also took the file out of the index, which leaves the
+/// base empty and the removal a staged mark against HEAD behind it.
 #[test]
 fn next_change_lands_a_working_tree_deletion_at_its_removal_row() {
-    let mut h = TestHarness::with_size(40, 20);
-    let workdir = PathBuf::from("/repo");
-    h.stoat.active_workspace_mut().git_root = workdir.clone();
-    {
-        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
-        builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
-        builder.deleted("d.rs", "x\ny\n");
+    for staged in [false, true] {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = PathBuf::from("/repo");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        {
+            let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+            builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+            builder.deleted("d.rs", "x\ny\n");
+            if staged {
+                builder.remove_index_file("d.rs");
+            }
+        }
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
+
+        assert_eq!(
+            (
+                focused_buffer_path(&h.stoat),
+                focused_cursor_point(&mut h.stoat).row,
+            ),
+            (workdir.join("d.rs"), 0),
+            "the deletion is reachable and lands on its removal row, staged {staged}",
+        );
     }
-    h.stoat.set_diff_warm_auto(true);
-    h.open_file(&workdir.join("a.rs"));
-    h.settle_diff_jobs();
-    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
-
-    goto_change(&mut h.stoat, ChangeDir::Next);
-    h.settle();
-
-    assert_eq!(
-        (
-            focused_buffer_path(&h.stoat),
-            focused_cursor_point(&mut h.stoat).row,
-        ),
-        (workdir.join("d.rs"), 0),
-        "the deletion is reachable and lands on its removal row",
-    );
 }
 
 /// A buffer opened through a symlink holds a path the changed list does not,
@@ -324,6 +332,43 @@ fn next_change_crosses_to_next_file_first_hunk() {
     assert!(
         focused_editor_mut(&mut h.stoat).expect("editor").diff_view,
         "diff_view carried across the file boundary"
+    );
+}
+
+/// Under the index base a file whose every change is staged has marks and no
+/// hunks. The hop still reaches it and lands on the mark's row.
+#[test]
+fn a_file_with_only_staged_changes_still_stops() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_index_scenario(
+        &workdir,
+        &[
+            ("a.rs", "a\nb\nc\n", "a\nb\nc\n", "a\nX\nc\n"),
+            ("b.rs", "d\ne\nf\n", "d\nY\nf\n", "d\nY\nf\n"),
+        ],
+    );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.set_diff_view(true);
+        set_cursor_row(editor, 1);
+    }
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        focused_buffer_path(&h.stoat),
+        workdir.join("b.rs"),
+        "crossed to b.rs, whose one change is staged",
+    );
+    assert_eq!(
+        focused_head_row(&mut h.stoat),
+        1,
+        "landed on the staged mark's row",
     );
 }
 

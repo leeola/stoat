@@ -9,7 +9,8 @@ const DIFF_PARAMS: &[ParamDef] = &[ParamDef {
     kind: ParamKind::String,
     value_source: ValueSource::None,
     required: false,
-    description: "Branch, tag, sha, or revspec to diff against. Defaults to HEAD.",
+    description: "Branch, tag, sha, or revspec to diff against. Without it the working tree \
+                  diffs against its index.",
 }];
 
 define_action_def!(
@@ -17,11 +18,12 @@ define_action_def!(
     "Diff",
     ActionKind::Diff,
     "open a diff of working-tree changes",
-    "Open the first changed file with a structural diff against HEAD, or \
+    "Open the first changed file with a structural diff against the index, \
+     with what the index holds over HEAD marked staged in the left column, or \
      against the given revision. A revision points the whole workspace at \
      that commit, so every file diffs against it and the change list spans \
      everything committed since. Running it again closes the diff and \
-     returns to HEAD. While the diff is open, the plain wheel scrolls until \
+     returns to the index. While the diff is open, the plain wheel scrolls until \
      the change under the cursor passes the editor.diff_wheel_jump line. \
      The next notch then walks to the next change, and a notch up walks \
      back. DiffWheelWalk turns that walk off and on.",
@@ -31,8 +33,8 @@ define_action_def!(
 
 #[derive(Debug)]
 pub struct Diff {
-    /// Revision to diff against, or `None` for the working tree's own
-    /// HEAD-plus-index.
+    /// Revision to diff against, or `None` for the working tree's own base,
+    /// the index with HEAD behind it.
     pub rev: Option<String>,
 }
 
@@ -64,6 +66,35 @@ define_action!(
      walk back on. The walk lasts for the session and starts on.",
     ActionPriority::Normal,
     command_name = "diff-wheel-walk"
+);
+
+define_action!(
+    DiffAgainstIndexDef,
+    DiffAgainstIndex,
+    "DiffAgainstIndex",
+    ActionKind::DiffAgainstIndex,
+    "diff the working tree against the index",
+    "Open the diff view with the index as the base, which is the working \
+     tree's default. The left column shows the staged text, its gutter marks \
+     what the index holds over HEAD, and the right column shows only unstaged \
+     edits. Under a revision or a commit review this returns the diff to the \
+     working tree, and :review-done still returns the checkout.",
+    ActionPriority::Normal,
+    command_name = "diff-against-index"
+);
+
+define_action!(
+    DiffAgainstHeadDef,
+    DiffAgainstHead,
+    "DiffAgainstHead",
+    ActionKind::DiffAgainstHead,
+    "diff the working tree against HEAD",
+    "Open the diff view with HEAD as the base, so the right column shows \
+     every change since the commit, a staged hunk marked in the staged color \
+     and an unstaged one in the unstaged color. Closing the diff returns the \
+     base to the index.",
+    ActionPriority::Normal,
+    command_name = "diff-against-head"
 );
 
 define_action!(

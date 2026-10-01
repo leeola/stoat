@@ -757,20 +757,20 @@ impl Workspace {
     }
 
     /// Point every buffer's diff at `base`, or back at the working tree's own
-    /// HEAD-plus-index with `None`.
+    /// base with `None`.
+    ///
+    /// The working tree's own base is the index, with the changes it holds
+    /// over HEAD as staged marks.
     ///
     /// Re-diffs the whole workspace. Every cached blob was read against the
     /// base being replaced, so none of them survive the change.
-    // The callers that point the diff at a revision do not exist yet, so
-    // `#[allow(dead_code)]` covers the gap until the first one arrives.
-    #[allow(dead_code)]
     pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
         self.diff.base_override = base;
         self.diff.invalidate_all();
     }
 
-    /// What buffers currently diff against, `None` for the working tree's own
-    /// HEAD-plus-index.
+    /// What buffers diff against, `None` for the working tree's own base that
+    /// [`Self::set_diff_base`] describes.
     pub(crate) fn diff_base(&self) -> Option<&DiffBase> {
         self.diff.base_override.as_ref()
     }

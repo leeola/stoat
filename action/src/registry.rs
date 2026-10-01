@@ -105,9 +105,9 @@ use crate::{
             SetRebaseOpSquash,
         },
         review::{
-            Diff, DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget,
-            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
-            ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
+            Diff, DiffAgainstHead, DiffAgainstIndex, DiffWheelWalk, GitReview, JumpToMoveSource,
+            JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships,
+            ReviewDone, ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
             ToggleStageLine, UnstageHunk, UnstageLine,
         },
         run::{
@@ -323,6 +323,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(Diff { rev }))
     });
     add(DiffWheelWalk::DEF, |_| Ok(Box::new(DiffWheelWalk)));
+    add(DiffAgainstIndex::DEF, |_| Ok(Box::new(DiffAgainstIndex)));
+    add(DiffAgainstHead::DEF, |_| Ok(Box::new(DiffAgainstHead)));
     add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
     add(CloseConflict::DEF, |_| Ok(Box::new(CloseConflict)));
     add(ConflictPickOurs::DEF, |_| Ok(Box::new(ConflictPickOurs)));
@@ -1342,6 +1344,8 @@ mod tests {
         "ForceReloadAll",
         "FollowChanges",
         "DiffWheelWalk",
+        "DiffAgainstIndex",
+        "DiffAgainstHead",
     ];
 
     #[test]
@@ -1851,7 +1855,8 @@ mod tests {
         // + 2 CommitsDetailDown/CommitsDetailUp.
         // + 1 FollowChanges.
         // + 1 DiffWheelWalk.
-        assert_eq!(all().count(), 424);
+        // + 2 DiffAgainstIndex/DiffAgainstHead.
+        assert_eq!(all().count(), 426);
     }
 
     #[test]

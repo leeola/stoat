@@ -73,6 +73,8 @@ action_kinds! {
     OpenHelp,
     Diff,
     DiffWheelWalk,
+    DiffAgainstIndex,
+    DiffAgainstHead,
     Conflict,
     CloseConflict,
     ConflictPickOurs,
