@@ -775,7 +775,7 @@ on key {
         Home -> ExtendToLineStart();
         0 -> ExtendToLineStart();
         End -> ExtendToLineEnd();
-        G -> ExtendToLastLine();
+        G -> ExtendGotoLineNumber();
         g -> SetMode(select_goto);
         m -> SetMode(select_match);
         z -> SetMode(select_z);

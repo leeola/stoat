@@ -1934,12 +1934,12 @@ define_action!(
 );
 
 define_action!(
-    ExtendToLastLineDef,
-    ExtendToLastLine,
-    "ExtendToLastLine",
-    ActionKind::ExtendToLastLine,
-    "extend selection to last line",
-    "Extend each selection's head to column 0 of the buffer's last line (falling back to the second-to-last line when the buffer ends with a trailing newline), keeping the tail fixed.",
+    ExtendGotoLineNumberDef,
+    ExtendGotoLineNumber,
+    "ExtendGotoLineNumber",
+    ActionKind::ExtendGotoLineNumber,
+    "extend to line number from count",
+    "Like `GotoLineNumber` but extends each selection rather than collapsing it. The selection's tail stays put while the head moves to column 0 of the counted line.",
     ActionPriority::Rare
 );
 

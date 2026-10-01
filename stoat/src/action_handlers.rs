@@ -888,7 +888,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendToLineStart => movement::goto_line_start(stoat, true),
         ActionKind::ExtendToLineEnd => movement::goto_line_end(stoat, true),
         ActionKind::ExtendToFileStart => movement::goto_file_start(stoat, true),
-        ActionKind::ExtendToLastLine => movement::goto_line_number(stoat, true),
+        ActionKind::ExtendGotoLineNumber => movement::goto_line_number(stoat, true),
         ActionKind::CollapseSelection => movement::collapse_selection(stoat),
         ActionKind::FlipSelections => movement::flip_selections(stoat),
         ActionKind::EnsureSelectionsForward => movement::ensure_selections_forward(stoat),

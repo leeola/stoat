@@ -11,9 +11,9 @@ use crate::{
 };
 use std::sync::Arc;
 use stoat_action::{
-    AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
-    ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
-    ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown,
+    AddSelectionBelow, CollapseSelection, ExtendDown, ExtendGotoLineNumber, ExtendLeft,
+    ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+    ExtendToFileStart, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown,
     MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
     MoveUp, PinMode, SelectAll,
 };
@@ -2977,22 +2977,22 @@ fn extend_to_line_start_from_mid_reverses() {
 }
 
 #[test]
-fn extend_to_last_line_grows_forward() {
+fn extend_goto_line_number_without_a_count_reaches_the_last_line() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
-    dispatch(&mut stoat, &ExtendToLastLine);
+    dispatch(&mut stoat, &ExtendGotoLineNumber);
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 9, false)]);
 }
 
 /// The same key with a count reaches the line the count names, where before it
 /// spent the count on nothing and ran to the end of the file.
 #[test]
-fn count_prefix_extend_to_last_line_reaches_that_line() {
+fn count_prefix_extend_goto_line_number_reaches_that_line() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\njkl\n");
     stoat.pending_count = Some(3);
 
-    dispatch(&mut stoat, &ExtendToLastLine);
+    dispatch(&mut stoat, &ExtendGotoLineNumber);
     assert_eq!(
         editor::selection_spans(&mut stoat),
         vec![(0, 9, false)],
@@ -3003,12 +3003,12 @@ fn count_prefix_extend_to_last_line_reaches_that_line() {
 /// A count past the last line lands on it rather than running off the buffer,
 /// and the blank row a trailing newline opens is not a line to land on.
 #[test]
-fn count_prefix_extend_to_last_line_clamps() {
+fn count_prefix_extend_goto_line_number_clamps() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
     stoat.pending_count = Some(99);
 
-    dispatch(&mut stoat, &ExtendToLastLine);
+    dispatch(&mut stoat, &ExtendGotoLineNumber);
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 5, false)]);
 }
 
@@ -3525,12 +3525,12 @@ fn snapshot_extend_to_file_start() {
 }
 
 #[test]
-fn snapshot_extend_to_last_line() {
+fn snapshot_extend_goto_line_number() {
     let mut h = TestHarness::with_size(20, 6);
     let path = h.write_file("s.txt", "abc\ndef\nghi\n");
     h.open_file(&path);
-    dispatch(&mut h.stoat, &ExtendToLastLine);
-    h.assert_snapshot("snapshot_extend_to_last_line");
+    dispatch(&mut h.stoat, &ExtendGotoLineNumber);
+    h.assert_snapshot("snapshot_extend_goto_line_number");
 }
 
 #[test]

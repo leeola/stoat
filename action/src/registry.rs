@@ -20,23 +20,23 @@ use crate::{
             CommitUndoCheckpoint, Decrement, DeleteSelection, DeleteSelectionNoYank, Earlier,
             EnsureSelectionsForward, EnterInsertMode, ExpandSelection, ExtendDown,
             ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
-            ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoNextParagraph,
-            ExtendGotoPrevParagraph, ExtendGotoWindowBottom, ExtendGotoWindowCenter,
-            ExtendGotoWindowTop, ExtendLeft, ExtendLineBelow, ExtendLineDown, ExtendLineUp,
-            ExtendMatchBrackets, ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart,
-            ExtendNextLongWordEnd, ExtendNextLongWordStart, ExtendNextWordEnd, ExtendNextWordStart,
-            ExtendPrevLongWordEnd, ExtendPrevLongWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
-            ExtendRight, ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar,
-            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
-            ExtendToLineEnd, ExtendToLineStart, ExtendToWord, ExtendUp, FindNextChar, FindPrevChar,
-            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
-            GotoDiffCallerUp, GotoFileStart, GotoFirstChange, GotoFirstDiagnostic,
-            GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed, GotoLastChange,
-            GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
-            GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
-            GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
-            GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
+            ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoLineNumber,
+            ExtendGotoNextParagraph, ExtendGotoPrevParagraph, ExtendGotoWindowBottom,
+            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendLineBelow,
+            ExtendLineDown, ExtendLineUp, ExtendMatchBrackets, ExtendMoveParentNodeEnd,
+            ExtendMoveParentNodeStart, ExtendNextLongWordEnd, ExtendNextLongWordStart,
+            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevLongWordEnd, ExtendPrevLongWordStart,
+            ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendSearchNext,
+            ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
+            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendToWord, ExtendUp,
+            FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn,
+            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstChange,
+            GotoFirstDiagnostic, GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed,
+            GotoLastChange, GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd,
+            GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
+            GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter,
+            GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment,
+            GotoPrevEntry, GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
             GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
             GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertAtLineEnd,
             InsertAtLineStart, InsertRegister, InsertTab, JoinSelections, JoinSelectionsSpace,
@@ -800,7 +800,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
-    add(ExtendToLastLine::DEF, |_| Ok(Box::new(ExtendToLastLine)));
+    add(ExtendGotoLineNumber::DEF, |_| {
+        Ok(Box::new(ExtendGotoLineNumber))
+    });
     add(CollapseSelection::DEF, |_| Ok(Box::new(CollapseSelection)));
     add(FlipSelections::DEF, |_| Ok(Box::new(FlipSelections)));
     add(EnsureSelectionsForward::DEF, |_| {

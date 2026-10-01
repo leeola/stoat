@@ -314,7 +314,7 @@ action_kinds! {
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,
-    ExtendToLastLine,
+    ExtendGotoLineNumber,
     CollapseSelection,
     FlipSelections,
     EnsureSelectionsForward,
