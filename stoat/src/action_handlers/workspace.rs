@@ -2,7 +2,10 @@ use crate::{
     app::{Stoat, UpdateEffect},
     host::FsHost,
     input_view::{InputView, SubmitTarget},
-    workspace::{registry, state_path_for, Workspace, WorkspaceId, WorkspaceUid},
+    workspace::{
+        registry::{self, RegistryEntry},
+        state_path_for, Workspace, WorkspaceId, WorkspaceUid,
+    },
     workspace_picker::WorkspacePicker,
 };
 use std::path::{Path, PathBuf};
@@ -196,10 +199,25 @@ pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// deserves an answer. The bare-launch wrapper
 /// [`Stoat::open_workspace_picker`] skips the lone-row case instead.
 ///
+/// A fresh active workspace gets no row when another row exists. It holds
+/// nothing, and Enter on its row only closes the finder, so the selection
+/// starts on a session to enter. The row stays when a saved session carries
+/// the workspace's uid, because that workspace is a restore in flight.
+///
 /// The mode drops to normal first, because the picker's own input takes insert
 /// and the editor underneath must not keep a mode it no longer owns.
 pub(crate) fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
     let inactive = registry::list_all(&*stoat.fs_host).unwrap_or_default();
+    open_workspace_picker_over(stoat, inactive)
+}
+
+/// [`open_workspace_picker`] over an explicit list of saved sessions.
+fn open_workspace_picker_over(stoat: &mut Stoat, inactive: Vec<RegistryEntry>) -> UpdateEffect {
+    let omit_active = {
+        let ws = stoat.active_workspace();
+        ws.is_fresh() && !inactive.iter().any(|reg| reg.meta.uid == ws.uid)
+    };
+
     stoat.set_focused_mode("normal".into());
     let input = {
         let executor = stoat.executor.clone();
@@ -212,12 +230,12 @@ pub(crate) fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
             1,
         )
     };
-    stoat.workspace_picker = Some(WorkspacePicker::new(
-        &stoat.workspaces,
-        stoat.active_workspace,
-        inactive,
-        input,
-    ));
+    let mut picker =
+        WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, inactive, input);
+    if omit_active {
+        picker.omit_active();
+    }
+    stoat.workspace_picker = Some(picker);
     UpdateEffect::Redraw
 }
 
@@ -458,6 +476,20 @@ mod tests {
             .collect()
     }
 
+    fn saved_session(uid: WorkspaceUid, name: &str) -> RegistryEntry {
+        RegistryEntry {
+            meta: WorkspaceMeta {
+                uid,
+                name: name.to_string(),
+                git_root: PathBuf::from("/proj"),
+                buffer_count: 1,
+                remote_host: None,
+            },
+            state_path: PathBuf::from("/state/hash/1.ron"),
+            mtime: UNIX_EPOCH,
+        }
+    }
+
     #[test]
     fn selecting_inactive_row_activates_it_with_the_metas_uid_and_spawns_a_restore() {
         let mut harness = Stoat::test();
@@ -642,6 +674,70 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("deleted session beta"),
             "the status names the deleted session"
+        );
+    }
+
+    #[test]
+    fn a_fresh_active_workspace_gets_no_row() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+
+        open_workspace_picker_over(stoat, vec![saved_session(WorkspaceUid(424242), "proj")]);
+
+        assert_eq!(
+            picker_rows(stoat),
+            ["proj"],
+            "the untouched active workspace has no row"
+        );
+        assert_eq!(
+            stoat
+                .workspace_picker
+                .as_ref()
+                .and_then(WorkspacePicker::selected_entry)
+                .map(|entry| entry.uid),
+            Some(WorkspaceUid(424242)),
+            "the selection starts on the saved session"
+        );
+    }
+
+    #[test]
+    fn a_touched_active_workspace_keeps_its_row() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        harness.edit_focused(0..0, "x");
+        let stoat = &mut harness.stoat;
+
+        open_workspace_picker_over(stoat, vec![saved_session(WorkspaceUid(424242), "proj")]);
+
+        assert_eq!(
+            picker_rows(stoat),
+            ["alpha", "proj"],
+            "an edited workspace keeps its row"
+        );
+    }
+
+    /// The second session gives the list a second row. Without it, the
+    /// lone-row guard keeps the active row and the uid check goes untested.
+    #[test]
+    fn a_fresh_workspace_under_a_saved_uid_keeps_its_row() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+        let uid = stoat.active_workspace().uid;
+
+        open_workspace_picker_over(
+            stoat,
+            vec![
+                saved_session(uid, "shadow"),
+                saved_session(WorkspaceUid(424242), "proj"),
+            ],
+        );
+
+        assert_eq!(
+            picker_rows(stoat),
+            ["alpha", "proj"],
+            "a workspace whose restore is in flight keeps its row"
         );
     }
 

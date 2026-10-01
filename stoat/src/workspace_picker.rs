@@ -304,11 +304,44 @@ impl WorkspacePicker {
         let Some(&entry_idx) = self.filtered.get(self.selected) else {
             return;
         };
+        self.remove_entry(entry_idx);
+    }
+
+    /// Drop the active workspace's row and select the first row that remains.
+    ///
+    /// A no-op when that row is the only one. A picker with no rows draws
+    /// nothing while its input still takes the keys.
+    pub(crate) fn omit_active(&mut self) {
+        if self.entries.len() <= 1 {
+            return;
+        }
+        let Some(idx) = self
+            .entries
+            .iter()
+            .position(|e| e.status == WorkspaceStatus::Active)
+        else {
+            return;
+        };
+
+        self.selected = 0;
+        self.remove_entry(idx);
+    }
+
+    fn remove_entry(&mut self, entry_idx: usize) {
         self.entries.remove(entry_idx);
         self.haystacks.remove(entry_idx);
 
         let query = self.last_filter_query.take().unwrap_or_default();
         self.refilter(&query);
+    }
+
+    /// Whether any row leads somewhere other than the active workspace.
+    ///
+    /// Without one, the bare launch keeps the finder closed.
+    pub(crate) fn has_switch_target(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.status != WorkspaceStatus::Active)
     }
 
     /// Free the filter input's editor and scratch buffer. Called when the picker
@@ -562,6 +595,62 @@ mod tests {
         picker.remove_selected();
 
         assert_eq!(picker.entries().len(), 2, "no entry is dropped");
+    }
+
+    /// The selection starts on `gamma`, so the reset to the first survivor is
+    /// observable. `new` alone already selects row 0.
+    #[test]
+    fn omit_active_drops_the_active_row_and_selects_the_first_survivor() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
+        picker.select_next();
+        picker.select_next();
+
+        picker.omit_active();
+
+        assert_eq!(
+            picker
+                .entries()
+                .iter()
+                .map(|e| e.basename.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "gamma"],
+            "the active row is gone and the rest keep their order"
+        );
+        assert_eq!(
+            picker.filtered(),
+            [0, 1],
+            "the ranking is rebuilt against the shrunk entry list"
+        );
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("beta"),
+            "the selection starts on the first row that remains"
+        );
+        assert!(
+            picker.has_switch_target(),
+            "every row that remains leads elsewhere"
+        );
+    }
+
+    #[test]
+    fn omit_active_keeps_a_lone_row() {
+        let mut picker = picker_with_roots(&["/tmp/alpha"]);
+
+        picker.omit_active();
+
+        assert_eq!(
+            picker
+                .entries()
+                .iter()
+                .map(|e| e.basename.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha"],
+            "the only row stays"
+        );
+        assert!(
+            !picker.has_switch_target(),
+            "the lone row is the active workspace"
+        );
     }
 
     #[test]

@@ -2944,6 +2944,7 @@ mod tests {
     #[test]
     fn switch_workspace_opens_picker() {
         let mut h = Stoat::test();
+        let first = h.stoat.active_workspace;
         h.type_action("NewWorkspace()");
         assert!(h.stoat.workspace_picker.is_none());
 
@@ -2951,7 +2952,11 @@ mod tests {
 
         assert!(h.stoat.workspace_picker.is_some());
         let picker = h.stoat.workspace_picker.as_ref().unwrap();
-        assert_eq!(picker.entries().len(), 2);
+        assert_eq!(
+            picker.entries().iter().map(|e| e.id).collect::<Vec<_>>(),
+            [Some(first)],
+            "the untouched active workspace has no row"
+        );
     }
 
     /// A launch that opens into its only workspace has nothing to pick from, so
@@ -2985,8 +2990,8 @@ mod tests {
             .map(|picker| picker.entries().len());
         assert_eq!(
             entries,
-            Some(2),
-            "a second workspace gives the finder something to pick"
+            Some(1),
+            "the other workspace is the one row to pick"
         );
     }
 
@@ -3103,7 +3108,14 @@ mod tests {
     fn typing_in_the_picker_filters_the_list() {
         let mut h = Stoat::test();
         h.type_action("NewWorkspace()");
-        let ids: Vec<_> = h.stoat.workspaces.keys().collect();
+        h.type_action("NewWorkspace()");
+        let active = h.stoat.active_workspace;
+        let ids: Vec<_> = h
+            .stoat
+            .workspaces
+            .keys()
+            .filter(|&id| id != active)
+            .collect();
         h.stoat.workspaces[ids[0]].name = "alpha".into();
         h.stoat.workspaces[ids[1]].name = "beta".into();
 
@@ -3111,7 +3123,7 @@ mod tests {
         assert_eq!(
             h.stoat.workspace_picker.as_ref().unwrap().filtered().len(),
             2,
-            "both workspaces list before filtering"
+            "both other workspaces list before filtering"
         );
 
         h.type_text("alph");

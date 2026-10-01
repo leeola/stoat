@@ -3517,7 +3517,7 @@ impl Stoat {
 
         if let Some(picker) = self
             .workspace_picker
-            .take_if(|picker| picker.entries().len() == 1)
+            .take_if(|picker| !picker.has_switch_target())
         {
             picker.dispose(self.active_workspace_mut());
         }
