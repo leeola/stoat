@@ -2060,6 +2060,26 @@ fn cursor_keys_move_inside_the_rename_input() {
     );
 }
 
+/// `foo_bar` is one word because `_` is a word character, which is why a bare
+/// `Ctrl-w` empties the prefill.
+#[test]
+fn rename_input_takes_the_readline_kill_keys() {
+    for (keys, expected) in [
+        ("ctrl-w", ""),
+        ("alt-backspace", ""),
+        ("ctrl-u", ""),
+        ("left left left ctrl-w", "bar"),
+        ("left left left ctrl-u", "bar"),
+        ("left left left ctrl-k", "foo_"),
+        ("home alt-d", ""),
+        ("home alt-delete", ""),
+    ] {
+        let mut h = open_rename_input();
+        h.type_keys(keys);
+        assert_eq!(rename_text(&h), expected, "{keys}");
+    }
+}
+
 /// The rename input over `foo_bar` in `fn foo_bar() {}`, prefilled with the
 /// name, its cursor at the end, in insert mode.
 fn open_rename_input() -> TestHarness {
