@@ -184,9 +184,10 @@ pub struct Pane {
     ///
     /// The flag the view itself reads lives on the editor, and every navigation
     /// builds a fresh one, so review intent has to be held somewhere the
-    /// navigation does not replace. While this is set, each buffer the pane
-    /// shows opens as a diff when it has hunks against HEAD and plain when it
-    /// does not. Only an explicit `:diff` clears it.
+    /// navigation does not replace. While this is set, a buffer the pane shows
+    /// opens as a diff when it has a hunk or a staged mark against the diff
+    /// base. A buffer with neither opens plain. Only an explicit `:diff` clears
+    /// it.
     ///
     /// Per pane rather than per workspace, because the widen it engages is per
     /// pane and a second pane stays independent of this one.
