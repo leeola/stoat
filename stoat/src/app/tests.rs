@@ -5493,27 +5493,84 @@ fn enter_continues_a_comment_only_on_the_comment_line() {
 }
 
 /// Lay out a hover of `num_lines` lines each `line_width` wide in a
-/// `width` x `height` window, returning the popup and inner rects.
-fn hover_layout(width: u16, height: u16, num_lines: usize, line_width: usize) -> (Rect, Rect) {
+/// `width` x `height` window, anchored at the start of line `anchor_line` of a
+/// sixty-line file. Returns the popup and inner rects, and the cursor cell the
+/// popup anchors to.
+fn hover_layout_at(
+    width: u16,
+    height: u16,
+    num_lines: usize,
+    line_width: usize,
+    anchor_line: usize,
+) -> (Rect, Rect, (u16, u16)) {
     use crate::{render::hover::HoverPopup, test_harness::TestHarness};
     use ratatui::style::Style;
 
     let mut h = TestHarness::with_size(width, height);
     let root = std::path::PathBuf::from("/hover");
     let path = root.join("a.txt");
-    h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+    let content: String = (0..60).map(|i| format!("line{i}\n")).collect();
+    h.fake_fs().insert_file(&path, content.as_bytes());
     h.stoat.active_workspace_mut().git_root = root;
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
     h.stoat.render();
 
+    let offset: usize = content
+        .lines()
+        .take(anchor_line)
+        .map(|line| line.len() + 1)
+        .sum();
     let text = "x".repeat(line_width);
     let lines = (0..num_lines)
         .map(|_| vec![(text.clone(), Style::default())])
         .collect();
     let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-    h.stoat.pending_hover = Some(HoverPopup::new(lines, 0, editor_id));
-    crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout")
+    h.stoat.pending_hover = Some(HoverPopup::new(lines, offset, editor_id));
+
+    let (_, cursor) = crate::render::cursor_popup::focused_editor_popup_ctx(&mut h.stoat, offset)
+        .expect("the anchor is on screen");
+    let (popup, inner) =
+        crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout");
+    (popup, inner, cursor)
+}
+
+/// [`hover_layout_at`] anchored at the top of the file.
+fn hover_layout(width: u16, height: u16, num_lines: usize, line_width: usize) -> (Rect, Rect) {
+    let (popup, inner, _) = hover_layout_at(width, height, num_lines, line_width, 0);
+    (popup, inner)
+}
+
+/// A hover low on the page opens above the cursor at the full capped height,
+/// rather than as a cramped box in the seven rows below it.
+#[test]
+fn a_hover_low_on_the_page_opens_above_at_full_height() {
+    let (popup, _, cursor) = hover_layout_at(60, 30, 20, 20, 22);
+    assert_eq!(
+        (popup.y + popup.height, popup.height),
+        (cursor.1, 15),
+        "half of 30 rows is the cap, and the box ends on the row above the cursor",
+    );
+}
+
+/// A hover that fits below keeps its place there, low on the page or not.
+#[test]
+fn a_short_hover_low_on_the_page_still_opens_below() {
+    let (popup, _, cursor) = hover_layout_at(60, 30, 2, 20, 24);
+    assert_eq!((popup.y, popup.height), (cursor.1 + 1, 4));
+}
+
+/// A hover too tall for either side at full height takes the side with more
+/// room, shrunk to the cap.
+#[test]
+fn a_hover_that_fits_neither_side_takes_the_larger() {
+    let (popup, _, cursor) = hover_layout_at(60, 30, 20, 20, 10);
+    let rows_below = 30 - (cursor.1 + 1);
+    assert_eq!(
+        (popup.y, popup.height),
+        (cursor.1 + 1, rows_below.min(15)),
+        "the rows below outnumber the rows above",
+    );
 }
 
 #[test]
