@@ -2452,6 +2452,85 @@ mod tests {
         );
     }
 
+    /// The names of a lookup's actions, in order.
+    fn action_names(actions: Option<Arc<[ResolvedAction]>>) -> Option<Vec<String>> {
+        actions.map(|actions| actions.iter().map(|action| action.name.clone()).collect())
+    }
+
+    /// The [`action_names`] of a lookup that runs `name` alone.
+    fn only(name: &str) -> Option<Vec<String>> {
+        Some(vec![name.to_string()])
+    }
+
+    #[test]
+    fn space_r_holds_the_review_mode_across_a_hop() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let to_review = keymap
+            .lookup(&space, &key_event(KeyCode::Char('R'), KeyModifiers::NONE))
+            .expect("R is bound in space mode");
+        assert_eq!(
+            (to_review[0].name.as_str(), &to_review[0].args[0].value),
+            ("SetMode", &Value::Ident("review".into())),
+            "space R reaches the mode itself, with no one-shot layer between",
+        );
+
+        let review = TestState::new().set("mode", StateValue::String("review".into()));
+        let pressed =
+            |key| action_names(keymap.lookup(&review, &key_event(key, KeyModifiers::NONE)));
+        assert_eq!(
+            (
+                pressed(KeyCode::Char('d')),
+                pressed(KeyCode::Char('n')),
+                pressed(KeyCode::Char('p')),
+                pressed(KeyCode::Char('w')),
+            ),
+            (
+                only("Diff"),
+                only("GotoNextChange"),
+                only("GotoPrevChange"),
+                only("DiffWheelWalk"),
+            ),
+            "a hop resets no mode, so a second press hops again",
+        );
+
+        let esc = keymap
+            .lookup(&review, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in review mode");
+        assert_eq!(
+            (esc[0].name.as_str(), &esc[0].args[0].value),
+            ("SetMode", &Value::Ident("normal".into())),
+        );
+    }
+
+    #[test]
+    fn the_review_mode_walks_from_the_side_buttons_and_alt_wheel() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let review = TestState::new().set("mode", StateValue::String("review".into()));
+        let button =
+            |button| action_names(keymap.lookup_side_button(&review, button, KeyModifiers::NONE));
+        let notch = |dir| action_names(keymap.lookup_wheel(&review, dir, KeyModifiers::ALT));
+
+        assert_eq!(
+            (
+                button(SideButton::Back),
+                button(SideButton::Forward),
+                notch(WheelDirection::Down),
+                notch(WheelDirection::Up),
+            ),
+            (
+                only("DiffBack"),
+                only("DiffForward"),
+                only("GotoNextChange"),
+                only("GotoPrevChange"),
+            ),
+            "the buttons bridge the walk and the jumplist, and the Alt notches walk",
+        );
+    }
+
     /// Every list modal answers the same keys with the same verbs.
     ///
     /// The scheme drifted once already, each picker minting its own actions
