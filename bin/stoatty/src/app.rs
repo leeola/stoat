@@ -1675,11 +1675,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                if let Some(bytes) = encode_key(
-                    &event.logical_key,
-                    state.modifiers.control_key(),
-                    state.modifiers.shift_key(),
-                ) {
+                if let Some(bytes) = encode_key(&event.logical_key, state.modifiers) {
                     Input {
                         terminal: &state.terminal,
                         pty: &mut state.pty,

@@ -134,22 +134,42 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
 /// for a key with no terminal encoding, such as a bare modifier, so the caller
 /// writes nothing.
 ///
-/// `ctrl` is whether Ctrl is held: with it, an ASCII letter becomes its C0
-/// control byte (Ctrl-C is `0x03`). Printable keys pass through as their own
-/// UTF-8 bytes.
+/// With Ctrl held, an ASCII letter becomes its C0 control byte (Ctrl-C is
+/// `0x03`). Printable keys pass through as their own UTF-8 bytes.
+///
+/// With Alt held, Enter, Backspace, Tab, Space, and a character key send their
+/// bytes behind an `ESC`, which the child terminal parser decodes as Alt on
+/// the key. Escape takes no prefix, because `ESC ESC` decodes as a bare
+/// Escape. On macOS a character key without Ctrl takes no prefix either.
+/// There Option already turned the press into the character the layout types
+/// (Option-d is U+2202 on a US layout), and a prefix breaks typing on every
+/// layout that needs Option.
 ///
 /// The named editing, navigation, and function keys send their xterm
 /// normal-mode sequences, which is what the child terminal parser decodes back
 /// into the matching key. Only the plain forms are sent: a modified navigation
 /// key writes its unmodified sequence, matching the cursor keys, which have no
 /// application-mode form here either.
-pub(crate) fn encode_key(key: &Key, ctrl: bool, shift: bool) -> Option<Vec<u8>> {
+pub(crate) fn encode_key(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
+    encode_key_with(key, mods, cfg!(target_os = "macos"))
+}
+
+/// [`encode_key`] with the macOS Option rule as a parameter, so a test run on
+/// one platform covers the rules of both.
+///
+/// `option_composes` is whether Option turns a character key without Ctrl into
+/// the composed character, as it does on macOS.
+fn encode_key_with(key: &Key, mods: ModifiersState, option_composes: bool) -> Option<Vec<u8>> {
+    let ctrl = mods.control_key();
+    let shift = mods.shift_key();
+    let alt = mods.alt_key();
+
     match key {
-        Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
-        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        Key::Named(NamedKey::Enter) => Some(alt_prefixed(alt, b"\r")),
+        Key::Named(NamedKey::Backspace) => Some(alt_prefixed(alt, &[0x7f])),
         Key::Named(NamedKey::Tab) if shift => Some(b"\x1b[Z".to_vec()),
-        Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
-        Key::Named(NamedKey::Space) => Some(vec![b' ']),
+        Key::Named(NamedKey::Tab) => Some(alt_prefixed(alt, b"\t")),
+        Key::Named(NamedKey::Space) => Some(alt_prefixed(alt, b" ")),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
         Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
         Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
@@ -173,22 +193,37 @@ pub(crate) fn encode_key(key: &Key, ctrl: bool, shift: bool) -> Option<Vec<u8>> 
         Key::Named(NamedKey::F10) => Some(b"\x1b[21~".to_vec()),
         Key::Named(NamedKey::F11) => Some(b"\x1b[23~".to_vec()),
         Key::Named(NamedKey::F12) => Some(b"\x1b[24~".to_vec()),
-        Key::Character(s) if ctrl => ctrl_byte(s).or_else(|| csi_u_ctrl(s)),
-        Key::Character(s) => Some(s.as_str().as_bytes().to_vec()),
+        // winit composes Option into the logical key only while Ctrl is up.
+        // So a character key with Ctrl keeps its Alt on macOS too.
+        Key::Character(s) if ctrl => ctrl_byte(s)
+            .map(|byte| alt_prefixed(alt, &[byte]))
+            .or_else(|| csi_u_ctrl(s, alt)),
+        Key::Character(s) => Some(alt_prefixed(alt && !option_composes, s.as_str().as_bytes())),
         _ => None,
     }
 }
 
+/// `bytes` with an `ESC` ahead of them when `alt` is held, which a terminal
+/// parser decodes as Alt on the key that follows.
+fn alt_prefixed(alt: bool, bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 1);
+    if alt {
+        out.push(0x1b);
+    }
+    out.extend_from_slice(bytes);
+    out
+}
+
 /// The C0 control byte for Ctrl held with a single ASCII letter (Ctrl-C is
 /// `0x03`), or `None` when `s` is not one such letter.
-fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
+fn ctrl_byte(s: &str) -> Option<u8> {
     let mut chars = s.chars();
     let c = chars.next()?;
     if chars.next().is_some() || !c.is_ascii_alphabetic() {
         return None;
     }
 
-    Some(vec![(c.to_ascii_uppercase() as u8) & 0x1f])
+    Some((c.to_ascii_uppercase() as u8) & 0x1f)
 }
 
 /// The CSI-u bytes for Ctrl held with a single character that has no C0 byte,
@@ -200,17 +235,20 @@ fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
 /// lets a chord such as `Ctrl-?` be bound at all.
 ///
 /// The modifier field is 5, which is ctrl alone in the `1 + bitmask` encoding
-/// CSI-u uses. Shift is dropped because the logical character already embodies
+/// CSI-u uses, or 7 when `alt` is held too. Alt goes in the field because an
+/// `ESC` ahead of the sequence decodes as a bare Escape and leaves the rest as
+/// typed text. Shift is dropped because the logical character already embodies
 /// it: the press that produced `?` reaches the program as `?` with ctrl, not as
 /// `/` with ctrl and shift.
-fn csi_u_ctrl(s: &str) -> Option<Vec<u8>> {
+fn csi_u_ctrl(s: &str, alt: bool) -> Option<Vec<u8>> {
     let mut chars = s.chars();
     let c = chars.next()?;
     if chars.next().is_some() || c.is_ascii_alphabetic() {
         return None;
     }
 
-    Some(format!("\x1b[{};5u", c as u32).into_bytes())
+    let field = if alt { 7 } else { 5 };
+    Some(format!("\x1b[{};{field}u", c as u32).into_bytes())
 }
 
 /// Encode clipboard `text` for the PTY on paste.
@@ -653,8 +691,8 @@ mod tests {
 
     #[test]
     fn encode_key_maps_keys_to_terminal_bytes() {
-        let named = |key| encode_key(&Key::Named(key), false, false);
-        let printable = |s: &str| encode_key(&Key::Character(s.into()), false, false);
+        let named = |key| encode_key(&Key::Named(key), ModifiersState::empty());
+        let printable = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::empty());
 
         assert_eq!(
             printable("a"),
@@ -706,7 +744,7 @@ mod tests {
 
     #[test]
     fn encode_key_maps_ctrl_letters_to_control_bytes() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), true, false);
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL);
 
         assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
         assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
@@ -718,7 +756,7 @@ mod tests {
     /// is what makes such a combo bindable.
     #[test]
     fn encode_key_maps_ctrl_punctuation_to_csi_u() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), true, false);
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL);
 
         assert_eq!(
             ctrl("?"),
@@ -740,14 +778,56 @@ mod tests {
     #[test]
     fn encode_key_shift_tab_sends_csi_z() {
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), false, true),
+            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
             Some(b"\x1b[Z".to_vec()),
             "Shift-Tab sends CSI Z so stoat decodes BackTab"
         );
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), false, false),
+            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::empty()),
             Some(vec![b'\t']),
             "plain Tab still sends a tab"
+        );
+    }
+
+    #[test]
+    fn encode_key_prefixes_alt_with_escape() {
+        let alt = ModifiersState::ALT;
+        let ctrl_alt = ModifiersState::CONTROL | alt;
+        let character = |s: &str| Key::Character(s.into());
+
+        let under_both_rules: [(Key, ModifiersState, &[u8]); 8] = [
+            (Key::Named(NamedKey::Backspace), alt, b"\x1b\x7f"),
+            (Key::Named(NamedKey::Enter), alt, b"\x1b\r"),
+            (Key::Named(NamedKey::Tab), alt, b"\x1b\t"),
+            (Key::Named(NamedKey::Space), alt, b"\x1b "),
+            (
+                Key::Named(NamedKey::Tab),
+                ModifiersState::SHIFT | alt,
+                b"\x1b[Z",
+            ),
+            (Key::Named(NamedKey::Escape), alt, b"\x1b"),
+            (character("x"), ctrl_alt, b"\x1b\x18"),
+            (character("?"), ctrl_alt, b"\x1b[63;7u"),
+        ];
+        for option_composes in [false, true] {
+            for (key, mods, bytes) in &under_both_rules {
+                assert_eq!(
+                    encode_key_with(key, *mods, option_composes),
+                    Some(bytes.to_vec()),
+                    "{key:?} with {mods:?}, option composes: {option_composes}"
+                );
+            }
+        }
+
+        assert_eq!(
+            encode_key_with(&character("d"), alt, false),
+            Some(b"\x1bd".to_vec()),
+            "Alt-d where Option does not compose"
+        );
+        assert_eq!(
+            encode_key_with(&character("\u{2202}"), alt, true),
+            Some("\u{2202}".as_bytes().to_vec()),
+            "the character Option composed takes no prefix"
         );
     }
 
