@@ -200,18 +200,22 @@ impl DiffState {
     }
 
     /// Stale every buffer's diff map by dropping all recorded versions and
-    /// in-flight jobs.
+    /// marking the jobs in flight superseded.
     ///
     /// Used after git state moves under the editor. An external rebase or
     /// checkout changes HEAD, so a map computed against the old one describes a
     /// base that no longer exists, whatever the buffer's own version says.
     ///
-    /// In-flight jobs are dropped as [`Self::invalidate`] drops them, since
-    /// their results would carry the same stale base. The next drive recomputes
-    /// only visible buffers, so hidden ones re-diff lazily when next shown. An
-    /// unedited buffer recomputes without the settle window.
+    /// A job in flight is marked superseded and not dropped. Its map installs
+    /// when it lands, because the job read its blobs no earlier than the map on
+    /// screen and so is no staler. The buffer stays stale, so the next drive
+    /// runs it again against fresh blobs. The next drive recomputes only visible
+    /// buffers, so hidden ones re-diff lazily when next shown. An unedited
+    /// buffer recomputes without the settle window.
     pub(super) fn invalidate_all(&mut self) {
-        self.jobs.clear();
+        for job in self.jobs.values_mut() {
+            job.superseded = true;
+        }
         self.versions.clear();
         self.tally_current = false;
         // The cached blobs were read from the git state this call is reacting
@@ -424,21 +428,26 @@ impl DiffState {
         redraw_notify: &Arc<Notify>,
     ) {
         let waker = futures::task::noop_waker();
-        let mut completed: Vec<DiffJobOutput> = Vec::new();
+        let mut completed: Vec<(DiffJobOutput, bool)> = Vec::new();
         self.jobs.retain(|_, job| {
             let mut cx = Context::from_waker(&waker);
             match Pin::new(&mut job.task).poll(&mut cx) {
                 Poll::Ready(out) => {
-                    completed.push(out);
+                    completed.push((out, job.superseded));
                     false
                 },
                 Poll::Pending => true,
             }
         });
-        for out in completed {
-            // Filed whether or not it resolved, since a miss is what an
-            // untracked buffer keeps re-deriving otherwise.
-            self.base_text.insert(out.path, out.base);
+        for (out, superseded) in completed {
+            // A superseded job read blobs that a git write has since moved, so
+            // neither its blobs nor its version is filed. Its map still paints,
+            // and the unrecorded version owes the buffer a re-run.
+            if !superseded {
+                // Filed whether or not it resolved, since a miss is what an
+                // untracked buffer keeps re-deriving otherwise.
+                self.base_text.insert(out.path, out.base);
+            }
             if let Some(shared) = buffers.get(out.buffer_id) {
                 let mut guard = shared.write().expect("buffer poisoned");
                 // A recompute landing on the same hunks is not news. Every
@@ -458,7 +467,9 @@ impl DiffState {
             }
             // Recorded either way, so an unchanged result still counts as
             // diffed and the buffer is not tried again next frame.
-            self.versions.insert(out.buffer_id, out.target_version);
+            if !superseded {
+                self.versions.insert(out.buffer_id, out.target_version);
+            }
             self.diffed.insert(out.buffer_id, out.target_version);
         }
 
@@ -582,6 +593,7 @@ impl DiffState {
                 DiffJob {
                     target_version: cur_version,
                     task,
+                    superseded: false,
                 },
             );
         }
@@ -591,6 +603,9 @@ impl DiffState {
 pub(super) struct DiffJob {
     pub(super) target_version: u64,
     pub(super) task: Task<DiffJobOutput>,
+    /// A `.git` write landed after the job read its blobs, so its map still
+    /// paints and its version and blobs do not count.
+    pub(super) superseded: bool,
 }
 
 pub(super) struct DiffJobOutput {
@@ -2304,6 +2319,44 @@ mod tests {
             staged_on_row_one(&h, buffer_id),
             Some(true),
             "the diff the landing started reads the staged blob"
+        );
+    }
+
+    /// The watcher's echo of a stage arrives while the job the stage started is
+    /// in flight. That job already read the staged blob.
+    #[test]
+    fn a_git_write_lets_the_job_in_flight_paint() {
+        let (mut h, buffer_id) = open_unstaged_change();
+        assert_eq!(
+            staged_on_row_one(&h, buffer_id),
+            Some(false),
+            "the change starts unstaged"
+        );
+
+        h.fake_git().add_repo("/repo").index_file("a.txt", "a\nc\n");
+        h.stoat
+            .active_workspace_mut()
+            .invalidate_diff(buffer_id, Path::new("/repo/a.txt"));
+        h.stoat.drive_background();
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+
+        h.settle();
+        h.stoat.drive_background();
+        assert_eq!(
+            staged_on_row_one(&h, buffer_id),
+            Some(true),
+            "the job in flight at the .git write still paints"
+        );
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "a re-run against the fresh blobs is owed"
+        );
+
+        h.settle();
+        h.stoat.drive_background();
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the re-run lands and the map is current"
         );
     }
 
