@@ -7786,6 +7786,11 @@ impl Stoat {
     /// Run from the event loop after input is handled and before the redraw,
     /// keeping [`Self::render`] a pure paint. Tests that previously relied on
     /// `render` to drive this call it directly.
+    ///
+    /// This drives the diff jobs before the pumps, so a pump reads the maps
+    /// that landed. It drives them again after the pumps, so a map that a pump
+    /// staled starts its job in the same frame. A landed stage stales its
+    /// buffer's map, and a write under `.git` stales every map.
     pub(crate) fn drive_background(&mut self) {
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
@@ -7800,6 +7805,9 @@ impl Stoat {
         self.drive_diff_jobs();
 
         self.drive_pumps();
+        // Not gated on the pumps' progress. The `.git` refresh drain stales
+        // every map and still reports none.
+        self.drive_diff_jobs();
     }
 
     /// Advance every asynchronous request the editor has out, and report

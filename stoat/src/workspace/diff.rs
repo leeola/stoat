@@ -1314,6 +1314,7 @@ mod tests {
         DIFF_SETTLE,
     };
     use crate::{
+        action_handlers::{self, movement},
         app,
         buffer::BufferId,
         diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, StagedMark},
@@ -1332,6 +1333,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
+    use stoat_action::StageHunk;
     use stoat_language::{parse, structural_diff::TreeCache, LanguageRegistry};
 
     /// The bar reads the totals and a file list reads the per-file counts, so
@@ -1415,7 +1417,7 @@ mod tests {
             "an unsaved edit cannot move the tally, so it buys no walk",
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveBuffer);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveBuffer);
         h.settle_diff_jobs();
         assert_eq!(
             h.fake_git().tally_calls(&workdir),
@@ -2244,24 +2246,12 @@ mod tests {
     /// event behind it.
     #[test]
     fn a_git_write_restages_an_unedited_buffer_on_the_next_drive() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
-        h.stoat.set_diff_warm_auto(true);
-        h.open_file(Path::new("/repo/a.txt"));
-        h.settle_diff_jobs();
-
-        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
-        let staged = |h: &TestHarness| {
-            let ws = h.stoat.active_workspace();
-            let buffer = ws.buffers.get(buffer_id).expect("buffer");
-            let guard = buffer.read().expect("poisoned");
-            guard
-                .diff_map
-                .as_ref()
-                .expect("diff map")
-                .staged_for_line(1)
-        };
-        assert_eq!(staged(&h), Some(false), "the change starts unstaged");
+        let (mut h, buffer_id) = open_unstaged_change();
+        assert_eq!(
+            staged_on_row_one(&h, buffer_id),
+            Some(false),
+            "the change starts unstaged"
+        );
 
         // The fake's patch apply records the patch and writes no index blob, so
         // the test writes the blob a real stage leaves.
@@ -2274,10 +2264,72 @@ mod tests {
         h.stoat.drive_background();
 
         assert_eq!(
-            staged(&h),
+            staged_on_row_one(&h, buffer_id),
             Some(true),
             "the next drive reads the staged blob"
         );
+    }
+
+    /// The test scheduler runs the press's git work inline, so the landing
+    /// waits in the queue. The one drive below is the frame that lands it, and
+    /// that frame owes the diff the landing staled.
+    #[test]
+    fn a_landed_stage_starts_its_diff_in_the_same_frame() {
+        let (mut h, buffer_id) = open_unstaged_change();
+        assert_eq!(
+            staged_on_row_one(&h, buffer_id),
+            Some(false),
+            "the change starts unstaged"
+        );
+
+        movement::set_cursor_row(
+            action_handlers::focused_editor_mut(&mut h.stoat).expect("editor"),
+            1,
+        );
+        action_handlers::dispatch(&mut h.stoat, &StageHunk);
+        // The fake's patch apply records the patch and writes no index blob, so
+        // the test writes the blob a real stage leaves.
+        h.fake_git().add_repo("/repo").index_file("a.txt", "a\nc\n");
+
+        h.stoat.drive_background();
+        assert_eq!(
+            h.stoat.active_workspace().diff.jobs.len(),
+            1,
+            "the frame that lands the stage starts its diff"
+        );
+
+        h.settle();
+        h.stoat.drive_background();
+        assert_eq!(
+            staged_on_row_one(&h, buffer_id),
+            Some(true),
+            "the diff the landing started reads the staged blob"
+        );
+    }
+
+    /// Open `a.txt` with one unstaged change on row 1, and settle its first
+    /// diff.
+    fn open_unstaged_change() -> (TestHarness, BufferId) {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        (h, buffer_id)
+    }
+
+    /// Whether the installed map marks row 1's change as staged.
+    fn staged_on_row_one(h: &TestHarness, buffer_id: BufferId) -> Option<bool> {
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        guard
+            .diff_map
+            .as_ref()
+            .expect("diff map")
+            .staged_for_line(1)
     }
 
     /// Every hunk's buffer spans, keyed by the first buffer row it covers.
@@ -2704,7 +2756,7 @@ mod tests {
     }
 
     fn diff_view_on(h: &mut TestHarness) -> bool {
-        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+        action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .diff_view
     }
