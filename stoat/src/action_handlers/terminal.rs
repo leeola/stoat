@@ -28,10 +28,8 @@ const TERM_COLS: u16 = 80;
 /// view it replaced, which is what restores that view if the terminal later
 /// exits in the last split pane. A spawn failure leaves the pane unchanged.
 ///
-/// Either way the pane enters insert mode so typing reaches the shell
-/// immediately. The focus-arrival hook in [`Stoat::update`] covers the same
-/// transition when the action is dispatched through the event loop, but the
-/// direct call here also readies a terminal opened off that seam.
+/// A shell that comes back is put in normal mode, so its keys reach it
+/// whatever chord it was left in.
 pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(term_id) = hidden_terminal_to_restore(stoat) {
         {
@@ -40,7 +38,7 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
             let pane = ws.panes.pane_mut(focused);
             pane.prev_view = Some(std::mem::replace(&mut pane.view, View::Terminal(term_id)));
         }
-        stoat.transition_mode("insert".to_string());
+        stoat.transition_mode("normal".to_string());
         return UpdateEffect::Redraw;
     }
 
@@ -54,7 +52,6 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
                 pane.prev_view = Some(prev);
                 pane.view = view;
             }
-            stoat.transition_mode("insert".to_string());
             UpdateEffect::Redraw
         },
         _ => UpdateEffect::None,
@@ -93,11 +90,6 @@ fn hidden_terminal_to_restore(stoat: &Stoat) -> Option<TermId> {
 /// restore or a workspace copy. Each dead pane and dock gets its own fresh
 /// shell. Runtime state (history, running processes) is intentionally lost, and
 /// a spawn failure leaves a `Terminal (closed)` label in place.
-///
-/// A focused terminal pane enters insert mode after the respawn, so a restore
-/// or copy that lands focus on a terminal is typing-ready like any other focus
-/// arrival ([`Stoat::auto_insert_focused_terminal`] covers the input-driven
-/// paths).
 pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
@@ -128,10 +120,6 @@ pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
         if let Some(dock) = stoat.active_workspace_mut().docks.get_mut(dock_id) {
             dock.view = view;
         }
-    }
-
-    if stoat.focused_shell_term_id().is_some() && stoat.focused_mode() != "insert" {
-        stoat.transition_mode("insert".to_string());
     }
 }
 
@@ -327,7 +315,7 @@ mod tests {
             ),
             "the buffer it covered is what the next toggle returns to",
         );
-        assert_eq!(h.stoat.focused_mode(), "insert");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]

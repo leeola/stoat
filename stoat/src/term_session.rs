@@ -5,11 +5,7 @@
 //! can host several sessions at once, and a pane view such as
 //! [`View::Agent`](crate::pane::View::Agent) names one by its [`TermId`].
 
-use crate::{
-    host::terminal::TerminalSession,
-    pane::{DockId, PaneId},
-    term_screen::TermScreen,
-};
+use crate::{host::terminal::TerminalSession, term_screen::TermScreen};
 use futures::FutureExt;
 use slotmap::new_key_type;
 use std::sync::{
@@ -82,23 +78,6 @@ impl TermSelection {
     }
 }
 
-/// Where focus sat when it last arrived on a terminal, so `Esc` can send it
-/// back there.
-///
-/// A terminal pane has no editing state of its own, which makes its normal mode
-/// a dead end. Remembering the origin turns `Esc` into the inverse of whatever
-/// motion reached the terminal.
-///
-/// The pane arm carries a tab index because a return can cross tabs, and the
-/// index is only meaningful against the workspace that recorded it. Both arms
-/// are validated at use, since a pane or dock can be closed while the record
-/// still names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TermReturnFocus {
-    Pane { tab: usize, pane: PaneId },
-    Dock(DockId),
-}
-
 /// A live term session pairing its screen emulator with the PTY session that
 /// drives it.
 ///
@@ -112,29 +91,20 @@ pub struct TermSession {
     /// selected. Set while dragging, kept highlighted after release for the copy,
     /// and cleared by the next keystroke, click, or new drag.
     pub selection: Option<TermSelection>,
-    /// The pane's input mode. `"insert"` enables PTY passthrough so keys reach
-    /// the child, while other modes keep stoat's pane-level bindings live.
+    /// The pane's input mode.
     ///
-    /// Held per-term, but a [`View::Terminal`](crate::pane::View::Terminal) pane
-    /// is forced to insert whenever focus arrives on it, so only a
-    /// [`View::Agent`](crate::pane::View::Agent) pane preserves a non-insert
-    /// mode across focus changes.
+    /// `"normal"` is the mode the pane rests in, and there its keys go to the
+    /// child. Any other mode is a chord in progress, and its keys go to the
+    /// keymap.
     pub mode: String,
-    /// Where focus came from when it last arrived on this terminal, or `None`
-    /// when it was never reached by a focus motion.
-    ///
-    /// Overwritten on every arrival, so terminal-to-terminal hops ping-pong.
-    /// The record is deliberately not persisted. Sessions die with the process,
-    /// and a respawned shell starts with no history to return to.
-    pub(crate) return_focus: Option<TermReturnFocus>,
     /// Process-unique name for this session, exported to a terminal shell as
     /// `STOAT_TERM_ID` so a command run inside it names the pane it came from.
     ///
     /// A [`TermId`] does not serve. The spawn environment is built before the
     /// PTY opens, while the id exists only after the finished session is
-    /// inserted. A [`PaneId`] does not serve either. Moving a pane swaps which
-    /// view sits where and strands the name, while the session itself stays
-    /// put.
+    /// inserted. A [`PaneId`](crate::pane::PaneId) does not serve either.
+    /// Moving a pane swaps which view sits where and strands the name, while
+    /// the session itself stays put.
     pub token: u64,
 }
 
@@ -148,19 +118,14 @@ impl TermSession {
         NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Pair `term` with the `session` driving it, opening in `"normal"` mode.
-    ///
-    /// A [`View::Terminal`](crate::pane::View::Terminal) pane is flipped to
-    /// insert when focus arrives, so this initial normal mode is what a
-    /// [`View::Agent`](crate::pane::View::Agent) pane holds until the user
-    /// presses `i`.
+    /// Pair `term` with the `session` driving it, in `"normal"` mode, where
+    /// the pane sends its keys to the child.
     pub fn new(term: TermScreen, session: Arc<dyn TerminalSession>, token: u64) -> Self {
         Self {
             term,
             session,
             selection: None,
             mode: "normal".into(),
-            return_focus: None,
             token,
         }
     }

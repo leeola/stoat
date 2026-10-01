@@ -1007,6 +1007,14 @@ on key {
     !modal && mode == insert {
         Ctrl-a -> SetMode(prefix);
     }
+    # A terminal or agent pane rests in normal mode and sends its keys to the
+    # child there, Escape included. It reads the keymap only for a key that
+    # types no character, and only among the bindings that name its pane kind,
+    # so a binding here is what takes a key away from the child. The modal
+    # guard is required for the reason the block above gives.
+    !modal && (pane == terminal || pane == agent) && mode == normal {
+        Ctrl-a -> SetMode(prefix);
+    }
     modal == finder && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();

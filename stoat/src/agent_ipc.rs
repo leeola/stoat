@@ -433,6 +433,7 @@ mod tests {
         test_fixture::{install_two_servers, open_buffer, seed},
         test_harness::TestHarness,
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::time::Duration;
     use tokio::{sync::mpsc::Receiver, task::JoinHandle, time::Instant};
 
@@ -599,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn open_in_term_takes_the_shell_out_of_insert_when_the_open_defers() {
+    fn a_deferred_open_in_term_keeps_the_next_keys_from_the_shell() {
         let mut h = TestHarness::with_size(80, 24);
         let root = PathBuf::from("/big");
         let path = root.join("huge.txt");
@@ -608,11 +609,6 @@ mod tests {
         h.fake_fs().insert_file(&path, vec![b'x'; (1 << 20) + 16]);
         h.stoat.active_workspace_mut().git_root = root;
         let (term_id, token) = terminal_in_focused_pane(&mut h);
-        assert_eq!(
-            h.stoat.focused_mode(),
-            "insert",
-            "a terminal pane opens ready to type into",
-        );
 
         let (_, mut done_rx) = open_in_term(&mut h, token, vec![path]);
 
@@ -621,9 +617,12 @@ mod tests {
             matches!(ws.panes.pane(ws.panes.focus()).view, crate::pane::View::Terminal(t) if t == term_id),
             "a deferred open leaves the shell on screen",
         );
-        assert_eq!(
-            h.stoat.focused_mode(),
-            "normal",
+        h.stoat.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            h.fake_terminal().sent_bytes().is_empty(),
             "the next keys are the user's, not the shell's",
         );
         done_rx.try_recv().expect("the caller is unparked");

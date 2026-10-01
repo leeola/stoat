@@ -73,7 +73,7 @@ use crate::{
     },
 };
 use std::path::PathBuf;
-use stoat_action::{Conflict, OpenFile};
+use stoat_action::{Conflict, DetachPane, OpenFile};
 use stoat_config::MinimapMode;
 use stoatty_protocol::{command, window_ipc::WindowIpcEvent};
 
@@ -1565,8 +1565,8 @@ fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
     h.type_action("SplitRight()");
     h.settle();
 
-    // Point the focused split pane at a terminal without leaving normal
-    // mode, so DetachPane rides its keybinding as a user would.
+    // Point the focused split pane at a terminal. Its keys go to the child,
+    // so the detach is dispatched rather than typed.
     let session: Arc<dyn crate::host::TerminalSession> =
         Arc::new(crate::host::FakeTerminalSession::new());
     let (focused, term_id, index) = {
@@ -1581,7 +1581,7 @@ fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
         (focused, term_id, ws.panes.pane(focused).index)
     };
 
-    h.type_action("DetachPane()");
+    action_handlers::dispatch(&mut h.stoat, &DetachPane);
     assert!(
         matches!(
             h.stoat.active_workspace().panes.pane(focused).placement,

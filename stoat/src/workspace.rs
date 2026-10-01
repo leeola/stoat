@@ -27,7 +27,7 @@ use crate::{
     run::{RunId, RunState},
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
-    term_session::{TermId, TermReturnFocus, TermSession},
+    term_session::{TermId, TermSession},
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState,
     },
@@ -509,19 +509,6 @@ impl Workspace {
             Some(prev) if prev > idx => Some(prev - 1),
             other => other,
         };
-
-        // A terminal's return-focus record names a tab by index, so it shifts
-        // with the same hole `last_tab` does, and a record pointing at the
-        // closed tab has nowhere left to send Esc.
-        for term in self.terms.values_mut() {
-            match term.return_focus {
-                Some(TermReturnFocus::Pane { tab, .. }) if tab == idx => term.return_focus = None,
-                Some(TermReturnFocus::Pane { tab, pane }) if tab > idx => {
-                    term.return_focus = Some(TermReturnFocus::Pane { tab: tab - 1, pane });
-                },
-                _ => {},
-            }
-        }
 
         removed
     }

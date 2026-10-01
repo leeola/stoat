@@ -3785,7 +3785,6 @@ fn stoat_with_focused_term(
         TermSession::next_token(),
     ));
     ws.panes.pane_mut(focused).view = make_view(term_id);
-    stoat.set_focused_mode("insert".to_string());
     (stoat, term_id, fake)
 }
 
@@ -4057,8 +4056,8 @@ fn focused_term_pane_routes_keys_to_pty() {
     );
     assert_eq!(
         stoat.focused_mode(),
-        "insert",
-        "Ctrl-W passes through, does not leave insert"
+        "normal",
+        "Ctrl-W passes through and switches no mode"
     );
 }
 
@@ -4074,7 +4073,7 @@ fn focused_terminal_pane_routes_keys_to_pty() {
         fake.sent_bytes(),
         vec![b"l".to_vec(), b"s".to_vec(), vec![b'\r']],
     );
-    assert_eq!(stoat.focused_mode(), "insert");
+    assert_eq!(stoat.focused_mode(), "normal");
 }
 
 #[test]
@@ -4084,33 +4083,124 @@ fn focused_term_pane_sends_interrupt_on_ctrl_c() {
     let effect = stoat.handle_key(ctrl('c'));
 
     assert_eq!(effect, UpdateEffect::None);
-    assert_eq!(stoat.focused_mode(), "insert");
+    assert_eq!(stoat.focused_mode(), "normal");
     assert_eq!(fake.sent_bytes(), vec![vec![0x03]]);
 }
 
 #[test]
-fn esc_escapes_term_pane_without_forwarding() {
-    let (mut stoat, _id, fake) = stoat_with_focused_agent();
+fn ctrl_a_in_a_terminal_enters_the_prefix_and_sends_nothing() {
+    for make_view in [View::Terminal, View::Agent] {
+        let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
 
-    let effect = stoat.handle_key(bare(KeyCode::Esc));
+        stoat.handle_key(ctrl('a'));
 
-    assert_eq!(effect, UpdateEffect::Redraw);
-    assert_eq!(stoat.focused_mode(), "normal");
-    assert!(
-        fake.sent_bytes().is_empty(),
-        "escape must not reach the agent"
+        assert_eq!(
+            (stoat.focused_mode().to_string(), fake.sent_bytes()),
+            ("prefix".to_string(), Vec::<Vec<u8>>::new()),
+            "Ctrl-a opens the tab prefix and never reaches the child",
+        );
+    }
+}
+
+#[test]
+fn a_terminal_sends_the_keys_that_normal_mode_binds_to_its_child() {
+    let (mut stoat, _id, fake) = stoat_with_focused_term(View::Terminal);
+
+    stoat.handle_key(bare(KeyCode::Tab));
+    stoat.handle_key(ctrl('u'));
+    stoat.handle_key(ctrl('s'));
+
+    assert_eq!(
+        (stoat.focused_mode(), fake.sent_bytes()),
+        ("normal", vec![vec![b'\t'], vec![0x15], vec![0x13]]),
+        "an editor binding of the same key does not take it from the child",
     );
 }
 
 #[test]
-fn terminal_action_enters_insert_and_types_without_i() {
+fn ctrl_a_escape_returns_a_terminal_to_rest() {
+    for make_view in [View::Terminal, View::Agent] {
+        let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
+
+        stoat.handle_key(ctrl('a'));
+        stoat.handle_key(bare(KeyCode::Esc));
+        stoat.handle_key(bare(KeyCode::Char('x')));
+
+        assert_eq!(
+            (stoat.focused_mode(), fake.sent_bytes()),
+            ("normal", vec![b"x".to_vec()]),
+            "Escape leaves the prefix, and the next key reaches the child",
+        );
+    }
+}
+
+#[test]
+fn ctrl_a_ctrl_a_from_a_terminal_toggles_the_tab_and_back() {
+    let mut h = Stoat::test();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('a')));
+    assert_eq!(
+        (
+            h.stoat.active_workspace().active_tab,
+            h.fake_terminal().sent_bytes()
+        ),
+        (0, Vec::<Vec<u8>>::new()),
+        "Ctrl-a Ctrl-a leaves the terminal's tab and sends it nothing",
+    );
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    assert_eq!(
+        (
+            h.stoat.active_workspace().active_tab,
+            h.fake_terminal().sent_bytes()
+        ),
+        (1, vec![b"x".to_vec()]),
+        "the toggle back lands on the terminal, which takes the next key",
+    );
+}
+
+#[test]
+fn the_quit_prompt_keeps_the_keys_from_the_terminal_behind_it() {
+    let (mut stoat, _id, fake) = stoat_with_focused_term(View::Terminal);
+    stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], Path::new("/")));
+
+    stoat.handle_key(bare(KeyCode::Char('x')));
+
+    assert!(
+        fake.sent_bytes().is_empty(),
+        "the open prompt takes the key, not the terminal behind it",
+    );
+}
+
+#[test]
+fn escape_in_a_terminal_or_agent_pane_reaches_the_child() {
+    for make_view in [View::Terminal, View::Agent] {
+        let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
+
+        let effect = stoat.handle_key(bare(KeyCode::Esc));
+
+        assert_eq!(
+            (effect, stoat.focused_mode().to_string(), fake.sent_bytes()),
+            (UpdateEffect::None, "normal".to_string(), vec![vec![0x1b]]),
+            "Escape is a key like any other for the child",
+        );
+    }
+}
+
+#[test]
+fn a_terminal_opens_with_its_keys_on_the_child() {
     let mut h = Stoat::test();
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
     assert_eq!(
         h.stoat.focused_mode(),
-        "insert",
-        "opening a terminal focuses it in insert mode",
+        "normal",
+        "an opened terminal rests in normal mode",
     );
 
     h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
@@ -4122,35 +4212,21 @@ fn terminal_action_enters_insert_and_types_without_i() {
 }
 
 #[test]
-fn refocusing_a_terminal_reenters_insert() {
+fn a_terminal_takes_keys_again_when_focus_returns() {
     let mut h = Stoat::test();
-    h.type_action("SplitRight()");
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "insert",
-        "the opened terminal is in insert"
-    );
-
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "normal",
-        "Esc drops the focused terminal to normal",
-    );
-
-    h.type_action("FocusLeft()");
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "normal",
-        "the editor pane keeps normal mode",
-    );
+    let (_, term_pane) = split_editor_and_terminal(&mut h);
+    assert_eq!(term_mode(&h.stoat, term_pane), "normal");
 
     h.type_action("FocusRight()");
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+
     assert_eq!(
-        h.stoat.focused_mode(),
-        "insert",
-        "returning focus to the terminal re-enters insert",
+        (
+            h.stoat.active_workspace().panes.focus(),
+            h.fake_terminal().sent_bytes()
+        ),
+        (term_pane, vec![b"x".to_vec()]),
+        "the terminal takes the first key after focus comes back",
     );
 }
 
@@ -4169,196 +4245,38 @@ fn split_editor_and_terminal(h: &mut crate::test_harness::TestHarness) -> (PaneI
     h.type_action("SplitRight()");
     action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
     let term_pane = h.stoat.active_workspace().panes.focus();
-    h.type_action("FocusLeft()");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
     (h.stoat.active_workspace().panes.focus(), term_pane)
 }
 
 #[test]
-fn esc_in_a_terminal_returns_to_the_pane_focus_arrived_from() {
-    let mut h = Stoat::test();
-    let (editor_pane, term_pane) = split_editor_and_terminal(&mut h);
+fn a_click_into_a_terminal_or_agent_pane_gives_it_the_keys() {
+    for make_view in [View::Terminal, View::Agent] {
+        let mut h = Stoat::test();
+        let (term_pane, term_id) = {
+            let ws = h.stoat.active_workspace_mut();
+            let editor_pane = ws.panes.focus();
+            let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+            let term_id = insert_term_session(ws);
+            ws.panes.pane_mut(term_pane).view = make_view(term_id);
+            ws.panes.set_focus(editor_pane);
+            ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
+            ws.panes.pane_mut(term_pane).area = Rect::new(40, 0, 40, 24);
+            (term_pane, term_id)
+        };
 
-    h.type_action("FocusRight()");
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 5));
 
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        editor_pane,
-        "Esc sends focus back to the pane it arrived from",
-    );
-    assert_eq!(
-        term_mode(&h.stoat, term_pane),
-        "normal",
-        "the terminal it left drops to normal",
-    );
-}
-
-#[test]
-fn esc_in_a_terminal_returns_across_tabs() {
-    let mut h = Stoat::test();
-    let origin_pane = h.stoat.active_workspace().panes.focus();
-
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTab { index: 1 });
-    assert_eq!(h.stoat.active_workspace().active_tab, 0);
-
-    // C-a <digit> is GotoTab through the prefix mode's digit placeholder, so
-    // the arrival on tab 2's terminal runs through update()'s record seam.
-    h.type_keys("C-a 2");
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "insert",
-        "arriving on the terminal auto-inserts",
-    );
-
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-
-    assert_eq!(
-        h.stoat.active_workspace().active_tab,
-        0,
-        "Esc returns to the tab focus came from",
-    );
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        origin_pane,
-        "and to the pane it was on there",
-    );
-}
-
-#[test]
-fn esc_in_an_in_place_terminal_only_drops_to_normal() {
-    let mut h = Stoat::test();
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-    let pane = h.stoat.active_workspace().panes.focus();
-
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        pane,
-        "a terminal opened in place has nowhere to return to",
-    );
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "normal",
-        "so normal mode stays reachable",
-    );
-}
-
-#[test]
-fn esc_in_a_terminal_whose_origin_pane_closed_drops_to_normal() {
-    let mut h = Stoat::test();
-    let (editor_pane, term_pane) = split_editor_and_terminal(&mut h);
-    h.type_action("FocusRight()");
-
-    assert!(
-        h.stoat.active_workspace_mut().panes.close(editor_pane),
-        "the recorded origin pane is closed out from under the record",
-    );
-
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        term_pane,
-        "a stale record leaves focus put",
-    );
-    assert_eq!(h.stoat.focused_mode(), "normal", "and only drops to normal");
-}
-
-#[test]
-fn closing_a_tab_fixes_up_terminal_return_records() {
-    let mut h = Stoat::test();
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-
-    let (at_closed, above_closed) = {
-        let ws = h.stoat.active_workspace_mut();
-        let pane = ws.panes.focus();
-        let at_closed = ws.terms.keys().next().expect("the opened terminal");
-        let above_closed = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            Arc::new(crate::host::FakeTerminalSession::default()),
-            TermSession::next_token(),
-        ));
-        ws.terms[at_closed].return_focus = Some(TermReturnFocus::Pane { tab: 1, pane });
-        ws.terms[above_closed].return_focus = Some(TermReturnFocus::Pane { tab: 2, pane });
-        (at_closed, above_closed)
-    };
-
-    h.stoat.active_workspace_mut().close_tab(1);
-
-    let ws = h.stoat.active_workspace();
-    assert_eq!(
-        ws.terms[at_closed].return_focus, None,
-        "a record naming the closed tab is dropped",
-    );
-    assert_eq!(
-        ws.terms[above_closed].return_focus,
-        Some(TermReturnFocus::Pane {
-            tab: 1,
-            pane: ws.panes.focus()
-        }),
-        "a record above the closed tab shifts down with it",
-    );
-}
-
-#[test]
-fn esc_bounces_between_two_terminals() {
-    let mut h = Stoat::test();
-    let (left_pane, right_pane) = split_editor_and_terminal(&mut h);
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-
-    h.type_action("FocusRight()");
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        left_pane,
-        "Esc in the right terminal lands on the left one",
-    );
-
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        right_pane,
-        "the arrival re-recorded the origin, so Esc bounces back",
-    );
-}
-
-#[test]
-fn mouse_click_into_terminal_pane_enters_insert() {
-    use crossterm::event::MouseButton;
-
-    let mut h = Stoat::test();
-    let term_pane = {
-        let ws = h.stoat.active_workspace_mut();
-        let editor_pane = ws.panes.focus();
-        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
-        let term_id = insert_term_session(ws);
-        ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
-        ws.panes.set_focus(editor_pane);
-        ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
-        ws.panes.pane_mut(term_pane).area = Rect::new(40, 0, 40, 24);
-        term_pane
-    };
-    assert_eq!(h.stoat.focused_mode(), "normal");
-
-    h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 5));
-
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        term_pane,
-        "the click focuses the terminal pane",
-    );
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "insert",
-        "focusing a terminal by mouse enters insert",
-    );
+        assert_eq!(
+            (
+                h.stoat.active_workspace().panes.focus(),
+                h.stoat.term_input_target()
+            ),
+            (term_pane, Some(term_id)),
+            "the click focuses the pane, and its keys go to the child",
+        );
+    }
 }
 
 fn focused_terminal_pane(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
@@ -4369,8 +4287,6 @@ fn focused_terminal_pane(h: &mut crate::test_harness::TestHarness, content: &[u8
         ws.panes.pane_mut(pane).view = View::Terminal(term_id);
         term_id
     };
-    // A focused terminal pane runs in insert, so typing routes to the pty.
-    h.stoat.set_focused_mode("insert".to_string());
     // A render fits the emulator to the focused pane, so feed the content
     // afterward to land it in the final grid.
     let _ = h.stoat.render();
@@ -4498,16 +4414,11 @@ fn palette_over_a_terminal_routes_typing_to_the_palette() {
         ));
         ws.panes.pane_mut(pane).view = View::Terminal(term_id);
     }
-    h.stoat.set_focused_mode("insert".to_string());
 
-    // Esc drops the terminal to normal so the next ':' opens the palette.
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-    assert_eq!(h.stoat.focused_mode(), "normal");
-
-    h.stoat.update(Event::Key(bare(KeyCode::Char(':'))));
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
     assert!(
         h.stoat.command_palette.is_some(),
-        "':' over a terminal pane opens the command palette",
+        "the command palette opens over a terminal pane",
     );
 
     for ch in "qui".chars() {
@@ -4530,47 +4441,16 @@ fn palette_over_a_terminal_routes_typing_to_the_palette() {
 
     h.stoat.update(Event::Key(bare(KeyCode::Esc)));
     assert!(h.stoat.command_palette.is_none(), "Esc closes the palette");
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
     assert_eq!(
-        h.stoat.focused_mode(),
-        "normal",
-        "the terminal is left in normal mode after the palette closes",
+        fake.sent_bytes(),
+        vec![b"x".to_vec()],
+        "the terminal takes its keys again after the palette closes",
     );
 }
 
 #[test]
-fn mouse_click_into_agent_pane_stays_normal() {
-    use crossterm::event::MouseButton;
-
-    let mut h = Stoat::test();
-    let agent_pane = {
-        let ws = h.stoat.active_workspace_mut();
-        let editor_pane = ws.panes.focus();
-        let agent_pane = ws.panes.split(crate::pane::Axis::Vertical);
-        let term_id = insert_term_session(ws);
-        ws.panes.pane_mut(agent_pane).view = View::Agent(term_id);
-        ws.panes.set_focus(editor_pane);
-        ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
-        ws.panes.pane_mut(agent_pane).area = Rect::new(40, 0, 40, 24);
-        agent_pane
-    };
-
-    h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 5));
-
-    assert_eq!(
-        h.stoat.active_workspace().panes.focus(),
-        agent_pane,
-        "the click focuses the agent pane",
-    );
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "normal",
-        "focusing an agent pane does not auto-enter insert",
-    );
-}
-
-#[test]
-fn respawn_enters_insert_on_focused_terminal() {
+fn a_respawned_focused_terminal_takes_keys() {
     let mut h = Stoat::test();
     let pane = {
         let ws = h.stoat.active_workspace_mut();
@@ -4593,23 +4473,24 @@ fn respawn_enters_insert_on_focused_terminal() {
         h.stoat.active_workspace().terms.contains_key(new_id),
         "respawned session is live",
     );
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
     assert_eq!(
-        h.stoat.focused_mode(),
-        "insert",
-        "a respawned focused terminal enters insert",
+        h.fake_terminal().sent_bytes(),
+        vec![b"x".to_vec()],
+        "a respawned focused terminal takes the next key",
     );
 }
 
 #[test]
-fn agent_input_ignored_outside_insert_mode() {
+fn a_pane_in_a_chord_mode_sends_no_key_to_its_child() {
     let (mut stoat, _id, fake) = stoat_with_focused_agent();
-    stoat.set_focused_mode("normal".to_string());
+    stoat.set_focused_mode("space_pane_display".to_string());
 
     stoat.handle_key(bare(KeyCode::Char('x')));
 
     assert!(
         fake.sent_bytes().is_empty(),
-        "normal mode must not route to the agent"
+        "a chord in progress holds the keys back from the child"
     );
 }
 
@@ -4919,6 +4800,23 @@ fn typing_a_printable_character_never_derives_a_keymap_lookup() {
     assert!(
         h.stoat.keymap_lookups.get() > entering_insert,
         "leaving insert resolves through the keymap"
+    );
+}
+
+#[test]
+fn typing_into_a_terminal_derives_a_keymap_lookup_only_for_a_key_that_types_nothing() {
+    let (mut stoat, _id, _fake) = stoat_with_focused_term(View::Terminal);
+
+    let before = stoat.keymap_lookups.get();
+    stoat.handle_key(bare(KeyCode::Char('a')));
+    stoat.handle_key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT));
+    let typed = stoat.keymap_lookups.get();
+    stoat.handle_key(bare(KeyCode::Enter));
+
+    assert_eq!(
+        (typed - before, stoat.keymap_lookups.get() - typed),
+        (0, 1),
+        "two typed characters derive no lookup, and Enter derives one",
     );
 }
 
@@ -5339,8 +5237,7 @@ fn a_bracketed_child_gets_a_guarded_paste() {
 fn a_paste_over_a_terminal_still_lands_in_an_open_modal() {
     let mut h = Stoat::test();
     action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
-    h.type_keys("space p");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
     assert!(h.stoat.file_finder.is_some(), "the finder is open");
 
     h.stoat.update(Event::Paste("note".to_string()));

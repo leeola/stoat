@@ -2867,6 +2867,50 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_a_enters_the_prefix_from_a_pane_at_rest() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let ctrl = |c| key_event(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let bare = |code| key_event(code, KeyModifiers::NONE);
+
+        for pane in ["terminal", "agent"] {
+            let at_rest = || {
+                TestState::new()
+                    .set("mode", StateValue::String("normal".into()))
+                    .set("pane", StateValue::String(pane.into()))
+            };
+            let scoped = |state: &TestState, event: KeyEvent| {
+                keymap
+                    .lookup_scoped(state, &event, "pane", pane)
+                    .map(|(actions, _)| {
+                        (
+                            actions[0].name.clone(),
+                            actions[0].args.first().map(|arg| arg.value.clone()),
+                        )
+                    })
+            };
+            let under_palette = at_rest().set("modal", StateValue::String("palette".into()));
+
+            assert_eq!(
+                (
+                    scoped(&at_rest(), ctrl('a')),
+                    scoped(&at_rest(), bare(KeyCode::Esc)),
+                    scoped(&at_rest(), bare(KeyCode::Tab)),
+                    scoped(&at_rest(), ctrl('d')),
+                    scoped(&under_palette, ctrl('a')),
+                ),
+                (
+                    Some(("SetMode".to_string(), Some(Value::Ident("prefix".into())))),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                "the {pane} pane takes back only Ctrl-a, and only with no modal open"
+            );
+        }
+    }
+
+    #[test]
     fn ca_prefix_chords_resolve_tab_actions() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);

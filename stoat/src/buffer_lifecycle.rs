@@ -222,6 +222,18 @@ fn spawn_pending_open(
     });
 }
 
+/// Whether a large file still on the blocking pool installs into `pane` of the
+/// active workspace.
+///
+/// Until the read lands, the pane shows the view the file replaces. So a
+/// terminal there must not take the keys meant for the buffer.
+pub(crate) fn pane_awaits_open(stoat: &Stoat, pane: PaneId) -> bool {
+    stoat
+        .pending_file_opens
+        .iter()
+        .any(|p| p.workspace == stoat.active_workspace && p.target == pane)
+}
+
 /// Install every pending open whose read has finished.
 ///
 /// Called from [`Stoat::drive_background`]. Drops an open whose target pane

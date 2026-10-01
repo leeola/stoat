@@ -43,7 +43,7 @@ use crate::{
     selection::merge_overlapping_spans,
     ssh,
     symbol_finder::SymbolFinder,
-    term_session::{TermId, TermReturnFocus},
+    term_session::TermId,
     theme_pool::{ThemePool, VscodeSource},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
@@ -4571,10 +4571,7 @@ impl Stoat {
                 }
 
                 let before = self.focused_cursor_pos();
-                let term_before = self.focused_shell_term_id();
-                let origin = self.focus_location();
                 let effect = self.handle_key(key);
-                self.auto_insert_focused_terminal(term_before, origin);
                 let cursor_moved = self.focused_cursor_pos() != before;
 
                 // Re-follow the cursor when a key moved it, pulling the view
@@ -4594,13 +4591,7 @@ impl Stoat {
                     effect
                 }
             },
-            Event::Mouse(mouse) => {
-                let term_before = self.focused_shell_term_id();
-                let origin = self.focus_location();
-                let effect = mouse::handle_mouse(self, mouse);
-                self.auto_insert_focused_terminal(term_before, origin);
-                effect
-            },
+            Event::Mouse(mouse) => mouse::handle_mouse(self, mouse),
             Event::Paste(text) => self.handle_paste(&text),
             _ => UpdateEffect::None,
         };
@@ -4696,7 +4687,8 @@ impl Stoat {
         // buffer read locks, a snapshot clone, mode and language allocations)
         // and the lookup scans every compiled binding, while the busiest keys
         // want neither. A printable insert character types without consulting
-        // the keymap, and terminal passthrough returns before any reader.
+        // the keymap. Terminal passthrough reads a scoped lookup of its own,
+        // and none for a printable key.
         //
         // Deriving late is sound for the same reason deriving once was. None of
         // the fall-through mutations between the readers below feed a keymap
@@ -4821,8 +4813,15 @@ impl Stoat {
             // (Escape -> RunModalDismiss) resolve through the keymap.
         }
 
-        if let Some(agent_id) = self.term_input_target() {
-            return self.route_key_to_term(agent_id, key);
+        if let Some(term_id) = self.term_input_target() {
+            if let Some((actions, captured_digit)) = self.passthrough_binding(&key) {
+                return self.run_bound_actions(
+                    &actions,
+                    captured_digit,
+                    matches!(key.code, KeyCode::Esc),
+                );
+            }
+            return self.route_key_to_term(term_id, key);
         }
 
         // The guards below all turn on the mode, and resolving it walks the
@@ -4850,8 +4849,7 @@ impl Stoat {
             // below, so bindings like `pane == run { Enter -> RunSubmit }`
             // override the built-in insert arms. Printable characters always
             // type, and an unbound key keeps today's insert defaults.
-            let printable = matches!(key.code, KeyCode::Char(_))
-                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
+            let printable = is_printable_key(&key);
             // handle_insert_key keeps priority for printable typing and for its
             // transient sub-modes (a completion popup, a pending insert
             // register), whose keys it owns. Otherwise a keymap binding for a
@@ -5404,61 +5402,62 @@ impl Stoat {
         effect
     }
 
-    /// The agent session that should receive raw keystrokes, if any.
+    /// The terminal or agent session that takes raw keystrokes, if any.
     ///
-    /// `Some` only in insert mode with a focused `View::Agent` or
-    /// `View::Terminal` split pane. This mirrors how insert mode sends typing
-    /// to the focused editor, except the bytes go to the pane's PTY. Normal
-    /// mode keeps its editor and pane-navigation bindings.
+    /// `Some` for a focused `View::Agent` or `View::Terminal` split pane in
+    /// normal mode, the mode such a pane rests in. The pane has no text to
+    /// edit, so its normal mode sends each key to the child. Any other mode is
+    /// a chord in progress, and its keys go to the keymap.
     ///
-    /// An overlay input (command palette, finder, search, ...) outranks
-    /// terminal passthrough. While one is focused it owns typing, so keys reach
-    /// its insert path rather than the PTY behind it. Its InputView sits in
-    /// insert, so the mode guard alone would misroute every key to the terminal.
-    /// The Ctrl-C branch in [`Self::handle_key`] encodes the same order.
+    /// An open modal outranks passthrough whether or not it has an input, and
+    /// so does the reword input of a paused rebase. The Ctrl-C branch in
+    /// [`Self::handle_key`] encodes the same order.
     ///
-    /// A `View::Terminal` pane auto-enters insert when focus arrives
-    /// ([`Self::auto_insert_focused_terminal`]), so typing reaches the shell
-    /// with no `i`. A `View::Agent` pane is entered manually with `i`, and both
-    /// leave via the [`Self::route_key_to_term`] escape.
+    /// A pane with a file open still on its way answers `None`, so the keys
+    /// typed before the buffer shows do not reach the shell it covers.
+    ///
+    /// A binding that names the pane kind outranks passthrough for a key that
+    /// types no character. See [`Self::passthrough_binding`].
     fn term_input_target(&self) -> Option<TermId> {
-        if self.focused_editor_ids().is_some() {
+        if self.focused_editor_ids().is_some() || active_modal(self).is_some() {
             return None;
         }
-        if self.focused_mode() != "insert" {
+        let term_id = self.focused_term_id()?;
+        if self.focused_mode() != "normal" {
             return None;
         }
-        self.focused_term_id()
+
+        let pane = self.active_workspace().panes.focus();
+        (!crate::buffer_lifecycle::pane_awaits_open(self, pane)).then_some(term_id)
     }
 
-    /// Encode `key` and send it to the agent's PTY, or handle the focus escape.
+    /// The binding that takes `key` away from the child of a pane in
+    /// passthrough, if one does.
     ///
-    /// `Esc` leaves passthrough by returning to normal mode, where the editor
-    /// and pane-navigation bindings resume and the user can move focus, split,
-    /// or close the pane. That keystroke is not forwarded. Every other key,
-    /// including `Ctrl-W`, is encoded by [`encode_key_to_pty`] and written, so
-    /// the agent still receives it. Keys with no encoding are swallowed.
+    /// Only a binding that names the pane kind is a candidate. A binding that
+    /// names the mode alone, such as normal-mode Escape, is an editor key that
+    /// a terminal at rest also matches. A printable key is never looked up, so
+    /// typing derives no keymap state.
+    fn passthrough_binding(&self, key: &KeyEvent) -> Option<BoundActions> {
+        if is_printable_key(key) {
+            return None;
+        }
+        let pane = keymap_state::pane_predicate(self.active_workspace())?;
+
+        #[cfg(test)]
+        self.keymap_lookups.set(self.keymap_lookups.get() + 1);
+
+        self.keymap
+            .lookup_scoped(&StoatKeymapState::from_stoat(self), key, "pane", pane)
+    }
+
+    /// Encode `key` and send it to the PTY of `agent_id`.
     ///
-    /// As a result, a literal `Esc` no longer reaches the agent during
-    /// passthrough. The deferred per-agent normal-mode bindings would restore
-    /// a way to send it.
-    ///
-    /// For a `View::Terminal` pane the normal mode is a waypoint, not a
-    /// destination. A terminal has no cursor to move and no text to operate on,
-    /// so `Esc` also sends focus back where it came from
-    /// ([`Self::return_from_terminal`]) and refocusing re-enters insert
-    /// ([`Self::auto_insert_focused_terminal`]). With no origin to return to the
-    /// drop to normal stands on its own, which keeps normal mode reachable on a
-    /// lone terminal pane. A `View::Agent` pane never returns and stays in
-    /// normal until the user presses `i`.
+    /// Every key that reaches here is sent, Escape included. A key with no
+    /// encoding is swallowed. A key that a pane-scoped binding takes never
+    /// reaches here. See [`Self::passthrough_binding`].
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         mouse::clear_term_selection(self, agent_id);
-        if key.code == KeyCode::Esc {
-            self.transition_mode("normal".to_string());
-            self.return_from_terminal();
-            return UpdateEffect::Redraw;
-        }
-
         if let Some(bytes) = encode_key_to_pty(&key) {
             self.write_to_term(agent_id, &bytes);
         }
@@ -6009,132 +6008,6 @@ impl Stoat {
         match &ws.panes.pane(ws.panes.focus()).view {
             View::Agent(id) | View::Terminal(id) => Some(*id),
             _ => None,
-        }
-    }
-
-    /// The focused pane's [`TermId`] only when it is a shell terminal
-    /// ([`View::Terminal`]), never an agent pane. Drives the focus-arrival
-    /// auto-insert, which applies to shell terminals alone -- agent panes keep
-    /// their manual `i` entry.
-    pub(crate) fn focused_shell_term_id(&self) -> Option<TermId> {
-        let ws = self.active_workspace();
-        let FocusTarget::SplitPane = ws.focus else {
-            return None;
-        };
-        match &ws.panes.pane(ws.panes.focus()).view {
-            View::Terminal(id) => Some(*id),
-            _ => None,
-        }
-    }
-
-    /// Where focus sits right now, in the form a terminal records to return to.
-    ///
-    /// Captured before an event is handled, so it names the place the event is
-    /// about to leave.
-    fn focus_location(&self) -> TermReturnFocus {
-        let ws = self.active_workspace();
-        match ws.focus {
-            FocusTarget::SplitPane => TermReturnFocus::Pane {
-                tab: ws.active_tab,
-                pane: ws.panes.focus(),
-            },
-            FocusTarget::Dock(id) => TermReturnFocus::Dock(id),
-        }
-    }
-
-    /// Ready a shell terminal that focus has just arrived on.
-    ///
-    /// The terminal records where focus came from and then enters insert, so
-    /// typing reaches the child without a manual `i`.
-    ///
-    /// `prev` is [`Self::focused_shell_term_id`] and `origin` is
-    /// [`Self::focus_location`], both captured before the event was handled.
-    /// Both steps run only when a terminal is focused now and it is a different
-    /// terminal than `prev`, which is what "focus arrived" means. Comparing ids
-    /// this way leaves an in-place `Esc` -- the same terminal focused before and
-    /// after -- alone, so it keeps its own record and stays in normal.
-    ///
-    /// The record is what [`Self::return_from_terminal`] sends `Esc` back to,
-    /// and it is overwritten on every arrival, so hopping between two terminals
-    /// bounces between them.
-    fn auto_insert_focused_terminal(&mut self, prev: Option<TermId>, origin: TermReturnFocus) {
-        let Some(term_id) = self.focused_shell_term_id() else {
-            return;
-        };
-        if prev == Some(term_id) {
-            return;
-        }
-        if let Some(term) = self.active_workspace_mut().terms.get_mut(term_id) {
-            term.return_focus = Some(origin);
-        }
-        if self.focused_mode() == "insert" {
-            return;
-        }
-        self.transition_mode("insert".to_string());
-    }
-
-    /// Send focus back to wherever it was when it last arrived on the focused
-    /// shell terminal. Returns whether focus actually moved.
-    ///
-    /// False when the focused pane is not a shell terminal, when it holds no
-    /// record, or when the record no longer names a reachable place -- a closed
-    /// pane, a dropped dock, a tab that has since gone. A record naming the
-    /// currently-focused location is also rejected, which is how a `:terminal`
-    /// opened in place keeps `Esc` as a plain drop to normal.
-    ///
-    /// The record is kept rather than consumed. Every arrival overwrites it
-    /// anyway, and a return that fails validation should not also erase where
-    /// the terminal came from.
-    fn return_from_terminal(&mut self) -> bool {
-        let Some(term_id) = self.focused_shell_term_id() else {
-            return false;
-        };
-        let Some(record) = self
-            .active_workspace()
-            .terms
-            .get(term_id)
-            .and_then(|term| term.return_focus)
-        else {
-            return false;
-        };
-
-        match record {
-            TermReturnFocus::Dock(id) => {
-                let ws = self.active_workspace_mut();
-                if ws.focus == FocusTarget::Dock(id) || !ws.docks.contains_key(id) {
-                    return false;
-                }
-                ws.focus = FocusTarget::Dock(id);
-                true
-            },
-            TermReturnFocus::Pane { tab, pane } if tab == self.active_workspace().active_tab => {
-                let ws = self.active_workspace_mut();
-                if pane == ws.panes.focus() || !ws.panes.split_pane_ids().contains(&pane) {
-                    return false;
-                }
-                ws.panes.set_focus(pane);
-                ws.focus = FocusTarget::SplitPane;
-                true
-            },
-            TermReturnFocus::Pane { tab, pane } => {
-                let parked_holds_pane = self
-                    .active_workspace()
-                    .tabs
-                    .get(tab)
-                    .and_then(|t| t.parked.as_ref())
-                    .is_some_and(|tree| tree.split_pane_ids().contains(&pane));
-                if !parked_holds_pane || !self.active_workspace_mut().switch_tab(tab) {
-                    return false;
-                }
-                // A parked tree carries the zero-sized rects it was stored with,
-                // so it has to be fitted to the screen before it is focused.
-                let size = self.size();
-                let ws = self.active_workspace_mut();
-                ws.layout(size);
-                ws.panes.set_focus(pane);
-                ws.focus = FocusTarget::SplitPane;
-                true
-            },
         }
     }
 
@@ -7369,11 +7242,6 @@ impl Stoat {
                     crate::buffer_lifecycle::open_file_in_pane(self, split, path);
                 }
 
-                // The user typed into the shell the request came from, so the
-                // buffer that replaced it must not inherit passthrough.
-                if self.focused_mode() == "insert" {
-                    self.transition_mode("normal".to_string());
-                }
                 let _ = done.send(());
                 UpdateEffect::Redraw
             },
@@ -7597,9 +7465,9 @@ impl Stoat {
                     return UpdateEffect::None;
                 }
 
-                // Insert keystrokes reach a terminal only when a split pane
-                // holds focus (see `term_input_target`), so a focused dock
-                // must not trigger the reset. Recorded before the loop closes
+                // Keys reach a terminal only when a split pane holds focus
+                // (see `term_input_target`), so a focused dock must not
+                // trigger the reset. Recorded before the loop closes
                 // or restores the pane, which reassigns focus.
                 let exited_held_focus = matches!(ws.focus, FocusTarget::SplitPane)
                     && pane_ids.contains(&ws.panes.focus());
@@ -8137,6 +8005,13 @@ fn kill_to_line_start_target(rope: &Rope, cursor: usize) -> usize {
     } else {
         line_start
     }
+}
+
+/// Whether `key` types a character, which is a `Char` with no modifier or with
+/// Shift alone.
+fn is_printable_key(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(_))
+        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
 }
 
 /// The byte sequence a VT terminal sends for `key`, or `None` when the key has
