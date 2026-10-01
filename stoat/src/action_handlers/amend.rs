@@ -102,8 +102,9 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
     }
 }
 
-/// The text `path` holds in the commit once the hunk or line under the cursor
-/// crosses the line the commit draws, with the status that names the move.
+/// The text `path` holds in the commit once the hunk, run, or line under the
+/// cursor crosses the line the commit draws, with the status that names the
+/// move.
 ///
 /// Staging amends in. The hunk is a worktree-only edit sitting between the
 /// commit and the buffer, and folding it in makes the commit say what the file
@@ -138,8 +139,8 @@ pub(super) fn amended_file(
         None => String::new(),
     };
 
-    let amend_in = || amended_content(&head, buffer_text, &head, cursor_row, true, unit);
-    let amend_out = || amended_content(&parent, &head, &head, cursor_row, false, unit);
+    let amend_in = || amended_content(&head, buffer_text, &head, cursor_row, true, &unit);
+    let amend_out = || amended_content(&parent, &head, &head, cursor_row, false, &unit);
     let (into, out_of, nothing) = unit.messages();
     let amended = match mode {
         HunkStage::Stage => amend_in().map(|text| (text, into)),
@@ -217,7 +218,7 @@ fn amended_content(
     commit: &str,
     cursor_row: u32,
     stage: bool,
-    unit: AmendUnit,
+    unit: &AmendUnit,
 ) -> Option<String> {
     let (from_rows, to_rows) = hunk_rows_at(from, to, cursor_row)?;
     let from_lines = row_lines(from, from_rows.clone());
@@ -231,6 +232,9 @@ fn amended_content(
         // moves its first remaining line, which walks it one press at a time.
         AmendUnit::Line if to_lines.is_empty() => at == 0,
         AmendUnit::Line => to_line == Some(cursor),
+        AmendUnit::Rows(rows) => {
+            to_line.is_some_and(|i| rows.contains(&(to_rows.start + i as u32)))
+        },
     };
 
     let mut region = String::new();
@@ -254,12 +258,15 @@ fn amended_content(
 }
 
 /// How much of the hunk under the cursor one keypress moves.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum AmendUnit {
     /// The whole hunk, which is what `s` and `u` move.
     Hunk,
     /// The cursor's line alone, which is what `S` and `U` move.
     Line,
+    /// The live buffer rows of the marked run under the cursor, which is what
+    /// `s` and `u` move inside a hunk the tree pass narrowed.
+    Rows(Range<u32>),
 }
 
 impl AmendUnit {
@@ -267,10 +274,11 @@ impl AmendUnit {
     /// `(amended in, amended out, nothing under the cursor)`.
     ///
     /// The unit is the whole point of the two key pairs, so it is the word the
-    /// user needs back to know which pair they just pressed.
-    fn messages(self) -> (&'static str, &'static str, &'static str) {
+    /// user needs back to know which pair they just pressed. A run answers as
+    /// a hunk, since the reader pressed the hunk keys.
+    fn messages(&self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Self::Hunk => (
+            Self::Hunk | Self::Rows(_) => (
                 "amended hunk into the commit",
                 "amended hunk out of the commit",
                 "no hunk under the cursor",
@@ -1011,6 +1019,31 @@ mod tests {
         assert_eq!(
             committed(&h).as_deref(),
             Some("fn f() {\n    if x {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n"),
+        );
+    }
+
+    /// Inside a hunk the tree pass narrowed, `s` amends only the marked run
+    /// under the cursor. The buffer's `c = 4` sits in a second run, so it stays
+    /// out of the commit with the reindent.
+    #[test]
+    fn stage_hunk_amends_only_the_run_under_the_cursor() {
+        let mut h = walking_the_tip_of(
+            "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nfn g() {}\n",
+            "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nfn g() { 1 }\n",
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.seed_focused_buffer(
+            "fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n        let c = 4;\n    }\n}\nfn g() { 1 }\n",
+        );
+        h.settle_diff_jobs();
+        cursor_to(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("fn f() {\n    if x {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nfn g() { 1 }\n"),
         );
     }
 

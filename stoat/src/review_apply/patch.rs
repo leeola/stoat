@@ -188,22 +188,23 @@ fn split_lines(text: &str) -> Vec<&str> {
     }
     lines
 }
-/// Restrict a chunk's rows to the single change at 1-based `side_line`, for
-/// staging or unstaging one line.
+/// Restrict a chunk's rows to the changes at the 1-based `side_lines`, for
+/// staging or unstaging a line or a run of lines.
 ///
-/// Keeps the [`ReviewRow::Changed`] row whose selected side -- right when
-/// `right_side`, else left -- sits at `side_line`, and rewrites every other
-/// `Changed` row so the emitted patch touches nothing else. Both callers apply
-/// the forward patch against the base (left) side, so a non-selected row with a
-/// base line becomes a [`ReviewRow::Context`] carrying that base content, and a
-/// right-only row (no base line) is dropped. Existing `Context` rows pass
-/// through, so the surrounding hunk context still anchors the patch.
+/// Keeps each [`ReviewRow::Changed`] row whose selected side, the right one
+/// when `right_side` and the left one otherwise, sits in `side_lines`, and
+/// rewrites every other `Changed` row so the emitted patch touches nothing
+/// else. Both callers apply the forward patch against the base (left) side, so
+/// a non-selected row with a base line becomes a [`ReviewRow::Context`]
+/// carrying that base content, and a right-only row (no base line) is dropped.
+/// Existing `Context` rows pass through, so the surrounding hunk context still
+/// anchors the patch.
 ///
-/// Returns [`None`] when no `Changed` row matched `side_line`, letting the
-/// caller report that the cursor sits on no change.
+/// Returns [`None`] when no `Changed` row matched, letting the caller report
+/// that the cursor sits on no change.
 pub(crate) fn line_restricted_rows(
     rows: &[ReviewRow],
-    side_line: u32,
+    side_lines: Range<u32>,
     right_side: bool,
 ) -> Option<Vec<ReviewRow>> {
     let mut matched = false;
@@ -217,7 +218,7 @@ pub(crate) fn line_restricted_rows(
                 } else {
                     left.as_ref()
                 };
-                if selected.is_some_and(|side| side.line_num == side_line) {
+                if selected.is_some_and(|side| side_lines.contains(&side.line_num)) {
                     matched = true;
                     out.push(row.clone());
                 } else if let Some(left) = left {

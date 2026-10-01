@@ -134,8 +134,10 @@ define_action!(
     ActionKind::StageHunk,
     "stage the hunk under the cursor",
     "Apply the diff hunk under the cursor to the git index, staging just \
-     that change. Works in any editor view on a git-tracked file, and is \
-     a no-op with a status message when the cursor is not on a hunk.",
+     that change. Inside a hunk the structural diff narrowed, it stages only \
+     the marked run under the cursor. Works in any editor view on a \
+     git-tracked file, and is a no-op with a status message when the cursor \
+     is not on a hunk.",
     ActionPriority::Common
 );
 
@@ -146,9 +148,10 @@ define_action!(
     ActionKind::UnstageHunk,
     "unstage the hunk under the cursor",
     "Reverse-apply the diff hunk under the cursor against the git index, \
-     unstaging just that change. Works in any editor view on a git-tracked \
-     file, and is a no-op with a status message when the cursor is not on \
-     a hunk.",
+     unstaging just that change. Inside a hunk the structural diff narrowed, \
+     it unstages only the marked run under the cursor. Works in any editor \
+     view on a git-tracked file, and is a no-op with a status message when \
+     the cursor is not on a hunk.",
     ActionPriority::Common
 );
 
@@ -159,9 +162,10 @@ define_action!(
     ActionKind::ToggleStageHunk,
     "toggle staging of the hunk under the cursor",
     "Stage the diff hunk under the cursor when it is unstaged, or unstage \
-     it when it is already staged. Works in any editor view on a \
-     git-tracked file, and is a no-op with a status message when the \
-     cursor is not on a hunk.",
+     it when it is already staged. Inside a hunk the structural diff \
+     narrowed, it toggles only the marked run under the cursor. Works in \
+     any editor view on a git-tracked file, and is a no-op with a status \
+     message when the cursor is not on a hunk.",
     ActionPriority::Common
 );
 
