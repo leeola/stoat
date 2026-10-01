@@ -190,8 +190,9 @@ pub struct Pane {
     /// entry from its earlier visit. The switch passes over both.
     ///
     /// Per pane rather than per workspace, so each split switches back among
-    /// the buffers it has actually shown. A workspace-wide most-recent list
-    /// answers with buffers the pane never displayed.
+    /// the buffers it has shown. A new split starts from a copy of the history
+    /// of the pane it splits from. A workspace-wide most-recent list answers
+    /// with buffers the pane never displayed.
     ///
     /// `serde(skip)`: navigation scratch like [`Self::jumplist`], so a restored
     /// session starts with nothing to switch back to.
@@ -401,18 +402,23 @@ impl PaneTree {
     ///
     /// If the parent split has the same axis, the new pane is inserted adjacent.
     /// Otherwise a new nested split is created. Focus moves to the new pane.
+    ///
+    /// The new pane starts with copies of the focused pane's jumplist and
+    /// buffer history. A backward jump, a close, or a switch to the last buffer
+    /// in it then goes to the same place as in the original pane.
     pub fn split(&mut self, axis: Axis) -> PaneId {
-        let focused_view = self.panes[self.focus_anchor()].view.clone();
-        let new_pane_id = self.panes.insert(Pane {
-            view: focused_view,
+        let anchor = &self.panes[self.focus_anchor()];
+        let pane = Pane {
+            view: anchor.view.clone(),
             prev_view: None,
             placement: Placement::Split,
             area: Rect::default(),
             index: self.next_index,
-            jumplist: JumpList::default(),
+            jumplist: anchor.jumplist.clone(),
             diff_mode: false,
-            buffer_history: Vec::new(),
-        });
+            buffer_history: anchor.buffer_history.clone(),
+        };
+        let new_pane_id = self.panes.insert(pane);
         self.next_index += 1;
 
         self.insert_pane_leaf(new_pane_id, axis);

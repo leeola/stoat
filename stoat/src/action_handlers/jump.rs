@@ -248,6 +248,24 @@ mod tests {
     }
 
     #[test]
+    fn a_split_inherits_the_jumplist_of_its_origin() {
+        let mut h = TestHarness::with_size(40, 6);
+        let a = h.write_file("a.rs", "aaaa\n");
+        let b = h.write_file("b.rs", "xxxx\n");
+        h.open_file(&a);
+        let a_buffer = focused_buffer(&mut h);
+        h.open_file(&b);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            focused_buffer(&mut h),
+            a_buffer,
+            "the new pane jumps back to a.rs, as its origin does",
+        );
+    }
+
+    #[test]
     fn jump_restores_the_full_selection_set() {
         let mut h = TestHarness::with_size(40, 6);
         let path = h.write_file("s.rs", "aaaa\nbbbb\ncccc\n");

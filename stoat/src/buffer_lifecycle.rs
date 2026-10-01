@@ -1043,14 +1043,13 @@ mod tests {
         );
     }
 
+    /// The pane's only earlier buffer is the scratch it started on, which the
+    /// open dropped.
     #[test]
     fn goto_last_accessed_reports_when_the_pane_has_shown_nothing_else() {
         let mut h = Stoat::test();
         let (_path, buffer_id) = open_path(&mut h, b"only\n");
 
-        // A split inherits the focused view but starts its own history, so the
-        // new pane has shown exactly one buffer.
-        dispatch(&mut h.stoat, &SplitRight);
         dispatch(&mut h.stoat, &GotoLastAccessed);
         h.settle();
 
@@ -1061,6 +1060,22 @@ mod tests {
             ),
             (buffer_id, Some("no previously shown buffer")),
             "a pane with no history stays put and says so"
+        );
+    }
+
+    #[test]
+    fn a_split_inherits_the_buffer_history_of_its_origin() {
+        let mut h = Stoat::test();
+        let (a, _) = open_two(&mut h);
+
+        dispatch(&mut h.stoat, &SplitRight);
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+
+        assert_eq!(
+            focused_buffer_id(&mut h.stoat),
+            a,
+            "the new pane switches back to a, as its origin does",
         );
     }
 
