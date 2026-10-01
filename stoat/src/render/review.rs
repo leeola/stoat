@@ -3517,6 +3517,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_cursor_paints_below_a_deleted_block_on_the_top_row() {
+        let mut editor = diff_editor("a\nd1\nd2\nd3\nb\nc\n", "a\nb\nc\n");
+        editor.scroll_row = 1;
+        crate::test_harness::editor::place_cursor(&mut editor, 1, 0);
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            true,
+            None,
+            None,
+            false,
+            Some(&mut ApcScene::new()),
+            DiffDials::shipped(),
+        );
+
+        assert!(
+            editor
+                .display_map
+                .snapshot()
+                .display_to_buffer(DisplayPoint::new(1, 0))
+                .is_none(),
+            "the pane's top row is a deleted line",
+        );
+        assert_eq!(
+            editor.cursor_screen_cell,
+            Some((68, 3)),
+            "the cursor on `b` paints three rows below a top row that is a deleted line",
+        );
+    }
+
     /// Press `keys` on the refined `fn other() {}` line of a diff, and return the
     /// row's columns in the selection wash and in the cursor block.
     ///

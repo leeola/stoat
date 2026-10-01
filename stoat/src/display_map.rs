@@ -1399,6 +1399,10 @@ impl DisplaySnapshot {
         self.block_snapshot.buffer_rows_above(display_row)
     }
 
+    pub fn row_start_at_or_after(&self, display_row: u32) -> Option<Point> {
+        self.block_snapshot.row_start_at_or_after(display_row)
+    }
+
     pub fn blocks_above(&self, display_row: u32) -> u32 {
         self.block_snapshot.blocks_above(display_row)
     }

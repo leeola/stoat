@@ -997,7 +997,10 @@ impl BlockSnapshot {
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
-        let wrap_point = WrapPoint::new(wrap_row, point.column);
+        Some(self.wrap_to_buffer(WrapPoint::new(wrap_row, point.column)))
+    }
+
+    fn wrap_to_buffer(&self, wrap_point: WrapPoint) -> Point {
         let tab_point = self.wrap_snapshot.to_tab_point(wrap_point);
         let fold_point = self
             .wrap_snapshot
@@ -1008,13 +1011,38 @@ impl BlockSnapshot {
             .tab_snapshot()
             .fold_snapshot()
             .to_inlay_point(fold_point);
-        let buf = self
-            .wrap_snapshot
+        self.wrap_snapshot
             .tab_snapshot()
             .fold_snapshot()
             .inlay_snapshot()
-            .to_buffer_point(inlay_point);
-        Some(buf)
+            .to_buffer_point(inlay_point)
+    }
+
+    /// Buffer point where display row `block_row` starts, or where the first
+    /// buffer row below it starts when the row belongs to a block.
+    ///
+    /// A block holds no buffer text, so a range of display rows that starts or
+    /// ends on one takes the next buffer row as its bound. `None` means no
+    /// buffer row lies at or below the row.
+    pub fn row_start_at_or_after(&self, block_row: u32) -> Option<Point> {
+        let target = OutputRow(block_row + 1);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&target, Bias::Left);
+
+        let Dimensions(input_start, output_start, _) = cursor.start();
+        // A block consumes no input, so the input rows before it index the
+        // first input row below it, however many blocks sit together.
+        let wrap_row = match cursor.item() {
+            Some(transform) if transform.block.is_some() => input_start.0,
+            _ => input_start.0 + block_row.saturating_sub(output_start.0),
+        };
+        if wrap_row >= self.wrap_snapshot.line_count() {
+            return None;
+        }
+
+        Some(self.wrap_to_buffer(WrapPoint::new(wrap_row, 0)))
     }
 
     pub fn classify_row(&self, block_row: u32) -> BlockRowKind<'_> {
@@ -2541,6 +2569,34 @@ mod tests {
         assert_eq!(
             snapshot.block_to_buffer(BlockPoint::new(2, 0)),
             Some(Point::new(1, 0))
+        );
+    }
+
+    #[test]
+    fn row_start_at_or_after_takes_the_buffer_row_below_a_block() {
+        let snapshot = create_block_snapshot(
+            "line1\nline2",
+            &[text_block(BlockPlacement::Below(0), "del1\ndel2")],
+        );
+        assert_eq!(
+            [0, 1, 2, 3].map(|row| snapshot.row_start_at_or_after(row)),
+            [
+                Some(Point::new(0, 0)),
+                Some(Point::new(1, 0)),
+                Some(Point::new(1, 0)),
+                Some(Point::new(1, 0)),
+            ],
+            "both block rows take the start of the buffer row below them",
+        );
+
+        let snapshot = create_block_snapshot(
+            "line1\nline2",
+            &[text_block(BlockPlacement::Below(1), "tail")],
+        );
+        assert_eq!(
+            snapshot.row_start_at_or_after(2),
+            None,
+            "a block below the last buffer row has no row to take",
         );
     }
 

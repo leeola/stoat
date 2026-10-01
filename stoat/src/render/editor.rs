@@ -2660,7 +2660,8 @@ fn cursor_reaches_viewport(cursor: usize, visible: &Range<usize>, rope_len: usiz
 /// Byte range of `rope` spanned by display rows `scroll_row..end_row`.
 ///
 /// Rows beyond the buffer resolve to the rope length, so the returned range is
-/// always valid to slice.
+/// always valid to slice. A row inside a block resolves to the first buffer row
+/// below it, since a block holds no buffer bytes.
 pub(crate) fn visible_byte_range(
     snapshot: &DisplaySnapshot,
     rope: &Rope,
@@ -2674,7 +2675,7 @@ pub(crate) fn visible_byte_range(
             return rope_len;
         }
         snapshot
-            .display_to_buffer(DisplayPoint::new(row, 0))
+            .row_start_at_or_after(row)
             .map(|point| rope.point_to_offset(point))
             .unwrap_or(rope_len)
             .min(rope_len)
