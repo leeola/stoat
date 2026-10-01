@@ -5571,7 +5571,7 @@ impl Stoat {
     /// A picker without an input (the jumplist, diagnostics, and location pickers,
     /// the quit prompt, a modal run) answers `None` so the caller keeps resolving
     /// through the panes behind it, which is where the keys it does handle land.
-    fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
+    pub(crate) fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
         let input = match active_modal(self)? {
             ActiveModal::WorkspacePicker => &self.workspace_picker.as_ref()?.input,
             ActiveModal::CommitPicker => &self.commit_picker.as_ref()?.input,

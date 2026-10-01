@@ -1,6 +1,6 @@
 use super::{split_selection, surround, view, LastMotion};
 use crate::{
-    action_handlers::focused_editor_mut,
+    action_handlers::{focused_editor_mut, input_target_editor_mut},
     app::{Stoat, UpdateEffect},
     diff_map,
     display_map::{DisplayPoint, DisplaySnapshot},
@@ -254,7 +254,7 @@ fn offset_at_exact_col(
 
 pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
-    let Some(editor) = focused_editor_mut(stoat) else {
+    let Some(editor) = input_target_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
     let display_snapshot = editor.display_map.snapshot();
@@ -314,7 +314,7 @@ fn move_vertical_by(
     let count = stoat.take_pending_count().unwrap_or(1);
     let delta = (delta as i64).saturating_mul(count as i64);
     let travel = if delta > 0 { Bias::Right } else { Bias::Left };
-    let Some(editor) = focused_editor_mut(stoat) else {
+    let Some(editor) = input_target_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
     let display_snapshot = editor.display_map.snapshot();
@@ -960,7 +960,7 @@ enum LineBoundary {
 }
 
 fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
+    let Some(editor) = input_target_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
     let display_snapshot = editor.display_map.snapshot();

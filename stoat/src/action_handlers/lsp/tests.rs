@@ -2040,6 +2040,59 @@ fn space_l_r_triggers_rename() {
 }
 
 #[test]
+fn cursor_keys_move_inside_the_rename_input() {
+    let mut h = open_rename_input();
+    let document_cursor = h.stoat.focused_cursor_pos();
+
+    h.type_keys("left");
+    h.type_text("X");
+    h.type_keys("home");
+    h.type_text("Y");
+    h.type_keys("end");
+    h.type_text("Z");
+    h.type_keys("up down");
+
+    assert_eq!(rename_text(&h), "Yfoo_baXrZ");
+    assert_eq!(
+        h.stoat.focused_cursor_pos(),
+        document_cursor,
+        "the document cursor stays"
+    );
+}
+
+/// The rename input over `foo_bar` in `fn foo_bar() {}`, prefilled with the
+/// name, its cursor at the end, in insert mode.
+fn open_rename_input() -> TestHarness {
+    use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+    let mut h = TestHarness::with_size(80, 24);
+    enable_rename(&h);
+    let root = seed(&mut h, &[("main.rs", "fn foo_bar() {}\n")]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    h.fake_lsp().set_prepare_rename(
+        path.to_str().unwrap(),
+        0,
+        0,
+        PrepareRenameResponse::Range(LspRange::new(
+            LspPosition::new(0, 3),
+            LspPosition::new(0, 10),
+        )),
+    );
+    h.type_keys("space l r");
+    h.settle();
+    h
+}
+
+fn rename_text(h: &TestHarness) -> String {
+    h.stoat
+        .rename_input
+        .as_ref()
+        .expect("modal open")
+        .input
+        .text(h.stoat.active_workspace())
+}
+
+#[test]
 fn snapshot_rename_input_modal() {
     use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
     let mut h = TestHarness::with_size(40, 12);

@@ -9114,6 +9114,27 @@ fn home_in_insert_mode_lands_at_column_zero() {
     assert_eq!(buffer_text(&h, &path), "Xabc\ndef\n");
 }
 
+#[test]
+fn cursor_keys_move_inside_the_palette_input() {
+    let mut h = Stoat::test();
+    open_scratch_file(&mut h, "abc\n");
+    h.type_keys(":");
+    h.type_text("abc");
+    h.type_keys("left");
+    h.type_text("X");
+
+    assert_eq!(
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette")
+            .focused_input()
+            .expect("input")
+            .text(h.stoat.active_workspace()),
+        "abXc"
+    );
+}
+
 /// Measured against the actions themselves rather than against a row this
 /// pin works out for itself, since the scroll arithmetic and the scrolloff
 /// band are the motion's business and not this binding's. Both legs page

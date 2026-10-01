@@ -1388,6 +1388,19 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     }
 }
 
+/// The editor a cursor key moves in, which is the editor typing reaches.
+///
+/// While a modal with an input is open, that input's editor answers.
+/// Otherwise this is [`focused_editor_mut`]. Every caller that is not a
+/// key-driven character or line motion keeps [`focused_editor_mut`], because
+/// it acts on the pane behind the modal.
+pub(crate) fn input_target_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
+    match stoat.active_modal_input() {
+        Some((editor_id, _)) => stoat.active_workspace_mut().editors.get_mut(editor_id),
+        None => focused_editor_mut(stoat),
+    }
+}
+
 /// Return a mutable reference to the focused pane's jumplist, or `None` when
 /// focus is on a dock rather than a split pane.
 ///
