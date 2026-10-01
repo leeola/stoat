@@ -51,7 +51,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
-        ActiveModal, Flags, FocusFlags, StoatKeymapState,
+        pane_predicate, ActiveModal, Flags, FocusFlags, StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
@@ -1312,9 +1312,10 @@ pub(crate) fn frame(
         let flags = Flags {
             rebase_exec: ws.rebase_active.is_some(),
         };
+        let pane = pane_predicate(ws);
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
-        let key = hints_cache_key(mode, screen, &flags, token, &focus, None);
+        let key = hints_cache_key(mode, screen, pane, &flags, token, &focus, None);
 
         if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
             // The conflict screen rides on normal mode, so scope to its own
@@ -1324,6 +1325,7 @@ pub(crate) fn frame(
             // whole mode, so take them all.
             let state = StoatKeymapState::with_flags(mode, flags)
                 .with_view(screen)
+                .with_pane(pane)
                 .with_token(token)
                 .with_focus_flags(focus);
             let raw = if screen == Some("conflict") {
@@ -1408,6 +1410,7 @@ pub(crate) fn frame(
 fn hints_cache_key(
     mode: &str,
     screen: Option<&str>,
+    pane: Option<&str>,
     flags: &Flags,
     token: Option<Option<crate::lsp::LspSymbolKind>>,
     focus: &FocusFlags,
@@ -1416,6 +1419,7 @@ fn hints_cache_key(
     let mut hasher = DefaultHasher::new();
     mode.hash(&mut hasher);
     screen.hash(&mut hasher);
+    pane.hash(&mut hasher);
     flags.hash(&mut hasher);
     token.hash(&mut hasher);
     focus.hash(&mut hasher);
@@ -1443,6 +1447,7 @@ fn cached_modal_hints(
 ) {
     let key = hints_cache_key(
         mode,
+        None,
         None,
         &Flags::default(),
         None,
@@ -1649,6 +1654,7 @@ mod dispatch_tests {
         hints_cache_key(
             mode,
             None,
+            None,
             &Flags::default(),
             None,
             &FocusFlags::default(),
@@ -1731,6 +1737,14 @@ mod lsp_filter_tests {
         }
     }
 
+    /// The text a hints row shows for the registered action `name`.
+    fn short_desc(name: &str) -> &'static str {
+        registry::lookup(name)
+            .unwrap_or_else(|| panic!("{name} is registered"))
+            .def
+            .short_desc()
+    }
+
     #[test]
     fn space_lsp_box_filters_rows_by_cursor_symbol_kind() {
         let mut h = TestHarness::with_size(150, 50);
@@ -1797,6 +1811,66 @@ mod lsp_filter_tests {
             ),
             (true, true, false),
             "the box lists the chord entries and leaves out the editor keys:\n{text}",
+        );
+    }
+
+    #[test]
+    fn the_forced_normal_box_lists_the_editor_pane_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        open_foo_bar(&mut h);
+        h.stoat.key_hints_visible = true;
+
+        let text = box_text(&mut h);
+        assert_eq!(
+            (
+                text.contains(short_desc("ToggleComments")),
+                text.contains(short_desc("RunInterrupt")),
+            ),
+            (true, false),
+            "the box lists the editor pane's Ctrl-c and not the run pane's:\n{text}",
+        );
+    }
+
+    #[test]
+    fn the_forced_insert_box_over_a_run_pane_lists_the_run_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.open_run();
+        h.stoat.key_hints_visible = true;
+
+        let text = box_text(&mut h);
+        let listed = [
+            "RunSubmit",
+            "RunHistoryPrev",
+            "RunHistoryNext",
+            "RunInterrupt",
+        ]
+        .map(|name| text.contains(short_desc(name)));
+        assert_eq!(
+            listed, [true; 4],
+            "the box lists every run pane key:\n{text}"
+        );
+    }
+
+    /// A run pane and a label pane in normal mode give the box the same mode,
+    /// view, token, and focus flags. Only the pane kind tells their lists apart.
+    #[test]
+    fn the_box_follows_focus_to_a_pane_of_another_kind() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.open_run();
+        h.type_keys("escape");
+        h.stoat.key_hints_visible = true;
+        let over_run = box_text(&mut h);
+
+        let ws = h.stoat.active_workspace_mut();
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).view = crate::pane::View::Label("label".into());
+        let over_label = box_text(&mut h);
+
+        let interrupt = short_desc("RunInterrupt");
+        assert_eq!(
+            (over_run.contains(interrupt), over_label.contains(interrupt)),
+            (true, false),
+            "the run pane's Ctrl-c leaves the box with the run pane:\n{over_label}",
         );
     }
 

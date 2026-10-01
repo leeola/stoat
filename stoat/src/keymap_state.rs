@@ -126,6 +126,17 @@ impl<'a> StoatKeymapState<'a> {
         self
     }
 
+    /// Set the `pane` predicate value on an otherwise flag-built state.
+    ///
+    /// The hint-overlay renderer uses it to scope bindings to the focused
+    /// pane's kind (`pane == run`). The renderer holds a mutable workspace
+    /// borrow, so it builds its state without [`Self::from_stoat`], which
+    /// reads the whole [`Stoat`].
+    pub(crate) fn with_pane(mut self, pane: Option<&str>) -> Self {
+        self.pane = pane.map(|p| StateValue::String(p.into()));
+        self
+    }
+
     /// Set the `token` and `token_known` predicate values from a semantic-token
     /// lookup at the cursor (see [`cursor_token`]).
     ///
@@ -298,7 +309,7 @@ fn focused_view(ws: &Workspace) -> Option<&View> {
 }
 
 /// The focused pane's kind as a `pane` predicate value.
-fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
+pub(crate) fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
     Some(match focused_view(ws)? {
         View::Label(_) => "label",
         View::Editor(_) => "editor",
