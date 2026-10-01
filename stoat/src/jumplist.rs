@@ -29,10 +29,27 @@ pub(crate) struct JumpEntry {
     pub(crate) selections: Vec<Selection<Anchor>>,
 }
 
+/// The selection set a change walk landed on, and the jumplist's push count at
+/// that moment.
+///
+/// The diff view's back and forward hops read it to tell a reader still on the
+/// change from one that a jump carried away.
+#[derive(Debug, Clone)]
+pub(crate) struct ChangeLanding {
+    pub(crate) entry: JumpEntry,
+    pub(crate) generation: u64,
+}
+
 /// Cross-buffer jump history over the shared [`NavList`] cursor primitive.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct JumpList {
     list: NavList<JumpEntry>,
+    /// The number of positions recorded since the list was made.
+    ///
+    /// A reader notes it and compares it later, to tell whether any jump
+    /// recorded a position after that moment. A push that the dedup skips does
+    /// not count.
+    generation: u64,
 }
 
 impl JumpList {
@@ -42,6 +59,10 @@ impl JumpList {
 
     pub(crate) fn cursor(&self) -> usize {
         self.list.cursor()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Position the walk cursor at `cursor` (clamped to the tip), so the next
@@ -70,6 +91,7 @@ impl JumpList {
             removed += 1;
         }
         self.list.push_tip(entry);
+        self.generation += 1;
         removed
     }
 
@@ -218,6 +240,24 @@ mod tests {
         jl.push(entry(&buffers, id, 4), &buffers);
         jl.push(entry(&buffers, id, 4), &buffers);
         assert_eq!(offsets(&jl, &buffers), vec![4]);
+    }
+
+    #[test]
+    fn generation_counts_pushes_and_skips_dedup() {
+        let (buffers, id) = one_buffer();
+        let mut jl = JumpList::default();
+        jl.push(entry(&buffers, id, 1), &buffers);
+        jl.push(entry(&buffers, id, 2), &buffers);
+        jl.push(entry(&buffers, id, 2), &buffers);
+        let after_pushes = jl.generation();
+
+        // A step back from the tip records the live position first.
+        jl.backward(entry(&buffers, id, 7), &buffers, 1);
+        assert_eq!(
+            (after_pushes, jl.generation()),
+            (2, 3),
+            "the duplicate does not count, the live record at the tip does",
+        );
     }
 
     #[test]

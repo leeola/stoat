@@ -4187,6 +4187,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     if let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
     }
+    super::jump::record_change_landing(stoat);
     // The landing goes to the middle of the screen rather than the edge the
     // walk arrived at. The key epilogue's follow then finds the cursor deep
     // inside its margin and leaves both the view and this glide alone.
@@ -4850,6 +4851,7 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
     if let Some(entry) = pending.origin {
         super::jump::push_entry(stoat, entry);
     }
+    super::jump::record_change_landing(stoat);
     if wrapped {
         stoat.set_status("wrapped");
     }

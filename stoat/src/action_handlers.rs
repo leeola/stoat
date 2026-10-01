@@ -5,6 +5,7 @@ pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
 pub(crate) mod conflict_view;
+pub(crate) mod diff_nav;
 pub(crate) mod diff_wheel;
 pub(crate) mod file;
 mod file_finder;
@@ -649,6 +650,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoNextChange => movement::goto_change(stoat, movement::ChangeDir::Next),
         ActionKind::GotoPrevChange => movement::goto_change(stoat, movement::ChangeDir::Prev),
         ActionKind::DiffWheelWalk => diff_wheel::toggle_walk(stoat),
+        ActionKind::DiffBack => diff_nav::back(stoat),
+        ActionKind::DiffForward => diff_nav::forward(stoat),
         ActionKind::DiffAgainstIndex => review::diff_against(stoat, None),
         ActionKind::DiffAgainstHead => review::diff_against(stoat, Some(DiffBase::Head)),
         ActionKind::GotoNextParagraph => {

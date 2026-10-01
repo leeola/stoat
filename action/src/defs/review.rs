@@ -98,6 +98,36 @@ define_action!(
 );
 
 define_action!(
+    DiffBackDef,
+    DiffBack,
+    "DiffBack",
+    ActionKind::DiffBack,
+    "walk to the next change, or back through the jumplist after a jump",
+    "In the diff view, walk to the next change, the way GotoNextChange does. \
+     Once a jump such as a definition lookup has carried the cursor off the \
+     change the last walk landed on, retrace the jumplist instead, one \
+     position per run, until the cursor is on that change again. The next run \
+     then walks to the next change. Bound to the mouse back button in the diff \
+     view.",
+    ActionPriority::Normal,
+    command_name = "diff-back"
+);
+
+define_action!(
+    DiffForwardDef,
+    DiffForward,
+    "DiffForward",
+    ActionKind::DiffForward,
+    "walk to the previous change, or forward through the jumplist after a jump",
+    "In the diff view, re-advance the jumplist while a jump has left the \
+     change the last walk landed on and forward history remains. Otherwise \
+     walk to the previous change, the way GotoPrevChange does. Bound to the \
+     mouse forward button in the diff view.",
+    ActionPriority::Normal,
+    command_name = "diff-forward"
+);
+
+define_action!(
     StageHunkDef,
     StageHunk,
     "StageHunk",

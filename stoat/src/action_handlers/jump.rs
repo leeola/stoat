@@ -11,7 +11,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    jumplist::JumpEntry,
+    jumplist::{ChangeLanding, JumpEntry},
     pane::{FocusTarget, PaneId, View},
     workspace::WorkspaceId,
 };
@@ -50,6 +50,27 @@ pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
     };
     let buffers = &ws.buffers;
     ws.panes.pane_mut(pane_id).jumplist.push(entry, buffers);
+}
+
+/// Record what a change walk landed on, with the jumplist's push count at that
+/// moment, on the focused pane.
+///
+/// Runs once the walk's origin is on the jumplist, so the count covers that
+/// push and only a later jump moves past it. A no-op when focus is on a dock.
+pub(crate) fn record_change_landing(stoat: &mut Stoat) {
+    let Some(entry) = live_entry(stoat) else {
+        return;
+    };
+    let ws = stoat.active_workspace_mut();
+    let pane_id = match ws.focus {
+        FocusTarget::SplitPane => ws.panes.focus(),
+        FocusTarget::Dock(_) => return,
+    };
+    let pane = ws.panes.pane_mut(pane_id);
+    pane.change_landing = Some(ChangeLanding {
+        entry,
+        generation: pane.jumplist.generation(),
+    });
 }
 
 /// Record `target` pane's outgoing editor position on its own jumplist before

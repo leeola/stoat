@@ -1,4 +1,9 @@
-use crate::{editor_state::EditorId, jumplist::JumpList, run::RunId, term_session::TermId};
+use crate::{
+    editor_state::EditorId,
+    jumplist::{ChangeLanding, JumpList},
+    run::RunId,
+    term_session::TermId,
+};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
@@ -165,6 +170,15 @@ pub struct Pane {
     /// restored session starts with an empty history.
     #[serde(skip)]
     pub(crate) jumplist: JumpList,
+    /// What the last change walk in this pane landed on, read by `DiffBack`
+    /// and `DiffForward`.
+    ///
+    /// Per pane because the jumplist it is compared against is per pane.
+    ///
+    /// `serde(skip)`: navigation scratch like [`Self::jumplist`], so a restored
+    /// session starts with no landing.
+    #[serde(skip)]
+    pub(crate) change_landing: Option<ChangeLanding>,
     /// Whether `:diff` has latched review mode on for this pane, surviving the
     /// `EditorState` swaps a cross-file navigation makes.
     ///
@@ -275,6 +289,7 @@ impl PaneTree {
             area,
             index: 0,
             jumplist: JumpList::default(),
+            change_landing: None,
             diff_mode: false,
             buffer_history: Vec::new(),
         });
@@ -403,9 +418,10 @@ impl PaneTree {
     /// If the parent split has the same axis, the new pane is inserted adjacent.
     /// Otherwise a new nested split is created. Focus moves to the new pane.
     ///
-    /// The new pane starts with copies of the focused pane's jumplist and
-    /// buffer history. A backward jump, a close, or a switch to the last buffer
-    /// in it then goes to the same place as in the original pane.
+    /// The new pane starts with copies of the focused pane's jumplist, change
+    /// walk landing, and buffer history. A backward jump, a close, or a switch
+    /// to the last buffer in it then goes to the same place as in the original
+    /// pane.
     pub fn split(&mut self, axis: Axis) -> PaneId {
         let anchor = &self.panes[self.focus_anchor()];
         let pane = Pane {
@@ -415,6 +431,7 @@ impl PaneTree {
             area: Rect::default(),
             index: self.next_index,
             jumplist: anchor.jumplist.clone(),
+            change_landing: anchor.change_landing.clone(),
             diff_mode: false,
             buffer_history: anchor.buffer_history.clone(),
         };
@@ -633,10 +650,12 @@ impl PaneTree {
     /// Swap the focused pane's content with the split leaf in `direction`,
     /// following it there. Returns whether a neighbour was found.
     ///
-    /// Only the content moves. `view`, `prev_view`, and the jumplist trade
-    /// places while each slot keeps its geometry and pane number, so the moved
-    /// pane lands in the neighbour's position rather than re-parenting the split
-    /// tree. Focus follows the content so repeated moves push the same pane.
+    /// Only the content moves. The view, the previous view, and the pane's
+    /// navigation state (the jumplist, the change walk landing, the buffer
+    /// history, and the diff latch) trade places while each slot keeps its
+    /// geometry and pane number, so the moved pane lands in the neighbour's
+    /// position rather than re-parenting the split tree. Focus follows the
+    /// content so repeated moves push the same pane.
     pub(crate) fn swap_view_direction(&mut self, direction: Direction) -> bool {
         let anchor = self.focus_anchor();
         let anchor_node = self.node_for_pane(anchor);
@@ -687,6 +706,7 @@ impl PaneTree {
         std::mem::swap(&mut pa.view, &mut pb.view);
         std::mem::swap(&mut pa.prev_view, &mut pb.prev_view);
         std::mem::swap(&mut pa.jumplist, &mut pb.jumplist);
+        std::mem::swap(&mut pa.change_landing, &mut pb.change_landing);
         std::mem::swap(&mut pa.buffer_history, &mut pb.buffer_history);
         std::mem::swap(&mut pa.diff_mode, &mut pb.diff_mode);
     }
