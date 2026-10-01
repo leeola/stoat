@@ -1556,6 +1556,40 @@ mod tests {
         );
     }
 
+    /// A block that the buffer wraps in a new `if`, which reindents every line.
+    const REINDENT_BASE: &str = "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
+
+    /// [`REINDENT_BASE`] wrapped in `if x { .. }`. The line pass sees rows 1 to
+    /// 5 changed, and only rows 1 and 5 hold an edit of their own.
+    const REINDENT_BUFFER: &str =
+        "fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n        let c = 3;\n    }\n}\n";
+
+    /// The `if x {` of [`REINDENT_BUFFER`] staged on its own, as an insertion
+    /// above the index's unchanged `let a = 1;`.
+    const REINDENT_IF_STAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,5 +1,6 @@\n fn f() {\n+    if x {\n     let a = 1;\n     let b = 2;\n     let c = 3;\n }\n";
+
+    /// Open [`REINDENT_BUFFER`] over [`REINDENT_BASE`], cursor on `row`.
+    fn open_reindent_at(h: &mut TestHarness, row: u32) -> PathBuf {
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", REINDENT_BASE, REINDENT_BUFFER)]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, row);
+        workdir
+    }
+
+    /// A reindent pairs each moved line with its old self, so the `if x {` it
+    /// added stages as an insertion rather than over `let a = 1;`.
+    #[test]
+    fn stage_line_on_a_line_a_reindent_added_inserts_it() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_reindent_at(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        assert_eq!(h.fake_git().applied_patches(&workdir), [REINDENT_IF_STAGE]);
+    }
+
     /// HEAD of a file whose first hunk turns `b` into two lines.
     const SHIFT_HEAD: &str = "a\nb\nc\nd\ne\nf\ng\nh\n";
 

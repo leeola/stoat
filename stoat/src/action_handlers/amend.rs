@@ -194,15 +194,23 @@ pub(super) fn write_amend(
     }
 }
 
-/// The content `commit` holds once the hunk at `cursor_row` in the diff from
+/// The content `commit` holds once the change at `cursor_row` in the diff from
 /// `from` to `to` moves across the line the commit draws, or `None` when no
 /// hunk sits at that row.
 ///
 /// The two directions read different diffs, because the hunk each moves lives
 /// between a different pair of texts. Amending in diffs the commit against the
 /// buffer and takes the buffer's text. Amending out diffs the base against the
-/// commit and takes the base's text. Either way the splice lands in `commit`,
+/// commit and takes the base's text. Either way the result lands in `commit`,
 /// which is why it is passed separately from the pair being diffed.
+///
+/// The hunk's lines pair the way
+/// [`align_lines`](stoat_language::structural_diff::align_lines) pairs them. A
+/// pair that moves takes the side the move goes to, and every other pair keeps
+/// the line the commit already holds, so a line amend leaves the rest of its
+/// hunk alone. A reindent pairs each moved line with its old self, so an
+/// amended line that the reindent added goes in as an insertion rather than
+/// over a neighbor.
 fn amended_content(
     from: &str,
     to: &str,
@@ -211,14 +219,38 @@ fn amended_content(
     stage: bool,
     unit: AmendUnit,
 ) -> Option<String> {
-    let (from_span, to_span) = match unit {
-        AmendUnit::Hunk => hunk_spans_at(from, to, cursor_row)?,
-        AmendUnit::Line => line_spans_at(from, to, cursor_row)?,
+    let (from_rows, to_rows) = hunk_rows_at(from, to, cursor_row)?;
+    let from_lines = row_lines(from, from_rows.clone());
+    let to_lines = row_lines(to, to_rows.clone());
+    let pairs = stoat_language::structural_diff::align_lines(&from_lines, &to_lines);
+
+    let cursor = cursor_row.saturating_sub(to_rows.start) as usize;
+    let moves = |at: usize, to_line: Option<usize>| match unit {
+        AmendUnit::Hunk => true,
+        // A deletion covers no `to` row for the cursor to pick, so each press
+        // moves its first remaining line, which walks it one press at a time.
+        AmendUnit::Line if to_lines.is_empty() => at == 0,
+        AmendUnit::Line => to_line == Some(cursor),
     };
-    Some(match stage {
-        true => splice(commit, from_span, to, to_span),
-        false => splice(commit, to_span, from, from_span),
-    })
+
+    let mut region = String::new();
+    for (at, &(from_line, to_line)) in pairs.iter().enumerate() {
+        let line = match moves(at, to_line) == stage {
+            true => to_line.map(|i| to_lines[i]),
+            false => from_line.map(|i| from_lines[i]),
+        };
+        if let Some(line) = line {
+            region.push_str(line);
+        }
+    }
+
+    let rows = match stage {
+        true => from_rows,
+        false => to_rows,
+    };
+    let mut amended = commit.to_string();
+    amended.replace_range(line_span(commit, rows), &region);
+    Some(amended)
 }
 
 /// How much of the hunk under the cursor one keypress moves.
@@ -252,27 +284,13 @@ impl AmendUnit {
     }
 }
 
-/// The byte spans a hunk covering `cursor_row` occupies on each side of the
-/// diff from `from` to `to`, as `(from span, to span)`.
-///
-/// Both spans are whole lines, covering everything the hunk moves. A hunk that
-/// deletes leaves an empty `to` span, anchored where the deletion sat, which is
-/// where the gutter marks it.
-///
-/// See also:
-/// - [`hunk_rows_at`] for how the hunk is found and its two sides aligned.
-/// - [`line_spans_at`] for the same spans narrowed to one line.
-fn hunk_spans_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<usize>, Range<usize>)> {
-    let (from_rows, to_rows) = hunk_rows_at(from, to, cursor_row)?;
-    Some((line_span(from, from_rows), line_span(to, to_rows)))
-}
-
 /// The line ranges the hunk covering `cursor_row` occupies on each side of the
 /// diff from `from` to `to`, as `(from rows, to rows)`.
 ///
 /// The row is a `to`-side row, since that is the text on screen. A hunk that
 /// deletes covers no `to` row, so it is found by the anchor the gutter marks it
-/// at rather than by containment.
+/// at rather than by containment. Its `to` rows are empty and anchored where
+/// the deletion sat, which is where the gutter marks it.
 ///
 /// The `from` rows come from the line ranges rather than from the hunk's raw
 /// base bytes. A hunk records which base bytes it replaces but not which base
@@ -295,37 +313,12 @@ fn hunk_rows_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<u32>, Ra
     ))
 }
 
-/// The byte spans the cursor's single line occupies on each side of the diff
-/// from `from` to `to`, as `(from span, to span)`.
-///
-/// The line-granularity counterpart to [`hunk_spans_at`], which is where the
-/// hunk under the cursor is found. Only the narrowing lives here.
-///
-/// A hunk that replaces three lines with five has no arithmetic mapping from a
-/// `to` row back to a `from` row, so the pairing is positional inside the hunk,
-/// the way `hunk_rows` in [`crate::review_apply`] pairs the rows it emits. The
-/// cursor's offset into the hunk is its offset into both sides, and a row past
-/// the shorter side is one-sided.
-///
-/// A cursor on a purely added line therefore has no counterpart, and its `from`
-/// span comes back empty, anchored where the line lands. A deletion hunk covers
-/// no `to` row at all, so its offset is zero and each call moves the first
-/// remaining `from` line, which walks the deletion one press at a time.
-fn line_spans_at(from: &str, to: &str, cursor_row: u32) -> Option<(Range<usize>, Range<usize>)> {
-    let (from_rows, to_rows) = hunk_rows_at(from, to, cursor_row)?;
-
-    let offset = cursor_row.saturating_sub(to_rows.start);
-    let from_row = from_rows.start + offset;
-    let from_line = match from_row < from_rows.end {
-        true => from_row..from_row + 1,
-        false => from_rows.end..from_rows.end,
-    };
-    let to_line = match to_rows.is_empty() {
-        true => to_rows.clone(),
-        false => cursor_row..cursor_row + 1,
-    };
-
-    Some((line_span(from, from_line), line_span(to, to_line)))
+/// The lines `rows` covers in `text`, each with its terminator.
+fn row_lines(text: &str, rows: Range<u32>) -> Vec<&str> {
+    let starts = line_starts(text);
+    let byte_at = |row: u32| starts.get(row as usize).copied().unwrap_or(text.len());
+    rows.map(|row| &text[byte_at(row)..byte_at(row + 1)])
+        .collect()
 }
 
 /// The bytes `rows` covers in `text`, from the start of the first row to the
@@ -334,13 +327,6 @@ fn line_span(text: &str, rows: Range<u32>) -> Range<usize> {
     let starts = line_starts(text);
     let byte_at = |row: u32| starts.get(row as usize).copied().unwrap_or(text.len());
     byte_at(rows.start)..byte_at(rows.end)
-}
-
-/// `target` with `span` replaced by `source[source_span]`.
-fn splice(target: &str, span: Range<usize>, source: &str, source_span: Range<usize>) -> String {
-    let mut out = target.to_string();
-    out.replace_range(span, &source[source_span]);
-    out
 }
 
 /// Move the walk off `old_sha` and onto `new_sha`, so stepping on and returning
@@ -1003,6 +989,57 @@ mod tests {
             Some("a\nX\nY\nN2\nd\n"),
             "the second added line went in on its own",
         );
+    }
+
+    /// A line that the buffer's reindent added goes into the commit as an
+    /// insertion. The reindented lines pair with their old selves, so none of
+    /// them is the commit line it replaces.
+    #[test]
+    fn stage_line_on_a_line_a_reindent_added_inserts_it() {
+        let mut h = walking_the_tip_of(
+            "fn f() {\n}\n",
+            "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n",
+        );
+        h.seed_focused_buffer(
+            "fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n        let c = 3;\n    }\n}\n",
+        );
+        cursor_to(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some("fn f() {\n    if x {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n"),
+        );
+    }
+
+    /// A deleted line ahead of the cursor's row shifts the pairs, so the cursor
+    /// picks the pair that holds its own row and not the pair at its offset.
+    #[test]
+    fn stage_line_moves_the_pair_on_the_cursor_row() {
+        let mut h = walking_the_tip_of("x1\na\n", "x1\nx2\na\n");
+        h.seed_focused_buffer("y\n  a\n");
+        cursor_to(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
+
+        assert_eq!(committed(&h).as_deref(), Some("x1\nx2\n  a\n"));
+    }
+
+    /// A deletion covers no row for the cursor to pick, so each `S` moves its
+    /// first remaining line, which walks the deletion one press at a time.
+    #[test]
+    fn stage_line_on_a_deletion_moves_its_first_line() {
+        let mut h = walking_the_tip_of("a\nb\nc\nd\ne\n", "a\nb\nc\nd\n");
+        h.seed_focused_buffer("a\nd\n");
+        cursor_to(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        h.settle();
+
+        assert_eq!(committed(&h).as_deref(), Some("a\nc\nd\n"));
     }
 
     /// Repeating walks the hunk a line at a time, which is what makes the

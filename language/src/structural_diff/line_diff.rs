@@ -12,8 +12,11 @@
 //! cheap even on the large or unparseable files this fallback exists for.
 
 use super::{ChangeKind, DiffChange, DiffResult, Side};
-use imara_diff::{intern::InternedInput, sources, Algorithm, Sink};
-use std::ops::Range;
+use imara_diff::{
+    intern::{InternedInput, TokenSource},
+    sources, Algorithm, Sink,
+};
+use std::{iter::Map, ops::Range, slice::Iter};
 
 /// Compute a line-level diff between `lhs` and `rhs`. The returned
 /// changes carry rope byte ranges (relative to each input) so they can
@@ -42,6 +45,34 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
         changes,
         fell_back_to_line_diff: true,
     }
+}
+
+/// Pairs the lines of one changed region, matching lines that differ only in
+/// whitespace.
+///
+/// A reindent rewrites every line it moves, so a line diff sees the whole
+/// region changed and does not say which old line each new line came from.
+/// With their whitespace collapsed, the moved lines match their old selves.
+/// The lines between two matches pair by position, and the longer side's extra
+/// lines pair with nothing.
+///
+/// Each pair is `(lhs index, rhs index)`. The pairs hold every line of both
+/// sides once, in order on both sides.
+pub fn align_lines(lhs: &[&str], rhs: &[&str]) -> Vec<(Option<usize>, Option<usize>)> {
+    let lhs_keys: Vec<String> = lhs.iter().map(|line| collapse_whitespace(line)).collect();
+    let rhs_keys: Vec<String> = rhs.iter().map(|line| collapse_whitespace(line)).collect();
+    let input = InternedInput::new(KeyLines(&lhs_keys), KeyLines(&rhs_keys));
+
+    imara_diff::diff(
+        Algorithm::Histogram,
+        &input,
+        PairSink {
+            pairs: Vec::with_capacity(lhs.len().max(rhs.len())),
+            lhs_at: 0,
+            rhs_at: 0,
+            lhs_len: lhs.len(),
+        },
+    )
 }
 
 /// The `(start, end)` byte offsets of one line in the source string.
@@ -154,6 +185,84 @@ fn range_for_lines(lines: &[LineRecord], start: usize, count: usize) -> Range<us
     lines[start].start..lines[end_line].end
 }
 
+/// `line` with no leading or trailing whitespace and each inner run of
+/// whitespace cut to one space, which is the form [`align_lines`] compares.
+fn collapse_whitespace(line: &str) -> String {
+    let mut key = String::with_capacity(line.len());
+    for word in line.split_whitespace() {
+        if !key.is_empty() {
+            key.push(' ');
+        }
+        key.push_str(word);
+    }
+    key
+}
+
+/// A [`TokenSource`] whose tokens are lines already in the form
+/// [`collapse_whitespace`] gives them.
+struct KeyLines<'a>(&'a [String]);
+
+impl<'a> TokenSource for KeyLines<'a> {
+    type Token = &'a str;
+    type Tokenizer = Map<Iter<'a, String>, fn(&'a String) -> &'a str>;
+
+    fn tokenize(&self) -> Self::Tokenizer {
+        self.0.iter().map(String::as_str)
+    }
+
+    fn estimate_tokens(&self) -> u32 {
+        self.0.len() as u32
+    }
+}
+
+/// Turns imara-diff's change regions into the line pairs [`align_lines`]
+/// returns, with a matched pair for each unchanged line between two regions.
+struct PairSink {
+    pairs: Vec<(Option<usize>, Option<usize>)>,
+    lhs_at: usize,
+    rhs_at: usize,
+    lhs_len: usize,
+}
+
+impl PairSink {
+    /// Pair the unchanged lines from the cursors up to lhs line `lhs_end`.
+    ///
+    /// The diff reports only changes, and an unchanged run between two of them
+    /// has the same length on both sides, so both cursors step together.
+    fn match_until(&mut self, lhs_end: usize) {
+        while self.lhs_at < lhs_end {
+            self.pairs.push((Some(self.lhs_at), Some(self.rhs_at)));
+            self.lhs_at += 1;
+            self.rhs_at += 1;
+        }
+    }
+}
+
+impl Sink for PairSink {
+    type Out = Vec<(Option<usize>, Option<usize>)>;
+
+    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
+        self.match_until(before.start as usize);
+
+        let lhs = before.start as usize..before.end as usize;
+        let rhs = after.start as usize..after.end as usize;
+        for i in 0..lhs.len().max(rhs.len()) {
+            self.pairs.push((
+                (i < lhs.len()).then_some(lhs.start + i),
+                (i < rhs.len()).then_some(rhs.start + i),
+            ));
+        }
+        self.lhs_at = lhs.end;
+        self.rhs_at = rhs.end;
+    }
+
+    fn finish(mut self) -> Self::Out {
+        let lhs_len = self.lhs_len;
+        self.match_until(lhs_len);
+        self.pairs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +373,43 @@ mod tests {
         let lhs = result.iter().find(|c| c.side == Side::Lhs).unwrap();
         assert_eq!(lhs.kind, ChangeKind::Novel);
         assert_eq!(lhs.deletion_rhs_anchor, Some(1));
+    }
+
+    #[test]
+    fn align_lines_pairs_a_reindented_line_with_its_old_self() {
+        let lhs = ["    let a = 1;\n", "    let b = 2;\n"];
+        let rhs = [
+            "    if x {\n",
+            "        let a = 1;\n",
+            "        let b = 2;\n",
+            "    }\n",
+        ];
+        assert_eq!(
+            align_lines(&lhs, &rhs),
+            [
+                (None, Some(0)),
+                (Some(0), Some(1)),
+                (Some(1), Some(2)),
+                (None, Some(3)),
+            ],
+        );
+    }
+
+    /// Inner spacing collapses too, and the lines between two matches pair by
+    /// position, the longer side's extra line with nothing.
+    #[test]
+    fn align_lines_pairs_the_lines_between_matches_by_position() {
+        let lhs = ["f(a,  b)", "x", "end"];
+        let rhs = ["f(a, b)", "y", "z", "  end"];
+        assert_eq!(
+            align_lines(&lhs, &rhs),
+            [
+                (Some(0), Some(0)),
+                (Some(1), Some(1)),
+                (None, Some(2)),
+                (Some(2), Some(3)),
+            ],
+        );
     }
 
     #[test]

@@ -67,6 +67,12 @@ pub(crate) fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> 
 /// context row carries both sides' line numbers without a second diff. Context
 /// is clipped at the neighbor hunks and at the file edges.
 ///
+/// Inside the hunk, a base line and a buffer line share a row when they are
+/// equal once whitespace is collapsed, and the lines between two such rows pair
+/// by position. A reindent therefore pairs each moved line with its old self,
+/// so a patch narrowed to some rows replaces the lines those rows came from and
+/// inserts the rest.
+///
 /// Returns [`None`] when `k` is out of range.
 pub(crate) fn hunk_rows(
     base_text: &str,
@@ -118,10 +124,14 @@ pub(crate) fn hunk_rows(
             right: side(&buffer_lines, buffer_start - offset),
         });
     }
-    for i in 0..base_len.max(buffer_len) {
+    let pairs = stoat_language::structural_diff::align_lines(
+        &hunk_lines(&base_lines, base_start, base_len),
+        &hunk_lines(&buffer_lines, buffer_start, buffer_len),
+    );
+    for (left, right) in pairs {
         rows.push(ReviewRow::Changed {
-            left: (i < base_len).then(|| side(&base_lines, base_start + i)),
-            right: (i < buffer_len).then(|| side(&buffer_lines, buffer_start + i)),
+            left: left.map(|i| side(&base_lines, base_start + i as u32)),
+            right: right.map(|i| side(&buffer_lines, buffer_start + i as u32)),
         });
     }
     for offset in 0..trailing {
@@ -131,6 +141,14 @@ pub(crate) fn hunk_rows(
         });
     }
     Some(rows)
+}
+
+/// The `len` lines of `lines` from `start`, with a line past the end read as
+/// empty, the way [`hunk_rows`] reads a row's text.
+fn hunk_lines<'a>(lines: &[&'a str], start: u32, len: u32) -> Vec<&'a str> {
+    (start..start + len)
+        .map(|line| lines.get(line as usize).copied().unwrap_or(""))
+        .collect()
 }
 
 /// A standalone patch for line hunk `k`, keyed at `rel`.

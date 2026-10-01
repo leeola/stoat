@@ -43,7 +43,7 @@ mod unchanged;
 
 pub use arena::{Atom, List, Syntax, SyntaxArena, SyntaxId};
 pub use content_id::ContentId;
-pub use line_diff::diff_lines;
+pub use line_diff::{align_lines, diff_lines};
 pub use lower::lower_tree;
 pub use moves::{find_moves, ChangesetMoveRecord, FileMoveInput, MoveRecord};
 use std::{ops::Range, path::PathBuf, sync::Arc};
