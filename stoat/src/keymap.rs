@@ -2155,6 +2155,43 @@ mod tests {
     }
 
     #[test]
+    fn the_diff_view_binds_the_side_buttons_to_the_bridging_hops() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let plain = TestState::new().set("mode", StateValue::String("normal".into()));
+        let in_diff = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("diff".into()));
+        let bound = |state: &TestState, button| {
+            keymap
+                .lookup_side_button(state, button, KeyModifiers::NONE)
+                .map(|actions| {
+                    actions
+                        .iter()
+                        .map(|action| action.name.clone())
+                        .collect::<Vec<_>>()
+                })
+        };
+
+        assert_eq!(
+            (
+                bound(&in_diff, SideButton::Back),
+                bound(&in_diff, SideButton::Forward),
+                bound(&plain, SideButton::Back),
+                bound(&plain, SideButton::Forward),
+            ),
+            (
+                Some(vec!["DiffBack".to_string()]),
+                Some(vec!["DiffForward".to_string()]),
+                None,
+                None,
+            ),
+            "the diff view binds both buttons, and a plain buffer binds neither"
+        );
+    }
+
+    #[test]
     fn the_default_side_buttons_walk_changes_in_the_pinned_goto_and_git_chords() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);

@@ -963,9 +963,16 @@ on key {
     }
     # Two atoms against the normal block's one, so the diff view walks changes
     # where a plain buffer walks functions.
+    #
+    # The side buttons ride the same hops, back as n and forward as p as in the
+    # pinned chords, but through DiffBack and DiffForward. Those retrace the
+    # jumplist once a jump has left the change, and walk changes again when the
+    # reader is back on it.
     view == diff && mode == normal {
         Alt-WheelDown -> GotoNextChange();
         Alt-WheelUp -> GotoPrevChange();
+        MouseBack -> DiffBack();
+        MouseForward -> DiffForward();
     }
     view == diff && rebase_exec {
         C -> RebaseContinue();
