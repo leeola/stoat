@@ -736,24 +736,31 @@ impl Keymap {
         state: &dyn KeymapState,
         event: &KeyEvent,
     ) -> Option<(Arc<[ResolvedAction]>, Option<f64>)> {
-        let mut best: Option<((usize, bool), &CompiledBinding)> = None;
-        for binding in &self.bindings {
-            if !binding.key.matches(event) {
-                continue;
-            }
-            if !binding.predicates.iter().all(|p| evaluate(p, state)) {
-                continue;
-            }
-            let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
-            // Rank exact keys above placeholders at equal specificity. Strict `>`
-            // then keeps the earliest binding on a full tie, so equally specific
-            // matches still resolve in source order.
-            let rank = (score, !binding.key.any_digit);
-            if best.is_none_or(|(best_rank, _)| rank > best_rank) {
-                best = Some((rank, binding));
-            }
-        }
-        best.map(|(_, binding)| (binding.actions.clone(), binding.key.captured_digit(event)))
+        self.best_binding(state, event, |_| true)
+            .map(|binding| (binding.actions.clone(), binding.key.captured_digit(event)))
+    }
+
+    /// Resolve `event` among only the bindings that compare `scope_field` equal
+    /// to `scope_value`.
+    ///
+    /// The ranking and the captured digit are those of
+    /// [`Self::lookup_with_capture`]. A binding outside the scope is no
+    /// candidate, however specific it is, so a broader binding with more atoms
+    /// never hides a scoped one. A negated compare claims no scope.
+    pub fn lookup_scoped(
+        &self,
+        state: &dyn KeymapState,
+        event: &KeyEvent,
+        scope_field: &str,
+        scope_value: &str,
+    ) -> Option<(Arc<[ResolvedAction]>, Option<f64>)> {
+        self.best_binding(state, event, |binding| {
+            binding
+                .predicates
+                .iter()
+                .any(|p| predicate_eq_matches(p, scope_field, scope_value))
+        })
+        .map(|binding| (binding.actions.clone(), binding.key.captured_digit(event)))
     }
 
     /// Resolve a wheel notch in `dir` held with `modifiers` against `state` to
@@ -817,6 +824,41 @@ impl Keymap {
             }
         }
         best.map(|(_, binding)| binding.actions.clone())
+    }
+
+    /// The binding a press of `event` reaches in `state`, among the bindings
+    /// `accept` admits.
+    ///
+    /// Bindings rank by predicate specificity, then an exact key above a `num`
+    /// placeholder, then source order. A binding `accept` refuses is no
+    /// candidate, so it never outranks one that `accept` admits.
+    fn best_binding(
+        &self,
+        state: &dyn KeymapState,
+        event: &KeyEvent,
+        accept: impl Fn(&CompiledBinding) -> bool,
+    ) -> Option<&CompiledBinding> {
+        let mut best: Option<((usize, bool), &CompiledBinding)> = None;
+        for binding in &self.bindings {
+            if !binding.key.matches(event) {
+                continue;
+            }
+            if !accept(binding) {
+                continue;
+            }
+            if !binding.predicates.iter().all(|p| evaluate(p, state)) {
+                continue;
+            }
+            let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
+            // Rank exact keys above placeholders at equal specificity. Strict `>`
+            // then keeps the earliest binding on a full tie, so equally specific
+            // matches still resolve in source order.
+            let rank = (score, !binding.key.any_digit);
+            if best.is_none_or(|(best_rank, _)| rank > best_rank) {
+                best = Some((rank, binding));
+            }
+        }
+        best.map(|(_, binding)| binding)
     }
 
     /// The binding a press reaches in `state`, for each key bound there, in
@@ -2785,6 +2827,42 @@ mod tests {
         assert!(
             keymap.lookup(&prompt, &ctrl_a).is_none(),
             "an open prompt keeps Ctrl-a out of the prefix"
+        );
+    }
+
+    #[test]
+    fn a_scoped_lookup_ranks_only_bindings_that_name_the_scope() {
+        let keymap = Keymap::compile(&parse_config(
+            "on key {
+                lsp && diags && mode == normal { Ctrl-a -> InsertTab(); }
+                mode == normal { Tab -> SmartTab(); }
+                pane == terminal && mode == normal { Ctrl-a -> SetMode(prefix); }
+            }",
+        ));
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("pane", StateValue::String("terminal".into()))
+            .set("lsp", StateValue::Bool(true))
+            .set("diags", StateValue::Bool(true));
+        let ctrl_a = key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let tab = key_event(KeyCode::Tab, KeyModifiers::NONE);
+        let scoped = |event: &KeyEvent, pane: &str| {
+            keymap
+                .lookup_scoped(&state, event, "pane", pane)
+                .map(|(actions, _)| actions[0].name.clone())
+        };
+
+        assert_eq!(
+            (
+                keymap
+                    .lookup(&state, &ctrl_a)
+                    .map(|actions| actions[0].name.clone()),
+                scoped(&ctrl_a, "terminal"),
+                scoped(&tab, "terminal"),
+                scoped(&ctrl_a, "editor"),
+            ),
+            (Some("InsertTab".into()), Some("SetMode".into()), None, None),
+            "the three-atom binding wins only the unscoped lookup"
         );
     }
 
