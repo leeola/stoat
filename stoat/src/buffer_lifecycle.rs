@@ -19,7 +19,7 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     editor_state::{EditorId, EditorState},
     pane::{FocusTarget, PaneId, View},
-    workspace::WorkspaceId,
+    workspace::{Workspace, WorkspaceId},
 };
 use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
 use std::{
@@ -453,19 +453,7 @@ pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
             View::Editor(eid) => ws.editors.get(eid).map(|editor| editor.buffer_id),
             _ => None,
         };
-
-        // A closed buffer never comes back, and the pane's own buffer is no
-        // switch at all. Both leave the tail rather than resolve again on every
-        // later press.
-        let history = &mut ws.panes.pane_mut(target).buffer_history;
-        while let Some(&id) = history.last()
-            && (Some(id) == current || ws.buffers.get(id).is_none())
-        {
-            history.pop();
-        }
-        history
-            .last()
-            .and_then(|&id| ws.buffers.get(id).map(|buffer| (target, id, buffer)))
+        prior_live_buffer(ws, target, current).map(|(id, buffer)| (target, id, buffer))
     };
 
     let Some((target, buffer_id, buffer)) = resolved else {
@@ -480,11 +468,16 @@ pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Drop the focused buffer from the workspace's
-/// [`crate::buffer_registry::BufferRegistry`] and notify the LSP
-/// server via [`crate::host::LspHost::did_close`]. Editor states
-/// that referenced the buffer are rebound to fresh scratch buffers
-/// so panes stay coherent. Refuses to close when the buffer is
-/// dirty so unsaved edits aren't silently lost.
+/// [`crate::buffer_registry::BufferRegistry`] and notify the LSP server via
+/// [`crate::host::LspHost::did_close`].
+///
+/// Each pane that showed the buffer returns to the buffer it showed most
+/// recently that is still open, and a latched diff pane re-enters the diff
+/// there. A pane that has shown nothing else still open gets a fresh scratch
+/// buffer, and so does an editor no pane of the active tab shows.
+///
+/// Refuses to close when the buffer is dirty, so unsaved edits are not
+/// silently lost.
 ///
 /// Session state keyed by the buffer goes with it, buffer-local marks
 /// included. Global marks stay. They hold a path and an offset rather
@@ -504,6 +497,32 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let executor = stoat.executor.clone();
+    let workspace = stoat.active_workspace;
+    let showing: Vec<PaneId> = {
+        let ws = &stoat.workspaces[workspace];
+        ws.panes
+            .split_pane_ids()
+            .into_iter()
+            .filter(|&pane| match ws.panes.pane(pane).view {
+                View::Editor(eid) => ws
+                    .editors
+                    .get(eid)
+                    .is_some_and(|editor| editor.buffer_id == buffer_id),
+                _ => false,
+            })
+            .collect()
+    };
+    // No jumplist entry records these switches. Such an entry names the closed
+    // buffer, which the purge below takes out of every jumplist anyway.
+    for pane in showing {
+        let prior = prior_live_buffer(&mut stoat.workspaces[workspace], pane, Some(buffer_id));
+        if let Some((id, buffer)) = prior {
+            show_buffer_in_pane(stoat, workspace, pane, id, buffer, executor.clone());
+        }
+    }
+
+    // What still holds the buffer is a pane with nothing live to return to,
+    // an editor in a parked tab, or an editor no pane shows.
     let editor_ids: Vec<EditorId> = stoat
         .active_workspace()
         .editors
@@ -583,6 +602,28 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// The buffer `pane` showed most recently that is still open, other than
+/// `current`, the one it shows.
+///
+/// A closed buffer never comes back, and the pane's own buffer is no switch at
+/// all. Both leave the history's tail on the way, so a later walk does not
+/// resolve them again.
+fn prior_live_buffer(
+    ws: &mut Workspace,
+    pane: PaneId,
+    current: Option<BufferId>,
+) -> Option<(BufferId, SharedBuffer)> {
+    let history = &mut ws.panes.pane_mut(pane).buffer_history;
+    while let Some(&id) = history.last()
+        && (Some(id) == current || ws.buffers.get(id).is_none())
+    {
+        history.pop();
+    }
+    history
+        .last()
+        .and_then(|&id| ws.buffers.get(id).map(|buffer| (id, buffer)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,7 +632,7 @@ mod tests {
         test_harness::{editor, TestHarness},
     };
     use stoat_action::{
-        CloseBuffer, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark, SplitRight,
+        CloseBuffer, Diff, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark, SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -1164,6 +1205,82 @@ mod tests {
             .get(new_id)
             .expect("scratch buffer exists");
         assert_eq!(new_buffer.read().expect("poisoned").rope().to_string(), "");
+    }
+
+    #[test]
+    fn close_returns_the_pane_to_the_buffer_it_showed_before() {
+        let mut h = Stoat::test();
+        let (a, b) = open_two(&mut h);
+        dispatch(&mut h.stoat, &CloseBuffer);
+        h.settle();
+
+        assert_eq!(
+            (
+                focused_buffer_id(&mut h.stoat),
+                h.stoat.active_workspace().buffers.get(b).is_some()
+            ),
+            (a, false),
+            "the pane shows a again and b is gone",
+        );
+    }
+
+    #[test]
+    fn repeated_closes_walk_back_through_the_shown_buffers() {
+        let mut h = Stoat::test();
+        let (a, b) = open_two(&mut h);
+        open_named(&mut h, "c.txt");
+        let close = |h: &mut TestHarness| {
+            dispatch(&mut h.stoat, &CloseBuffer);
+            h.settle();
+            focused_buffer_id(&mut h.stoat)
+        };
+
+        let landed = [close(&mut h), close(&mut h)];
+        assert_eq!(landed, [b, a], "each close returns to the buffer before");
+
+        let last = close(&mut h);
+        let ws = h.stoat.active_workspace();
+        let text = ws
+            .buffers
+            .get(last)
+            .map(|buffer| buffer.read().expect("poisoned").rope().to_string());
+        assert_eq!(
+            (ws.buffers.path_for(last), text),
+            (None, Some(String::new())),
+            "and the last close leaves a pathless empty scratch",
+        );
+    }
+
+    /// A latched diff pane re-enters the diff on the file a close returns it to.
+    #[test]
+    fn a_close_in_the_diff_view_reopens_the_prior_file_as_a_diff() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", "a\nb\n", "a\nc\n"), ("b.txt", "d\ne\n", "d\nf\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.open_file(Path::new("/repo/b.txt"));
+        h.settle_diff_jobs();
+        dispatch(&mut h.stoat, &Diff { rev: None });
+        h.settle();
+
+        dispatch(&mut h.stoat, &CloseBuffer);
+        h.settle();
+
+        let buffer_id = focused_buffer_id(&mut h.stoat);
+        let diff_view = focused_editor_mut(&mut h.stoat).expect("editor").diff_view;
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.buffers.path_for(buffer_id),
+                diff_view,
+                ws.panes.pane(ws.panes.focus()).diff_mode
+            ),
+            (Some(Path::new("/repo/a.txt")), true, true),
+            "the pane returns to a.txt and shows it as a diff",
+        );
     }
 
     /// A pane starts on a scratch, and a close leaves one behind. Opening a file
