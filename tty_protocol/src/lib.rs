@@ -72,9 +72,13 @@
 /// Version 7 strokes `sketch_elbow`, a hand-drawn polyline whose corners round.
 /// A terminal that predates it ignores those frames whole.
 ///
+/// Version 8 reads `pool_cursor_release`, which takes the cursor anchor off a
+/// pool. A terminal that predates it ignores those frames whole, and keeps the
+/// anchor until the pool is dropped.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 pub mod command;
 pub mod detect;

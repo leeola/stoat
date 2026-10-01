@@ -22,16 +22,17 @@ use stoatty_protocol::command::{
     encode_fill_end, encode_font_step, encode_hello, encode_icon, encode_ident_reply,
     encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
     encode_minimap_view, encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor,
-    encode_pool_drop, encode_pool_region, encode_popover, encode_reposition, encode_reset,
-    encode_scale, encode_scroll, encode_scroll_region, encode_sketch, encode_text_run,
-    encode_window_open, encode_zoom_capture, BarCommand, BorderCommand,
-    BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
+    encode_pool_cursor_release, encode_pool_drop, encode_pool_region, encode_popover,
+    encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+    encode_sketch, encode_text_run, encode_window_open, encode_zoom_capture, BarCommand,
+    BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
     IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
     MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
     PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
-    PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
-    ScrollCommand, ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase,
-    SketchShape, SketchStyle, SketchTiming, TextRunCommand, WindowOpenCommand,
+    PoolCursorReleaseCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+    RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, SketchBounds,
+    SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
+    TextRunCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -4087,6 +4088,37 @@ fn pool_drop_clears_the_cursor_anchor() {
         terminal.pools().first().map(|pool| pool.cursor_anchor),
         Some(None),
         "a re-declared pool does not inherit the dropped pool's anchor",
+    );
+}
+
+#[test]
+fn a_cursor_release_takes_the_anchor_off_its_pool_alone() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    declare_pool(&mut terminal, 0, 4, 8);
+    declare_pool(&mut terminal, 1, 4, 8);
+    terminal.advance(&encode_pool_cursor(&PoolCursorCommand {
+        pool: 0,
+        row: 42,
+        col: 7,
+    }));
+    terminal.advance(&encode_pool_cursor(&PoolCursorCommand {
+        pool: 1,
+        row: 9,
+        col: 3,
+    }));
+
+    terminal.advance(&encode_pool_cursor_release(&PoolCursorReleaseCommand {
+        pool: 0,
+    }));
+
+    assert_eq!(
+        terminal
+            .pools()
+            .iter()
+            .map(|pool| pool.cursor_anchor)
+            .collect::<Vec<_>>(),
+        [None, Some((9, 3))],
+        "the release clears pool 0's anchor and leaves pool 1's",
     );
 }
 

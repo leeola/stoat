@@ -148,6 +148,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `pool_region` | P | 16 B | Declares a smooth-scroll pool |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
+| `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
 | `reposition` | P | 12 B | Re-anchors across an unbuffered gap |
 | `pool_drop` | P | 4 B | Retires a pool |
 | `minimap_lines` | P | 16 B header + lines | Paginates past the payload cap; runs of 3 B |

@@ -95,6 +95,17 @@ pub struct PoolCursorCommand {
     pub col: u16,
 }
 
+/// Take the cursor anchor off smooth-scroll pool [`Self::pool`].
+///
+/// An anchor outlives the glide it was sent for, and the terminal draws the
+/// cursor on any anchored pool that glides. So the program sends this when the
+/// pane behind the pool stops being the one that owns the cursor. A pool with no
+/// anchor, or an id the terminal does not know, makes it a no-op.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoolCursorReleaseCommand {
+    pub pool: u32,
+}
+
 /// A floating surface's tie to the pool it must ride.
 ///
 /// A popup laid out over a scrolling pane is drawn from a live frame, but no
@@ -321,6 +332,22 @@ pub fn encode_pool_cursor_into(out: &mut Vec<u8>, command: &PoolCursorCommand) {
     frame::end(out);
 }
 
+/// Encode a [`PoolCursorReleaseCommand`] as a full
+/// `Gstoatty;pool_cursor_release` frame for an emitter.
+pub fn encode_pool_cursor_release(command: &PoolCursorReleaseCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_pool_cursor_release_into(&mut out, command.pool);
+    out
+}
+
+/// Append a `Gstoatty;pool_cursor_release` frame releasing pool `pool`'s cursor
+/// anchor to `out`.
+pub fn encode_pool_cursor_release_into(out: &mut Vec<u8>, pool: u32) {
+    frame::begin(out, "pool_cursor_release");
+    frame::push_arg(out, |w| w.write_all(&pool.to_be_bytes()));
+    frame::end(out);
+}
+
 /// Encode a [`PoolAnchorCommand`] as a full `Gstoatty;pool_anchor` frame.
 ///
 /// The anchor rides one fixed 12-byte big-endian argument holding the anchored
@@ -425,6 +452,14 @@ pub(super) fn decode_pool_cursor(args: &[Vec<u8>]) -> Option<PoolCursorCommand> 
             arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
         ]),
         col: u16::from_be_bytes([arg[12], arg[13]]),
+    })
+}
+
+pub(super) fn decode_pool_cursor_release(args: &[Vec<u8>]) -> Option<PoolCursorReleaseCommand> {
+    let arg: &[u8; 4] = args.first()?.get(..4)?.try_into().ok()?;
+
+    Some(PoolCursorReleaseCommand {
+        pool: u32::from_be_bytes(*arg),
     })
 }
 
@@ -632,6 +667,22 @@ mod tests {
     fn rejects_wrong_length_pool_cursor_payload() {
         // The single arg here decodes to 3 bytes, not the 14 a cursor anchor needs.
         assert!(decode(b"Gstoatty;pool_cursor;YWJj").is_none());
+    }
+
+    #[test]
+    fn pool_cursor_release_round_trips() {
+        let command = PoolCursorReleaseCommand { pool: 7 };
+
+        assert_eq!(
+            decode(&encode_pool_cursor_release(&command)),
+            Some(Command::PoolCursorRelease(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_pool_cursor_release_payload() {
+        // The single arg here decodes to 3 bytes, not the 4 a pool id needs.
+        assert!(decode(b"Gstoatty;pool_cursor_release;YWJj").is_none());
     }
 
     #[test]

@@ -811,7 +811,8 @@ struct Pool {
     /// `Gstoatty;pool_cursor`. `Some((row, col))` names the document display row
     /// and grid-absolute column the cursor rides, so a renderer draws it at the
     /// eased content offset rather than the VT cursor cell. `None` when no anchor
-    /// has arrived. Cleared when the pool is dropped, since the pool is removed.
+    /// has arrived. Cleared by `Gstoatty;pool_cursor_release`, and gone with the
+    /// pool when it is dropped.
     cursor_anchor: Option<(u64, u16)>,
     /// This pool's tie to a host pool it must ride, set by
     /// `Gstoatty;pool_anchor`. `Some((host, top_rows))` names the host pool and
@@ -1250,6 +1251,7 @@ impl Terminal {
                         | Command::PoolRegion(_)
                         | Command::Scroll(_)
                         | Command::PoolCursor(_)
+                        | Command::PoolCursorRelease(_)
                         | Command::Reposition(_)
                         | Command::PoolDrop(_)
                         | Command::MinimapLines(_)
@@ -1592,6 +1594,15 @@ impl Terminal {
             Command::PoolCursor(cursor) => {
                 let window = self.pools.get_mut(&cursor.pool).map(|pool| {
                     pool.cursor_anchor = Some((cursor.row, cursor.col));
+                    pool.region.window
+                });
+                if let Some(window) = window {
+                    self.mark_window_dirty(window);
+                }
+            },
+            Command::PoolCursorRelease(release) => {
+                let window = self.pools.get_mut(&release.pool).map(|pool| {
+                    pool.cursor_anchor = None;
                     pool.region.window
                 });
                 if let Some(window) = window {
@@ -2003,6 +2014,7 @@ impl Terminal {
             | Command::PoolRegion(_)
             | Command::Scroll(_)
             | Command::PoolCursor(_)
+            | Command::PoolCursorRelease(_)
             | Command::PoolAnchor(_)
             | Command::Reposition(_)
             | Command::PoolDrop(_)
