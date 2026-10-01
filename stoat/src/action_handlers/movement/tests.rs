@@ -2977,11 +2977,15 @@ fn extend_to_line_start_from_mid_reverses() {
 }
 
 #[test]
-fn extend_goto_line_number_without_a_count_reaches_the_last_line() {
+fn extend_goto_line_number_without_a_count_stays_put() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
     dispatch(&mut stoat, &ExtendGotoLineNumber);
-    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 9, false)]);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 1, false)],
+        "the seeded cursor, unmoved"
+    );
 }
 
 /// The same key with a count reaches the line the count names, where before it
@@ -3529,6 +3533,7 @@ fn snapshot_extend_goto_line_number() {
     let mut h = TestHarness::with_size(20, 6);
     let path = h.write_file("s.txt", "abc\ndef\nghi\n");
     h.open_file(&path);
+    h.stoat.pending_count = Some(3);
     dispatch(&mut h.stoat, &ExtendGotoLineNumber);
     h.assert_snapshot("snapshot_extend_goto_line_number");
 }
@@ -8175,6 +8180,27 @@ fn goto_line_number_jumps_to_count_line() {
 }
 
 #[test]
+fn goto_line_number_without_a_count_stays_put() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    h.type_keys("G");
+
+    let ws = h.stoat.active_workspace();
+    let no_jump = ws
+        .panes
+        .pane(ws.panes.focus())
+        .jumplist
+        .entries()
+        .is_empty();
+    assert_eq!(
+        (h.cursor_display_positions(), no_jump),
+        (vec![(0, 0)], true),
+        "a bare G neither moves nor records a jump",
+    );
+}
+
+#[test]
 fn goto_line_number_clamps_at_last_line() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\n");
@@ -8230,21 +8256,6 @@ fn goto_file_start_without_count_still_reaches_the_top() {
 
     h.type_keys("g k");
     assert_eq!(h.cursor_display_positions(), vec![(0, 0)]);
-}
-
-#[test]
-fn goto_line_number_without_count_jumps_to_last_line() {
-    let mut h = TestHarness::with_size(20, 10);
-    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
-    h.open_file(&path);
-    h.type_keys("G");
-    let with_g = h.cursor_display_positions();
-    let mut h2 = TestHarness::with_size(20, 10);
-    let path2 = h2.write_file("s.txt", "a\nb\nc\nd\ne\n");
-    h2.open_file(&path2);
-    h2.type_keys("g j");
-    let with_gj = h2.cursor_display_positions();
-    assert_eq!(with_g, with_gj);
 }
 
 #[test]

@@ -1539,7 +1539,7 @@ define_action!(
     "GotoLineNumber",
     ActionKind::GotoLineNumber,
     "goto line number from count",
-    "Jump to the start of the line numbered by the pending count prefix (1-indexed); falls back to the last line when no count is pending. Counts beyond the buffer length clamp to the last visible row.",
+    "Jump to the start of the line numbered by the pending count prefix (1-indexed). With no count pending, do nothing. `GotoLastLine` reaches the last line. Counts beyond the buffer length clamp to the last visible row.",
     ActionPriority::Rare
 );
 

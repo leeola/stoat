@@ -5427,9 +5427,15 @@ fn goto_line_row(stoat: &mut Stoat, count: u32, extend: bool) -> UpdateEffect {
 /// it. Select mode binds `G` to the extending flavor, which is stoat's own
 /// scheme rather than a key Helix rebinds there, and a count reaching the
 /// target is what makes the two flavors agree on what `G` means.
+/// The handler behind `GotoLineNumber` and `ExtendGotoLineNumber`, which move
+/// or extend to the start of the line the pending count names.
+///
+/// A bare press does nothing. The last line has its own actions,
+/// `GotoLastLine` and `ExtendGotoLastLine`, and a jump the reader did not ask
+/// for pushes a jumplist entry and loses their place.
 pub(super) fn goto_line_number(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(count) = stoat.take_pending_count() else {
-        return goto_last_line(stoat, extend);
+        return UpdateEffect::None;
     };
     super::jump::push_jump(stoat);
     goto_line_row(stoat, count, extend)
