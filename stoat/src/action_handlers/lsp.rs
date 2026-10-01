@@ -12,12 +12,13 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    display_map::{DisplayPoint, DisplaySnapshot, InlayKind},
+    display_map::InlayKind,
     editor_state::ScrollGlide,
     host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
     input_view::{InputView, SubmitTarget},
     location_picker::{location_haystack, LocationEntry, LocationPicker},
     lsp::stamp::DocumentStamp,
+    render::editor,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
 };
 pub(crate) use lsp_types::Uri;
@@ -687,14 +688,15 @@ fn build_inlay_hint_request(
         let buf_snap = snapshot.buffer_snapshot();
         let rope = buf_snap.rope().clone();
         let end_row = (scroll_row + viewport).min(snapshot.line_count());
+        let visible = editor::visible_byte_range(&snapshot, &rope, scroll_row, end_row);
         (
             editor.buffer_id,
             buf_snap.version(),
             scroll_row,
             end_row,
-            rope.clone(),
-            display_row_offset(&snapshot, &rope, scroll_row),
-            display_row_offset(&snapshot, &rope, end_row),
+            rope,
+            visible.start,
+            visible.end,
         )
     };
 
@@ -722,16 +724,6 @@ fn build_inlay_hint_request(
         rope,
         params,
     })
-}
-
-/// Byte offset of the start of display `row`, clamped to the rope length.
-fn display_row_offset(snapshot: &DisplaySnapshot, rope: &Rope, row: u32) -> usize {
-    let rope_len = rope.len();
-    snapshot
-        .display_to_buffer(DisplayPoint::new(row, 0))
-        .map(|point| rope.point_to_offset(point))
-        .unwrap_or(rope_len)
-        .min(rope_len)
 }
 
 /// Convert LSP inlay hints into [`InlayHintItem`]s using the request-time rope.

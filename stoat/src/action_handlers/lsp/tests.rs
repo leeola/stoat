@@ -3238,6 +3238,49 @@ fn inlay_hints_refresh_after_edit() {
     assert_eq!(hint_ids_len(&mut h), 2);
 }
 
+#[test]
+fn an_inlay_request_starts_below_a_deleted_block_on_the_top_row() {
+    use crate::{diff_map::DiffMap, host::OffsetEncoding};
+    use std::sync::Arc;
+    use stoat_language::structural_diff;
+
+    let mut h = TestHarness::with_size(80, 24);
+    let root = seed(&mut h, &[("a.rs", "a\nb\nc\n")]);
+    open_buffer(&mut h, root.join("a.rs"));
+
+    let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("focused editor")
+        .buffer_id;
+    let (base, text) = ("a\nd1\nd2\nd3\nb\nc\n", "a\nb\nc\n");
+    h.stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)
+        .expect("buffer")
+        .write()
+        .expect("poisoned")
+        .diff_map = Some(DiffMap::from_structural_changes(
+        structural_diff::diff(base, text),
+        Arc::new(base.to_string()),
+        text,
+    ));
+
+    let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+    editor.set_diff_view(true);
+    editor.scroll_row = 1;
+    editor.viewport_rows = Some(5);
+
+    let range = super::build_inlay_hint_request(&mut h.stoat, OffsetEncoding::Utf8)
+        .expect("the focused editor builds a request")
+        .params
+        .range;
+    assert_eq!(
+        (range.start.line, range.end.line),
+        (1, 3),
+        "the range starts on the first buffer row below the deleted lines",
+    );
+}
+
 fn tree_sitter_token_count(h: &mut TestHarness) -> usize {
     let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
     let snapshot = editor.display_map.snapshot();
