@@ -12,6 +12,11 @@ const BORDER_PAD: usize = 2;
 const CONTENT_PAD: usize = 2;
 /// Rows a footer adds, being a separator and the text under it.
 const FOOTER_ROWS: usize = 2;
+/// The fewest columns of action text that a cut keeps.
+///
+/// A box too narrow to give every column this much draws nothing, because a key
+/// beside a stub of its action tells the reader nothing.
+const MIN_ACTION: usize = 8;
 
 #[derive(Clone)]
 pub(crate) struct HintsFooter {
@@ -236,19 +241,35 @@ fn lay_out(rows: &[(String, String)], key: LayoutKey) -> Option<HintsLayout> {
     let col_count = rows.len().div_ceil(available_rows);
     let rows_per_col = rows.len().div_ceil(col_count);
 
-    let columns: Vec<LaidColumn> = rows
-        .chunks(rows_per_col)
-        .map(|chunk| {
-            let key_width = chunk.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-            let action_width = chunk.iter().map(|(_, a)| a.len()).max().unwrap_or(0);
+    let chunks: Vec<&[(String, String)]> = rows.chunks(rows_per_col).collect();
+    let key_widths: Vec<usize> = chunks
+        .iter()
+        .map(|chunk| widest(chunk.iter().map(|(k, _)| k)))
+        .collect();
+    let action_widths: Vec<usize> = chunks
+        .iter()
+        .map(|chunk| widest(chunk.iter().map(|(_, a)| a)))
+        .collect();
+
+    // A box wider than the area cuts its action text to fit, so every key stays
+    // on screen. If the keys leave too little room for text, the box keeps its
+    // text whole, lays out too wide, and draws nothing.
+    let caps = action_caps(&key_widths, &action_widths, key.area_width as usize)
+        .unwrap_or_else(|| action_widths.clone());
+
+    let columns: Vec<LaidColumn> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let (key_width, cap) = (key_widths[i], caps[i]);
             let cells = chunk
                 .iter()
-                .map(|(k, a)| (format!("{k:>key_width$}"), format!("   {a}")))
+                .map(|(k, a)| (format!("{k:>key_width$}"), format!("   {}", clip(a, cap))))
                 .collect();
             LaidColumn {
                 cells,
                 key_width,
-                action_width,
+                action_width: action_widths[i].min(cap),
             }
         })
         .collect();
@@ -273,6 +294,55 @@ fn lay_out(rows: &[(String, String)], key: LayoutKey) -> Option<HintsLayout> {
     })
 }
 
+/// The columns that the widest of `texts` spans, at one column per char as the
+/// painter draws them.
+fn widest<'a>(texts: impl Iterator<Item = &'a String>) -> usize {
+    texts.map(|text| text.chars().count()).max().unwrap_or(0)
+}
+
+/// The widest action text each column keeps, so a box of these columns fits
+/// `area_width`.
+///
+/// Columns whose actions are short keep them whole and leave the rest of their
+/// share to the columns with longer ones, so a cut lands only where the text is
+/// long. `None` when some column keeps neither its whole action text nor
+/// [`MIN_ACTION`] columns of it.
+fn action_caps(
+    key_widths: &[usize],
+    action_widths: &[usize],
+    area_width: usize,
+) -> Option<Vec<usize>> {
+    let fixed = BORDER_PAD
+        + CONTENT_PAD
+        + INTER_COL_GAP * key_widths.len().saturating_sub(1)
+        + key_widths.iter().map(|width| width + GAP).sum::<usize>();
+    let mut budget = area_width.checked_sub(fixed)?;
+
+    let mut by_width: Vec<usize> = (0..action_widths.len()).collect();
+    by_width.sort_by_key(|&column| action_widths[column]);
+    let mut caps = vec![0; action_widths.len()];
+    for (placed, &column) in by_width.iter().enumerate() {
+        let share = budget / (by_width.len() - placed);
+        caps[column] = action_widths[column].min(share);
+        budget -= caps[column];
+    }
+
+    caps.iter()
+        .zip(action_widths)
+        .all(|(&cap, &width)| cap >= width.min(MIN_ACTION))
+        .then_some(caps)
+}
+
+/// `text` cut to `cap` columns, ending in an ellipsis when it was longer.
+fn clip(text: &str, cap: usize) -> String {
+    if text.chars().count() <= cap {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(cap.saturating_sub(1)).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
 /// Collapses entries that share an action description, joining their keys with
 /// `", "` in first-seen order. Ensures each action appears on exactly one row.
 pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, String)> {
@@ -294,7 +364,7 @@ pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{group_by_action, render_hints_grouped, HintsCache, HintsFooter};
+    use super::{action_caps, group_by_action, render_hints_grouped, HintsCache, HintsFooter};
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -440,6 +510,40 @@ mod tests {
         assert!(
             wide > narrow,
             "the longer footer must widen the box, got {narrow} then {wide}",
+        );
+    }
+
+    /// A long action text is cut to fit the area, and its key stays on screen.
+    /// A short action text in the same column stays whole.
+    #[test]
+    fn a_box_too_wide_cuts_its_action_text_to_fit() {
+        let long = "x".repeat(60);
+        let buf = render(&[("a", long), ("b", "short".to_string())], 40, 10);
+
+        let rows: Vec<String> = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+        let cut = format!("a   {}\u{2026}", "x".repeat(31));
+        assert_eq!(
+            (
+                rows.iter().any(|row| row.contains(&cut)),
+                rows.iter().any(|row| row.contains("b   short")),
+            ),
+            (true, true),
+            "the long text ends in an ellipsis at the box edge: {rows:#?}",
+        );
+    }
+
+    #[test]
+    fn short_actions_keep_their_width_and_leave_the_rest_to_long_ones() {
+        assert_eq!(action_caps(&[1, 1], &[60, 5], 40), Some(vec![20, 5]));
+    }
+
+    /// One column with a one-column key spends 8 columns on its frame, padding,
+    /// key, and gap, so an area of 16 leaves exactly 8 for its action text.
+    #[test]
+    fn a_cut_keeps_at_least_eight_columns_of_action_text() {
+        assert_eq!(
+            (action_caps(&[1], &[60], 16), action_caps(&[1], &[60], 15)),
+            (Some(vec![8]), None),
         );
     }
 
