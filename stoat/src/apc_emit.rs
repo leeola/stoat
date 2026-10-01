@@ -498,6 +498,9 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
 /// conflict) -- is retired with `pool_drop`, so returning to it re-declares the
 /// region and refills the page window.
 ///
+/// A pool that took the cursor anchor is released with `pool_cursor_release` in
+/// the first pass after its pane stops being the focused editor.
+///
 /// Runs at the frame seam after the live frame is published, so the pane
 /// layout (and thus each editor rectangle) reflects the frame just drawn and
 /// the APC bytes are written to stdout right after the grid frame.
@@ -839,11 +842,18 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // the focused split editor outside insert mode. Resolved before the ws
     // borrow so the per-pane loop can gate on it.
     let focused_editor = stoat.focused_editor_ids().map(|(id, _)| id);
+    let focused_pool = panes
+        .iter()
+        .find(|(_, id, region)| region.window == 0 && focused_editor == Some(*id))
+        .map(|(_, _, region)| region.pool);
     let focused_insert = stoat.focused_mode() == "insert";
     let single_minimap = stoat.single_minimap_rect.is_some();
     // The focused detached pane's pool cursor, collected during the pane loop
     // and emitted after it, past the workspace borrow.
     let mut detached_cursor: Option<(u32, u64, u16)> = None;
+    // The pool that takes the cursor anchor in this pass, recorded after the
+    // loop, past the workspace borrow.
+    let mut anchored_pool: Option<u32> = None;
     let theme_epoch = stoat.theme_epoch;
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let theme = &stoat.theme;
@@ -1040,6 +1050,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     col,
                 },
             );
+            anchored_pool = Some(region.pool);
         }
 
         // A focused detached pane draws its cursor from its window pool. No
@@ -1108,6 +1119,22 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             );
         }
         stoat.aux_cursor = detached_cursor;
+    }
+
+    // An anchor outlives its glide in the terminal, so the pool keeps the cursor
+    // on a later glide unless it is released when its pane loses focus. A
+    // focused pane keeps its anchor through its own settle, since the terminal's
+    // ease continues for some frames after the editor's ends. A pass with an
+    // overlay screen has no panes, so it releases a held pool that the same pass
+    // drops, which the terminal ignores.
+    if let Some(pool) = stoat.pool_cursor_holder
+        && focused_pool != Some(pool)
+    {
+        stoatty_protocol::command::encode_pool_cursor_release_into(&mut out, pool);
+        stoat.pool_cursor_holder = None;
+    }
+    if anchored_pool.is_some() {
+        stoat.pool_cursor_holder = anchored_pool;
     }
 
     if let (Some(list), Some(finder)) = (finder_list, stoat.file_finder.as_ref()) {

@@ -2860,6 +2860,127 @@ fn emit_smooth_scroll_anchors_the_cursor_during_a_wheel_glide() {
 }
 
 #[test]
+fn a_pane_that_loses_focus_releases_its_cursor_anchor() {
+    let (mut h, mut rx) = split_pool_harness();
+    let id = h.stoat.focused_editor_ids().expect("focused editor").0;
+    arm_focused_glide(&mut h);
+
+    emit_smooth_scroll(&mut h.stoat);
+    let frames = cursor_frames(&mut rx);
+    let held = *frames.0.first().expect("the gliding pane takes the anchor");
+    assert_eq!(
+        frames,
+        (vec![held], vec![]),
+        "only the focused glide takes the anchor",
+    );
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    emit_smooth_scroll(&mut h.stoat);
+    assert_eq!(
+        cursor_frames(&mut rx),
+        (vec![], vec![held]),
+        "the pane that lost focus gives the cursor up",
+    );
+
+    emit_smooth_scroll(&mut h.stoat);
+    assert_eq!(
+        cursor_frames(&mut rx),
+        (vec![], vec![]),
+        "the release goes out once",
+    );
+
+    h.stoat
+        .active_workspace_mut()
+        .editors
+        .get_mut(id)
+        .expect("the first focused editor")
+        .scroll_glide = ScrollGlide::Wheel;
+    emit_smooth_scroll(&mut h.stoat);
+    assert_eq!(
+        cursor_frames(&mut rx),
+        (vec![], vec![]),
+        "a glide of the pane without focus takes no anchor",
+    );
+}
+
+#[test]
+fn a_focused_pane_keeps_its_anchor_when_its_glide_ends() {
+    let (mut h, mut rx) = split_pool_harness();
+    arm_focused_glide(&mut h);
+    emit_smooth_scroll(&mut h.stoat);
+    let held = *cursor_frames(&mut rx)
+        .0
+        .first()
+        .expect("the gliding pane takes the anchor");
+
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("focused editor")
+        .scroll_glide = ScrollGlide::None;
+    emit_smooth_scroll(&mut h.stoat);
+
+    assert_eq!(
+        cursor_frames(&mut rx).1,
+        Vec::<u32>::new(),
+        "the end of a focused glide releases nothing",
+    );
+    assert_eq!(
+        h.stoat.pool_cursor_holder,
+        Some(held),
+        "the focused pool still holds the cursor",
+    );
+}
+
+/// A 200-line file in two side-by-side panes, with the APC channel drained.
+fn split_pool_harness() -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/pool");
+    let path = root.join("a.txt");
+    let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    h.fake_fs().insert_file(&path, body.as_bytes());
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+
+    h.type_action("SplitRight()");
+    h.settle();
+    while rx.try_recv().is_ok() {}
+    (h, rx)
+}
+
+/// Arm a wheel glide on the focused editor with its cursor on screen, the
+/// state in which the emit ships a cursor anchor.
+fn arm_focused_glide(h: &mut crate::test_harness::TestHarness) {
+    let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+    editor.scroll_glide = ScrollGlide::Wheel;
+    editor.cursor_screen_cell = Some((7, 3));
+}
+
+/// The pools of the `pool_cursor` frames and of the `pool_cursor_release`
+/// frames queued on `rx`, draining it.
+fn cursor_frames(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> (Vec<u32>, Vec<u32>) {
+    use stoatty_protocol::command::Command;
+
+    let mut anchored = Vec::new();
+    let mut released = Vec::new();
+    for frame in drain_apc(rx) {
+        match frame {
+            Command::PoolCursor(cursor) => anchored.push(cursor.pool),
+            Command::PoolCursorRelease(release) => released.push(release.pool),
+            _ => {},
+        }
+    }
+    (anchored, released)
+}
+
+#[test]
 fn a_jump_ships_the_cursor_anchor_at_the_landed_row() {
     use stoatty_protocol::command::Command;
 

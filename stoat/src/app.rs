@@ -1027,6 +1027,13 @@ pub struct Stoat {
     /// col)`, so [`Self::emit_smooth_scroll`] re-emits only when it moves and an
     /// idle frame ships nothing. `None` when no detached pane holds focus.
     pub(crate) aux_cursor: Option<(u32, u64, u16)>,
+    /// The main-window pool that last took a cursor anchor from
+    /// [`apc_emit::emit_smooth_scroll`].
+    ///
+    /// The terminal keeps an anchor until it is released, and draws the cursor
+    /// on any anchored pool that glides. So the emit releases this pool once its
+    /// pane is no longer the focused editor. `None` when no pool holds one.
+    pub(crate) pool_cursor_holder: Option<u32>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -2356,6 +2363,7 @@ impl Stoat {
             zoom_claimed: false,
             aux_windows: std::collections::BTreeMap::new(),
             aux_cursor: None,
+            pool_cursor_holder: None,
             _index_build_task: None,
             redraw_notify,
             drain_notify,
