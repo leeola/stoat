@@ -901,6 +901,43 @@ impl Keymap {
             .map(|binding| (binding.key.display_label(), binding.actions.as_ref()))
             .collect()
     }
+
+    /// Returns `(key, actions)` for the chord entries and the context keys a
+    /// press reaches in `state`.
+    ///
+    /// This is the hint list for a primary mode, where [`Self::active_keys`]
+    /// lists the whole editor keymap. A chord entry runs `SetMode` into a mode
+    /// outside `primary_modes`. A context key has a guard that names a field
+    /// other than `mode`, such as a view, a symbol kind, or a flag.
+    ///
+    /// A negated guard such as `!modal` does not count, because it keeps a key
+    /// out of a state and claims no scope of its own. In a chord mode, use
+    /// [`Self::active_keys`], because the chord is the list.
+    pub fn context_bindings(
+        &self,
+        state: &dyn KeymapState,
+        primary_modes: &[&str],
+    ) -> Vec<(&CompiledKey, &[ResolvedAction])> {
+        self.effective_bindings(state)
+            .into_iter()
+            .filter(|binding| {
+                let scoped = binding
+                    .predicates
+                    .iter()
+                    .any(|p| predicate_names_other_field(p, "mode"));
+                let enters_chord = binding.actions.iter().any(|action| {
+                    action.name == "SetMode"
+                        && action
+                            .args
+                            .first()
+                            .and_then(|arg| value_str(&arg.value))
+                            .is_some_and(|mode| !primary_modes.contains(&mode))
+                });
+                scoped || enters_chord
+            })
+            .map(|binding| (&binding.key, binding.actions.as_ref()))
+            .collect()
+    }
 }
 
 /// Reports whether `name` is an action name nothing will run.
@@ -925,6 +962,28 @@ fn predicate_eq_matches(pred: &Predicate, field: &str, value: &str) -> bool {
         // A negated scope equality is not a scope claim, so `Not` is not walked.
         Predicate::Not(_) => false,
         _ => false,
+    }
+}
+
+/// Whether `pred` holds an atom on a field other than `field` outside any `!`.
+///
+/// `Not` is not walked, for the reason [`predicate_eq_matches`] gives: a
+/// negated atom is not a scope claim.
+fn predicate_names_other_field(pred: &Predicate, field: &str) -> bool {
+    match pred {
+        Predicate::Eq(f, _)
+        | Predicate::NotEq(f, _)
+        | Predicate::Gt(f, _)
+        | Predicate::Lt(f, _)
+        | Predicate::Gte(f, _)
+        | Predicate::Lte(f, _)
+        | Predicate::Matches(f, _)
+        | Predicate::Bool(f) => f.node != field,
+        Predicate::And(l, r) | Predicate::Or(l, r) => {
+            predicate_names_other_field(&l.node, field)
+                || predicate_names_other_field(&r.node, field)
+        },
+        Predicate::Not(_) => false,
     }
 }
 
@@ -3466,5 +3525,46 @@ mod tests {
             .map(|(_, a)| a[0].name.clone())
             .collect();
         assert_eq!(scoped, vec!["CloseHelp".to_string()]);
+    }
+
+    #[test]
+    fn context_bindings_keeps_chord_entries_and_context_keys() {
+        let config = parse_config(
+            r#"on key {
+                Ctrl-? -> ToggleKeyHints();
+                !modal && mode == "normal" {
+                    j -> MoveDown();
+                    Space -> SetMode(space);
+                    i -> SetMode(insert);
+                }
+                view == "diff" && mode == "normal" {
+                    n -> GotoNextChange();
+                }
+                token && mode == "normal" {
+                    d -> GotoDefinition();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("diff".into()))
+            .set("token", StateValue::Bool(true));
+
+        let listed: Vec<_> = keymap
+            .context_bindings(&state, &["normal", "insert"])
+            .iter()
+            .map(|(k, a)| (k.display_label(), a[0].name.clone()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("Spc".to_string(), "SetMode".to_string()),
+                ("n".to_string(), "GotoNextChange".to_string()),
+                ("d".to_string(), "GotoDefinition".to_string()),
+            ],
+            "the editor key, the primary-mode entry, and the unguarded toggle stay out",
+        );
     }
 }

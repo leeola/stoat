@@ -1318,8 +1318,10 @@ pub(crate) fn frame(
 
         if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
             // The conflict screen rides on normal mode, so scope to its own
-            // `view == conflict` bindings. A chord sub-mode owns its whole
-            // mode, so take them all.
+            // `view == conflict` bindings. A primary mode narrows to the chord
+            // entries and the context-bound keys, because the whole editor
+            // keymap is what the help screen is for. A chord sub-mode owns its
+            // whole mode, so take them all.
             let state = StoatKeymapState::with_flags(mode, flags)
                 .with_view(screen)
                 .with_token(token)
@@ -1327,16 +1329,18 @@ pub(crate) fn frame(
             let raw = if screen == Some("conflict") {
                 stoat.keymap.scoped_bindings(&state, "view", "conflict")
             } else {
+                let keys = if PRIMARY_MODES.contains(&mode) {
+                    stoat.keymap.context_bindings(&state, PRIMARY_MODES)
+                } else {
+                    stoat.keymap.active_keys(&state)
+                };
                 // Wheel gestures are left out. This overlay affords pressing
                 // one of the keys it lists, which a notch is not. Width is also
-                // the scarce resource here, because normal mode already fills
+                // the scarce resource here, because a large chord already fills
                 // two columns and a third overflows any ordinary terminal. The
                 // help screen reads the unfiltered set, so nothing is hidden
                 // from a reader looking for it.
-                stoat
-                    .keymap
-                    .active_keys(&state)
-                    .into_iter()
+                keys.into_iter()
                     .filter(|(key, _)| key.wheel.is_none())
                     .map(|(key, actions)| (key.display_label(), actions))
                     .collect()
@@ -1697,6 +1701,7 @@ mod dispatch_tests {
 mod lsp_filter_tests {
     use crate::{lsp::LspSymbolKind, test_harness::TestHarness};
     use std::sync::Arc;
+    use stoat_action::registry;
 
     /// Render one frame and flatten the painted cells into searchable text.
     fn box_text(h: &mut TestHarness) -> String {
@@ -1768,6 +1773,30 @@ mod lsp_filter_tests {
         assert!(
             !over_function.contains("implementor of the trait"),
             "the implementors row is hidden over a function"
+        );
+    }
+
+    /// The normal-mode box, forced open, lists the chords that lead on from
+    /// here, not the whole editor keymap that the help screen holds.
+    #[test]
+    fn the_forced_normal_box_lists_chords_not_the_editor_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        open_foo_bar(&mut h);
+        h.stoat.key_hints_visible = true;
+
+        let text = box_text(&mut h);
+        let move_down = registry::lookup("MoveDown")
+            .expect("MoveDown is registered")
+            .def
+            .short_desc();
+        assert_eq!(
+            (
+                text.contains("space mode"),
+                text.contains("goto mode"),
+                text.contains(move_down),
+            ),
+            (true, true, false),
+            "the box lists the chord entries and leaves out the editor keys:\n{text}",
         );
     }
 

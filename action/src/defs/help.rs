@@ -22,8 +22,9 @@ define_action!(
     ActionKind::ToggleKeyHints,
     "toggle the keybinding hints overlay",
     "Show or hide the compact keybinding hints overlay for the current \
-     mode. Normal mode shows it on nothing else, so this is how to bring up \
-     its active-binding list. Invoke it again to dismiss.",
+     mode. Normal and insert mode show it on nothing else, and there it \
+     lists the chord entries and the keys the current view, symbol, or state \
+     binds. A chord mode lists its whole chord. Invoke it again to dismiss.",
     ActionPriority::Common,
     command_name = "hints"
 );
