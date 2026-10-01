@@ -23,6 +23,73 @@ const FONT_SIZE_FLOOR: u32 = 6;
 /// stepping the zoom never reaches it.
 const FONT_SIZE_CEIL: u32 = 256;
 
+/// The shape of the xterm sequence a named navigation, editing, or function
+/// key sends, which decides where its modifier parameter goes.
+///
+/// Each variant holds the byte or number that tells apart the keys of its
+/// shape. A modified key always takes a CSI form, because only CSI carries a
+/// parameter.
+enum XtermKey {
+    /// The arrows, Home, and End send `ESC [ X`, or `ESC [ 1 ; m X` when
+    /// modified.
+    Csi(u8),
+
+    /// F1 to F4 send `ESC O X`, or `ESC [ 1 ; m X` when modified.
+    Ss3(u8),
+
+    /// Insert, Delete, PageUp, PageDown, and F5 to F12 send `ESC [ n ~`, or
+    /// `ESC [ n ; m ~` when modified.
+    Tilde(u8),
+}
+
+impl XtermKey {
+    /// The shape `key` sends, or `None` for a named key with no sequence of
+    /// these shapes.
+    fn of(key: NamedKey) -> Option<Self> {
+        let shape = match key {
+            NamedKey::ArrowUp => Self::Csi(b'A'),
+            NamedKey::ArrowDown => Self::Csi(b'B'),
+            NamedKey::ArrowRight => Self::Csi(b'C'),
+            NamedKey::ArrowLeft => Self::Csi(b'D'),
+            NamedKey::Home => Self::Csi(b'H'),
+            NamedKey::End => Self::Csi(b'F'),
+            NamedKey::F1 => Self::Ss3(b'P'),
+            NamedKey::F2 => Self::Ss3(b'Q'),
+            NamedKey::F3 => Self::Ss3(b'R'),
+            NamedKey::F4 => Self::Ss3(b'S'),
+            NamedKey::Insert => Self::Tilde(2),
+            NamedKey::Delete => Self::Tilde(3),
+            NamedKey::PageUp => Self::Tilde(5),
+            NamedKey::PageDown => Self::Tilde(6),
+            NamedKey::F5 => Self::Tilde(15),
+            NamedKey::F6 => Self::Tilde(17),
+            NamedKey::F7 => Self::Tilde(18),
+            NamedKey::F8 => Self::Tilde(19),
+            NamedKey::F9 => Self::Tilde(20),
+            NamedKey::F10 => Self::Tilde(21),
+            NamedKey::F11 => Self::Tilde(23),
+            NamedKey::F12 => Self::Tilde(24),
+            _ => return None,
+        };
+        Some(shape)
+    }
+
+    /// The bytes the key sends under the xterm modifier parameter `param`.
+    ///
+    /// A `param` of 1 names no modifier and keeps the plain form.
+    fn bytes(self, param: u8) -> Vec<u8> {
+        match self {
+            Self::Csi(final_byte) if param == 1 => vec![0x1b, b'[', final_byte],
+            Self::Ss3(final_byte) if param == 1 => vec![0x1b, b'O', final_byte],
+            Self::Csi(final_byte) | Self::Ss3(final_byte) => {
+                format!("\x1b[1;{param}{}", char::from(final_byte)).into_bytes()
+            },
+            Self::Tilde(number) if param == 1 => format!("\x1b[{number}~").into_bytes(),
+            Self::Tilde(number) => format!("\x1b[{number};{param}~").into_bytes(),
+        }
+    }
+}
+
 /// The font-size step a key press maps to, or `None` when it is not the
 /// platform zoom combo.
 ///
@@ -147,9 +214,12 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
 ///
 /// The named editing, navigation, and function keys send their xterm
 /// normal-mode sequences, which is what the child terminal parser decodes back
-/// into the matching key. Only the plain forms are sent: a modified navigation
-/// key writes its unmodified sequence, matching the cursor keys, which have no
-/// application-mode form here either.
+/// into the matching key. A held Shift, Alt, or Ctrl goes in the xterm modifier
+/// parameter `1 + shift + 2 * alt + 4 * ctrl`. Ctrl-Left is then
+/// `ESC [ 1 ; 5 D`, and Alt-Delete is `ESC [ 3 ; 3 ~`. A modified F1 to F4
+/// takes that CSI form in place of its SS3 form, because SS3 carries no
+/// parameter. Super has no bit. The cursor keys have no application-mode form
+/// here.
 pub(crate) fn encode_key(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
     encode_key_with(key, mods, cfg!(target_os = "macos"))
 }
@@ -171,28 +241,10 @@ fn encode_key_with(key: &Key, mods: ModifiersState, option_composes: bool) -> Op
         Key::Named(NamedKey::Tab) => Some(alt_prefixed(alt, b"\t")),
         Key::Named(NamedKey::Space) => Some(alt_prefixed(alt, b" ")),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
-        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
-        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
-        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
-        Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
-        Key::Named(NamedKey::Insert) => Some(b"\x1b[2~".to_vec()),
-        Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
-        Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
-        Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
-        Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
-        Key::Named(NamedKey::F1) => Some(b"\x1bOP".to_vec()),
-        Key::Named(NamedKey::F2) => Some(b"\x1bOQ".to_vec()),
-        Key::Named(NamedKey::F3) => Some(b"\x1bOR".to_vec()),
-        Key::Named(NamedKey::F4) => Some(b"\x1bOS".to_vec()),
-        Key::Named(NamedKey::F5) => Some(b"\x1b[15~".to_vec()),
-        Key::Named(NamedKey::F6) => Some(b"\x1b[17~".to_vec()),
-        Key::Named(NamedKey::F7) => Some(b"\x1b[18~".to_vec()),
-        Key::Named(NamedKey::F8) => Some(b"\x1b[19~".to_vec()),
-        Key::Named(NamedKey::F9) => Some(b"\x1b[20~".to_vec()),
-        Key::Named(NamedKey::F10) => Some(b"\x1b[21~".to_vec()),
-        Key::Named(NamedKey::F11) => Some(b"\x1b[23~".to_vec()),
-        Key::Named(NamedKey::F12) => Some(b"\x1b[24~".to_vec()),
+        Key::Named(named) => {
+            let param = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+            XtermKey::of(*named).map(|xterm_key| xterm_key.bytes(param))
+        },
         // winit composes Option into the logical key only while Ctrl is up.
         // So a character key with Ctrl keeps its Alt on macOS too.
         Key::Character(s) if ctrl => ctrl_byte(s)
@@ -829,6 +881,32 @@ mod tests {
             Some("\u{2202}".as_bytes().to_vec()),
             "the character Option composed takes no prefix"
         );
+    }
+
+    #[test]
+    fn encode_key_gives_csi_keys_their_modifier_parameter() {
+        let ctrl = ModifiersState::CONTROL;
+        let shift = ModifiersState::SHIFT;
+        let alt = ModifiersState::ALT;
+
+        let cases: [(NamedKey, ModifiersState, &[u8]); 9] = [
+            (NamedKey::ArrowLeft, ctrl, b"\x1b[1;5D"),
+            (NamedKey::ArrowUp, shift, b"\x1b[1;2A"),
+            (NamedKey::ArrowDown, alt, b"\x1b[1;3B"),
+            (NamedKey::End, ctrl | shift, b"\x1b[1;6F"),
+            (NamedKey::Delete, alt, b"\x1b[3;3~"),
+            (NamedKey::Delete, ctrl, b"\x1b[3;5~"),
+            (NamedKey::F5, ctrl, b"\x1b[15;5~"),
+            (NamedKey::F1, alt, b"\x1b[1;3P"),
+            (NamedKey::ArrowLeft, ModifiersState::empty(), b"\x1b[D"),
+        ];
+        for (key, mods, bytes) in cases {
+            assert_eq!(
+                encode_key(&Key::Named(key), mods),
+                Some(bytes.to_vec()),
+                "{key:?} with {mods:?}"
+            );
+        }
     }
 
     #[test]
