@@ -602,6 +602,21 @@ impl Workspace {
         })
     }
 
+    /// Whether a pane in any tab, detached into a window or not, or a dock shows
+    /// `term_id`.
+    pub(crate) fn term_shown(&self, term_id: TermId) -> bool {
+        let shows =
+            |view: &View| matches!(view, View::Terminal(t) | View::Agent(t) if *t == term_id);
+        let in_tree = |tree: &PaneTree| {
+            tree.split_panes().any(|(_, pane)| shows(&pane.view))
+                || tree
+                    .windowed_panes()
+                    .into_iter()
+                    .any(|(id, _)| shows(&tree.pane(id).view))
+        };
+        self.pane_trees().any(in_tree) || self.docks.values().any(|dock| shows(&dock.view))
+    }
+
     /// Stable identifier for this session across restarts.
     ///
     /// Keys the workspace's on-disk state file and its per-session agent hook

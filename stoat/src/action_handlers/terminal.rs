@@ -66,24 +66,12 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
 /// The live shell `pane` covers, ready to be shown again.
 ///
 /// `None` unless the pane's record names a terminal, the workspace still holds
-/// that session, and nothing else on screen already shows it.
+/// that session, and no view in any tab, window, or dock already shows it.
 pub(super) fn covered_terminal(ws: &Workspace, pane: PaneId) -> Option<TermId> {
     let Some(View::Terminal(term_id)) = ws.panes.pane(pane).prev_view else {
         return None;
     };
-    if !ws.terms.contains_key(term_id) {
-        return None;
-    }
-
-    let shown_in_pane = ws.panes.split_pane_ids().into_iter().any(
-        |id| matches!(ws.panes.pane(id).view, View::Terminal(t) | View::Agent(t) if t == term_id),
-    );
-    let shown_in_dock = ws
-        .docks
-        .iter()
-        .any(|(_, dock)| matches!(dock.view, View::Terminal(t) | View::Agent(t) if t == term_id));
-
-    (!shown_in_pane && !shown_in_dock).then_some(term_id)
+    (ws.terms.contains_key(term_id) && !ws.term_shown(term_id)).then_some(term_id)
 }
 
 /// Respawn a fresh shell for every persisted terminal pane and dock whose
@@ -355,6 +343,58 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_pane_over_a_covered_shell_ends_the_shell() {
+        assert_eq!(
+            close_over_a_covered_shell(&stoat_action::ClosePane, |_, _| {}),
+            (false, true),
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_keeps_a_covered_shell_that_a_dock_shows() {
+        assert_eq!(
+            close_over_a_covered_shell(&stoat_action::ClosePane, show_in_a_dock),
+            (true, false),
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_over_a_covered_shell_ends_the_shell() {
+        let away_and_back = |stoat: &mut Stoat, _| {
+            super::super::dispatch(stoat, &stoat_action::NewTab);
+            super::super::dispatch(stoat, &stoat_action::PrevTab);
+        };
+        assert_eq!(
+            close_over_a_covered_shell(&stoat_action::CloseTab, away_and_back),
+            (false, true),
+        );
+    }
+
+    /// Cover a live shell in a second pane, run `before`, dispatch `close`,
+    /// and report whether the session lives on and whether its child was
+    /// killed.
+    fn close_over_a_covered_shell(
+        close: &dyn stoat_action::Action,
+        before: impl FnOnce(&mut Stoat, TermId),
+    ) -> (bool, bool) {
+        let mut h = Stoat::test();
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        let hidden = hide_a_live_terminal(&mut h);
+        before(&mut h.stoat, hidden);
+
+        super::super::dispatch(&mut h.stoat, close);
+        h.settle();
+
+        (
+            h.stoat.active_workspace().terms.contains_key(hidden),
+            h.fake_terminal().was_killed(),
+        )
+    }
+
+    #[test]
     fn a_dead_recorded_shell_spawns_a_fresh_one() {
         let mut h = Stoat::test();
         let hidden = hide_a_live_terminal(&mut h);
@@ -401,16 +441,44 @@ mod tests {
 
     #[test]
     fn a_shell_a_dock_shows_spawns_a_fresh_one() {
+        refuses_a_shell_shown_elsewhere(show_in_a_dock);
+    }
+
+    #[test]
+    fn a_shell_another_tab_shows_spawns_a_fresh_one() {
+        refuses_a_shell_shown_elsewhere(|stoat, hidden| {
+            super::super::dispatch(stoat, &stoat_action::NewTab);
+            let ws = stoat.active_workspace_mut();
+            let pane = ws.panes.focus();
+            ws.panes.pane_mut(pane).view = View::Terminal(hidden);
+            super::super::dispatch(stoat, &stoat_action::PrevTab);
+        });
+    }
+
+    #[test]
+    fn a_shell_a_window_shows_spawns_a_fresh_one() {
+        refuses_a_shell_shown_elsewhere(|stoat, hidden| {
+            let ws = stoat.active_workspace_mut();
+            let side = ws.panes.split(crate::pane::Axis::Vertical);
+            ws.panes.pane_mut(side).view = View::Terminal(hidden);
+            assert!(
+                ws.panes.detach(side, 1),
+                "the side pane leaves for a window"
+            );
+        });
+    }
+
+    /// Show `term` in a hidden dock, a surface that keeps the session alive
+    /// with no pane on it.
+    fn show_in_a_dock(stoat: &mut Stoat, term: TermId) {
         use crate::pane::{DockPanel, DockSide, DockVisibility};
 
-        refuses_a_shell_shown_elsewhere(|stoat, hidden| {
-            stoat.active_workspace_mut().docks.insert(DockPanel {
-                view: View::Terminal(hidden),
-                side: DockSide::Right,
-                visibility: DockVisibility::Hidden,
-                default_width: 30,
-                area: Default::default(),
-            });
+        stoat.active_workspace_mut().docks.insert(DockPanel {
+            view: View::Terminal(term),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Default::default(),
         });
     }
 

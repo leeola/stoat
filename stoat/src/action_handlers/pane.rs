@@ -97,14 +97,34 @@ pub(super) fn toggle_pane_widen(stoat: &mut Stoat) {
 /// Closes a specific pane by id and disposes its backing view state. Returns
 /// `false` when the pane tree refused to close (only one split pane
 /// remains); in that case no state is touched.
+///
+/// A shell the pane covered ends with it, unless another view shows it.
 pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let view = ws.panes.pane(id).view.clone();
+    let (view, covered) = {
+        let pane = ws.panes.pane(id);
+        let covered = match pane.prev_view {
+            Some(View::Terminal(term_id)) => Some(term_id),
+            _ => None,
+        };
+        (pane.view.clone(), covered)
+    };
     if !ws.panes.close(id) {
         return false;
     }
+
     dispose_view(ws, &executor, view, EditorDisposal::Remove);
+    if let Some(term_id) = covered
+        && !ws.term_shown(term_id)
+    {
+        dispose_view(
+            ws,
+            &executor,
+            View::Terminal(term_id),
+            EditorDisposal::Remove,
+        );
+    }
     true
 }
 

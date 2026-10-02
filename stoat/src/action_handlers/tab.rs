@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::pane::{dispose_view, EditorDisposal},
     app::{Stoat, UpdateEffect},
+    pane::View,
 };
 use stoat_config::TabBarMode;
 
@@ -68,6 +69,8 @@ pub(super) fn toggle_tab(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// Editors go through the referenced check rather than being dropped outright,
 /// since tabs share a workspace's editors and another tab may still show one.
+/// A shell that a pane of the tab covered ends with the tab, unless another
+/// view shows it.
 pub(super) fn close_tab(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
@@ -81,8 +84,25 @@ pub(super) fn close_tab(stoat: &mut Stoat) -> UpdateEffect {
         .split_panes()
         .map(|(_, pane)| pane.view.clone())
         .collect();
+    let covered: Vec<_> = closed
+        .split_panes()
+        .filter_map(|(_, pane)| match pane.prev_view {
+            Some(View::Terminal(term_id)) => Some(term_id),
+            _ => None,
+        })
+        .collect();
     for view in views {
         dispose_view(ws, &executor, view, EditorDisposal::GcIfUnreferenced);
+    }
+    for term_id in covered {
+        if !ws.term_shown(term_id) {
+            dispose_view(
+                ws,
+                &executor,
+                View::Terminal(term_id),
+                EditorDisposal::GcIfUnreferenced,
+            );
+        }
     }
 
     relayout(stoat);
