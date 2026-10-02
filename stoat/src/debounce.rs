@@ -134,7 +134,9 @@ impl PathEdit {
 /// A `.git` write goes to [`arm_diff_refresh_debounce`] and a working-tree file
 /// to [`arm_index_external_edit_debounce`]. While [`Stoat::follow_changes`] is
 /// on, a written working-tree file also goes to
-/// [`auto_reload::note_followed_change`]. None of them does the work here. Each
+/// [`auto_reload::note_followed_change`]. While [`Stoat::live_reload`] is on, a
+/// written file with an open buffer also goes to
+/// [`auto_reload::note_live_reload`]. None of them does the work here. Each
 /// arms a timer whose drain lands on the main loop later.
 ///
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
@@ -214,6 +216,20 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
                 .is_some_and(|meta| !meta.is_dir)
         {
             auto_reload::note_followed_change(stoat, path.clone());
+        }
+
+        if stoat.live_reload
+            && matches!(
+                kind,
+                FsEventKind::Modified | FsEventKind::Created | FsEventKind::Renamed
+            )
+            && stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(&path)
+                .is_some()
+        {
+            auto_reload::note_live_reload(stoat, path.clone());
         }
 
         // Past the ignored-directory filter, so what is left is a real

@@ -34,6 +34,7 @@ use crate::{
     pane::{FocusTarget, PaneId, View},
 };
 use std::{
+    mem,
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -159,6 +160,10 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
 /// A dirty buffer, a file whose mtime has not moved, and a file whose last read
 /// is still out start nothing, so in-memory edits are never clobbered and one
 /// file costs one read at a time. Returns whether a read was spawned.
+///
+/// `mode` decides what the install does with the cursors, and
+/// [`AutoReloadMode::Off`] moves none, which is what a live reload of an
+/// unflagged buffer passes.
 pub(crate) fn stat_and_read_buffer(
     stoat: &mut Stoat,
     id: BufferId,
@@ -930,6 +935,59 @@ fn follow_target(stoat: &Stoat) -> Option<PaneId> {
     matches!(ws.panes.pane(pane).view, View::Editor(_)).then_some(pane)
 }
 
+/// Hold `path`, the file of an open buffer written outside the editor, for the
+/// live-reload window.
+///
+/// The window opens on the first write of a burst and closes a fixed
+/// [`FS_WATCH_DEBOUNCE`] later, as the follow window does.
+pub(crate) fn note_live_reload(stoat: &mut Stoat, path: PathBuf) {
+    stoat.live_reload_pending.insert(path);
+    if stoat.live_reload_timer.is_some() {
+        return;
+    }
+
+    let executor = stoat.executor.clone();
+    let tx = stoat.live_reload_tx.clone();
+    let redraw = stoat.redraw_notify.clone();
+    stoat.live_reload_timer = Some(stoat.executor.spawn_with_redraw(redraw, async move {
+        executor.timer(FS_WATCH_DEBOUNCE).await;
+        let _ = tx.send(()).await;
+    }));
+}
+
+/// Start a read for every held path once the live-reload window closes, and
+/// report whether any read started.
+///
+/// A path whose last read is still out stays held and arms the window again.
+/// The install records the mtime of the stat that started that read, so a write
+/// that lands during the read is otherwise never read until the file changes
+/// again.
+///
+/// Each read takes the buffer's own [`AutoReloadMode`]. An unflagged buffer
+/// reads under [`AutoReloadMode::Off`], which moves no cursor, and a buffer
+/// flagged through `:auto-reload` keeps the cursor behavior it asked for.
+pub(crate) fn drain_live_reload(stoat: &mut Stoat) -> bool {
+    if stoat.live_reload_rx.try_recv().is_err() {
+        return false;
+    }
+    stoat.live_reload_timer = None;
+
+    let mut spawned = false;
+    for path in mem::take(&mut stoat.live_reload_pending) {
+        let Some(id) = stoat.active_workspace().buffers.id_for_path(&path) else {
+            continue;
+        };
+        if stoat.pending_auto_reloads.iter().any(|p| p.id == id) {
+            note_live_reload(stoat, path);
+            continue;
+        }
+
+        let mode = stoat.active_workspace().buffers.auto_reload_mode(id);
+        spawned |= stat_and_read_buffer(stoat, id, &path, mode);
+    }
+    spawned
+}
+
 /// Set whether saving a config file re-applies it, backing
 /// `:auto-reload-config`.
 ///
@@ -1092,7 +1150,7 @@ mod tests {
         collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, follow_change_now,
         open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install, reload_all,
         reload_focused, session_log_path, set_auto_reload_config, set_buffer_auto_reload,
-        target_log_stem, toggle_follow_changes,
+        stat_and_read_buffer, target_log_stem, toggle_follow_changes,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -1105,7 +1163,10 @@ mod tests {
         test_harness::{editor, TestHarness},
         Stoat,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+    };
     use stoat_action::{MoveDown, OpenFile};
 
     /// Latin-1 bytes, which are not valid UTF-8.
@@ -1506,8 +1567,8 @@ mod tests {
     }
 
     /// A repo where `a.rs` and `b.rs` both differ from HEAD on their second
-    /// row, with follow on and `a.rs` open in the focused pane.
-    fn follow_harness() -> TestHarness {
+    /// row.
+    fn changed_repo() -> TestHarness {
         let mut h = TestHarness::with_size(80, 24);
         h.stage_review_scenario(
             "/repo",
@@ -1516,9 +1577,34 @@ mod tests {
                 ("b.rs", "x\ny\nz\n", "x\nY\nz\n"),
             ],
         );
+        h
+    }
+
+    /// The [`changed_repo`] with follow on and `a.rs` open in the focused pane.
+    fn follow_harness() -> TestHarness {
+        let mut h = changed_repo();
         h.open_file(Path::new("/repo/a.rs"));
         h.stoat.follow_changes = true;
         h
+    }
+
+    /// The [`changed_repo`] with live reload on and both files open, `a.rs`
+    /// focused, and the buffer ids of `a.rs` and `b.rs`.
+    fn live_reload_harness() -> (TestHarness, BufferId, BufferId) {
+        let mut h = changed_repo();
+        h.open_file(Path::new("/repo/b.rs"));
+        h.open_file(Path::new("/repo/a.rs"));
+        h.stoat.live_reload = true;
+
+        let id = |h: &TestHarness, path: &str| {
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(Path::new(path))
+                .expect("open buffer")
+        };
+        let (a, b) = (id(&h, "/repo/a.rs"), id(&h, "/repo/b.rs"));
+        (h, a, b)
     }
 
     /// The focused buffer's path, whether its editor shows the diff view, and
@@ -1664,6 +1750,145 @@ mod tests {
             h.stoat.active_workspace().panes.pane(focus).view,
             View::Label(_)
         ));
+    }
+
+    #[test]
+    fn a_watched_write_reloads_every_open_buffer_in_place() {
+        let (mut h, a, b) = live_reload_harness();
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        h.fake_fs().insert_file("/repo/b.rs", b"x\nY\nZ\n");
+        watched_write(&mut h, "/repo/a.rs", FsEventKind::Modified);
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            (
+                landing(&mut h),
+                buffer_text(&h, a),
+                buffer_text(&h, b),
+                editor::focused_dirty(&h.stoat)
+            ),
+            (
+                (PathBuf::from("/repo/a.rs"), false, 0),
+                "a\nB\nC\n".to_string(),
+                "x\nY\nZ\n".to_string(),
+                false
+            ),
+            "both buffers reload clean, and the pane, view, and cursor stay put",
+        );
+    }
+
+    #[test]
+    fn live_reload_leaves_a_last_line_cursor_put() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/live-reload-tail");
+        let id = open_plain(&mut h, &root, "log.txt", b"aaa\nbbb\nccc");
+        h.stoat.live_reload = true;
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &MoveDown);
+
+        h.fake_fs()
+            .insert_file(root.join("log.txt"), b"aaa\nbbb\nccc\nddd\n");
+        watched_write(&mut h, "/live-reload-tail/log.txt", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            (buffer_text(&h, id), focused_cursor_row(&mut h)),
+            ("aaa\nbbb\nccc\nddd\n".to_string(), 2),
+            "a live reload leaves a last-line cursor where it was, unlike a tail",
+        );
+    }
+
+    #[test]
+    fn live_reload_skips_a_dirty_buffer() {
+        let (mut h, a, _) = live_reload_harness();
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(a)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        watched_write(&mut h, "/repo/a.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            buffer_text(&h, a),
+            "xa\nB\nc\n",
+            "the unsaved edit survives the write"
+        );
+    }
+
+    #[test]
+    fn live_reload_holds_only_open_buffers_while_on() {
+        let (mut h, _, _) = live_reload_harness();
+        h.fake_fs().insert_file("/repo/c.rs", b"new\n");
+        watched_write(&mut h, "/repo/c.rs", FsEventKind::Created);
+        h.stoat.live_reload = false;
+        watched_write(&mut h, "/repo/a.rs", FsEventKind::Modified);
+
+        assert_eq!(
+            (
+                h.stoat.live_reload_pending.is_empty(),
+                h.stoat.live_reload_timer.is_some()
+            ),
+            (true, false),
+            "a file with no buffer, and any write while off, holds nothing",
+        );
+    }
+
+    #[test]
+    fn a_write_during_a_read_is_held_for_the_next_window() {
+        let (mut h, a, _) = live_reload_harness();
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        assert!(
+            stat_and_read_buffer(
+                &mut h.stoat,
+                a,
+                Path::new("/repo/a.rs"),
+                AutoReloadMode::Off
+            ),
+            "the first write starts a read",
+        );
+
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nD\n");
+        watched_write(&mut h, "/repo/a.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(
+            h.stoat.live_reload_pending,
+            HashSet::from([PathBuf::from("/repo/a.rs")]),
+            "the path waits out another window while the first read is out",
+        );
+
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(
+            (buffer_text(&h, a), h.stoat.live_reload_pending.is_empty()),
+            ("a\nB\nD\n".to_string(), true),
+            "the next window reads the second write",
+        );
+    }
+
+    #[test]
+    fn follow_and_live_reload_share_a_burst() {
+        let (mut h, a, _) = live_reload_harness();
+        h.stoat.follow_changes = true;
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        h.fake_fs().insert_file("/repo/b.rs", b"x\nY\nZ\n");
+        watched_write(&mut h, "/repo/a.rs", FsEventKind::Modified);
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            (landing(&mut h), buffer_text(&h, a)),
+            (
+                (PathBuf::from("/repo/b.rs"), true, 2),
+                "a\nB\nC\n".to_string()
+            ),
+            "follow lands the last write, and live reload reloads the other in place",
+        );
     }
 
     #[test]

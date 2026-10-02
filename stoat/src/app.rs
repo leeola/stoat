@@ -1598,6 +1598,21 @@ pub struct Stoat {
     /// [`crate::auto_reload::drain_followed_change`].
     pub(crate) follow_tx: Sender<()>,
     pub(crate) follow_rx: Receiver<()>,
+    /// The paths of open buffers written while [`Self::live_reload`] is on,
+    /// waiting for [`Self::live_reload_timer`] to close their window.
+    ///
+    /// A set where [`Self::follow_pending`] is one slot, because every written
+    /// buffer reloads.
+    pub(crate) live_reload_pending: std::collections::HashSet<PathBuf>,
+    /// The debounce timer covering [`Self::live_reload_pending`].
+    ///
+    /// Armed when the set fills from empty, for the reason
+    /// [`Self::index_external_edit_timer`] gives.
+    pub(crate) live_reload_timer: Option<stoat_scheduler::Task<()>>,
+    /// Channel [`Self::live_reload_timer`] signals when its window closes,
+    /// waking [`crate::auto_reload::drain_live_reload`].
+    pub(crate) live_reload_tx: Sender<()>,
+    pub(crate) live_reload_rx: Receiver<()>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
@@ -1658,6 +1673,13 @@ pub struct Stoat {
     /// The `FollowChanges` action is the only writer. Session-scoped and off at
     /// start, never persisted, because it answers what the reader watches now.
     pub(crate) follow_changes: bool,
+    /// Whether every open buffer re-reads its file when the file is written
+    /// outside the editor.
+    ///
+    /// The pane, the view, and each cursor stay where they are, and a buffer
+    /// with unsaved edits is skipped. Session-scoped, off at start, and never
+    /// persisted.
+    pub(crate) live_reload: bool,
     /// Directory holding the per-workspace agent sockets, the single source of
     /// the path both [`Self::serve_term_session`] binds and an owned child's
     /// `STOAT_AGENT_SOCK` names.
@@ -2284,6 +2306,7 @@ impl Stoat {
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (follow_tx, follow_rx) = tokio::sync::mpsc::channel(256);
+        let (live_reload_tx, live_reload_rx) = tokio::sync::mpsc::channel(256);
         let (auto_reload_tx, auto_reload_rx) = tokio::sync::mpsc::channel(1);
         // Dropped at once, leaving the channel closed until `set_stoatty_rx`
         // installs the UI thread's end. Closed is the truthful state for a
@@ -2481,6 +2504,10 @@ impl Stoat {
             follow_timer: None,
             follow_tx,
             follow_rx,
+            live_reload_pending: std::collections::HashSet::new(),
+            live_reload_timer: None,
+            live_reload_tx,
+            live_reload_rx,
             git_host: Arc::new(LocalGit::new()),
             env_host,
             home,
@@ -2492,6 +2519,7 @@ impl Stoat {
             env_auto_load: false,
             diff_warm_auto: false,
             follow_changes: false,
+            live_reload: false,
             agent_socket_dir: None,
             serve_agent_sockets: false,
             served_agent_sockets: std::collections::HashSet::new(),
@@ -7761,6 +7789,7 @@ impl Stoat {
         action_handlers::picker::sync_jumplist_picker(self);
 
         let followed_change = crate::auto_reload::drain_followed_change(self);
+        let live_reload = crate::auto_reload::drain_live_reload(self);
         let auto_reload = crate::auto_reload::pump_auto_reload_install(self);
 
         let format_on_save = action_handlers::file::pump_format_on_save(self);
@@ -7779,6 +7808,7 @@ impl Stoat {
             || diff_nav_jump
             || lsp
             || followed_change
+            || live_reload
             || auto_reload
             || format_on_save
             || pending_save
