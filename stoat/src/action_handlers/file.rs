@@ -199,6 +199,10 @@ fn format_on_save_host(
 /// server, so the server formats the text being saved rather than whatever the
 /// 50ms debounce is still holding. The buffer version read here rides along on
 /// the outcome and gates the edits at the pump.
+///
+/// The task wakes the run loop when it resolves, because
+/// [`pump_format_on_save`] runs only from a frame and an idle editor asks for
+/// none.
 fn arm_format_on_save(
     stoat: &mut Stoat,
     host: Arc<dyn crate::host::LspHost>,
@@ -222,7 +226,7 @@ fn arm_format_on_save(
 
     let executor = stoat.executor.clone();
     let encoding = host.offset_encoding();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         if let Some(pending_change) = pending_change {
             pending_change.await;
         }
@@ -797,6 +801,7 @@ mod tests {
         test_harness::{editor, TestHarness},
         Stoat,
     };
+    use futures::FutureExt;
     use lsp_types::{
         SaveOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
         TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
@@ -1260,6 +1265,35 @@ mod tests {
         h.settle();
 
         assert_eq!(on_disk(&h, &path), b"fn main() {}\n");
+    }
+
+    #[test]
+    fn a_format_on_save_answer_wakes_the_run_loop() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-wake");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+        // The open leaves a permit. This drain clears it, so the format
+        // answer's wake is the only one to observe.
+        let redraw = h.stoat.redraw_notify.clone();
+        let _ = redraw.notified().now_or_never();
+
+        // `settle` drives the pump, and the write that the pump arms notifies on
+        // its own. Only the scheduler runs here, so the format task is the one
+        // source of a wake.
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.run_until_parked();
+
+        let notified = redraw.notified();
+        tokio::pin!(notified);
+        assert!(
+            notified.enable(),
+            "the format answer wakes the loop, so the pump applies it without a key",
+        );
     }
 
     #[test]
