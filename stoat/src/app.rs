@@ -3634,8 +3634,10 @@ impl Stoat {
 
     /// Handle that makes [`Self::run`] quit at its next loop turn when
     /// notified via [`tokio::sync::Notify::notify_one`], regardless of the
-    /// editor's current mode or focus. The `--timeout` self-driver holds a
-    /// clone and fires it after the delay to auto-close the session.
+    /// editor's current mode or focus. The `--timeout` self-driver and the
+    /// binary's termination-signal task each hold a clone. The self-driver
+    /// fires it after the delay, and the task fires it on SIGHUP, SIGINT, or
+    /// SIGTERM.
     pub fn shutdown_handle(&self) -> Arc<tokio::sync::Notify> {
         self.shutdown_notify.clone()
     }

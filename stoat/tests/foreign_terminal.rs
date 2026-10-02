@@ -14,12 +14,14 @@
 //! stoatty must put nothing but its detection probe on the wire, however the
 //! handshake, the emit gate, and the render branches each behave in isolation.
 //! And input after a resize depends on the real binary, which blocks SIGWINCH
-//! on every thread and takes it on one. No unit test controls that.
+//! on every thread and takes it on one. No unit test controls that. A
+//! termination signal reaches only a real process, so the quit it causes shows
+//! only here.
 
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::{
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -227,17 +229,24 @@ impl Session {
     ///
     /// Through the command rather than ctrl-c, which quits nothing here. Normal
     /// mode binds that key to a comment toggle and a run pane to an interrupt,
-    /// and no signal handler stands behind either. Nothing is modified in a
-    /// fresh fixture workspace, so this quits with no confirmation to answer.
+    /// and raw mode delivers it as a key, not as SIGINT. Nothing is modified in
+    /// a fresh fixture workspace, so this quits with no confirmation to answer.
     fn quit(mut self) -> (ExitStatus, Vec<u8>) {
         self.send(":quit-all\r");
+        let (status, captured, _dirs) = self.wait();
+        (status, captured)
+    }
+
+    /// Wait for the session to exit, and return how it exited, everything it
+    /// wrote, and its directories, which stay alive for a check of what it left.
+    fn wait(self) -> (ExitStatus, Vec<u8>, (TempDir, TempDir)) {
         let Session {
             mut child,
             master: _master,
             writer,
             output,
             collector,
-            dirs: _dirs,
+            dirs,
             grids: _,
         } = self;
         drop(writer);
@@ -245,7 +254,7 @@ impl Session {
         let status = wait_for_exit(&mut child);
         collector.join().expect("join the reader");
         let captured = output.lock().expect("output lock").clone();
-        (status, captured)
+        (status, captured, dirs)
     }
 }
 
@@ -350,6 +359,45 @@ fn a_resize_during_the_handshake_repaints_after_it() {
     );
 }
 
+/// A termination signal quits the session through its normal exit path, which
+/// the removed agent socket and the clean exit status show.
+///
+/// The socket has to exist before the signal, or a session that never bound
+/// one passes for a session that removed it.
+#[test]
+fn a_termination_signal_quits_the_session_and_removes_its_socket() {
+    let ended_by = |signal: libc::c_int| {
+        let session = Session::start(120, 40);
+        let deadline = Instant::now() + SCREEN_TIMEOUT;
+        let bound = loop {
+            if agent_sockets(session.dirs.1.path()).len() == 1 {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        let pid = session.child.process_id().expect("the session's pid");
+        // SAFETY: kill takes two values and touches no memory.
+        let sent = unsafe { libc::kill(pid as libc::pid_t, signal) };
+        assert_eq!(sent, 0, "signal {signal} reaches the session");
+
+        let (status, _, dirs) = session.wait();
+        (bound, status.success(), agent_sockets(dirs.1.path()))
+    };
+
+    assert_eq!(
+        [libc::SIGHUP, libc::SIGINT, libc::SIGTERM].map(ended_by),
+        [
+            (true, true, Vec::new()),
+            (true, true, Vec::new()),
+            (true, true, Vec::new()),
+        ],
+    );
+}
+
 /// Whether the status bar on `screen` reaches the right edge of the grid.
 ///
 /// The bar ends with the cursor position, right-aligned to the width stoat laid
@@ -397,6 +445,24 @@ fn fixture_workspace() -> (TempDir, TempDir, PathBuf, PathBuf) {
 
     stoat::fixture::materialize("history", &root).expect("materialize the history fixture");
     (repo_dir, home_dir, root, home)
+}
+
+/// The agent sockets in the stoat state directory under `home`, sorted, and
+/// none when the directory does not read.
+fn agent_sockets(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(home.join(".local/state/stoat")) else {
+        return Vec::new();
+    };
+    let mut sockets: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("agent-") && name.ends_with(".sock"))
+        })
+        .collect();
+    sockets.sort();
+    sockets
 }
 
 /// Every stoatty sub-command in `bytes`, in emission order.

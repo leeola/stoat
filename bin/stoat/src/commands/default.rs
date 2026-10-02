@@ -2,6 +2,8 @@ use clap::{builder::FalseyValueParser, ArgAction, CommandFactory, Parser, Subcom
 use crossterm::event::Event;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
+    future::Future,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -14,7 +16,10 @@ use stoat::{
 };
 use stoat_cli::{CommonArgs, FixtureArgs, FixtureSub};
 use stoat_scheduler::{Executor, TokioScheduler};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::{
+    signal::unix::{self, SignalKind},
+    sync::mpsc::UnboundedSender,
+};
 
 const VERSION_INFO: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -214,7 +219,7 @@ pub fn run(args: Args, session_log: Option<PathBuf>) -> Result<(), Whatever> {
             run_fixture(fixture, text_proto_log, common, session_log)
         },
         Some(Command::Completions { shell }) => {
-            clap_complete::generate(shell, &mut Args::command(), "stoat", &mut std::io::stdout());
+            clap_complete::generate(shell, &mut Args::command(), "stoat", &mut io::stdout());
             Ok(())
         },
         Some(Command::Review) => run_tui(
@@ -650,6 +655,32 @@ fn run_tui(
                 .detach();
         }
 
+        // A signal's default action skips every drop, which strands the
+        // session's socket files and its unsaved workspace state.
+        match termination_signal() {
+            Ok(signal) => {
+                let shutdown = stoat.shutdown_handle();
+                executor
+                    .spawn(async move {
+                        signal.await;
+                        tracing::info!(
+                            target: "stoat::bin",
+                            "the session quits on a termination signal"
+                        );
+                        shutdown.notify_one();
+                    })
+                    .detach();
+            },
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::bin",
+                    %err,
+                    "termination signals keep their default action, so a signal ends this \
+                     session with no cleanup"
+                );
+            },
+        }
+
         let outcome = stoat.run(event_rx, render_tx).await;
         hosts::shutdown_lsp(&stoat).await;
         outcome
@@ -688,6 +719,27 @@ fn read_config(path: &Path) -> Option<String> {
 #[allow(clippy::disallowed_methods)]
 fn window_socket_path() -> Option<PathBuf> {
     std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from)
+}
+
+/// Takes over SIGHUP, SIGINT, and SIGTERM, and returns a future that completes
+/// on the first one.
+///
+/// The call registers the three signals itself, so a signal sent between the
+/// call and the first poll is kept, and the call must run inside the runtime.
+///
+/// Registration replaces the default action of each signal for the rest of the
+/// process, so none of them ends the process by itself after this call.
+fn termination_signal() -> io::Result<impl Future<Output = ()>> {
+    let mut hangup = unix::signal(SignalKind::hangup())?;
+    let mut interrupt = unix::signal(SignalKind::interrupt())?;
+    let mut terminate = unix::signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            _ = hangup.recv() => {},
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
+    })
 }
 
 /// The input sequence the named fixture opens itself with, or `None` when it

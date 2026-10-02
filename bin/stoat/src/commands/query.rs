@@ -118,8 +118,8 @@ fn find_sole_socket() -> Result<PathBuf, Whatever> {
 
 /// The one live `agent-*.sock` in `dir`.
 ///
-/// A session that ends normally removes its socket, but a session that a signal
-/// kills leaves it behind. A candidate that refuses a connection has no session
+/// A session that ends normally removes its socket, but a session that SIGKILL
+/// or a crash ends leaves it behind. A candidate that refuses a connection has no session
 /// behind it, so this removes it through `fs` and skips it. Any other connect
 /// failure skips the candidate and keeps the file, since nothing proves it dead.
 ///
