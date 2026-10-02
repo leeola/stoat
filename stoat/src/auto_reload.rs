@@ -1703,6 +1703,19 @@ mod tests {
         assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
     }
 
+    /// The fake holds no base for the new file, so the row is left out.
+    #[test]
+    fn a_file_in_a_directory_that_arrives_with_it_follows() {
+        let mut h = follow_harness();
+        h.fake_fs().insert_file("/repo/new/c.rs", "c\n");
+        watched_write(&mut h, "/repo/new", FsEventKind::Created);
+        debounce::drain_fs_watch_events(&mut h.stoat);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        let (path, diff_view, _) = landing(&mut h);
+        assert_eq!((path, diff_view), (PathBuf::from("/repo/new/c.rs"), true));
+    }
+
     #[test]
     fn a_save_renamed_over_its_target_follows_the_target() {
         let mut h = follow_harness();

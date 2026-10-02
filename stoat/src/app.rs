@@ -18,8 +18,8 @@ use crate::{
     git_jobs::{self, GitJobs},
     help::Help,
     host::{
-        ClipboardKind, EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost,
-        NoopFsWatcher,
+        ClipboardKind, EnvHost, FsEventKind, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs,
+        LocalGit, LspHost, NoopFsWatcher,
     },
     keymap::{self, Keymap, ResolvedAction, SideButton, StateValue},
     keymap_state::{
@@ -1531,6 +1531,12 @@ pub struct Stoat {
     /// A workspace entered again, or a second workspace on one root, then
     /// costs no walk of the tree.
     pub(crate) watched_roots: std::collections::HashSet<PathBuf>,
+    /// Events [`debounce::drain_fs_watch_events`] made for the entries of a
+    /// directory that arrived with content.
+    ///
+    /// The drain takes these ahead of the host's queue, under the same cap per
+    /// turn, so a large tree is adopted over several turns and not in one.
+    pub(crate) fs_watch_backlog: std::collections::VecDeque<(PathBuf, FsEventKind)>,
     /// Single-slot debounce for staling every open diff at once. A commit
     /// writes many `.git` files in a burst, and one HEAD move stales them all,
     /// so this collapses the burst into one invalidation. Re-arming replaces
@@ -2505,6 +2511,7 @@ impl Stoat {
             fs_host: Arc::new(LocalFs),
             fs_watch_host: Arc::new(NoopFsWatcher::new()),
             watched_roots: std::collections::HashSet::new(),
+            fs_watch_backlog: std::collections::VecDeque::new(),
             pending_diff_refresh: None,
             diff_refresh_tx,
             diff_refresh_rx,

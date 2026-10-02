@@ -142,20 +142,28 @@ impl PathEdit {
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
 /// again when it stops there, so a checkout's worth of paths drains over
 /// several turns instead of stalling one.
+///
+/// A directory that arrives is watched and its entries are queued as created
+/// events, which the next turn takes ahead of the host's queue under the same
+/// cap.
 pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let host = stoat.fs_watch_host.clone();
     let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
     for _ in 0..FS_WATCH_DRAIN_CAP {
-        let Some(event) = host.try_recv() else {
+        let Some((path, kind)) = stoat
+            .fs_watch_backlog
+            .pop_front()
+            .or_else(|| host.try_recv().map(|event| (event.path, event.kind)))
+        else {
             break;
         };
         tracing::trace!(
             target: "stoat::app",
-            path = %event.path.display(),
-            kind = ?event.kind,
+            path = %path.display(),
+            kind = ?kind,
             "fs watch event observed",
         );
-        events.push((event.path, event.kind));
+        events.push((path, kind));
     }
 
     // The cap is the only thing that stops the loop early, so hitting it
@@ -253,10 +261,14 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
                 _ => stoat.fs_host.metadata(&path).ok().flatten(),
             };
 
-            // Watches are per directory, so one created after startup is
-            // invisible until it gets its own.
-            if kind == FsEventKind::Created && arrived.as_ref().is_some_and(|meta| meta.is_dir) {
-                let _ = stoat.fs_watch_host.watch(&path);
+            // Watches are per directory, so one that arrives after startup is
+            // invisible until it gets its own, and what it already holds raised
+            // no event.
+            if matches!(kind, FsEventKind::Created | FsEventKind::Renamed)
+                && arrived.as_ref().is_some_and(|meta| meta.is_dir)
+                && !dir_ignored(stoat, &path, &git_root, &mut repo)
+            {
+                adopt_directory(stoat, &path);
             }
 
             if !note_finder_change(
@@ -284,6 +296,36 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     }
 
     apply_finder_changes(stoat, &git_root, finder_changes);
+
+    // The entries queued this turn raise no watch event, so nothing else wakes
+    // the loop for them.
+    if !stoat.fs_watch_backlog.is_empty() {
+        stoat.drain_notify.notify_one();
+    }
+}
+
+/// Watch a directory that arrived in the tree, and queue a created event for
+/// each entry it holds.
+///
+/// A tool that makes a directory and writes into it at once is done before this
+/// watch lands, so no event names what it wrote. The queued events stand in for
+/// those. The watch goes first, so an entry made after it raises its own event
+/// and an entry made before it is in the listing.
+///
+/// An entry that is a directory comes back through here on a later turn, which
+/// adopts a whole tree without a walk in one turn. A symlink is skipped, as the
+/// workspace walk skips it.
+fn adopt_directory(stoat: &mut Stoat, dir: &Path) {
+    let _ = stoat.fs_watch_host.watch(dir);
+    let Ok(entries) = stoat.fs_host.list_dir(dir) else {
+        return;
+    };
+    stoat.fs_watch_backlog.extend(
+        entries
+            .into_iter()
+            .filter(|entry| !entry.is_symlink)
+            .map(|entry| (dir.join(entry.name.as_str()), FsEventKind::Created)),
+    );
 }
 
 /// Record a source-tree change for the turn's one edit of the cached finder
@@ -438,8 +480,7 @@ fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit 
 /// is not caught here, so the callers that care keep their own per-file
 /// check.
 ///
-/// `repo` memoizes the repository discovery across one drain batch. Paths
-/// outside `git_root` have no verdict and report false.
+/// Paths outside `git_root` have no verdict and report false.
 fn parent_dir_ignored(
     stoat: &mut Stoat,
     path: &Path,
@@ -452,13 +493,26 @@ fn parent_dir_ignored(
     let Some(parent) = path.parent() else {
         return false;
     };
-    if let Some(ignored) = stoat.ignored_dir_cache.get(parent) {
+    dir_ignored(stoat, parent, git_root, repo)
+}
+
+/// Whether `dir` is gitignored, answering from [`Stoat::ignored_dir_cache`]
+/// when it has been asked about before.
+///
+/// `repo` memoizes the repository discovery across one drain batch.
+fn dir_ignored(
+    stoat: &mut Stoat,
+    dir: &Path,
+    git_root: &Path,
+    repo: &mut Option<Option<Arc<dyn GitRepo>>>,
+) -> bool {
+    if let Some(ignored) = stoat.ignored_dir_cache.get(dir) {
         return *ignored;
     }
 
     let git_host = stoat.git_host.clone();
     let repo = repo.get_or_insert_with(|| git_host.discover(git_root));
-    let ignored = repo.as_ref().is_some_and(|r| r.is_path_ignored(parent));
+    let ignored = repo.as_ref().is_some_and(|r| r.is_path_ignored(dir));
 
     // A bound rather than an eviction policy, because the working set here is
     // the directories one build touches. Dropping all of it costs at most one
@@ -466,9 +520,7 @@ fn parent_dir_ignored(
     if stoat.ignored_dir_cache.len() >= IGNORED_DIR_CACHE_MAX {
         stoat.ignored_dir_cache.clear();
     }
-    stoat
-        .ignored_dir_cache
-        .insert(parent.to_path_buf(), ignored);
+    stoat.ignored_dir_cache.insert(dir.to_path_buf(), ignored);
     ignored
 }
 
@@ -1039,6 +1091,120 @@ mod tests {
         assert!(
             h.stoat.index_pending_external_edits.is_empty(),
             "the new rule applies rather than the verdict cached before it"
+        );
+    }
+
+    /// A tool that makes a directory and writes into it at once is done before
+    /// the drain watches it, so no event names the file inside.
+    #[test]
+    fn a_directory_that_arrives_with_content_is_adopted_whole() {
+        assert_eq!(
+            arrive("/repo/new", "/repo/new/sub/deep.rs", FsEventKind::Created),
+            (
+                true,
+                true,
+                HashSet::from([PathBuf::from("/repo/new/sub/deep.rs")])
+            ),
+        );
+    }
+
+    #[test]
+    fn a_directory_renamed_into_the_tree_is_adopted() {
+        assert_eq!(
+            arrive("/repo/moved", "/repo/moved/a.rs", FsEventKind::Renamed),
+            (
+                true,
+                true,
+                HashSet::from([PathBuf::from("/repo/moved/a.rs")])
+            ),
+        );
+    }
+
+    /// Seed `file` under `dir`, report `dir` arriving as `kind`, and drain
+    /// until quiet. Answers whether `dir` and the file's own directory are
+    /// watched, and which paths wait to reach the index.
+    fn arrive(dir: &str, file: &str, kind: FsEventKind) -> (bool, bool, HashSet<PathBuf>) {
+        let mut h = ignored_dir_harness();
+        h.fake_fs().insert_file(file, "");
+        h.fake_fs_watcher().inject(Path::new(dir), kind);
+        drain_until_quiet(&mut h);
+
+        let parent = Path::new(file)
+            .parent()
+            .expect("a file under the directory");
+        (
+            h.fake_fs_watcher().is_watching(Path::new(dir)),
+            h.fake_fs_watcher().is_watching(parent),
+            h.stoat.index_pending_external_edits.clone(),
+        )
+    }
+
+    /// Drain until the watcher and the backlog both run dry, as the run loop
+    /// does when each turn's wake brings it back.
+    fn drain_until_quiet(h: &mut crate::test_harness::TestHarness) {
+        for _ in 0..16 {
+            drain_fs_watch_events(&mut h.stoat);
+            if h.stoat.fs_watch_backlog.is_empty() && h.fake_fs_watcher().pending() == 0 {
+                return;
+            }
+        }
+        panic!("the drain never ran dry");
+    }
+
+    /// The workspace walk skips a symlink. A queued link back up the tree adopts
+    /// the same directories over and over.
+    #[test]
+    fn a_symlink_in_an_arriving_directory_is_not_queued() {
+        let mut h = ignored_dir_harness();
+        h.fake_fs().insert_file("/repo/new/a.rs", "");
+        h.fake_fs().insert_symlink("/repo/new/loop", "/repo/new");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/new"), FsEventKind::Created);
+
+        drain_fs_watch_events(&mut h.stoat);
+
+        assert_eq!(
+            Vec::from(h.stoat.fs_watch_backlog.clone()),
+            [(PathBuf::from("/repo/new/a.rs"), FsEventKind::Created)],
+        );
+    }
+
+    /// An ignored directory is build output, so it earns no watch and no
+    /// listing however much it holds.
+    #[test]
+    fn an_ignored_directory_that_arrives_is_left_alone() {
+        let mut h = ignored_dir_harness();
+        h.fake_git().add_repo("/repo").ignored("out");
+        h.fake_fs().insert_file("/repo/out/a.rs", "");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/out"), FsEventKind::Created);
+
+        drain_fs_watch_events(&mut h.stoat);
+
+        assert_eq!(
+            (
+                h.fake_fs_watcher().is_watching(Path::new("/repo/out")),
+                h.stoat.fs_watch_backlog.len(),
+            ),
+            (false, 0),
+        );
+    }
+
+    /// The entries a drain queues raise no watch event, so the drain asks for
+    /// the turn that takes them.
+    #[test]
+    fn a_turn_that_queues_entries_wakes_the_loop_for_them() {
+        let mut h = ignored_dir_harness();
+        h.fake_fs().insert_file("/repo/new/a.rs", "");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/new"), FsEventKind::Created);
+        let _ = h.stoat.drain_notify.notified().now_or_never();
+
+        drain_fs_watch_events(&mut h.stoat);
+
+        assert!(
+            h.stoat.drain_notify.notified().now_or_never().is_some(),
+            "the drain asks for the turn that takes the queued entries",
         );
     }
 }
