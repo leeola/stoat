@@ -7306,6 +7306,7 @@ impl Stoat {
                 uid,
                 term,
                 paths,
+                hold,
                 done,
             } => {
                 let Some(ws_id) = self
@@ -7314,7 +7315,7 @@ impl Stoat {
                     .find(|(_, ws)| ws.uid == uid)
                     .map(|(id, _)| id)
                 else {
-                    let _ = done.send(());
+                    let _ = done.send(false);
                     return UpdateEffect::None;
                 };
                 self.active_workspace = ws_id;
@@ -7336,19 +7337,39 @@ impl Stoat {
                 };
 
                 let Some((first, rest)) = paths.split_first() else {
-                    let _ = done.send(());
+                    let _ = done.send(false);
                     return UpdateEffect::None;
                 };
-                crate::buffer_lifecycle::open_file_in_pane(self, target, first);
+                // FIXME: A file past the inline-read ceiling opens on the pool and
+                // holds no client, so its command returns at once
+                let mut opened: Vec<BufferId> = Vec::new();
+                opened.extend(crate::buffer_lifecycle::open_file_in_pane(
+                    self, target, first,
+                ));
                 for path in rest {
                     let split = self
                         .active_workspace_mut()
                         .panes
                         .split(crate::pane::Axis::Vertical);
-                    crate::buffer_lifecycle::open_file_in_pane(self, split, path);
+                    opened.extend(crate::buffer_lifecycle::open_file_in_pane(
+                        self, split, path,
+                    ));
                 }
 
-                let _ = done.send(());
+                // The original sender drops with the match, so the clones on
+                // the buffers are the only ones and the command returns when
+                // the last buffer leaves the editor.
+                let held = match hold {
+                    Some(hold) if !opened.is_empty() => {
+                        let ws = self.active_workspace_mut();
+                        for id in opened {
+                            ws.hold_buffer(id, BridgeWaiter { done: hold.clone() });
+                        }
+                        true
+                    },
+                    _ => false,
+                };
+                let _ = done.send(held);
                 UpdateEffect::Redraw
             },
             AgentControl::Query {

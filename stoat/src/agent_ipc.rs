@@ -8,11 +8,12 @@
 //! A hook line forwards to the render process's event loop as an
 //! [`AgentEvent`], which it applies to the owning workspace's
 //! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
-//! rides [`AgentControl`] and expects a reply: a query answers with live
-//! session state, `open-editor` parks the caller until its buffer closes and
-//! answers whether the buffer closed clean, and
-//! `open-in-term` opens files in the terminal pane the caller runs in, which is
-//! what makes a `stoat <file>` inside a pane reach the instance hosting it.
+//! rides [`AgentControl`] and expects a reply. A query answers with live
+//! session state. `open-editor` parks the caller until its buffer closes and
+//! answers whether the buffer closed clean. `open-in-term` opens files in the
+//! terminal pane the caller runs in, which is what makes a `stoat <file>`
+//! inside a pane reach the instance hosting it, and holds the caller until
+//! those files close when it asks to wait.
 
 use crate::{
     agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
@@ -77,17 +78,18 @@ pub enum AgentControl {
     },
     /// Open `paths` in the split pane showing the terminal whose
     /// [`token`](crate::term_session::TermSession::token) is `term`, in front of
-    /// the shell that asked, and fire `done` once they are open.
+    /// the shell that asked.
     ///
-    /// Unlike [`Self::OpenEditor`], nothing blocks on the buffer: the requesting
-    /// command wants its prompt back, so `done` fires as soon as the open lands.
-    /// It fires on every path through the handler, since a caller parked on a
-    /// reply that never comes hangs the user's shell.
+    /// `done` answers whether a waiter was registered. It fires on every path
+    /// through the handler, since a caller parked on a reply that never comes
+    /// hangs the user's shell. With `hold`, each opened buffer takes a clone,
+    /// and the command returns when the last of them leaves the editor.
     OpenInTerm {
         uid: WorkspaceUid,
         term: u64,
         paths: Vec<PathBuf>,
-        done: oneshot::Sender<()>,
+        hold: Option<UnboundedSender<BridgeOutcome>>,
+        done: oneshot::Sender<bool>,
     },
     /// Answer a live-session [`AgentQuery`] and fire `reply` with the JSON
     /// result. The connection stays open afterward, so several queries ride one
@@ -126,10 +128,16 @@ pub enum AgentQuery {
 enum AgentRequest {
     /// `{"req":"open-editor","path":"..."}`.
     OpenEditor { path: PathBuf },
-    /// `{"req":"open-in-term","term":N,"paths":["/abs/a"]}`. `term` is the
-    /// terminal's `STOAT_TERM_ID`, and the paths are absolute, since the
-    /// requesting shell's working directory is not the workspace root.
-    OpenInTerm { term: u64, paths: Vec<PathBuf> },
+    /// `{"req":"open-in-term","term":N,"paths":["/abs/a"],"wait":true}`.
+    /// `term` is the terminal's `STOAT_TERM_ID`, and the paths are absolute,
+    /// since the requesting shell's working directory is not the workspace
+    /// root. `wait` is false when absent, which is the open-and-exit form.
+    OpenInTerm {
+        term: u64,
+        paths: Vec<PathBuf>,
+        #[serde(default)]
+        wait: bool,
+    },
     /// `{"req":"lsp-status"}`.
     LspStatus,
     /// `{"req":"diagnostics"}` or `{"req":"diagnostics","path":"..."}`.
@@ -289,22 +297,18 @@ async fn serve_connection<R>(
                     }
                     let status = held_status(&mut done_rx).await;
                     let reply = json!({ "reply": "editor-closed", "status": status });
-                    match serde_json::to_vec(&reply) {
-                        Ok(mut encoded) => {
-                            encoded.push(b'\n');
-                            let _ = write_half.write_all(&encoded).await;
-                        },
-                        Err(err) => tracing::warn!(%err, "failed to encode editor reply"),
-                    }
+                    let _ = write_json_line(&mut write_half, &reply).await;
                     return;
                 },
-                AgentRequest::OpenInTerm { term, paths } => {
+                AgentRequest::OpenInTerm { term, paths, wait } => {
                     let (done_tx, done_rx) = oneshot::channel();
+                    let (hold_tx, mut hold_rx) = tokio::sync::mpsc::unbounded_channel();
                     if control_tx
                         .send(AgentControl::OpenInTerm {
                             uid,
                             term,
                             paths,
+                            hold: wait.then_some(hold_tx),
                             done: done_tx,
                         })
                         .await
@@ -312,13 +316,17 @@ async fn serve_connection<R>(
                     {
                         return;
                     }
-                    let _ = done_rx.await;
-                    if write_half
-                        .write_all(b"{\"reply\":\"opened\"}\n")
-                        .await
-                        .is_err()
-                    {
+                    let held = done_rx.await.unwrap_or(false);
+                    let opened = json!({ "reply": "opened", "held": held });
+                    if !write_json_line(&mut write_half, &opened).await {
                         return;
+                    }
+                    if held {
+                        let status = held_status(&mut hold_rx).await;
+                        let closed = json!({ "reply": "closed", "status": status });
+                        if !write_json_line(&mut write_half, &closed).await {
+                            return;
+                        }
                     }
                     continue;
                 },
@@ -343,15 +351,7 @@ async fn serve_connection<R>(
                 Ok(value) => value,
                 Err(_) => return,
             };
-            let mut encoded = match serde_json::to_vec(&value) {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    tracing::warn!(%err, "failed to encode query reply");
-                    continue;
-                },
-            };
-            encoded.push(b'\n');
-            if write_half.write_all(&encoded).await.is_err() {
+            if !write_json_line(&mut write_half, &value).await {
                 return;
             }
             continue;
@@ -381,6 +381,26 @@ async fn held_status(hold: &mut UnboundedReceiver<BridgeOutcome>) -> i32 {
         }
     }
     status
+}
+
+/// Write `value` to `out` as one JSON line, and answer whether the connection
+/// still takes writes.
+///
+/// A value that does not encode is logged and skipped, which keeps the
+/// connection open.
+async fn write_json_line<W>(out: &mut W, value: &Value) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut encoded = match serde_json::to_vec(value) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            tracing::warn!(%err, "failed to encode a reply");
+            return true;
+        },
+    };
+    encoded.push(b'\n');
+    out.write_all(&encoded).await.is_ok()
 }
 
 /// Decode one newline-stripped JSON hook line into an [`AgentHookEvent`].
@@ -485,7 +505,12 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::time::Duration;
-    use tokio::{net::UnixStream, sync::mpsc::Receiver, task::JoinHandle, time::Instant};
+    use tokio::{
+        net::UnixStream,
+        sync::mpsc::{error::TryRecvError, Receiver},
+        task::JoinHandle,
+        time::Instant,
+    };
 
     #[test]
     fn lsp_status_lists_each_running_server() {
@@ -547,13 +572,35 @@ mod tests {
         h: &mut TestHarness,
         term: u64,
         paths: Vec<PathBuf>,
-    ) -> (crate::app::UpdateEffect, oneshot::Receiver<()>) {
+    ) -> (crate::app::UpdateEffect, oneshot::Receiver<bool>) {
+        request_open_in_term(h, term, paths, None)
+    }
+
+    /// Open `paths` as a request that waits, and return its answer and the
+    /// receiver the held buffers report to.
+    fn open_in_term_held(
+        h: &mut TestHarness,
+        term: u64,
+        paths: Vec<PathBuf>,
+    ) -> (oneshot::Receiver<bool>, UnboundedReceiver<BridgeOutcome>) {
+        let (hold_tx, hold_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_, done_rx) = request_open_in_term(h, term, paths, Some(hold_tx));
+        (done_rx, hold_rx)
+    }
+
+    fn request_open_in_term(
+        h: &mut TestHarness,
+        term: u64,
+        paths: Vec<PathBuf>,
+        hold: Option<UnboundedSender<BridgeOutcome>>,
+    ) -> (crate::app::UpdateEffect, oneshot::Receiver<bool>) {
         let uid = h.stoat.active_workspace().uid();
         let (done_tx, done_rx) = oneshot::channel();
         let effect = h.stoat.handle_agent_control(AgentControl::OpenInTerm {
             uid,
             term,
             paths,
+            hold,
             done: done_tx,
         });
         (effect, done_rx)
@@ -674,12 +721,7 @@ mod tests {
     #[test]
     fn a_deferred_open_in_term_keeps_the_next_keys_from_the_shell() {
         let mut h = TestHarness::with_size(80, 24);
-        let root = PathBuf::from("/big");
-        let path = root.join("huge.txt");
-        // Past the inline-read ceiling, so the open lands on the pool and the
-        // pane still shows the shell when the handler returns.
-        h.fake_fs().insert_file(&path, vec![b'x'; (1 << 20) + 16]);
-        h.stoat.active_workspace_mut().git_root = root;
+        let path = seed_huge_file(&mut h);
         let (term_id, token) = terminal_in_focused_pane(&mut h);
 
         let (_, mut done_rx) = open_in_term(&mut h, token, vec![path]);
@@ -709,6 +751,65 @@ mod tests {
 
         assert_eq!(effect, crate::app::UpdateEffect::None);
         done_rx.try_recv().expect("the caller is unparked");
+    }
+
+    #[test]
+    fn a_held_open_in_term_waits_for_every_buffer_it_opened() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let (term_id, token) = terminal_in_focused_pane(&mut h);
+        let term_pane = h.stoat.active_workspace().panes.focus();
+
+        let (mut done_rx, mut hold_rx) =
+            open_in_term_held(&mut h, token, vec![root.join("a.rs"), root.join("b.rs")]);
+        let opened = (done_rx.try_recv(), hold_rx.try_recv());
+
+        let split = h.stoat.active_workspace().panes.focus();
+        crate::action_handlers::close_pane_by_id(&mut h.stoat, split);
+        let after_split = [hold_rx.try_recv(), hold_rx.try_recv()];
+
+        h.stoat.active_workspace_mut().panes.set_focus(term_pane);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Quit);
+        let after_quit = [hold_rx.try_recv(), hold_rx.try_recv()];
+
+        let ws = h.stoat.active_workspace();
+        let shell_back = matches!(
+            ws.panes.pane(term_pane).view,
+            crate::pane::View::Terminal(t) if t == term_id
+        );
+        assert_eq!(
+            (opened, after_split, after_quit, shell_back),
+            (
+                (Ok(true), Err(TryRecvError::Empty)),
+                [Ok(BridgeOutcome::Closed), Err(TryRecvError::Empty)],
+                [Ok(BridgeOutcome::Closed), Err(TryRecvError::Disconnected)],
+                true,
+            ),
+        );
+    }
+
+    #[test]
+    fn a_held_open_in_term_that_opens_nothing_holds_nothing() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = seed_huge_file(&mut h);
+        let (_, token) = terminal_in_focused_pane(&mut h);
+
+        let (mut done_rx, mut hold_rx) = open_in_term_held(&mut h, token, vec![path]);
+
+        assert_eq!(
+            (done_rx.try_recv(), hold_rx.try_recv()),
+            (Ok(false), Err(TryRecvError::Disconnected)),
+        );
+    }
+
+    /// Seed a file past the inline-read ceiling, so its open lands on the pool
+    /// and the pane still shows the shell when the handler returns.
+    fn seed_huge_file(h: &mut TestHarness) -> PathBuf {
+        let root = PathBuf::from("/big");
+        let path = root.join("huge.txt");
+        h.fake_fs().insert_file(&path, vec![b'x'; (1 << 20) + 16]);
+        h.stoat.active_workspace_mut().git_root = root;
+        path
     }
 
     #[test]
@@ -922,7 +1023,7 @@ mod tests {
         let decoded: AgentRequest =
             serde_json::from_str(r#"{"req":"open-in-term","term":7,"paths":["/abs/a","/abs/b"]}"#)
                 .expect("open-in-term decodes");
-        let AgentRequest::OpenInTerm { term, paths } = decoded else {
+        let AgentRequest::OpenInTerm { term, paths, wait } = decoded else {
             panic!("expected an open-in-term request, got {decoded:?}");
         };
         assert_eq!(term, 7);
@@ -930,6 +1031,15 @@ mod tests {
             paths,
             vec![PathBuf::from("/abs/a"), PathBuf::from("/abs/b")]
         );
+        assert!(!wait, "a request with no wait field does not wait");
+
+        let waiting: AgentRequest =
+            serde_json::from_str(r#"{"req":"open-in-term","term":7,"paths":[],"wait":true}"#)
+                .expect("a waiting open-in-term decodes");
+        assert!(matches!(
+            waiting,
+            AgentRequest::OpenInTerm { wait: true, .. }
+        ));
     }
 
     #[tokio::test]
@@ -956,6 +1066,7 @@ mod tests {
             uid: got_uid,
             term,
             paths,
+            hold,
             done,
         } = control_rx.recv().await.expect("control message")
         else {
@@ -964,10 +1075,11 @@ mod tests {
         assert_eq!(got_uid, uid);
         assert_eq!(term, 3);
         assert_eq!(paths, vec![PathBuf::from("/abs/a")]);
-        done.send(()).expect("connection parked on the waiter");
+        assert!(hold.is_none(), "a request with no wait holds nothing");
+        done.send(false).expect("connection parked on the waiter");
         assert_eq!(
-            replies.next_line().await.unwrap().unwrap(),
-            r#"{"reply":"opened"}"#
+            next_reply(&mut replies).await,
+            json!({ "reply": "opened", "held": false })
         );
 
         // A second request over the same connection proves the read loop
@@ -982,15 +1094,74 @@ mod tests {
             panic!("expected a second open-in-term control message");
         };
         assert_eq!(term, 4);
-        done.send(()).expect("connection parked again");
+        done.send(false).expect("connection parked again");
         assert_eq!(
-            replies.next_line().await.unwrap().unwrap(),
-            r#"{"reply":"opened"}"#
+            next_reply(&mut replies).await,
+            json!({ "reply": "opened", "held": false })
         );
 
         drop(client_write);
         drop(replies);
         conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_held_open_in_term_replies_closed_with_its_status() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
+        let (client, server) = tokio::io::duplex(256);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+        let conn = tokio::spawn(async move {
+            serve_connection(server, WorkspaceUid(12), &tx, &control_tx).await;
+        });
+
+        client_write
+            .write_all(
+                b"{\"req\":\"open-in-term\",\"term\":3,\"paths\":[\"/abs/a\"],\"wait\":true}\n",
+            )
+            .await
+            .unwrap();
+        let AgentControl::OpenInTerm { hold, done, .. } =
+            control_rx.recv().await.expect("control message")
+        else {
+            panic!("expected an open-in-term control message");
+        };
+        let hold = hold.expect("a request that waits carries a hold");
+        done.send(true).expect("connection parked on the open");
+        let opened = next_reply(&mut replies).await;
+
+        hold.send(BridgeOutcome::Abandoned)
+            .expect("connection parked on the hold");
+        drop(hold);
+        let closed = next_reply(&mut replies).await;
+
+        assert_eq!(
+            [opened, closed],
+            [
+                json!({ "reply": "opened", "held": true }),
+                json!({ "reply": "closed", "status": 1 }),
+            ],
+        );
+        drop(client_write);
+        drop(replies);
+        conn.await.unwrap();
+    }
+
+    /// The next reply line on `replies`, parsed, so the assertion does not
+    /// depend on the order the encoder writes the keys in.
+    async fn next_reply<R>(replies: &mut tokio::io::Lines<R>) -> Value
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        let line = replies
+            .next_line()
+            .await
+            .expect("read a reply")
+            .expect("a reply line");
+        serde_json::from_str(&line).expect("a reply is JSON")
     }
 
     #[tokio::test]
