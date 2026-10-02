@@ -1677,8 +1677,10 @@ pub struct Stoat {
     /// outside the editor.
     ///
     /// The pane, the view, and each cursor stay where they are, and a buffer
-    /// with unsaved edits is skipped. Session-scoped, off at start, and never
-    /// persisted.
+    /// with unsaved edits is skipped.
+    ///
+    /// The `LiveReload` action is the only writer. Session-scoped, off at
+    /// start, and never persisted.
     pub(crate) live_reload: bool,
     /// Directory holding the per-workspace agent sockets, the single source of
     /// the path both [`Self::serve_term_session`] binds and an owned child's

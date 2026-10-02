@@ -65,8 +65,8 @@ use crate::{
         },
         file::{
             AutoReload, AutoReloadConfig, FollowChanges, FontSizeDec, FontSizeInc, ForceReloadAll,
-            ForceReloadBuffer, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ReloadAll,
-            ReloadBuffer, ToggleMinimap, ToggleWrap,
+            ForceReloadBuffer, ForceSaveBuffer, LiveReload, OpenBuffer, OpenConfig, OpenFile,
+            ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
         file_finder::{
             FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -519,6 +519,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ReloadAll::DEF, |_| Ok(Box::new(ReloadAll)));
     add(ForceReloadAll::DEF, |_| Ok(Box::new(ForceReloadAll)));
     add(FollowChanges::DEF, |_| Ok(Box::new(FollowChanges)));
+    add(LiveReload::DEF, |_| Ok(Box::new(LiveReload)));
     add(FontSizeInc::DEF, |_| Ok(Box::new(FontSizeInc)));
     add(FontSizeDec::DEF, |_| Ok(Box::new(FontSizeDec)));
     add(OpenConfig::DEF, |params| {
@@ -1348,6 +1349,7 @@ mod tests {
         "ReloadAll",
         "ForceReloadAll",
         "FollowChanges",
+        "LiveReload",
         "DiffWheelWalk",
         "DiffAgainstIndex",
         "DiffAgainstHead",
@@ -1861,10 +1863,11 @@ mod tests {
         // + 1 Mosh.
         // + 2 CommitsDetailDown/CommitsDetailUp.
         // + 1 FollowChanges.
+        // + 1 LiveReload.
         // + 1 DiffWheelWalk.
         // + 2 DiffAgainstIndex/DiffAgainstHead.
         // + 2 DiffBack/DiffForward.
-        assert_eq!(all().count(), 428);
+        assert_eq!(all().count(), 429);
     }
 
     #[test]

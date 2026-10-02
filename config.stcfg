@@ -1205,6 +1205,10 @@ on key {
     # opens in the diff view with the cursor on the change, until a second `f`
     # stops it.
     #
+    # `R` holds `r` on. Each open buffer re-reads its file as an outside write
+    # lands, with the pane and the cursor left where they are, until a second
+    # `R` stops it.
+    #
     # The mouse side buttons ride the same hops, forward as p and back as n, so
     # a pinned chord walks changes from the mouse exactly as the keys do. The
     # forward button sits above the back button, so the upper button walks up
@@ -1226,6 +1230,7 @@ on key {
         MouseBack -> [GotoNextChange(), SetMode(normal)];
         r -> [ReloadAll(), SetMode(normal)];
         f -> [FollowChanges(), SetMode(normal)];
+        R -> [LiveReload(), SetMode(normal)];
         m -> [JumpToMoveSource(), SetMode(normal)];
         M -> [JumpToMoveTarget(), SetMode(normal)];
         l -> GitLs();

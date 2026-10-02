@@ -3271,19 +3271,24 @@ mod tests {
     }
 
     #[test]
-    fn the_git_chord_binds_f_to_follow_changes() {
+    fn the_git_chord_binds_its_mode_toggles() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space_git = TestState::new().set("mode", StateValue::String("space_git".into()));
-        let f = keymap
-            .lookup(
-                &space_git,
-                &key_event(KeyCode::Char('f'), KeyModifiers::NONE),
-            )
-            .expect("f is bound in space_git");
-        let names: Vec<&str> = f.iter().map(|action| action.name.as_str()).collect();
-        assert_eq!(names, ["FollowChanges", "SetMode"]);
+        for (key, action) in [('f', "FollowChanges"), ('R', "LiveReload")] {
+            let bound = keymap
+                .lookup(
+                    &space_git,
+                    &key_event(KeyCode::Char(key), KeyModifiers::NONE),
+                )
+                .expect("the key is bound in space_git");
+            let names: Vec<&str> = bound
+                .iter()
+                .map(|resolved| resolved.name.as_str())
+                .collect();
+            assert_eq!(names, [action, "SetMode"], "{key} in space_git");
+        }
     }
 
     #[test]

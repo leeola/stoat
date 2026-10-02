@@ -273,6 +273,17 @@ define_action!(
 );
 
 define_action!(
+    LiveReloadDef,
+    LiveReload,
+    "LiveReload",
+    ActionKind::LiveReload,
+    "reload open buffers as their files change",
+    "Toggle live reload of the open buffers. While on, a buffer re-reads its file each time the file is written outside the editor. The pane, the view, and the cursor stay where they are, which is what separates this from FollowChanges. A buffer with unsaved edits is skipped, never clobbered. A file with no open buffer stays closed. Only watched directories report writes, so a file under an ignored directory needs :auto-reload on instead. A second run turns it off. The mode lasts for the session and starts off.",
+    ActionPriority::Normal,
+    command_name = "live-reload"
+);
+
+define_action!(
     FontSizeIncDef,
     FontSizeInc,
     "FontSizeInc",

@@ -840,6 +840,25 @@ pub(crate) fn toggle_follow_changes(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Flip the workspace live reload, backing the `LiveReload` action.
+///
+/// Turning the mode off drops the writes still waiting on their window, so no
+/// buffer reloads after the reader stops it.
+pub(crate) fn toggle_live_reload(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.live_reload = !stoat.live_reload;
+    if !stoat.live_reload {
+        stoat.live_reload_pending.clear();
+        stoat.live_reload_timer = None;
+    }
+
+    stoat.set_status(if stoat.live_reload {
+        "live reload on"
+    } else {
+        "live reload off"
+    });
+    UpdateEffect::Redraw
+}
+
 /// Hold `path`, a working-tree file written outside the editor, for the follow
 /// window.
 ///
@@ -1150,7 +1169,7 @@ mod tests {
         collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, follow_change_now,
         open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install, reload_all,
         reload_focused, session_log_path, set_auto_reload_config, set_buffer_auto_reload,
-        stat_and_read_buffer, target_log_stem, toggle_follow_changes,
+        stat_and_read_buffer, target_log_stem, toggle_follow_changes, toggle_live_reload,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -1167,7 +1186,7 @@ mod tests {
         collections::HashSet,
         path::{Path, PathBuf},
     };
-    use stoat_action::{MoveDown, OpenFile};
+    use stoat_action::{LiveReload, MoveDown, OpenFile};
 
     /// Latin-1 bytes, which are not valid UTF-8.
     const NOT_UTF8: &[u8] = b"caf\xe9 au lait\n";
@@ -1888,6 +1907,39 @@ mod tests {
                 "a\nB\nC\n".to_string()
             ),
             "follow lands the last write, and live reload reloads the other in place",
+        );
+    }
+
+    #[test]
+    fn live_reload_toggles_and_drops_the_held_writes() {
+        let (mut h, a, _) = live_reload_harness();
+        h.stoat.live_reload = false;
+
+        dispatch(&mut h.stoat, &LiveReload);
+        assert_eq!(
+            (h.stoat.live_reload, h.stoat.pending_message.as_deref()),
+            (true, Some("live reload on")),
+        );
+
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        watched_write(&mut h, "/repo/a.rs", FsEventKind::Modified);
+        toggle_live_reload(&mut h.stoat);
+        assert_eq!(
+            (
+                h.stoat.live_reload,
+                h.stoat.live_reload_pending.is_empty(),
+                h.stoat.live_reload_timer.is_some(),
+                h.stoat.pending_message.as_deref()
+            ),
+            (false, true, false, Some("live reload off")),
+            "turning live reload off drops the write still in its window",
+        );
+
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(
+            buffer_text(&h, a),
+            "a\nB\nc\n",
+            "no buffer reloads after the reader stops it"
         );
     }
 

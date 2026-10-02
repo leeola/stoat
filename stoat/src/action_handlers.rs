@@ -500,6 +500,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReloadAll => auto_reload::reload_all(stoat, false),
         ActionKind::ForceReloadAll => auto_reload::reload_all(stoat, true),
         ActionKind::FollowChanges => auto_reload::toggle_follow_changes(stoat),
+        ActionKind::LiveReload => auto_reload::toggle_live_reload(stoat),
         ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => crate::buffer_lifecycle::close_buffer(stoat),
         ActionKind::GotoLastAccessed => crate::buffer_lifecycle::goto_last_accessed(stoat),
