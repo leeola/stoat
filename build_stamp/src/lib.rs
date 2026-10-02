@@ -5,12 +5,28 @@
 //! datetime, and the build datetime into the crate as compile-time variables.
 
 use std::{
-    env,
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const UNKNOWN: &str = "unknown";
+
+/// Files at the workspace root that crates embed or that every build reads.
+///
+/// No manifest names them, so the stamp of each binary tracks all of them.
+const WORKSPACE_INPUTS: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "config.stcfg",
+    "stoatignore",
+    "stoatty.toml",
+    "themes",
+    "assets",
+    "vendor",
+];
 
 /// Stamp the package whose build script calls this with its commit and build
 /// time, as compile-time variables under `prefix`.
@@ -27,17 +43,15 @@ const UNKNOWN: &str = "unknown";
 /// A value that no source supplies reads `unknown`. `STOAT_COMMIT` and
 /// `STOAT_COMMIT_TIME` in the build environment take precedence over git, so a
 /// build from a source tree with no repository still names its commit.
+///
+/// The build script runs again and takes a new stamp when a crate that the
+/// package depends on by path changes, when an input at the workspace root
+/// such as `Cargo.lock` changes, or when HEAD moves or git writes the index.
 pub fn emit(prefix: &str) {
-    // The paths resolve against the calling package, two directories below the
-    // repository root.
-    for path in [
-        "../../.git/HEAD",
-        "../../.git/index",
-        "src",
-        "build.rs",
-        "Cargo.toml",
-    ] {
-        println!("cargo:rerun-if-changed={path}");
+    if let Some(manifest_dir) = env::var_os("CARGO_MANIFEST_DIR") {
+        for path in tracked_paths(Path::new(&manifest_dir)) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
     println!("cargo:rerun-if-env-changed=STOAT_COMMIT");
     println!("cargo:rerun-if-env-changed=STOAT_COMMIT_TIME");
@@ -92,6 +106,81 @@ fn short_commit(commit: &str) -> String {
     };
     let short = sha.get(..8).unwrap_or(sha);
     format!("{short}{dirty}")
+}
+
+/// Every path whose change takes the stamp of the package at `package_dir`
+/// again.
+///
+/// The list holds only paths that exist. Cargo reruns a build script on every
+/// build when a tracked path does not exist.
+fn tracked_paths(package_dir: &Path) -> Vec<PathBuf> {
+    let root_inputs = workspace_root(package_dir)
+        .into_iter()
+        .flat_map(|root| WORKSPACE_INPUTS.iter().map(move |input| root.join(input)));
+
+    // `--git-path` answers for a worktree too, where `.git` is a file. Every
+    // move of HEAD appends to `logs/HEAD`, a message-only amend included.
+    let git_paths = ["HEAD", "index", "logs/HEAD"]
+        .into_iter()
+        .filter_map(|name| capture("git", &["rev-parse", "--git-path", name], &[]))
+        .map(|path| package_dir.join(path));
+
+    path_dependency_dirs(package_dir)
+        .into_iter()
+        .chain(root_inputs)
+        .chain(git_paths)
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// The directories of the crate at `package_dir` and of every crate it depends
+/// on by path, at any depth.
+///
+/// Dev-dependencies count too, which tracks more than the binary needs and
+/// never less.
+fn path_dependency_dirs(package_dir: &Path) -> BTreeSet<PathBuf> {
+    let mut dirs = BTreeSet::new();
+    let mut pending = vec![package_dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let dir = fs::canonicalize(&dir).unwrap_or(dir);
+        if dirs.contains(&dir) {
+            continue;
+        }
+
+        if let Ok(manifest) = fs::read_to_string(dir.join("Cargo.toml")) {
+            pending.extend(
+                manifest
+                    .lines()
+                    .flat_map(path_values)
+                    .map(|path| dir.join(path))
+                    // A `path` that names a file, such as the source of a
+                    // `[[bin]]`, holds no manifest and so names no crate.
+                    .filter(|path| path.join("Cargo.toml").is_file()),
+            );
+        }
+        dirs.insert(dir);
+    }
+    dirs
+}
+
+/// The value of each `path = "..."` key on one manifest line.
+fn path_values(line: &str) -> impl Iterator<Item = &str> {
+    line.split("path").skip(1).filter_map(|after| {
+        let quoted = after.trim_start().strip_prefix('=')?.trim_start();
+        let (value, _) = quoted.strip_prefix('"')?.split_once('"')?;
+        Some(value)
+    })
+}
+
+/// The root of the workspace that holds the package at `package_dir`.
+fn workspace_root(package_dir: &Path) -> Option<PathBuf> {
+    package_dir
+        .ancestors()
+        .find(|dir| {
+            fs::read_to_string(dir.join("Cargo.toml"))
+                .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "[workspace]"))
+        })
+        .map(Path::to_path_buf)
 }
 
 /// The full sha of the commit the package builds from, with `-dirty` when the
@@ -202,7 +291,12 @@ fn capture(cmd: &str, args: &[&str], envs: &[(&str, &str)]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{short_commit, utc_timestamp, Stamp};
+    use super::{path_dependency_dirs, short_commit, utc_timestamp, workspace_root, Stamp};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     const CLEAN: &str = "6e14badb0d2316841d3029706dd2c0d882617912";
     const DIRTY: &str = "6e14badb0d2316841d3029706dd2c0d882617912-dirty";
@@ -243,5 +337,75 @@ mod tests {
                 "2026-10-01T16:26:44Z"
             ],
         );
+    }
+
+    #[test]
+    fn the_path_closure_follows_dependencies_to_any_depth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = workspace(dir.path());
+        let canonical = |name: &str| ws.join(name).canonicalize().expect("canonical path");
+        assert_eq!(
+            path_dependency_dirs(&ws.join("app")),
+            BTreeSet::from(["app", "lib_a", "lib_b"].map(canonical)),
+        );
+    }
+
+    #[test]
+    fn the_workspace_root_is_the_manifest_that_declares_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = workspace(dir.path());
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            [
+                workspace_root(&ws.join("app")),
+                workspace_root(empty.path())
+            ],
+            [Some(ws), None],
+        );
+    }
+
+    /// A workspace under `root` whose `app` reaches `lib_b` through `lib_a`,
+    /// beside an `other` crate that nothing names.
+    fn workspace(root: &Path) -> PathBuf {
+        let ws = root.join("ws");
+        write(
+            &ws,
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["app", "lib_a", "lib_b", "other"]
+            "#,
+        );
+        write(
+            &ws,
+            "app/Cargo.toml",
+            r#"
+            [[bin]]
+            name = "app"
+            path = "src/main.rs"
+            [dependencies]
+            lib_a = { path = "../lib_a" }
+            [dev-dependencies]
+            app = { path = "." }
+            "#,
+        );
+        write(&ws, "app/src/main.rs", "fn main() {}\n");
+        write(
+            &ws,
+            "lib_a/Cargo.toml",
+            r#"
+            [dependencies.lib_b]
+            path = "../lib_b"
+            "#,
+        );
+        write(&ws, "lib_b/Cargo.toml", "[package]\n");
+        write(&ws, "other/Cargo.toml", "[package]\n");
+        ws
+    }
+
+    fn write(root: &Path, rel: &str, text: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().expect("a parent directory")).expect("create directory");
+        fs::write(path, text).expect("write file");
     }
 }

@@ -4151,6 +4151,9 @@ dependencies = [
 [[package]]
 name = "stoat_build_stamp"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "stoat_cli"
