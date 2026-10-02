@@ -265,6 +265,9 @@ fn buffer_version(stoat: &Stoat, buffer_id: BufferId) -> Option<u64> {
 /// buffer is written as it stands. Their offsets name text that moved, and the
 /// `changes` carrier they travel in has no version gate of its own, so applying
 /// them corrupts what the user typed inside the save window.
+///
+/// The pump schedules the applied edits for the servers itself, because the
+/// scan that sends buffer changes runs only on an input event.
 pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_format_on_save.take() else {
         return false;
@@ -293,6 +296,7 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
                             "format-on-save edit failed to apply",
                         );
                     }
+                    sync::notify_buffer_changes_pending(stoat);
                 } else {
                     tracing::info!(
                         target: "stoat::lsp",
@@ -1250,6 +1254,16 @@ mod tests {
         buf
     }
 
+    /// The text of every content change the fake server received, in order.
+    fn observed_texts(h: &TestHarness) -> Vec<String> {
+        h.fake_lsp()
+            .observed_changes()
+            .into_iter()
+            .flat_map(|change| change.content_changes)
+            .map(|content| content.text)
+            .collect()
+    }
+
     #[test]
     fn format_on_save_formats_then_writes() {
         let mut h = Stoat::test();
@@ -1370,19 +1384,36 @@ mod tests {
         dispatch(&mut h.stoat, &SaveBuffer);
         h.settle();
 
-        let texts: Vec<String> = h
-            .fake_lsp()
-            .observed_changes()
-            .into_iter()
-            .flat_map(|change| change.content_changes)
-            .map(|content| content.text)
-            .collect();
         assert_eq!(
-            texts,
+            observed_texts(&h),
             ["// typed\nfn  main (){}\n"],
             "the save must deliver the edit before it asks the server to format",
         );
         assert_eq!(on_disk(&h, &path), b"// typed\nfn  main (){}\n");
+    }
+
+    #[test]
+    fn format_on_save_sends_the_formatted_text_to_the_server() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::FULL);
+        let root = PathBuf::from("/fos-sync");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+        h.advance_clock(sync::LSP_DID_CHANGE_DEBOUNCE);
+
+        assert_eq!(
+            observed_texts(&h),
+            ["fn main() {}\n"],
+            "the server hears the formatted text with no input event",
+        );
     }
 
     #[test]
