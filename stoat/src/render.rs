@@ -60,7 +60,7 @@ use crate::{
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
     toggle::{self, Toggle, ToggleStates},
-    workspace::{diff, Workspace, WorkspaceId},
+    workspace::{self, diff, Workspace, WorkspaceId},
 };
 use ratatui::{
     buffer::{Buffer, Cell},
@@ -649,14 +649,7 @@ pub(crate) fn frame(
         None
     };
 
-    let workspace_name = if !ws.name.is_empty() {
-        ws.name.as_str()
-    } else {
-        ws.git_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("(unnamed)")
-    };
+    let workspace_name = workspace::display_name_of(&ws.name, &ws.git_root);
 
     // Reading which buffer is focused costs nothing, so the server list settles
     // from that rather than re-deriving its names every frame.

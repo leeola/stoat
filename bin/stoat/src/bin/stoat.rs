@@ -122,7 +122,7 @@ fn resolve_log_path(stem: &str) -> io::Result<PathBuf> {
 ///
 /// The shared client log moves aside to `stoat-cli.log.old` once it passes
 /// [`CLIENT_LOG_MAX`], replacing the one there. A session's log belongs to that
-/// session alone and never moves.
+/// session alone, so it never rotates.
 fn log_path_in(dir: &Path, stem: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{stem}.log"));
@@ -142,6 +142,9 @@ fn log_path_in(dir: &Path, stem: &str) -> io::Result<PathBuf> {
 /// id (from `STOATTY_LOG_ID`), so the stem is `stoatty-<sid>-stoat-<id>` and the
 /// file sorts next to the stoatty log. Without it (ssh, a foreign terminal), the
 /// stem is `headless-stoat-<id>`.
+///
+/// A running session renames its file to `<stem>-<workspace name>.log`, so the
+/// stem stays the prefix of every name the file takes.
 fn log_file_stem(stoatty_id: Option<&str>, id: &LogId, session: bool) -> String {
     if !session {
         return CLIENT_LOG_STEM.to_owned();

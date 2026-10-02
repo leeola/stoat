@@ -599,6 +599,14 @@ impl Workspace {
         self.uid
     }
 
+    /// The name this workspace shows.
+    ///
+    /// That is [`Self::name`] when it is set, else the file name of
+    /// [`Self::git_root`], else `(unnamed)`.
+    pub(crate) fn display_name(&self) -> &str {
+        display_name_of(&self.name, &self.git_root)
+    }
+
     /// True when the user did nothing in this workspace.
     ///
     /// Such a workspace has one tab with one un-split pane on an empty scratch
@@ -1397,6 +1405,21 @@ impl Workspace {
             }
         }
     }
+}
+
+/// The name a workspace with `name` and `git_root` shows, as
+/// [`Workspace::display_name`] answers it.
+///
+/// It borrows the two fields alone. A frame holds the name while it paints the
+/// panes, and that paint borrows the rest of the workspace mutably.
+pub(crate) fn display_name_of<'a>(name: &'a str, git_root: &'a Path) -> &'a str {
+    if !name.is_empty() {
+        return name;
+    }
+    git_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("(unnamed)")
 }
 
 #[cfg(test)]

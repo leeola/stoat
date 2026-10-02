@@ -254,15 +254,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         return;
     }
 
-    let workspace_name = if !ws.name.is_empty() {
-        ws.name.clone()
-    } else {
-        ws.git_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("(unnamed)")
-            .to_string()
-    };
+    let workspace_name = ws.display_name().to_owned();
     let screen = crate::keymap_state::view_predicate(ws);
     let focus_target = ws.focus;
     let focus_id = ws.panes.focus();

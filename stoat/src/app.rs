@@ -1703,7 +1703,8 @@ pub struct Stoat {
     /// The log file this session writes.
     ///
     /// `None` by default, which is what a test and a `--log-stderr` run have.
-    /// The binary sets it via [`Self::set_session_log`].
+    /// The binary sets it via [`Self::set_session_log`]. The session renames
+    /// the file as the active workspace's name changes.
     pub(crate) session_log: Option<SessionLog>,
     /// Workspaces whose hook socket is already served, so the spawn paths call
     /// [`Self::serve_term_session`] freely without stacking listeners on one
@@ -7751,6 +7752,7 @@ impl Stoat {
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
         self.install_pending_workspace_restore();
+        crate::session_log::sync(self);
         crate::diff_warm::ensure_diff_warm(self);
         crate::diff_warm::install_finished(self);
         crate::buffer_lifecycle::install_pending_opens(self);

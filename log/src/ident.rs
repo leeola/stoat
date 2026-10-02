@@ -42,10 +42,12 @@ impl fmt::Display for LogId {
 /// A process's installed identity: its [`LogId`] and the stem its log files are
 /// named with.
 ///
-/// `file_stem` is the log filename minus the `.log` extension. It is retained
-/// rather than recomputed so downstream files that must sort next to the main
-/// log -- LSP transcripts especially -- can reuse the exact stem instead of
-/// re-deriving it from the id and prefix.
+/// `file_stem` is the name the log file is created under, minus the `.log`
+/// extension. A session appends its workspace name to that file's name later,
+/// so the stem is the prefix the log shares with the files that sort next to
+/// it. It is retained rather than recomputed, so downstream files that must
+/// sort next to the main log, LSP transcripts especially, reuse the exact stem
+/// instead of re-deriving it from the id and prefix.
 pub struct ProcessIdent {
     pub id: LogId,
     pub file_stem: String,
