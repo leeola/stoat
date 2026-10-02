@@ -44,7 +44,7 @@ use crate::{
     session_log::SessionLog,
     ssh,
     symbol_finder::SymbolFinder,
-    term_session::TermId,
+    term_session::{TermId, TermLocation},
     theme_pool::{ThemePool, VscodeSource},
     ui::RenderFrame,
     workspace::{BridgeWaiter, Workspace, WorkspaceId, WorkspaceUid},
@@ -6136,6 +6136,52 @@ impl Stoat {
         match &ws.panes.pane(ws.panes.focus()).view {
             View::Agent(id) | View::Terminal(id) => Some(*id),
             _ => None,
+        }
+    }
+
+    /// Move focus to `at`, and switch to its tab when the tab is parked.
+    /// Returns whether focus moved.
+    ///
+    /// Returns `false` for the place focus already sits, a closed pane, a
+    /// dropped dock, or a tab that is gone.
+    pub(crate) fn focus_location(&mut self, at: TermLocation) -> bool {
+        match at {
+            TermLocation::Dock(id) => {
+                let ws = self.active_workspace_mut();
+                if ws.focus == FocusTarget::Dock(id) || !ws.docks.contains_key(id) {
+                    return false;
+                }
+                ws.focus = FocusTarget::Dock(id);
+                true
+            },
+            TermLocation::Pane { tab, pane } if tab == self.active_workspace().active_tab => {
+                let ws = self.active_workspace_mut();
+                if pane == ws.panes.focus() || !ws.panes.split_pane_ids().contains(&pane) {
+                    return false;
+                }
+                ws.panes.set_focus(pane);
+                ws.focus = FocusTarget::SplitPane;
+                true
+            },
+            TermLocation::Pane { tab, pane } => {
+                let parked_holds_pane = self
+                    .active_workspace()
+                    .tabs
+                    .get(tab)
+                    .and_then(|t| t.parked.as_ref())
+                    .is_some_and(|tree| tree.split_pane_ids().contains(&pane));
+                if !parked_holds_pane || !self.active_workspace_mut().switch_tab(tab) {
+                    return false;
+                }
+                // A parked tree keeps zero-sized rects, so a layout pass fits it
+                // to the screen before focus moves into it.
+                let size = self.size();
+                let ws = self.active_workspace_mut();
+                ws.layout(size);
+                ws.panes.set_focus(pane);
+                ws.focus = FocusTarget::SplitPane;
+                true
+            },
         }
     }
 

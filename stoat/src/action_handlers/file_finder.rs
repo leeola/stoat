@@ -204,6 +204,12 @@ pub(super) fn open_file_finder(
 
     let modified = spawn_modified_query(stoat, git_root.clone());
     let buffer_paths = stoat.active_workspace().buffers.open_paths();
+    // Only the Buffers scope reads the rows, and the scope toggle never enters
+    // it, so another scope takes none.
+    let term_rows = match initial_scope {
+        FinderScope::Buffers => crate::file_finder::term_rows(stoat.active_workspace()),
+        _ => Vec::new(),
+    };
     let finder_scopes = stoat.settings.finder_scopes.clone();
 
     let ws = stoat.active_workspace_mut();
@@ -219,6 +225,7 @@ pub(super) fn open_file_finder(
         walk_epoch,
         modified,
         buffer_paths,
+        term_rows,
         &finder_scopes,
     );
     if let Some(roots) = all_workspaces_roots {
@@ -462,11 +469,18 @@ fn push_ancestor_dirs(
 /// the caller can fall through to other prompt consumers.
 pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     settle_finder_scan(stoat);
-    let (path, intent) = {
+    let (path, term, intent) = {
         let finder = stoat.file_finder.as_ref()?;
-        (finder.selected_path()?.to_path_buf(), finder.open_intent)
+        (
+            finder.selected_path()?.to_path_buf(),
+            finder.selected_term(),
+            finder.open_intent,
+        )
     };
     close_file_finder(stoat);
+    if let Some(term) = term {
+        return Some(super::terminal::show_terminal(stoat, term, intent));
+    }
     match intent {
         OpenIntent::Replace => {},
         OpenIntent::HSplit => {

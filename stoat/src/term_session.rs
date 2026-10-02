@@ -5,7 +5,11 @@
 //! can host several sessions at once, and a pane view such as
 //! [`View::Agent`](crate::pane::View::Agent) names one by its [`TermId`].
 
-use crate::{host::terminal::TerminalSession, term_screen::TermScreen};
+use crate::{
+    host::terminal::TerminalSession,
+    pane::{DockId, PaneId},
+    term_screen::TermScreen,
+};
 use futures::FutureExt;
 use slotmap::new_key_type;
 use std::sync::{
@@ -76,6 +80,17 @@ impl TermSelection {
         let before_end = row < end_row || col <= end_col;
         after_start && before_end
     }
+}
+
+/// A place on screen that shows a terminal, either a split pane of a tab or a
+/// dock.
+///
+/// The pane arm carries a tab index, because the view sits in a parked tab at
+/// times. The index is good only against the workspace that gave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TermLocation {
+    Pane { tab: usize, pane: PaneId },
+    Dock(DockId),
 }
 
 /// A live term session pairing its screen emulator with the PTY session that

@@ -28,7 +28,7 @@ use crate::{
     run::{RunId, RunState},
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
-    term_session::{TermId, TermSession},
+    term_session::{TermId, TermLocation, TermSession},
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState, WorktreeBase,
     },
@@ -642,6 +642,54 @@ impl Workspace {
                     .any(|(id, _)| shows(&tree.pane(id).view))
         };
         self.pane_trees().any(in_tree) || self.docks.values().any(|dock| shows(&dock.view))
+    }
+
+    /// Every shell terminal a pane or a dock names, shown or covered, oldest
+    /// first.
+    pub(crate) fn shell_terms(&self) -> Vec<TermId> {
+        // FIXME: A terminal in a detached pane has no row, because split_panes
+        // leaves detached panes out.
+        let mut terms: Vec<TermId> = self
+            .pane_trees()
+            .flat_map(|tree| tree.split_panes().map(|(_, pane)| pane))
+            .flat_map(|pane| [Some(&pane.view), pane.prev_view.as_ref()])
+            .flatten()
+            .chain(self.docks.values().map(|dock| &dock.view))
+            .filter_map(|view| match view {
+                View::Terminal(id) if self.terms.contains_key(*id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        terms.sort_by_key(|id| self.terms[*id].token);
+        terms.dedup();
+        terms
+    }
+
+    /// Where a view shows `term_id`, or `None` for a session that no view
+    /// shows.
+    pub(crate) fn term_location(&self, term_id: TermId) -> Option<TermLocation> {
+        let shows =
+            |view: &View| matches!(view, View::Terminal(t) | View::Agent(t) if *t == term_id);
+        let in_tree = |tree: &PaneTree| {
+            tree.split_panes()
+                .find(|(_, pane)| shows(&pane.view))
+                .map(|(id, _)| id)
+        };
+        if let Some(pane) = in_tree(&self.panes) {
+            return Some(TermLocation::Pane {
+                tab: self.active_tab,
+                pane,
+            });
+        }
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if let Some(pane) = tab.parked.as_ref().and_then(in_tree) {
+                return Some(TermLocation::Pane { tab: index, pane });
+            }
+        }
+        self.docks
+            .iter()
+            .find(|(_, dock)| shows(&dock.view))
+            .map(|(id, _)| TermLocation::Dock(id))
     }
 
     /// Stable identifier for this session across restarts.
@@ -1537,7 +1585,14 @@ pub(crate) fn display_name_of<'a>(name: &'a str, git_root: &'a Path) -> &'a str 
 #[cfg(test)]
 mod tests {
     use super::{BridgeWaiter, ParseJob, Workspace, INLINE_PARSE_MAX_BYTES};
-    use crate::{buffer::BufferId, pane::View, test_harness::TestHarness};
+    use crate::{
+        buffer::BufferId,
+        host::FakeTerminalSession,
+        pane::{Axis, DockPanel, DockSide, DockVisibility, View},
+        term_screen::TermScreen,
+        term_session::{TermId, TermSession},
+        test_harness::TestHarness,
+    };
     use std::{
         path::{Path, PathBuf},
         sync::{
@@ -1555,6 +1610,47 @@ mod tests {
             View::Editor(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// The rows of `:buffers` name every shell that a pane in any tab shows or
+    /// covers, or that a dock shows, once each and oldest first. An agent is no
+    /// shell, and a record that outlived its session names nothing.
+    #[test]
+    fn shell_terms_lists_each_shell_once_oldest_first() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        let [docked, shown, covered, agent, gone] = [(); 5].map(|_| insert_session(ws));
+        ws.terms.remove(gone);
+
+        let focus = ws.panes.focus();
+        let pane = ws.panes.pane_mut(focus);
+        pane.view = View::Terminal(shown);
+        pane.prev_view = Some(View::Terminal(covered));
+        let side = ws.panes.split(Axis::Vertical);
+        let pane = ws.panes.pane_mut(side);
+        pane.view = View::Agent(agent);
+        pane.prev_view = Some(View::Terminal(gone));
+        for term in [docked, shown] {
+            ws.docks.insert(DockPanel {
+                view: View::Terminal(term),
+                side: DockSide::Right,
+                visibility: DockVisibility::Hidden,
+                default_width: 30,
+                area: Default::default(),
+            });
+        }
+
+        assert_eq!(ws.shell_terms(), [docked, shown, covered]);
+    }
+
+    /// Insert a session with a fake PTY into `ws`, newer than every session
+    /// inserted before it.
+    fn insert_session(ws: &mut Workspace) -> TermId {
+        ws.terms.insert(TermSession::new(
+            TermScreen::new(4, 10),
+            Arc::new(FakeTerminalSession::new()),
+            TermSession::next_token(),
+        ))
     }
 
     /// The status line names the first command that waits on a buffer, and the

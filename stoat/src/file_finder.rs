@@ -3,6 +3,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     paths,
     picker::{BaseId, DisplayCache, PathPicker, PreviewPolicy, Scan},
+    term_session::TermId,
     workspace::Workspace,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -40,9 +41,9 @@ pub enum FinderScope {
     /// so the list stays current.
     Modified,
     /// Currently-open path-bound buffers from the workspace's
-    /// [`BufferRegistry`]. Captured at open time. Reachable only through
-    /// the dedicated `OpenBufferPicker` action; Shift-Tab from this scope
-    /// flips back to [`FinderScope::All`].
+    /// [`BufferRegistry`], then the workspace's shell terminals. Captured at
+    /// open time. Reachable only through the dedicated `OpenBufferPicker`
+    /// action; Shift-Tab from this scope flips back to [`FinderScope::All`].
     Buffers,
     /// A config-defined named glob scope (`finder.scope.<name>`). Shift-Tab
     /// cycles through these alphabetically after Modified, and the list shows
@@ -146,6 +147,17 @@ pub(crate) struct FinderPathCache {
     pub(crate) display: Option<DisplayCache>,
 }
 
+/// A terminal row of the [`FinderScope::Buffers`] list.
+///
+/// The pick list holds paths and derives each row's text from its path, and a
+/// relative path displays as written. A terminal rides in the list as a
+/// relative path that spells its label, which is then both the row text and
+/// what the query matches. This maps that path back to the session.
+pub(crate) struct TermRow {
+    pub(crate) key: PathBuf,
+    pub(crate) term: TermId,
+}
+
 pub struct FileFinder {
     pub(crate) input: InputView,
     /// What submit should do with the selected file.
@@ -173,8 +185,12 @@ pub struct FileFinder {
     /// it derived from them. Restamped wherever either is rebuilt.
     base_generation: u64,
     /// Absolute paths of currently-open buffers. Captured once at open time;
-    /// not re-queried on scope toggle.
+    /// not re-queried on scope toggle. The keys of [`Self::term_rows`] follow
+    /// the buffer paths.
     pub(crate) buffer_paths: Vec<PathBuf>,
+    /// The terminal rows of the [`FinderScope::Buffers`] list, captured at
+    /// open time like the buffer paths.
+    pub(crate) term_rows: Vec<TermRow>,
     /// The [`crate::app::Stoat::finder_path_epoch`] this finder's walk started
     /// under, carried into [`FinderPathCache`] on close.
     ///
@@ -268,7 +284,8 @@ impl FileFinder {
         seed_display: Option<DisplayCache>,
         walk_epoch: u64,
         modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
-        buffer_paths: Vec<PathBuf>,
+        mut buffer_paths: Vec<PathBuf>,
+        term_rows: Vec<TermRow>,
         finder_scopes: &BTreeMap<String, Vec<String>>,
     ) -> Self {
         let input = InputView::create(
@@ -282,6 +299,7 @@ impl FileFinder {
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = seed_paths;
         core.walk_display = seed_display;
+        buffer_paths.extend(term_rows.iter().map(|row| row.key.clone()));
 
         let mut finder = Self {
             input,
@@ -290,6 +308,7 @@ impl FileFinder {
             modified_paths: Vec::new(),
             modified: Some(modified),
             buffer_paths,
+            term_rows,
             walk_epoch,
             base_generation: crate::picker::next_generation(),
             core,
@@ -328,6 +347,18 @@ impl FileFinder {
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
         self.active_core_ref().selected_path()
+    }
+
+    /// The terminal the selected row names, or `None` for a file row.
+    pub(crate) fn selected_term(&self) -> Option<TermId> {
+        if self.scope != FinderScope::Buffers || self.browse.is_some() {
+            return None;
+        }
+        let selected = self.core.selected_path()?;
+        self.term_rows
+            .iter()
+            .find(|row| row.key == selected)
+            .map(|row| row.term)
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
@@ -571,13 +602,17 @@ impl FileFinder {
     /// In [`FinderScope::Buffers`] the selection previews the live, possibly
     /// modified in-memory buffer. Every other scope reads the file from disk. A
     /// buffer selection whose path has no open buffer falls back to the disk
-    /// file.
+    /// file. A terminal row previews nothing, since its key is no file.
     pub(crate) fn sync_preview(
         &mut self,
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &stoat_language::LanguageRegistry,
     ) {
+        if self.selected_term().is_some() {
+            self.core.preview.clear(ws);
+            return;
+        }
         let policy = if self.browse.is_some() {
             PreviewPolicy::File
         } else if self.scope == FinderScope::Buffers {
@@ -669,6 +704,28 @@ fn compile_named_scopes(finder_scopes: &BTreeMap<String, Vec<String>>) -> Vec<(S
                     );
                     None
                 },
+            }
+        })
+        .collect()
+}
+
+/// The terminal rows of the [`FinderScope::Buffers`] list, one per shell
+/// terminal of `ws`, oldest first.
+///
+/// A row reads `term <n>: <title>`, or `term <n>` when the child set no title.
+/// The number keeps two terminals with one title apart.
+pub(crate) fn term_rows(ws: &Workspace) -> Vec<TermRow> {
+    ws.shell_terms()
+        .into_iter()
+        .enumerate()
+        .map(|(i, term)| {
+            let label = match ws.terms[term].term.title() {
+                Some(title) => format!("term {}: {title}", i + 1),
+                None => format!("term {}", i + 1),
+            };
+            TermRow {
+                key: PathBuf::from(label),
+                term,
             }
         })
         .collect()
@@ -984,6 +1041,98 @@ mod tests {
         assert!(base.iter().any(|p| p.ends_with("c.rs")));
         assert!(!base.iter().any(|p| p.ends_with("b.rs")));
         assert_eq!(h.snapshot().mode, "insert");
+    }
+
+    /// A terminal has no path, so the buffer list names it by its place among
+    /// the workspace's shells and by the title its child set.
+    #[test]
+    fn the_buffer_picker_lists_terminals_after_the_buffers() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}")]);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let first = focused_terminal(&h);
+        h.stoat.active_workspace_mut().terms[first]
+            .term
+            .feed(b"\x1b]0;build\x07");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitNewRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        // A key chord goes to the shell, because a terminal pane sends its
+        // keys to the child.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+
+        let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
+        assert_eq!(
+            finder.core.picklist.base.to_vec(),
+            [
+                root.join("a.rs"),
+                PathBuf::from("term 1: build"),
+                PathBuf::from("term 2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn enter_on_a_terminal_row_switches_to_the_tab_that_shows_it() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let term_id = focused_terminal(&h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+
+        h.type_text("term");
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.file_finder.is_none(),
+                ws.active_tab,
+                focused_terminal(&h)
+            ),
+            (true, 0, term_id),
+        );
+    }
+
+    /// A terminal row's key is no file, so the pane shows nothing for it rather
+    /// than the placeholder of a failed read.
+    #[test]
+    fn a_terminal_row_previews_nothing() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}\n")]);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+        h.snapshot();
+        let file_preview = preview_text(&h);
+
+        h.type_keys("down");
+        h.snapshot();
+
+        assert_eq!(
+            (file_preview.is_empty(), preview_text(&h)),
+            (false, String::new())
+        );
+    }
+
+    /// The terminal session the focused pane shows.
+    fn focused_terminal(h: &TestHarness) -> TermId {
+        let ws = h.stoat.active_workspace();
+        let crate::pane::View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the focused pane shows a terminal");
+        };
+        term_id
     }
 
     /// A capped scope's base does not move between keystrokes, so the picker

@@ -1,14 +1,16 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    file_finder::OpenIntent,
     host::terminal::TerminalSession,
-    pane::{PaneId, View},
+    pane::{DockVisibility, PaneId, View},
     run::{agent_socket_path_in, spawn_term_reader, spawn_terminal, TermSpawnEnv},
     term_screen::TermScreen,
-    term_session::{TermId, TermSession},
+    term_session::{TermId, TermLocation, TermSession},
     workspace::Workspace,
 };
 use futures::FutureExt;
 use std::sync::Arc;
+use stoat_action::{SplitNewDown, SplitNewRight};
 
 /// Dimensions the terminal PTY opens at before the render/resize pass fits it
 /// to the focused pane.
@@ -37,13 +39,7 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
         covered_terminal(ws, ws.panes.focus())
     };
     if let Some(term_id) = covered {
-        {
-            let ws = stoat.active_workspace_mut();
-            let focused = ws.panes.focus();
-            let pane = ws.panes.pane_mut(focused);
-            pane.prev_view = Some(std::mem::replace(&mut pane.view, View::Terminal(term_id)));
-        }
-        stoat.transition_mode("normal".to_string());
+        show_in_focused_pane(stoat, term_id);
         return UpdateEffect::Redraw;
     }
 
@@ -63,6 +59,18 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
+/// Show `term_id` in the focused pane, with the view it covers recorded behind
+/// it, and put the pane in normal mode, where its keys reach the shell.
+fn show_in_focused_pane(stoat: &mut Stoat, term_id: TermId) {
+    {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let pane = ws.panes.pane_mut(focused);
+        pane.prev_view = Some(std::mem::replace(&mut pane.view, View::Terminal(term_id)));
+    }
+    stoat.transition_mode("normal".to_string());
+}
+
 /// The live shell `pane` covers, ready to be shown again.
 ///
 /// `None` unless the pane's record names a terminal, the workspace still holds
@@ -72,6 +80,51 @@ pub(super) fn covered_terminal(ws: &Workspace, pane: PaneId) -> Option<TermId> {
         return None;
     };
     (ws.terms.contains_key(term_id) && !ws.term_shown(term_id)).then_some(term_id)
+}
+
+/// Bring terminal `term_id` to focus, at the view that shows it, or in the
+/// focused pane when it is covered.
+///
+/// A shown terminal takes focus where it is, across tabs, and the split intent
+/// has no effect, since two views over one PTY fight for its input. A hidden
+/// dock that shows it opens. For a covered terminal, the split intent applies
+/// first. If the session exited, the status line reports it.
+pub(super) fn show_terminal(
+    stoat: &mut Stoat,
+    term_id: TermId,
+    intent: OpenIntent,
+) -> UpdateEffect {
+    if !stoat.active_workspace().terms.contains_key(term_id) {
+        stoat.set_status("terminal exited");
+        return UpdateEffect::Redraw;
+    }
+
+    // A terminal pane rests in normal mode, where its keys go to the child, so
+    // the focus move sets no mode.
+    if let Some(at) = stoat.active_workspace().term_location(term_id) {
+        if let TermLocation::Dock(id) = at
+            && let Some(dock) = stoat.active_workspace_mut().docks.get_mut(id)
+            && dock.visibility == DockVisibility::Hidden
+        {
+            dock.visibility = DockVisibility::Open {
+                width: dock.default_width,
+            };
+        }
+        stoat.focus_location(at);
+        return UpdateEffect::Redraw;
+    }
+
+    match intent {
+        OpenIntent::Replace => {},
+        OpenIntent::HSplit => {
+            super::dispatch(stoat, &SplitNewDown);
+        },
+        OpenIntent::VSplit => {
+            super::dispatch(stoat, &SplitNewRight);
+        },
+    }
+    show_in_focused_pane(stoat, term_id);
+    UpdateEffect::Redraw
 }
 
 /// Respawn a fresh shell for every persisted terminal pane and dock whose
@@ -277,6 +330,77 @@ mod tests {
             panic!("focused pane should hold a terminal view");
         };
         term_id
+    }
+
+    #[test]
+    fn showing_a_covered_terminal_puts_it_in_the_focused_pane() {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+
+        show_terminal(&mut h.stoat, hidden, OpenIntent::Replace);
+
+        assert_eq!(
+            (
+                focused_view_terminal(&h),
+                h.stoat.focused_mode().to_string(),
+                h.stoat.active_workspace().panes.split_pane_ids().len(),
+            ),
+            (hidden, "normal".to_string(), 1),
+        );
+    }
+
+    #[test]
+    fn showing_a_covered_terminal_with_a_split_intent_opens_a_pane_for_it() {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+
+        show_terminal(&mut h.stoat, hidden, OpenIntent::VSplit);
+
+        assert_eq!(
+            (
+                focused_view_terminal(&h),
+                h.stoat.active_workspace().panes.split_pane_ids().len(),
+            ),
+            (hidden, 2),
+        );
+    }
+
+    /// Two views over one PTY fight for its input, so a shown terminal takes
+    /// focus where it is and a split intent adds nothing.
+    #[test]
+    fn showing_a_shown_terminal_focuses_its_pane_and_adds_no_view() {
+        let mut h = Stoat::test();
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let terminal_pane = h.stoat.active_workspace().panes.focus();
+        let term_id = focused_view_terminal(&h);
+        super::super::dispatch(&mut h.stoat, &SplitNewRight);
+
+        show_terminal(&mut h.stoat, term_id, OpenIntent::VSplit);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.panes.focus(), ws.panes.split_pane_ids().len()),
+            (terminal_pane, 2),
+        );
+    }
+
+    #[test]
+    fn showing_a_terminal_in_a_hidden_dock_opens_the_dock_and_focuses_it() {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+        show_in_a_dock(&mut h.stoat, hidden);
+
+        show_terminal(&mut h.stoat, hidden, OpenIntent::Replace);
+
+        let ws = h.stoat.active_workspace();
+        let (id, dock) = ws.docks.iter().next().expect("the dock");
+        assert_eq!(
+            (ws.focus, dock.visibility),
+            (
+                crate::pane::FocusTarget::Dock(id),
+                DockVisibility::Open { width: 30 },
+            ),
+        );
     }
 
     #[test]
