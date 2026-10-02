@@ -46,10 +46,11 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The quit aborts whenever the save did not land. A scratch buffer with no
 /// path, a file changed on disk since it was opened, or a write error all leave
-/// the app running with the failure in [`Stoat::pending_message`]. When
-/// `format_on_save` defers the write, the quit is deferred too --
-/// [`Stoat::quit_after_save`] arms it and [`pump_format_on_save`] quits once the
-/// formatted write actually lands.
+/// the app running with the failure in [`Stoat::pending_message`].
+///
+/// A write that lands later, through format on save or the background write,
+/// defers the quit with it. [`Stoat::quit_after_save`] records the pane, and
+/// the pump that lands the write closes that pane.
 pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
     match save_flow(stoat, false) {
         SaveFlow::Wrote => {
@@ -60,7 +61,8 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
             }
         },
         SaveFlow::Armed | SaveFlow::AlreadyPending => {
-            stoat.quit_after_save = true;
+            let pane = stoat.active_workspace().panes.focus();
+            stoat.quit_after_save = Some((stoat.active_workspace, pane));
             UpdateEffect::Redraw
         },
         SaveFlow::RefusedDiskChanged | SaveFlow::Failed => UpdateEffect::Redraw,
@@ -68,6 +70,28 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
             stoat.set_status("nothing to write; use :q to quit");
             UpdateEffect::Redraw
         },
+    }
+}
+
+/// Quit the pane a deferred `:wq` waits on, once its write has landed.
+///
+/// The quit drops when the write failed, so the buffer stays for the user. It
+/// also drops when the pane is gone or its workspace is not the active one. A
+/// pane id names a pane only within its own workspace, so after a switch it
+/// names no pane on screen.
+fn finish_deferred_quit(stoat: &mut Stoat, wrote: bool) {
+    let Some((workspace, pane)) = stoat.quit_after_save.take() else {
+        return;
+    };
+    if !wrote
+        || stoat.active_workspace != workspace
+        || !stoat.active_workspace().panes.contains(pane)
+    {
+        return;
+    }
+
+    if !super::pane::close_pane_by_id(stoat, pane) {
+        stoat.quit_requested = true;
     }
 }
 
@@ -83,8 +107,8 @@ enum SaveFlow {
     /// The file changed on disk since it was opened, so a guarded save was
     /// refused and [`Stoat::pending_message`] set. `:w!` overrides.
     RefusedDiskChanged,
-    /// A format-on-save request was armed. The write lands asynchronously when
-    /// the request resolves, via [`pump_format_on_save`].
+    /// A format-on-save request or a background write was armed. The write
+    /// lands later, through [`pump_format_on_save`] or [`pump_pending_save`].
     Armed,
     /// A format-on-save write was already in flight, so this save was dropped.
     /// The in-flight write still lands the latest text.
@@ -306,22 +330,11 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
                     );
                 }
             }
-            // A `:wq` that deferred behind this write quits once it lands, but
-            // only if it succeeded, so a failed deferred write leaves the buffer
-            // for the user instead of exiting over unsaved changes. An armed
-            // write leaves the flag for its own pump to consume.
+            // An armed write leaves a deferred `:wq` for the pump that lands it.
             match write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path, outcome.force) {
                 WriteOutcome::Armed => {},
-                WriteOutcome::Wrote => {
-                    if std::mem::take(&mut stoat.quit_after_save) {
-                        stoat.quit_requested = true;
-                    }
-                },
-                WriteOutcome::Failed => {
-                    if std::mem::take(&mut stoat.quit_after_save) {
-                        stoat.quit_requested = false;
-                    }
-                },
+                WriteOutcome::Wrote => finish_deferred_quit(stoat, true),
+                WriteOutcome::Failed => finish_deferred_quit(stoat, false),
             }
             true
         },
@@ -603,9 +616,7 @@ pub(crate) fn pump_pending_save(stoat: &mut Stoat) -> bool {
         },
     };
 
-    if std::mem::take(&mut stoat.quit_after_save) {
-        stoat.quit_requested = wrote;
-    }
+    finish_deferred_quit(stoat, wrote);
     true
 }
 
@@ -811,7 +822,7 @@ mod tests {
         TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
     };
     use std::path::{Path, PathBuf};
-    use stoat_action::{ForceSaveBuffer, OpenFile, SaveBuffer, WriteQuit};
+    use stoat_action::{ForceSaveBuffer, OpenFile, SaveBuffer, SplitRight, WriteQuit};
     use stoatty_protocol::command;
 
     /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
@@ -1909,6 +1920,48 @@ mod tests {
     }
 
     #[test]
+    fn write_quit_with_a_second_pane_closes_only_its_pane() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/wq-split");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+        let first = h.stoat.active_workspace().panes.focus();
+        dispatch(&mut h.stoat, &SplitRight);
+
+        dispatch(&mut h.stoat, &WriteQuit);
+        h.settle();
+
+        assert_eq!(
+            (
+                h.stoat.quit_requested,
+                h.stoat.active_workspace().panes.split_pane_ids()
+            ),
+            (false, vec![first]),
+            "wq closes the pane it was pressed in and keeps the app",
+        );
+        assert_eq!(on_disk(&h, &path), b"edited original\n");
+    }
+
+    #[test]
+    fn a_deferred_write_quit_drops_after_a_workspace_switch() {
+        let mut h = Stoat::test();
+        let pane = h.stoat.active_workspace().panes.focus();
+        h.stoat.quit_after_save = Some((h.stoat.active_workspace, pane));
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+
+        super::finish_deferred_quit(&mut h.stoat, true);
+
+        assert_eq!(
+            (
+                h.stoat.quit_requested,
+                h.stoat.active_workspace().panes.split_pane_ids().len()
+            ),
+            (false, 1),
+            "the quit names a pane of the workspace it left",
+        );
+    }
+
+    #[test]
     fn write_quit_refuses_when_disk_changed() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/wq-guard");
@@ -1953,9 +2006,11 @@ mod tests {
             vec![whole_file_edit("fn main() {}\n")],
         );
 
+        let pane = h.stoat.active_workspace().panes.focus();
         assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
-        assert!(
+        assert_eq!(
             h.stoat.quit_after_save,
+            Some((h.stoat.active_workspace, pane)),
             "the quit defers behind the formatted write"
         );
         assert!(!h.stoat.quit_requested);
@@ -1967,7 +2022,10 @@ mod tests {
             b"fn main() {}\n",
             "the formatted write landed"
         );
-        assert!(!h.stoat.quit_after_save, "the deferred quit is consumed");
+        assert_eq!(
+            h.stoat.quit_after_save, None,
+            "the deferred quit is consumed"
+        );
         assert!(h.stoat.quit_requested, "the landed write requests the quit");
     }
 
@@ -1985,11 +2043,14 @@ mod tests {
             .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
 
         assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
-        assert!(h.stoat.quit_after_save);
+        assert!(h.stoat.quit_after_save.is_some());
 
         h.settle();
 
-        assert!(!h.stoat.quit_after_save, "the deferred quit is consumed");
+        assert_eq!(
+            h.stoat.quit_after_save, None,
+            "the deferred quit is consumed"
+        );
         assert!(
             !h.stoat.quit_requested,
             "a failed deferred write aborts the quit"

@@ -1907,15 +1907,17 @@ pub struct Stoat {
     /// While `Some`, further saves are dropped so a burst does not queue
     /// duplicate writes.
     pub(crate) pending_save: Option<action_handlers::file::PendingSave>,
-    /// Set by `:wq` ([`action_handlers::file::write_quit`]) when the save it
-    /// triggered was deferred to an in-flight write. Whichever pump lands that
-    /// write consumes it, setting [`Self::quit_requested`] only if the write
-    /// succeeded, so a failed deferred write aborts the quit and leaves the
-    /// buffer for the user.
-    pub(crate) quit_after_save: bool,
-    /// Set once a `:wq`-driven write has landed and the app should exit. The run
-    /// loop takes it right after [`Self::drive_background`] and quits, so a quit
-    /// deferred behind a format-on-save write happens on the frame it completes.
+    /// The pane a `:wq` ([`action_handlers::file::write_quit`]) was pressed in,
+    /// with its workspace, while the write it started is on its way.
+    ///
+    /// The pump that lands the write takes it and closes that pane, and sets
+    /// [`Self::quit_requested`] only when the pane is the last. A failed write
+    /// or a pane that is gone drops the quit and leaves the buffer for the user.
+    pub(crate) quit_after_save: Option<(WorkspaceId, PaneId)>,
+    /// Set once a `:wq`-driven write has landed and the pane it closes is the
+    /// last. The run loop takes it right after [`Self::drive_background`] and
+    /// quits, so a quit deferred behind a write happens on the frame it
+    /// completes.
     pub(crate) quit_requested: bool,
 
     /// Editor autocomplete popup waiting to be painted. Set by the
@@ -2569,7 +2571,7 @@ impl Stoat {
             pending_format_request: StampedPending::default(),
             pending_format_on_save: None,
             pending_save: None,
-            quit_after_save: false,
+            quit_after_save: None,
             quit_requested: false,
             pending_completion: None,
             completion_generation: 0,
@@ -3747,9 +3749,9 @@ impl Stoat {
                     if self.passthrough.is_some() {
                         continue;
                     }
-                    // A `:wq` deferred behind a format-on-save write sets
-                    // `quit_requested` from the pump inside `drive_background`
-                    // once the write lands, so quit on the frame it completes.
+                    // A `:wq` deferred behind a write sets `quit_requested` from
+                    // the pump inside `drive_background` once the write lands on
+                    // the last pane, so quit on the frame it completes.
                     if std::mem::take(&mut self.quit_requested) {
                         self.save_all_workspaces();
                         break;
