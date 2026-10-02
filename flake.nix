@@ -62,6 +62,25 @@
         # which every Mac that runs this code has.
         floorTargetCpu = if pkgs.stdenv.hostPlatform.isx86_64 then "x86-64-v3" else null;
 
+        # The commit the flake builds, for the stamp the build scripts put in
+        # each binary. The package source is a store copy with no `.git` and the
+        # sandbox has no git, so the scripts find no repository to ask. A dirty
+        # tree reports its HEAD with a `-dirty` suffix.
+        commit = self.rev or self.dirtyRev or "unknown";
+
+        # The time of that commit, as `YYYY-MM-DDTHH:MM:SSZ`. A git flake's
+        # last-modified time is the committer time of its commit, and
+        # `lastModifiedDate` holds it as `YYYYMMDDHHMMSS` in UTC.
+        commitTime =
+          let
+            stamp = self.lastModifiedDate or "";
+            part = start: len: builtins.substring start len stamp;
+          in
+          if builtins.stringLength stamp == 14 then
+            "${part 0 4}-${part 4 2}-${part 6 2}T${part 8 2}:${part 10 2}:${part 12 2}Z"
+          else
+            "unknown";
+
         # Derivation attributes shared by every package, compiled for
         # `targetCpu`: a rustc `-C target-cpu` name, or null for the target's
         # default. `native` works, but a derivation's hash does not cover the
@@ -87,6 +106,9 @@
           # invoking clang (e.g. `aarch64-apple-darwin` -> `arm64-apple-macosx`).
           NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING = "1";
           RUSTFLAGS = pkgs.lib.optionalString (targetCpu != null) "-C target-cpu=${targetCpu}";
+          # Both binaries' build scripts read these in place of git.
+          STOAT_COMMIT = commit;
+          STOAT_COMMIT_TIME = commitTime;
           # `pkg.withTargetCpu "znver4"` rebuilds the same package for a named
           # CPU, for a consumer that wants a machine-specific build that stays
           # reproducible.
