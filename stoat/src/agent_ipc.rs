@@ -13,7 +13,8 @@
 //! answers whether the buffer closed clean. `open-in-term` opens files in the
 //! terminal pane the caller runs in, which is what makes a `stoat <file>`
 //! inside a pane reach the instance hosting it, and holds the caller until
-//! those files close when it asks to wait.
+//! those files close when it asks to wait. A caller that goes away while it
+//! waits leaves no waiter behind.
 
 use crate::{
     agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
@@ -26,15 +27,22 @@ use std::{
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines},
     net::UnixListener,
     sync::{
         mpsc::{Sender, UnboundedReceiver, UnboundedSender},
         oneshot,
     },
 };
+
+/// The number the next connection takes.
+///
+/// One counter serves every session socket in the process, so a number names
+/// one connection whichever workspace holds its waiters.
+static NEXT_CLIENT: AtomicU64 = AtomicU64::new(0);
 
 /// A hook event tagged with the session it belongs to.
 ///
@@ -73,6 +81,9 @@ pub enum AgentControl {
     /// invocation returns. A sender dropped with no outcome reads as closed.
     OpenEditor {
         uid: WorkspaceUid,
+        /// The connection that parks on the buffer, which a
+        /// [`Self::ClientGone`] names when it ends first.
+        client: u64,
         path: PathBuf,
         done: UnboundedSender<BridgeOutcome>,
     },
@@ -86,11 +97,19 @@ pub enum AgentControl {
     /// and the command returns when the last of them leaves the editor.
     OpenInTerm {
         uid: WorkspaceUid,
+        /// The connection that asked, which a [`Self::ClientGone`] names when
+        /// it ends while held.
+        client: u64,
         term: u64,
         paths: Vec<PathBuf>,
         hold: Option<UnboundedSender<BridgeOutcome>>,
         done: oneshot::Sender<bool>,
     },
+    /// Connection `client` ended while it waited on buffers.
+    ///
+    /// The event loop drops the waiters the connection parked, and the buffers
+    /// stay open with their edits.
+    ClientGone { uid: WorkspaceUid, client: u64 },
     /// Answer a live-session [`AgentQuery`] and fire `reply` with the JSON
     /// result. The connection stays open afterward, so several queries ride one
     /// connection, unlike the park-and-return [`Self::OpenEditor`].
@@ -252,6 +271,9 @@ pub async fn serve_agent_hooks(
 /// `$EDITOR` blocks for exactly that long. Every other request replies and
 /// reads on, so one connection carries a series.
 ///
+/// A client that goes away while parked is reported as
+/// [`AgentControl::ClientGone`], so its waiters do not outlive it.
+///
 /// Otherwise returns when the client disconnects, a read fails, or a receiver
 /// is dropped. Blank lines are ignored and malformed lines are logged and
 /// skipped, so one bad line never tears down the connection.
@@ -263,6 +285,7 @@ async fn serve_connection<R>(
 ) where
     R: AsyncRead + AsyncWrite + Unpin,
 {
+    let client = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
     loop {
@@ -287,6 +310,7 @@ async fn serve_connection<R>(
                     if control_tx
                         .send(AgentControl::OpenEditor {
                             uid,
+                            client,
                             path,
                             done: done_tx,
                         })
@@ -295,7 +319,10 @@ async fn serve_connection<R>(
                     {
                         return;
                     }
-                    let status = held_status(&mut done_rx).await;
+                    let Some(status) = held_status(&mut done_rx, &mut lines).await else {
+                        report_client_gone(control_tx, uid, client).await;
+                        return;
+                    };
                     let reply = json!({ "reply": "editor-closed", "status": status });
                     let _ = write_json_line(&mut write_half, &reply).await;
                     return;
@@ -306,6 +333,7 @@ async fn serve_connection<R>(
                     if control_tx
                         .send(AgentControl::OpenInTerm {
                             uid,
+                            client,
                             term,
                             paths,
                             hold: wait.then_some(hold_tx),
@@ -319,10 +347,19 @@ async fn serve_connection<R>(
                     let held = done_rx.await.unwrap_or(false);
                     let opened = json!({ "reply": "opened", "held": held });
                     if !write_json_line(&mut write_half, &opened).await {
+                        // The event loop parks the waiters before it answers,
+                        // so a client that is gone before this reply holds
+                        // them too.
+                        if held {
+                            report_client_gone(control_tx, uid, client).await;
+                        }
                         return;
                     }
                     if held {
-                        let status = held_status(&mut hold_rx).await;
+                        let Some(status) = held_status(&mut hold_rx, &mut lines).await else {
+                            report_client_gone(control_tx, uid, client).await;
+                            return;
+                        };
                         let closed = json!({ "reply": "closed", "status": status });
                         if !write_json_line(&mut write_half, &closed).await {
                             return;
@@ -369,18 +406,44 @@ async fn serve_connection<R>(
 }
 
 /// The exit status for a command once every buffer it waits on has left the
-/// editor.
+/// editor, or `None` when the client goes away first.
 ///
 /// A buffer left with unsaved edits makes it 1. A waiter dropped with no
-/// outcome counts as closed.
-async fn held_status(hold: &mut UnboundedReceiver<BridgeOutcome>) -> i32 {
+/// outcome counts as closed. The end of `lines` or a failed read is a client
+/// that went away. A line that arrives meanwhile is dropped, since no client
+/// sends one while it waits.
+async fn held_status<L>(
+    hold: &mut UnboundedReceiver<BridgeOutcome>,
+    lines: &mut Lines<L>,
+) -> Option<i32>
+where
+    L: AsyncBufRead + Unpin,
+{
     let mut status = 0;
-    while let Some(outcome) = hold.recv().await {
-        if outcome == BridgeOutcome::Abandoned {
-            status = 1;
+    loop {
+        // Both futures are cancel safe, so the arm that loses a round drops no
+        // input.
+        tokio::select! {
+            outcome = hold.recv() => match outcome {
+                Some(BridgeOutcome::Abandoned) => status = 1,
+                Some(BridgeOutcome::Closed) => {},
+                None => return Some(status),
+            },
+            line = lines.next_line() => {
+                if !matches!(line, Ok(Some(_))) {
+                    return None;
+                }
+            },
         }
     }
-    status
+}
+
+/// Tell the event loop that connection `client` went away while it waited on
+/// buffers, so the waiters it parked go too.
+async fn report_client_gone(control_tx: &Sender<AgentControl>, uid: WorkspaceUid, client: u64) {
+    let _ = control_tx
+        .send(AgentControl::ClientGone { uid, client })
+        .await;
 }
 
 /// Write `value` to `out` as one JSON line, and answer whether the connection
@@ -504,8 +567,9 @@ mod tests {
         test_harness::TestHarness,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use std::time::Duration;
+    use std::{future::poll_fn, pin::pin, task::Poll, time::Duration};
     use tokio::{
+        io::DuplexStream,
         net::UnixStream,
         sync::mpsc::{error::TryRecvError, Receiver},
         task::JoinHandle,
@@ -598,6 +662,7 @@ mod tests {
         let (done_tx, done_rx) = oneshot::channel();
         let effect = h.stoat.handle_agent_control(AgentControl::OpenInTerm {
             uid,
+            client: 0,
             term,
             paths,
             hold,
@@ -1001,6 +1066,7 @@ mod tests {
             uid: got_uid,
             path,
             done,
+            ..
         } = control_rx.recv().await.expect("control message")
         else {
             panic!("expected an open-editor control message");
@@ -1068,6 +1134,7 @@ mod tests {
             paths,
             hold,
             done,
+            ..
         } = control_rx.recv().await.expect("control message")
         else {
             panic!("expected an open-in-term control message");
@@ -1152,9 +1219,9 @@ mod tests {
 
     /// The next reply line on `replies`, parsed, so the assertion does not
     /// depend on the order the encoder writes the keys in.
-    async fn next_reply<R>(replies: &mut tokio::io::Lines<R>) -> Value
+    async fn next_reply<R>(replies: &mut Lines<R>) -> Value
     where
-        R: tokio::io::AsyncBufRead + Unpin,
+        R: AsyncBufRead + Unpin,
     {
         let line = replies
             .next_line()
@@ -1162,6 +1229,107 @@ mod tests {
             .expect("read a reply")
             .expect("a reply line");
         serde_json::from_str(&line).expect("a reply is JSON")
+    }
+
+    #[tokio::test]
+    async fn an_editor_client_that_leaves_while_parked_is_reported_gone() {
+        let uid = WorkspaceUid(13);
+        let (mut client, mut controls, conn) = serve_duplex(uid);
+        client
+            .write_all(b"{\"req\":\"open-editor\",\"path\":\"/tmp/msg\"}\n")
+            .await
+            .unwrap();
+        let Some(AgentControl::OpenEditor {
+            client: parked,
+            done: _waiter,
+            ..
+        }) = controls.recv().await
+        else {
+            panic!("expected an open-editor control message");
+        };
+
+        drop(client);
+
+        assert_eq!(next_gone(&mut controls).await, (uid, parked));
+        conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_held_client_that_leaves_is_reported_gone() {
+        for leaves_before_opened in [false, true] {
+            let uid = WorkspaceUid(14);
+            let (client, mut controls, conn) = serve_duplex(uid);
+            let mut client = BufReader::new(client);
+            client
+                .get_mut()
+                .write_all(
+                    b"{\"req\":\"open-in-term\",\"term\":3,\"paths\":[\"/abs/a\"],\"wait\":true}\n",
+                )
+                .await
+                .unwrap();
+            let Some(AgentControl::OpenInTerm {
+                client: parked,
+                hold: _waiter,
+                done,
+                ..
+            }) = controls.recv().await
+            else {
+                panic!("expected an open-in-term control message");
+            };
+
+            if leaves_before_opened {
+                drop(client);
+                done.send(true).expect("connection parked on the open");
+            } else {
+                done.send(true).expect("connection parked on the open");
+                client.read_line(&mut String::new()).await.unwrap();
+                drop(client);
+            }
+
+            assert_eq!(
+                next_gone(&mut controls).await,
+                (uid, parked),
+                "leaves before its opened reply: {leaves_before_opened}",
+            );
+            conn.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stray_line_keeps_a_client_parked() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let mut lines = BufReader::new(server).lines();
+        let (hold_tx, mut hold_rx) = tokio::sync::mpsc::unbounded_channel();
+        client.write_all(b"stray\n").await.unwrap();
+
+        let mut parked = pin!(held_status(&mut hold_rx, &mut lines));
+        let first = poll_fn(|cx| Poll::Ready(parked.as_mut().poll(cx))).await;
+        assert_eq!(first, Poll::Pending, "a stray line ends no wait");
+
+        hold_tx.send(BridgeOutcome::Abandoned).unwrap();
+        drop(hold_tx);
+        assert_eq!(parked.await, Some(1));
+    }
+
+    /// Serve one in-memory connection for `uid` on a task, and return the
+    /// client end with the receiver its control messages arrive on.
+    fn serve_duplex(uid: WorkspaceUid) -> (DuplexStream, Receiver<AgentControl>, JoinHandle<()>) {
+        let (tx, _) = tokio::sync::mpsc::channel(8);
+        let (control_tx, control_rx) = tokio::sync::mpsc::channel(8);
+        let (client, server) = tokio::io::duplex(256);
+        let conn = tokio::spawn(async move {
+            serve_connection(server, uid, &tx, &control_tx).await;
+        });
+        (client, control_rx, conn)
+    }
+
+    /// The session and the connection that the next control message reports
+    /// gone.
+    async fn next_gone(controls: &mut Receiver<AgentControl>) -> (WorkspaceUid, u64) {
+        match controls.recv().await {
+            Some(AgentControl::ClientGone { uid, client }) => (uid, client),
+            _ => panic!("expected a client-gone control message"),
+        }
     }
 
     #[tokio::test]

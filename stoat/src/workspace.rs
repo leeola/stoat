@@ -327,13 +327,17 @@ pub struct Workspace {
     ///
     /// When a command shells out to `$EDITOR`, the agent socket opens the file
     /// as a buffer and parks the connection here until
-    /// [`Self::release_bridge_waiters`] tells it how the buffer left. It is not
-    /// persisted, because a channel does not outlive the process.
+    /// [`Self::release_bridge_waiters`] tells it how the buffer left, or until
+    /// [`Self::drop_client_waiters`] drops it for a command that went away. It
+    /// is not persisted, because a channel does not outlive the process.
     pub(crate) editor_bridge_waiters: HashMap<BufferId, Vec<BridgeWaiter>>,
 }
 
 /// One command parked on a buffer until the buffer closes.
 pub(crate) struct BridgeWaiter {
+    /// The connection that parked this waiter, which
+    /// [`Workspace::drop_client_waiters`] matches when that command goes away.
+    pub(crate) client: u64,
     pub(crate) done: UnboundedSender<BridgeOutcome>,
 }
 
@@ -724,6 +728,18 @@ impl Workspace {
         for waiter in waiters {
             let _ = waiter.done.send(outcome);
         }
+    }
+
+    /// Drop every waiter that connection `client` parked, since the command
+    /// that waited through it no longer runs.
+    ///
+    /// The buffers stay open with their edits. A buffer that no other command
+    /// waits on is an ordinary buffer again, which a quit leaves open.
+    pub(crate) fn drop_client_waiters(&mut self, client: u64) {
+        self.editor_bridge_waiters.retain(|_, waiters| {
+            waiters.retain(|waiter| waiter.client != client);
+            !waiters.is_empty()
+        });
     }
 
     /// Whether any state [`Self::release_buffer`] drops still exists for `id`,

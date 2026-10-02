@@ -7273,9 +7273,17 @@ impl Stoat {
     /// [`UpdateEffect::None`] when no live workspace owns the session or the
     /// file does not open. The dropped sender then unblocks the agent so its
     /// `$EDITOR` invocation does not hang.
+    ///
+    /// An [`AgentControl::ClientGone`] drops the waiters of a command that
+    /// went away, and leaves the active workspace as it is.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
-            AgentControl::OpenEditor { uid, path, done } => {
+            AgentControl::OpenEditor {
+                uid,
+                client,
+                path,
+                done,
+            } => {
                 let Some(ws_id) = self
                     .workspaces
                     .iter()
@@ -7299,11 +7307,12 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 self.active_workspace_mut()
-                    .hold_buffer(buffer_id, BridgeWaiter { done });
+                    .hold_buffer(buffer_id, BridgeWaiter { client, done });
                 UpdateEffect::Redraw
             },
             AgentControl::OpenInTerm {
                 uid,
+                client,
                 term,
                 paths,
                 hold,
@@ -7363,13 +7372,26 @@ impl Stoat {
                     Some(hold) if !opened.is_empty() => {
                         let ws = self.active_workspace_mut();
                         for id in opened {
-                            ws.hold_buffer(id, BridgeWaiter { done: hold.clone() });
+                            ws.hold_buffer(
+                                id,
+                                BridgeWaiter {
+                                    client,
+                                    done: hold.clone(),
+                                },
+                            );
                         }
                         true
                     },
                     _ => false,
                 };
                 let _ = done.send(held);
+                UpdateEffect::Redraw
+            },
+            AgentControl::ClientGone { uid, client } => {
+                let Some((_, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == uid) else {
+                    return UpdateEffect::None;
+                };
+                ws.drop_client_waiters(client);
                 UpdateEffect::Redraw
             },
             AgentControl::Query {

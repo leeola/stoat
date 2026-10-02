@@ -12893,6 +12893,14 @@ fn agent_event_for_unknown_session_is_ignored() {
 fn open_agent_editor(
     h: &mut crate::test_harness::TestHarness,
 ) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {
+    open_agent_editor_from(h, 0)
+}
+
+/// Open the bridge file the way connection `client` asks for it.
+fn open_agent_editor_from(
+    h: &mut crate::test_harness::TestHarness,
+    client: u64,
+) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {
     let root = PathBuf::from("/bridge");
     let path = root.join("msg.txt");
     h.fake_fs().insert_file(&path, b"draft\n");
@@ -12902,6 +12910,7 @@ fn open_agent_editor(
     let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
     let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
         uid,
+        client,
         path,
         done: done_tx,
     });
@@ -12981,6 +12990,51 @@ fn a_second_request_for_a_held_buffer_keeps_the_first_waiting() {
     assert_eq!(
         [first.try_recv(), second.try_recv()],
         [Ok(BridgeOutcome::Closed); 2]
+    );
+}
+
+#[test]
+fn a_gone_client_leaves_the_other_waiters_parked() {
+    let mut h = Stoat::test();
+    let (_, mut first) = open_agent_editor_from(&mut h, 1);
+    let (_, mut second) = open_agent_editor_from(&mut h, 2);
+    let uid = h.stoat.active_workspace().uid;
+
+    let effect = h
+        .stoat
+        .handle_agent_control(AgentControl::ClientGone { uid, client: 1 });
+
+    assert_eq!(effect, UpdateEffect::Redraw);
+    assert_eq!(
+        [first.try_recv(), second.try_recv()],
+        [Err(TryRecvError::Disconnected), Err(TryRecvError::Empty)],
+        "only the gone client's waiter drops"
+    );
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+    assert_eq!(second.try_recv(), Ok(BridgeOutcome::Closed));
+}
+
+#[test]
+fn a_quit_keeps_a_buffer_whose_client_left() {
+    let mut h = Stoat::test();
+    let (buffer_id, _done_rx) = open_agent_editor_from(&mut h, 1);
+    let (home, uid) = (h.stoat.active_workspace, h.stoat.active_workspace().uid);
+    let away = h.create_workspace();
+    h.set_active_workspace(away);
+
+    h.stoat
+        .handle_agent_control(AgentControl::ClientGone { uid, client: 1 });
+    assert_eq!(
+        h.stoat.active_workspace, away,
+        "a gone client switches no workspace"
+    );
+
+    h.set_active_workspace(home);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Quit);
+    assert!(
+        h.stoat.active_workspace().buffers.get(buffer_id).is_some(),
+        "a buffer no command waits on stays open after a quit"
     );
 }
 
