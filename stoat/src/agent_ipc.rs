@@ -9,7 +9,8 @@
 //! [`AgentEvent`], which it applies to the owning workspace's
 //! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
 //! rides [`AgentControl`] and expects a reply: a query answers with live
-//! session state, `open-editor` parks the caller until its buffer closes, and
+//! session state, `open-editor` parks the caller until its buffer closes and
+//! answers whether the buffer closed clean, and
 //! `open-in-term` opens files in the terminal pane the caller runs in, which is
 //! what makes a `stoat <file>` inside a pane reach the instance hosting it.
 
@@ -28,7 +29,10 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::UnixListener,
-    sync::{mpsc::Sender, oneshot},
+    sync::{
+        mpsc::{Sender, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
 };
 
 /// A hook event tagged with the session it belongs to.
@@ -42,21 +46,34 @@ pub struct AgentEvent {
     pub event: AgentHookEvent,
 }
 
+/// How a bridged buffer left the editor, which decides the exit status of the
+/// command that waits on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeOutcome {
+    /// The buffer was clean when its tie ended, so the edit stands.
+    Closed,
+    /// The buffer still held unsaved edits when its tie ended, so the command
+    /// that waits on it reports the edit abandoned.
+    Abandoned,
+}
+
 /// A control request from an owned agent that expects a reply.
 ///
-/// Unlike [`AgentEvent`], a control request carries a [`oneshot::Sender`] the
-/// event loop fires when the requested interaction finishes, so it cannot ride
-/// the serde-and-`Clone` [`AgentHookEvent`] path. The event loop routes it by
-/// `uid` to the owning workspace.
+/// Unlike [`AgentEvent`], a control request carries a channel sender that the
+/// event loop fires when the requested interaction finishes. A sender has no
+/// serde form, so the request travels outside the [`AgentHookEvent`] path. The
+/// event loop routes it by `uid` to the owning workspace.
 pub enum AgentControl {
     /// Open `path` as a buffer in the session's workspace and keep the agent
-    /// blocked until that buffer (or its hosting pane) closes. The close path
-    /// fires `done`, which unblocks the parked socket connection so the agent's
-    /// `$EDITOR` invocation returns.
+    /// blocked until that buffer leaves the editor.
+    ///
+    /// The release sends a [`BridgeOutcome`] on `done` and drops it, which
+    /// unblocks the parked socket connection so the agent's `$EDITOR`
+    /// invocation returns. A sender dropped with no outcome reads as closed.
     OpenEditor {
         uid: WorkspaceUid,
         path: PathBuf,
-        done: oneshot::Sender<()>,
+        done: UnboundedSender<BridgeOutcome>,
     },
     /// Open `paths` in the split pane showing the terminal whose
     /// [`token`](crate::term_session::TermSession::token) is `term`, in front of
@@ -222,9 +239,10 @@ pub async fn serve_agent_hooks(
 ///
 /// Each line is tried as an [`AgentRequest`] first, then as an
 /// [`AgentHookEvent`]. An open-editor request parks the connection until the
-/// event loop fires its waiter, then writes an `editor-closed` reply and
-/// returns, since the caller's `$EDITOR` blocks for exactly that long. Every
-/// other request replies and reads on, so one connection carries a series.
+/// event loop releases its waiter, then writes an `editor-closed` reply with
+/// the exit status from [`held_status`] and returns, since the caller's
+/// `$EDITOR` blocks for exactly that long. Every other request replies and
+/// reads on, so one connection carries a series.
 ///
 /// Otherwise returns when the client disconnects, a read fails, or a receiver
 /// is dropped. Blank lines are ignored and malformed lines are logged and
@@ -257,7 +275,7 @@ async fn serve_connection<R>(
         if let Ok(request) = serde_json::from_str::<AgentRequest>(trimmed) {
             let query = match request {
                 AgentRequest::OpenEditor { path } => {
-                    let (done_tx, done_rx) = oneshot::channel();
+                    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
                     if control_tx
                         .send(AgentControl::OpenEditor {
                             uid,
@@ -269,10 +287,15 @@ async fn serve_connection<R>(
                     {
                         return;
                     }
-                    let _ = done_rx.await;
-                    let _ = write_half
-                        .write_all(b"{\"reply\":\"editor-closed\"}\n")
-                        .await;
+                    let status = held_status(&mut done_rx).await;
+                    let reply = json!({ "reply": "editor-closed", "status": status });
+                    match serde_json::to_vec(&reply) {
+                        Ok(mut encoded) => {
+                            encoded.push(b'\n');
+                            let _ = write_half.write_all(&encoded).await;
+                        },
+                        Err(err) => tracing::warn!(%err, "failed to encode editor reply"),
+                    }
                     return;
                 },
                 AgentRequest::OpenInTerm { term, paths } => {
@@ -343,6 +366,21 @@ async fn serve_connection<R>(
             Err(err) => tracing::warn!(%err, line = %trimmed, "ignored malformed hook line"),
         }
     }
+}
+
+/// The exit status for a command once every buffer it waits on has left the
+/// editor.
+///
+/// A buffer left with unsaved edits makes it 1. A waiter dropped with no
+/// outcome counts as closed.
+async fn held_status(hold: &mut UnboundedReceiver<BridgeOutcome>) -> i32 {
+    let mut status = 0;
+    while let Some(outcome) = hold.recv().await {
+        if outcome == BridgeOutcome::Abandoned {
+            status = 1;
+        }
+    }
+    status
 }
 
 /// Decode one newline-stripped JSON hook line into an [`AgentHookEvent`].
@@ -823,6 +861,25 @@ mod tests {
 
     #[tokio::test]
     async fn open_editor_request_routes_to_control_and_replies_on_close() {
+        open_editor_replies(
+            BridgeOutcome::Closed,
+            "{\"reply\":\"editor-closed\",\"status\":0}\n",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_editor_replies_with_status_one() {
+        open_editor_replies(
+            BridgeOutcome::Abandoned,
+            "{\"reply\":\"editor-closed\",\"status\":1}\n",
+        )
+        .await;
+    }
+
+    /// Route an open-editor request, release its waiter with `outcome`, and
+    /// assert the connection answers `expected`.
+    async fn open_editor_replies(outcome: BridgeOutcome, expected: &str) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -850,12 +907,13 @@ mod tests {
         assert_eq!(got_uid, uid);
         assert_eq!(path, PathBuf::from("/tmp/msg"));
 
-        done.send(())
+        done.send(outcome)
             .expect("connection still parked on the waiter");
+        drop(done);
 
         let mut reply = String::new();
         client.read_to_string(&mut reply).await.unwrap();
-        assert_eq!(reply, "{\"reply\":\"editor-closed\"}\n");
+        assert_eq!(reply, expected);
         conn.await.unwrap();
     }
 

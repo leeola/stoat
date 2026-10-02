@@ -1,4 +1,5 @@
 use crate::{
+    agent_ipc::BridgeOutcome,
     app::{Stoat, UpdateEffect},
     editor_state::{EditorId, EditorState},
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, PaneId, Placement, View},
@@ -160,6 +161,9 @@ pub(crate) enum EditorDisposal {
 /// Shared by pane close and tab close, which differ only in how they treat the
 /// editor. Killing a PTY is spawned onto `executor` rather than awaited, so the
 /// caller is not blocked on a child that ignores its signal.
+///
+/// An editor's bridge waiters are released when no editor still holds its
+/// buffer, as abandoned when the buffer is dirty.
 pub(crate) fn dispose_view(
     ws: &mut Workspace,
     executor: &Executor,
@@ -175,19 +179,29 @@ pub(crate) fn dispose_view(
                         super::drop_unreferenced_scratch(ws, editor.buffer_id);
                     }
                 },
-                EditorDisposal::GcIfUnreferenced => {
-                    super::gc_editor_if_unreferenced(ws, id);
-                    // Still referenced, so its bridge waiter stays armed too.
-                    if ws.editors.contains_key(id) {
-                        return;
-                    }
-                },
+                EditorDisposal::GcIfUnreferenced => super::gc_editor_if_unreferenced(ws, id),
             }
-            if let Some(buffer_id) = buffer_id
-                && let Some(done) = ws.editor_bridge_waiters.remove(&buffer_id)
+            let Some(buffer_id) = buffer_id else {
+                return;
+            };
+            if ws
+                .editors
+                .values()
+                .any(|editor| editor.buffer_id == buffer_id)
             {
-                let _ = done.send(());
+                return;
             }
+
+            let dirty = ws
+                .buffers
+                .get(buffer_id)
+                .is_some_and(|buffer| buffer.read().expect("buffer poisoned").dirty);
+            let outcome = if dirty {
+                BridgeOutcome::Abandoned
+            } else {
+                BridgeOutcome::Closed
+            };
+            ws.release_bridge_waiters(buffer_id, outcome);
         },
         View::Run(id) => {
             if let Some(mut state) = ws.runs.remove(id) {

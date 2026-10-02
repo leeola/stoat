@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     action_handlers::lsp::RenameInputState,
+    agent_ipc::BridgeOutcome,
     agent_status::AgentHookEvent,
     apc_emit::{
         display_map_stamp, editor_page_content_version, osc_default_colors, window_content_version,
@@ -27,6 +28,7 @@ use std::{
 };
 use stoat_config::LineNumbers;
 use stoatty_protocol::command::{self, PoolRegionCommand};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
@@ -12890,14 +12892,14 @@ fn agent_event_for_unknown_session_is_ignored() {
 
 fn open_agent_editor(
     h: &mut crate::test_harness::TestHarness,
-) -> (BufferId, tokio::sync::oneshot::Receiver<()>) {
+) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {
     let root = PathBuf::from("/bridge");
     let path = root.join("msg.txt");
     h.fake_fs().insert_file(&path, b"draft\n");
     h.stoat.active_workspace_mut().git_root = root;
     let uid = h.stoat.active_workspace().uid;
 
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
     let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
         uid,
         path,
@@ -12924,15 +12926,20 @@ fn agent_open_editor_waiter_fires_on_buffer_close() {
             .contains_key(&buffer_id),
         "a waiter is registered for the opened buffer",
     );
-    assert!(done_rx.try_recv().is_err(), "waiter not fired before close");
+    assert_eq!(
+        done_rx.try_recv(),
+        Err(TryRecvError::Empty),
+        "waiter not fired before close"
+    );
 
     assert_eq!(
         action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer),
         UpdateEffect::Redraw
     );
 
-    assert!(
-        done_rx.try_recv().is_ok(),
+    assert_eq!(
+        done_rx.try_recv(),
+        Ok(BridgeOutcome::Closed),
         "closing the buffer fires the waiter"
     );
     assert!(
@@ -12951,10 +12958,69 @@ fn agent_open_editor_waiter_fires_on_pane_close() {
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
 
-    assert!(
-        done_rx.try_recv().is_ok(),
+    assert_eq!(
+        done_rx.try_recv(),
+        Ok(BridgeOutcome::Closed),
         "closing the pane fires the waiter"
     );
+}
+
+#[test]
+fn a_second_request_for_a_held_buffer_keeps_the_first_waiting() {
+    let mut h = Stoat::test();
+    let (_, mut first) = open_agent_editor(&mut h);
+    let (_, mut second) = open_agent_editor(&mut h);
+    assert_eq!(
+        first.try_recv(),
+        Err(TryRecvError::Empty),
+        "the second request leaves the first parked"
+    );
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+
+    assert_eq!(
+        [first.try_recv(), second.try_recv()],
+        [Ok(BridgeOutcome::Closed); 2]
+    );
+}
+
+#[test]
+fn a_bridged_buffer_two_panes_show_waits_for_the_last_of_them() {
+    let mut h = Stoat::test();
+    let (buffer_id, mut done_rx) = open_agent_editor(&mut h);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+    let showing: Vec<PaneId> = {
+        let ws = h.stoat.active_workspace();
+        ws.panes
+            .split_pane_ids()
+            .into_iter()
+            .filter(|&pane| match ws.panes.pane(pane).view {
+                View::Editor(id) => ws.editors.get(id).is_some_and(|e| e.buffer_id == buffer_id),
+                _ => false,
+            })
+            .collect()
+    };
+    assert_eq!(showing.len(), 2, "the split shows the bridged buffer too");
+
+    action_handlers::close_pane_by_id(&mut h.stoat, showing[0]);
+    let after_first = done_rx.try_recv();
+    action_handlers::close_pane_by_id(&mut h.stoat, showing[1]);
+
+    assert_eq!(
+        [after_first, done_rx.try_recv()],
+        [Err(TryRecvError::Empty), Ok(BridgeOutcome::Closed)],
+    );
+}
+
+#[test]
+fn a_dirty_bridged_buffer_reports_it_abandoned() {
+    let mut h = Stoat::test();
+    let (_, mut done_rx) = open_agent_editor(&mut h);
+    h.type_keys("i x <esc>");
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+    assert_eq!(done_rx.try_recv(), Ok(BridgeOutcome::Abandoned));
 }
 
 /// The whole point of the emission: an image pane on a capable terminal

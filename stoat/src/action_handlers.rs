@@ -40,6 +40,7 @@ pub(crate) mod workspace;
 pub(crate) mod yank;
 
 use crate::{
+    agent_ipc::BridgeOutcome,
     apc_emit,
     app::{Stoat, UpdateEffect},
     auto_reload,
@@ -1470,9 +1471,7 @@ pub(crate) fn drop_unreferenced_scratch(ws: &mut crate::workspace::Workspace, id
             tree.pane_mut(pane_id).jumplist.remove_buffer(id);
         }
     }
-    if let Some(done) = ws.editor_bridge_waiters.remove(&id) {
-        let _ = done.send(());
-    }
+    ws.release_bridge_waiters(id, BridgeOutcome::Closed);
 }
 
 /// Drive [`ActionKind::QuitAll`]. Quits immediately when no buffer is

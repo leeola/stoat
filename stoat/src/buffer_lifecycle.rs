@@ -14,6 +14,7 @@ use crate::{
         file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump, read_open_content,
         restore_covered_terminal, OpenContent,
     },
+    agent_ipc::BridgeOutcome,
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
@@ -568,13 +569,11 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
 
-    if let Some(done) = stoat
+    // A dirty buffer never reaches this point, so every waiter learns the
+    // buffer closed clean.
+    stoat
         .active_workspace_mut()
-        .editor_bridge_waiters
-        .remove(&buffer_id)
-    {
-        let _ = done.send(());
-    }
+        .release_bridge_waiters(buffer_id, BridgeOutcome::Closed);
     stoat.lsp_opened.remove(&buffer_id);
     stoat.lsp_buffer_versions.remove(&buffer_id);
     stoat.lsp_pending_changes.remove(&buffer_id);

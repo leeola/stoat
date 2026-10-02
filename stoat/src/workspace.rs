@@ -6,6 +6,7 @@ pub(crate) mod registry;
 #[cfg(test)]
 use crate::diff_map::DiffMap;
 use crate::{
+    agent_ipc::BridgeOutcome,
     agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer},
@@ -56,7 +57,7 @@ use stoat_scheduler::{Executor, Task};
 use stoat_text::Rope;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
-    oneshot, Notify,
+    Notify,
 };
 
 new_key_type! {
@@ -322,15 +323,18 @@ pub struct Workspace {
     /// on paint without touching the agent's IPC path. The per-session hook
     /// server drives it via [`AgentStatus::apply`].
     pub(crate) agent: Option<AgentStatus>,
-    /// Open temp-file editors an owned agent is blocked on, keyed by the
-    /// buffer hosting each one.
+    /// The commands parked on each buffer, in arrival order.
     ///
-    /// When Claude shells out to `$EDITOR`, the agent socket opens the temp
-    /// file as a buffer and parks the connection on a oneshot. The sender
-    /// lives here until the buffer or its pane closes, at which point either
-    /// close path fires it to unblock the waiting agent. It is not persisted,
-    /// because a oneshot cannot outlive the process.
-    pub(crate) editor_bridge_waiters: HashMap<BufferId, oneshot::Sender<()>>,
+    /// When a command shells out to `$EDITOR`, the agent socket opens the file
+    /// as a buffer and parks the connection here until
+    /// [`Self::release_bridge_waiters`] tells it how the buffer left. It is not
+    /// persisted, because a channel does not outlive the process.
+    pub(crate) editor_bridge_waiters: HashMap<BufferId, Vec<BridgeWaiter>>,
+}
+
+/// One command parked on a buffer until the buffer closes.
+pub(crate) struct BridgeWaiter {
+    pub(crate) done: UnboundedSender<BridgeOutcome>,
 }
 
 /// A parse running for one buffer.
@@ -682,6 +686,28 @@ impl Workspace {
         self.index_jobs.remove(&id);
         self.index_debounce.remove(&id);
         self.diff.release(id, path);
+    }
+
+    /// Park `waiter` on `buffer` until the buffer leaves the editor.
+    pub(crate) fn hold_buffer(&mut self, buffer: BufferId, waiter: BridgeWaiter) {
+        self.editor_bridge_waiters
+            .entry(buffer)
+            .or_default()
+            .push(waiter);
+    }
+
+    /// Tell every command parked on `buffer` that it left the editor with
+    /// `outcome`.
+    ///
+    /// A command that already went away ignores the outcome.
+    pub(crate) fn release_bridge_waiters(&mut self, buffer: BufferId, outcome: BridgeOutcome) {
+        let waiters = self
+            .editor_bridge_waiters
+            .remove(&buffer)
+            .unwrap_or_default();
+        for waiter in waiters {
+            let _ = waiter.done.send(outcome);
+        }
     }
 
     /// Whether any state [`Self::release_buffer`] drops still exists for `id`,

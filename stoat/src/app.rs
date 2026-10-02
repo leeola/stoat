@@ -47,7 +47,7 @@ use crate::{
     term_session::TermId,
     theme_pool::{ThemePool, VscodeSource},
     ui::RenderFrame,
-    workspace::{Workspace, WorkspaceId, WorkspaceUid},
+    workspace::{BridgeWaiter, Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
 };
 use crossterm::event::{
@@ -7267,11 +7267,12 @@ impl Stoat {
     /// closing that buffer or its pane unblocks the agent.
     ///
     /// Switches the active workspace to the owning session so the editor lands
-    /// beside the agent pane, splits a new pane for the file, and stores the
-    /// request's oneshot in [`Workspace::editor_bridge_waiters`] keyed by the
-    /// opened buffer. Returns [`UpdateEffect::None`] when no live workspace owns
-    /// the session or the file cannot be opened. The dropped oneshot then
-    /// unblocks the agent so its `$EDITOR` invocation does not hang.
+    /// beside the agent pane, splits a new pane for the file, and parks the
+    /// request's sender on the opened buffer through [`Workspace::hold_buffer`].
+    /// A buffer that is already held gains a second waiter. Returns
+    /// [`UpdateEffect::None`] when no live workspace owns the session or the
+    /// file does not open. The dropped sender then unblocks the agent so its
+    /// `$EDITOR` invocation does not hang.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
             AgentControl::OpenEditor { uid, path, done } => {
@@ -7298,8 +7299,7 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 self.active_workspace_mut()
-                    .editor_bridge_waiters
-                    .insert(buffer_id, done);
+                    .hold_buffer(buffer_id, BridgeWaiter { done });
                 UpdateEffect::Redraw
             },
             AgentControl::OpenInTerm {
