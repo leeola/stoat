@@ -338,6 +338,12 @@ impl VtermGrid {
 
 impl vte::Perform for VtermGrid {
     fn print(&mut self, c: char) {
+        // The parser hands C0 and C1 controls to execute, so DEL is the one
+        // control that arrives here. A terminal ignores DEL, and a control
+        // character in a cell fails the draw.
+        if c.is_control() {
+            return;
+        }
         self.put_char(c);
     }
 

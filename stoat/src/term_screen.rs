@@ -395,9 +395,7 @@ impl TermScreen {
                 {
                     continue;
                 }
-                // A tab marks only the cell it started in, and the cells up to
-                // the stop stay blank, so a blank in its place keeps the columns.
-                row_text.push(if cell.c == '\t' { ' ' } else { cell.c });
+                row_text.push(painted_char(cell.c));
                 row_text.extend(cell.zerowidth().into_iter().flatten());
             }
             text.push_str(row_text.trim_end_matches(' '));
@@ -451,10 +449,24 @@ impl Dimensions for GridSize {
 
 fn convert_cell(cell: &TermCell) -> StyledCell {
     StyledCell {
-        ch: cell.c,
+        ch: painted_char(cell.c),
         fg: map_color(cell.fg),
         bg: map_color(cell.bg),
         modifiers: map_modifiers(cell.flags),
+    }
+}
+
+/// The character a cell paints, with a control character as a blank.
+///
+/// A tab leaves '\t' in the cell where it started and writes nothing in the
+/// cells up to its stop, so a blank in its place keeps the columns the tab
+/// moved past. A control character in a ratatui cell fails a debug assertion
+/// at the draw, and a release build writes it raw to the host terminal.
+fn painted_char(c: char) -> char {
+    if c.is_control() {
+        ' '
+    } else {
+        c
     }
 }
 
@@ -567,6 +579,15 @@ mod tests {
         term.feed(b"ab\r\ncd");
         assert_eq!(text_row(&term, 0), "ab");
         assert_eq!(text_row(&term, 1), "cd");
+    }
+
+    /// A tab leaves its control character in the cell where it started, and a
+    /// control character in a painted cell panics the draw.
+    #[test]
+    fn a_tab_reads_as_the_blank_columns_it_moved_past() {
+        let mut term = TermScreen::new(4, 10);
+        term.feed(b"a\tb");
+        assert_eq!(text_row(&term, 0), format!("a{}b", " ".repeat(7)));
     }
 
     /// The parser buffers an OSC payload without bound and keeps the capacity

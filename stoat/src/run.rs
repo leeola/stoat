@@ -301,6 +301,14 @@ mod tests {
         grid.row(row).iter().map(|cell| cell.ch).collect()
     }
 
+    /// The parser hands DEL to print, where a terminal ignores it.
+    #[test]
+    fn a_delete_byte_takes_no_cell() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"a\x7fb");
+        assert_eq!(row_text(&grid, 0), "ab");
+    }
+
     #[test]
     fn a_finished_row_holds_only_its_cells() {
         let mut grid = VtermGrid::new(200);
