@@ -244,26 +244,35 @@ pub(crate) fn paint_path_rows(
         let width = end_x.saturating_sub(label_x) as usize;
         let label_len = label.chars().count();
 
-        // A row wider than its column is start-truncated helix-style so the file
-        // name at the tail stays on screen. An ellipsis replaces the `dropped`
-        // leading chars in one cell, leaving `width - 1` cells for the tail.
-        let (dropped, text_x) = if label_len > width && width > 1 {
-            let dropped = label_len - (width - 1);
-            buf[(label_x, row)].set_char('\u{2026}').set_style(style);
-            let tail_start = label
-                .char_indices()
-                .nth(dropped)
-                .map_or(label.len(), |(byte, _)| byte);
-            write_str_clipped(buf, label_x + 1, row, &label[tail_start..], style, end_x);
-            (dropped, label_x + 1)
+        // A row wider than its column gives up chars to an ellipsis in one cell,
+        // leaving `width - 1` cells for the rest. A path is start-truncated
+        // helix-style so the file name at the tail stays on screen. A relative
+        // entry is a label rather than a path, such as a terminal row of the
+        // buffer list, and its head names it, so its tail goes instead.
+        let (dropped, text_x, text_end) = if label_len > width && width > 1 {
+            if picklist.base[idx].is_absolute() {
+                let dropped = label_len - (width - 1);
+                buf[(label_x, row)].set_char('\u{2026}').set_style(style);
+                let tail_start = label
+                    .char_indices()
+                    .nth(dropped)
+                    .map_or(label.len(), |(byte, _)| byte);
+                write_str_clipped(buf, label_x + 1, row, &label[tail_start..], style, end_x);
+                (dropped, label_x + 1, end_x)
+            } else {
+                let ellipsis_x = end_x - 1;
+                write_str_clipped(buf, label_x, row, &label, style, ellipsis_x);
+                buf[(ellipsis_x, row)].set_char('\u{2026}').set_style(style);
+                (0, label_x, ellipsis_x)
+            }
         } else {
             write_str_clipped(buf, label_x, row, &label, style, end_x);
-            (0, label_x)
+            (0, label_x, end_x)
         };
 
         for (label_col, _) in label.chars().enumerate().skip(dropped) {
             let col = text_x + (label_col - dropped) as u16;
-            if col >= end_x {
+            if col >= text_end {
                 break;
             }
             let label_col = label_col as u32;
@@ -444,6 +453,37 @@ mod tests {
         assert!(
             text.ends_with("file_name.rs"),
             "the file name at the tail stays visible: {text:?}"
+        );
+    }
+
+    /// A relative entry is a label rather than a path, such as a terminal row
+    /// of the buffer list, and its head names it. So a cut keeps the head, and
+    /// a match in the cut tail paints nothing over the ellipsis.
+    #[test]
+    fn a_long_label_keeps_its_head() {
+        let label = "term 1: lee@host: /very/long/working/directory";
+        let list = list_of(vec![PathBuf::from(label)], vec![vec![0, 18]]);
+        // Column width 20 leaves a 19-cell label area after the one-cell pad.
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        paint_path_rows(
+            &list,
+            Path::new("/r"),
+            None,
+            "",
+            area,
+            0,
+            &match_theme(),
+            &mut buf,
+        );
+
+        let match_fg = Color::Rgb(255, 0, 0);
+        let highlighted: Vec<u16> = (area.x..area.x + area.width)
+            .filter(|&c| buf[(c, 0)].fg == match_fg)
+            .collect();
+        assert_eq!(
+            (row_text(&buf, 0, area), highlighted),
+            (format!(" {}\u{2026}", &label[..18]), vec![1]),
         );
     }
 

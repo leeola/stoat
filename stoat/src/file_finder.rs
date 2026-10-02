@@ -153,6 +153,9 @@ pub(crate) struct FinderPathCache {
 /// relative path displays as written. A terminal rides in the list as a
 /// relative path that spells its label, which is then both the row text and
 /// what the query matches. This maps that path back to the session.
+///
+/// The key stays relative for the row paint too. A long relative row loses its
+/// tail rather than its head, so the `term <n>` that names it stays on screen.
 pub(crate) struct TermRow {
     pub(crate) key: PathBuf,
     pub(crate) term: TermId,
