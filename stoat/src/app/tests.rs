@@ -3870,6 +3870,31 @@ fn hints_cache_reuses_rows_across_unchanged_frames() {
     );
 }
 
+#[test]
+fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
+    let mut h = Stoat::test();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+    h.stoat.key_hints_visible = true;
+    let mut buf = Buffer::empty(h.stoat.size());
+
+    h.stoat.paint_into(&mut buf);
+
+    let keys: Vec<&str> = h
+        .stoat
+        .hints_cache
+        .as_ref()
+        .expect("the toggle shows the box over a terminal")
+        .rows
+        .iter()
+        .map(|(keys, _)| keys.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        ["C-a", "C-?"],
+        "a terminal at rest lists only the keys it takes from its child"
+    );
+}
+
 /// Paint a whole frame and return the APC scene it built.
 ///
 /// Read before any flush, so the decoration lane still holds this frame
@@ -4188,6 +4213,25 @@ fn escape_in_a_terminal_or_agent_pane_reaches_the_child() {
             (effect, stoat.focused_mode().to_string(), fake.sent_bytes()),
             (UpdateEffect::None, "normal".to_string(), vec![vec![0x1b]]),
             "Escape is a key like any other for the child",
+        );
+    }
+}
+
+#[test]
+fn ctrl_question_in_a_terminal_toggles_the_hints_and_sends_nothing() {
+    for make_view in [View::Terminal, View::Agent] {
+        let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
+
+        stoat.handle_key(ctrl('?'));
+
+        assert_eq!(
+            (
+                stoat.key_hints_visible,
+                stoat.focused_mode().to_string(),
+                fake.sent_bytes()
+            ),
+            (true, "normal".to_string(), Vec::<Vec<u8>>::new()),
+            "Ctrl-? shows the hints and never reaches the child",
         );
     }
 }

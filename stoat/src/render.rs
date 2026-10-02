@@ -1319,7 +1319,9 @@ pub(crate) fn frame(
 
         if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
             // The conflict screen rides on normal mode, so scope to its own
-            // `view == conflict` bindings. A primary mode narrows to the chord
+            // `view == conflict` bindings. A terminal or agent pane at rest
+            // sends every other key to its child, so it scopes to the bindings
+            // that name its pane kind. A primary mode narrows to the chord
             // entries and the context-bound keys, because the whole editor
             // keymap is what the help screen is for. A chord sub-mode owns its
             // whole mode, so take them all.
@@ -1330,6 +1332,8 @@ pub(crate) fn frame(
                 .with_focus_flags(focus);
             let raw = if screen == Some("conflict") {
                 stoat.keymap.scoped_bindings(&state, "view", "conflict")
+            } else if let Some(kind @ ("terminal" | "agent")) = pane.filter(|_| mode == "normal") {
+                stoat.keymap.scoped_bindings(&state, "pane", kind)
             } else {
                 let keys = if PRIMARY_MODES.contains(&mode) {
                     stoat.keymap.context_bindings(&state, PRIMARY_MODES)

@@ -1200,6 +1200,18 @@ mod tests {
         config.expect("expected config")
     }
 
+    /// Each action's name with its argument values, so a test compares a
+    /// binding's whole action list at once.
+    fn action_calls(actions: &[ResolvedAction]) -> Vec<(String, Vec<Value>)> {
+        actions
+            .iter()
+            .map(|action| {
+                let args = action.args.iter().map(|arg| arg.value.clone()).collect();
+                (action.name.clone(), args)
+            })
+            .collect()
+    }
+
     #[test]
     fn compile_simple_char() {
         let kp = KeyPart {
@@ -2762,16 +2774,7 @@ mod tests {
                 &prefix,
                 &key_event(KeyCode::Char('e'), KeyModifiers::CONTROL),
             )
-            .map(|actions| {
-                actions
-                    .iter()
-                    .map(|action| {
-                        let args: Vec<Value> =
-                            action.args.iter().map(|arg| arg.value.clone()).collect();
-                        (action.name.clone(), args)
-                    })
-                    .collect::<Vec<_>>()
-            });
+            .map(|actions| action_calls(&actions));
         assert_eq!(
             actions,
             Some(vec![(
@@ -2897,7 +2900,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_enters_the_prefix_from_a_pane_at_rest() {
+    fn a_pane_at_rest_answers_ctrl_a_and_ctrl_question() {
         let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
         let ctrl = |c| key_event(KeyCode::Char(c), KeyModifiers::CONTROL);
         let bare = |code| key_event(code, KeyModifiers::NONE);
@@ -2911,31 +2914,31 @@ mod tests {
             let scoped = |state: &TestState, event: KeyEvent| {
                 keymap
                     .lookup_scoped(state, &event, "pane", pane)
-                    .map(|(actions, _)| {
-                        (
-                            actions[0].name.clone(),
-                            actions[0].args.first().map(|arg| arg.value.clone()),
-                        )
-                    })
+                    .map(|(actions, _)| action_calls(&actions))
             };
             let under_palette = at_rest().set("modal", StateValue::String("palette".into()));
 
             assert_eq!(
                 (
                     scoped(&at_rest(), ctrl('a')),
+                    scoped(&at_rest(), ctrl('?')),
                     scoped(&at_rest(), bare(KeyCode::Esc)),
                     scoped(&at_rest(), bare(KeyCode::Tab)),
                     scoped(&at_rest(), ctrl('d')),
                     scoped(&under_palette, ctrl('a')),
                 ),
                 (
-                    Some(("SetMode".to_string(), Some(Value::Ident("prefix".into())))),
+                    Some(vec![(
+                        "SetMode".to_string(),
+                        vec![Value::Ident("prefix".into())]
+                    )]),
+                    Some(vec![("ToggleKeyHints".to_string(), Vec::new())]),
                     None,
                     None,
                     None,
                     None,
                 ),
-                "the {pane} pane takes back only Ctrl-a, and only with no modal open"
+                "the {pane} pane takes back only Ctrl-a and Ctrl-?, and only with no modal open"
             );
         }
     }

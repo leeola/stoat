@@ -1014,6 +1014,7 @@ on key {
     # guard is required for the reason the block above gives.
     !modal && (pane == terminal || pane == agent) && mode == normal {
         Ctrl-a -> SetMode(prefix);
+        Ctrl-? -> ToggleKeyHints();
     }
     modal == finder && mode == insert {
         Up -> PickerPrev();
