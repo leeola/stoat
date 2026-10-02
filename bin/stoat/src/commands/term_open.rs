@@ -2,9 +2,10 @@
 //!
 //! A terminal pane's shell inherits `STOAT_AGENT_SOCK` and `STOAT_TERM_ID`,
 //! which together name a running instance and the pane the shell sits in.
-//! Typing `stoat foo` there means "show me this file", not "start a second
-//! editor inside the one I am already looking at", so the open is sent to that
-//! instance and this process exits.
+//! Typing `stoat foo` there opens the file in that instance, in the pane the
+//! shell sits in, and this process stays alive until its buffers close, so it
+//! serves as `$EDITOR`. A parent that does not hold the files takes them, and
+//! this process exits at once.
 //!
 //! Every failure falls through instead of reporting. A dead parent or an env
 //! pair copied into a surviving multiplexer both end in the ordinary nested
@@ -22,6 +23,9 @@ pub enum Forward {
     /// The files are on screen in the parent, and this process has nothing
     /// left to do.
     Opened,
+    /// The parent held this command until the buffers closed, and the value is
+    /// the exit status it reported.
+    Closed(i32),
     /// This shell is not a stoat terminal pane, so there was no parent to try.
     NoParent,
     /// A parent was named but did not take the files, for the reason held
@@ -32,8 +36,28 @@ pub enum Forward {
     Failed(String),
 }
 
+/// How the instance answered a forwarded request.
+#[derive(Debug, PartialEq)]
+enum Sent {
+    /// The connection ended with no reply.
+    Unanswered,
+    /// The instance took the files and holds nothing.
+    Opened,
+    /// The instance held the command until its buffers closed, with this exit
+    /// status.
+    Closed(i32),
+}
+
+/// One reply line from the instance.
+#[derive(Debug, PartialEq)]
+enum Reply {
+    Opened { held: bool },
+    Closed(i32),
+}
+
 /// Open `files` in the instance hosting this shell.
 ///
+/// A parent that holds the files blocks this call until their buffers close.
 /// Logs nothing, so a caller that tries this before its log exists leaves no
 /// log file behind when the parent takes the files.
 // The env reads are the blessed boundary. They hand their values straight to
@@ -58,8 +82,9 @@ pub fn try_forward(files: &[PathBuf]) -> Forward {
 /// Ask the instance at `socket` to open `paths` in the terminal `token` names.
 fn forward_to(socket: &Path, token: u64, paths: &[PathBuf]) -> Forward {
     match send(socket, &request_line(token, paths)) {
-        Ok(true) => Forward::Opened,
-        Ok(false) => Forward::Failed(format!(
+        Ok(Sent::Opened) => Forward::Opened,
+        Ok(Sent::Closed(status)) => Forward::Closed(status),
+        Ok(Sent::Unanswered) => Forward::Failed(format!(
             "the parent instance at {} closed without opening the files",
             socket.display()
         )),
@@ -100,33 +125,63 @@ fn request_line(token: u64, paths: &[PathBuf]) -> String {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>(),
+        "wait": true,
     })
     .to_string()
 }
 
-/// Send `line` to the socket and report whether the instance confirmed the open.
+/// Send `line` to the socket and report how the instance answered.
 ///
-/// `Ok(false)` is a connection that ended without the reply, which is what a
-/// parent exiting mid-request looks like.
-fn send(socket: &Path, line: &str) -> std::io::Result<bool> {
+/// An open that the parent does not hold answers at once, and a held open
+/// answers when its buffers close. A connection that ends after a held open
+/// and before its close is a parent that went away, which reads as status 0,
+/// the rule `stoat editor` follows. A connection that ends before any reply is
+/// what a parent exiting mid-request looks like.
+fn send(socket: &Path, line: &str) -> std::io::Result<Sent> {
     let mut stream = UnixStream::connect(socket)?;
     stream.write_all(line.as_bytes())?;
     stream.write_all(b"\n")?;
 
+    let mut held = false;
     for reply in BufReader::new(stream).lines() {
-        if reply_is_opened(&reply?) {
-            return Ok(true);
+        match parse_reply(&reply?) {
+            Some(Reply::Opened { held: false }) => return Ok(Sent::Opened),
+            Some(Reply::Opened { held: true }) => held = true,
+            Some(Reply::Closed(status)) => return Ok(Sent::Closed(status)),
+            None => {},
         }
     }
-    Ok(false)
+    Ok(if held {
+        Sent::Closed(0)
+    } else {
+        Sent::Unanswered
+    })
 }
 
-/// True when `line` is the instance's `opened` reply.
-fn reply_is_opened(line: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
-    };
-    value.get("reply").and_then(|reply| reply.as_str()) == Some("opened")
+/// The reply `line` carries, or `None` for any other line.
+///
+/// A field the instance leaves out takes its default. An `opened` with no
+/// `held` holds nothing, which is what an instance that never holds answers,
+/// and a `closed` with no `status` reads as 0.
+fn parse_reply(line: &str) -> Option<Reply> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    match value.get("reply")?.as_str()? {
+        "opened" => {
+            let held = value
+                .get("held")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            Some(Reply::Opened { held })
+        },
+        "closed" => {
+            let status = value
+                .get("status")
+                .and_then(serde_json::Value::as_i64)
+                .map_or(0, |status| i32::try_from(status).unwrap_or(1));
+            Some(Reply::Closed(status))
+        },
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +234,7 @@ mod tests {
             value["paths"],
             serde_json::json!(["/work/a.rs", "/work/b.rs"]),
         );
+        assert_eq!(value["wait"].as_bool(), Some(true));
     }
 
     /// Bind `socket`, then serve one connection on a thread: read the request
@@ -217,7 +273,7 @@ mod tests {
 
         let live = dir.path().join("live.sock");
         let served = serve_once(&live, &[r#"{"reply":"opened"}"#]);
-        assert!(send(&live, "the-request").unwrap());
+        assert_eq!(send(&live, "the-request").unwrap(), Sent::Opened);
         assert_eq!(
             served.join().unwrap(),
             "the-request\n",
@@ -226,8 +282,9 @@ mod tests {
 
         let quiet = dir.path().join("quiet.sock");
         let served = serve_once(&quiet, &[]);
-        assert!(
-            !send(&quiet, "the-request").unwrap(),
+        assert_eq!(
+            send(&quiet, "the-request").unwrap(),
+            Sent::Unanswered,
             "an instance that exits mid-request opened nothing",
         );
         served.join().unwrap();
@@ -274,11 +331,59 @@ mod tests {
     }
 
     #[test]
-    fn only_the_opened_reply_counts_as_forwarded() {
-        assert!(reply_is_opened(r#"{"reply":"opened"}"#));
-        assert!(!reply_is_opened(r#"{"reply":"editor-closed"}"#));
-        assert!(!reply_is_opened(""));
-        assert!(!reply_is_opened("not json"));
-        assert!(!reply_is_opened(r#"{"hook":"stop"}"#));
+    fn a_held_forward_waits_for_the_closed_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [PathBuf::from("/work/a.rs")];
+        let held = r#"{"reply":"opened","held":true}"#;
+        let cases: [&[&str]; 3] = [
+            &[held, r#"{"reply":"closed","status":1}"#],
+            &[held],
+            &[r#"{"reply":"opened"}"#],
+        ];
+
+        let forwards: Vec<Forward> = cases
+            .iter()
+            .enumerate()
+            .map(|(case, replies)| {
+                let socket = dir.path().join(format!("{case}.sock"));
+                let served = serve_once(&socket, replies);
+                let forward = forward_to(&socket, 7, &paths);
+                served.join().unwrap();
+                forward
+            })
+            .collect();
+
+        assert_eq!(
+            forwards,
+            [Forward::Closed(1), Forward::Closed(0), Forward::Opened],
+            "a lost parent after a held open reads as 0, and an older parent holds nothing",
+        );
+    }
+
+    #[test]
+    fn only_opened_and_closed_replies_parse() {
+        assert_eq!(
+            [
+                r#"{"reply":"opened"}"#,
+                r#"{"reply":"opened","held":true}"#,
+                r#"{"reply":"closed","status":1}"#,
+                r#"{"reply":"closed"}"#,
+                r#"{"reply":"editor-closed"}"#,
+                "",
+                "not json",
+                r#"{"hook":"stop"}"#,
+            ]
+            .map(parse_reply),
+            [
+                Some(Reply::Opened { held: false }),
+                Some(Reply::Opened { held: true }),
+                Some(Reply::Closed(1)),
+                Some(Reply::Closed(0)),
+                None,
+                None,
+                None,
+                None,
+            ],
+        );
     }
 }

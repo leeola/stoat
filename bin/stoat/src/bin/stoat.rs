@@ -39,9 +39,11 @@ fn main() {
 
     // A bare file open from a stoat terminal pane goes to the parent instance
     // and exits. Trying it before logging starts leaves no log file behind.
-    // Outside a pane this costs one absent environment read.
+    // Outside a pane this costs one absent environment read. A held open keeps
+    // this process alive until the buffers close.
     let forward_failure = match args.forwardable_files().map(term_open::try_forward) {
         Some(Forward::Opened) => return,
+        Some(Forward::Closed(status)) => std::process::exit(status),
         Some(Forward::Failed(reason)) => Some(reason),
         Some(Forward::NoParent) | None => None,
     };
