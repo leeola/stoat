@@ -60,7 +60,7 @@ pub fn settings_schema() -> &'static [SettingDef] {
             shape: ValueShape::Bool,
             doc: "Run LSP formatting on the focused buffer before each save when \
                   the server supports it.",
-            default: "false",
+            default: "true",
         },
         SettingDef {
             path: &[Lit("search"), Lit("smart_case")],

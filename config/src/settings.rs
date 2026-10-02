@@ -74,9 +74,9 @@ pub struct Settings {
     /// Enables the LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
     /// Runs LSP formatting on the focused buffer before each save when the
-    /// server advertises the capability. `None` falls back to disabled. Set
-    /// `format_on_save = true;` in stcfg. A format that errors or exceeds the
-    /// save-time budget saves the buffer unchanged.
+    /// server advertises the capability. `None` falls back to enabled, and
+    /// `format_on_save = false;` in stcfg saves the buffer as typed. A format
+    /// that errors or exceeds the save-time budget saves the buffer unchanged.
     pub format_on_save: Option<bool>,
     /// Whether a buffer search reads the pattern's own case as the request.
     /// `None` falls back to enabled. Set `search.smart_case = false;` in stcfg

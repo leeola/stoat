@@ -6511,12 +6511,12 @@ fn user_config_overrides_embedded_setting() {
         scheduler.executor(),
         Settings::default(),
         PathBuf::new(),
-        Some("on init { format_on_save = true; }".to_string()),
+        Some("on init { format_on_save = false; }".to_string()),
         Vec::new(),
         None,
     );
 
-    assert_eq!(stoat.settings.format_on_save, Some(true));
+    assert_eq!(stoat.settings.format_on_save, Some(false));
     assert_eq!(
         stoat.pending_message, None,
         "a clean parse shows no message"
@@ -6699,7 +6699,7 @@ fn broken_user_config_falls_back_to_embedded_with_status() {
 
     assert_eq!(
         stoat.settings.format_on_save,
-        Some(false),
+        Some(true),
         "the embedded default survives a broken user config"
     );
     assert_eq!(

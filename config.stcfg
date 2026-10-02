@@ -240,9 +240,10 @@ on init {
     text_proto_log = false;
 
     # Run LSP formatting on the focused buffer before each save when the server
-    # advertises the capability. Off by default. A format that errors or exceeds
-    # the save-time budget writes the buffer unchanged.
-    format_on_save = false;
+    # advertises the capability. On by default. Set false to save the buffer as
+    # typed. A format that errors or exceeds the save-time budget writes the
+    # buffer unchanged. lsp.except below keeps one server out.
+    format_on_save = true;
 
     # Re-apply a config file as soon as it is saved from within stoat, rather
     # than waiting for a restart. Covers both this config and stoatty's. On by

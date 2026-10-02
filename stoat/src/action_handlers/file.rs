@@ -181,7 +181,7 @@ fn format_on_save_host(
     stoat: &Stoat,
     buffer_id: BufferId,
 ) -> Option<Arc<dyn crate::host::LspHost>> {
-    if stoat.settings.format_on_save != Some(true) {
+    if stoat.settings.format_on_save == Some(false) {
         return None;
     }
     crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Format)
@@ -807,7 +807,7 @@ mod tests {
     };
     use futures::FutureExt;
     use lsp_types::{
-        SaveOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+        OneOf, SaveOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
         TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
     };
     use std::path::{Path, PathBuf};
@@ -956,7 +956,7 @@ mod tests {
     /// A config naming a theme, setting format_on_save, and binding a key that
     /// the default keymap leaves free in normal mode.
     const RELOADED_CONFIG: &str = "theme swapped { ui.text.fg = \"#abcdef\"; }\n\
-         on init { theme = swapped; format_on_save = true; }\n\
+         on init { theme = swapped; format_on_save = false; }\n\
          on key { mode == normal { F2 -> SaveBuffer(); } }\n";
 
     fn binds_f2(stoat: &Stoat) -> bool {
@@ -982,7 +982,11 @@ mod tests {
             None,
         );
 
-        assert_eq!(h.stoat.settings.format_on_save, Some(true), "settings swap");
+        assert_eq!(
+            h.stoat.settings.format_on_save,
+            Some(false),
+            "settings swap"
+        );
         assert_eq!(h.stoat.theme.name, "swapped", "theme swaps");
         assert!(binds_f2(&h.stoat), "the new binding resolves");
         assert_eq!(h.stoat.pending_message.as_deref(), Some("config reloaded"));
@@ -1223,8 +1227,11 @@ mod tests {
     }
 
     fn enable_format_on_save(h: &mut TestHarness) {
-        use lsp_types::{OneOf, ServerCapabilities};
         h.stoat.settings.format_on_save = Some(true);
+        advertise_formatting(h);
+    }
+
+    fn advertise_formatting(h: &TestHarness) {
         h.fake_lsp().set_capabilities(ServerCapabilities {
             document_formatting_provider: Some(OneOf::Left(true)),
             ..Default::default()
@@ -1418,12 +1425,9 @@ mod tests {
 
     #[test]
     fn format_on_save_disabled_writes_unformatted() {
-        use lsp_types::{OneOf, ServerCapabilities};
         let mut h = Stoat::test();
-        h.fake_lsp().set_capabilities(ServerCapabilities {
-            document_formatting_provider: Some(OneOf::Left(true)),
-            ..Default::default()
-        });
+        h.stoat.settings.format_on_save = Some(false);
+        advertise_formatting(&h);
         let root = PathBuf::from("/fos-disabled");
         let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
         h.fake_lsp().set_formatting(
@@ -1436,6 +1440,24 @@ mod tests {
 
         assert_eq!(on_disk(&h, &path), b"fn  main (){}\n");
         assert!(h.stoat.pending_format_on_save.is_none());
+    }
+
+    #[test]
+    fn an_unset_format_on_save_formats() {
+        let mut h = Stoat::test();
+        h.stoat.settings.format_on_save = None;
+        advertise_formatting(&h);
+        let root = PathBuf::from("/fos-unset");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"fn main() {}\n");
     }
 
     #[test]

@@ -3323,7 +3323,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
-                format_on_save: Some(false),
+                format_on_save: Some(true),
                 search_smart_case: Some(true),
                 config_auto_reload: Some(true),
                 review_precompute: Some(false),
