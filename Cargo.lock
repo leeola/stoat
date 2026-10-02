@@ -4134,6 +4134,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "stoat",
+ "stoat_build_stamp",
  "stoat_cli",
  "stoat_host",
  "stoat_language",
@@ -4146,6 +4147,10 @@ dependencies = [
  "viewport",
  "vscode_theme",
 ]
+
+[[package]]
+name = "stoat_build_stamp"
+version = "0.1.0"
 
 [[package]]
 name = "stoat_cli"
@@ -4248,6 +4253,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "snafu",
+ "stoat_build_stamp",
  "stoat_cli",
  "stoat_log",
  "stoatty_protocol",

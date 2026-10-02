@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "action",
+  "build_stamp",
   "bin/stoat",
   "cli",
   "codegraph",

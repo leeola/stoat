@@ -45,6 +45,9 @@ tokio = { workspace = true, features = ["time"] }
 tempfile.workspace = true
 time.workspace = true
 
+[build-dependencies]
+stoat_build_stamp = { path = "../../build_stamp" }
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

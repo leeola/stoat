@@ -40,5 +40,8 @@ toml.workspace = true
 etcetera.workspace = true
 snafu.workspace = true
 
+[build-dependencies]
+stoat_build_stamp = { path = "../../build_stamp" }
+
 [dev-dependencies]
 tempfile.workspace = true
