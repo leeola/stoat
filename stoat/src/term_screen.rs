@@ -371,6 +371,42 @@ impl TermScreen {
         out.extend((0..cols).map(|col| convert_cell(&line[Column(col)])));
     }
 
+    /// The viewport as plain text, one line per row.
+    ///
+    /// The text drops the trailing blanks of each row and the trailing blank
+    /// rows, so a nearly empty screen does not read as a block of spaces. Each
+    /// character reads as the screen shows it. A wide character reads once, a
+    /// combining mark stays with its base, and a tab reads as the blank columns
+    /// it moved past.
+    pub fn text(&self) -> String {
+        let grid = self.term.grid();
+        let mut text = String::new();
+        let mut row_text = String::new();
+        for row in 0..self.rows() {
+            row_text.clear();
+            let line = &grid[Line(row as i32)];
+            for col in 0..self.cols() {
+                let cell = &line[Column(col)];
+                // A wide character holds its second column with a spacer cell,
+                // and one that wraps leaves a spacer at the end of the row.
+                if cell
+                    .flags
+                    .intersects(TermFlags::WIDE_CHAR_SPACER | TermFlags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                // A tab marks only the cell it started in, and the cells up to
+                // the stop stay blank, so a blank in its place keeps the columns.
+                row_text.push(if cell.c == '\t' { ' ' } else { cell.c });
+                row_text.extend(cell.zerowidth().into_iter().flatten());
+            }
+            text.push_str(row_text.trim_end_matches(' '));
+            text.push('\n');
+        }
+        text.truncate(text.trim_end_matches('\n').len());
+        text
+    }
+
     /// The cursor cell, or `None` when the program has hidden it.
     pub fn cursor(&self) -> Option<CursorPos> {
         let content = self.term.renderable_content();
@@ -831,5 +867,26 @@ mod tests {
     /// the screen mutably.
     fn owned_title(term: &TermScreen) -> Option<String> {
         term.title().map(str::to_owned)
+    }
+
+    #[test]
+    fn text_joins_the_rows_and_drops_trailing_blanks() {
+        let mut term = TermScreen::new(4, 10);
+
+        term.feed(b"ab\r\n\r\ncd  ");
+
+        assert_eq!(term.text(), "ab\n\ncd");
+    }
+
+    /// A tab, a wide character, and a combining mark each fill the cells in
+    /// their own way, and the text reads each one as the screen shows it.
+    #[test]
+    fn text_reads_tabs_wide_characters_and_marks_as_shown() {
+        let mut term = TermScreen::new(2, 20);
+
+        term.feed("a\tb\u{4e2d}c e\u{301}".as_bytes());
+
+        let tab = " ".repeat(7);
+        assert_eq!(term.text(), format!("a{tab}b\u{4e2d}c e\u{301}"));
     }
 }

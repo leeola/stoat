@@ -2,7 +2,7 @@ use crate::{
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::{BaseId, DisplayCache, PathPicker, PreviewPolicy, Scan},
+    picker::{BaseId, DisplayCache, PathPicker, PreviewPolicy, PreviewSource, Scan},
     term_session::TermId,
     workspace::Workspace,
 };
@@ -602,15 +602,20 @@ impl FileFinder {
     /// In [`FinderScope::Buffers`] the selection previews the live, possibly
     /// modified in-memory buffer. Every other scope reads the file from disk. A
     /// buffer selection whose path has no open buffer falls back to the disk
-    /// file. A terminal row previews nothing, since its key is no file.
+    /// file. A terminal row previews the session's screen.
     pub(crate) fn sync_preview(
         &mut self,
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &stoat_language::LanguageRegistry,
     ) {
-        if self.selected_term().is_some() {
-            self.core.preview.clear(ws);
+        if let Some(term) = self.selected_term() {
+            self.core.preview.sync(
+                ws,
+                fs_host,
+                language_registry,
+                PreviewSource::Terminal(term),
+            );
             return;
         }
         let policy = if self.browse.is_some() {
@@ -1100,29 +1105,32 @@ mod tests {
         );
     }
 
-    /// A terminal row's key is no file, so the pane shows nothing for it rather
-    /// than the placeholder of a failed read.
+    /// A terminal row previews the screen as plain text, since program output
+    /// has no language to highlight it with.
     #[test]
-    fn a_terminal_row_previews_nothing() {
+    fn a_terminal_row_previews_the_screen() {
         let mut h = crate::Stoat::test();
-        let root = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}\n")]);
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &stoat_action::OpenFile {
-                path: root.join("a.rs"),
-            },
-        );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let term_id = focused_terminal(&h);
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(b"hello");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
-        h.snapshot();
-        let file_preview = preview_text(&h);
 
-        h.type_keys("down");
         h.snapshot();
 
+        let preview = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .core
+            .preview
+            .buffer;
+        let language = h.stoat.active_workspace().buffers.language_for(preview);
         assert_eq!(
-            (file_preview.is_empty(), preview_text(&h)),
-            (false, String::new())
+            (preview_text(&h), language.map(|language| language.name)),
+            ("hello".to_string(), None),
         );
     }
 

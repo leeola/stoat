@@ -6,6 +6,7 @@ use crate::{
     input_view::InputView,
     paths,
     render::sanitize,
+    term_session::TermId,
     workspace::Workspace,
 };
 use std::{
@@ -1610,6 +1611,9 @@ pub(crate) enum PreviewSource {
     /// the backing file. Used by the finder's Buffers scope and the palette's
     /// buffer argument picker.
     Buffer(BufferId),
+    /// A terminal session's screen text as of the sync, with no language. The
+    /// pane does not follow the child's later output.
+    Terminal(TermId),
 }
 
 /// Paths [`PreviewTextCache`] holds before the oldest goes.
@@ -1715,7 +1719,7 @@ impl Preview {
             return;
         }
         // Each arm loads the pane itself, rather than handing one type of text
-        // back to a shared call: the cache holds an `Arc<str>` and the other two
+        // back to a shared call: the cache holds an `Arc<str>` and the others
         // build a `String`, and unifying those would copy a live buffer's whole
         // rope a second time.
         let language = match &source {
@@ -1751,6 +1755,16 @@ impl Preview {
                     .unwrap_or_default();
                 replace_preview_text(ws, self.editor, self.buffer, &content);
                 ws.buffers.language_for(*id)
+            },
+            PreviewSource::Terminal(id) => {
+                let text = ws
+                    .terms
+                    .get(*id)
+                    .map(|session| session.term.text())
+                    .unwrap_or_default();
+                let text = sanitize::sanitize_preview_text(&text);
+                replace_preview_text(ws, self.editor, self.buffer, &text);
+                None
             },
         };
         ws.reset_preview_syntax(self.buffer);
