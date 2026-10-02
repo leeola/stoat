@@ -1,4 +1,4 @@
-use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{builder::FalseyValueParser, ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
 use crossterm::event::Event;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
@@ -48,6 +48,17 @@ pub struct Args {
         value_hint = ValueHint::DirPath
     )]
     working_dir: Option<PathBuf>,
+
+    /// Start an editor of its own inside a Stoat terminal pane. Without it, a
+    /// bare `stoat <files>` there opens the files in the instance that hosts
+    /// the pane.
+    #[arg(
+        long = "nested",
+        env = "STOAT_NESTED",
+        action = ArgAction::SetTrue,
+        value_parser = FalseyValueParser::new()
+    )]
+    nested: bool,
 
     /// Enable the LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
@@ -106,9 +117,10 @@ impl Args {
     /// The process entry tries the forward before its log opens and before
     /// anything takes over the terminal. A forwarded open then leaves the shell
     /// as it found it and no log file behind. `None` for every form that asks
-    /// for a session of its own.
+    /// for a session of its own, `--nested` among them.
     pub fn forwardable_files(&self) -> Option<&[PathBuf]> {
-        let forwards = self.attachable.is_none()
+        let forwards = !self.nested
+            && self.attachable.is_none()
             && self.command.is_none()
             && forwardable(&TuiStart::Files, &self.common, self.working_dir.as_deref());
         forwards.then_some(self.common.files.as_slice())
@@ -739,6 +751,7 @@ async fn drive_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::FromArgMatches;
     use stoat_scheduler::TestScheduler;
     use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -793,7 +806,7 @@ mod tests {
 
     #[test]
     fn only_a_bare_file_open_offers_its_files_to_the_parent() {
-        let cases: [(&[&str], Option<&[&str]>); 7] = [
+        let cases: [(&[&str], Option<&[&str]>); 8] = [
             (&["a.rs"], Some(&["a.rs"])),
             (&["a.rs", "b.rs"], Some(&["a.rs", "b.rs"])),
             (&[], None),
@@ -801,12 +814,12 @@ mod tests {
             (&["--attachable", "main", "a.rs"], None),
             (&["-d", "/elsewhere", "a.rs"], None),
             (&["--continue", "a.rs"], None),
+            (&["--nested", "a.rs"], None),
         ];
         let offered: Vec<(&[&str], Option<Vec<PathBuf>>)> = cases
             .iter()
             .map(|&(argv, _)| {
-                let args = Args::try_parse_from(["stoat"].into_iter().chain(argv.iter().copied()))
-                    .unwrap_or_else(|e| panic!("stoat {argv:?}: {e}"));
+                let args = parse_without_nested_env(argv);
                 (argv, args.forwardable_files().map(<[PathBuf]>::to_vec))
             })
             .collect();
@@ -820,6 +833,18 @@ mod tests {
             })
             .collect();
         assert_eq!(offered, expected);
+    }
+
+    /// Parse `argv` after `stoat` as if `STOAT_NESTED` were unset.
+    ///
+    /// A developer who nests on purpose exports the variable, and a plain
+    /// parse then answers for that shell rather than for the arguments.
+    fn parse_without_nested_env(argv: &[&str]) -> Args {
+        let matches = Args::command()
+            .mut_arg("nested", |arg| arg.env(None::<&str>))
+            .try_get_matches_from(["stoat"].into_iter().chain(argv.iter().copied()))
+            .unwrap_or_else(|e| panic!("stoat {argv:?}: {e}"));
+        Args::from_arg_matches(&matches).expect("matches from the command Args builds")
     }
 
     #[test]
