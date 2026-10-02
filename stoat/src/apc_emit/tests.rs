@@ -3397,6 +3397,51 @@ fn error_popout_emits_scaled_runs_under_stoatty() {
 }
 
 #[test]
+fn diff_sides_bar_emits_a_compact_run_under_stoatty() {
+    use crate::render::TEXT_SCALE_COMPACT;
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(120, 10);
+    h.stoat.minimap_override = Some(false);
+    h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&PathBuf::from("/repo/a.rs"));
+    h.settle_diff_jobs();
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("focused editor")
+        .set_diff_view(true);
+    h.type_keys("j");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let buf = h.stoat.render();
+    emit_apc_scene(&mut h.stoat);
+
+    let mut raw = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        raw.extend(batch);
+    }
+    let cmds = command::decode_stream(&raw);
+    let top_row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+
+    assert_eq!(
+        (
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::TextRun(t) if t.scale == TEXT_SCALE_COMPACT
+                    && t.row == 0
+                    && t.text.contains("index → working tree")
+            )),
+            cmds.iter()
+                .any(|c| matches!(c, Command::Panel(panel) if panel.top == 0)),
+            top_row.contains("working tree"),
+        ),
+        (true, true, false),
+        "the bar streams as a compact run on a panel, with no grid text",
+    );
+}
+
+#[test]
 fn transient_status_message_keeps_the_rich_status_bar() {
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();

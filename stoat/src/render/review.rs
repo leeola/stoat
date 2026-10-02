@@ -2193,6 +2193,7 @@ mod tests {
             scope::{UI_SEARCH_MATCH, UI_SELECTION_EDITOR},
             Theme,
         },
+        workspace::diff::WorktreeBase,
     };
     use std::sync::{Arc, RwLock};
     use stoat_language::structural_diff;
@@ -3342,6 +3343,65 @@ mod tests {
         (0..buf.area.height)
             .find(|&y| line_text(buf, y, cols.clone()).starts_with(needle))
             .unwrap_or_else(|| panic!("no row across {cols:?} starts with {needle:?}"))
+    }
+
+    #[test]
+    fn the_sides_bar_yields_to_a_cursor_on_the_top_row() {
+        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        assert_eq!(
+            top_row_in_both_frames(&mut h).map(|row| row.contains("working tree")),
+            [false, false],
+            "the line under edit stays clear in both frames",
+        );
+    }
+
+    #[test]
+    fn the_diff_view_names_both_sides_on_its_top_row() {
+        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        h.type_keys("j");
+        let index = top_row_in_both_frames(&mut h);
+
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.settle_diff_jobs();
+        let head = top_row_in_both_frames(&mut h);
+
+        assert_eq!(
+            (
+                index
+                    .each_ref()
+                    .map(|row| row.contains("index → working tree")),
+                head.each_ref()
+                    .map(|row| row.contains("HEAD → working tree")),
+            ),
+            ([true, true], [true, true]),
+            "{index:?} then {head:?}",
+        );
+    }
+
+    #[test]
+    fn a_plain_pane_carries_no_sides_bar() {
+        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+        h.type_keys("j");
+        h.snapshot();
+        assert!(
+            !h.rendered_text().contains("working tree"),
+            "{}",
+            h.rendered_text()
+        );
+    }
+
+    /// Row 0 of the stoatty frame and of the fallback frame, in that order.
+    fn top_row_in_both_frames(h: &mut crate::test_harness::TestHarness) -> [String; 2] {
+        [true, false].map(|stoatty| {
+            h.stoat.stoatty = stoatty;
+            h.snapshot();
+            line_text(h.rendered_buffer(), 0, 0..120)
+        })
     }
 
     /// `a` a's, a space, then `b` b's: a line that wraps after the space when

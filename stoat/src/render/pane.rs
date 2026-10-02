@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::search::SearchPrompt,
+    action_handlers::{search::SearchPrompt, view},
     app::SPINNER_FRAMES,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -13,6 +13,7 @@ use crate::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
         },
+        review::{DiffColumns, DiffLayout},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         undercurl::UndercurlBatch,
@@ -207,6 +208,16 @@ pub(crate) fn render_pane(
         scene,
     );
 
+    // An unfocused diff view draws no cursor, so only a focused one has a line
+    // under edit for the bar to keep clear of.
+    if let View::Editor(editor_id) = &pane.view
+        && let Some(editor) = editors.get_mut(*editor_id)
+        && editor.diff_view
+        && !(is_focused && view::cursor_display_row(editor) == editor.scroll_row)
+    {
+        paint_diff_sides_bar(content_area, is_focused, frame, buf, scene);
+    }
+
     let status_rows: u16 = if is_focused && frame.lsp_status_open {
         let mut rows: Vec<String> = frame
             .lsp_progress_entries
@@ -305,6 +316,87 @@ pub(crate) fn render_pane(
             }
         }
     }
+}
+
+/// Paint the diff view's sides bar over the top row of `content_area`.
+///
+/// The bar names the base on the left and the buffers on the right, with the
+/// arrow over the divider so each name sits above its own column. It takes the
+/// pane's status bar style on a popout card. A card is the surface that shows
+/// over a gliding pane under stoatty and falls back to cells elsewhere.
+fn paint_diff_sides_bar(
+    content_area: Rect,
+    is_focused: bool,
+    frame: FrameCtx<'_>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let theme = frame.theme;
+    let (from, to) = frame.diff_sides;
+    let text = format!(" {from} → {to} ");
+
+    let style = theme.get(match is_focused {
+        true => crate::theme::scope::UI_STATUSBAR_FOCUSED,
+        false => crate::theme::scope::UI_STATUSBAR_UNFOCUSED,
+    });
+    let bg = style.bg.unwrap_or_else(|| crate::render::themed_bg(theme));
+    let border = theme
+        .get(crate::theme::scope::UI_BORDER_INACTIVE)
+        .fg
+        .unwrap_or_else(|| crate::render::themed_fg(theme));
+
+    // A run draws at the compact scale, so it spans fewer cells than it has
+    // chars. The fallback writes one char per cell.
+    let rich = scene.live() && style_rgb(style.fg).is_some() && style_rgb(Some(bg)).is_some();
+    let cells = |chars: usize| match rich {
+        true => (chars * TEXT_SCALE_COMPACT as usize).div_ceil(TEXT_SCALE_FULL as usize) as u16,
+        false => chars as u16,
+    };
+    let lead_cells = cells(from.chars().count() + 2);
+    let text_cells = cells(text.chars().count());
+
+    let divider = DiffColumns::compute(content_area, DiffLayout::DIFF_VIEW).sep_x;
+    let Some(area) = diff_sides_bar_area(content_area, divider, lead_cells, text_cells) else {
+        return;
+    };
+    let content = paint_popout_card(buf, area, bg, border, theme, scene);
+    chrome::text(
+        buf,
+        content.x,
+        content.y,
+        content.x + content.width,
+        &text,
+        style,
+        style_rgb(Some(bg)),
+        TEXT_SCALE_COMPACT,
+        scene,
+    );
+}
+
+/// Where the diff view's sides bar sits on the top row of `content`, or `None`
+/// when the content has no room for it.
+///
+/// The bar is `text_cells` wide plus the card's inset column on each side.
+/// `lead_cells` is the width of the left name with its padding, which puts the
+/// arrow on the `divider`. The unified layout has no divider, so there the bar
+/// centers. Either way it stays inside the content.
+fn diff_sides_bar_area(
+    content: Rect,
+    divider: Option<u16>,
+    lead_cells: u16,
+    text_cells: u16,
+) -> Option<Rect> {
+    let width = text_cells + 2;
+    if content.height < 2 || width > content.width {
+        return None;
+    }
+
+    let max_x = content.x + content.width - width;
+    let x = match divider {
+        Some(divider) => divider.saturating_sub(lead_cells + 1),
+        None => content.x + (content.width - width) / 2,
+    };
+    Some(Rect::new(x.clamp(content.x, max_x), content.y, width, 1))
 }
 
 /// A pane's content and status rectangles, given where the single-minimap band
@@ -1512,7 +1604,7 @@ fn render_image_pane(
 }
 #[cfg(test)]
 mod tests {
-    use super::{diff_base_lead, focused_staged_label, status_filename};
+    use super::{diff_base_lead, diff_sides_bar_area, focused_staged_label, status_filename};
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
         agent_status::{AgentHookEvent, AgentStatus},
@@ -1524,7 +1616,7 @@ mod tests {
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range};
-    use ratatui::buffer::Buffer;
+    use ratatui::{buffer::Buffer, layout::Rect};
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -2134,6 +2226,27 @@ mod tests {
             }),
             "diff vs original",
             "a proposal has no revision, so it names what it replaced"
+        );
+    }
+
+    #[test]
+    fn the_sides_bar_sets_its_arrow_over_the_divider() {
+        let wide = Rect::new(0, 0, 120, 10);
+        assert_eq!(
+            [
+                diff_sides_bar_area(wide, Some(59), 7, 22),
+                diff_sides_bar_area(Rect::new(0, 0, 80, 10), None, 7, 22),
+                diff_sides_bar_area(wide, Some(3), 7, 22),
+                diff_sides_bar_area(Rect::new(0, 0, 20, 10), None, 7, 22),
+                diff_sides_bar_area(Rect::new(0, 0, 120, 1), Some(59), 7, 22),
+            ],
+            [
+                Some(Rect::new(51, 0, 24, 1)),
+                Some(Rect::new(28, 0, 24, 1)),
+                Some(Rect::new(0, 0, 24, 1)),
+                None,
+                None,
+            ],
         );
     }
 
