@@ -664,74 +664,62 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
 
 /// Open a log file and follow it as new lines are written.
 ///
-/// `target` is the `:logs` argument: [`None`] or `"stoat"` opens this
-/// session's own log, `"stoatty"` opens the enclosing terminal's. Resolves the
-/// file under `<log dir>` and delegates to [`open_log_buffer`]. Reports via
-/// [`Stoat::pending_message`] and opens nothing when the log directory cannot
-/// be resolved, when `target` names neither program, or when the named session
-/// wrote no log file.
+/// `target` is the `:logs` argument. [`None`] or `"stoat"` opens this session's
+/// own log, and `"stoatty"` opens the enclosing terminal's. The session's own
+/// log is the path the binary gave [`Stoat::set_session_log`], and stoatty's
+/// resolves under the log directory. Delegates to [`open_log_buffer`].
+///
+/// Reports via [`Stoat::pending_message`] and opens nothing when the log
+/// directory does not resolve, when `target` names neither program, or when the
+/// named session wrote no log file.
 pub(crate) fn open_logs(stoat: &mut Stoat, target: Option<&str>) -> UpdateEffect {
     let Ok(dir) = stoat_log::log_dir() else {
         stoat.set_status("could not resolve the log directory");
         return UpdateEffect::Redraw;
     };
 
-    let stem = target_log_stem(
+    let path = target_log_path(
         target,
-        stoat_log::ident::get().map(|i| i.file_stem.as_str()),
+        stoat.session_log.as_ref().map(|log| log.path.as_path()),
+        &dir,
         stoat.env_host.var(STOATTY_LOG_ID).as_deref(),
     );
-    let stem = match stem {
-        Ok(stem) => stem,
+    match path {
+        Ok(Some(path)) => open_log_buffer(stoat, &path),
+        Ok(None) => {
+            stoat.set_status("no log file for this session; started with --log-stderr?");
+            UpdateEffect::Redraw
+        },
         Err(status) => {
             stoat.set_status(status);
-            return UpdateEffect::Redraw;
+            UpdateEffect::Redraw
         },
-    };
-
-    let Some(path) = session_log_path(&dir, stem.as_deref()) else {
-        stoat.set_status("no log file for this session; started with --log-stderr?");
-        return UpdateEffect::Redraw;
-    };
-    open_log_buffer(stoat, &path)
+    }
 }
 
-/// The log file stem `target` names, or the status to report instead.
+/// The log file `target` names, or the status to report instead.
 ///
-/// `Ok(None)` means the named session wrote no log file, which is what
-/// `--log-stderr` produces; [`session_log_path`] turns that into no path.
+/// `Ok(None)` means this session writes no log file, which is what
+/// `--log-stderr` produces.
 ///
-/// Pure so every branch is testable. Its two inputs are otherwise unreachable
-/// from a test: `ident_stem` comes from a first-write-wins process global, and
-/// `stoatty_id` from the environment.
-fn target_log_stem(
+/// Pure so every branch is testable, because `stoatty_id` comes from the
+/// environment.
+fn target_log_path(
     target: Option<&str>,
-    ident_stem: Option<&str>,
+    session_log: Option<&Path>,
+    dir: &Path,
     stoatty_id: Option<&str>,
-) -> Result<Option<String>, &'static str> {
+) -> Result<Option<PathBuf>, &'static str> {
     match target {
-        None | Some("stoat") => Ok(ident_stem.map(str::to_owned)),
-        // stoatty names its log after the same id it exports, so the stem is
+        None | Some("stoat") => Ok(session_log.map(Path::to_path_buf)),
+        // stoatty names its log after the same id it exports, so the file is
         // the variable with the prefix put back on.
         Some("stoatty") => match stoatty_id {
-            Some(sid) => Ok(Some(format!("stoatty-{sid}"))),
+            Some(sid) => Ok(Some(dir.join(format!("stoatty-{sid}.log")))),
             None => Err("logs: not running inside stoatty"),
         },
         Some(_) => Err("logs: expected stoat or stoatty"),
     }
-}
-
-/// The log file `stem` names under `dir`, or `None` when no stem was given.
-///
-/// Split out from [`open_logs`] because the stem comes from a process-global
-/// identity that is first-write-wins (`stoat_log::ident::install`). A test
-/// cannot install one without fixing it for every later test in the binary, so
-/// the path logic takes the stem as a parameter instead of reading it.
-///
-/// A `None` stem means the binary never named a log file, which is what
-/// `--log-stderr` produces.
-fn session_log_path(dir: &Path, stem: Option<&str>) -> Option<PathBuf> {
-    Some(dir.join(format!("{}.log", stem?)))
 }
 
 /// Open `path` as an auto-reloading buffer tailing its end, or report when the
@@ -1168,8 +1156,8 @@ mod tests {
     use super::{
         collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, follow_change_now,
         open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install, reload_all,
-        reload_focused, session_log_path, set_auto_reload_config, set_buffer_auto_reload,
-        stat_and_read_buffer, target_log_stem, toggle_follow_changes, toggle_live_reload,
+        reload_focused, set_auto_reload_config, set_buffer_auto_reload, stat_and_read_buffer,
+        target_log_path, toggle_follow_changes, toggle_live_reload,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -2463,38 +2451,39 @@ mod tests {
     }
 
     #[test]
-    fn target_log_stem_resolves_each_target() {
-        let ident = Some("headless-stoat-20260718-143022-1");
+    fn target_log_path_resolves_each_target() {
+        let session = Some(Path::new("/logs/headless-stoat-20260718-143022-1.log"));
+        let dir = Path::new("/logs");
         let sid = Some("20260718-143022-7");
 
         assert_eq!(
-            target_log_stem(None, ident, sid),
-            Ok(Some("headless-stoat-20260718-143022-1".to_string())),
+            target_log_path(None, session, dir, sid),
+            Ok(session.map(Path::to_path_buf)),
             "an omitted target is this stoat's own log",
         );
         assert_eq!(
-            target_log_stem(Some("stoat"), ident, sid),
-            Ok(Some("headless-stoat-20260718-143022-1".to_string())),
+            target_log_path(Some("stoat"), session, dir, sid),
+            Ok(session.map(Path::to_path_buf)),
             "the stoat target is the same as omitting it",
         );
         assert_eq!(
-            target_log_stem(Some("stoatty"), ident, sid),
-            Ok(Some("stoatty-20260718-143022-7".to_string())),
+            target_log_path(Some("stoatty"), session, dir, sid),
+            Ok(Some(PathBuf::from("/logs/stoatty-20260718-143022-7.log"))),
             "the stoatty target puts the prefix back on the exported id",
         );
 
         assert_eq!(
-            target_log_stem(None, None, sid),
+            target_log_path(None, None, dir, sid),
             Ok(None),
-            "a stoat that named no log file resolves no stem",
+            "a stoat that named no log file resolves no path",
         );
         assert_eq!(
-            target_log_stem(Some("stoatty"), ident, None),
+            target_log_path(Some("stoatty"), session, dir, None),
             Err("logs: not running inside stoatty"),
             "no exported id means no enclosing stoatty",
         );
         assert_eq!(
-            target_log_stem(Some("x"), ident, sid),
+            target_log_path(Some("x"), session, dir, sid),
             Err("logs: expected stoat or stoatty"),
             "an unknown target names neither program",
         );
@@ -2536,17 +2525,21 @@ mod tests {
     }
 
     #[test]
-    fn session_log_path_names_the_ident_stem() {
-        let dir = Path::new("/logs");
+    fn open_logs_opens_the_session_log() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/logs-session");
+        let path = root.join("headless-stoat-1.log");
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        h.stoat.set_session_log(path.clone());
+
+        assert_eq!(open_logs(&mut h.stoat, None), UpdateEffect::Redraw);
+
+        let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
         assert_eq!(
-            session_log_path(dir, Some("headless-stoat-20260718-143022-1")),
-            Some(PathBuf::from("/logs/headless-stoat-20260718-143022-1.log")),
-            "the stem names the file under the log dir",
-        );
-        assert_eq!(
-            session_log_path(dir, None),
-            None,
-            "a session that named no log file resolves no path",
+            h.stoat.active_workspace().buffers.id_for_path(&path),
+            Some(id),
+            "the focused buffer is the session log",
         );
     }
 

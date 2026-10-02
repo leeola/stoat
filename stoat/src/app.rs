@@ -41,6 +41,7 @@ use crate::{
     },
     run::{CommandMark, PtyNotification, RunId},
     selection::merge_overlapping_spans,
+    session_log::SessionLog,
     ssh,
     symbol_finder::SymbolFinder,
     term_session::TermId,
@@ -1699,6 +1700,11 @@ pub struct Stoat {
     /// needs a live Tokio reactor, which only the binary and the fixture
     /// harness run, so no test ever enqueues the server task.
     pub(crate) serve_agent_sockets: bool,
+    /// The log file this session writes.
+    ///
+    /// `None` by default, which is what a test and a `--log-stderr` run have.
+    /// The binary sets it via [`Self::set_session_log`].
+    pub(crate) session_log: Option<SessionLog>,
     /// Workspaces whose hook socket is already served, so the spawn paths call
     /// [`Self::serve_term_session`] freely without stacking listeners on one
     /// path. A second bind of a live socket replaces the file and orphans the
@@ -2524,6 +2530,7 @@ impl Stoat {
             live_reload: false,
             agent_socket_dir: None,
             serve_agent_sockets: false,
+            session_log: None,
             served_agent_sockets: std::collections::HashSet::new(),
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
@@ -3384,6 +3391,11 @@ impl Stoat {
     /// binary and the fixture harness turn it on alongside the directory.
     pub fn set_serve_agent_sockets(&mut self, enabled: bool) {
         self.serve_agent_sockets = enabled;
+    }
+
+    /// Name the log file this session writes, which `:logs` opens.
+    pub fn set_session_log(&mut self, path: PathBuf) {
+        self.session_log = Some(SessionLog::new(path));
     }
 
     pub fn active_workspace(&self) -> &Workspace {

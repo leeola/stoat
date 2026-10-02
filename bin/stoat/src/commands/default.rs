@@ -170,7 +170,11 @@ enum Command {
     },
 }
 
-pub fn run(args: Args) -> Result<(), Whatever> {
+/// Run the invocation `args` names.
+///
+/// `session_log` is the file this process logs to, `None` under
+/// `--log-stderr`. Only an editor session reads it.
+pub fn run(args: Args, session_log: Option<PathBuf>) -> Result<(), Whatever> {
     let Args {
         command,
         common,
@@ -194,7 +198,9 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
         Some(Command::Query { sub }) => crate::commands::query::run(sub),
         Some(Command::Walkthrough { sub }) => crate::commands::walkthrough::run(sub),
-        Some(Command::Fixture(fixture)) => run_fixture(fixture, text_proto_log, common),
+        Some(Command::Fixture(fixture)) => {
+            run_fixture(fixture, text_proto_log, common, session_log)
+        },
         Some(Command::Completions { shell }) => {
             clap_complete::generate(shell, &mut Args::command(), "stoat", &mut std::io::stdout());
             Ok(())
@@ -205,6 +211,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
             working_dir,
             TuiStart::Review,
             attach_serve,
+            session_log,
         ),
         Some(Command::Conflict) => run_tui(
             text_proto_log,
@@ -212,6 +219,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
             working_dir,
             TuiStart::Conflict,
             attach_serve,
+            session_log,
         ),
         None => run_tui(
             text_proto_log,
@@ -219,6 +227,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
             working_dir,
             TuiStart::Files,
             attach_serve,
+            session_log,
         ),
     }
 }
@@ -232,6 +241,7 @@ fn run_fixture(
     args: FixtureArgs,
     text_proto_log: Option<bool>,
     mut common: CommonArgs,
+    session_log: Option<PathBuf>,
 ) -> Result<(), Whatever> {
     match (args.sub, args.name) {
         (Some(FixtureSub::Ls), _) => {
@@ -243,7 +253,14 @@ fn run_fixture(
                 whatever!("`--fixture` conflicts with the fixture subcommand");
             }
             common.fixture = Some(name);
-            run_tui(text_proto_log, common, None, TuiStart::Files, None)
+            run_tui(
+                text_proto_log,
+                common,
+                None,
+                TuiStart::Files,
+                None,
+                session_log,
+            )
         },
         (None, None) => whatever!("specify a fixture name or `ls`"),
     }
@@ -296,6 +313,7 @@ fn run_tui(
     working_dir: Option<PathBuf>,
     start: TuiStart,
     attach_serve: Option<String>,
+    session_log: Option<PathBuf>,
 ) -> Result<(), Whatever> {
     // Read before `common` is spent, since the answer depends on flags the
     // destructure moves out.
@@ -510,6 +528,9 @@ fn run_tui(
         stoat.set_cell_pixels_rx(cell_pixels_rx);
         stoat.set_window_ipc(window_socket_path());
         stoat.set_version_info(VERSION_INFO);
+        if let Some(path) = session_log {
+            stoat.set_session_log(path);
+        }
         stoat.set_lsp_auto_spawn(true);
         stoat.set_env_auto_load(true);
         stoat.set_diff_warm_auto(true);

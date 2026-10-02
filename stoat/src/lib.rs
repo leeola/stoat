@@ -73,6 +73,7 @@ mod review_apply;
 mod review_session;
 pub mod run;
 mod selection;
+mod session_log;
 mod smooth_scroll;
 pub mod ssh;
 pub(crate) mod symbol_finder;

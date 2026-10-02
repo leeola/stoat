@@ -108,7 +108,7 @@ fn main() {
         );
     }
 
-    if let Err(e) = stoat_bin::commands::default::run(args) {
+    if let Err(e) = stoat_bin::commands::default::run(args, log_path) {
         println!("Error: {e}");
         std::process::exit(1);
     }
