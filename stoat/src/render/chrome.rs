@@ -366,6 +366,44 @@ pub(crate) fn vline(
     }
 }
 
+/// Draw the on or off mark of a toggle beside its key, where `(x, y)` is the
+/// cell directly right of the key.
+///
+/// The fallback is taken when `scene` is dead, or when `style`'s foreground
+/// does not resolve to RGB. It writes a small filled square for on and a small
+/// hollow square for off into that cell, styled with `style`. Otherwise it
+/// emits one [`Bar`] two sixteenths wide, tall for on and short for off, and
+/// writes no glyph.
+pub(crate) fn toggle_mark(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    on: bool,
+    style: Style,
+    scene: &mut ApcScene,
+) {
+    match style_rgb(style.fg).filter(|_| scene.live()) {
+        Some(color) => {
+            // The negative x puts the bar in the strip of the key's last cell
+            // that the key run leaves clear, because bars draw under every
+            // text-run box.
+            Bar {
+                x: -2,
+                y: if on { 3 } else { 6 },
+                width: 2,
+                height: if on { 10 } else { 4 },
+                color,
+            }
+            .render(Rect::new(x, y, 1, 1), buf, scene);
+        },
+        None => {
+            buf[(x, y)]
+                .set_char(if on { '\u{25aa}' } else { '\u{25ab}' })
+                .set_style(style);
+        },
+    }
+}
+
 /// Draw `content` at cell `(x, y)`, clipped before column `end_x`.
 ///
 /// The fallback -- taken when `scene` is dead, `style`'s foreground does not
@@ -417,8 +455,8 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        hline, modal_box, modal_frame, modal_frame_above_pools, popout_frame, text, vline,
-        POPOUT_INSET_PX,
+        hline, modal_box, modal_frame, modal_frame_above_pools, popout_frame, text, toggle_mark,
+        vline, POPOUT_INSET_PX,
     };
     use crate::theme::Theme;
     use ratatui::{
@@ -757,6 +795,56 @@ mod tests {
                 height: 1,
                 color: [1, 2, 3],
             })
+        );
+    }
+
+    #[test]
+    fn toggle_mark_fallback_draws_a_square_and_stoatty_emits_a_bar() {
+        let mark = |on: bool, style: Style| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
+            let mut scene = ApcScene::new();
+            toggle_mark(&mut buf, 3, 1, on, style, &mut scene);
+            let symbol = buf
+                .cell((3, 1))
+                .expect("cell in bounds")
+                .symbol()
+                .to_string();
+            (symbol, scene.buffer().to_vec())
+        };
+
+        assert_eq!(
+            [mark(true, plain_style()), mark(false, plain_style())],
+            [
+                ("\u{25aa}".to_string(), Vec::new()),
+                ("\u{25ab}".to_string(), Vec::new()),
+            ],
+            "the fallback draws a filled square on and a hollow one off",
+        );
+        assert_eq!(
+            [mark(true, rgb_style()), mark(false, rgb_style())],
+            [
+                (
+                    " ".to_string(),
+                    encode_bar(&BarCommand {
+                        x: 46,
+                        y: 19,
+                        width: 2,
+                        height: 10,
+                        color: [1, 2, 3],
+                    })
+                ),
+                (
+                    " ".to_string(),
+                    encode_bar(&BarCommand {
+                        x: 46,
+                        y: 22,
+                        width: 2,
+                        height: 4,
+                        color: [1, 2, 3],
+                    })
+                ),
+            ],
+            "stoatty draws a tall bar on and a short one off, and no glyph",
         );
     }
 

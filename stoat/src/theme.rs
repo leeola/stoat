@@ -509,6 +509,10 @@ pub mod scope {
 
     pub const UI_PROMPT: &str = "ui.prompt";
     pub const UI_KEY_LABEL: &str = "ui.key_label";
+    /// The mark the key hints box draws beside a key whose toggle is on.
+    /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
+    pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";
+    pub const UI_TOGGLE_INACTIVE: &str = "ui.toggle.inactive";
     pub const UI_HEADING: &str = "ui.heading";
     pub const UI_ERROR: &str = "ui.error";
     pub const UI_MESSAGE_ERROR: &str = "ui.message.error";

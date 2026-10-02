@@ -11,7 +11,7 @@ use crate::{
     host::FsEventKind,
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
-    render::{review::DiffDials, walkthrough::Spotlight},
+    render::{hints::HintRow, review::DiffDials, walkthrough::Spotlight},
     run::GridSelection,
     term_session::{TermSelection, TermSession},
     test_fixture::{
@@ -3854,19 +3854,61 @@ fn hints_cache_reuses_rows_across_unchanged_frames() {
     let key = h.stoat.hints_cache.as_ref().expect("cache populated").key;
 
     // A rebuild would drop this sentinel row. Reuse keeps it.
-    h.stoat
-        .hints_cache
-        .as_mut()
-        .unwrap()
-        .rows
-        .push(("SENTINEL".into(), "SENTINEL".into()));
+    h.stoat.hints_cache.as_mut().unwrap().rows.push(HintRow {
+        keys: "SENTINEL".into(),
+        action: "SENTINEL".into(),
+        toggle: None,
+    });
 
     h.stoat.paint_into(&mut buf);
     let cache = h.stoat.hints_cache.as_ref().expect("cache retained");
     assert_eq!(cache.key, key, "unchanged state keeps the same cache key");
     assert!(
-        cache.rows.iter().any(|(k, _)| k == "SENTINEL"),
+        cache.rows.iter().any(|row| row.keys == "SENTINEL"),
         "an unchanged frame reuses the cached rows instead of rewalking",
+    );
+}
+
+#[test]
+fn the_git_chord_marks_its_toggles() {
+    use crate::{render::paint::style_rgb, theme::scope};
+    use stoatty_protocol::command::{decode_stream, Command};
+
+    // The harness paints a stoatty frame, where the mark is a bar the text
+    // snapshot does not show, so the glyph checks run on the fallback frame.
+    let mut h = Stoat::test();
+    h.stoat.stoatty = false;
+    h.type_keys("space G");
+    assert!(
+        h.rendered_text().contains("f\u{25ab}  follow every change"),
+        "follow starts off: {}",
+        h.rendered_text(),
+    );
+
+    h.stoat.follow_changes = true;
+    h.snapshot();
+    assert!(
+        h.rendered_text().contains("f\u{25aa}  follow every change"),
+        "a flip repaints the cached rows: {}",
+        h.rendered_text(),
+    );
+
+    h.stoat.stoatty = true;
+    let mut buf = Buffer::empty(h.stoat.size());
+    h.stoat.paint_into(&mut buf);
+    let rgb = |name| style_rgb(h.stoat.theme.get(name).fg).expect("the theme colors the mark");
+    let (active, inactive) = (rgb(scope::UI_TOGGLE_ACTIVE), rgb(scope::UI_TOGGLE_INACTIVE));
+    let marks: Vec<(u16, [u8; 3])> = decode_stream(h.stoat.apc_scene.bytes())
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Bar(bar) if bar.width == 2 && bar.height < 16 => Some((bar.height, bar.color)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [(4, inactive), (10, active), (4, inactive)],
+        "the key hints toggle and R are off, and f is on",
     );
 }
 
@@ -3886,7 +3928,7 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
         .expect("the toggle shows the box over a terminal")
         .rows
         .iter()
-        .map(|(keys, _)| keys.as_str())
+        .map(|row| row.keys.as_str())
         .collect();
     assert_eq!(
         keys,

@@ -71,6 +71,8 @@ theme default_dark {
 
     ui.prompt.fg = warning;
     ui.key_label.fg = accent;
+    ui.toggle.active.fg = success;
+    ui.toggle.inactive.fg = danger;
     ui.heading = { fg: warning, modifiers: [bold] };
     ui.error.fg = danger;
     ui.text.fg = text;

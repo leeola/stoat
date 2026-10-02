@@ -1,4 +1,5 @@
 use super::TEXT_SCALE_POPUP;
+use crate::toggle::{Toggle, ToggleStates};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::collections::HashMap;
 
@@ -24,20 +25,32 @@ pub(crate) struct HintsFooter {
     pub(crate) style: Style,
 }
 
+/// One row of the hints box, holding the keys that reach an action, the
+/// action's label, and the toggle the action flips.
+///
+/// The row records which toggle it flips and never the state, so a flip
+/// repaints the row with no rebuild.
+pub(crate) struct HintRow {
+    pub(crate) keys: String,
+    pub(crate) action: String,
+    pub(crate) toggle: Option<Toggle>,
+}
+
 /// A frame's grouped hint rows kept for reuse across frames.
 ///
 /// `key` hashes the keymap-state inputs that decide which bindings are active,
 /// so an unchanged key means the same rows and the keymap walk plus regrouping
-/// can be skipped.
+/// can be skipped. A toggle's state is not part of the key, because each frame
+/// reads it into the [`ToggleStates`] the paint takes.
 pub(crate) struct HintsCache {
     pub(crate) key: u64,
-    pub(crate) rows: Vec<(String, String)>,
+    pub(crate) rows: Vec<HintRow>,
     /// The most recent layout of [`Self::rows`], or `None` before one is built.
     layout: Option<HintsLayout>,
 }
 
 impl HintsCache {
-    pub(crate) fn new(key: u64, rows: Vec<(String, String)>) -> Self {
+    pub(crate) fn new(key: u64, rows: Vec<HintRow>) -> Self {
         Self {
             key,
             rows,
@@ -79,22 +92,37 @@ struct LayoutKey {
 
 /// One column of the box, holding each row's text as it will be painted.
 struct LaidColumn {
-    /// Right-aligned key and indented action, ready to hand to the painter.
-    cells: Vec<(String, String)>,
+    /// Right-aligned key and indented action, ready to hand to the painter,
+    /// with the toggle that marks the cell after the key.
+    cells: Vec<LaidCell>,
     key_width: usize,
     action_width: usize,
 }
 
-/// Paint the hints box from pre-grouped `(keys, action)` rows.
+/// One row of a [`LaidColumn`].
+#[derive(Clone, Debug, PartialEq)]
+struct LaidCell {
+    key: String,
+    action: String,
+    toggle: Option<Toggle>,
+}
+
+/// Paint the hints box from pre-grouped [`HintRow`]s.
 ///
 /// Takes rows rather than bindings because every caller holds a per-frame cache
 /// keyed on the keymap state, and so paints an unchanged frame without
 /// re-walking the keymap or regrouping. Run [`group_by_action`] first when
 /// building rows fresh.
+///
+/// A row whose binding flips a toggle gets a mark directly right of its key,
+/// on or off as `toggles` reads it. The mark changes no width and moves no
+/// text in the box.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_hints_grouped(
     mode: &str,
     cache: &mut HintsCache,
     footer: Option<&HintsFooter>,
+    toggles: ToggleStates,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -150,6 +178,8 @@ pub(crate) fn render_hints_grouped(
     );
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let toggle_on = theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE);
+    let toggle_off = theme.get(crate::theme::scope::UI_TOGGLE_INACTIVE);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
     let end_x = inner.x + inner.width;
     let run_bg = crate::render::paint::style_rgb(
@@ -160,7 +190,7 @@ pub(crate) fn render_hints_grouped(
 
     let mut col_x = inner.x + 1;
     for column in &layout.columns {
-        for (i, (padded_key, action_text)) in column.cells.iter().enumerate() {
+        for (i, cell) in column.cells.iter().enumerate() {
             let row = inner.y + i as u16;
             if row >= inner.y + inner.height {
                 break;
@@ -170,7 +200,7 @@ pub(crate) fn render_hints_grouped(
                 col_x,
                 row,
                 end_x,
-                padded_key,
+                &cell.key,
                 key_style,
                 run_bg,
                 TEXT_SCALE_POPUP,
@@ -182,12 +212,26 @@ pub(crate) fn render_hints_grouped(
                 col_x + column.key_width as u16,
                 row,
                 end_x,
-                action_text,
+                &cell.action,
                 action_style,
                 run_bg,
                 TEXT_SCALE_POPUP,
                 &mut *scene,
             );
+
+            // The action text's fallback writes its leading spaces into the
+            // mark's cell, so the mark goes last.
+            if let Some(toggle) = cell.toggle {
+                let on = toggles.is_on(toggle);
+                crate::render::chrome::toggle_mark(
+                    buf,
+                    col_x + column.key_width as u16,
+                    row,
+                    on,
+                    if on { toggle_on } else { toggle_off },
+                    &mut *scene,
+                );
+            }
         }
         col_x += (column.key_width + GAP + column.action_width + INTER_COL_GAP) as u16;
     }
@@ -228,7 +272,7 @@ pub(crate) fn render_hints_grouped(
 /// that has nothing to lay out rather than something too large to show. A box
 /// wider or taller than the area still lays out, so the caller can cache that it
 /// does not fit.
-fn lay_out(rows: &[(String, String)], key: LayoutKey) -> Option<HintsLayout> {
+fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
     let extra_rows = key.footer_len.map(|_| FOOTER_ROWS).unwrap_or(0);
 
     // Rows that fit vertically inside the box. The layout grows into extra
@@ -241,14 +285,14 @@ fn lay_out(rows: &[(String, String)], key: LayoutKey) -> Option<HintsLayout> {
     let col_count = rows.len().div_ceil(available_rows);
     let rows_per_col = rows.len().div_ceil(col_count);
 
-    let chunks: Vec<&[(String, String)]> = rows.chunks(rows_per_col).collect();
+    let chunks: Vec<&[HintRow]> = rows.chunks(rows_per_col).collect();
     let key_widths: Vec<usize> = chunks
         .iter()
-        .map(|chunk| widest(chunk.iter().map(|(k, _)| k)))
+        .map(|chunk| widest(chunk.iter().map(|row| &row.keys)))
         .collect();
     let action_widths: Vec<usize> = chunks
         .iter()
-        .map(|chunk| widest(chunk.iter().map(|(_, a)| a)))
+        .map(|chunk| widest(chunk.iter().map(|row| &row.action)))
         .collect();
 
     // A box wider than the area cuts its action text to fit, so every key stays
@@ -264,7 +308,11 @@ fn lay_out(rows: &[(String, String)], key: LayoutKey) -> Option<HintsLayout> {
             let (key_width, cap) = (key_widths[i], caps[i]);
             let cells = chunk
                 .iter()
-                .map(|(k, a)| (format!("{k:>key_width$}"), format!("   {}", clip(a, cap))))
+                .map(|row| LaidCell {
+                    key: format!("{:>key_width$}", row.keys),
+                    action: format!("   {}", clip(&row.action, cap)),
+                    toggle: row.toggle,
+                })
                 .collect();
             LaidColumn {
                 cells,
@@ -345,18 +393,25 @@ fn clip(text: &str, cap: usize) -> String {
 
 /// Collapses entries that share an action description, joining their keys with
 /// `", "` in first-seen order. Ensures each action appears on exactly one row.
-pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, String)> {
-    let mut rows: Vec<(String, String)> = Vec::new();
+///
+/// Each entry is a key, its action's label, and the toggle the binding flips.
+/// A merged row keeps the toggle of its first binding.
+pub(crate) fn group_by_action(bindings: &[(&str, String, Option<Toggle>)]) -> Vec<HintRow> {
+    let mut rows: Vec<HintRow> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
-    for (key, action) in bindings {
+    for (key, action, toggle) in bindings {
         let action = action.as_str();
         if let Some(&i) = index.get(action) {
             let row = &mut rows[i];
-            row.0.push_str(", ");
-            row.0.push_str(key);
+            row.keys.push_str(", ");
+            row.keys.push_str(key);
         } else {
             index.insert(action, rows.len());
-            rows.push((key.to_string(), action.to_string()));
+            rows.push(HintRow {
+                keys: key.to_string(),
+                action: action.to_string(),
+                toggle: *toggle,
+            });
         }
     }
     rows
@@ -364,8 +419,13 @@ pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{action_caps, group_by_action, render_hints_grouped, HintsCache, HintsFooter};
-    use crate::theme::Theme;
+    use super::{
+        action_caps, group_by_action, render_hints_grouped, HintsCache, HintsFooter, LaidCell,
+    };
+    use crate::{
+        theme::Theme,
+        toggle::{Toggle, ToggleStates},
+    };
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn row_text(buf: &Buffer, y: u16) -> String {
@@ -376,14 +436,23 @@ mod tests {
     }
 
     fn render(bindings: &[(&str, String)], width: u16, height: u16) -> Buffer {
-        let mut cache = HintsCache::new(0, group_by_action(bindings));
-        render_into(&mut cache, None, width, height)
+        let mut cache = HintsCache::new(0, group_by_action(&plain(bindings)));
+        render_into(&mut cache, None, ToggleStates::default(), width, height)
+    }
+
+    /// `bindings` as entries whose binding flips no toggle.
+    fn plain<'a>(bindings: &[(&'a str, String)]) -> Vec<(&'a str, String, Option<Toggle>)> {
+        bindings
+            .iter()
+            .map(|(key, action)| (*key, action.clone(), None))
+            .collect()
     }
 
     /// Paint `cache` at the given size, laying it out first if it needs it.
     fn render_into(
         cache: &mut HintsCache,
         footer: Option<&HintsFooter>,
+        toggles: ToggleStates,
         width: u16,
         height: u16,
     ) -> Buffer {
@@ -396,6 +465,7 @@ mod tests {
             "normal",
             cache,
             footer,
+            toggles,
             &Theme::empty(),
             area,
             &mut buf,
@@ -453,10 +523,10 @@ mod tests {
     #[test]
     fn an_unchanged_frame_paints_from_the_laid_out_strings() {
         let bindings = vec![("k", "act".to_string()), ("kk", "other".to_string())];
-        let mut cache = HintsCache::new(7, group_by_action(&bindings));
+        let mut cache = HintsCache::new(7, group_by_action(&plain(&bindings)));
 
-        let first = render_into(&mut cache, None, 40, 20);
-        let laid_out: Vec<Vec<(String, String)>> = cache
+        let first = render_into(&mut cache, None, ToggleStates::default(), 40, 20);
+        let laid_out: Vec<Vec<LaidCell>> = cache
             .layout
             .as_ref()
             .expect("the first paint lays out")
@@ -465,13 +535,13 @@ mod tests {
             .map(|column| column.cells.clone())
             .collect();
 
-        let second = render_into(&mut cache, None, 40, 20);
+        let second = render_into(&mut cache, None, ToggleStates::default(), 40, 20);
         assert_eq!(
             second.content, first.content,
             "a repaint with nothing changed paints the same cells",
         );
 
-        let after: Vec<Vec<(String, String)>> = cache
+        let after: Vec<Vec<LaidCell>> = cache
             .layout
             .as_ref()
             .expect("the layout survives the repaint")
@@ -487,14 +557,20 @@ mod tests {
     #[test]
     fn a_longer_footer_widens_the_box() {
         let bindings = vec![("k", "act".to_string())];
-        let mut cache = HintsCache::new(7, group_by_action(&bindings));
+        let mut cache = HintsCache::new(7, group_by_action(&plain(&bindings)));
 
         let footer = |text: &str| HintsFooter {
             text: text.to_string(),
             style: Default::default(),
         };
 
-        render_into(&mut cache, Some(&footer("1/9")), 60, 20);
+        render_into(
+            &mut cache,
+            Some(&footer("1/9")),
+            ToggleStates::default(),
+            60,
+            20,
+        );
         let narrow = cache.layout.as_ref().expect("laid out").box_width;
 
         render_into(
@@ -502,6 +578,7 @@ mod tests {
             Some(&footer(
                 "a footer far longer than the single binding above it",
             )),
+            ToggleStates::default(),
             60,
             20,
         );
@@ -544,6 +621,43 @@ mod tests {
         assert_eq!(
             (action_caps(&[1], &[60], 16), action_caps(&[1], &[60], 15)),
             (Some(vec![8]), None),
+        );
+    }
+
+    #[test]
+    fn a_toggle_row_marks_the_cell_after_its_key_and_moves_no_text() {
+        let paint = |toggle: Option<Toggle>, toggles: ToggleStates| {
+            let bindings = [
+                ("f", "follow".to_string(), toggle),
+                ("n", "next".to_string(), None),
+            ];
+            let mut cache = HintsCache::new(0, group_by_action(&bindings));
+            let buf = render_into(&mut cache, None, toggles, 40, 20);
+            (0..buf.area.height)
+                .map(|y| row_text(&buf, y))
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        let on = paint(
+            Some(Toggle::FollowChanges),
+            [Toggle::FollowChanges].into_iter().collect(),
+        );
+        let off = paint(Some(Toggle::FollowChanges), ToggleStates::default());
+        let unmarked = paint(None, ToggleStates::default());
+
+        assert_eq!(
+            (
+                on.contains("f\u{25aa}  follow"),
+                off.contains("f\u{25ab}  follow"),
+                unmarked.contains("f   follow"),
+            ),
+            (true, true, true),
+            "the mark sits in the cell after the key:\n{on}\n{off}\n{unmarked}",
+        );
+        assert_eq!(
+            (on.replace('\u{25aa}', " "), off.replace('\u{25ab}', " ")),
+            (unmarked.clone(), unmarked),
+            "the mark moves no text in the box",
         );
     }
 

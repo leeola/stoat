@@ -59,6 +59,7 @@ use crate::{
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
+    toggle::{self, Toggle, ToggleStates},
     workspace::{diff, Workspace, WorkspaceId},
 };
 use ratatui::{
@@ -954,6 +955,7 @@ pub(crate) fn frame(
         .expect("refresh_chrome ran at the top of the frame")
         .1;
     let mode = stoat.frame_mode.as_str();
+    let toggles = ToggleStates::read(stoat);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::render_badges(
         &ws.badges,
@@ -987,6 +989,7 @@ pub(crate) fn frame(
                     mode,
                     "quit_confirm",
                     Some("quit"),
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1011,6 +1014,7 @@ pub(crate) fn frame(
                     mode,
                     "workspace_picker",
                     Some("picker"),
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1039,6 +1043,7 @@ pub(crate) fn frame(
                     mode,
                     "jumplist",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1069,6 +1074,7 @@ pub(crate) fn frame(
                     mode,
                     "diagnostics",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1098,6 +1104,7 @@ pub(crate) fn frame(
                     mode,
                     "commit_picker",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1128,6 +1135,7 @@ pub(crate) fn frame(
                     mode,
                     "location",
                     Some("locations"),
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1157,6 +1165,7 @@ pub(crate) fn frame(
                     mode,
                     "finder",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1185,6 +1194,7 @@ pub(crate) fn frame(
                     mode,
                     "symbols",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1213,6 +1223,7 @@ pub(crate) fn frame(
                     mode,
                     "code_search",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1240,6 +1251,7 @@ pub(crate) fn frame(
                     mode,
                     "palette",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1267,6 +1279,7 @@ pub(crate) fn frame(
                     mode,
                     "help",
                     None,
+                    toggles,
                     &stoat.theme,
                     full,
                     buf,
@@ -1351,9 +1364,15 @@ pub(crate) fn frame(
                     .map(|(key, actions)| (key.display_label(), actions))
                     .collect()
             };
-            let bindings: Vec<(&str, String)> = raw
+            let bindings: Vec<(&str, String, Option<Toggle>)> = raw
                 .iter()
-                .map(|(key, actions)| (key.as_str(), binding_display_desc(actions)))
+                .map(|(key, actions)| {
+                    (
+                        key.as_str(),
+                        binding_display_desc(actions),
+                        toggle::binding_toggle(actions),
+                    )
+                })
                 .collect();
             stoat.hints_cache = Some(hints::HintsCache::new(
                 key,
@@ -1396,6 +1415,7 @@ pub(crate) fn frame(
             hint_label,
             cache,
             footer,
+            toggles,
             &stoat.theme,
             full,
             buf,
@@ -1444,6 +1464,7 @@ fn cached_modal_hints(
     mode: &str,
     modal: &'static str,
     title: Option<&str>,
+    toggles: ToggleStates,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -1461,9 +1482,15 @@ fn cached_modal_hints(
     if cache.as_ref().map(|c| c.key) != Some(key) {
         let state = StoatKeymapState::with_flags(mode, Flags::default()).with_modal(modal);
         let raw = keymap.scoped_bindings(&state, "modal", modal);
-        let bindings: Vec<(&str, String)> = raw
+        let bindings: Vec<(&str, String, Option<Toggle>)> = raw
             .iter()
-            .map(|(key, actions)| (key.as_str(), binding_display_desc(actions)))
+            .map(|(key, actions)| {
+                (
+                    key.as_str(),
+                    binding_display_desc(actions),
+                    toggle::binding_toggle(actions),
+                )
+            })
             .collect();
         *cache = Some(hints::HintsCache::new(
             key,
@@ -1471,7 +1498,16 @@ fn cached_modal_hints(
         ));
     }
     let cache = cache.as_mut().expect("cache populated above");
-    hints::render_hints_grouped(title.unwrap_or(modal), cache, None, theme, area, buf, scene);
+    hints::render_hints_grouped(
+        title.unwrap_or(modal),
+        cache,
+        None,
+        toggles,
+        theme,
+        area,
+        buf,
+        scene,
+    );
 }
 
 /// Paint a large digit badge centered on each split pane while the

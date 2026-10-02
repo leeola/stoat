@@ -167,6 +167,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `ui.modal.run` -- the border hue per floating modal.
 - `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
   chrome accents.
+- `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
+  toggle's key in the key hints box.
 - `ui.badge.active`, `ui.badge.complete`, `ui.badge.error` -- transient status
   badges.
 - `ui.walkthrough.focus`, `ui.walkthrough.card`, `ui.walkthrough.marker1`
