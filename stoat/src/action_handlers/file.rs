@@ -4,6 +4,7 @@ use crate::{
     buffer::BufferId,
     host::LanguageServerFeature,
     lsp::sync,
+    workspace::WorkspaceId,
 };
 use lsp_types::{
     DidSaveTextDocumentParams, DocumentFormattingParams, TextDocumentIdentifier,
@@ -178,6 +179,9 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
 /// edits are `None` when the server errored or the save-time budget elapsed, in
 /// which case the buffer is written unchanged.
 pub(crate) struct FormatOnSaveOutcome {
+    /// The workspace the save started in, where the outcome lands. A buffer id
+    /// names a buffer only within its own workspace.
+    workspace: WorkspaceId,
     buffer_id: BufferId,
     path: PathBuf,
     uri: Uri,
@@ -245,6 +249,7 @@ fn arm_format_on_save(
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
+    let workspace = stoat.active_workspace;
     let version = buffer_version(stoat, buffer_id).unwrap_or_default();
     let pending_change = sync::flush_pending_did_change(stoat, buffer_id);
 
@@ -262,6 +267,7 @@ fn arm_format_on_save(
             _ => None,
         };
         FormatOnSaveOutcome {
+            workspace,
             buffer_id,
             path,
             uri,
@@ -292,6 +298,9 @@ fn buffer_version(stoat: &Stoat, buffer_id: BufferId) -> Option<u64> {
 ///
 /// The pump schedules the applied edits for the servers itself, because the
 /// scan that sends buffer changes runs only on an input event.
+///
+/// The outcome lands in the workspace the save started in, whichever workspace
+/// is on screen. An outcome whose workspace closed writes nothing.
 pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_format_on_save.take() else {
         return false;
@@ -300,41 +309,13 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(outcome) => {
-            let current = buffer_version(stoat, outcome.buffer_id);
-            if let Some(edits) = outcome.edits {
-                if current == Some(outcome.version) {
-                    #[allow(clippy::mutable_key_type)]
-                    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-                    changes.insert(outcome.uri, edits);
-                    let edit = WorkspaceEdit {
-                        changes: Some(changes),
-                        document_changes: None,
-                        change_annotations: None,
-                    };
-                    if let Err(err) =
-                        crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, outcome.encoding)
-                    {
-                        tracing::warn!(
-                            target: "stoat::lsp",
-                            ?err,
-                            "format-on-save edit failed to apply",
-                        );
-                    }
-                    sync::notify_buffer_changes_pending(stoat);
-                } else {
-                    tracing::info!(
-                        target: "stoat::lsp",
-                        formatted = outcome.version,
-                        ?current,
-                        "format-on-save edits discarded; the buffer changed while formatting",
-                    );
-                }
-            }
+            let workspace = outcome.workspace;
+            let landed = stoat.in_workspace(workspace, |stoat| land_format_on_save(stoat, outcome));
             // An armed write leaves a deferred `:wq` for the pump that lands it.
-            match write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path, outcome.force) {
-                WriteOutcome::Armed => {},
-                WriteOutcome::Wrote => finish_deferred_quit(stoat, true),
-                WriteOutcome::Failed => finish_deferred_quit(stoat, false),
+            match landed {
+                Some(WriteOutcome::Armed) => {},
+                Some(WriteOutcome::Wrote) => finish_deferred_quit(stoat, true),
+                Some(WriteOutcome::Failed) | None => finish_deferred_quit(stoat, false),
             }
             true
         },
@@ -343,6 +324,44 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
             false
         },
     }
+}
+
+/// Apply a finished format request's edits to the buffer in the active
+/// workspace, then write the buffer.
+///
+/// [`pump_format_on_save`] runs this inside the workspace the save started in.
+fn land_format_on_save(stoat: &mut Stoat, outcome: FormatOnSaveOutcome) -> WriteOutcome {
+    let current = buffer_version(stoat, outcome.buffer_id);
+    if let Some(edits) = outcome.edits {
+        if current == Some(outcome.version) {
+            #[allow(clippy::mutable_key_type)]
+            let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+            changes.insert(outcome.uri, edits);
+            let edit = WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            };
+            if let Err(err) =
+                crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, outcome.encoding)
+            {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    ?err,
+                    "format-on-save edit failed to apply",
+                );
+            }
+            sync::notify_buffer_changes_pending(stoat);
+        } else {
+            tracing::info!(
+                target: "stoat::lsp",
+                formatted = outcome.version,
+                ?current,
+                "format-on-save edits discarded; the buffer changed while formatting",
+            );
+        }
+    }
+    write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path, outcome.force)
 }
 
 /// Write `buffer_id`'s current text to `path`, clear the dirty flag, refresh the
@@ -522,6 +541,9 @@ fn is_config_path(path: &Path) -> bool {
 pub(crate) struct PendingSave {
     rx: mpsc::Receiver<std::io::Result<()>>,
     _task: stoat_scheduler::Task<()>,
+    /// The workspace the write started in, where its outcome lands. A buffer id
+    /// names a buffer only within its own workspace.
+    workspace: WorkspaceId,
     buffer_id: BufferId,
     path: PathBuf,
     /// The buffer version the written bytes came from.
@@ -572,6 +594,7 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
     stoat.pending_save = Some(PendingSave {
         rx,
         _task: task,
+        workspace: stoat.active_workspace,
         buffer_id,
         path: target,
         version,
@@ -583,6 +606,9 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
 /// The buffer is marked clean only when it still holds the version that was
 /// written. One that moved inside the write window is genuinely dirty against
 /// what reached the disk, so it keeps its flag and the next save writes again.
+///
+/// The write lands in the workspace it started in, whichever workspace is on
+/// screen.
 ///
 /// Returns `true` when an outcome landed this call, which is what tells the run
 /// loop to redraw.
@@ -606,7 +632,9 @@ pub(crate) fn pump_pending_save(stoat: &mut Stoat) -> bool {
 
     let wrote = match result {
         Ok(()) => {
-            finish_pending_save(stoat, &pending);
+            stoat.in_workspace(pending.workspace, |stoat| {
+                finish_pending_save(stoat, &pending)
+            });
             true
         },
         Err(err) => {
@@ -1958,6 +1986,62 @@ mod tests {
             ),
             (false, 1),
             "the quit names a pane of the workspace it left",
+        );
+    }
+
+    #[test]
+    fn a_background_write_lands_in_the_workspace_that_started_it() {
+        let mut h = Stoat::test();
+        let first = h.stoat.active_workspace;
+        open_edited(&mut h, Path::new("/ws-first"), "a.txt", b"original\n");
+        let second = h.create_workspace();
+        h.set_active_workspace(second);
+        open_edited(&mut h, Path::new("/ws-second"), "b.txt", b"other\n");
+
+        h.set_active_workspace(first);
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.set_active_workspace(second);
+        h.settle();
+
+        let mut dirty = |workspace| {
+            h.set_active_workspace(workspace);
+            editor::focused_dirty(&h.stoat)
+        };
+        assert_eq!(
+            [dirty(first), dirty(second)],
+            [false, true],
+            "the write marks its own buffer clean and leaves the other workspace's",
+        );
+    }
+
+    #[test]
+    fn a_format_on_save_lands_in_the_workspace_that_started_it() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let first = h.stoat.active_workspace;
+        let path = open_rs(&mut h, Path::new("/fos-first"), "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+        let second = h.create_workspace();
+        h.set_active_workspace(second);
+        let other = open_rs(
+            &mut h,
+            Path::new("/fos-second"),
+            "b.rs",
+            b"fn  other (){}\n",
+        );
+
+        h.set_active_workspace(first);
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.set_active_workspace(second);
+        h.settle();
+
+        assert_eq!(
+            [on_disk(&h, &path), on_disk(&h, &other)],
+            [b"fn main() {}\n".to_vec(), b"fn  other (){}\n".to_vec()],
+            "the formatted text lands in its own file and the other file stays",
         );
     }
 

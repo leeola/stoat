@@ -9,10 +9,9 @@
 //! lands, so it reads the state those jobs left. Its work runs on the blocking
 //! pool. Its landing runs on the loop in [`pump`].
 
-use crate::{app::Stoat, workspace::WorkspaceId};
+use crate::app::Stoat;
 use std::{
     collections::VecDeque,
-    mem,
     sync::mpsc::{self, TryRecvError},
 };
 use stoat_scheduler::Task;
@@ -102,11 +101,11 @@ pub(crate) fn enqueue(stoat: &mut Stoat, job: GitJob) {
     let workspace = stoat.active_workspace;
     let GitJob { key, start } = job;
     let job = GitJob::new(key, move |stoat: &mut Stoat| {
-        let work = in_workspace(stoat, workspace, start).flatten()?;
+        let work = stoat.in_workspace(workspace, start).flatten()?;
         Some(Box::new(move || {
             let landing = work();
             Box::new(move |stoat: &mut Stoat| {
-                in_workspace(stoat, workspace, landing);
+                stoat.in_workspace(workspace, landing);
             }) as GitLanding
         }) as GitWork)
     });
@@ -174,27 +173,6 @@ fn start_next(stoat: &mut Stoat) {
             _task: task,
         });
     }
-}
-
-/// Run `f` with `workspace` active, then put the active workspace back.
-///
-/// Returns `None` if `workspace` closed, since nothing is left for the job to
-/// act on. The workspace that was active before the call stays active after
-/// it, unless it closed during `f`.
-fn in_workspace<R>(
-    stoat: &mut Stoat,
-    workspace: WorkspaceId,
-    f: impl FnOnce(&mut Stoat) -> R,
-) -> Option<R> {
-    if !stoat.workspaces.contains_key(workspace) {
-        return None;
-    }
-    let front = mem::replace(&mut stoat.active_workspace, workspace);
-    let result = f(stoat);
-    if stoat.workspaces.contains_key(front) {
-        stoat.active_workspace = front;
-    }
-    Some(result)
 }
 
 /// A job whose work and landing do nothing, for a test that holds later jobs

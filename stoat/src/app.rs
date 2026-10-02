@@ -3409,6 +3409,29 @@ impl Stoat {
         &mut self.workspaces[self.active_workspace]
     }
 
+    /// Run `f` with `workspace` active, then put the active workspace back.
+    ///
+    /// Background work lands through this in the workspace that started it,
+    /// because buffer and pane ids repeat across workspaces. Returns `None` if
+    /// `workspace` closed, since nothing is left for the work to act on. The
+    /// workspace that was active before the call stays active after it, unless
+    /// it closed during `f`.
+    pub(crate) fn in_workspace<R>(
+        &mut self,
+        workspace: WorkspaceId,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> Option<R> {
+        if !self.workspaces.contains_key(workspace) {
+            return None;
+        }
+        let front = std::mem::replace(&mut self.active_workspace, workspace);
+        let result = f(self);
+        if self.workspaces.contains_key(front) {
+            self.active_workspace = front;
+        }
+        Some(result)
+    }
+
     /// Resolve [`Self::chrome`] against the active theme when it has not been.
     ///
     /// Separate from reading it, so a caller that goes on to borrow the rest of
