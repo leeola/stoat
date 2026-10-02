@@ -4150,6 +4150,15 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     landings.sort_unstable_by_key(|(id, ..)| *id);
 
     if landings.is_empty() {
+        // The repository's changed files are no part of a comparison of two
+        // files, so the walk ends where the file's differences end.
+        if matches!(
+            stoat.active_workspace().diff_base(),
+            Some(DiffBase::Pair { .. })
+        ) {
+            stoat.set_status("no more changes");
+            return UpdateEffect::Redraw;
+        }
         return goto_change_across_files(stoat, dir, current_path, source_diff_view, origin);
     }
 

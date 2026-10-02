@@ -3149,6 +3149,25 @@ mod tests {
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
+    #[test]
+    fn the_git_chord_binds_the_pair_diff_only_with_a_pair() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let pressed = |pair| {
+            let state = TestState::new()
+                .set("mode", StateValue::String("space_git".into()))
+                .set("pair", StateValue::Bool(pair));
+            action_names(keymap.lookup(&state, &key_event(KeyCode::Char('D'), KeyModifiers::NONE)))
+        };
+        assert_eq!(
+            [pressed(true), pressed(false)],
+            [
+                Some(vec!["SetMode".to_string(), "DiffPair".to_string()]),
+                None
+            ],
+        );
+    }
+
     /// The pinned twin of `space G G`, spelled with the doubled letter the
     /// same way.
     #[test]

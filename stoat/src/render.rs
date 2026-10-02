@@ -715,7 +715,7 @@ pub(crate) fn frame(
         repo_change_counts: ws.repo_change_counts(),
         hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
-        diff_sides: (&diff_sides.0, diff_sides.1),
+        diff_sides: (&diff_sides.0, &diff_sides.1),
         lsp_pending,
         lsp_message: stoat
             .lsp_message
@@ -1918,6 +1918,25 @@ mod lsp_filter_tests {
             (over_run.contains(interrupt), over_label.contains(interrupt)),
             (true, false),
             "the run pane's Ctrl-c leaves the box with the run pane:\n{over_label}",
+        );
+    }
+
+    #[test]
+    fn the_git_chord_box_lists_the_pair_diff_only_with_a_pair() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.stoat.set_focused_mode("space_git".into());
+        let alone = box_text(&mut h);
+        h.stoat.set_focused_mode("normal".into());
+
+        h.open_side_by_side(("/pair/a.txt", "a\n"), ("/pair/b.txt", "b\n"));
+        h.stoat.set_focused_mode("space_git".into());
+        let paired = box_text(&mut h);
+
+        let row = short_desc("DiffPair");
+        assert_eq!(
+            (alone.contains(row), paired.contains(row)),
+            (false, true),
+            "the pair diff row follows the layout:\n{paired}",
         );
     }
 

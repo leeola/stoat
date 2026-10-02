@@ -292,7 +292,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         repo_change_counts: ws.repo_change_counts(),
         hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
-        diff_sides: (&diff_sides.0, diff_sides.1),
+        diff_sides: (&diff_sides.0, &diff_sides.1),
         lsp_pending,
         lsp_message: stoat
             .lsp_message

@@ -354,6 +354,9 @@ pub struct Availability {
     pub walkthrough_open: bool,
     /// Focused pane hosts a [`View::Run`], or a modal run is active.
     pub run_focused: bool,
+    /// `workspace.pair_panes().is_some()`: two split panes show two different
+    /// files, so the pair diff has its two sides.
+    pub pair_open: bool,
 }
 
 impl Availability {
@@ -393,6 +396,7 @@ impl Availability {
             review_walk_open: ws.review_walk.is_some(),
             walkthrough_open: ws.walkthrough.is_some(),
             run_focused,
+            pair_open: ws.pair_panes().is_some(),
         }
     }
 }
@@ -426,6 +430,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | JumpToNextMoveSource
         | JumpToPrevMoveSource
         | QueryMoveRelationships => ctx.diff_view_open,
+
+        DiffPair => ctx.pair_open,
 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
@@ -1296,6 +1302,23 @@ mod tests {
     }
 
     #[test]
+    fn active_scope_lists_the_pair_diff_only_with_a_pair() {
+        let lists_it = |ctx: &Availability| {
+            action_names_for_scope("", PaletteScope::Active, ctx).contains(&"DiffPair")
+        };
+        assert_eq!(
+            [
+                lists_it(&Availability::default()),
+                lists_it(&Availability {
+                    pair_open: true,
+                    ..Availability::default()
+                }),
+            ],
+            [false, true],
+        );
+    }
+
+    #[test]
     fn active_scope_in_conflict_surfaces_conflict_actions() {
         let ctx = Availability {
             in_rebase_exec: true,
@@ -1397,6 +1420,7 @@ mod tests {
             review_walk_open: true,
             walkthrough_open: true,
             run_focused: true,
+            pair_open: true,
         };
         for entry in registry::all() {
             assert!(

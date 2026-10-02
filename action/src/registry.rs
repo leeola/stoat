@@ -106,7 +106,7 @@ use crate::{
         },
         review::{
             Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit, DiffBaseToggle,
-            DiffForward, DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget,
+            DiffForward, DiffPair, DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget,
             JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
             ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
             ToggleStageLine, UnstageHunk, UnstageLine,
@@ -328,6 +328,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DiffAgainstHead::DEF, |_| Ok(Box::new(DiffAgainstHead)));
     add(DiffBaseToggle::DEF, |_| Ok(Box::new(DiffBaseToggle)));
     add(DiffBaseEdit::DEF, |_| Ok(Box::new(DiffBaseEdit)));
+    add(DiffPair::DEF, |_| Ok(Box::new(DiffPair)));
     add(DiffBack::DEF, |_| Ok(Box::new(DiffBack)));
     add(DiffForward::DEF, |_| Ok(Box::new(DiffForward)));
     add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
@@ -1357,6 +1358,7 @@ mod tests {
         "DiffAgainstHead",
         "DiffBaseToggle",
         "DiffBaseEdit",
+        "DiffPair",
         "DiffBack",
         "DiffForward",
     ];
@@ -1873,7 +1875,8 @@ mod tests {
         // + 2 DiffBack/DiffForward.
         // + 1 DiffBaseToggle.
         // + 1 DiffBaseEdit.
-        assert_eq!(all().count(), 431);
+        // + 1 DiffPair.
+        assert_eq!(all().count(), 432);
     }
 
     #[test]

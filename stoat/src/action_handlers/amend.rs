@@ -36,16 +36,21 @@ pub(super) enum AmendRoute {
     Index,
     /// The tree sits on a commit the user is free to rewrite.
     Commit(AmendTarget),
-    /// A base is installed, but rewriting the commit under it would destroy
-    /// work.
-    Refused,
+    /// No transport fits the installed base. The text is what the staging keys
+    /// report.
+    Refused(&'static str),
 }
 
 /// What every staging key says when [`AmendRoute::Refused`] closes the
-/// transport. Both funnels that read the route share it, so their wording
-/// stays in step.
+/// transport over a commit that is not safe to rewrite, or over an agent
+/// proposal, which has no commit. Both funnels that read the route share it,
+/// so their wording stays in step.
 pub(super) const REFUSED_BADGE: &str =
     "amend needs HEAD on the reviewed commit; use :rebase edit for older commits";
+
+/// What every staging key says under a pair base. A hunk measured against
+/// another file fits neither the index nor a commit.
+pub(super) const PAIR_REFUSED: &str = "no staging while the diff compares two files";
 
 /// Whether `s` and `u` rewrite the checked-out commit rather than the index.
 ///
@@ -61,10 +66,13 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
         Some(DiffBase::Rev { sha }) => sha.clone(),
         // An agent's proposal sits under no commit, so there is nothing to
         // amend it into.
-        Some(DiffBase::Memory { .. }) => return AmendRoute::Refused,
+        Some(DiffBase::Memory { .. }) => return AmendRoute::Refused(REFUSED_BADGE),
+        // The hunks measure one file against another, which no index or
+        // commit holds.
+        Some(DiffBase::Pair { .. }) => return AmendRoute::Refused(PAIR_REFUSED),
     };
     let Some(head_sha) = repo.resolve_rev("HEAD") else {
-        return AmendRoute::Refused;
+        return AmendRoute::Refused(REFUSED_BADGE);
     };
 
     let paused = ws
@@ -98,7 +106,7 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
             head_sha,
             branch,
         }),
-        false => AmendRoute::Refused,
+        false => AmendRoute::Refused(REFUSED_BADGE),
     }
 }
 
@@ -805,6 +813,32 @@ mod tests {
                 Some("amend needs HEAD on the reviewed commit; use :rebase edit for older commits"),
             ),
             "the commit was left alone and the badge named the missing transport",
+        );
+    }
+
+    /// A pair's hunks measure one file against another, which no index or
+    /// commit holds, so the transport refuses with its own reason.
+    #[test]
+    fn a_pair_base_refuses_to_stage() {
+        let mut h = walking_the_tip();
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Pair {
+                path: "/repo/a.rs".into(),
+                base_path: "/repo/other.rs".into(),
+                text: Arc::new("a\nb\nc\n".to_string()),
+            }));
+        cursor_to(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        h.settle();
+
+        assert_eq!(
+            (committed(&h).as_deref(), h.stoat.pending_message.as_deref()),
+            (
+                Some("a\nb\nX\n"),
+                Some("no staging while the diff compares two files")
+            ),
         );
     }
 

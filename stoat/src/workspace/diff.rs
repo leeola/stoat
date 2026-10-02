@@ -82,7 +82,8 @@ pub(crate) struct ChangedRangesScan {
 /// the index holds over HEAD are staged marks. Reviewing a commit checks it
 /// out and points the diff at the commit's parent, so the base moves off HEAD
 /// while the buffers stay the working tree. An agent's proposed edits have no
-/// commit behind them at all, so they carry their base as text.
+/// commit behind them at all, so they carry their base as text. A pair of files
+/// has no commit behind it either, so it carries the other file's text.
 #[derive(Clone)]
 pub(crate) enum DiffBase {
     /// The working tree against HEAD, with the index marking which hunks are
@@ -97,6 +98,16 @@ pub(crate) enum DiffBase {
     /// diffs normally.
     Memory {
         files: HashMap<PathBuf, Arc<String>>,
+    },
+    /// One open file measured against another, for two files git does not
+    /// relate.
+    ///
+    /// `path`'s buffer diffs against `text`, the content of `base_path`. Every
+    /// other path diffs against the index, as with no override.
+    Pair {
+        path: PathBuf,
+        base_path: PathBuf,
+        text: Arc<String>,
     },
 }
 
@@ -650,18 +661,53 @@ pub(super) struct DiffJobOutput {
 ///
 /// A commit review names the commit's parent on the left and the working tree
 /// on the right. The review checks the commit out under the buffers, and the
-/// review badge names that commit.
-pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, &'static str) {
+/// review badge names that commit. A pair names its two files.
+pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, String) {
     match base {
-        None => ("index".to_string(), "working tree"),
-        Some(DiffBase::Head) => ("HEAD".to_string(), "working tree"),
-        Some(DiffBase::Rev { sha: Some(sha) }) => (sha.chars().take(7).collect(), "working tree"),
+        None => ("index".to_string(), "working tree".to_string()),
+        Some(DiffBase::Head) => ("HEAD".to_string(), "working tree".to_string()),
+        Some(DiffBase::Rev { sha: Some(sha) }) => {
+            (sha.chars().take(7).collect(), "working tree".to_string())
+        },
         // A root commit's parent, against which every line reads added.
-        Some(DiffBase::Rev { sha: None }) => ("empty".to_string(), "working tree"),
+        Some(DiffBase::Rev { sha: None }) => ("empty".to_string(), "working tree".to_string()),
         // An agent's proposal sits under no revision. The base is the file as
         // it stood before the proposal, which is what "original" names.
-        Some(DiffBase::Memory { .. }) => ("original".to_string(), "proposal"),
+        Some(DiffBase::Memory { .. }) => ("original".to_string(), "proposal".to_string()),
+        Some(DiffBase::Pair {
+            path, base_path, ..
+        }) => pair_names(base_path, path),
     }
+}
+
+/// The names a pair diff shows for its two files, the base first.
+///
+/// Each file takes its file name alone. Two files with one name take their
+/// paths below the directory they share, so the two sides never read the same.
+fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
+    let file_name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let names = (file_name(base_path), file_name(path));
+    if names.0 != names.1 {
+        return names;
+    }
+
+    let shared = base_path
+        .components()
+        .zip(path.components())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let below = |path: &Path| {
+        path.components()
+            .skip(shared)
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
+    };
+    (below(base_path), below(path))
 }
 
 /// Where the cursor sits among every hunk in the repository, as
@@ -983,13 +1029,17 @@ pub(super) fn compute_diff_map(
 /// Read the texts a diff measures `path` against from the repo `git_root` is
 /// in, per the workspace's base.
 ///
-/// [`None`] when `git_root` is in no repo, or as [`base_texts`] answers.
+/// A pair base answers for its file with no repository. Otherwise [`None`]
+/// when `git_root` is in no repo, or as [`base_texts`] answers.
 fn resolve_base(
     git: &dyn GitHost,
     git_root: &Path,
     path: &Path,
     base_override: Option<&DiffBase>,
 ) -> Option<DiffBaseText> {
+    if let Some(base) = pair_base(path, base_override) {
+        return Some(base);
+    }
     let repo = git.discover(git_root)?;
     base_texts(&*repo, path, base_override)
 }
@@ -1017,6 +1067,10 @@ fn resolve_base(
 /// every hunk unstaged. Nothing has applied an agent's proposal anywhere. A path
 /// the map does not carry diffs against the index, as with no override.
 ///
+/// Under a [`DiffBase::Pair`] the measured file reads the other file's text on
+/// both sides. A path outside the pair diffs against the index, as with no
+/// override.
+///
 /// [`None`] when the working tree carries no text for `path` in HEAD or the
 /// index, which is what leaves an untracked buffer without a diff map.
 pub(crate) fn base_texts(
@@ -1041,7 +1095,26 @@ pub(crate) fn base_texts(
             Some(text) => Some(DiffBaseText::new(text.clone(), text.clone(), None)),
             None => index_base(repo, path),
         },
+        Some(DiffBase::Pair { .. }) => {
+            pair_base(path, base_override).or_else(|| index_base(repo, path))
+        },
         None => index_base(repo, path),
+    }
+}
+
+/// The base a [`DiffBase::Pair`] supplies for `path`, and `None` for every
+/// other path and every other base.
+///
+/// Both sides are the supplied text, so every hunk reads unstaged, since no
+/// index holds any of it.
+fn pair_base(path: &Path, base_override: Option<&DiffBase>) -> Option<DiffBaseText> {
+    match base_override {
+        Some(DiffBase::Pair {
+            path: pair_path,
+            text,
+            ..
+        }) if pair_path == path => Some(DiffBaseText::new(text.clone(), text.clone(), None)),
+        _ => None,
     }
 }
 
@@ -1366,8 +1439,8 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, compute_diff_map, diff_sides,
-        repo_hunk_position, scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase,
-        DiffBaseText, DIFF_SETTLE,
+        repo_hunk_position, resolve_base, scan_changed_ranges, BaseHighlightCache,
+        BaseHighlightMemo, DiffBase, DiffBaseText, DIFF_SETTLE,
     };
     use crate::{
         action_handlers::{self, movement},
@@ -1447,6 +1520,36 @@ mod tests {
             h.fake_git().rename_source_calls(&workdir),
             after_open,
             "and the recorded miss answers every settle after it",
+        );
+    }
+
+    #[test]
+    fn a_pair_base_answers_for_its_file_alone() {
+        let mut h = TestHarness::with_size(40, 12);
+        h.stage_review_scenario("/repo", &[("t.txt", "old\n", "new\n")]);
+        let pair = DiffBase::Pair {
+            path: "/pair/b.txt".into(),
+            base_path: "/pair/a.txt".into(),
+            text: Arc::new("one\n".to_string()),
+        };
+        let resolved = |root: &str, path: &str| {
+            resolve_base(
+                &**h.fake_git(),
+                Path::new(root),
+                Path::new(path),
+                Some(&pair),
+            )
+            .map(|texts| texts.base.to_string())
+        };
+        assert_eq!(
+            [
+                resolved("/pair", "/pair/b.txt"),
+                resolved("/pair", "/pair/a.txt"),
+                resolved("/repo", "/repo/t.txt"),
+            ],
+            [Some("one\n".to_string()), None, Some("old\n".to_string())],
+            "the pair's file reads the other file with no repository, and every other path \
+             keeps its own base",
         );
     }
 
@@ -3146,20 +3249,32 @@ mod tests {
         let memory = DiffBase::Memory {
             files: HashMap::new(),
         };
+        let pair = |base_path: &str, path: &str| DiffBase::Pair {
+            path: path.into(),
+            base_path: base_path.into(),
+            text: Arc::new(String::new()),
+        };
+        let sides = [
+            diff_sides(None),
+            diff_sides(Some(&DiffBase::Head)),
+            diff_sides(Some(&rev(Some("abc1234def5678")))),
+            diff_sides(Some(&rev(None))),
+            diff_sides(Some(&memory)),
+            diff_sides(Some(&pair("/p/a.txt", "/p/b.txt"))),
+            diff_sides(Some(&pair("/p/x/conf.toml", "/p/y/conf.toml"))),
+        ];
         assert_eq!(
+            sides
+                .each_ref()
+                .map(|(left, right)| (left.as_str(), right.as_str())),
             [
-                diff_sides(None),
-                diff_sides(Some(&DiffBase::Head)),
-                diff_sides(Some(&rev(Some("abc1234def5678")))),
-                diff_sides(Some(&rev(None))),
-                diff_sides(Some(&memory)),
-            ],
-            [
-                ("index".to_string(), "working tree"),
-                ("HEAD".to_string(), "working tree"),
-                ("abc1234".to_string(), "working tree"),
-                ("empty".to_string(), "working tree"),
-                ("original".to_string(), "proposal"),
+                ("index", "working tree"),
+                ("HEAD", "working tree"),
+                ("abc1234", "working tree"),
+                ("empty", "working tree"),
+                ("original", "proposal"),
+                ("a.txt", "b.txt"),
+                ("x/conf.toml", "y/conf.toml"),
             ],
         );
     }

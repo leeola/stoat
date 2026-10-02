@@ -132,6 +132,25 @@ define_action!(
 );
 
 define_action!(
+    DiffPairDef,
+    DiffPair,
+    "DiffPair",
+    ActionKind::DiffPair,
+    "diff the two open files",
+    "Open the diff view over the two files that two panes show. The file in \
+     the first pane, the left one or the top one, is the base in the left \
+     column. The file in the other pane is the editable right column and \
+     takes the focus, so each file stays on its side. Git does not have to \
+     track either file. The base is the first file's text as its buffer held \
+     it when the view opened. The change keys walk the differences and stop \
+     at the last one, and the staging keys do nothing here. A second run \
+     closes the view. The command needs exactly two panes that show two \
+     different files.",
+    ActionPriority::Normal,
+    command_name = "diff-pair"
+);
+
+define_action!(
     DiffBackDef,
     DiffBack,
     "DiffBack",

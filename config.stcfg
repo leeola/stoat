@@ -1206,6 +1206,11 @@ on key {
     # base between the index and HEAD. `e` opens the base on the command line
     # for editing.
     #
+    # `D` diffs the two files that two panes show, with the first pane's file
+    # as the base. It is bound only while two panes show two different files.
+    # Its mode switch leads, because the action moves focus to the second
+    # pane, and a switch after it lands on that pane's editor.
+    #
     # `f` follows the whole working tree. Each file written outside the editor
     # opens in the diff view with the cursor on the change, until a second `f`
     # stops it.
@@ -1226,6 +1231,11 @@ on key {
         h -> [DiffAgainstHead(), SetMode(normal)];
         b -> [DiffBaseToggle(), SetMode(normal)];
         e -> [SetMode(normal), DiffBaseEdit()];
+
+        pair {
+            D -> [SetMode(normal), DiffPair()];
+        }
+
         s -> [StageHunk(), SetMode(normal)];
         u -> [UnstageHunk(), SetMode(normal)];
         S -> [StageLine(), SetMode(normal)];

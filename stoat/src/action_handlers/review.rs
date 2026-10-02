@@ -11,6 +11,7 @@ use crate::{
     git_jobs::{self, GitJob, GitLanding, GitWork},
     host::GitRepo,
     multi_buffer::MultiBufferSnapshot,
+    pane::{FocusTarget, View},
     review::{line_count, ReviewFileInput, ReviewHunk},
     review_apply::{
         base_line_range, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
@@ -222,16 +223,16 @@ pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffec
 /// Flip the working tree's own base between the index and HEAD, and name both
 /// sides of the diff in the status line.
 ///
-/// A revision, a review, or a proposal base gives way to the pick on the first
-/// press, with no flip, so one press always lands back on the working tree.
-/// The next press flips.
+/// A revision, a review, a proposal, or a pair base gives way to the pick on
+/// the first press, with no flip, so one press always lands back on the
+/// working tree. The next press flips.
 ///
 /// The diff view stays open or closed, and the cursor stays where it is.
 pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace();
     let displaced = matches!(
         ws.diff_base(),
-        Some(DiffBase::Rev { .. } | DiffBase::Memory { .. })
+        Some(DiffBase::Rev { .. } | DiffBase::Memory { .. } | DiffBase::Pair { .. })
     );
     let next = match (displaced, ws.worktree_base()) {
         (true, pick) => pick,
@@ -250,14 +251,103 @@ pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// Enter runs the ordinary `:diff <rev>`, so a revision, `index`, or `HEAD`
 /// points the diff at it, and Escape changes nothing. A base with no revision
-/// name to retype, the empty parent of a root commit or an agent proposal,
-/// seeds a bare `diff `.
+/// name to retype, the empty parent of a root commit, an agent proposal, or a
+/// pair of files, seeds a bare `diff `.
 pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     let seed = match stoat.active_workspace().diff_base() {
-        Some(DiffBase::Rev { sha: None } | DiffBase::Memory { .. }) => "diff ".to_string(),
+        Some(DiffBase::Rev { sha: None } | DiffBase::Memory { .. } | DiffBase::Pair { .. }) => {
+            "diff ".to_string()
+        },
         base => format!("diff {}", diff::diff_sides(base).0),
     };
     super::palette::open_palette_seeded(stoat, &seed)
+}
+
+/// Open the diff view over the workspace's file pair, or close it when it
+/// already shows that pair, driven by [`stoat_action::DiffPair`].
+///
+/// The first pane's file is the base column. The other pane shows the diff and
+/// takes the focus, so each file stays on the side it was on. The base is the
+/// first file's buffer text when the view opens, unsaved edits included.
+///
+/// The pair base displaces a revision, a review, or a proposal base, and the
+/// checkout a review made stays. Closing returns to the working tree's base.
+///
+/// Two equal files open the view with equal columns and a status that says
+/// so. With no pair it badges and changes nothing.
+///
+/// See also:
+/// - [`Workspace::pair_panes`] for what counts as a pair.
+pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
+    let Some([(_, base_buffer), (target_pane, target_buffer)]) =
+        stoat.active_workspace().pair_panes()
+    else {
+        emit_review_error_badge(stoat, "diff pair needs two files in two panes", None);
+        return UpdateEffect::Redraw;
+    };
+
+    let (base_path, path, showing) = {
+        let ws = stoat.active_workspace();
+        let (Some(base_path), Some(path)) = (
+            ws.buffers.path_for(base_buffer),
+            ws.buffers.path_for(target_buffer),
+        ) else {
+            return UpdateEffect::None;
+        };
+        let installed = matches!(
+            ws.diff_base(),
+            Some(DiffBase::Pair { path: p, base_path: b, .. })
+                if p.as_path() == path && b.as_path() == base_path
+        );
+        let view_on = match ws.panes.pane(target_pane).view {
+            View::Editor(id) => ws.editors.get(id).is_some_and(|editor| editor.diff_view),
+            _ => false,
+        };
+        (
+            base_path.to_path_buf(),
+            path.to_path_buf(),
+            installed && view_on,
+        )
+    };
+
+    {
+        let ws = stoat.active_workspace_mut();
+        ws.panes.set_focus(target_pane);
+        ws.focus = FocusTarget::SplitPane;
+    }
+
+    if showing {
+        exit_diff_view(stoat);
+        stoat.active_workspace_mut().set_diff_base(None);
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(text) = stoat
+        .active_workspace()
+        .buffers
+        .get(base_buffer)
+        .map(|shared| {
+            let guard = shared.read().expect("buffer poisoned");
+            Arc::new(guard.snapshot.visible_text.to_string())
+        })
+    else {
+        return UpdateEffect::None;
+    };
+    stoat
+        .active_workspace_mut()
+        .set_diff_base(Some(DiffBase::Pair {
+            path,
+            base_path,
+            text,
+        }));
+    reopen_diff_view(stoat);
+
+    if let Some((editor_id, _)) = stoat.focused_editor_ids()
+        && !editor_shows_changes(stoat, editor_id)
+    {
+        stoat.set_status("the two files do not differ");
+    }
+    UpdateEffect::Redraw
 }
 
 /// Turn the diff view on, whatever it was showing before.
@@ -480,6 +570,11 @@ pub(crate) fn ensure_diff_map(stoat: &mut Stoat, editor_id: EditorId, buffer_id:
         );
     }
 
+    editor_shows_changes(stoat, editor_id)
+}
+
+/// Whether the editor's diff map holds a hunk or a staged mark.
+fn editor_shows_changes(stoat: &mut Stoat, editor_id: EditorId) -> bool {
     stoat
         .active_workspace_mut()
         .editors
@@ -629,8 +724,8 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         let target = match amend::amend_route(stoat, &*repo) {
             AmendRoute::Index => None,
             AmendRoute::Commit(target) => Some(target),
-            AmendRoute::Refused => {
-                stoat.set_status(amend::REFUSED_BADGE);
+            AmendRoute::Refused(why) => {
+                stoat.set_status(why);
                 return None;
             },
         };
@@ -704,11 +799,14 @@ fn marked_run_at(
 ///
 /// A root commit's base is `Some(None)`, the empty tree. A `Memory` base names
 /// no commit, so it reads as no base, and so does the HEAD base, which reviews
-/// nothing.
+/// nothing. A pair base names no commit either.
 fn review_rev(ws: &Workspace) -> Option<Option<String>> {
     match ws.diff_base() {
         Some(DiffBase::Rev { sha }) => Some(sha.clone()),
-        None | Some(DiffBase::Head) | Some(DiffBase::Memory { .. }) => None,
+        None
+        | Some(DiffBase::Head)
+        | Some(DiffBase::Memory { .. })
+        | Some(DiffBase::Pair { .. }) => None,
     }
 }
 
@@ -1589,6 +1687,146 @@ mod tests {
             .map(|palette| palette.input.text(h.stoat.active_workspace()));
         run(h, &stoat_action::CancelPromptInput);
         seed
+    }
+
+    #[test]
+    fn diff_pair_opens_the_second_file_against_the_first() {
+        let mut h = pair_harness();
+        run(&mut h, &stoat_action::DiffPair);
+        assert_eq!(
+            (pair_base(&h), pair_view(&mut h), review_cursor_row(&mut h)),
+            (
+                Some((
+                    "/pair/a.txt".into(),
+                    "/pair/b.txt".into(),
+                    "one\ntwo\nthree\n".into()
+                )),
+                (true, true, Some(PathBuf::from("/pair/b.txt"))),
+                1,
+            ),
+            "the right file diffs against the left, focused and widened, with the cursor on \
+             the first difference",
+        );
+    }
+
+    #[test]
+    fn a_second_diff_pair_closes_the_view() {
+        let mut h = pair_harness();
+        run(&mut h, &stoat_action::DiffPair);
+        run(&mut h, &stoat_action::DiffPair);
+        assert_eq!(
+            (pair_base(&h), pair_view(&mut h)),
+            (None, (false, false, Some(PathBuf::from("/pair/b.txt")))),
+        );
+    }
+
+    #[test]
+    fn diff_pair_over_equal_files_says_so_and_stays_put() {
+        let mut h = TestHarness::with_size(120, 20);
+        h.stage_review_scenario("/repo", &[("c.txt", "1\n", "2\n")]);
+        h.open_side_by_side(("/repo/a.txt", "same\n"), ("/repo/b.txt", "same\n"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+
+        let view = pair_view(&mut h);
+        assert_eq!(
+            (
+                h.stoat.pending_changed_file_jump.is_none(),
+                h.stoat.pending_message.as_deref(),
+                view,
+            ),
+            (
+                true,
+                Some("the two files do not differ"),
+                (true, true, Some(PathBuf::from("/repo/b.txt"))),
+            ),
+            "no hop into the repo's changed file",
+        );
+    }
+
+    #[test]
+    fn the_change_walk_ends_inside_a_pair() {
+        let mut h = TestHarness::with_size(120, 20);
+        h.stage_review_scenario("/repo", &[("c.txt", "1\n", "2\n")]);
+        h.open_side_by_side(("/repo/a.txt", "one\ntwo\n"), ("/repo/b.txt", "one\nTWO\n"));
+        run(&mut h, &stoat_action::DiffPair);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+
+        let path = pair_view(&mut h).2;
+        assert_eq!(
+            (
+                h.stoat.pending_changed_file_jump.is_none(),
+                h.stoat.pending_message.as_deref(),
+                path,
+            ),
+            (
+                true,
+                Some("no more changes"),
+                Some(PathBuf::from("/repo/b.txt"))
+            ),
+        );
+    }
+
+    #[test]
+    fn diff_pair_without_a_pair_badges_and_changes_nothing() {
+        let mut h = TestHarness::with_size(80, 20);
+        run(&mut h, &stoat_action::DiffPair);
+
+        let badge = h
+            .stoat
+            .active_workspace()
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| h.stoat.active_workspace().badges.get(id))
+            .map(|badge| badge.label.clone());
+        assert_eq!(
+            (
+                badge.as_deref(),
+                h.stoat.active_workspace().diff_base().is_none()
+            ),
+            (Some("diff pair needs two files in two panes"), true),
+        );
+    }
+
+    /// Two files side by side with the focus on the first, the base.
+    fn pair_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(120, 20);
+        h.open_side_by_side(
+            ("/pair/a.txt", "one\ntwo\nthree\n"),
+            ("/pair/b.txt", "one\nTWO\nthree\n"),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        h
+    }
+
+    /// The `(base_path, path, text)` a [`DiffBase::Pair`] override carries.
+    fn pair_base(h: &TestHarness) -> Option<(String, String, String)> {
+        let Some(DiffBase::Pair {
+            path,
+            base_path,
+            text,
+        }) = h.stoat.active_workspace().diff_base()
+        else {
+            return None;
+        };
+        Some((
+            base_path.display().to_string(),
+            path.display().to_string(),
+            text.to_string(),
+        ))
+    }
+
+    /// The focused editor's diff flag, whether the focused pane is widened, and
+    /// the focused buffer's path.
+    fn pair_view(h: &mut TestHarness) -> (bool, bool, Option<PathBuf>) {
+        let diff_view = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .is_some_and(|editor| editor.diff_view);
+        let ws = h.stoat.active_workspace();
+        let widened = ws.panes.widened() == Some(ws.panes.focus());
+        let path = h
+            .stoat
+            .focused_editor_ids()
+            .and_then(|(_, buffer_id)| ws.buffers.path_for(buffer_id).map(Path::to_path_buf));
+        (diff_view, widened, path)
     }
 
     /// The bare command closes the diff, and a base a revision installed goes
