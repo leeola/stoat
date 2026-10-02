@@ -779,6 +779,9 @@ struct State {
     /// a refused open is the one liable to send thousands, and a log entry each
     /// would be its own way to bring the session down.
     warned_window_open_refused: bool,
+    /// The bound window-event socket file. Held for the life of the window
+    /// state, because its drop removes the file. `None` when the bind failed.
+    _window_socket: Option<WindowSocket>,
     /// Channel to the thread serving the window-event socket, carrying encoded
     /// [`WindowIpcEvent`] lines to forward to the connected child. `None` when
     /// the socket could not be bound, in which case aux windows still render but
@@ -925,7 +928,9 @@ impl ApplicationHandler<PtyEvent> for App {
                 self.working_directory.as_deref(),
                 self.stoat_dir.as_deref(),
                 stoat_log::ident::get().map(|i| i.id.as_str()),
-                window_socket.as_deref().and_then(Path::to_str),
+                window_socket
+                    .as_ref()
+                    .and_then(|socket| socket.path.to_str()),
                 &self.theme_name,
                 spawn_rows as u16,
                 spawn_cols as u16,
@@ -1100,6 +1105,7 @@ impl ApplicationHandler<PtyEvent> for App {
             last_popovers_epoch: None,
             aux: Vec::new(),
             warned_window_open_refused: false,
+            _window_socket: window_socket,
             window_event_tx,
             window_client_connected,
             wheel_pixels: 0.0,
@@ -3429,18 +3435,40 @@ fn app_has_focus(primary: bool, aux: impl IntoIterator<Item = bool>) -> bool {
     primary || aux.into_iter().any(|focused| focused)
 }
 
+/// The bound window-event socket file, removed on drop.
+///
+/// The path is per pid, so no other process binds it while this one lives, and
+/// the drop removes the file without a check of what the path names.
+struct WindowSocket {
+    path: PathBuf,
+}
+
+// Removing the socket file is socket lifecycle, and the terminal holds no
+// FsHost to route it through.
+#[allow(clippy::disallowed_methods)]
+impl Drop for WindowSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Bind the window-event socket and start its serving thread, or report that no
 /// socket is available.
 ///
-/// Returns the path to export as `STOATTY_WINDOW_SOCKET`, the channel aux
-/// windows report on, and the flag saying whether a child is connected to read
-/// them. The first two are `None` on a bind failure or a non-unix build, where
-/// aux windows render but report nothing upstream, and the flag stays false.
-fn open_window_event_socket() -> (Option<PathBuf>, Option<Sender<String>>, Arc<AtomicBool>) {
+/// Returns the bound socket, whose path the child gets as
+/// `STOATTY_WINDOW_SOCKET`, the channel aux windows report on, and the flag
+/// saying whether a child is connected to read them. The first two are `None`
+/// on a bind failure or a non-unix build, where aux windows render but report
+/// nothing upstream, and the flag stays false.
+fn open_window_event_socket() -> (
+    Option<WindowSocket>,
+    Option<Sender<String>>,
+    Arc<AtomicBool>,
+) {
     #[cfg(unix)]
     {
         match bind_window_socket() {
-            Ok((path, tx, connected)) => (Some(path), Some(tx), connected),
+            Ok((socket, tx, connected)) => (Some(socket), Some(tx), connected),
             Err(error) => {
                 tracing::warn!(%error, "window-event socket unavailable");
                 (None, None, Arc::new(AtomicBool::new(false)))
@@ -3466,7 +3494,7 @@ fn window_socket_path(dir: &Path, pid: u32) -> PathBuf {
 // and the terminal holds no FsHost to route them through.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
-fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>, Arc<AtomicBool>)> {
+fn bind_window_socket() -> io::Result<(WindowSocket, Sender<String>, Arc<AtomicBool>)> {
     let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = window_socket_path(&dir, std::process::id());
@@ -3474,6 +3502,7 @@ fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>, Arc<AtomicBool>)
     // fails on an existing path, so clear a stale one first.
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
+    let socket = WindowSocket { path };
     let (tx, rx) = mpsc::channel::<String>();
     let connected = Arc::new(AtomicBool::new(false));
     std::thread::Builder::new()
@@ -3482,7 +3511,7 @@ fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>, Arc<AtomicBool>)
             let connected = connected.clone();
             move || serve_window_events(listener, rx, &connected)
         })?;
-    Ok((path, tx, connected))
+    Ok((socket, tx, connected))
 }
 
 /// Forward queued window-event lines to the connected child.
@@ -3702,6 +3731,7 @@ mod tests {
     #[cfg(unix)]
     use super::{
         serve_window_events, window_socket_path, AtomicBool, Ordering, PathBuf, UnixListener,
+        WindowSocket,
     };
     use crate::{
         anim::{
@@ -4581,6 +4611,18 @@ mod tests {
             window_socket_path(std::path::Path::new("/run/stoat"), 42),
             PathBuf::from("/run/stoat/stoatty-win-42.sock"),
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_window_socket_removes_its_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("win.sock");
+        let _listener = UnixListener::bind(&path).expect("bind");
+
+        drop(WindowSocket { path: path.clone() });
+
+        assert!(!path.exists(), "the socket file outlived its guard");
     }
 
     #[test]
