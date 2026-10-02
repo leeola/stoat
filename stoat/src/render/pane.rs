@@ -18,7 +18,10 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
-    workspace::{diff::DiffBase, Workspace},
+    workspace::{
+        diff::{self, DiffBase},
+        Workspace,
+    },
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
@@ -1238,18 +1241,7 @@ fn staged_label_body(
 /// Every override names itself, so the bar never leaves a reader guessing
 /// which base the hunks on screen were measured against.
 pub(crate) fn diff_base_lead(base: &DiffBase) -> String {
-    match base {
-        DiffBase::Head => "diff vs HEAD".to_string(),
-        DiffBase::Rev { sha: Some(sha) } => {
-            let short: String = sha.chars().take(7).collect();
-            format!("diff vs {short}")
-        },
-        // A root commit's parent, against which every line reads added.
-        DiffBase::Rev { sha: None } => "diff vs empty".to_string(),
-        // An agent's proposal sits under no revision. The base is the file as
-        // it stood before the proposal, which is what "original" names.
-        DiffBase::Memory { .. } => "diff vs original".to_string(),
-    }
+    format!("diff vs {}", diff::diff_sides(Some(base)).0)
 }
 
 fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {

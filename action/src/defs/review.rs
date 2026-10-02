@@ -101,6 +101,22 @@ define_action!(
 );
 
 define_action!(
+    DiffBaseToggleDef,
+    DiffBaseToggle,
+    "DiffBaseToggle",
+    ActionKind::DiffBaseToggle,
+    "switch the diff base between the index and HEAD",
+    "Flip the base the working tree diffs against between the index and \
+     HEAD, in the diff view or in a plain pane, where the gutter follows it. \
+     The diff view stays as it is, open or closed. Under a revision, a commit \
+     review, or an agent proposal the first run returns to the working \
+     tree's base, and the next run flips it. The status line names both \
+     sides.",
+    ActionPriority::Normal,
+    command_name = "diff-base-toggle"
+);
+
+define_action!(
     DiffBackDef,
     DiffBack,
     "DiffBack",

@@ -645,6 +645,25 @@ pub(super) struct DiffJobOutput {
     pub(super) base: Option<DiffBaseText>,
 }
 
+/// The names of what the diff view's left and right columns hold under
+/// `base`, as `(left, right)`.
+///
+/// A commit review names the commit's parent on the left and the working tree
+/// on the right. The review checks the commit out under the buffers, and the
+/// review badge names that commit.
+pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, &'static str) {
+    match base {
+        None => ("index".to_string(), "working tree"),
+        Some(DiffBase::Head) => ("HEAD".to_string(), "working tree"),
+        Some(DiffBase::Rev { sha: Some(sha) }) => (sha.chars().take(7).collect(), "working tree"),
+        // A root commit's parent, against which every line reads added.
+        Some(DiffBase::Rev { sha: None }) => ("empty".to_string(), "working tree"),
+        // An agent's proposal sits under no revision. The base is the file as
+        // it stood before the proposal, which is what "original" names.
+        Some(DiffBase::Memory { .. }) => ("original".to_string(), "proposal"),
+    }
+}
+
 /// Where the cursor sits among every hunk in the repository, as
 /// `(position, total)`, or `None` when the focused pane is not a diff view over
 /// a file the repo tracks.
@@ -1346,9 +1365,9 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_byte_ranges, compute_base_highlights, compute_diff_map, repo_hunk_position,
-        scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase, DiffBaseText,
-        DIFF_SETTLE,
+        changed_byte_ranges, compute_base_highlights, compute_diff_map, diff_sides,
+        repo_hunk_position, scan_changed_ranges, BaseHighlightCache, BaseHighlightMemo, DiffBase,
+        DiffBaseText, DIFF_SETTLE,
     };
     use crate::{
         action_handlers::{self, movement},
@@ -3116,6 +3135,32 @@ mod tests {
             dm.base_text().map(|t| t.as_str()),
             Some("mid\n"),
             "an untouched file keeps the working tree's own base"
+        );
+    }
+
+    #[test]
+    fn every_base_names_both_sides() {
+        let rev = |sha: Option<&str>| DiffBase::Rev {
+            sha: sha.map(str::to_string),
+        };
+        let memory = DiffBase::Memory {
+            files: HashMap::new(),
+        };
+        assert_eq!(
+            [
+                diff_sides(None),
+                diff_sides(Some(&DiffBase::Head)),
+                diff_sides(Some(&rev(Some("abc1234def5678")))),
+                diff_sides(Some(&rev(None))),
+                diff_sides(Some(&memory)),
+            ],
+            [
+                ("index".to_string(), "working tree"),
+                ("HEAD".to_string(), "working tree"),
+                ("abc1234".to_string(), "working tree"),
+                ("empty".to_string(), "working tree"),
+                ("original".to_string(), "proposal"),
+            ],
         );
     }
 

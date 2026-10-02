@@ -2599,12 +2599,14 @@ mod tests {
                 pressed(KeyCode::Char('n')),
                 pressed(KeyCode::Char('p')),
                 pressed(KeyCode::Char('w')),
+                pressed(KeyCode::Char('b')),
             ),
             (
                 only("Diff"),
                 only("GotoNextChange"),
                 only("GotoPrevChange"),
                 only("DiffWheelWalk"),
+                only("DiffBaseToggle"),
             ),
             "a hop resets no mode, so a second press hops again",
         );
@@ -3121,6 +3123,7 @@ mod tests {
             ('n', "GotoNextChange"),
             ('s', "StageHunk"),
             ('r', "ReloadAll"),
+            ('b', "DiffBaseToggle"),
         ] {
             let bound = keymap
                 .lookup(

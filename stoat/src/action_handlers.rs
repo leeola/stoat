@@ -655,6 +655,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiffForward => diff_nav::forward(stoat),
         ActionKind::DiffAgainstIndex => review::diff_against(stoat, WorktreeBase::Index),
         ActionKind::DiffAgainstHead => review::diff_against(stoat, WorktreeBase::Head),
+        ActionKind::DiffBaseToggle => review::toggle_diff_base(stoat),
         ActionKind::GotoNextParagraph => {
             movement::goto_paragraph(stoat, movement::ParaDir::Next, false)
         },

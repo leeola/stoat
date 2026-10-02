@@ -1201,7 +1201,8 @@ on key {
     # `r` re-reads the open buffers, so an external tool's edits reach the diff
     # without leaving the chord. It spells the same verb `space r` does.
     #
-    # `i` and `h` point the diff at the index or at HEAD.
+    # `i` and `h` point the diff at the index or at HEAD. `b` flips the diff
+    # base between the index and HEAD.
     #
     # `f` follows the whole working tree. Each file written outside the editor
     # opens in the diff view with the cursor on the change, until a second `f`
@@ -1221,6 +1222,7 @@ on key {
         d -> [Diff(), SetMode(normal)];
         i -> [DiffAgainstIndex(), SetMode(normal)];
         h -> [DiffAgainstHead(), SetMode(normal)];
+        b -> [DiffBaseToggle(), SetMode(normal)];
         s -> [StageHunk(), SetMode(normal)];
         u -> [UnstageHunk(), SetMode(normal)];
         S -> [StageLine(), SetMode(normal)];
@@ -1266,14 +1268,16 @@ on key {
     # mode instead of running a single arm. d opens the diff and a second d
     # closes it. n, p, and the Alt notches walk the changes, and the side
     # buttons walk changes or retrace a jump out of one. w turns the plain
-    # wheel's walk off and on. No arm here chains SetMode(normal), which is what
-    # holds the mode, and Escape leaves it.
+    # wheel's walk off and on. b flips the diff base between the index and
+    # HEAD. No arm here chains SetMode(normal), which is what holds the mode,
+    # and Escape leaves it.
     mode == review {
         Escape -> SetMode(normal);
         d -> Diff();
         n -> GotoNextChange();
         p -> GotoPrevChange();
         w -> DiffWheelWalk();
+        b -> DiffBaseToggle();
         MouseBack -> DiffBack();
         MouseForward -> DiffForward();
         Alt-WheelDown -> GotoNextChange();

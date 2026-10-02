@@ -75,6 +75,7 @@ action_kinds! {
     DiffWheelWalk,
     DiffAgainstIndex,
     DiffAgainstHead,
+    DiffBaseToggle,
     DiffBack,
     DiffForward,
     Conflict,

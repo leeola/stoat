@@ -18,7 +18,7 @@ use crate::{
     },
     review_session::DiffDocument,
     workspace::{
-        diff::{compute_base_highlights, BaseHighlightCache, DiffBase, WorktreeBase},
+        diff::{self, compute_base_highlights, BaseHighlightCache, DiffBase, WorktreeBase},
         Workspace,
     },
 };
@@ -205,6 +205,32 @@ pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffec
     }
     // Turned on rather than toggled, as a named revision is.
     reopen_diff_view(stoat);
+    UpdateEffect::Redraw
+}
+
+/// Flip the working tree's own base between the index and HEAD, and name both
+/// sides of the diff in the status line.
+///
+/// A revision, a review, or a proposal base gives way to the pick on the first
+/// press, with no flip, so one press always lands back on the working tree.
+/// The next press flips.
+///
+/// The diff view stays open or closed, and the cursor stays where it is.
+pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace();
+    let displaced = matches!(
+        ws.diff_base(),
+        Some(DiffBase::Rev { .. } | DiffBase::Memory { .. })
+    );
+    let next = match (displaced, ws.worktree_base()) {
+        (true, pick) => pick,
+        (false, WorktreeBase::Index) => WorktreeBase::Head,
+        (false, WorktreeBase::Head) => WorktreeBase::Index,
+    };
+    stoat.active_workspace_mut().set_worktree_base(next);
+
+    let (from, to) = diff::diff_sides(stoat.active_workspace().diff_base());
+    stoat.set_status(format!("diff: {from} → {to}"));
     UpdateEffect::Redraw
 }
 
@@ -1417,6 +1443,59 @@ mod tests {
             head_base_and_view(&mut h),
             (true, true),
             "HEAD replaces the review base"
+        );
+    }
+
+    #[test]
+    fn the_base_toggle_flips_between_the_index_and_head() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffBaseToggle);
+        assert_eq!(
+            (
+                head_base_and_view(&mut h),
+                h.stoat.pending_message.as_deref()
+            ),
+            ((true, false), Some("diff: HEAD → working tree")),
+            "the first press picks HEAD and opens nothing",
+        );
+
+        run(&mut h, &stoat_action::DiffBaseToggle);
+        assert_eq!(
+            (
+                head_base_and_view(&mut h),
+                h.stoat.pending_message.as_deref()
+            ),
+            ((false, false), Some("diff: index → working tree")),
+            "the second press returns to the index",
+        );
+    }
+
+    #[test]
+    fn the_base_toggle_keeps_an_open_view_open() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffBaseToggle);
+        assert_eq!(head_base_and_view(&mut h), (true, true));
+    }
+
+    /// The first press under a revision lands on the pick with no flip, so one
+    /// press always returns to the working tree.
+    #[test]
+    fn the_base_toggle_under_a_revision_returns_to_the_pick() {
+        let mut h = half_staged_harness();
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Rev {
+                sha: Some("base0".into()),
+            }));
+        run(&mut h, &stoat_action::DiffBaseToggle);
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().diff_base().is_none(),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (true, Some("diff: index → working tree")),
         );
     }
 
