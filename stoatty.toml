@@ -32,6 +32,8 @@ ligatures = true
 
 # Cursor motion style. "block" is the rigid square that slides between cells.
 # "warp" stretches the cursor along its path, then snaps back to a block.
+# With either style, a move of one or two cells along a row lands at once, so
+# the cursor stays on the text as it is typed.
 cursor_animation = "block"
 
 # Program to launch over the PTY instead of your default shell. Uncomment and

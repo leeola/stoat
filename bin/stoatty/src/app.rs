@@ -673,6 +673,13 @@ struct State {
     /// the cursor stretches along its path. Drives the
     /// [`CursorAnimation::Warp`] motion.
     cursor_corner_anim: [[f32; 2]; 4],
+    /// The cell the cursor last eased toward.
+    ///
+    /// [`step_cursor`] measures the next move against it to tell a typed
+    /// character's hop from a motion. `None` before the first shown cursor and
+    /// after a frame that drew the cursor at a glide anchor, where the cursor
+    /// is off its cell and the move that follows is the settle flight.
+    cursor_target: Option<[f32; 2]>,
     /// Whether last frame drew the cursor at a glide anchor rather than easing it.
     ///
     /// Set while a pool glides and the cursor rides its content. On the first
@@ -1071,6 +1078,7 @@ impl ApplicationHandler<PtyEvent> for App {
             cursor_anim: [0.0, 0.0],
             cursor_animation: self.cursor_animation,
             cursor_corner_anim: [[0.0, 0.0]; 4],
+            cursor_target: None,
             cursor_was_anchored: false,
             popover_scrolls: Vec::new(),
             popover_offsets: Vec::new(),
@@ -2689,6 +2697,7 @@ fn redraw(state: &mut State) {
                 state.cursor_animation,
                 &mut state.cursor_anim,
                 &mut state.cursor_corner_anim,
+                &mut state.cursor_target,
                 cursor_position(cursor),
                 dt,
             );
@@ -2803,10 +2812,14 @@ fn redraw(state: &mut State) {
                 // content offset, so the cursor is placed directly
                 // rather than eased toward the VT cell. Once its line
                 // has scrolled off the pool it leaves the region and
-                // hides. Keep the anim in sync for a clean settle.
+                // hides. Keep the anim in sync for a clean settle. The
+                // cursor draws off its terminal cell here, so the recorded
+                // target goes and the settle flight is not measured as a
+                // hop.
                 state.cursor_anim = anchor.pos;
                 state.cursor_corner_anim = block_corners(anchor.pos);
                 state.cursor_was_anchored = true;
+                state.cursor_target = None;
                 if anchor.in_region {
                     (Some(anchor.pos), Some(block_corners(anchor.pos)), false)
                 } else {
@@ -2824,6 +2837,7 @@ fn redraw(state: &mut State) {
                     state.cursor_animation,
                     &mut state.cursor_anim,
                     &mut state.cursor_corner_anim,
+                    &mut state.cursor_target,
                     cursor_position(cursor),
                     dt,
                 )

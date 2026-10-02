@@ -29,6 +29,13 @@ pub(crate) const EASE_BASELINE_FRAME: Duration = Duration::from_micros(16_667);
 /// to its target in one step.
 pub(crate) const MAX_EASE_DT: Duration = Duration::from_millis(40);
 
+/// The widest cursor move along one row that counts as the echo of a typed
+/// character.
+///
+/// Two cells cover a wide character, and two narrow ones that land within one
+/// frame.
+const TYPING_HOP_CELLS: f32 = 2.0;
+
 /// Rescale a per-baseline-frame easing factor to the elapsed frame time `dt`.
 ///
 /// Compounds the per-frame decay continuously, so two half-length frames
@@ -131,17 +138,32 @@ type CursorStep = (Option<[f32; 2]>, Option<[[f32; 2]; 4]>, bool);
 /// one-cell quad from it. [`CursorAnimation::Warp`] eases the four `corners`
 /// independently so the block stretches along its path and collapses back to a
 /// square as it arrives, taking the eased centroid as the ligature-break cell.
-/// Only the state matching `animation` is advanced.
+/// Only the state matching `animation` is eased.
+///
+/// A move that [`is_typing_hop`] accepts places both states on `target` in this
+/// call, whatever flight the cursor is in, so the cursor stays on text a program
+/// echoes. `last_target` is the cell the last shown call moved toward. This call
+/// records `target` in it, and a hidden call leaves it as it is.
 pub(crate) fn step_cursor(
     animation: CursorAnimation,
     point: &mut [f32; 2],
     corners: &mut [[f32; 2]; 4],
+    last_target: &mut Option<[f32; 2]>,
     target: Option<[f32; 2]>,
     dt: Duration,
 ) -> CursorStep {
     let Some(target) = target else {
         return (None, None, false);
     };
+
+    let hopped = last_target
+        .replace(target)
+        .is_some_and(|previous| is_typing_hop(previous, target));
+    if hopped {
+        *point = target;
+        *corners = block_corners(target);
+    }
+
     match animation {
         CursorAnimation::Block => {
             let (next, settled) = ease(*point, target, dt);
@@ -154,6 +176,17 @@ pub(crate) fn step_cursor(
             (Some(centroid(next)), Some(next), !settled)
         },
     }
+}
+
+/// Whether a cursor move from `previous` to `target` is the echo of a typed or
+/// erased character rather than a motion.
+///
+/// The terminal sees cells and not causes, so the test is the shape of the
+/// move, which is one row and at most [`TYPING_HOP_CELLS`] columns. A move of
+/// no columns is not a hop, because every frame of a flight repeats its target.
+fn is_typing_hop(previous: [f32; 2], target: [f32; 2]) -> bool {
+    let columns = (target[0] - previous[0]).abs();
+    previous[1] == target[1] && columns > 0.0 && columns <= TYPING_HOP_CELLS
 }
 
 /// A popover's content overflow height in rows, or `None` when its content fits
@@ -1866,6 +1899,7 @@ mod tests {
             CursorAnimation::Block,
             &mut point,
             &mut corners,
+            &mut None,
             Some(landing),
             EASE_BASELINE_FRAME,
         );
@@ -1873,6 +1907,97 @@ mod tests {
         assert!(
             point[1] < 40.0 && point[1] > landing[1],
             "it advanced from the edge toward the landing: {point:?}",
+        );
+    }
+
+    /// One [`step_cursor`] call from `point` toward `target`, with `last` as the
+    /// recorded target. Returns the step and the record the call leaves.
+    fn step_once(
+        animation: CursorAnimation,
+        point: [f32; 2],
+        last: Option<[f32; 2]>,
+        target: Option<[f32; 2]>,
+    ) -> (CursorStep, Option<[f32; 2]>) {
+        let mut point = point;
+        let mut corners = block_corners(point);
+        let mut last = last;
+        let step = step_cursor(
+            animation,
+            &mut point,
+            &mut corners,
+            &mut last,
+            target,
+            EASE_BASELINE_FRAME,
+        );
+        (step, last)
+    }
+
+    #[test]
+    fn a_short_move_along_a_row_lands_in_one_step() {
+        let from = [4.0, 2.0];
+        for to in [[5.0, 2.0], [3.0, 2.0], [6.0, 2.0]] {
+            assert_eq!(
+                step_once(CursorAnimation::Block, from, Some(from), Some(to)),
+                ((Some(to), Some(block_corners(to)), false), Some(to)),
+                "the block cursor lands on {to:?}",
+            );
+            assert_eq!(
+                step_once(CursorAnimation::Warp, from, Some(from), Some(to)),
+                (
+                    (
+                        Some(centroid(block_corners(to))),
+                        Some(block_corners(to)),
+                        false
+                    ),
+                    Some(to)
+                ),
+                "the warp cursor lands on {to:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_move_that_is_no_typing_hop_eases() {
+        let from = [4.0, 2.0];
+        let cases = [
+            ("three columns", from, Some(from), [7.0, 2.0]),
+            ("a row change", from, Some(from), [4.0, 3.0]),
+            ("a diagonal", from, Some(from), [5.0, 3.0]),
+            ("a cursor with no record", from, None, [5.0, 2.0]),
+            ("a flight whose target holds", [40.0, 2.0], Some(from), from),
+        ];
+        for (case, point, last, to) in cases {
+            let (next, _) = ease(point, to, EASE_BASELINE_FRAME);
+            assert_eq!(
+                step_once(CursorAnimation::Block, point, last, Some(to)),
+                ((Some(next), Some(block_corners(next)), true), Some(to)),
+                "{case} eases",
+            );
+        }
+    }
+
+    #[test]
+    fn a_hop_ends_a_flight_in_progress() {
+        let to = [5.0, 2.0];
+        assert_eq!(
+            step_once(
+                CursorAnimation::Block,
+                [40.0, 2.0],
+                Some([4.0, 2.0]),
+                Some(to)
+            ),
+            ((Some(to), Some(block_corners(to)), false), Some(to)),
+            "a typed character lands the cursor even in the middle of a flight",
+        );
+    }
+
+    #[test]
+    fn a_hidden_frame_keeps_the_recorded_target() {
+        let from = [4.0, 2.0];
+        assert_eq!(
+            step_once(CursorAnimation::Block, from, Some(from), None),
+            ((None, None, false), Some(from)),
+            "a hidden cursor leaves the record for the next shown frame",
         );
     }
 

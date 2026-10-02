@@ -66,6 +66,8 @@ pub struct Config {
 
     /// Selected cursor motion style. The default `block` is today's rigid
     /// square. `warp` stretches the cursor along its path between cells.
+    /// With either style, a move of one or two cells along a row lands at once,
+    /// so the cursor stays on text as it is typed.
     #[serde(default = "default_cursor_animation")]
     pub cursor_animation: CursorAnimation,
 
