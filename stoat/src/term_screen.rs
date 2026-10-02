@@ -72,11 +72,15 @@ pub struct CursorPos {
 /// This proxy appends reply payloads and decoded clipboard text to buffers the
 /// owning [`TermScreen`] drains and hands back to the caller. A [`Mutex`] (not
 /// `RefCell`) keeps the proxy `Send`, since a [`TermSession`](crate::term_session::TermSession)
-/// crosses threads. The remaining events (title, bell) are ignored.
+/// crosses threads. A title event is held for the owning screen to apply. The
+/// bell is ignored.
 #[derive(Clone)]
 struct EventProxy {
     replies: Arc<Mutex<Vec<u8>>>,
     clipboard_writes: Arc<Mutex<Vec<String>>>,
+    /// The newest title event the owning screen has not applied. The outer
+    /// `None` means no event arrived, and an inner `None` is a reset.
+    title_event: Arc<Mutex<Option<Option<String>>>>,
 }
 
 impl EventListener for EventProxy {
@@ -93,6 +97,12 @@ impl EventListener for EventProxy {
                     .lock()
                     .expect("term clipboard buffer poisoned")
                     .push(text);
+            },
+            Event::Title(title) => {
+                *self.title_event.lock().expect("term title buffer poisoned") = Some(Some(title));
+            },
+            Event::ResetTitle => {
+                *self.title_event.lock().expect("term title buffer poisoned") = Some(None);
             },
             _ => {},
         }
@@ -118,6 +128,12 @@ pub struct TermScreen {
     osc: OscCap,
     replies: Arc<Mutex<Vec<u8>>>,
     clipboard_writes: Arc<Mutex<Vec<String>>>,
+    /// The title event the [`EventProxy`] holds until a feed applies it.
+    title_event: Arc<Mutex<Option<Option<String>>>>,
+    /// The title the child set, as [`Self::title`] reports it.
+    title: Option<String>,
+    /// Whether the title changed since [`Self::take_retitled`] last ran.
+    retitled: bool,
     generation: u64,
 }
 
@@ -134,9 +150,11 @@ impl TermScreen {
 
         let replies = Arc::new(Mutex::new(Vec::new()));
         let clipboard_writes = Arc::new(Mutex::new(Vec::new()));
+        let title_event = Arc::new(Mutex::new(None));
         let listener = EventProxy {
             replies: replies.clone(),
             clipboard_writes: clipboard_writes.clone(),
+            title_event: title_event.clone(),
         };
 
         // No scrollback. The pane exposes no scroll offset, so nothing reads
@@ -154,6 +172,9 @@ impl TermScreen {
             osc: OscCap::new(MAX_OSC_PLAIN_BYTES, MAX_OSC_CLIPBOARD_BYTES),
             replies,
             clipboard_writes,
+            title_event,
+            title: None,
+            retitled: false,
             generation: 0,
         }
     }
@@ -201,6 +222,7 @@ impl TermScreen {
             self.parser.advance(&mut self.term, &bytes[span]);
         }
 
+        self.apply_title_event();
         self.drain_replies()
     }
 
@@ -236,6 +258,30 @@ impl TermScreen {
         std::mem::take(&mut *self.replies.lock().expect("term reply buffer poisoned"))
     }
 
+    /// Apply the title event the [`EventProxy`] holds, if any.
+    fn apply_title_event(&mut self) {
+        let Some(event) = self
+            .title_event
+            .lock()
+            .expect("term title buffer poisoned")
+            .take()
+        else {
+            return;
+        };
+        let title = event
+            .map(|title| {
+                title
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect::<String>()
+            })
+            .filter(|title| !title.is_empty());
+        if title != self.title {
+            self.title = title;
+            self.retitled = true;
+        }
+    }
+
     /// Take the decoded OSC 52 clipboard payloads the child wrote since the last
     /// call, leaving the buffer empty.
     ///
@@ -249,6 +295,23 @@ impl TermScreen {
                 .lock()
                 .expect("term clipboard buffer poisoned"),
         )
+    }
+
+    /// The title the child gave the screen, or `None` while it has set none.
+    ///
+    /// OSC 0 and OSC 2 set it, and a title-stack pop restores an earlier one.
+    /// An empty title clears it. Control characters are removed, so the title
+    /// paints in one row.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Whether the title changed since the last call.
+    ///
+    /// The caller repaints on it, because a title shows on surfaces that the
+    /// screen's own cells do not reach.
+    pub fn take_retitled(&mut self) -> bool {
+        std::mem::take(&mut self.retitled)
     }
 
     /// Whether the program running in this screen asked for bracketed paste.
@@ -671,5 +734,102 @@ mod tests {
             term.take_clipboard_writes().is_empty(),
             "a second take drains to empty"
         );
+    }
+
+    #[test]
+    fn an_osc_title_names_the_screen_and_an_empty_one_clears_it() {
+        let mut term = TermScreen::new(24, 80);
+
+        term.feed(b"\x1b]0;build\x07");
+        let named = (
+            owned_title(&term),
+            term.take_retitled(),
+            term.take_retitled(),
+        );
+        term.feed(b"\x1b]2;\x07");
+        let cleared = (owned_title(&term), term.take_retitled());
+
+        assert_eq!(
+            (named, cleared),
+            ((Some("build".to_string()), true, false), (None, true)),
+        );
+    }
+
+    #[test]
+    fn a_repeated_title_reports_no_change() {
+        let mut term = TermScreen::new(24, 80);
+        term.feed(b"\x1b]0;build\x07");
+        term.take_retitled();
+
+        term.feed(b"\x1b]0;build\x07");
+
+        assert_eq!(
+            (owned_title(&term), term.take_retitled()),
+            (Some("build".to_string()), false),
+        );
+    }
+
+    #[test]
+    fn a_title_split_across_two_feeds_lands_on_the_second() {
+        let mut term = TermScreen::new(24, 80);
+
+        term.feed(b"\x1b]0;bui");
+        let partial = owned_title(&term);
+        term.feed(b"ld\x07");
+
+        assert_eq!(
+            (partial, owned_title(&term)),
+            (None, Some("build".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_title_stack_pop_restores_the_pushed_title() {
+        let mut term = TermScreen::new(24, 80);
+
+        term.feed(b"\x1b]0;shell\x07\x1b[22;0t\x1b]0;vim\x07\x1b[23;0t");
+
+        assert_eq!(term.title(), Some("shell"));
+    }
+
+    #[test]
+    fn a_title_stack_pop_restores_no_title() {
+        let mut term = TermScreen::new(24, 80);
+
+        term.feed(b"\x1b[22;0t\x1b]0;vim\x07");
+        let pushed = (owned_title(&term), term.take_retitled());
+        term.feed(b"\x1b[23;0t");
+
+        assert_eq!(
+            (pushed, (owned_title(&term), term.take_retitled())),
+            ((Some("vim".to_string()), true), (None, true)),
+        );
+    }
+
+    #[test]
+    fn a_title_past_the_osc_cap_reads_as_no_title() {
+        let mut term = TermScreen::with_osc_caps(24, 80, 4, 16);
+
+        term.feed(b"\x1b]0;ok\x07");
+        let within = owned_title(&term);
+        term.feed(b"\x1b]0;far too long\x07");
+
+        assert_eq!((within, owned_title(&term)), (Some("ok".to_string()), None));
+    }
+
+    /// A control character in the title breaks the row the title paints in.
+    #[test]
+    fn a_control_character_in_a_title_is_dropped() {
+        let mut term = TermScreen::new(24, 80);
+
+        term.feed("\x1b]0;bu\x7fil\u{9b}d\x07".as_bytes());
+
+        assert_eq!(term.title(), Some("build"));
+    }
+
+    /// The screen's title, owned, so a test reads it beside a call that takes
+    /// the screen mutably.
+    fn owned_title(term: &TermScreen) -> Option<String> {
+        term.title().map(str::to_owned)
     }
 }

@@ -3086,6 +3086,37 @@ fn agent_output_feeds_emulator() {
     assert!(row.starts_with("hello"), "row: {row:?}");
 }
 
+/// The tab bar names a terminal in a parked tab by its title, so a retitle
+/// repaints with no surface showing the terminal's cells.
+#[test]
+fn a_retitle_on_a_hidden_terminal_marks_the_frame_dirty() {
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
+    let session: Arc<dyn crate::host::TerminalSession> =
+        Arc::new(crate::host::FakeTerminalSession::new());
+    let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
+        crate::term_screen::TermScreen::new(24, 80),
+        session,
+        TermSession::next_token(),
+    ));
+    let output = |stoat: &mut Stoat, data: &[u8]| {
+        stoat.handle_pty_notification(PtyNotification::TermOutput {
+            agent_id,
+            data: data.to_vec(),
+        });
+        std::mem::take(&mut stoat.pty_dirty)
+    };
+
+    assert_eq!(
+        [
+            output(&mut stoat, b"plain"),
+            output(&mut stoat, b"\x1b]0;build\x07"),
+        ],
+        [false, true],
+        "plain output on a hidden terminal waits, and a retitle repaints",
+    );
+}
+
 /// Fills the pty channel the way the reader thread does, from a thread and
 /// against a visible pane.
 ///

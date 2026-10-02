@@ -2186,6 +2186,7 @@ pub struct Stoat {
     pub(crate) minimap_build_pending: bool,
     /// Whether a visible run or terminal fed output since the last frame tick, so
     /// the tick repaints once rather than the output arm repainting per PTY chunk.
+    /// A terminal that changed its title sets it too, visible or not.
     pub(crate) pty_dirty: bool,
     /// Wall-clock seconds an in-flight LSP work-done spinner has animated, mapped
     /// to a [`SPINNER_FRAMES`] glyph by [`spinner_phase`]. Advanced by the frame
@@ -7609,6 +7610,7 @@ impl Stoat {
                 };
                 let replies = agent.term.feed(&data);
                 let clipboard_writes = agent.term.take_clipboard_writes();
+                let retitled = agent.term.take_retitled();
                 if !replies.is_empty() {
                     self.write_to_term(agent_id, &replies);
                 }
@@ -7620,7 +7622,7 @@ impl Stoat {
                         &text,
                     );
                 }
-                if visible {
+                if visible || retitled {
                     self.pty_dirty = true;
                 }
                 UpdateEffect::None
