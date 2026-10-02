@@ -91,6 +91,9 @@ fn main() {
     tracing::info!(
         log_id = %installed.id,
         stoatty_log_id = ?stoatty_id,
+        commit = env!("STOAT_BUILD_COMMIT"),
+        commit_time = env!("STOAT_BUILD_COMMIT_TIME"),
+        built = env!("STOAT_BUILD_TIME"),
         hostname = %ident::hostname(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,

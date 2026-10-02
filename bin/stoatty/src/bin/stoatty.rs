@@ -42,6 +42,9 @@ fn main() {
     install_panic_hook();
     tracing::info!(
         log_id = %installed.id,
+        commit = env!("STOATTY_BUILD_COMMIT"),
+        commit_time = env!("STOATTY_BUILD_COMMIT_TIME"),
+        built = env!("STOATTY_BUILD_TIME"),
         hostname = %ident::hostname(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
