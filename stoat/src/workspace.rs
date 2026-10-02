@@ -151,6 +151,14 @@ pub struct Workspace {
     /// the renderer into the `git_root.file_name()` fallback used by tests.
     pub(crate) name: String,
     pub git_root: PathBuf,
+    /// The working tree root of the repository that holds [`Self::git_root`],
+    /// or `None` when the root is in no repository or has not been entered.
+    ///
+    /// A session started below the repository root has a `git_root` deeper
+    /// than this. The diff view covers the whole repository, so the file watch
+    /// and the follow of external writes read this root. The finder and the
+    /// code index stay on `git_root`.
+    pub(crate) repo_root: Option<PathBuf>,
     /// The workspace's resolved project environment, loaded from direnv.
     pub(crate) env: crate::project_env::WorkspaceEnv,
     /// Whether the background diff-cache warm has run for this workspace's
@@ -398,6 +406,7 @@ impl Workspace {
             uid,
             name,
             git_root,
+            repo_root: None,
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
             last_finder_scope: None,

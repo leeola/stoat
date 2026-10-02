@@ -1703,6 +1703,22 @@ mod tests {
         assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
     }
 
+    /// A session started below the repository root follows a write anywhere
+    /// in the repository, the scope the diff view reads.
+    #[test]
+    fn a_write_outside_the_workspace_root_follows() {
+        let mut h = follow_harness();
+        {
+            let ws = h.stoat.active_workspace_mut();
+            ws.git_root = PathBuf::from("/repo/sub");
+            ws.repo_root = Some(PathBuf::from("/repo"));
+        }
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
+    }
+
     /// The fake holds no base for the new file, so the row is left out.
     #[test]
     fn a_file_in_a_directory_that_arrives_with_it_follows() {

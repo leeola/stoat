@@ -345,6 +345,21 @@ fn watch_workspace_dirs(fs: &dyn FsHost, watcher: &dyn FsWatchHost, root: &Path)
     }
 }
 
+/// The ancestor of `root` that is the repository's working tree root, spelled
+/// as `root` spells it.
+///
+/// The watcher names an event by the watched directory joined with the entry
+/// name, and the finder and the index match events against the workspace root
+/// by prefix. Through a symlink, git reads the root back in another spelling,
+/// and no event under that spelling matches. `root` itself answers when no
+/// ancestor equals `workdir`.
+fn repo_tree_root(root: &Path, workdir: Option<&Path>) -> PathBuf {
+    root.ancestors()
+        .find(|ancestor| Some(*ancestor) == workdir)
+        .unwrap_or(root)
+        .to_path_buf()
+}
+
 /// Whether an index drain that has merged `drained` updates in `elapsed` has
 /// used up its turn.
 ///
@@ -4082,17 +4097,21 @@ impl Stoat {
         (effect, coalesced)
     }
 
-    /// Watches the directories of the active workspace's root, and reports
-    /// whether that root is inside a git repository.
+    /// Watches the working tree of the repository that holds the active
+    /// workspace's root, and reports whether there is one.
     ///
-    /// A root already watched costs nothing. A root outside a repository gets
-    /// no watch, for the reason [`Self::start_index_build`] gives.
+    /// Records that tree's root as [`Workspace::repo_root`]. A tree already
+    /// watched costs nothing. A root outside a repository gets no watch, for
+    /// the reason [`Self::start_index_build`] gives.
     pub(crate) fn watch_active_root(&mut self) -> bool {
         let root = self.active_workspace().git_root.clone();
-        if self.git_host.discover(&root).is_none() {
+        let Some(repo) = self.git_host.discover(&root) else {
+            self.active_workspace_mut().repo_root = None;
             return false;
-        }
-        if !self.watched_roots.insert(root.clone()) {
+        };
+        let tree = repo_tree_root(&root, repo.workdir().as_deref());
+        self.active_workspace_mut().repo_root = Some(tree.clone());
+        if !self.watched_roots.insert(tree.clone()) {
             return true;
         }
 
@@ -4102,7 +4121,7 @@ impl Stoat {
             .spawn_blocking({
                 let watcher = self.fs_watch_host.clone();
                 let fs = self.fs_host.clone();
-                move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &root)
+                move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &tree)
             })
             .detach();
         true

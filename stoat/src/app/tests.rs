@@ -2271,6 +2271,59 @@ fn a_persistence_disabled_index_build_still_watches_the_repo_root() {
 }
 
 #[test]
+fn a_root_below_the_repository_watches_the_whole_working_tree() {
+    use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
+
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let mut stoat = Stoat::new(
+        scheduler.executor(),
+        Settings::default(),
+        PathBuf::from("/repo/sub"),
+    );
+    stoat.persistence_disabled = true;
+
+    let fs = Arc::new(FakeFs::new());
+    fs.insert_file("/repo/sub/a.rs", "");
+    fs.insert_file("/repo/other/b.rs", "");
+    stoat.set_fs_host(fs);
+    let git = FakeGit::new();
+    git.add_repo("/repo");
+    stoat.set_git_host(Arc::new(git));
+    let watcher = Arc::new(FakeFsWatcher::new());
+    stoat.set_fs_watch_host(watcher.clone());
+
+    stoat.start_index_build();
+    scheduler.run_until_parked();
+
+    assert_eq!(
+        (
+            ["/repo", "/repo/other", "/repo/sub"].map(|dir| watcher.is_watching(Path::new(dir))),
+            stoat.active_workspace().repo_root.clone(),
+        ),
+        ([true; 3], Some(PathBuf::from("/repo"))),
+    );
+}
+
+#[test]
+fn the_repository_root_keeps_the_workspace_roots_spelling() {
+    let cases = [
+        ("/repo/sub", Some("/repo/"), "/repo"),
+        ("/repo", Some("/repo"), "/repo"),
+        ("/link/sub", Some("/real"), "/link/sub"),
+        ("/repo/sub", None, "/repo/sub"),
+    ];
+    let roots: Vec<PathBuf> = cases
+        .iter()
+        .map(|&(root, workdir, _)| repo_tree_root(Path::new(root), workdir.map(Path::new)))
+        .collect();
+    let expected: Vec<PathBuf> = cases
+        .iter()
+        .map(|&(_, _, tree)| PathBuf::from(tree))
+        .collect();
+    assert_eq!(roots, expected);
+}
+
+#[test]
 fn batched_reindex_drain_cross_links_like_sequential() {
     let file_a = codegraph::FileId(1);
     let file_b = codegraph::FileId(2);

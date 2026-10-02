@@ -146,6 +146,10 @@ impl PathEdit {
 /// A directory that arrives is watched and its entries are queued as created
 /// events, which the next turn takes ahead of the host's queue under the same
 /// cap.
+///
+/// The follow test, the ignore verdict, and the `.git` test read
+/// [`repo_root`](crate::workspace::Workspace::repo_root), and the finder and
+/// the index read the workspace root, which sits at or below it.
 pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let host = stoat.fs_watch_host.clone();
     let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
@@ -176,8 +180,12 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     if events.is_empty() {
         return;
     }
-    let git_root = stoat.active_workspace().git_root.clone();
-    let git_dir = git_root.join(".git");
+    let (git_root, repo_root) = {
+        let ws = stoat.active_workspace();
+        let repo_root = ws.repo_root.clone().unwrap_or_else(|| ws.git_root.clone());
+        (ws.git_root.clone(), repo_root)
+    };
+    let git_dir = repo_root.join(".git");
     // Opened at most once for the batch, and only where a verdict is needed.
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
     let mut finder_changes = Vec::new();
@@ -202,7 +210,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         // below want it. The initial index walk filters these out too, so
         // reindexing one here would put generated files in the code graph
         // that a rebuild drops.
-        if !in_git_dir && parent_dir_ignored(stoat, &path, &git_root, &mut repo) {
+        if !in_git_dir && parent_dir_ignored(stoat, &path, &repo_root, &mut repo) {
             continue;
         }
 
@@ -211,7 +219,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         // destination from the source the rename left.
         if stoat.follow_changes
             && !in_git_dir
-            && path.starts_with(&git_root)
+            && path.starts_with(&repo_root)
             && matches!(
                 kind,
                 FsEventKind::Modified | FsEventKind::Created | FsEventKind::Renamed
@@ -245,7 +253,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         // removes a path moves the set a walk lists, and a plain content edit
         // does not.
         if !in_git_dir
-            && path.starts_with(&git_root)
+            && path.starts_with(&repo_root)
             && matches!(
                 kind,
                 FsEventKind::Created | FsEventKind::Removed | FsEventKind::Renamed
@@ -266,19 +274,21 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             // no event.
             if matches!(kind, FsEventKind::Created | FsEventKind::Renamed)
                 && arrived.as_ref().is_some_and(|meta| meta.is_dir)
-                && !dir_ignored(stoat, &path, &git_root, &mut repo)
+                && !dir_ignored(stoat, &path, &repo_root, &mut repo)
             {
                 adopt_directory(stoat, &path);
             }
 
-            if !note_finder_change(
-                stoat,
-                &path,
-                &git_root,
-                arrived.as_ref(),
-                &mut repo,
-                &mut finder_changes,
-            ) {
+            if path.starts_with(&git_root)
+                && !note_finder_change(
+                    stoat,
+                    &path,
+                    &git_root,
+                    arrived.as_ref(),
+                    &mut repo,
+                    &mut finder_changes,
+                )
+            {
                 stoat.finder_path_epoch += 1;
             }
         }
@@ -480,20 +490,20 @@ fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit 
 /// is not caught here, so the callers that care keep their own per-file
 /// check.
 ///
-/// Paths outside `git_root` have no verdict and report false.
+/// Paths outside `repo_root` have no verdict and report false.
 fn parent_dir_ignored(
     stoat: &mut Stoat,
     path: &Path,
-    git_root: &Path,
+    repo_root: &Path,
     repo: &mut Option<Option<Arc<dyn GitRepo>>>,
 ) -> bool {
-    if !path.starts_with(git_root) {
+    if !path.starts_with(repo_root) {
         return false;
     }
     let Some(parent) = path.parent() else {
         return false;
     };
-    dir_ignored(stoat, parent, git_root, repo)
+    dir_ignored(stoat, parent, repo_root, repo)
 }
 
 /// Whether `dir` is gitignored, answering from [`Stoat::ignored_dir_cache`]
@@ -503,7 +513,7 @@ fn parent_dir_ignored(
 fn dir_ignored(
     stoat: &mut Stoat,
     dir: &Path,
-    git_root: &Path,
+    repo_root: &Path,
     repo: &mut Option<Option<Arc<dyn GitRepo>>>,
 ) -> bool {
     if let Some(ignored) = stoat.ignored_dir_cache.get(dir) {
@@ -511,7 +521,7 @@ fn dir_ignored(
     }
 
     let git_host = stoat.git_host.clone();
-    let repo = repo.get_or_insert_with(|| git_host.discover(git_root));
+    let repo = repo.get_or_insert_with(|| git_host.discover(repo_root));
     let ignored = repo.as_ref().is_some_and(|r| r.is_path_ignored(dir));
 
     // A bound rather than an eviction policy, because the working set here is
@@ -812,6 +822,7 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_finder::FinderPathCache;
     use futures::FutureExt;
     use std::time::Duration;
     // TEST IMPORTS
@@ -1206,5 +1217,74 @@ mod tests {
             h.stoat.drain_notify.notified().now_or_never().is_some(),
             "the drain asks for the turn that takes the queued entries",
         );
+    }
+
+    #[test]
+    fn a_git_write_above_the_workspace_root_stales_the_diffs() {
+        let mut h = ignored_dir_harness();
+        below_the_repository_root(&mut h);
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/.git/HEAD"), FsEventKind::Modified);
+
+        drain_fs_watch_events(&mut h.stoat);
+
+        assert!(
+            h.stoat.pending_diff_refresh.is_some(),
+            "a commit above the workspace root stales its diffs",
+        );
+    }
+
+    #[test]
+    fn a_directory_that_arrives_above_the_workspace_root_is_adopted() {
+        let mut h = ignored_dir_harness();
+        below_the_repository_root(&mut h);
+        h.fake_fs().insert_file("/repo/new/a.rs", "");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/new"), FsEventKind::Created);
+
+        drain_until_quiet(&mut h);
+
+        assert!(
+            h.fake_fs_watcher().is_watching(Path::new("/repo/new")),
+            "the whole repository is watched, not only the workspace root",
+        );
+    }
+
+    /// The finder lists the workspace root's own tree, so a file that arrives
+    /// elsewhere in the repository stays out of the cached list.
+    #[test]
+    fn a_file_above_the_workspace_root_stays_out_of_the_finder_list() {
+        let mut h = ignored_dir_harness();
+        below_the_repository_root(&mut h);
+        let epoch = h.stoat.finder_path_epoch;
+        h.stoat.finder_path_cache = Some(FinderPathCache {
+            root: PathBuf::from("/repo/src"),
+            paths: Arc::new(Vec::new()),
+            epoch,
+            display: None,
+        });
+        h.fake_fs().insert_file("/repo/other.rs", "");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/other.rs"), FsEventKind::Created);
+
+        drain_fs_watch_events(&mut h.stoat);
+
+        let listed = h
+            .stoat
+            .finder_path_cache
+            .as_ref()
+            .map(|cache| cache.paths.as_ref().clone());
+        assert_eq!(
+            (listed, h.stoat.finder_path_epoch),
+            (Some(Vec::new()), epoch)
+        );
+    }
+
+    /// Root the active workspace at `/repo/src`, below the repository at
+    /// `/repo`, as a session started in a subdirectory is.
+    fn below_the_repository_root(h: &mut crate::test_harness::TestHarness) {
+        let ws = h.stoat.active_workspace_mut();
+        ws.git_root = PathBuf::from("/repo/src");
+        ws.repo_root = Some(PathBuf::from("/repo"));
     }
 }
