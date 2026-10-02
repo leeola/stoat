@@ -106,6 +106,13 @@ impl FakeFsWatcher {
         state.paths.contains_key(path)
     }
 
+    /// How many live tokens watch `path`, so a test sees a directory that was
+    /// registered twice.
+    pub fn watch_count(&self, path: &Path) -> usize {
+        let state = self.state.lock().expect("FakeFsWatcher poisoned");
+        state.paths.get(path).map_or(0, Vec::len)
+    }
+
     /// Wire `fs` so every successful [`FsHost::write`]
     /// (`crate::fs::FsHost::write`) on a currently-watched path
     /// auto-emits a [`FsEventKind::Modified`] event. Holds a weak

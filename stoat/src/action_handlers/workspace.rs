@@ -79,11 +79,13 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Shared tail of every workspace-switch action. Points [`Stoat::active_workspace`]
 /// at `next` and re-layouts the new active workspace to the current terminal size
-/// so the first render after the switch shows correctly-sized panes.
+/// so the first render after the switch shows correctly-sized panes, and watches
+/// its root, so a workspace entered after launch hears the writes under it.
 fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     stoat.active_workspace = next;
     let size = stoat.size();
     stoat.active_workspace_mut().layout(size);
+    stoat.watch_active_root();
 
     if stoat.active_workspace().remote.is_some() {
         stoat.remote_pending = true;
@@ -368,6 +370,8 @@ pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
 /// or why the change was refused, surfaces as the one-shot bottom-row status
 /// message. An empty path, an unresolvable path (including a `~` form with no
 /// `$HOME`), or a non-directory leaves the root untouched.
+///
+/// The new root is watched, so writes under it reach the diff and follow.
 pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
     let path = path.trim();
     if path.is_empty() {
@@ -407,6 +411,7 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
                 // the new root, so drop it. A reload below repopulates it.
                 ws.env = crate::project_env::WorkspaceEnv::default();
             }
+            stoat.watch_active_root();
 
             if stoat.env_auto_load
                 && stoat.settings.direnv_reload_on_cd.unwrap_or(true)
@@ -445,6 +450,7 @@ mod tests {
         badge::BadgeSource,
         dump::{self, DumpId},
         input_view::{InputView, SubmitTarget},
+        test_harness::TestHarness,
         workspace::registry::{RegistryEntry, WorkspaceMeta},
         workspace_picker::WorkspacePicker,
     };
@@ -544,6 +550,54 @@ mod tests {
                 .is_some(),
             "a session restore was spawned for the reactivated workspace"
         );
+    }
+
+    #[test]
+    fn entering_a_saved_session_watches_its_root() {
+        let mut harness = Stoat::test();
+        harness.fake_git().add_repo("/proj");
+        harness.fake_fs().insert_file("/proj/src/a.rs", "");
+        let input = picker_input(&mut harness.stoat);
+        let mut picker = WorkspacePicker::new(
+            &harness.stoat.workspaces,
+            harness.stoat.active_workspace,
+            vec![saved_session(WorkspaceUid(7), "proj")],
+            input,
+        );
+        picker.select_next();
+        harness.stoat.workspace_picker = Some(picker);
+
+        workspace_picker_select(&mut harness.stoat);
+        harness.run_until_parked();
+
+        assert_eq!(
+            watch_counts(&harness, ["/proj", "/proj/src"]),
+            [1; 2],
+            "the entered workspace's directories are watched",
+        );
+    }
+
+    #[test]
+    fn cd_watches_the_new_root_once() {
+        let mut harness = Stoat::test();
+        harness.fake_git().add_repo("/other");
+        harness.fake_fs().insert_file("/other/lib/b.rs", "");
+
+        for _ in 0..2 {
+            set_cwd(&mut harness.stoat, "/other");
+            harness.run_until_parked();
+        }
+
+        assert_eq!(
+            watch_counts(&harness, ["/other", "/other/lib"]),
+            [1; 2],
+            "a root entered twice is walked once",
+        );
+    }
+
+    /// How many watches the harness's watcher holds on each of `dirs`.
+    fn watch_counts(harness: &TestHarness, dirs: [&str; 2]) -> [usize; 2] {
+        dirs.map(|dir| harness.fake_fs_watcher().watch_count(Path::new(dir)))
     }
 
     /// Persistence stays disabled, the harness default, so the deletion under

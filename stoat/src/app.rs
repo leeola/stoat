@@ -1526,6 +1526,11 @@ pub struct Stoat {
     /// [`debounce::drain_fs_watch_events`] so an external edit stales the
     /// diffs it affects.
     pub(crate) fs_watch_host: Arc<dyn FsWatchHost>,
+    /// The roots whose directories [`Self::fs_watch_host`] watches.
+    ///
+    /// A workspace entered again, or a second workspace on one root, then
+    /// costs no walk of the tree.
+    pub(crate) watched_roots: std::collections::HashSet<PathBuf>,
     /// Single-slot debounce for staling every open diff at once. A commit
     /// writes many `.git` files in a burst, and one HEAD move stales them all,
     /// so this collapses the burst into one invalidation. Re-arming replaces
@@ -2499,6 +2504,7 @@ impl Stoat {
             last_motion: None,
             fs_host: Arc::new(LocalFs),
             fs_watch_host: Arc::new(NoopFsWatcher::new()),
+            watched_roots: std::collections::HashSet::new(),
             pending_diff_refresh: None,
             diff_refresh_tx,
             diff_refresh_rx,
@@ -3297,12 +3303,16 @@ impl Stoat {
     /// [`debounce::drain_fs_watch_events`]. Wiring it here rather than in
     /// [`Self::new`] is what makes it reach every host, since the one `new`
     /// installs produces no events at all.
+    ///
+    /// The installed host holds no watch, so every root is watched again on
+    /// its next entry.
     pub fn set_fs_watch_host(&mut self, host: Arc<dyn FsWatchHost>) {
         host.set_wake(Box::new({
             let drain = self.drain_notify.clone();
             move || drain.notify_one()
         }));
         self.fs_watch_host = host;
+        self.watched_roots.clear();
     }
 
     /// Returns the active [`FsWatchHost`].
@@ -4065,6 +4075,32 @@ impl Stoat {
         (effect, coalesced)
     }
 
+    /// Watches the directories of the active workspace's root, and reports
+    /// whether that root is inside a git repository.
+    ///
+    /// A root already watched costs nothing. A root outside a repository gets
+    /// no watch, for the reason [`Self::start_index_build`] gives.
+    pub(crate) fn watch_active_root(&mut self) -> bool {
+        let root = self.active_workspace().git_root.clone();
+        if self.git_host.discover(&root).is_none() {
+            return false;
+        }
+        if !self.watched_roots.insert(root.clone()) {
+            return true;
+        }
+
+        // The walk reads the tree, which blocks the run loop on a large repo,
+        // so it runs on the blocking pool.
+        self.executor
+            .spawn_blocking({
+                let watcher = self.fs_watch_host.clone();
+                let fs = self.fs_host.clone();
+                move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &root)
+            })
+            .detach();
+        true
+    }
+
     /// Kick off a background cold build of the active workspace's code index.
     ///
     /// The scan runs on the blocking pool and streams shards back through
@@ -4078,7 +4114,7 @@ impl Stoat {
     pub(crate) fn start_index_build(&mut self) {
         let workspace = self.active_workspace;
         let git_root = self.active_workspace().git_root.clone();
-        if self.git_host.discover(&git_root).is_none() {
+        if !self.watch_active_root() {
             tracing::info!(
                 target: "stoat::app",
                 root = %git_root.display(),
@@ -4087,18 +4123,6 @@ impl Stoat {
             return;
         }
         let index_dir = self.index_dir_for_build(&git_root);
-
-        // The walk reads the tree, which is what blocks the runtime thread
-        // before the first frame on a large repo. Run it on the blocking
-        // pool so startup stays interactive.
-        self.executor
-            .spawn_blocking({
-                let watcher = self.fs_watch_host.clone();
-                let fs = self.fs_host.clone();
-                let root = git_root.clone();
-                move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &root)
-            })
-            .detach();
 
         let handles = crate::code_index::build::IndexBuild {
             fs: self.fs_host.clone(),
