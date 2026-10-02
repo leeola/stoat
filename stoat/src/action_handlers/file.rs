@@ -42,8 +42,11 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     save_effect(save_flow(stoat, true))
 }
 
-/// Save the focused buffer, then close its pane and exit when it is the last,
-/// like [`Quit`](stoat_action::Quit). Backs the `:wq` command.
+/// Save the focused buffer, then quit its pane like [`Quit`](stoat_action::Quit).
+/// Backs the `:wq` command.
+///
+/// A pane that covers a live shell returns to that shell. Any other pane
+/// closes, and the last one exits the application.
 ///
 /// The quit aborts whenever the save did not land. A scratch buffer with no
 /// path, a file changed on disk since it was opened, or a write error all leave
@@ -51,11 +54,12 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// A write that lands later, through format on save or the background write,
 /// defers the quit with it. [`Stoat::quit_after_save`] records the pane, and
-/// the pump that lands the write closes that pane.
+/// the pump that lands the write quits that pane.
 pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
     match save_flow(stoat, false) {
         SaveFlow::Wrote => {
-            if super::pane::close_focused_pane(stoat) {
+            let focused = stoat.active_workspace().panes.focus();
+            if super::pane::quit_pane(stoat, focused) {
                 UpdateEffect::Redraw
             } else {
                 UpdateEffect::Quit
@@ -91,7 +95,7 @@ fn finish_deferred_quit(stoat: &mut Stoat, wrote: bool) {
         return;
     }
 
-    if !super::pane::close_pane_by_id(stoat, pane) {
+    if !super::pane::quit_pane(stoat, pane) {
         stoat.quit_requested = true;
     }
 }

@@ -10,7 +10,7 @@ define_action!(
     "Quit",
     ActionKind::Quit,
     "close pane or exit",
-    "Close the focused pane. Exit the application when closing the last remaining pane.",
+    "Close the focused pane, or return it to the shell it covers. Exit the application when it is the last pane and covers no shell.",
     ActionPriority::Common,
     aliases = &["q"]
 );

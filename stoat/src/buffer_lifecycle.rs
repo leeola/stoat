@@ -12,7 +12,7 @@
 use crate::{
     action_handlers::{
         file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump, read_open_content,
-        OpenContent,
+        restore_covered_terminal, OpenContent,
     },
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
@@ -483,7 +483,8 @@ pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
 /// [`crate::buffer_registry::BufferRegistry`] and notify the LSP server via
 /// [`crate::host::LspHost::did_close`].
 ///
-/// Each pane that showed the buffer returns to the buffer it showed most
+/// A pane that showed the buffer over a live shell returns to that shell.
+/// Each other pane that showed the buffer returns to the buffer it showed most
 /// recently that is still open, and a latched diff pane re-enters the diff
 /// there. A pane that has shown nothing else still open gets a fresh scratch
 /// buffer, and so does an editor no pane of the active tab shows.
@@ -527,6 +528,9 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     // No jumplist entry records these switches. Such an entry names the closed
     // buffer, which the purge below takes out of every jumplist anyway.
     for pane in showing {
+        if restore_covered_terminal(stoat, pane) {
+            continue;
+        }
         let prior = prior_live_buffer(&mut stoat.workspaces[workspace], pane, Some(buffer_id));
         if let Some((id, buffer)) = prior {
             show_buffer_in_pane(stoat, workspace, pane, id, buffer, executor.clone());

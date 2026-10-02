@@ -567,6 +567,28 @@ mod tests {
     }
 
     #[test]
+    fn write_quit_on_a_buffer_over_a_shell_returns_to_the_shell() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        let (term_id, token) = terminal_in_focused_pane(&mut h);
+        open_in_term(&mut h, token, vec![root.join("a.rs")]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::WriteQuit);
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let shell_back = matches!(
+            ws.panes.pane(ws.panes.focus()).view,
+            crate::pane::View::Terminal(t) if t == term_id
+        );
+        assert_eq!(
+            (shell_back, h.stoat.quit_requested),
+            (true, false),
+            "the landed write returns the pane to its shell and keeps the app",
+        );
+    }
+
+    #[test]
     fn open_in_term_with_an_unknown_token_uses_the_focused_pane() {
         let mut h = TestHarness::with_size(80, 24);
         let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);

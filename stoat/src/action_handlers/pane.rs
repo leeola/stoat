@@ -107,6 +107,42 @@ pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     true
 }
 
+/// Put the shell `id` covers back on screen in place of the view in front of it.
+///
+/// Returns `false` and changes nothing when the pane covers no live shell. The
+/// view in front is disposed as a pane close disposes it, and the pane's record
+/// of the shell is cleared.
+///
+/// When the pane has focus, the editor goes to normal mode, the mode a shell
+/// that comes back rests in.
+pub(crate) fn restore_covered_terminal(stoat: &mut Stoat, id: PaneId) -> bool {
+    let executor = stoat.executor.clone();
+    let focused = {
+        let ws = stoat.active_workspace_mut();
+        let Some(term_id) = super::terminal::covered_terminal(ws, id) else {
+            return false;
+        };
+        let pane = ws.panes.pane_mut(id);
+        pane.prev_view = None;
+        let front = std::mem::replace(&mut pane.view, View::Terminal(term_id));
+        dispose_view(ws, &executor, front, EditorDisposal::Remove);
+        matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == id
+    };
+
+    if focused {
+        stoat.transition_mode("normal".to_string());
+    }
+    true
+}
+
+/// Return `id` to the shell it covers, or close it when it covers none.
+///
+/// Returns `false` when it is the last pane and covers no shell, which is when
+/// the caller exits.
+pub(super) fn quit_pane(stoat: &mut Stoat, id: PaneId) -> bool {
+    restore_covered_terminal(stoat, id) || close_pane_by_id(stoat, id)
+}
+
 /// What to do with the editor behind a closing [`View::Editor`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditorDisposal {

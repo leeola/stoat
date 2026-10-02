@@ -56,7 +56,7 @@ pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
 pub(crate) use palette::sync_palette_picker;
-pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
+pub(crate) use pane::{close_pane_by_id, restore_covered_terminal, restore_pane_after_term_exit};
 use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
@@ -203,7 +203,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     };
     let effect = match action.kind() {
         ActionKind::Quit => {
-            if pane::close_focused_pane(stoat) {
+            let focused = stoat.active_workspace().panes.focus();
+            if pane::quit_pane(stoat, focused) {
                 UpdateEffect::Redraw
             } else {
                 UpdateEffect::Quit

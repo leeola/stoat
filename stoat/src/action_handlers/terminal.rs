@@ -1,10 +1,11 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     host::terminal::TerminalSession,
-    pane::View,
+    pane::{PaneId, View},
     run::{agent_socket_path_in, spawn_term_reader, spawn_terminal, TermSpawnEnv},
     term_screen::TermScreen,
     term_session::{TermId, TermSession},
+    workspace::Workspace,
 };
 use futures::FutureExt;
 use std::sync::Arc;
@@ -31,7 +32,11 @@ const TERM_COLS: u16 = 80;
 /// A shell that comes back is put in normal mode, so its keys reach it
 /// whatever chord it was left in.
 pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(term_id) = hidden_terminal_to_restore(stoat) {
+    let covered = {
+        let ws = stoat.active_workspace();
+        covered_terminal(ws, ws.panes.focus())
+    };
+    if let Some(term_id) = covered {
         {
             let ws = stoat.active_workspace_mut();
             let focused = ws.panes.focus();
@@ -58,13 +63,12 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
-/// The live shell the focused pane covers, ready to be shown again.
+/// The live shell `pane` covers, ready to be shown again.
 ///
 /// `None` unless the pane's record names a terminal, the workspace still holds
 /// that session, and nothing else on screen already shows it.
-fn hidden_terminal_to_restore(stoat: &Stoat) -> Option<TermId> {
-    let ws = stoat.active_workspace();
-    let Some(View::Terminal(term_id)) = ws.panes.pane(ws.panes.focus()).prev_view else {
+pub(super) fn covered_terminal(ws: &Workspace, pane: PaneId) -> Option<TermId> {
+    let Some(View::Terminal(term_id)) = ws.panes.pane(pane).prev_view else {
         return None;
     };
     if !ws.terms.contains_key(term_id) {
@@ -316,6 +320,38 @@ mod tests {
             "the buffer it covered is what the next toggle returns to",
         );
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn quit_on_a_pane_that_covers_a_shell_returns_to_the_shell() {
+        returns_to_the_covered_shell(&stoat_action::Quit);
+    }
+
+    #[test]
+    fn a_buffer_close_on_a_pane_that_covers_a_shell_returns_to_the_shell() {
+        returns_to_the_covered_shell(&stoat_action::CloseBuffer);
+    }
+
+    /// Dispatch `action` on a pane that covers a live shell, and assert the
+    /// shell comes back in that pane with no record left and no second spawn.
+    fn returns_to_the_covered_shell(action: &dyn stoat_action::Action) {
+        let mut h = Stoat::test();
+        let hidden = hide_a_live_terminal(&mut h);
+
+        let effect = super::super::dispatch(&mut h.stoat, action);
+
+        let ws = h.stoat.active_workspace();
+        let no_record = ws.panes.pane(ws.panes.focus()).prev_view.is_none();
+        assert_eq!(
+            (
+                effect,
+                focused_view_terminal(&h),
+                no_record,
+                h.stoat.focused_mode(),
+                h.fake_terminal_host().spawns().len(),
+            ),
+            (UpdateEffect::Redraw, hidden, true, "normal", 1),
+        );
     }
 
     #[test]
