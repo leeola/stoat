@@ -1700,8 +1700,10 @@ impl Preview {
     /// `language_registry`. `Buffer` reads the live in-memory text and copies
     /// the source buffer's own language, ignoring both arguments. Stale syntax
     /// state is reset on every swap so an in-flight parse of the previous
-    /// source cannot paint onto the new one. Read errors render a placeholder
-    /// so the pane always shows something.
+    /// source does not paint onto the new one. A source with no language leaves
+    /// the pane with none, so its text never paints as code of the previous
+    /// source. Read errors render a placeholder so the pane always shows
+    /// something.
     pub(crate) fn sync(
         &mut self,
         ws: &mut Workspace,
@@ -1752,8 +1754,9 @@ impl Preview {
             },
         };
         ws.reset_preview_syntax(self.buffer);
-        if let Some(language) = language {
-            ws.buffers.set_language(self.buffer, language);
+        match language {
+            Some(language) => ws.buffers.set_language(self.buffer, language),
+            None => ws.buffers.clear_language(self.buffer),
         }
         self.rendered_for = Some(source);
     }
@@ -2390,6 +2393,32 @@ mod tests {
         );
 
         picker.dispose(ws);
+    }
+
+    /// A source with no language previews as plain text, even after a source
+    /// that had one. The parse reads the language, so a kept one paints the
+    /// new text as code of the old source.
+    #[test]
+    fn a_source_with_no_language_drops_the_language_before_it() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let fs = crate::host::FakeFs::new();
+        fs.insert_files([("/repo/a.rs", "fn a() {}\n"), ("/repo/b.txt", "plain\n")]);
+
+        let ws = h.stoat.active_workspace_mut();
+        let mut preview = Preview::new(ws, executor);
+        let mut language_after = |path: &str| {
+            preview.sync(ws, &fs, &language_registry, PreviewSource::File(p(path)));
+            ws.buffers
+                .language_for(preview.buffer)
+                .map(|language| language.name)
+        };
+
+        assert_eq!(
+            [language_after("/repo/a.rs"), language_after("/repo/b.txt")],
+            [Some("rust"), None],
+        );
     }
 
     /// Display strings of the filtered rows after running `query` over `base`.

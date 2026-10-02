@@ -444,6 +444,17 @@ impl BufferRegistry {
         }
     }
 
+    /// Drop the language of `id` with its syntax, so the text paints plain.
+    ///
+    /// A buffer that swaps in text of no known language takes this, or the next
+    /// parse reads the new text in the language of the old.
+    pub(crate) fn clear_language(&mut self, id: BufferId) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.language = None;
+        }
+        self.clear_syntax(id);
+    }
+
     /// Whether `id` is flagged as a preview surface.
     ///
     /// A preview buffer has no editor of its own, so a sweep that drops what no
