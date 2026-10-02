@@ -1373,6 +1373,9 @@ on key {
     mode == prefix {
         Escape -> SetMode(normal);
         Ctrl-a -> [SetMode(normal), ToggleTab()];
+        # The pane picker, for a pane where `space a e` is out of reach, since a
+        # terminal sends space to its child.
+        Ctrl-e -> SetMode(space_pane_display);
         c -> [SetMode(normal), NewTab()];
         x -> [SetMode(normal), CloseTab()];
         num -> [SetMode(normal), GotoTab($num)];

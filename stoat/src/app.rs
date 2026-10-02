@@ -4571,7 +4571,10 @@ impl Stoat {
                 }
 
                 let before = self.focused_cursor_pos();
+                let workspace_before = self.active_workspace;
+                let term_before = self.focused_term_id();
                 let effect = self.handle_key(key);
+                self.rest_left_terminal(workspace_before, term_before);
                 let cursor_moved = self.focused_cursor_pos() != before;
 
                 // Re-follow the cursor when a key moved it, pulling the view
@@ -4591,7 +4594,13 @@ impl Stoat {
                     effect
                 }
             },
-            Event::Mouse(mouse) => mouse::handle_mouse(self, mouse),
+            Event::Mouse(mouse) => {
+                let workspace_before = self.active_workspace;
+                let term_before = self.focused_term_id();
+                let effect = mouse::handle_mouse(self, mouse);
+                self.rest_left_terminal(workspace_before, term_before);
+                effect
+            },
             Event::Paste(text) => self.handle_paste(&text),
             _ => UpdateEffect::None,
         };
@@ -6008,6 +6017,35 @@ impl Stoat {
         match &ws.panes.pane(ws.panes.focus()).view {
             View::Agent(id) | View::Terminal(id) => Some(*id),
             _ => None,
+        }
+    }
+
+    /// Put the terminal or agent pane that held focus before an event back in
+    /// normal mode when the event moved focus off it.
+    ///
+    /// A mode other than normal on such a pane is a chord in progress, and the
+    /// chord ends when focus leaves, because a pane without focus takes no
+    /// keys. A binding that moves focus before it switches the mode leaves the
+    /// switch on the pane that took focus. Without this reset, the pane it left
+    /// keeps the chord mode and holds its keys back from the child when focus
+    /// returns.
+    ///
+    /// `workspace` is the active workspace and `term` is
+    /// [`Self::focused_term_id`], both read before the event.
+    fn rest_left_terminal(&mut self, workspace: WorkspaceId, term: Option<TermId>) {
+        let Some(term_id) = term else {
+            return;
+        };
+        if self.active_workspace == workspace && self.focused_term_id() == Some(term_id) {
+            return;
+        }
+
+        if let Some(session) = self
+            .workspaces
+            .get_mut(workspace)
+            .and_then(|ws| ws.terms.get_mut(term_id))
+        {
+            session.mode = "normal".into();
         }
     }
 

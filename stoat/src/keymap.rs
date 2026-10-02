@@ -2753,6 +2753,36 @@ mod tests {
     }
 
     #[test]
+    fn prefix_ctrl_e_opens_the_pane_picker() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+
+        let actions = keymap
+            .lookup(
+                &prefix,
+                &key_event(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            )
+            .map(|actions| {
+                actions
+                    .iter()
+                    .map(|action| {
+                        let args: Vec<Value> =
+                            action.args.iter().map(|arg| arg.value.clone()).collect();
+                        (action.name.clone(), args)
+                    })
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(
+            actions,
+            Some(vec![(
+                "SetMode".to_string(),
+                vec![Value::Ident("space_pane_display".into())]
+            )]),
+            "Ctrl-e in the prefix opens the pane picker and does nothing else"
+        );
+    }
+
+    #[test]
     fn plus_and_minus_take_over_increment_and_decrement_from_ctrl_a() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);

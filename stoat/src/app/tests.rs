@@ -4279,6 +4279,74 @@ fn a_click_into_a_terminal_or_agent_pane_gives_it_the_keys() {
     }
 }
 
+#[test]
+fn ctrl_a_ctrl_e_and_a_digit_pick_a_pane_from_a_terminal() {
+    let mut h = Stoat::test();
+    let (editor_pane, term_pane) = split_editor_and_terminal(&mut h);
+    h.type_action("FocusRight()");
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('e')));
+    assert_eq!(
+        term_mode(&h.stoat, term_pane),
+        "space_pane_display",
+        "Ctrl-a Ctrl-e shows the pane numbers from a terminal",
+    );
+
+    h.stoat.update(Event::Key(bare(KeyCode::Char('1'))));
+    assert_eq!(
+        (
+            h.stoat.active_workspace().panes.focus(),
+            term_mode(&h.stoat, term_pane),
+            h.fake_terminal().sent_bytes()
+        ),
+        (editor_pane, "normal".to_string(), Vec::<Vec<u8>>::new()),
+        "the digit focuses the editor, and the terminal it left rests",
+    );
+
+    h.type_action("FocusRight()");
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    assert_eq!(
+        h.fake_terminal().sent_bytes(),
+        vec![b"x".to_vec()],
+        "the terminal takes its keys again when focus returns",
+    );
+}
+
+#[test]
+fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
+    let mut h = Stoat::test();
+    let (editor_pane, term_pane) = {
+        let ws = h.stoat.active_workspace_mut();
+        let editor_pane = ws.panes.focus();
+        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
+        ws.panes.set_focus(term_pane);
+        ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
+        ws.panes.pane_mut(term_pane).area = Rect::new(40, 0, 40, 24);
+        (editor_pane, term_pane)
+    };
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    assert_eq!(
+        term_mode(&h.stoat, term_pane),
+        "prefix",
+        "Ctrl-a opens the chord on the terminal",
+    );
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5));
+
+    assert_eq!(
+        (
+            h.stoat.active_workspace().panes.focus(),
+            term_mode(&h.stoat, term_pane)
+        ),
+        (editor_pane, "normal".to_string()),
+        "a click that moves focus off the terminal ends its chord",
+    );
+}
+
 fn focused_terminal_pane(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
     let term_id = {
         let ws = h.stoat.active_workspace_mut();
