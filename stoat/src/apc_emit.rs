@@ -445,6 +445,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
             frame,
             &mut ws.editors,
             &ws.buffers,
+            &ws.terms,
             badge,
         );
         let content_version = {

@@ -20,6 +20,7 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
+    term_session::{TermId, TermSession},
     workspace::{
         diff::{self, DiffBase},
         Workspace,
@@ -204,6 +205,7 @@ pub(crate) fn render_pane(
         frame,
         editors,
         buffers,
+        terms,
         badge_rect,
         buf,
         scene,
@@ -598,6 +600,7 @@ fn render_pane_status(
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    terms: &SlotMap<TermId, TermSession>,
     badge_rect: &mut Option<Rect>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -620,7 +623,7 @@ fn render_pane_status(
 
     let segments = status_segments_area(area, frame.badge_cover);
     let (left, right) = status_segments(
-        view, is_focused, segments, frame, editors, buffers, badge_rect,
+        view, is_focused, segments, frame, editors, buffers, terms, badge_rect,
     );
 
     let cache = match view {
@@ -681,6 +684,7 @@ pub(crate) fn pane_status_cells(
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    terms: &SlotMap<TermId, TermSession>,
     badge: Option<u32>,
 ) -> PaneStatusCells {
     let base_style = if is_focused {
@@ -689,8 +693,9 @@ pub(crate) fn pane_status_cells(
         frame.theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
     };
 
-    let (mut left, right) =
-        status_segments(view, is_focused, area, frame, editors, buffers, &mut None);
+    let (mut left, right) = status_segments(
+        view, is_focused, area, frame, editors, buffers, terms, &mut None,
+    );
 
     if let Some(digit) = badge {
         let badge_style = frame
@@ -919,6 +924,7 @@ fn status_segments(
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    terms: &SlotMap<TermId, TermSession>,
     badge_rect: &mut Option<Rect>,
 ) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
     let theme = frame.theme;
@@ -967,7 +973,14 @@ fn status_segments(
         }
     }
 
-    let status = pane_status_info(view, frame.workspace_root, frame.home, editors, buffers);
+    let status = pane_status_info(
+        view,
+        frame.workspace_root,
+        frame.home,
+        editors,
+        buffers,
+        terms,
+    );
     let cursor_pos = status.cursor_pos;
     if let Some(name) = &status.filename
         && prompt.is_none()
@@ -1493,6 +1506,7 @@ fn pane_status_info(
     home: Option<&Path>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    terms: &SlotMap<TermId, TermSession>,
 ) -> PaneStatusInfo {
     let owned = |name: &str| PaneStatusInfo {
         filename: Some(name.to_string()),
@@ -1525,8 +1539,18 @@ fn pane_status_info(
             }
         },
         View::Run(_) => owned("[run]"),
-        View::Agent(_) => owned("[agent]"),
-        View::Terminal(_) => owned("[term]"),
+        View::Agent(id) => owned(
+            terms
+                .get(*id)
+                .and_then(|session| session.term.title())
+                .unwrap_or("[agent]"),
+        ),
+        View::Terminal(id) => owned(
+            terms
+                .get(*id)
+                .and_then(|session| session.term.title())
+                .unwrap_or("[term]"),
+        ),
         View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
         View::Label(label) => owned(label),
     }
@@ -1631,6 +1655,8 @@ mod tests {
         editor_state::EditorState,
         host::LspNotification,
         lsp::drain,
+        pane::View,
+        term_session::TermId,
         workspace::diff::DiffBase,
         Stoat,
     };
@@ -1643,6 +1669,10 @@ mod tests {
     };
     use stoat_action::OpenFile;
     use tokio::sync::mpsc;
+
+    /// The view a terminal session shows as, so one test covers each kind of
+    /// pane a session fills.
+    type SessionView = fn(TermId) -> View;
 
     /// The rendered name is reused only while everything it was rendered from
     /// holds still.
@@ -1784,6 +1814,47 @@ mod tests {
             "and stays whole with no home to measure against, got {:?}",
             paint(None),
         );
+    }
+
+    /// A shell or an agent in a pane names itself through its title, and the
+    /// bar keeps the kind label until the child sets one.
+    #[test]
+    fn a_terminal_or_agent_pane_status_names_the_childs_title() {
+        let kinds: [(SessionView, &str); 2] =
+            [(View::Terminal, "[term]"), (View::Agent, "[agent]")];
+        let bars: Vec<(bool, bool, bool)> = kinds
+            .iter()
+            .map(|&(view, label)| {
+                let (before, after) = bar_before_and_after_a_title(view);
+                (
+                    before.contains(label),
+                    after.contains("build"),
+                    after.contains(label),
+                )
+            })
+            .collect();
+        assert_eq!(bars, [(true, true, false); 2]);
+    }
+
+    /// Show a fresh terminal session in the focused pane as `view`, and paint
+    /// its bar before and after the child titles it `build`.
+    fn bar_before_and_after_a_title(view: SessionView) -> (String, String) {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 8);
+        dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let term_id = {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            let View::Terminal(term_id) = ws.panes.pane(focus).view else {
+                panic!("the terminal action shows a terminal");
+            };
+            ws.panes.pane_mut(focus).view = view(term_id);
+            term_id
+        };
+        let before = bar_row(&h.render_composited());
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(b"\x1b]0;build\x07");
+        (before, bar_row(&h.render_composited()))
     }
 
     /// Push a work-done progress begin so `fake`'s server reads as busy, painting
