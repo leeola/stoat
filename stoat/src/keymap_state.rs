@@ -241,7 +241,7 @@ pub(crate) fn focused_pane_pinned(ws: &Workspace) -> bool {
 /// [`cursor_token`] and [`focus_flags`] both derive their fields from.
 ///
 /// `None` when the focused pane is not an editor or its editor is gone.
-fn resolve_focus(ws: &Workspace) -> Option<(&EditorState, BufferId)> {
+pub(crate) fn resolve_focus(ws: &Workspace) -> Option<(&EditorState, BufferId)> {
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
         return None;
     };
