@@ -103,11 +103,15 @@ pub(crate) enum DiffBase {
     /// relate.
     ///
     /// `path`'s buffer diffs against `text`, the content of `base_path`. Every
-    /// other path diffs against the index, as with no override.
+    /// other path diffs against the index, as with no override. `text` follows
+    /// the base file's buffer while that buffer is open.
     Pair {
         path: PathBuf,
         base_path: PathBuf,
         text: Arc<String>,
+        /// The version of the base file's buffer that `text` was read at,
+        /// which is how the diff drive knows the base moved.
+        base_version: u64,
     },
 }
 
@@ -211,6 +215,17 @@ pub(crate) struct DiffState {
     /// The redraw timers [`Self::settled`] arms, held so they are not cancelled
     /// on drop. Replaced per buffer, so a burst keeps one.
     settle_timers: HashMap<BufferId, Task<()>>,
+    /// The base buffer version that a pair base waits to settle, and when that
+    /// version was first seen.
+    ///
+    /// A slot of its own rather than an entry in [`Self::settle`], which the
+    /// base buffer's own diff keys by the same buffer and version. That map
+    /// drops its entry when it answers, so a shared entry opens a second window
+    /// for whichever caller asks second.
+    pair_settle: Option<(u64, Instant)>,
+    /// The redraw timer for the [`Self::pair_settle`] window, held so it is not
+    /// cancelled on drop.
+    pair_settle_timer: Option<Task<()>>,
 }
 
 impl DiffState {
@@ -321,11 +336,8 @@ impl DiffState {
             },
             _ => {
                 self.settle.insert(buffer_id, (version, now));
-                let timer_executor = executor.clone();
-                let task = executor.spawn_with_redraw(redraw_notify.clone(), async move {
-                    timer_executor.timer(DIFF_SETTLE).await;
-                });
-                self.settle_timers.insert(buffer_id, task);
+                self.settle_timers
+                    .insert(buffer_id, settle_timer(executor, redraw_notify));
                 false
             },
         }
@@ -437,10 +449,80 @@ impl DiffState {
         self.versions.insert(id, version);
     }
 
+    /// Re-read a pair base's text once the base file's buffer has held a new
+    /// version for [`DIFF_SETTLE`].
+    ///
+    /// The measured file's map goes stale with it, so the drive that follows
+    /// re-diffs it with no second window, because its own text did not move. A
+    /// base file with no open buffer keeps the text last read.
+    fn refresh_pair_base(
+        &mut self,
+        buffers: &BufferRegistry,
+        executor: &Executor,
+        redraw_notify: &Arc<Notify>,
+    ) {
+        let Some(DiffBase::Pair {
+            path,
+            base_path,
+            base_version,
+            ..
+        }) = &self.base_override
+        else {
+            return;
+        };
+        let (path, base_path, base_version) = (path.clone(), base_path.clone(), *base_version);
+        let Some(shared) = buffers
+            .id_for_path(&base_path)
+            .and_then(|id| buffers.get(id))
+        else {
+            return;
+        };
+        let version = shared.read().expect("buffer poisoned").snapshot.version;
+        if version == base_version {
+            return;
+        }
+
+        let now = executor.now();
+        match self.pair_settle {
+            Some((settling, since)) if settling == version => {
+                if now.duration_since(since) < DIFF_SETTLE {
+                    return;
+                }
+            },
+            _ => {
+                self.pair_settle = Some((version, now));
+                self.pair_settle_timer = Some(settle_timer(executor, redraw_notify));
+                return;
+            },
+        }
+
+        self.pair_settle = None;
+        let (read_version, read_text) = {
+            let guard = shared.read().expect("buffer poisoned");
+            (
+                guard.snapshot.version,
+                Arc::new(guard.snapshot.visible_text.to_string()),
+            )
+        };
+        if let Some(DiffBase::Pair {
+            text, base_version, ..
+        }) = &mut self.base_override
+        {
+            *text = read_text;
+            *base_version = read_version;
+        }
+        self.base_text.remove(&path);
+        if let Some(id) = buffers.id_for_path(&path) {
+            self.jobs.remove(&id);
+            self.versions.remove(&id);
+        }
+    }
+
     /// Populate visible git-tracked buffers' diff maps on a background thread.
     ///
     /// Polls in-flight jobs and installs their diff maps, then spawns a job for
-    /// each visible git-tracked buffer whose diff is stale.
+    /// each visible git-tracked buffer whose diff is stale. A pair base is
+    /// refreshed from its buffer first, so the jobs below read the current base.
     ///
     /// Mirrors [`Self::drive_parse_jobs`] with at most one job per buffer,
     /// coalescing rapid edits by re-queuing only after the in-flight job
@@ -459,6 +541,8 @@ impl DiffState {
         base_cache: &BaseHighlightCache,
         redraw_notify: &Arc<Notify>,
     ) {
+        self.refresh_pair_base(buffers, executor, redraw_notify);
+
         let waker = futures::task::noop_waker();
         let mut completed: Vec<(DiffJobOutput, bool)> = Vec::new();
         self.jobs.retain(|_, job| {
@@ -654,6 +738,15 @@ pub(super) struct DiffJobOutput {
     /// answer for an untracked file and re-deriving it costs a working-tree
     /// walk.
     pub(super) base: Option<DiffBaseText>,
+}
+
+/// A task that wakes a redraw when a settle window closes, so the frame that
+/// ends the window is drawn even when nothing else asks for one.
+fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
+    let timer_executor = executor.clone();
+    executor.spawn_with_redraw(redraw_notify.clone(), async move {
+        timer_executor.timer(DIFF_SETTLE).await;
+    })
 }
 
 /// The names of what the diff view's left and right columns hold under
@@ -1531,6 +1624,7 @@ mod tests {
             path: "/pair/b.txt".into(),
             base_path: "/pair/a.txt".into(),
             text: Arc::new("one\n".to_string()),
+            base_version: 0,
         };
         let resolved = |root: &str, path: &str| {
             resolve_base(
@@ -2293,6 +2387,70 @@ mod tests {
             before,
             "which reuses the cached blobs rather than rereading them",
         );
+    }
+
+    #[test]
+    fn a_pair_base_follows_an_edit_of_its_file() {
+        let mut h = pair_harness();
+        assert_eq!(
+            focused_diff_statuses(&h, 2),
+            [DiffStatus::Unchanged, DiffStatus::Modified]
+        );
+
+        rewrite_base(&h, "one\nTWO\n");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (pair_text(&h), focused_diff_statuses(&h, 2)),
+            (
+                Some("one\nTWO\n".to_string()),
+                vec![DiffStatus::Unchanged, DiffStatus::Unchanged]
+            ),
+            "the base took the edit and the hunk is gone",
+        );
+    }
+
+    #[test]
+    fn a_pair_base_waits_out_the_settle_window() {
+        let mut h = pair_harness();
+        rewrite_base(&h, "one\nTWO\n");
+        h.stoat.drive_background();
+        assert_eq!(
+            pair_text(&h),
+            Some("one\ntwo\n".to_string()),
+            "a moved base waits for the window like any edit",
+        );
+    }
+
+    /// `/pair/b.txt` diffed against `/pair/a.txt`, side by side and settled.
+    fn pair_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(120, 20);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_side_by_side(("/pair/a.txt", "one\ntwo\n"), ("/pair/b.txt", "one\nTWO\n"));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        h.settle_diff_jobs();
+        h
+    }
+
+    /// The text a [`DiffBase::Pair`] override measures against.
+    fn pair_text(h: &TestHarness) -> Option<String> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Pair { text, .. }) => Some(text.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Replace the whole text of the `/pair/a.txt` buffer, as an edit in its
+    /// pane does.
+    fn rewrite_base(h: &TestHarness, text: &str) {
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .buffers
+            .id_for_path(Path::new("/pair/a.txt"))
+            .expect("the base file is open");
+        let buffer = ws.buffers.get(id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        let len = guard.snapshot.visible_text.len();
+        guard.edit(0..len, text);
     }
 
     /// Every decoration consumer keys off the diff map's version, and the
@@ -3253,6 +3411,7 @@ mod tests {
             path: path.into(),
             base_path: base_path.into(),
             text: Arc::new(String::new()),
+            base_version: 0,
         };
         let sides = [
             diff_sides(None),

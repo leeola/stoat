@@ -268,7 +268,8 @@ pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The first pane's file is the base column. The other pane shows the diff and
 /// takes the focus, so each file stays on the side it was on. The base is the
-/// first file's buffer text when the view opens, unsaved edits included.
+/// first file's buffer text, unsaved edits included, and the diff drive keeps
+/// it in step with that buffer.
 ///
 /// The pair base displaces a revision, a review, or a proposal base, and the
 /// checkout a review made stays. Closing returns to the working tree's base.
@@ -322,14 +323,18 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let Some(text) = stoat
-        .active_workspace()
-        .buffers
-        .get(base_buffer)
-        .map(|shared| {
-            let guard = shared.read().expect("buffer poisoned");
-            Arc::new(guard.snapshot.visible_text.to_string())
-        })
+    let Some((base_version, text)) =
+        stoat
+            .active_workspace()
+            .buffers
+            .get(base_buffer)
+            .map(|shared| {
+                let guard = shared.read().expect("buffer poisoned");
+                (
+                    guard.snapshot.version,
+                    Arc::new(guard.snapshot.visible_text.to_string()),
+                )
+            })
     else {
         return UpdateEffect::None;
     };
@@ -339,6 +344,7 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
             path,
             base_path,
             text,
+            base_version,
         }));
     reopen_diff_view(stoat);
 
@@ -1804,6 +1810,7 @@ mod tests {
             path,
             base_path,
             text,
+            ..
         }) = h.stoat.active_workspace().diff_base()
         else {
             return None;

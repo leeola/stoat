@@ -827,6 +827,7 @@ mod tests {
                 path: "/repo/a.rs".into(),
                 base_path: "/repo/other.rs".into(),
                 text: Arc::new("a\nb\nc\n".to_string()),
+                base_version: 0,
             }));
         cursor_to(&mut h, 2);
 
