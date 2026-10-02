@@ -34,6 +34,7 @@ use lsp_types::{
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    ops,
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
@@ -444,11 +445,12 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
 /// redundant answer then does not open a picker over one target.
 ///
 /// Each entry carries the byte offset under its server's [`OffsetEncoding`],
-/// the 1-based line and column, and the trimmed text of the target line.
-/// Targets in the source file reuse `source_rope`. The resolve reads each
-/// other file through `fs` and builds its rope once for all the candidates in
-/// it, so a file with no open buffer resolves too. The reads and the rope
-/// builds block, so both callers run this on the pool.
+/// the 1-based line and column, the trimmed text of the target line, and the
+/// bytes of the block a link names. Targets in the source file reuse
+/// `source_rope`. The resolve reads each other file through `fs` and builds
+/// its rope once for all the candidates in it, so a file with no open buffer
+/// resolves too. The reads and the rope builds block, so both callers run
+/// this on the pool.
 fn resolve_goto_targets(
     answers: Vec<(OffsetEncoding, GotoDefinitionResponse)>,
     source_path: &Path,
@@ -458,15 +460,16 @@ fn resolve_goto_targets(
     let candidates = answers.into_iter().flat_map(|(encoding, response)| {
         goto_candidates(response)
             .into_iter()
-            .map(move |(uri, position)| (uri, position, encoding))
+            .map(move |(uri, position, block)| (uri, position, block, encoding))
     });
-    let mut by_path: HashMap<PathBuf, Vec<(usize, Position, OffsetEncoding)>> = HashMap::new();
-    for (index, (uri, position, encoding)) in candidates.enumerate() {
+    type Target = (usize, Position, Option<Range>, OffsetEncoding);
+    let mut by_path: HashMap<PathBuf, Vec<Target>> = HashMap::new();
+    for (index, (uri, position, block, encoding)) in candidates.enumerate() {
         if let Some(path) = crate::lsp::util::lsp_uri_to_path(&uri) {
             by_path
                 .entry(path)
                 .or_default()
-                .push((index, position, encoding));
+                .push((index, position, block, encoding));
         }
     }
 
@@ -492,7 +495,7 @@ fn resolve_goto_targets(
         };
 
         let mut seen = HashSet::new();
-        for (index, position, encoding) in targets {
+        for (index, position, block, encoding) in targets {
             let offset = crate::lsp::util::lsp_pos_to_byte_offset(rope, position, encoding);
             if !seen.insert(offset) {
                 continue;
@@ -503,6 +506,10 @@ fn resolve_goto_targets(
                 line: position.line + 1,
                 column: position.character + 1,
                 text: line_text(rope, position.line),
+                block: block.map(|range| {
+                    crate::lsp::util::lsp_pos_to_byte_offset(rope, range.start, encoding)
+                        ..crate::lsp::util::lsp_pos_to_byte_offset(rope, range.end, encoding)
+                }),
             };
             entries.push((index, entry));
         }
@@ -512,20 +519,28 @@ fn resolve_goto_targets(
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
-/// The target URI and the landing position of each candidate in `response`.
+/// The target URI, the landing position, and the named block of each
+/// candidate in `response`.
 ///
 /// A link lands on its selection range, the symbol's name, because its target
-/// range starts at the docs and attributes above the name.
-fn goto_candidates(response: GotoDefinitionResponse) -> Vec<(Uri, Position)> {
+/// range starts at the docs and attributes above the name. That target range
+/// is the block, the whole declaration. A bare location names no block.
+fn goto_candidates(response: GotoDefinitionResponse) -> Vec<(Uri, Position, Option<Range>)> {
     match response {
-        GotoDefinitionResponse::Scalar(loc) => vec![(loc.uri, loc.range.start)],
+        GotoDefinitionResponse::Scalar(loc) => vec![(loc.uri, loc.range.start, None)],
         GotoDefinitionResponse::Array(locs) => locs
             .into_iter()
-            .map(|loc| (loc.uri, loc.range.start))
+            .map(|loc| (loc.uri, loc.range.start, None))
             .collect(),
         GotoDefinitionResponse::Link(links) => links
             .into_iter()
-            .map(|link| (link.target_uri, link.target_selection_range.start))
+            .map(|link| {
+                (
+                    link.target_uri,
+                    link.target_selection_range.start,
+                    Some(link.target_range),
+                )
+            })
             .collect(),
     }
 }
@@ -2204,7 +2219,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
                 0 => crate::lsp::session::set_lsp_status(stoat, format!("lsp: no {label} found")),
                 1 => {
                     let entry = entries.remove(0);
-                    apply_jump(stoat, &entry.path, entry.offset);
+                    apply_jump(stoat, &entry.path, entry.offset, entry.block);
                 },
                 _ => {
                     stoat.location_picker = Some(open_location_picker(stoat, entries));
@@ -2222,7 +2237,16 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
 /// Open `path` in the focused pane and collapse every selection onto
 /// `offset`. Opening is a no-op when the file is already the pane's
 /// buffer.
-pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
+///
+/// A `block` of bytes, the declaration a link names, frames in the pane per
+/// [`super::view::frame_jump_on_block`]. A jump with no block follows the
+/// cursor with the least scroll.
+pub(crate) fn apply_jump(
+    stoat: &mut Stoat,
+    path: &Path,
+    offset: usize,
+    block: Option<ops::Range<usize>>,
+) {
     super::jump::push_jump(stoat);
 
     let buffer_before =
@@ -2239,10 +2263,17 @@ pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
 
     // Landing in another file means a freshly shown editor with no prior view to
     // glide from, so it snaps.
-    if Some(editor.buffer_id) == buffer_before {
-        super::view::follow_jump(editor, scrolloff);
-    } else {
-        super::view::ensure_cursor_in_view(editor, scrolloff);
+    let same_buffer = Some(editor.buffer_id) == buffer_before;
+    match (block, same_buffer) {
+        (Some(block), _) => {
+            super::view::frame_jump_on_block(editor, block, scrolloff, same_buffer);
+        },
+        (None, true) => {
+            super::view::follow_jump(editor, scrolloff);
+        },
+        (None, false) => {
+            super::view::ensure_cursor_in_view(editor, scrolloff);
+        },
     }
 }
 

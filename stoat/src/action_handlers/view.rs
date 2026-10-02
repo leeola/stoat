@@ -419,6 +419,104 @@ pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     scrolled
 }
 
+/// Frame a jump's `block` of buffer bytes in the view, and report whether the
+/// view moved.
+///
+/// A block already whole on screen, with the cursor inside the margin band,
+/// leaves the view where the reader sees it. Otherwise the view moves to the
+/// scroll [`block_frame_scroll`] picks.
+///
+/// With `glide` a move over one row glides from the pre-jump row, as
+/// [`follow_jump`] does. A jump into another file passes no glide, because its
+/// freshly shown editor has no view to glide from.
+///
+/// See also:
+/// - [`follow_jump`] for a jump that names no block.
+pub(crate) fn frame_jump_on_block(
+    editor: &mut EditorState,
+    block: Range<usize>,
+    scrolloff: u32,
+    glide: bool,
+) -> bool {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let (block_rows, max_scroll) = {
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let start = rope.offset_to_point(block.start.min(rope.len()));
+        let end = rope.offset_to_point(block.end.min(rope.len()));
+        let start_row = snapshot.buffer_to_display(start).row;
+        let end_row = snapshot.buffer_to_display(end).row;
+        // A block that ends at the start of a line below its first covers none
+        // of that line, so the line stays out of the frame.
+        let end_row = match end.column == 0 && end.row > start.row {
+            true => end_row,
+            false => end_row + 1,
+        };
+        (
+            start_row..end_row,
+            max_scroll_row(snapshot.line_count(), viewport),
+        )
+    };
+    let cursor_row = cursor_display_row(editor);
+    let rows = block_rows.start.min(cursor_row)..block_rows.end.max(cursor_row + 1);
+
+    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(viewport / 2);
+    let prev = editor.scroll_row;
+    let on_screen = rows.start >= prev && rows.end <= prev + viewport;
+    let in_band = cursor_row >= prev + top && cursor_row + bottom < prev + viewport;
+    if on_screen && in_band {
+        return false;
+    }
+
+    editor.scroll_row = block_frame_scroll(rows, cursor_row, viewport, scrolloff, max_scroll);
+    // A jump lands on the row grid, whatever fraction the wheel last rested on.
+    editor.scroll_frac = 0.0;
+    if glide && prev.abs_diff(editor.scroll_row) > 1 {
+        editor.scroll_offset = prev as f32;
+        editor.scroll_glide = ScrollGlide::Page;
+    }
+    editor.scroll_row != prev
+}
+
+/// The scroll row that frames a jump's `block` of display rows, with the
+/// cursor on `cursor_row`.
+///
+/// A block that fits the viewport centers. A taller block starts at the top
+/// margin, so the head of the declaration shows first. When docs above the
+/// name push the cursor below the middle row, the view moves on until the
+/// cursor sits on the middle row, which splits the pane between the docs and
+/// the body.
+///
+/// The result clamps into the band [`ensure_cursor_in_view`] holds the cursor
+/// in, so the cursor never hides and the next key moves nothing. It also
+/// clamps to `max_scroll`, so the document end pins to the bottom.
+fn block_frame_scroll(
+    block: Range<u32>,
+    cursor_row: u32,
+    viewport: u32,
+    scrolloff: u32,
+    max_scroll: u32,
+) -> u32 {
+    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(viewport / 2);
+    let height = block.end.saturating_sub(block.start);
+
+    let framed = match height <= viewport {
+        true => block.start.saturating_sub((viewport - height) / 2),
+        false => block
+            .start
+            .saturating_sub(top)
+            .max(cursor_row.saturating_sub(viewport.saturating_sub(1) / 2)),
+    };
+
+    // The margins sum to less than the viewport, so the band is never empty.
+    let lowest = (cursor_row + bottom + 1).saturating_sub(viewport);
+    let highest = cursor_row.saturating_sub(top);
+    framed.clamp(lowest, highest).min(max_scroll)
+}
+
 /// Center the view on the cursor after a jump, biased `center_off` rows toward
 /// the side the jump arrived from, and report whether the view moved.
 ///
@@ -1002,6 +1100,70 @@ mod tests {
             "the bias caps at four, so the landing sits on the last row of the \
              ten the viewport holds",
         );
+    }
+
+    #[test]
+    fn a_block_frames_by_its_size() {
+        assert_eq!(
+            [
+                block_frame_scroll(100..106, 102, 20, 3, 500),
+                block_frame_scroll(100..160, 103, 20, 3, 500),
+                block_frame_scroll(100..200, 150, 20, 3, 500),
+                block_frame_scroll(100..120, 119, 20, 3, 500),
+                block_frame_scroll(0..4, 1, 20, 3, 500),
+                block_frame_scroll(190..196, 191, 20, 3, 177),
+            ],
+            [93, 97, 141, 103, 0, 177],
+            "centered, top margin, cursor on the middle row, cursor band over \
+             the fit, document start, document end",
+        );
+    }
+
+    #[test]
+    fn a_block_on_screen_leaves_the_view_alone() {
+        let mut h = framing_harness();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.scroll_row = 90;
+        assert_eq!(
+            (
+                frame_jump_on_block(editor, 900..954, 3, true),
+                editor.scroll_row
+            ),
+            (false, 90),
+        );
+    }
+
+    #[test]
+    fn a_framed_jump_glides_only_inside_one_buffer() {
+        let mut h = framing_harness();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let mut frame = |glide| {
+            editor.scroll_row = 0;
+            editor.scroll_offset = 0.0;
+            editor.scroll_glide = ScrollGlide::None;
+            frame_jump_on_block(editor, 900..954, 3, glide);
+            (editor.scroll_row, editor.scroll_offset, editor.scroll_glide)
+        };
+        assert_eq!(
+            [frame(true), frame(false)],
+            [(93, 0.0, ScrollGlide::Page), (93, 0.0, ScrollGlide::None)],
+            "the block centers either way, and only a jump inside one buffer \
+             glides there",
+        );
+    }
+
+    /// A 200-line buffer of nine-byte lines in a viewport of 20, with the
+    /// cursor on row 102. Rows 100 through 105 span bytes `900..954`.
+    fn framing_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(20);
+        movement::set_cursor_row(editor, 102);
+        h
     }
 
     #[test]

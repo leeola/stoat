@@ -7,7 +7,7 @@
 //! path a single-location goto uses.
 
 use crate::picker::{PreviewSource, TargetPicker};
-use std::path::PathBuf;
+use std::{ops::Range, path::PathBuf};
 
 /// One resolved goto candidate. Carries the byte offset to jump to plus
 /// the 1-based line/column and the target line's text for display.
@@ -18,6 +18,11 @@ pub(crate) struct LocationEntry {
     pub(crate) line: u32,
     pub(crate) column: u32,
     pub(crate) text: String,
+    /// The byte range of the whole declaration the server named for the
+    /// target, docs included, which the jump frames in the pane.
+    ///
+    /// `None` when the server sent a bare location, which names no block.
+    pub(crate) block: Option<Range<usize>>,
 }
 
 /// Modal chooser over the candidates of a multi-location goto.

@@ -1730,6 +1730,7 @@ mod dispatch_tests {
                 line: 1,
                 column: 1,
                 text: "candidate".to_owned(),
+                block: None,
             }],
         ));
         h.render_composited();

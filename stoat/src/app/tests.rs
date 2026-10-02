@@ -7415,6 +7415,7 @@ fn normal_mode_bindings_stop_at_the_location_picker() {
             line: 1,
             column: 1,
             text: "candidate".to_owned(),
+            block: None,
         }],
     ));
 
@@ -11549,6 +11550,7 @@ fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) 
             line: i as u32 + 1,
             column: 1,
             text: format!("candidate-{}", i + 1),
+            block: None,
         })
         .collect();
     h.stoat.location_picker = Some(action_handlers::lsp::open_location_picker(

@@ -755,6 +755,51 @@ fn goto_definition_over_a_link_lands_on_the_name() {
     );
 }
 
+#[test]
+fn goto_definition_centers_a_small_block() {
+    use lsp_types::{Position, Range};
+
+    let mut h = TestHarness::with_size(80, 21);
+    enable_goto_definition(&h);
+    let text: String = (0..200)
+        .map(|row| match row {
+            0 => "target();\n",
+            100 | 101 => "/// docs\n",
+            102 => "fn target() {\n",
+            103 | 104 => "    body();\n",
+            105 => "}\n",
+            _ => "\n",
+        })
+        .collect();
+    let root = seed(&mut h, &[("main.rs", text.as_str())]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    // The jump frames against the pane's measured viewport, which a render sets.
+    h.snapshot();
+    let path = path.to_str().unwrap();
+    h.fake_lsp().set_definition_link(
+        path,
+        0,
+        0,
+        path,
+        Range::new(Position::new(100, 0), Position::new(105, 1)),
+        Range::new(Position::new(102, 3), Position::new(102, 9)),
+    );
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+    h.settle();
+
+    let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+    let viewport = editor.viewport_rows.expect("the render measured the pane");
+    assert_eq!(
+        (
+            crate::render::editor::editor_cursor_position(editor).map(|(line, _)| line - 1),
+            103 - editor.scroll_row,
+        ),
+        (Some(102), viewport / 2),
+        "the cursor lands on the name, and the block's middle row sits on the pane's middle row",
+    );
+}
+
 fn enable_goto_declaration(h: &TestHarness) {
     use lsp_types::{DeclarationCapability, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {
@@ -3441,7 +3486,7 @@ fn a_same_file_jump_glides_while_a_cross_file_jump_snaps() {
         editor.scroll_glide = ScrollGlide::None;
     }
 
-    super::apply_jump(&mut h.stoat, &root.join("a.rs"), long.len());
+    super::apply_jump(&mut h.stoat, &root.join("a.rs"), long.len(), None);
     {
         let editor =
             crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
@@ -3457,7 +3502,7 @@ fn a_same_file_jump_glides_while_a_cross_file_jump_snaps() {
         editor.scroll_glide = ScrollGlide::None;
     }
 
-    super::apply_jump(&mut h.stoat, &root.join("b.rs"), long.len());
+    super::apply_jump(&mut h.stoat, &root.join("b.rs"), long.len(), None);
     h.settle();
     let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
     assert!(

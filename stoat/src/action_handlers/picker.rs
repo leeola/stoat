@@ -355,7 +355,7 @@ pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(entry) = entry else {
         return UpdateEffect::Redraw;
     };
-    super::lsp::apply_jump(stoat, &entry.path, entry.offset);
+    super::lsp::apply_jump(stoat, &entry.path, entry.offset, entry.block);
     UpdateEffect::Redraw
 }
 
