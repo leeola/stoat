@@ -24,7 +24,7 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
-    render::{layout::split_pane_status, walkthrough::SlideParts},
+    render::{layout::split_pane_status, text, walkthrough::SlideParts},
     run::{RunId, RunState},
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
@@ -78,6 +78,13 @@ const INLINE_PARSE_MAX_BYTES: usize = 256 * 1024;
 /// inside this. Anything that does not is a reparse worth moving off the run
 /// loop, which the abort does at the cost of the time already spent.
 const INLINE_PARSE_BUDGET: Duration = Duration::from_millis(1);
+
+/// The widest a terminal or an agent title gets as a tab's name.
+///
+/// A shell commonly titles itself with its user, host, and directory, and a
+/// few such titles uncut take the whole tab bar. 24 columns holds a typical
+/// agent title. A file name and a `RenameTab` name are not cut.
+const TAB_TITLE_MAX_COLS: usize = 24;
 
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
 /// key whose generation is recycled each run, so it can't serve as an on-disk
@@ -544,9 +551,10 @@ impl Workspace {
     /// What tab `idx` calls itself in the tab bar, taken from its focused
     /// pane's view.
     ///
-    /// An editor names its file, or reads as scratch when it has none. The
-    /// other views name their kind, since a terminal or run pane has nothing
-    /// more specific to offer. An out-of-range index is empty.
+    /// An editor names its file, or reads as scratch when it has none. A
+    /// terminal or an agent names itself by the title its child set, cut to
+    /// [`TAB_TITLE_MAX_COLS`], and by its kind until the child sets one. A run
+    /// pane names its kind. An out-of-range index is empty.
     ///
     /// The kind names match the `pane` keymap predicate's, so what the bar
     /// shows and what a binding condition matches on read the same.
@@ -575,8 +583,8 @@ impl Workspace {
                 .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "scratch".to_string()),
-            View::Agent(_) => "agent".to_string(),
-            View::Terminal(_) => "term".to_string(),
+            View::Agent(id) => self.session_tab_title(*id, "agent"),
+            View::Terminal(id) => self.session_tab_title(*id, "term"),
             View::Run(_) => "run".to_string(),
             View::Image { path, .. } => path
                 .file_name()
@@ -584,6 +592,16 @@ impl Workspace {
                 .unwrap_or_else(|| "image".to_string()),
             View::Label(_) => "pane".to_string(),
         }
+    }
+
+    /// The tab name of session `id`, which is the title its child set, or
+    /// `kind` while it has set none.
+    fn session_tab_title(&self, id: TermId, kind: &str) -> String {
+        self.terms
+            .get(id)
+            .and_then(|session| session.term.title())
+            .map(|title| text::truncate_to_cols(title, TAB_TITLE_MAX_COLS))
+            .unwrap_or_else(|| kind.to_string())
     }
 
     /// Every pane tree in the workspace, the active one first.

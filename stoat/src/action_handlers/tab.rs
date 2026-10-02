@@ -163,7 +163,7 @@ fn relayout(stoat: &mut Stoat) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, pane::View, test_harness::TestHarness};
+    use crate::{app::Stoat, pane::View, term_session::TermId, test_harness::TestHarness};
     use stoat_config::TabBarMode;
 
     fn dispatch(h: &mut TestHarness, action: &dyn stoat_action::Action) {
@@ -357,6 +357,80 @@ mod tests {
         assert_eq!(ws.tab_title(0), "notes.md", "the parked tab keeps its file");
         assert_eq!(ws.tab_title(1), "scratch", "a fresh tab has no file yet");
         assert_eq!(ws.tab_title(9), "", "an out-of-range index is empty");
+    }
+
+    /// A tab on a shell or an agent reads as what the child says it runs. A
+    /// parked tab follows its session too, and the cut keeps a long title from
+    /// filling the bar.
+    #[test]
+    fn a_terminal_tab_takes_the_childs_title_and_falls_back_to_its_kind() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NewTab);
+        dispatch(&mut h, &stoat_action::Terminal);
+        let term_id = focused_terminal(&h);
+        let titled = |h: &mut TestHarness, bytes: &[u8]| {
+            h.stoat.active_workspace_mut().terms[term_id]
+                .term
+                .feed(bytes);
+            h.stoat.active_workspace().tab_title(1)
+        };
+
+        let named = titled(&mut h, b"\x1b]0;build\x07");
+        dispatch(&mut h, &stoat_action::PrevTab);
+        let long = titled(&mut h, format!("\x1b]0;{}\x07", "x".repeat(30)).as_bytes());
+        let cleared = titled(&mut h, b"\x1b]2;\x07");
+
+        assert_eq!(
+            [named, long, cleared],
+            ["build".to_string(), "x".repeat(24), "term".to_string()],
+        );
+    }
+
+    #[test]
+    fn an_agent_tab_takes_the_childs_title() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::Terminal);
+        let term_id = focused_terminal(&h);
+        let ws = h.stoat.active_workspace_mut();
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).view = View::Agent(term_id);
+
+        let untitled = ws.tab_title(ws.active_tab);
+        ws.terms[term_id].term.feed(b"\x1b]0;claude\x07");
+
+        assert_eq!(
+            [untitled, ws.tab_title(ws.active_tab)],
+            ["agent".to_string(), "claude".to_string()],
+        );
+    }
+
+    #[test]
+    fn a_renamed_tab_keeps_its_name_over_a_terminal_title() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::Terminal);
+        dispatch(
+            &mut h,
+            &stoat_action::RenameTab {
+                name: Some("ops".to_string()),
+            },
+        );
+        let term_id = focused_terminal(&h);
+
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(b"\x1b]0;build\x07");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(ws.tab_title(ws.active_tab), "ops");
+    }
+
+    /// The terminal session the focused pane shows.
+    fn focused_terminal(h: &TestHarness) -> TermId {
+        let ws = h.stoat.active_workspace();
+        let View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the focused pane shows a terminal");
+        };
+        term_id
     }
 
     /// Asserting the tab count alone would pass against a close that leaked
