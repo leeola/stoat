@@ -1,7 +1,6 @@
 use crate::{
     action_handlers::pane::{dispose_view, EditorDisposal},
     app::{Stoat, UpdateEffect},
-    command_palette::{Availability, CommandPalette},
 };
 use stoat_config::TabBarMode;
 
@@ -114,7 +113,7 @@ pub(super) fn toggle_tab_bar(stoat: &mut Stoat) -> UpdateEffect {
 /// name entry.
 pub(super) fn rename_tab(stoat: &mut Stoat, name: Option<&str>) -> UpdateEffect {
     let Some(name) = name else {
-        return open_rename_palette(stoat);
+        return super::palette::open_palette_seeded(stoat, "tab-rename ");
     };
 
     let trimmed = name.trim();
@@ -131,31 +130,6 @@ pub(super) fn rename_tab(stoat: &mut Stoat, name: Option<&str>) -> UpdateEffect 
     };
 
     stoat.set_status(status);
-    UpdateEffect::Redraw
-}
-
-/// Open the command palette already collecting a `tab-rename` argument, so the
-/// bare action lands the user in inline name entry.
-///
-/// The seed is applied and the picker synced in the same tick, so the palette
-/// shows arg mode on the first frame rather than after the next keystroke.
-fn open_rename_palette(stoat: &mut Stoat) -> UpdateEffect {
-    let executor = stoat.executor.clone();
-    let availability = Availability::from_stoat(stoat);
-    {
-        let ws = stoat.active_workspace_mut();
-        stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
-    }
-
-    let active_idx = stoat.active_workspace;
-    {
-        let ws = &mut stoat.workspaces[active_idx];
-        if let Some(palette) = stoat.command_palette.as_ref() {
-            palette.input.replace_text(ws, "tab-rename ");
-        }
-    }
-    super::palette::sync_palette_picker(stoat);
-
     UpdateEffect::Redraw
 }
 

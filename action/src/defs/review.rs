@@ -10,7 +10,8 @@ const DIFF_PARAMS: &[ParamDef] = &[ParamDef {
     value_source: ValueSource::None,
     required: false,
     description: "Branch, tag, sha, or revspec to diff against. Without it the working tree \
-                  diffs against its own base.",
+                  diffs against its own base. `index` and `HEAD` name the working tree's two \
+                  bases.",
 }];
 
 define_action_def!(
@@ -23,8 +24,9 @@ define_action_def!(
      with what the index holds over HEAD marked staged in the left column, \
      unless DiffAgainstHead picked HEAD. A revision points the whole \
      workspace at that commit, so every file diffs against it and the change \
-     list spans everything committed since. Running it again closes the \
-     diff, and a revision gives way to the working tree's base. While the \
+     list spans everything committed since. `index` and `HEAD` name the \
+     working tree's two bases rather than revisions. Running it again closes \
+     the diff, and a revision gives way to the working tree's base. While the \
      diff is open, the plain wheel scrolls until the change under the cursor \
      passes the editor.diff_wheel_jump line. The next notch then walks to \
      the next change, and a notch up walks back. DiffWheelWalk turns that \
@@ -114,6 +116,19 @@ define_action!(
      sides.",
     ActionPriority::Normal,
     command_name = "diff-base-toggle"
+);
+
+define_action!(
+    DiffBaseEditDef,
+    DiffBaseEdit,
+    "DiffBaseEdit",
+    ActionKind::DiffBaseEdit,
+    "edit what the diff compares against",
+    "Open the command line holding the diff command and the current base, so \
+     a retyped revision, `index`, or `HEAD` and Enter points the diff at it. \
+     Escape leaves the base as it is.",
+    ActionPriority::Normal,
+    command_name = "diff-base-edit"
 );
 
 define_action!(

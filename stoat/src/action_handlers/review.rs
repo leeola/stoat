@@ -148,6 +148,11 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 /// A revision the repository cannot resolve changes nothing at all: it badges
 /// and leaves the view, the latch, and the base where they were. A command that
 /// half-applies leaves the reader worse off than one that refuses.
+///
+/// The words `index` and `HEAD`, in any letter case, name the working tree's
+/// own two bases, as [`diff_against`] picks them. HEAD as a word keeps the
+/// index marking what is staged, which a HEAD resolved to a sha does not. A
+/// branch that carries either name stays reachable as `refs/heads/<name>`.
 pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     let Some(rev) = rev else {
         // The bare command also drops any base a revision left installed, so
@@ -155,6 +160,12 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
         toggle_diff_view(stoat);
         return UpdateEffect::Redraw;
     };
+    if rev.eq_ignore_ascii_case("index") {
+        return diff_against(stoat, WorktreeBase::Index);
+    }
+    if rev.eq_ignore_ascii_case("head") {
+        return diff_against(stoat, WorktreeBase::Head);
+    }
 
     let git_root = stoat.active_workspace().git_root.clone();
     let Some(repo) = stoat.git_host.discover(&git_root) else {
@@ -232,6 +243,21 @@ pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     let (from, to) = diff::diff_sides(stoat.active_workspace().diff_base());
     stoat.set_status(format!("diff: {from} → {to}"));
     UpdateEffect::Redraw
+}
+
+/// Open the command palette holding `diff` and the current base, for the
+/// reader to retype.
+///
+/// Enter runs the ordinary `:diff <rev>`, so a revision, `index`, or `HEAD`
+/// points the diff at it, and Escape changes nothing. A base with no revision
+/// name to retype, the empty parent of a root commit or an agent proposal,
+/// seeds a bare `diff `.
+pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
+    let seed = match stoat.active_workspace().diff_base() {
+        Some(DiffBase::Rev { sha: None } | DiffBase::Memory { .. }) => "diff ".to_string(),
+        base => format!("diff {}", diff::diff_sides(base).0),
+    };
+    super::palette::open_palette_seeded(stoat, &seed)
 }
 
 /// Turn the diff view on, whatever it was showing before.
@@ -1497,6 +1523,72 @@ mod tests {
             ),
             (true, Some("diff: index → working tree")),
         );
+    }
+
+    #[test]
+    fn diff_head_as_a_word_installs_the_head_base() {
+        let mut h = half_staged_harness();
+        run(
+            &mut h,
+            &stoat_action::Diff {
+                rev: Some("HEAD".into()),
+            },
+        );
+        assert_eq!(head_base_and_view(&mut h), (true, true));
+    }
+
+    #[test]
+    fn diff_index_as_a_word_returns_to_the_index() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffAgainstHead);
+        run(
+            &mut h,
+            &stoat_action::Diff {
+                rev: Some("index".into()),
+            },
+        );
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().diff_base().is_none(),
+                head_base_and_view(&mut h).1
+            ),
+            (true, true),
+        );
+    }
+
+    #[test]
+    fn the_base_edit_seeds_the_palette_with_the_current_base() {
+        let mut h = half_staged_harness();
+        let mut seeds = vec![base_edit_seed(&mut h)];
+        run(&mut h, &stoat_action::DiffAgainstHead);
+        seeds.push(base_edit_seed(&mut h));
+        for sha in [Some("base0"), None] {
+            h.stoat
+                .active_workspace_mut()
+                .set_diff_base(Some(DiffBase::Rev {
+                    sha: sha.map(str::to_string),
+                }));
+            seeds.push(base_edit_seed(&mut h));
+        }
+
+        assert_eq!(
+            seeds,
+            ["diff index", "diff HEAD", "diff base0", "diff "].map(|seed| Some(seed.to_string())),
+        );
+    }
+
+    /// The text `DiffBaseEdit` opens the palette with. The palette closes again,
+    /// so the next press opens a fresh one.
+    fn base_edit_seed(h: &mut TestHarness) -> Option<String> {
+        run(h, &stoat_action::DiffBaseEdit);
+        let seed = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.input.text(h.stoat.active_workspace()));
+        run(h, &stoat_action::CancelPromptInput);
+        seed
     }
 
     /// The bare command closes the diff, and a base a revision installed goes

@@ -1,6 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    command_palette::PaletteOutcome,
+    command_palette::{Availability, CommandPalette, PaletteOutcome},
     file_finder::Browse,
     host::FsHost,
     picker::{PathPicker, Scan},
@@ -100,6 +100,33 @@ fn cached_workspace_paths(stoat: &Stoat, git_root: &Path) -> Option<Arc<Vec<Path
         .as_ref()
         .filter(|cache| cache.root == git_root && cache.epoch == stoat.finder_path_epoch)
         .map(|cache| Arc::clone(&cache.paths))
+}
+
+/// Open the command palette with `seed` already typed.
+///
+/// A seed that names a command and ends in a space opens the palette already
+/// collecting that command's argument, so a bare action lands the reader in
+/// inline entry. The seed is applied and the picker synced in the same tick, so
+/// the palette shows that mode on the first frame rather than after the next
+/// keystroke.
+pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect {
+    let executor = stoat.executor.clone();
+    let availability = Availability::from_stoat(stoat);
+    {
+        let ws = stoat.active_workspace_mut();
+        stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
+    }
+
+    let active_idx = stoat.active_workspace;
+    {
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(palette) = stoat.command_palette.as_ref() {
+            palette.input.replace_text(ws, seed);
+        }
+    }
+    sync_palette_picker(stoat);
+
+    UpdateEffect::Redraw
 }
 
 /// Sync the palette's inline file picker once per frame, before the palette is

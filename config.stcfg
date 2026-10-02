@@ -1202,7 +1202,8 @@ on key {
     # without leaving the chord. It spells the same verb `space r` does.
     #
     # `i` and `h` point the diff at the index or at HEAD. `b` flips the diff
-    # base between the index and HEAD.
+    # base between the index and HEAD. `e` opens the base on the command line
+    # for editing.
     #
     # `f` follows the whole working tree. Each file written outside the editor
     # opens in the diff view with the cursor on the change, until a second `f`
@@ -1223,6 +1224,7 @@ on key {
         i -> [DiffAgainstIndex(), SetMode(normal)];
         h -> [DiffAgainstHead(), SetMode(normal)];
         b -> [DiffBaseToggle(), SetMode(normal)];
+        e -> [SetMode(normal), DiffBaseEdit()];
         s -> [StageHunk(), SetMode(normal)];
         u -> [UnstageHunk(), SetMode(normal)];
         S -> [StageLine(), SetMode(normal)];

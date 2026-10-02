@@ -105,11 +105,11 @@ use crate::{
             SetRebaseOpSquash,
         },
         review::{
-            Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseToggle, DiffForward,
-            DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
-            JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone, ReviewNextCommit,
-            ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk, ToggleStageLine, UnstageHunk,
-            UnstageLine,
+            Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit, DiffBaseToggle,
+            DiffForward, DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget,
+            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
+            ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
+            ToggleStageLine, UnstageHunk, UnstageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -327,6 +327,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DiffAgainstIndex::DEF, |_| Ok(Box::new(DiffAgainstIndex)));
     add(DiffAgainstHead::DEF, |_| Ok(Box::new(DiffAgainstHead)));
     add(DiffBaseToggle::DEF, |_| Ok(Box::new(DiffBaseToggle)));
+    add(DiffBaseEdit::DEF, |_| Ok(Box::new(DiffBaseEdit)));
     add(DiffBack::DEF, |_| Ok(Box::new(DiffBack)));
     add(DiffForward::DEF, |_| Ok(Box::new(DiffForward)));
     add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
@@ -1355,6 +1356,7 @@ mod tests {
         "DiffAgainstIndex",
         "DiffAgainstHead",
         "DiffBaseToggle",
+        "DiffBaseEdit",
         "DiffBack",
         "DiffForward",
     ];
@@ -1870,7 +1872,8 @@ mod tests {
         // + 2 DiffAgainstIndex/DiffAgainstHead.
         // + 2 DiffBack/DiffForward.
         // + 1 DiffBaseToggle.
-        assert_eq!(all().count(), 430);
+        // + 1 DiffBaseEdit.
+        assert_eq!(all().count(), 431);
     }
 
     #[test]
