@@ -304,6 +304,10 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
     "ZELLIJ_PANE_ID",
 ];
 
+/// Variables by which a shell in a Stoat terminal pane addresses the instance
+/// that hosts it.
+const HOST_ENV_VARS: [&str; 3] = ["STOAT_SESSION", "STOAT_AGENT_SOCK", "STOAT_TERM_ID"];
+
 /// Set the environment a stoatty child shell inherits.
 ///
 /// `TERM` selects the terminfo the shell and its children load.
@@ -337,6 +341,11 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// control this window. A real multiplexer launched inside stoatty re-sets
 /// these for its own children, so in-stoatty-mux detection still stands down as
 /// intended.
+///
+/// Inherited host variables ([`HOST_ENV_VARS`]) are removed because a stoatty
+/// started from a Stoat terminal pane is a new terminal. With them, a `stoat`
+/// in it sends its files to that pane's instance and starts no editor. The
+/// editor stoatty starts sets them again for its own panes.
 // PATH is inherited to be extended, not consulted, and EnvHost::var yields only
 // UTF-8, which a PATH is not required to be. prepend_path holds the pure part.
 #[allow(clippy::disallowed_methods)]
@@ -362,6 +371,9 @@ fn configure_child_env(
         command.env("STOAT_THEME", theme);
     }
     for var in MULTIPLEXER_ENV_VARS {
+        command.env_remove(var);
+    }
+    for var in HOST_ENV_VARS {
         command.env_remove(var);
     }
     if let Some(dir) = stoat_dir {
@@ -817,6 +829,23 @@ mod tests {
             command.get_env("STOATTY_VERSION"),
             Some(OsStr::new(crate::cli::VERSION_INFO)),
         );
+    }
+
+    /// A stoatty started from a Stoat terminal pane inherits the variables that
+    /// the pane's shell addresses its instance by, and a `stoat` in the new
+    /// window forwards its files there unless this removes them.
+    #[test]
+    fn configure_child_env_strips_the_hosting_stoats_vars() {
+        let host = ["STOAT_SESSION", "STOAT_AGENT_SOCK", "STOAT_TERM_ID"];
+        let mut command = CommandBuilder::new("/bin/sh");
+        for var in host {
+            command.env(var, "set by the hosting pane");
+        }
+
+        configure_child_env(&mut command, None, None, None, "");
+
+        let kept: Vec<Option<&OsStr>> = host.iter().map(|var| command.get_env(var)).collect();
+        assert_eq!(kept, [None; 3]);
     }
 
     /// A stoatty launched from another terminal inherits that terminal's
