@@ -1286,6 +1286,10 @@ fn client_capabilities() -> ClientCapabilities {
                 content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
                 ..Default::default()
             }),
+            declaration: Some(GotoCapability {
+                link_support: Some(true),
+                ..Default::default()
+            }),
             definition: Some(GotoCapability {
                 link_support: Some(true),
                 ..Default::default()

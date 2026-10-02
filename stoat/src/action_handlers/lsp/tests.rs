@@ -728,6 +728,33 @@ fn goto_definition_jumps_within_same_file() {
     assert_eq!(focused_buffer_path(&h), path);
 }
 
+#[test]
+fn goto_definition_over_a_link_lands_on_the_name() {
+    use lsp_types::{Position, Range};
+
+    let mut h = TestHarness::with_size(80, 24);
+    enable_goto_definition(&h);
+    let root = seed(&mut h, &[("main.rs", "foo();\n\n/// docs\nfn foo() {}\n")]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    let path = path.to_str().unwrap();
+    h.fake_lsp().set_definition_link(
+        path,
+        0,
+        0,
+        path,
+        Range::new(Position::new(2, 0), Position::new(3, 11)),
+        Range::new(Position::new(3, 3), Position::new(3, 6)),
+    );
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+    h.settle();
+    assert_eq!(
+        cursor_offset(&mut h),
+        20,
+        "the cursor lands on the name, below the docs"
+    );
+}
+
 fn enable_goto_declaration(h: &TestHarness) {
     use lsp_types::{DeclarationCapability, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {

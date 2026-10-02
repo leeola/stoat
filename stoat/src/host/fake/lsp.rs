@@ -17,8 +17,8 @@ use lsp_types::{
     DocumentSymbolResponse, ExecuteCommandParams, FileChangeType, FileEvent, FileRename,
     FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, LocationLink, MarkupContent,
+    MarkupKind, MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
     PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameFilesParams,
     RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensDeltaParams,
     SemanticTokensFullDeltaResult, SemanticTokensParams, SemanticTokensRangeParams,
@@ -1657,6 +1657,31 @@ impl FakeLsp {
         self.state.lock().unwrap().definitions.insert(
             LspKey::new(path, line, col),
             GotoDefinitionResponse::Array(locations),
+        );
+    }
+
+    /// Seed a definition response with one location link, so a goto at
+    /// `(path, line, col)` returns a `GotoDefinitionResponse::Link`.
+    /// `target_range` spans the whole declaration, docs included, and
+    /// `selection_range` is the name inside it.
+    pub fn set_definition_link(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        target_path: &str,
+        target_range: Range,
+        selection_range: Range,
+    ) {
+        let link = LocationLink {
+            origin_selection_range: None,
+            target_uri: file_uri(target_path),
+            target_range,
+            target_selection_range: selection_range,
+        };
+        self.state.lock().unwrap().definitions.insert(
+            LspKey::new(path, line, col),
+            GotoDefinitionResponse::Link(vec![link]),
         );
     }
 

@@ -512,7 +512,10 @@ fn resolve_goto_targets(
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
-/// The target URI and start position of each candidate in `response`.
+/// The target URI and the landing position of each candidate in `response`.
+///
+/// A link lands on its selection range, the symbol's name, because its target
+/// range starts at the docs and attributes above the name.
 fn goto_candidates(response: GotoDefinitionResponse) -> Vec<(Uri, Position)> {
     match response {
         GotoDefinitionResponse::Scalar(loc) => vec![(loc.uri, loc.range.start)],
@@ -522,7 +525,7 @@ fn goto_candidates(response: GotoDefinitionResponse) -> Vec<(Uri, Position)> {
             .collect(),
         GotoDefinitionResponse::Link(links) => links
             .into_iter()
-            .map(|link| (link.target_uri, link.target_range.start))
+            .map(|link| (link.target_uri, link.target_selection_range.start))
             .collect(),
     }
 }
