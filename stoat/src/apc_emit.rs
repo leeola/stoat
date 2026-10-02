@@ -261,6 +261,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
 
     let diff_base_lead = ws.diff_base().map(crate::render::pane::diff_base_lead);
     let diff_sides = diff::diff_sides(ws.diff_base());
+    let held_buffers = ws.held_buffer_labels();
 
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
@@ -276,6 +277,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
             .macro_recording
             .as_ref()
             .map(|rec| rec.register.name()),
+        held_buffers: &held_buffers,
         lsp_status_open: false,
         lsp_progress_entries: &[],
         spinner_phase: 0,

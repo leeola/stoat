@@ -338,6 +338,9 @@ pub(crate) struct BridgeWaiter {
     /// The connection that parked this waiter, which
     /// [`Workspace::drop_client_waiters`] matches when that command goes away.
     pub(crate) client: u64,
+    /// The name the status line shows for what waits, such as `git` for a
+    /// `git commit` that runs the editor.
+    pub(crate) label: String,
     pub(crate) done: UnboundedSender<BridgeOutcome>,
 }
 
@@ -740,6 +743,15 @@ impl Workspace {
             waiters.retain(|waiter| waiter.client != client);
             !waiters.is_empty()
         });
+    }
+
+    /// Every buffer a command waits on, with the label of the first command
+    /// that parked on it.
+    pub(crate) fn held_buffer_labels(&self) -> Vec<(BufferId, String)> {
+        self.editor_bridge_waiters
+            .iter()
+            .filter_map(|(&buffer, waiters)| Some((buffer, waiters.first()?.label.clone())))
+            .collect()
     }
 
     /// Whether any state [`Self::release_buffer`] drops still exists for `id`,
@@ -1482,7 +1494,7 @@ pub(crate) fn display_name_of<'a>(name: &'a str, git_root: &'a Path) -> &'a str 
 
 #[cfg(test)]
 mod tests {
-    use super::{ParseJob, Workspace, INLINE_PARSE_MAX_BYTES};
+    use super::{BridgeWaiter, ParseJob, Workspace, INLINE_PARSE_MAX_BYTES};
     use crate::{buffer::BufferId, pane::View, test_harness::TestHarness};
     use std::{
         path::{Path, PathBuf},
@@ -1493,6 +1505,7 @@ mod tests {
     };
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
+    use tokio::sync::mpsc;
     /// The editor showing in the workspace's focused pane, or `None` when the
     /// focused pane shows something else.
     fn focused_editor_id(ws: &Workspace) -> Option<crate::editor_state::EditorId> {
@@ -1500,6 +1513,39 @@ mod tests {
             View::Editor(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// The status line names the first command that waits on a buffer, and the
+    /// next one takes over the name when the first goes away.
+    #[test]
+    fn a_held_buffer_is_labelled_for_its_first_waiter() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        let buffer = BufferId::new(1);
+        let (done, _outcomes) = mpsc::unbounded_channel();
+        for (client, label) in [(1, "git"), (2, "stoat")] {
+            let label = label.to_string();
+            let done = done.clone();
+            ws.hold_buffer(
+                buffer,
+                BridgeWaiter {
+                    client,
+                    label,
+                    done,
+                },
+            );
+        }
+        let first = ws.held_buffer_labels();
+
+        ws.drop_client_waiters(1);
+
+        assert_eq!(
+            (first, ws.held_buffer_labels()),
+            (
+                vec![(buffer, "git".to_string())],
+                vec![(buffer, "stoat".to_string())],
+            ),
+        );
     }
 
     #[test]

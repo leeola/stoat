@@ -13,6 +13,8 @@
 //! selection and cursor pass. So an unfocused pane's *content* reads no
 //! selections, no cursor, and not the editor mode. Its *status row* does read
 //! the primary cursor and the buffer's dirty flag, which is why both are here.
+//! The row also names what waits on a held buffer, which no key part tracks, so
+//! a held buffer never replays.
 
 use crate::{
     buffer::BufferId,
@@ -231,6 +233,11 @@ impl PaneCacheEntry {
 /// Only an editor pane showing an ordinary document qualifies. The review,
 /// diff, and conflict views take their own branches out of the editor render
 /// and read state this never audited, so they always paint.
+///
+/// A buffer a command waits on always paints too. Its status row names what
+/// waits, and that name changes when the first waiter goes while no part of
+/// the key moves. A held buffer is rare and usually focused, so the paint it
+/// costs is small.
 pub(crate) fn pane_cache_key(
     pane: &Pane,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -247,6 +254,10 @@ pub(crate) fn pane_cache_key(
     }
 
     let buffer = editor.buffer_id;
+    if frame.held_buffers.iter().any(|(held, _)| *held == buffer) {
+        return None;
+    }
+
     let (dirty, diff_version) = {
         let shared = buffers.get(buffer)?;
         let guard = shared.read().ok()?;

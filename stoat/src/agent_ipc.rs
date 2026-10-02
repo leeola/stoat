@@ -867,6 +867,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_held_open_in_term_is_labelled_for_the_foreground_process() {
+        for (foreground, label) in [(None, "shell"), (Some("git"), "git")] {
+            let mut h = TestHarness::with_size(80, 24);
+            let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+            if let Some(name) = foreground {
+                h.fake_terminal().set_foreground_name(name);
+            }
+            let (_, token) = terminal_in_focused_pane(&mut h);
+
+            let _parked = open_in_term_held(&mut h, token, vec![root.join("a.rs")]);
+            let opened = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("the open covers the terminal's pane")
+                .buffer_id;
+
+            assert_eq!(
+                h.stoat.active_workspace().held_buffer_labels(),
+                [(opened, label.to_string())],
+                "foreground process {foreground:?}",
+            );
+        }
+    }
+
     /// Seed a file past the inline-read ceiling, so its open lands on the pool
     /// and the pane still shows the shell when the handler returns.
     fn seed_huge_file(h: &mut TestHarness) -> PathBuf {

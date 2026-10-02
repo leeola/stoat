@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::{search::SearchPrompt, view},
     app::SPINNER_FRAMES,
+    buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, View},
@@ -979,6 +980,19 @@ fn status_segments(
         };
         push_left(&mut left, &mut cursor, end_x, text, base_style);
     }
+    if let Some((_, label)) = status
+        .buffer_id
+        .and_then(|id| frame.held_buffers.iter().find(|(held, _)| *held == id))
+        && prompt.is_none()
+    {
+        push_left(
+            &mut left,
+            &mut cursor,
+            end_x,
+            format!("[for {label}] "),
+            base_style.add_modifier(Modifier::BOLD),
+        );
+    }
 
     let mut right: Vec<(String, Style)> = Vec::new();
     let mut right_anchor = end_x;
@@ -1504,6 +1518,7 @@ fn pane_status_info(
                 .unwrap_or_default();
             PaneStatusInfo {
                 filename: Some(filename),
+                buffer_id: Some(buffer_id),
                 dirty,
                 cursor_pos: editor_cursor_position(editor),
                 staged_counts,
@@ -1521,6 +1536,9 @@ fn pane_status_info(
 #[derive(Default)]
 struct PaneStatusInfo {
     filename: Option<String>,
+    /// The buffer an editor view shows, which the bar looks up in
+    /// [`FrameCtx::held_buffers`].
+    buffer_id: Option<BufferId>,
     dirty: bool,
     cursor_pos: Option<(u32, u32)>,
     /// `(staged, unstaged)` hunk counts, `None` when the buffer has no diff.
@@ -1607,6 +1625,7 @@ mod tests {
     use super::{diff_base_lead, diff_sides_bar_area, focused_staged_label, status_filename};
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
+        agent_ipc::AgentControl,
         agent_status::{AgentHookEvent, AgentStatus},
         buffer::{BufferId, TextBuffer},
         editor_state::EditorState,
@@ -1623,6 +1642,7 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_action::OpenFile;
+    use tokio::sync::mpsc;
 
     /// The rendered name is reused only while everything it was rendered from
     /// holds still.
@@ -2365,6 +2385,47 @@ mod tests {
             !stopped.contains("REC"),
             "and the indicator leaves with the recording:\n{stopped}",
         );
+    }
+
+    /// A command that waits on a buffer ends when the buffer leaves, and a quit
+    /// over the buffer returns to a shell, so every pane that shows it names
+    /// what waits.
+    ///
+    /// The mark has to leave with the waiter while the file stays on screen.
+    #[test]
+    fn the_status_bar_names_what_waits_on_a_held_buffer() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 12);
+        let path = PathBuf::from("/bridge/msg.txt");
+        h.fake_fs().insert_file(&path, b"draft\n");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/bridge");
+        let uid = h.stoat.active_workspace().uid;
+        let (done, _outcome) = mpsc::unbounded_channel();
+        h.stoat.handle_agent_control(AgentControl::OpenEditor {
+            uid,
+            client: 0,
+            path,
+            done,
+        });
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::SplitRight);
+
+        let names = |h: &mut crate::test_harness::TestHarness| {
+            h.snapshot();
+            let text = h.rendered_text();
+            (
+                text.matches("msg.txt").count(),
+                text.matches("msg.txt [for agent] ").count(),
+            )
+        };
+        assert_eq!(
+            names(&mut h),
+            (2, 2),
+            "both panes on the file name its waiter"
+        );
+
+        h.stoat
+            .handle_agent_control(AgentControl::ClientGone { uid, client: 0 });
+        assert_eq!(names(&mut h), (2, 0), "the mark leaves with the waiter");
     }
 
     /// The search prompt is the only thing on screen that reports the query, so

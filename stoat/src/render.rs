@@ -236,6 +236,12 @@ pub(crate) struct FrameCtx<'a> {
     /// off, so the status bar shows it. Without the sign, a user who looks away
     /// has nothing to tell them their next edits go into a macro.
     pub(crate) recording_register: Option<char>,
+    /// The buffers a command waits on, each with the name of what waits, which
+    /// the status line of every pane that shows one names.
+    ///
+    /// A quit over such a buffer returns to the shell and ends the command, so
+    /// the reader has to see the tie before the quit, not after it.
+    pub(crate) held_buffers: &'a [(BufferId, String)],
     /// Whether the detailed LSP status popout is open (pinned) above the focused
     /// pane's status bar. Drives whether the multi-row status card paints.
     pub(crate) lsp_status_open: bool,
@@ -681,6 +687,7 @@ pub(crate) fn frame(
     // borrow of the workspace, which the pane loop mutates as it paints.
     let diff_base_lead = ws.diff_base().map(pane::diff_base_lead);
     let diff_sides = diff::diff_sides(ws.diff_base());
+    let held_buffers = ws.held_buffer_labels();
 
     let frame = FrameCtx {
         workspace_name,
@@ -700,6 +707,7 @@ pub(crate) fn frame(
             .macro_recording
             .as_ref()
             .map(|rec| rec.register.name()),
+        held_buffers: &held_buffers,
         lsp_status_open,
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),

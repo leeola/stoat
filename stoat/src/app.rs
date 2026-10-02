@@ -7306,8 +7306,14 @@ impl Stoat {
                 else {
                     return UpdateEffect::None;
                 };
-                self.active_workspace_mut()
-                    .hold_buffer(buffer_id, BridgeWaiter { client, done });
+                self.active_workspace_mut().hold_buffer(
+                    buffer_id,
+                    BridgeWaiter {
+                        client,
+                        label: "agent".to_string(),
+                        done,
+                    },
+                );
                 UpdateEffect::Redraw
             },
             AgentControl::OpenInTerm {
@@ -7371,11 +7377,18 @@ impl Stoat {
                 let held = match hold {
                     Some(hold) if !opened.is_empty() => {
                         let ws = self.active_workspace_mut();
+                        let label = ws
+                            .terms
+                            .values()
+                            .find(|session| session.token == term)
+                            .and_then(|session| session.session.foreground_process_name())
+                            .unwrap_or_else(|| "shell".to_string());
                         for id in opened {
                             ws.hold_buffer(
                                 id,
                                 BridgeWaiter {
                                     client,
+                                    label: label.clone(),
                                     done: hold.clone(),
                                 },
                             );
