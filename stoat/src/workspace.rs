@@ -29,7 +29,7 @@ use crate::{
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermSession},
     workspace::diff::{
-        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState,
+        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState, WorktreeBase,
     },
 };
 use codegraph::{CodeGraph, FileId};
@@ -746,20 +746,37 @@ impl Workspace {
     /// Point every buffer's diff at `base`, or back at the working tree's own
     /// base with `None`.
     ///
-    /// The working tree's own base is the index, with the changes it holds
-    /// over HEAD as staged marks.
+    /// The working tree's own base is the one the reader picked through
+    /// [`Self::set_worktree_base`], the index until they pick HEAD.
     ///
     /// Re-diffs the whole workspace. Every cached blob was read against the
     /// base being replaced, so none of them survive the change.
     pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
-        self.diff.base_override = base;
+        self.diff.base_override = base.or(match self.diff.worktree_base {
+            WorktreeBase::Index => None,
+            WorktreeBase::Head => Some(DiffBase::Head),
+        });
         self.diff.invalidate_all();
     }
 
-    /// What buffers diff against, `None` for the working tree's own base that
-    /// [`Self::set_diff_base`] describes.
+    /// Pick which of its two own bases the working tree diffs against.
+    ///
+    /// Installs the pick at once, so any revision, review, or proposal base
+    /// gives way to it. The pick then holds through every later
+    /// [`Self::set_diff_base`] with `None`.
+    pub(crate) fn set_worktree_base(&mut self, base: WorktreeBase) {
+        self.diff.worktree_base = base;
+        self.set_diff_base(None);
+    }
+
+    /// What buffers diff against, `None` for the index.
     pub(crate) fn diff_base(&self) -> Option<&DiffBase> {
         self.diff.base_override.as_ref()
+    }
+
+    /// The working tree's own base that [`Self::set_worktree_base`] picked.
+    pub(crate) fn worktree_base(&self) -> WorktreeBase {
+        self.diff.worktree_base
     }
 
     /// Hunks staged and unstaged across the repo, as `(staged, unstaged)`, or

@@ -76,8 +76,7 @@ pub(crate) struct ChangedRangesScan {
     pub(super) computed: Vec<(FileId, ContentHash, ContentHash, Vec<Range<usize>>)>,
 }
 
-/// What a workspace's buffers diff against, when that is not the working
-/// tree's own base.
+/// What a workspace's buffers diff against, when that is not the index.
 ///
 /// With no override the working tree diffs against its index, and the changes
 /// the index holds over HEAD are staged marks. Reviewing a commit checks it
@@ -94,11 +93,25 @@ pub(crate) enum DiffBase {
     /// commit's parent amounts to.
     Rev { sha: Option<String> },
     /// Base text supplied directly, keyed by absolute path. A path the map
-    /// does not carry falls back to the working tree's own base, so an
-    /// untouched file still diffs normally.
+    /// does not carry falls back to the index, so an untouched file still
+    /// diffs normally.
     Memory {
         files: HashMap<PathBuf, Arc<String>>,
     },
+}
+
+/// Which of its two own bases the working tree diffs against, picked by the
+/// reader.
+///
+/// A revision, a commit review, or an agent proposal displaces the pick while
+/// that base holds. The diff returns to the pick when that base gives way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WorktreeBase {
+    /// The index, with the changes it holds over HEAD as staged marks.
+    #[default]
+    Index,
+    /// HEAD, as [`DiffBase::Head`] reads it.
+    Head,
 }
 
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
@@ -139,11 +152,19 @@ pub(crate) struct DiffState {
     /// passes, and only a git write turns a path into a rename target, so the
     /// miss is as cacheable as a hit and clears with the rest.
     pub(super) base_text: HashMap<PathBuf, Option<DiffBaseText>>,
-    /// What buffers diff against, `None` for the ordinary working-tree diff.
+    /// What buffers diff against, `None` for the index.
+    ///
+    /// Holds [`DiffBase::Head`] while the reader's pick is HEAD and no
+    /// revision, review, or proposal displaces it.
     ///
     /// Set through [`super::Workspace::set_diff_base`], which invalidates
     /// every buffer, since a base change moves every diff in the workspace.
     pub(super) base_override: Option<DiffBase>,
+    /// The base the working tree diffs against when nothing displaces it.
+    ///
+    /// [`super::Workspace::set_diff_base`] installs it for `None`, so every
+    /// caller that drops a revision, a review, or a proposal lands on it.
+    pub(super) worktree_base: WorktreeBase,
     /// Parsed trees the structural refinement reuses across settles.
     ///
     /// A settle re-parses the same base and the same buffer prefix the last one
@@ -975,7 +996,7 @@ fn resolve_base(
 ///
 /// Under a [`DiffBase::Memory`] both sides are the supplied text, which leaves
 /// every hunk unstaged. Nothing has applied an agent's proposal anywhere. A path
-/// the map does not carry diffs against the working tree's own base.
+/// the map does not carry diffs against the index, as with no override.
 ///
 /// [`None`] when the working tree carries no text for `path` in HEAD or the
 /// index, which is what leaves an untracked buffer without a diff map.
@@ -1005,7 +1026,8 @@ pub(crate) fn base_texts(
     }
 }
 
-/// The working tree's own base for `path`, the index with HEAD behind it.
+/// The base `path` diffs against with no override, the index with HEAD behind
+/// it.
 fn index_base(repo: &dyn GitRepo, path: &Path) -> Option<DiffBaseText> {
     let (head, index) = working_tree_texts(repo, path)?;
     Some(DiffBaseText::new(index.clone(), index, Some(head)))

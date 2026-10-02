@@ -18,7 +18,7 @@ use crate::{
     },
     review_session::DiffDocument,
     workspace::{
-        diff::{compute_base_highlights, BaseHighlightCache, DiffBase},
+        diff::{compute_base_highlights, BaseHighlightCache, DiffBase, WorktreeBase},
         Workspace,
     },
 };
@@ -180,26 +180,28 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Point every buffer's diff at `base` and show the diff view over it.
+/// Pick `base` as the working tree's own base and show the diff view over it.
 ///
-/// `None` is the index, the working tree's own base, and [`DiffBase::Head`] is
-/// HEAD. Any other installed base gives way to `base`, a revision or a commit
-/// review's included, but the checkout a review made stays where it is.
+/// The pick holds after the view closes, so the gutter of a plain pane keeps
+/// marking against it. A revision, a review, or a proposal base gives way to
+/// the pick, but the checkout a review made stays where it is.
 ///
 /// The base already installed with the view open costs nothing, not even a
 /// re-diff. With the view closed, the view opens over that base.
-pub(super) fn diff_against(stoat: &mut Stoat, base: Option<DiffBase>) -> UpdateEffect {
-    let same = matches!(
-        (stoat.active_workspace().diff_base(), &base),
-        (None, None) | (Some(DiffBase::Head), Some(DiffBase::Head))
-    );
+pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffect {
+    let ws = stoat.active_workspace();
+    let same = ws.worktree_base() == base
+        && matches!(
+            (ws.diff_base(), base),
+            (None, WorktreeBase::Index) | (Some(DiffBase::Head), WorktreeBase::Head)
+        );
     let view_on = super::focused_editor_mut(stoat).is_some_and(|editor| editor.diff_view);
     if same && view_on {
         return UpdateEffect::Redraw;
     }
 
     if !same {
-        stoat.active_workspace_mut().set_diff_base(base);
+        stoat.active_workspace_mut().set_worktree_base(base);
     }
     // Turned on rather than toggled, as a named revision is.
     reopen_diff_view(stoat);
@@ -1370,22 +1372,35 @@ mod tests {
         );
     }
 
-    /// Closing the diff drops every installed base, the HEAD base included, so
-    /// the next diff reads the index again.
+    /// Closing the diff keeps the HEAD base the reader picked, so the gutter
+    /// of the plain pane goes on marking against HEAD.
     #[test]
-    fn a_bare_diff_close_after_head_drops_to_the_index() {
+    fn a_bare_diff_close_keeps_the_head_base() {
         let mut h = half_staged_harness();
         run(&mut h, &stoat_action::DiffAgainstHead);
         run(&mut h, &stoat_action::Diff { rev: None });
 
         assert_eq!(
-            (
-                h.stoat.active_workspace().diff_base().is_none(),
-                head_base_and_view(&mut h).1
-            ),
+            head_base_and_view(&mut h),
             (true, false),
-            "the view closes onto the index base",
+            "the view closes onto the HEAD base",
         );
+    }
+
+    /// A revision displaces the HEAD pick only while it holds. Closing the
+    /// diff returns to HEAD, not to the index.
+    #[test]
+    fn a_displaced_head_base_returns_when_the_revision_closes() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffAgainstHead);
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Rev {
+                sha: Some("base0".into()),
+            }));
+        run(&mut h, &stoat_action::Diff { rev: None });
+
+        assert_eq!(head_base_and_view(&mut h), (true, false));
     }
 
     #[test]
