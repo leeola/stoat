@@ -13023,6 +13023,29 @@ fn a_dirty_bridged_buffer_reports_it_abandoned() {
     assert_eq!(done_rx.try_recv(), Ok(BridgeOutcome::Abandoned));
 }
 
+#[test]
+fn a_quit_closes_a_clean_bridged_buffer() {
+    quit_on_a_bridged_buffer("", (Ok(BridgeOutcome::Closed), false));
+}
+
+#[test]
+fn a_quit_keeps_a_dirty_bridged_buffer() {
+    quit_on_a_bridged_buffer("i x <esc>", (Ok(BridgeOutcome::Abandoned), true));
+}
+
+/// Type `keys` into a bridged buffer and quit its pane, then assert the outcome
+/// its waiter got and whether the buffer stays open.
+fn quit_on_a_bridged_buffer(keys: &str, expected: (Result<BridgeOutcome, TryRecvError>, bool)) {
+    let mut h = Stoat::test();
+    let (buffer_id, mut done_rx) = open_agent_editor(&mut h);
+    h.type_keys(keys);
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Quit);
+
+    let open = h.stoat.active_workspace().buffers.get(buffer_id).is_some();
+    assert_eq!((done_rx.try_recv(), open), expected);
+}
+
 /// The whole point of the emission: an image pane on a capable terminal
 /// puts the file's pixels on the wire and asks for them to be drawn.
 #[test]

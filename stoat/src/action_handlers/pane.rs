@@ -1,6 +1,6 @@
 use crate::{
-    agent_ipc::BridgeOutcome,
     app::{Stoat, UpdateEffect},
+    buffer_lifecycle,
     editor_state::{EditorId, EditorState},
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, PaneId, Placement, View},
     workspace::Workspace,
@@ -139,9 +139,26 @@ pub(crate) fn restore_covered_terminal(stoat: &mut Stoat, id: PaneId) -> bool {
 /// Return `id` to the shell it covers, or close it when it covers none.
 ///
 /// Returns `false` when it is the last pane and covers no shell, which is when
-/// the caller exits.
+/// the caller exits. A clean bridged buffer that the quit released is closed
+/// with it.
 pub(super) fn quit_pane(stoat: &mut Stoat, id: PaneId) -> bool {
-    restore_covered_terminal(stoat, id) || close_pane_by_id(stoat, id)
+    let held = {
+        let ws = stoat.active_workspace();
+        match ws.panes.pane(id).view {
+            View::Editor(editor) => ws
+                .editors
+                .get(editor)
+                .map(|editor| editor.buffer_id)
+                .filter(|buffer_id| ws.editor_bridge_waiters.contains_key(buffer_id)),
+            _ => None,
+        }
+    };
+
+    let quit = restore_covered_terminal(stoat, id) || close_pane_by_id(stoat, id);
+    if quit && let Some(buffer_id) = held {
+        buffer_lifecycle::close_released_buffer(stoat, buffer_id);
+    }
+    quit
 }
 
 /// What to do with the editor behind a closing [`View::Editor`].
@@ -192,15 +209,7 @@ pub(crate) fn dispose_view(
                 return;
             }
 
-            let dirty = ws
-                .buffers
-                .get(buffer_id)
-                .is_some_and(|buffer| buffer.read().expect("buffer poisoned").dirty);
-            let outcome = if dirty {
-                BridgeOutcome::Abandoned
-            } else {
-                BridgeOutcome::Closed
-            };
+            let outcome = ws.bridge_outcome(buffer_id);
             ws.release_bridge_waiters(buffer_id, outcome);
         },
         View::Run(id) => {

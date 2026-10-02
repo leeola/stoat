@@ -696,6 +696,22 @@ impl Workspace {
             .push(waiter);
     }
 
+    /// The outcome `buffer` leaves the editor with at this moment.
+    ///
+    /// It is abandoned when the buffer holds unsaved edits, and closed
+    /// otherwise.
+    pub(crate) fn bridge_outcome(&self, buffer: BufferId) -> BridgeOutcome {
+        let dirty = self
+            .buffers
+            .get(buffer)
+            .is_some_and(|buffer| buffer.read().expect("buffer poisoned").dirty);
+        if dirty {
+            BridgeOutcome::Abandoned
+        } else {
+            BridgeOutcome::Closed
+        }
+    }
+
     /// Tell every command parked on `buffer` that it left the editor with
     /// `outcome`.
     ///

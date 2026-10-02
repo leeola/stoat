@@ -14,7 +14,6 @@ use crate::{
         file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump, read_open_content,
         restore_covered_terminal, OpenContent,
     },
-    agent_ipc::BridgeOutcome,
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
@@ -509,7 +508,16 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         tracing::warn!(target: "stoat::file", ?buffer_id, "refusing close of dirty buffer");
         return UpdateEffect::None;
     }
+    close_buffer_by_id(stoat, buffer_id)
+}
 
+/// Drop `buffer_id` from the active workspace, whatever its dirty state.
+///
+/// The caller answers for unsaved edits. The panes, the session state, and the
+/// servers are treated as [`close_buffer`] documents, and a command parked on
+/// the buffer learns whether it went with unsaved edits.
+pub(crate) fn close_buffer_by_id(stoat: &mut Stoat, buffer_id: BufferId) -> UpdateEffect {
+    let outcome = stoat.active_workspace().bridge_outcome(buffer_id);
     let executor = stoat.executor.clone();
     let workspace = stoat.active_workspace;
     let showing: Vec<PaneId> = {
@@ -569,11 +577,9 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
 
-    // A dirty buffer never reaches this point, so every waiter learns the
-    // buffer closed clean.
     stoat
         .active_workspace_mut()
-        .release_bridge_waiters(buffer_id, BridgeOutcome::Closed);
+        .release_bridge_waiters(buffer_id, outcome);
     stoat.lsp_opened.remove(&buffer_id);
     stoat.lsp_buffer_versions.remove(&buffer_id);
     stoat.lsp_pending_changes.remove(&buffer_id);
@@ -615,6 +621,29 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
     UpdateEffect::Redraw
+}
+
+/// Close a buffer whose bridge waiters a quit just released, when nothing else
+/// needs it.
+///
+/// The buffer stays when a command still waits on it, an editor still holds
+/// it, or it holds unsaved edits, so the close discards no edit.
+pub(crate) fn close_released_buffer(stoat: &mut Stoat, buffer_id: BufferId) {
+    let needed = {
+        let ws = stoat.active_workspace();
+        ws.editor_bridge_waiters.contains_key(&buffer_id)
+            || ws
+                .editors
+                .values()
+                .any(|editor| editor.buffer_id == buffer_id)
+            || ws
+                .buffers
+                .get(buffer_id)
+                .is_none_or(|buffer| buffer.read().expect("buffer poisoned").dirty)
+    };
+    if !needed {
+        close_buffer_by_id(stoat, buffer_id);
+    }
 }
 
 /// The buffer `pane` showed most recently that is still open, other than
