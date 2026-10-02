@@ -16,6 +16,7 @@
 use crate::{
     agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
 };
+use futures::stream::{FuturesUnordered, StreamExt};
 use lsp_types::{HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -171,6 +172,9 @@ impl Drop for BoundSocket {
 /// The server removes its socket file when it stops, which includes the drop
 /// of its task when the runtime shuts down at exit. A file that a later session
 /// bound at the same path stays.
+///
+/// Connections are served side by side, so one parked on an open editor holds
+/// up no other. A server that stops drops its parked connections with it.
 pub async fn serve_agent_hooks(
     socket_path: PathBuf,
     uid: WorkspaceUid,
@@ -191,13 +195,21 @@ pub async fn serve_agent_hooks(
     };
     let _bound = BoundSocket::new(socket_path);
 
+    // An empty set answers `None`, which turns its arm off for the round, so
+    // the loop then waits on `accept` alone.
+    let mut connections = FuturesUnordered::new();
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => serve_connection(stream, uid, &tx, &control_tx).await,
-            Err(err) => {
-                tracing::warn!(%err, "agent hook server stopped accepting");
-                break;
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    connections.push(serve_connection(stream, uid, &tx, &control_tx));
+                },
+                Err(err) => {
+                    tracing::warn!(%err, "agent hook server stopped accepting");
+                    break;
+                },
             },
+            Some(()) = connections.next() => {},
         }
         if tx.is_closed() {
             break;
@@ -435,7 +447,7 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::time::Duration;
-    use tokio::{sync::mpsc::Receiver, task::JoinHandle, time::Instant};
+    use tokio::{net::UnixStream, sync::mpsc::Receiver, task::JoinHandle, time::Instant};
 
     #[test]
     fn lsp_status_lists_each_running_server() {
@@ -988,6 +1000,42 @@ mod tests {
             path.exists(),
             "the stopped server removed its successor's socket"
         );
+    }
+
+    #[tokio::test]
+    async fn a_parked_editor_request_does_not_hold_up_a_second_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.sock");
+        let (server, _events, mut controls) = serve_at(&path).await;
+
+        let mut editor = UnixStream::connect(&path).await.unwrap();
+        editor
+            .write_all(b"{\"req\":\"open-editor\",\"path\":\"/tmp/msg\"}\n")
+            .await
+            .unwrap();
+        // Held to the end of the test, so its waiter never fires and the first
+        // connection stays parked.
+        let parked = controls.recv().await;
+        assert!(matches!(parked, Some(AgentControl::OpenEditor { .. })));
+
+        let mut query = UnixStream::connect(&path).await.unwrap();
+        query
+            .write_all(b"{\"req\":\"lsp-status\"}\n")
+            .await
+            .unwrap();
+        let next = tokio::time::timeout(Duration::from_secs(5), controls.recv())
+            .await
+            .expect("a parked editor request holds up no other connection");
+        assert!(matches!(
+            next,
+            Some(AgentControl::Query {
+                request: AgentQuery::LspStatus,
+                ..
+            })
+        ));
+
+        server.abort();
+        let _ = server.await;
     }
 
     /// Serve hooks at `path` on a task, and wait until the server binds it.

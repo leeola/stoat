@@ -35,7 +35,7 @@ crossterm.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
-futures.workspace = true
+futures = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
 compact_str.workspace = true
 etcetera.workspace = true
