@@ -1329,6 +1329,7 @@ pub(crate) fn frame(
         // mutable borrow of the active workspace, so read the flags directly.
         let flags = Flags {
             rebase_exec: ws.rebase_active.is_some(),
+            pair: ws.pair_panes().is_some(),
         };
         let pane = pane_predicate(ws);
         let token = cursor_token(ws);

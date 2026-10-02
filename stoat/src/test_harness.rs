@@ -439,6 +439,18 @@ impl TestHarness {
         self.capture("open_file");
     }
 
+    /// Seed two files and open them in two panes, `left` in the first pane and
+    /// `right` in a split to its right, which holds the focus.
+    ///
+    /// Each argument is a `(path, text)` pair.
+    pub(crate) fn open_side_by_side(&mut self, left: (&str, &str), right: (&str, &str)) {
+        self.fake_fs.insert_file(left.0, left.1);
+        self.fake_fs.insert_file(right.0, right.1);
+        self.open_file(std::path::Path::new(left.0));
+        self.type_action("SplitRight()");
+        self.open_file(std::path::Path::new(right.0));
+    }
+
     pub fn type_keys(&mut self, seq: &str) {
         self.step += 100;
         self.sub_frame = 0;

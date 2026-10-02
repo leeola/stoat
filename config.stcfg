@@ -338,6 +338,7 @@ on init {
 #   diags          the focused buffer has published diagnostics
 #   has_selection  the newest selection is non-empty
 #   modified       the buffer has unsaved edits
+#   pair           exactly two split panes show two different files
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when

@@ -22,6 +22,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "view",
     "modal",
     "rebase_exec",
+    "pair",
     "token",
     "token_known",
     "lsp",
@@ -41,11 +42,16 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
 #[derive(Default, Hash)]
 pub(crate) struct Flags {
     pub(crate) rebase_exec: bool,
+    /// Whether the split panes hold a file pair. See [`Workspace::pair_panes`].
+    pub(crate) pair: bool,
 }
 
 pub(crate) struct StoatKeymapState<'a> {
     mode_value: StateValue,
     rebase_exec: StateValue,
+    /// Whether the split panes hold two different files, which is what a pair
+    /// diff compares.
+    pair: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -92,6 +98,7 @@ impl<'a> StoatKeymapState<'a> {
         Self {
             mode_value: StateValue::String(mode.into()),
             rebase_exec: StateValue::Bool(flags.rebase_exec),
+            pair: StateValue::Bool(flags.pair),
             pane: None,
             view: None,
             modal: None,
@@ -170,6 +177,7 @@ impl<'a> StoatKeymapState<'a> {
         let ws = stoat.active_workspace();
         let flags = Flags {
             rebase_exec: ws.rebase_active.is_some(),
+            pair: ws.pair_panes().is_some(),
         };
         Self {
             pane: pane_predicate(ws).map(|s| StateValue::String(s.into())),
@@ -188,6 +196,7 @@ impl KeymapState for StoatKeymapState<'_> {
         match field {
             "mode" => Some(&self.mode_value),
             "rebase_exec" => Some(&self.rebase_exec),
+            "pair" => Some(&self.pair),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -853,6 +862,78 @@ mod tests {
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "pane"), Some("run".to_string()));
         assert_eq!(state.get("view"), None);
+    }
+
+    /// The `pair` predicate as the keymap reads it.
+    fn pair(h: &crate::test_harness::TestHarness) -> Option<StateValue> {
+        StoatKeymapState::from_stoat(&h.stoat).get("pair").cloned()
+    }
+
+    #[test]
+    fn two_files_in_two_panes_are_a_pair() {
+        let mut h = Stoat::test();
+        assert_eq!(
+            pair(&h),
+            Some(StateValue::Bool(false)),
+            "one scratch pane is no pair"
+        );
+
+        h.open_side_by_side(("/pair/a.txt", "a\n"), ("/pair/b.txt", "b\n"));
+        assert_eq!(pair(&h), Some(StateValue::Bool(true)));
+    }
+
+    #[test]
+    fn the_same_file_in_both_panes_is_no_pair() {
+        let mut h = Stoat::test();
+        h.seed_fixture("/pair/a.txt", "a\n");
+        h.open_file(std::path::Path::new("/pair/a.txt"));
+        h.type_action("SplitRight()");
+        assert_eq!(pair(&h), Some(StateValue::Bool(false)));
+    }
+
+    #[test]
+    fn only_file_panes_count_toward_a_pair() {
+        let mut h = Stoat::test();
+        h.open_side_by_side(("/pair/a.txt", "a\n"), ("/pair/b.txt", "b\n"));
+        h.type_action("SplitDown()");
+        assert_eq!(
+            pair(&h),
+            Some(StateValue::Bool(false)),
+            "a third file pane leaves no pair"
+        );
+
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let pane_id = ws.panes.focus();
+            ws.panes.pane_mut(pane_id).view = View::Run(RunId::default());
+        }
+        assert_eq!(
+            pair(&h),
+            Some(StateValue::Bool(true)),
+            "a run pane does not count"
+        );
+    }
+
+    #[test]
+    fn the_first_pane_in_layout_order_leads_the_pair() {
+        let mut h = Stoat::test();
+        h.open_side_by_side(("/pair/a.txt", "a\n"), ("/pair/b.txt", "b\n"));
+        let paths = |h: &crate::test_harness::TestHarness| {
+            let ws = h.stoat.active_workspace();
+            ws.pair_panes().map(|pair| {
+                pair.map(|(_, buffer_id)| {
+                    ws.buffers
+                        .path_for(buffer_id)
+                        .expect("a pair buffer has a path")
+                        .to_path_buf()
+                })
+            })
+        };
+        let expected = Some(["/pair/a.txt", "/pair/b.txt"].map(std::path::PathBuf::from));
+        assert_eq!(paths(&h), expected);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        assert_eq!(paths(&h), expected, "focus does not reorder the pair");
     }
 
     fn open_foo_bar(h: &mut crate::test_harness::TestHarness) -> BufferId {

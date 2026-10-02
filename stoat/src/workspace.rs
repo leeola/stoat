@@ -21,7 +21,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::GitHost,
     input_history::InputHistory,
-    pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
+    pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, walkthrough::SlideParts},
     run::{RunId, RunState},
@@ -1134,6 +1134,31 @@ impl Workspace {
                 let rows = editor.viewport_rows?;
                 Some(editor.scroll_row..editor.scroll_row.saturating_add(rows))
             })
+    }
+
+    /// The two panes a pair diff compares, in layout order, each with the
+    /// buffer it shows.
+    ///
+    /// A pair is exactly two split panes that show an editor over a buffer with
+    /// a file path, on two different buffers. A pane of any other kind is
+    /// passed over, so two files beside a run pane are a pair. A third file
+    /// pane leaves no pair, because nothing says which two to compare.
+    ///
+    /// The first entry is the pane earlier in [`PaneTree::split_panes`] order,
+    /// the left pane of a side-by-side split and the top pane of a stacked one.
+    /// A covered pane under a widen still counts, because the widen hides a
+    /// pane and does not close it.
+    pub(crate) fn pair_panes(&self) -> Option<[(PaneId, BufferId); 2]> {
+        let mut files = self.panes.split_panes().filter_map(|(pane_id, pane)| {
+            let View::Editor(editor_id) = pane.view else {
+                return None;
+            };
+            let buffer_id = self.editors.get(editor_id)?.buffer_id;
+            self.buffers.path_for(buffer_id)?;
+            Some((pane_id, buffer_id))
+        });
+        let pair = [files.next()?, files.next()?];
+        (files.next().is_none() && pair[0].1 != pair[1].1).then_some(pair)
     }
 
     /// Buffer ids currently shown in a split-pane editor or held as a preview,
