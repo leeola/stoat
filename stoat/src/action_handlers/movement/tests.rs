@@ -336,40 +336,126 @@ fn next_change_crosses_to_next_file_first_hunk() {
 }
 
 /// Under the index base a file whose every change is staged has marks and no
-/// hunks. The hop still reaches it and lands on the mark's row.
+/// hunks. A plain pane's hop reaches it and lands on the mark's row, and the
+/// diff view's hop passes it, since the view shows no change there.
 #[test]
-fn a_file_with_only_staged_changes_still_stops() {
-    let mut h = TestHarness::with_size(40, 20);
+fn a_file_with_only_staged_changes_stops_a_plain_walk_alone() {
     let workdir = PathBuf::from("/repo");
+    let walk = |diff_view: bool| {
+        let mut h = TestHarness::with_size(40, 20);
+        h.stage_index_scenario(
+            &workdir,
+            &[
+                ("a.rs", "a\nb\nc\n", "a\nb\nc\n", "a\nX\nc\n"),
+                ("b.rs", "d\ne\nf\n", "d\nY\nf\n", "d\nY\nf\n"),
+            ],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.set_diff_view(diff_view);
+            set_cursor_row(editor, 1);
+        }
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
+
+        (
+            (
+                focused_buffer_path(&h.stoat),
+                focused_head_row(&mut h.stoat),
+            ),
+            h.stoat.pending_message.clone(),
+        )
+    };
+
+    let [(plain, _), (diff, diff_message)] = [false, true].map(walk);
+
+    assert_eq!(
+        [plain, diff],
+        [(workdir.join("b.rs"), 1), (workdir.join("a.rs"), 1)],
+    );
+    assert_eq!(diff_message.as_deref(), Some("no more changes"));
+}
+
+/// A latched pane that shows a clean file plain compares against the
+/// workspace's base too, so its hop passes a file whose changes are all staged.
+#[test]
+fn a_latched_pane_hops_past_a_file_with_only_staged_changes() {
+    let workdir = PathBuf::from("/repo");
+    let mut h = TestHarness::with_size(40, 20);
     h.stage_index_scenario(
         &workdir,
         &[
-            ("a.rs", "a\nb\nc\n", "a\nb\nc\n", "a\nX\nc\n"),
+            ("a.rs", "a\n", "a\n", "a\n"),
             ("b.rs", "d\ne\nf\n", "d\nY\nf\n", "d\nY\nf\n"),
+            ("c.rs", "g\nh\ni\n", "g\nh\ni\n", "g\nZ\ni\n"),
         ],
     );
     h.stoat.set_diff_warm_auto(true);
     h.open_file(&workdir.join("a.rs"));
     h.settle_diff_jobs();
     {
-        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
-        editor.set_diff_view(true);
-        set_cursor_row(editor, 1);
+        let ws = h.stoat.active_workspace_mut();
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).diff_mode = true;
     }
 
     goto_change(&mut h.stoat, ChangeDir::Next);
     h.settle();
 
     assert_eq!(
-        focused_buffer_path(&h.stoat),
-        workdir.join("b.rs"),
-        "crossed to b.rs, whose one change is staged",
+        (
+            focused_buffer_path(&h.stoat),
+            focused_head_row(&mut h.stoat)
+        ),
+        (workdir.join("c.rs"), 1),
     );
-    assert_eq!(
-        focused_head_row(&mut h.stoat),
-        1,
-        "landed on the staged mark's row",
+}
+
+/// `f.txt` under the index base, with a staged mark at row 1 and an unstaged
+/// hunk at row 3, open on row 0 with the view as `diff_view` sets it.
+fn half_staged(diff_view: bool) -> TestHarness {
+    let mut h = TestHarness::with_size(40, 20);
+    h.stage_index_scenario(
+        "/repo",
+        &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
     );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&PathBuf::from("/repo/f.txt"));
+    h.settle_diff_jobs();
+    let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+    editor.set_diff_view(diff_view);
+    set_cursor_row(editor, 0);
+    h
+}
+
+/// The staged mark at row 1 is a stop in a plain pane, and the diff view walks
+/// past it to the unstaged hunk at row 3.
+#[test]
+fn the_in_file_walk_stops_on_a_staged_mark_in_a_plain_pane_alone() {
+    let walk = |diff_view: bool| {
+        let mut h = half_staged(diff_view);
+        goto_change(&mut h.stoat, ChangeDir::Next);
+        focused_head_row(&mut h.stoat)
+    };
+
+    assert_eq!([false, true].map(walk), [1, 3]);
+}
+
+/// The first-change jump reads the walk's stops, so the diff view lands on the
+/// unstaged hunk past the staged mark.
+#[test]
+fn the_first_change_jump_passes_a_staged_mark_in_the_diff_view() {
+    let jump = |diff_view: bool| {
+        let mut h = half_staged(diff_view);
+        goto_first_change(&mut h.stoat);
+        focused_head_row(&mut h.stoat)
+    };
+
+    assert_eq!([false, true].map(jump), [1, 3]);
 }
 
 /// The in-file walk reads its stops from the diff map. A hop that leaves the

@@ -488,7 +488,7 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
         let target_row = display_snapshot.diff_map().and_then(|diff_map| {
             diff_map
                 .live_hunks(buffer_snapshot)
-                .change_stops()
+                .hunk_stops()
                 .first()
                 .map(|stop| stop.start)
         });
@@ -1498,16 +1498,16 @@ mod tests {
         run(&mut h, &stoat_action::DiffAgainstIndex);
         assert_eq!(
             (head_base_and_view(&mut h).1, review_cursor_row(&mut h)),
-            (true, 1),
-            "the view opens on the staged mark, the first change",
+            (true, 3),
+            "the view opens on the unstaged hunk, the first change against the index",
         );
 
-        run(&mut h, &stoat_action::MoveDown);
-        run(&mut h, &stoat_action::MoveDown);
+        run(&mut h, &stoat_action::MoveUp);
+        run(&mut h, &stoat_action::MoveUp);
         run(&mut h, &stoat_action::DiffAgainstIndex);
         assert_eq!(
             review_cursor_row(&mut h),
-            3,
+            1,
             "and a second press moves nothing"
         );
     }

@@ -4115,6 +4115,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             .path_for(buffer_id)
             .map(Path::to_path_buf)
     });
+    let diff_walk = walks_diff_view(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -4125,7 +4126,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
     // One walk over them feeds every selection, since each one picks its own
     // target out of the same sorted list.
-    let hunk_rows = live_hunk_rows(&display_snapshot, buffer_snapshot);
+    let hunk_rows = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
 
     // Every selection steps from its own cursor, so a multi-cursor set walks to
     // one hunk each rather than sharing whichever cursor happened to be newest.
@@ -4159,7 +4160,14 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             stoat.set_status("no more changes");
             return UpdateEffect::Redraw;
         }
-        return goto_change_across_files(stoat, dir, current_path, source_diff_view, origin);
+        return goto_change_across_files(
+            stoat,
+            dir,
+            current_path,
+            source_diff_view,
+            diff_walk,
+            origin,
+        );
     }
 
     editor
@@ -4336,14 +4344,36 @@ fn landing_row(rows: &Range<u32>) -> u32 {
 /// reaches the row the gutter paints its mark on. A refined hunk offers one
 /// stop per marked run, so a walk crosses the rows that changed rather than
 /// the block that holds them. A buffer with no diff map at all answers empty.
+///
+/// A walk in the diff view takes the hunks alone, and a plain pane's walk takes
+/// the staged marks too.
 pub(super) fn live_hunk_rows(
     display_snapshot: &DisplaySnapshot,
     buffer_snapshot: &MultiBufferSnapshot,
+    diff_walk: bool,
 ) -> Vec<Range<u32>> {
     display_snapshot
         .diff_map()
-        .map(|diff_map| diff_map.live_hunks(buffer_snapshot).change_stops())
+        .map(|diff_map| {
+            let live = diff_map.live_hunks(buffer_snapshot);
+            match diff_walk {
+                true => live.hunk_stops(),
+                false => live.change_stops(),
+            }
+        })
         .unwrap_or_default()
+}
+
+/// Whether a change walk from the focused pane reads the diff view's stops.
+///
+/// True in the diff view, and in a latched pane that shows a clean file plain,
+/// since both compare against the workspace's base.
+fn walks_diff_view(stoat: &mut Stoat) -> bool {
+    let latched = {
+        let panes = &stoat.active_workspace().panes;
+        panes.pane(panes.focus()).diff_mode
+    };
+    latched || focused_editor_mut(stoat).is_some_and(|editor| editor.diff_view)
 }
 
 pub(crate) fn goto_first_change(stoat: &mut Stoat) -> UpdateEffect {
@@ -4363,13 +4393,14 @@ pub(super) fn goto_last_change(stoat: &mut Stoat) -> UpdateEffect {
 /// walk. The per-selection stepping, the extend branch, the repeat record and
 /// the cross-file hop all answer questions an end of the list does not ask.
 fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
+    let diff_walk = walks_diff_view(stoat);
     let target = {
         let Some(editor) = focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let rows = live_hunk_rows(&display_snapshot, buffer_snapshot);
+        let rows = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
         let rows = match last {
             true => rows.last().cloned(),
             false => rows.first().cloned(),
@@ -4461,6 +4492,15 @@ enum ChangedFileJump {
     NoMoreChanges,
 }
 
+/// What a hop compares a candidate file against to find the file's stops.
+#[derive(Clone, Copy)]
+struct StopBase<'a> {
+    /// The workspace's diff base, or `None` for the default comparison.
+    base: Option<&'a DiffBase>,
+    /// Whether the walk is the diff view's, which passes over staged marks.
+    diff_walk: bool,
+}
+
 /// Jump to the adjacent changed file when the focused buffer has no further
 /// hunk in `dir`.
 ///
@@ -4477,6 +4517,7 @@ fn goto_change_across_files(
     dir: ChangeDir,
     current_path: Option<PathBuf>,
     source_diff_view: bool,
+    diff_walk: bool,
     origin: Option<JumpEntry>,
 ) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
@@ -4499,7 +4540,10 @@ fn goto_change_across_files(
             &git_root,
             current_path,
             dir,
-            base.as_ref(),
+            StopBase {
+                base: base.as_ref(),
+                diff_walk,
+            },
             tally,
         );
         let _ = tx.send(found);
@@ -4583,7 +4627,7 @@ fn scan_changed_file_jump(
     git_root: &Path,
     current_path: Option<PathBuf>,
     dir: ChangeDir,
-    base: Option<&DiffBase>,
+    stop_base: StopBase<'_>,
     tally: Option<Vec<(PathBuf, usize)>>,
 ) -> ChangedFileJump {
     let Some(repo) = git_host.discover(git_root) else {
@@ -4595,7 +4639,7 @@ fn scan_changed_file_jump(
     // `n`. A memory base supplies its text rather than a commit, so there is no
     // revision to list against and the working tree's own list is the closest
     // true answer.
-    let listed = match base {
+    let listed = match stop_base.base {
         Some(DiffBase::Rev { sha: Some(sha) }) => repo.changed_files_from(sha.as_str()),
         _ => {
             // A moved file lists as changed while owning no hunk, so a hop into
@@ -4661,7 +4705,7 @@ fn scan_changed_file_jump(
         {
             return ChangedFileJump::NoMoreChanges;
         }
-        let Some((line, rows)) = first_hunk_stop(&*repo, fs_host, path, dir, base) else {
+        let Some((line, rows)) = first_hunk_stop(&*repo, fs_host, path, dir, stop_base) else {
             continue;
         };
         return ChangedFileJump::To {
@@ -4678,7 +4722,8 @@ fn scan_changed_file_jump(
 /// The landing row of `path`'s first (Next) or last (Prev) change against the
 /// workspace's diff base, paired with the rows that change occupies.
 ///
-/// A change is a hunk, or a staged mark under the index base. The texts come
+/// A change is a hunk. Outside the diff view a staged mark under the index base
+/// is a change too, as in [`live_hunk_rows`]. The texts come
 /// from [`diff::base_texts`], which is what the target's own diff map reads,
 /// so the row this lands on is one of the stops that map offers. Reading HEAD
 /// instead leaves a file committed on top of a review base looking clean, and
@@ -4696,11 +4741,15 @@ fn first_hunk_stop(
     fs_host: &Arc<dyn FsHost>,
     path: &Path,
     dir: ChangeDir,
-    base_override: Option<&DiffBase>,
+    stop_base: StopBase<'_>,
 ) -> Option<(u32, Range<u32>)> {
-    let texts = diff::base_texts(repo, path, base_override)?;
+    let texts = diff::base_texts(repo, path, stop_base.base)?;
     let base = texts.base.as_str();
-    let behind = texts.staged_from.as_deref().map(String::as_str);
+    let behind = texts
+        .staged_from
+        .as_deref()
+        .map(String::as_str)
+        .filter(|_| !stop_base.diff_walk);
 
     let mut bytes = Vec::new();
     let Ok(()) = fs_host.read(path, &mut bytes) else {

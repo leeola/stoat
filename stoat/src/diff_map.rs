@@ -262,7 +262,7 @@ impl<'a> LiveHunks<'a> {
         }
     }
 
-    /// The row ranges change navigation stops on, in document order.
+    /// The row ranges the hunks offer change navigation, in document order.
     ///
     /// A refined hunk contributes one range per marked run, so `n` inside a
     /// hundred-line reindent walks the handful of rows that actually changed
@@ -272,11 +272,7 @@ impl<'a> LiveHunks<'a> {
     ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
     /// what a caller turns into a single-cell landing at the seam row.
-    ///
-    /// Each staged mark contributes its rows too, the way a staged hunk does
-    /// under a HEAD base, so `n`, `p`, and the wheel walk reach it and `u`
-    /// unstages it there.
-    pub fn change_stops(&self) -> Vec<Range<u32>> {
+    pub fn hunk_stops(&self) -> Vec<Range<u32>> {
         let mut stops = Vec::with_capacity(self.hunks.len());
         for live in &self.hunks {
             match live.hunk.refined() {
@@ -293,6 +289,19 @@ impl<'a> LiveHunks<'a> {
                 false => stops.push(live.rows.clone()),
             }
         }
+        stops
+    }
+
+    /// The row ranges change navigation stops on outside the diff view, in
+    /// document order.
+    ///
+    /// The stops of [`Self::hunk_stops`] and the rows of each staged mark. Under
+    /// the index base the two together are every change since HEAD, which is
+    /// what a plain pane's gutter marks. The diff view walks
+    /// [`Self::hunk_stops`] alone, because a staged mark is no difference from
+    /// the base the view compares against.
+    pub fn change_stops(&self) -> Vec<Range<u32>> {
+        let mut stops = self.hunk_stops();
         stops.extend(self.staged.iter().map(|(rows, _)| rows.clone()));
         stops.sort_by_key(|run| (run.start, run.end));
         stops
@@ -2695,20 +2704,26 @@ mod tests {
         );
     }
 
-    /// `n`, `p`, and the wheel walk stop on a staged mark the way they stop on
-    /// a hunk.
+    /// A plain pane's walk stops on a staged mark the way it stops on a hunk,
+    /// and the diff view's walk passes it.
     #[test]
-    fn change_stops_include_staged_marks() {
+    fn staged_marks_are_change_stops_and_not_hunk_stops() {
         let dm = staged_map(
             "b0\nb1\nb2\nb3\nb4\n",
             vec![modified_hunk(1..2, 3..6)],
             vec![mark(DiffHunkStatus::Modified, 4..5)],
         );
+        let live = dm.live_hunks(&buffer_holding("b0\nX1\nb2\nb3\nb4\n").snapshot());
+        let rows = |stops: Vec<std::ops::Range<u32>>| {
+            stops
+                .into_iter()
+                .map(|run| (run.start, run.end))
+                .collect::<Vec<_>>()
+        };
+
         assert_eq!(
-            dm.live_hunks(&buffer_holding("b0\nX1\nb2\nb3\nb4\n").snapshot())
-                .change_stops(),
-            [1..2, 4..5],
-            "the hunk, then the mark",
+            (rows(live.hunk_stops()), rows(live.change_stops())),
+            (vec![(1, 2)], vec![(1, 2), (4, 5)]),
         );
     }
 

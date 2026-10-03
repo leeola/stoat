@@ -92,6 +92,7 @@ pub(crate) fn toggle_walk(stoat: &mut Stoat) -> UpdateEffect {
 /// Both sides measure against the wheel's scroll target, not the eased offset,
 /// so the gate reads the view the reader is about to see.
 fn gate_open(editor: &mut EditorState, dir: ChangeDir, fraction: f32) -> bool {
+    let diff_view = editor.diff_view;
     let max_scroll = view::max_scroll_offset(editor);
     let top = editor.scroll_row as f32 + editor.scroll_frac;
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1) as f32;
@@ -107,7 +108,7 @@ fn gate_open(editor: &mut EditorState, dir: ChangeDir, fraction: f32) -> bool {
             .offset_to_point(cursor_offset(rope, tail_off, head_off))
             .row;
 
-        let stops = movement::live_hunk_rows(&snapshot, buffer_snapshot);
+        let stops = movement::live_hunk_rows(&snapshot, buffer_snapshot, diff_view);
         let Some(rows) = movement::departure_stop(&stops, cursor_row, dir) else {
             return true;
         };
