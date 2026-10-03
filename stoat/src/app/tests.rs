@@ -13055,6 +13055,39 @@ fn agent_open_editor_waiter_fires_on_pane_close() {
     );
 }
 
+/// A bridge file that reads on the blocking pool holds the agent from the
+/// start. The buffer the read installs as releases the agent when it closes.
+#[test]
+fn agent_open_editor_waits_for_a_file_read_on_the_pool() {
+    let mut h = Stoat::test();
+    let root = PathBuf::from("/bridge");
+    let path = root.join("big.txt");
+    h.fake_fs().insert_file(&path, vec![b'x'; (1 << 20) + 16]);
+    h.stoat.active_workspace_mut().git_root = root;
+    let uid = h.stoat.active_workspace().uid;
+
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
+    let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+        uid,
+        client: 0,
+        path,
+        done: done_tx,
+    });
+    let opened = (effect, done_rx.try_recv());
+
+    h.settle();
+    crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+
+    assert_eq!(
+        (opened, done_rx.try_recv()),
+        (
+            (UpdateEffect::Redraw, Err(TryRecvError::Empty)),
+            Ok(BridgeOutcome::Closed),
+        ),
+    );
+}
+
 #[test]
 fn a_second_request_for_a_held_buffer_keeps_the_first_waiting() {
     let mut h = Stoat::test();

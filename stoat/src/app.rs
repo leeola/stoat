@@ -7384,10 +7384,11 @@ impl Stoat {
     /// Switches the active workspace to the owning session so the editor lands
     /// beside the agent pane, splits a new pane for the file, and parks the
     /// request's sender on the opened buffer through [`Workspace::hold_buffer`].
-    /// A buffer that is already held gains a second waiter. Returns
-    /// [`UpdateEffect::None`] when no live workspace owns the session or the
-    /// file does not open. The dropped sender then unblocks the agent so its
-    /// `$EDITOR` invocation does not hang.
+    /// A buffer that is already held gains a second waiter. A file that reads on
+    /// the blocking pool parks the sender on that read, which hands it to the
+    /// buffer the read installs as. Returns [`UpdateEffect::None`] when no live
+    /// workspace owns the session or the file does not open. The dropped sender
+    /// then unblocks the agent so its `$EDITOR` invocation does not hang.
     ///
     /// An [`AgentControl::ClientGone`] drops the waiters of a command that
     /// went away, and leaves the active workspace as it is.
@@ -7416,19 +7417,21 @@ impl Stoat {
                     new_pane
                 };
 
-                let Some(buffer_id) =
-                    crate::buffer_lifecycle::open_file_in_pane(self, new_pane, &path)
-                else {
-                    return UpdateEffect::None;
+                let waiter = BridgeWaiter {
+                    client,
+                    label: "agent".to_string(),
+                    done,
                 };
-                self.active_workspace_mut().hold_buffer(
-                    buffer_id,
-                    BridgeWaiter {
-                        client,
-                        label: "agent".to_string(),
-                        done,
+                let held = match crate::buffer_lifecycle::open_file_in_pane(self, new_pane, &path) {
+                    Some(buffer_id) => {
+                        self.active_workspace_mut().hold_buffer(buffer_id, waiter);
+                        true
                     },
-                );
+                    None => crate::buffer_lifecycle::hold_pending_open(self, &path, waiter),
+                };
+                if !held {
+                    return UpdateEffect::None;
+                }
                 UpdateEffect::Redraw
             },
             AgentControl::OpenInTerm {
