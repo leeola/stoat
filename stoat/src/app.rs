@@ -3424,8 +3424,9 @@ impl Stoat {
     /// Point the per-workspace agent sockets at `dir`, enabling both socket
     /// serving and session-environment injection for owned children.
     ///
-    /// Unset by default, which leaves both off. The binary and the fixture
-    /// harness pass the Stoat state directory.
+    /// Unset by default, which leaves both off. The binary passes
+    /// [`crate::run::agent_socket_bind_dir`], and the fixture harness passes a
+    /// temporary directory.
     pub fn set_agent_socket_dir(&mut self, dir: PathBuf) {
         self.agent_socket_dir = Some(dir);
     }

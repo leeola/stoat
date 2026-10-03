@@ -7,9 +7,9 @@ use crate::{
     workspace::Workspace,
 };
 pub use pty::{
-    agent_socket_path, agent_socket_path_in, spawn_claude, spawn_oneshot, spawn_shell,
-    spawn_ssh_reader, spawn_term_reader, spawn_terminal, PtyNotification, ShellHandle,
-    TermSpawnEnv,
+    agent_socket_bind_dir, agent_socket_dir, agent_socket_path, agent_socket_path_in, spawn_claude,
+    spawn_oneshot, spawn_shell, spawn_ssh_reader, spawn_term_reader, spawn_terminal,
+    PtyNotification, ShellHandle, TermSpawnEnv,
 };
 use ratatui::layout::Rect;
 use slotmap::new_key_type;

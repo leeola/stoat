@@ -565,7 +565,7 @@ fn run_tui(
         // restore, which adopts the persisted session uid. Production-only like
         // set_lsp_auto_spawn, since binding needs the reactor only a real run
         // has.
-        match stoat::log::state_dir() {
+        match stoat::run::agent_socket_bind_dir() {
             Ok(dir) => {
                 stoat.set_agent_socket_dir(dir);
                 stoat.set_serve_agent_sockets(true);
@@ -573,7 +573,7 @@ fn run_tui(
             Err(err) => tracing::warn!(
                 target: "stoat::bin",
                 %err,
-                "state directory unresolved; agent hooks and runtime queries disabled this session",
+                "agent socket directory unavailable; agent hooks and runtime queries disabled this session",
             ),
         }
         let active_uid = stoat.active_workspace().uid();

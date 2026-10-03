@@ -8,7 +8,7 @@ use std::{
 };
 use stoat::{
     host::{FsHost, LocalFs},
-    log, run,
+    run,
     workspace::WorkspaceUid,
 };
 
@@ -96,8 +96,8 @@ pub fn run(sub: QueryCommand) -> Result<(), Whatever> {
 /// Resolve which session socket to query.
 ///
 /// `--socket` wins as an explicit path. Otherwise a `--session` uid maps to its
-/// [`run::agent_socket_path`]. With neither, the state directory is scanned for a
-/// sole live `agent-*.sock`.
+/// [`run::agent_socket_path`]. With neither, [`run::agent_socket_dir`] is
+/// scanned for a sole live `agent-*.sock`.
 fn resolve_socket_path(args: &SocketArgs) -> Result<PathBuf, Whatever> {
     if let Some(socket) = &args.socket {
         return Ok(socket.clone());
@@ -109,10 +109,10 @@ fn resolve_socket_path(args: &SocketArgs) -> Result<PathBuf, Whatever> {
     find_sole_socket()
 }
 
-/// Locate the one live session socket in [`log::state_dir`] when neither
+/// Locate the one live session socket in [`run::agent_socket_dir`] when neither
 /// `--socket` nor `--session` pins it down.
 fn find_sole_socket() -> Result<PathBuf, Whatever> {
-    let dir = log::state_dir().whatever_context("resolve state directory")?;
+    let dir = run::agent_socket_dir().whatever_context("resolve agent socket directory")?;
     sole_live_socket(&dir, &LocalFs)
 }
 
