@@ -124,7 +124,9 @@ fn displace(slot: &ClientSlot, stream: UnixStream) {
 /// to.
 ///
 /// Owns the PTY master the relay threads pump and the socket file they accept
-/// on. [`Self::finish`] is what takes both down in the right order.
+/// on. [`Self::finish`] is what takes both down in the right order. A server
+/// dropped without [`Self::finish`] still removes the socket file, so an error
+/// exit strands no session name.
 pub struct AttachServer {
     attached_rx: Option<UnboundedReceiver<()>>,
     master: Arc<File>,
@@ -186,6 +188,11 @@ impl AttachServer {
         if let Some(stream) = self.slot.current.lock().expect("attach client lock").take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
+    }
+}
+
+impl Drop for AttachServer {
+    fn drop(&mut self) {
         let _ = LocalFs.remove_file(&self.path);
     }
 }
@@ -622,8 +629,8 @@ fn last_error() -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        client_exit_code, displace, server_argv, write_to_client, Arc, ClientSlot, Duration,
-        Instant, Mutex, Read, UnixStream, Write, CHUNK,
+        client_exit_code, displace, server_argv, write_to_client, Arc, AttachServer, ClientSlot,
+        Duration, Instant, Mutex, Read, UnixListener, UnixStream, Write, CHUNK,
     };
     use std::{ffi::OsString, sync::Condvar, thread};
     use stoat::attach::REPLACED_EXIT;
@@ -772,5 +779,26 @@ mod tests {
     fn a_replaced_client_exits_apart_from_a_finished_one() {
         assert_eq!(client_exit_code(true), REPLACED_EXIT);
         assert_eq!(client_exit_code(false), 0);
+    }
+
+    /// An error exit drops the server without [`AttachServer::finish`], and the
+    /// socket file goes either way, so no exit strands the session name.
+    #[test]
+    fn a_server_removes_its_socket_file_however_it_ends() {
+        let ends: [fn(AttachServer); 2] = [drop, AttachServer::finish];
+        let exists = ends.map(|end| {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join("attach-box.sock");
+            let _listener = UnixListener::bind(&path).expect("bind");
+            end(AttachServer {
+                attached_rx: None,
+                master: Arc::new(tempfile::tempfile().expect("a temp file")),
+                slot: Arc::default(),
+                path: path.clone(),
+            });
+            path.exists()
+        });
+
+        assert_eq!(exists, [false, false]);
     }
 }
