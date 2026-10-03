@@ -27,7 +27,7 @@ use crossterm::{
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen},
 };
 use futures::FutureExt;
-use ratatui::buffer::Buffer;
+use ratatui::{buffer::Buffer, DefaultTerminal};
 #[cfg(feature = "perf")]
 use std::time::Instant;
 use std::{
@@ -162,7 +162,7 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
 
 async fn run(
     channels: &mut UiChannels,
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     mouse_captured: bool,
 ) -> io::Result<()> {
     let UiChannels {
@@ -274,7 +274,7 @@ async fn run(
                         if mouse_captured {
                             execute!(io::stdout(), EnableMouseCapture)?;
                         }
-                        terminal.clear()?;
+                        repaint_all(terminal)?;
                         stamp = UndercurlStamp::default();
                     },
                 }
@@ -374,6 +374,19 @@ async fn run(
     log_input_latency(&ui_perf);
 
     Ok(())
+}
+
+/// Clear the screen and have the next frame paint every cell.
+///
+/// A resize to the size the terminal already has does both, without the
+/// cursor-position query that [`ratatui::Terminal::clear`] sends to restore the
+/// cursor. The query goes out while the input thread runs its handshake against
+/// a terminal that just attached. The two readers of fd 0 then take each other's
+/// replies. A terminal that answers no query makes the clear time out, and the
+/// error ends this thread.
+fn repaint_all(terminal: &mut DefaultTerminal) -> io::Result<()> {
+    let size = terminal.size()?;
+    terminal.resize(size.into())
 }
 
 /// Announce this editor to the terminal and report whether a stoatty answered.

@@ -21,7 +21,9 @@
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::{
     io::{Read, Write},
+    os::unix::{net::UnixStream, process::CommandExt},
     path::{Path, PathBuf},
+    process::{Child as ServerChild, Command, Stdio},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -43,6 +45,24 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// a loaded machine still passes, and short enough that a missed step fails the
 /// run quickly.
 const SCREEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a spawned session must not inherit.
+///
+/// A test that runs inside stoatty carries every marker of it, and a child that
+/// inherits one makes a claim that no one honors. The XDG overrides go too, so
+/// config, data, and state resolve under the scratch home.
+const ISOLATED_VARS: [&str; 7] = [
+    "STOATTY",
+    "STOATTY_VERSION",
+    "STOATTY_LOG_ID",
+    "STOATTY_WINDOW_SOCKET",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+];
+
+/// The detachable session [`AttachServer`] serves and a client attaches to.
+const ATTACH_NAME: &str = "guard";
 
 /// A stoat process on a real pty, with everything it writes collected.
 ///
@@ -86,27 +106,27 @@ impl Session {
 
     /// Spawn stoat in a `history` fixture repository on a `cols` by `rows` pty.
     fn spawn(cols: u16, rows: u16) -> Self {
+        Session::spawn_in(cols, rows, fixture_workspace(), &[])
+    }
+
+    /// Spawn stoat with `args` on a `cols` by `rows` pty, in the repository and
+    /// the home that `workspace` holds.
+    fn spawn_in(
+        cols: u16,
+        rows: u16,
+        workspace: (TempDir, TempDir, PathBuf, PathBuf),
+        args: &[&str],
+    ) -> Self {
         let binary = stoat_binary();
-        let (repo_dir, home_dir, root, home) = fixture_workspace();
+        let (repo_dir, home_dir, root, home) = workspace;
         let pair = portable_pty::native_pty_system()
             .openpty(pty_size(cols, rows))
             .expect("open a pty");
 
         let mut cmd = CommandBuilder::new(&binary);
+        cmd.args(args);
         cmd.cwd(&root);
-        // Whatever launched the test may itself be running under stoatty. Every
-        // marker of that has to go, or the child inherits a claim no one will
-        // honor. The XDG overrides go too, so config, data, and state resolve
-        // under the scratch home.
-        for key in [
-            "STOATTY",
-            "STOATTY_VERSION",
-            "STOATTY_LOG_ID",
-            "STOATTY_WINDOW_SOCKET",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-        ] {
+        for key in ISOLATED_VARS {
             cmd.env_remove(key);
         }
         cmd.env("HOME", &home);
@@ -258,6 +278,80 @@ impl Session {
     }
 }
 
+/// A detachable session that serves [`ATTACH_NAME`], started as a client starts
+/// one, with no terminal of its own.
+///
+/// The server is killed on drop, so a run that fails before the quit leaves no
+/// server behind.
+struct AttachServer {
+    child: ServerChild,
+}
+
+impl AttachServer {
+    /// Start the server in `root` with `home` as its home, and wait until it
+    /// accepts a connection.
+    fn spawn(root: &Path, home: &Path) -> Self {
+        let mut command = Command::new(stoat_binary());
+        command
+            .args(["--attach-serve", ATTACH_NAME])
+            .current_dir(root)
+            .env("HOME", home)
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for key in ISOLATED_VARS {
+            command.env_remove(key);
+        }
+        // SAFETY: setsid is async-signal-safe and touches only the child's
+        // session, which is all that runs between fork and exec. The server
+        // takes the pty it opens as its terminal, which only a session leader
+        // with no terminal does.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let server = AttachServer {
+            child: command.spawn().expect("spawn the attach server"),
+        };
+
+        let file = format!("attach-{ATTACH_NAME}.sock");
+        let socket = stoat_log::socket_dir(home.join(".local/state/stoat"), &file).join(file);
+        let deadline = Instant::now() + SCREEN_TIMEOUT;
+        while UnixStream::connect(&socket).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "the attach server never accepted"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        server
+    }
+
+    /// Whether the server exits with success within [`EXIT_TIMEOUT`].
+    fn exits_cleanly(mut self) -> bool {
+        let deadline = Instant::now() + EXIT_TIMEOUT;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("poll the attach server") {
+                return status.success();
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for AttachServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// The commit picker is where the leak was reported, so this drives the surface
 /// that produced it rather than an idle screen. The picker's list and diff both
 /// pool, and its graph strokes paths, so a regression in any of the three gates
@@ -395,6 +489,39 @@ fn a_termination_signal_quits_the_session_and_removes_its_socket() {
             (true, true, Vec::new()),
             (true, true, Vec::new()),
         ],
+    );
+}
+
+/// A terminal that attaches to a running session gets the whole screen and
+/// reads keys, with no key needed first.
+///
+/// The re-entry asks the new terminal nothing. The handshake that identifies the
+/// terminal reads fd 0 at the same moment, and nothing here answers a query. A
+/// re-entry that asks for the cursor waits out its query and draws nothing.
+#[test]
+fn an_attach_paints_the_new_terminal_and_reads_its_keys() {
+    let workspace = fixture_workspace();
+    let server = AttachServer::spawn(&workspace.2, &workspace.3);
+    let mut client = Session::spawn_in(120, 40, workspace, &["--attachable", ATTACH_NAME]);
+
+    let painted = client.settles(|screen| screen.contains(" NOR "));
+    client.send("i");
+    let inserting = client.settles(|screen| screen.contains(" INS "));
+    client.send("\x1b");
+    let normal = client.settles(|screen| screen.contains(" NOR "));
+    let screen = client.screen_text();
+    let (status, _) = client.quit();
+
+    assert_eq!(
+        (
+            painted,
+            inserting,
+            normal,
+            status.success(),
+            server.exits_cleanly()
+        ),
+        (true, true, true, true, true),
+        "the attached screen and its keys:\n{screen}",
     );
 }
 
