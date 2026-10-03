@@ -1732,11 +1732,13 @@ pub struct Stoat {
     /// The binary sets it via [`Self::set_session_log`]. The session renames
     /// the file as the active workspace's name changes.
     pub(crate) session_log: Option<SessionLog>,
-    /// Workspaces whose hook socket is already served, so the spawn paths call
-    /// [`Self::serve_term_session`] freely without stacking listeners on one
-    /// path. A second bind of a live socket replaces the file and orphans the
-    /// children already connected through it.
-    pub(crate) served_agent_sockets: std::collections::HashSet<WorkspaceUid>,
+    /// The hook server of each workspace whose socket is served.
+    ///
+    /// The key lets the spawn paths call [`Self::serve_term_session`] freely
+    /// without stacking listeners on one path. A second bind of a live socket
+    /// replaces the file and orphans the children already connected through it.
+    /// Dropping a task stops its server, which removes its socket file.
+    pub(crate) agent_servers: std::collections::HashMap<WorkspaceUid, stoat_scheduler::Task<()>>,
     /// Landing slot for a finished direnv load, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
     /// Shared rather than returned because the load runs detached on
@@ -2563,7 +2565,7 @@ impl Stoat {
             agent_socket_dir: None,
             serve_agent_sockets: false,
             session_log: None,
-            served_agent_sockets: std::collections::HashSet::new(),
+            agent_servers: std::collections::HashMap::new(),
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
@@ -3859,6 +3861,12 @@ impl Stoat {
                 UpdateEffect::None => {},
             }
         }
+
+        // A dropped task is cancelled on the executor's next turn, and the yield
+        // gives it that turn. So the socket files are gone before the caller
+        // starts its shutdown, which a kill cuts short when a server is slow.
+        self.agent_servers.clear();
+        tokio::task::yield_now().await;
 
         crate::image_emit::emit_drop_all_images(self);
         apc_emit::emit_reset_default_colors(self);
@@ -7558,20 +7566,19 @@ impl Stoat {
             };
             crate::run::agent_socket_path_in(dir, uid)
         };
-        if !self.served_agent_sockets.insert(uid) {
+        if self.agent_servers.contains_key(&uid) {
             return Ok(());
         }
 
         let tx = self.agent_event_tx.clone();
         let control_tx = self.agent_control_tx.clone();
-        self.executor
-            .spawn(crate::agent_ipc::serve_agent_hooks(
-                socket_path,
-                uid,
-                tx,
-                control_tx,
-            ))
-            .detach();
+        let task = self.executor.spawn(crate::agent_ipc::serve_agent_hooks(
+            socket_path,
+            uid,
+            tx,
+            control_tx,
+        ));
+        self.agent_servers.insert(uid, task);
         Ok(())
     }
 

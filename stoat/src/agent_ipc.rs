@@ -168,11 +168,12 @@ enum AgentRequest {
 
 /// The socket file a hook server bound, removed when the server stops.
 ///
-/// The server stops when its accept loop ends or when the runtime drops its
-/// task at exit, and the file goes either way. Two sessions that share a
-/// workspace uid bind the same path, and the later bind replaces the file. The
-/// guard removes the path only while it still names the file this server
-/// bound, so the exit of the earlier session leaves the later one's socket.
+/// The server stops when its accept loop ends or when its task is dropped,
+/// which the session does as its run loop ends and the runtime does at exit.
+/// The file goes either way. Two sessions that share a workspace uid bind the
+/// same path, and the later bind replaces the file. The guard removes the path
+/// only while it still names the file this server bound, so the exit of the
+/// earlier session leaves the later one's socket.
 struct BoundSocket {
     path: PathBuf,
     /// Device, inode, and change time of the bound file. A file system reuses a
@@ -214,8 +215,8 @@ impl Drop for BoundSocket {
 /// server, leaving the app running without hook status for that session.
 ///
 /// The server removes its socket file when it stops, which includes the drop
-/// of its task when the runtime shuts down at exit. A file that a later session
-/// bound at the same path stays.
+/// of its task. The session drops it as its run loop ends, and the runtime
+/// drops it at exit. A file that a later session bound at the same path stays.
 ///
 /// Connections are served side by side, so one parked on an open editor holds
 /// up no other. A server that stops drops its parked connections with it.

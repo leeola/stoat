@@ -3685,7 +3685,7 @@ fn agent_sockets_stay_unserved_without_the_production_flag() {
         idle,
         "a socket directory alone names a socket, it does not bind one",
     );
-    assert!(h.stoat.served_agent_sockets.is_empty());
+    assert!(h.stoat.agent_servers.is_empty());
 }
 
 #[test]
@@ -3706,10 +3706,7 @@ fn a_workspaces_agent_socket_is_served_once() {
         idle + 1,
         "every spawn calls this, so a repeat must not stack a second listener",
     );
-    assert_eq!(
-        h.stoat.served_agent_sockets.iter().collect::<Vec<_>>(),
-        vec![&uid],
-    );
+    assert_eq!(h.stoat.agent_servers.keys().collect::<Vec<_>>(), vec![&uid],);
 }
 
 #[test]

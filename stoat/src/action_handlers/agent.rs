@@ -131,7 +131,7 @@ mod tests {
         super::super::dispatch(&mut h.stoat, &stoat_action::SpawnClaude);
 
         assert_eq!(
-            h.stoat.served_agent_sockets.iter().collect::<Vec<_>>(),
+            h.stoat.agent_servers.keys().collect::<Vec<_>>(),
             vec![&uid],
             "the agent's hooks call back over this socket, so something has to be on it",
         );

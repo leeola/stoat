@@ -421,8 +421,10 @@ mod tests {
         });
     }
 
+    /// The socket goes as the run loop ends, while the runtime lives on, so a
+    /// shutdown that a kill cuts short leaves no file behind.
     #[test]
-    fn the_agent_socket_goes_with_the_harness() {
+    fn the_agent_socket_goes_when_the_loop_ends() {
         let (_dir, mut harness) = basic_diff_harness();
         let socket = harness.socket_path.clone();
         harness.run(|handle| async move {
@@ -432,10 +434,9 @@ mod tests {
                 .expect("the session socket answers");
         });
 
-        drop(harness);
         assert!(
             !socket.exists(),
-            "the socket outlives its harness at {socket:?}"
+            "the socket outlives the run loop at {socket:?}"
         );
     }
 
