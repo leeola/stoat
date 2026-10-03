@@ -8,6 +8,8 @@
 //! here and [`stoatty_render`] receives only its handle, keeping the renderer
 //! toolkit-agnostic.
 
+#[cfg(unix)]
+use crate::signals;
 use crate::{
     anim::{
         advance_pool_glide, advance_sketches, anchored_shift, block_corners, cursor_in_region,
@@ -270,6 +272,20 @@ fn run_with_config(
         working_directory,
         stoat_dir,
     );
+
+    #[cfg(unix)]
+    std::thread::Builder::new()
+        .name("signals".to_string())
+        .spawn({
+            let proxy = event_loop.create_proxy();
+            move || {
+                if let Ok(signal) = signals::wait_termination() {
+                    let _ = proxy.send_event(PtyEvent::TerminationSignal(signal));
+                }
+            }
+        })
+        .expect("spawn the signal thread");
+
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -312,6 +328,9 @@ enum PtyEvent {
     /// bundled faces lack stops drawing as tofu. Boxed because a scanned database
     /// holds every installed face.
     FontsScanned(Box<FontDatabase>),
+    /// The process took SIGHUP, SIGINT, or SIGTERM, whose number this carries.
+    /// The main thread closes as it does for a window close, so every drop runs.
+    TerminationSignal(i32),
 }
 
 /// The text-rendering configuration read from the config once, which [`App`]
@@ -1130,6 +1149,13 @@ impl ApplicationHandler<PtyEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
+        // Ahead of the state guard, so a signal that arrives before the window
+        // exists still closes.
+        if let PtyEvent::TerminationSignal(signal) = event {
+            tracing::info!(signal, "closing on a termination signal");
+            event_loop.exit();
+            return;
+        }
         let Some(state) = self.state.as_mut() else {
             self.pending_events.push(event);
             return;
@@ -1216,6 +1242,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
                 event_loop.exit();
             },
+            PtyEvent::TerminationSignal(_) => unreachable!("taken ahead of the state guard"),
         }
     }
 

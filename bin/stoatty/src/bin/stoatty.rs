@@ -15,8 +15,18 @@ use stoat_log::{
     LogTarget,
 };
 use stoatty_bin::cli::{Cli, TtyCommand};
+#[cfg(unix)]
+use stoatty_bin::signals;
 
 fn main() {
+    // First, because a thread inherits the mask of the thread that spawns it,
+    // and logging and the font scan start threads.
+    #[cfg(unix)]
+    if let Err(e) = signals::block_termination() {
+        eprintln!("Failed to block the termination signals: {e}");
+        std::process::exit(1);
+    }
+
     let mut cli = Cli::parse();
 
     let id = LogId::mint();

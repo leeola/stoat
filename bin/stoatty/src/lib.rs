@@ -11,4 +11,6 @@ pub mod cli;
 pub mod config;
 mod input;
 pub mod pty;
+#[cfg(unix)]
+pub mod signals;
 mod stoat_bin;
