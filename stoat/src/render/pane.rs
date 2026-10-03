@@ -328,6 +328,9 @@ pub(crate) fn render_pane(
 /// arrow over the divider so each name sits above its own column. It takes the
 /// pane's status bar style on a popout card. A card is the surface that shows
 /// over a gliding pane under stoatty and falls back to cells elsewhere.
+///
+/// Both names take the width of the longer one, so the card centers on the
+/// divider and reaches equally far over each column.
 fn paint_diff_sides_bar(
     content_area: Rect,
     is_focused: bool,
@@ -337,7 +340,7 @@ fn paint_diff_sides_bar(
 ) {
     let theme = frame.theme;
     let (from, to) = frame.diff_sides;
-    let text = format!(" {from} → {to} ");
+    let (text, lead_chars) = diff_sides_bar_text(from, to);
 
     let style = theme.get(match is_focused {
         true => crate::theme::scope::UI_STATUSBAR_FOCUSED,
@@ -356,7 +359,7 @@ fn paint_diff_sides_bar(
         true => (chars * TEXT_SCALE_COMPACT as usize).div_ceil(TEXT_SCALE_FULL as usize) as u16,
         false => chars as u16,
     };
-    let lead_cells = cells(from.chars().count() + 2);
+    let lead_cells = cells(lead_chars);
     let text_cells = cells(text.chars().count());
 
     let divider = DiffColumns::compute(content_area, DiffLayout::DIFF_VIEW).sep_x;
@@ -377,11 +380,20 @@ fn paint_diff_sides_bar(
     );
 }
 
+/// The sides bar's text, and the count of chars ahead of its arrow.
+///
+/// Both names pad to the width of the longer one. This puts the arrow at the
+/// middle char, and the card reaches equally far over each column.
+fn diff_sides_bar_text(from: &str, to: &str) -> (String, usize) {
+    let width = from.chars().count().max(to.chars().count());
+    (format!(" {from:>width$} → {to:<width$} "), width + 2)
+}
+
 /// Where the diff view's sides bar sits on the top row of `content`, or `None`
 /// when the content has no room for it.
 ///
 /// The bar is `text_cells` wide plus the card's inset column on each side.
-/// `lead_cells` is the width of the left name with its padding, which puts the
+/// `lead_cells` is the width of the text ahead of the arrow, which puts the
 /// arrow on the `divider`. The unified layout has no divider, so there the bar
 /// centers. Either way it stays inside the content.
 fn diff_sides_bar_area(
@@ -1695,7 +1707,8 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_base_lead, diff_sides_bar_area, focused_staged_label, status_filename, tab_spans,
+        diff_base_lead, diff_sides_bar_area, diff_sides_bar_text, focused_staged_label,
+        status_filename, tab_spans,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -2388,6 +2401,23 @@ mod tests {
                 None,
                 None,
             ],
+        );
+    }
+
+    #[test]
+    fn the_sides_bar_pads_both_names_to_the_longer_one() {
+        assert_eq!(
+            [
+                diff_sides_bar_text("index", "working tree"),
+                diff_sides_bar_text("parent abc1234", "commit def5678"),
+                diff_sides_bar_text("a.txt", "b"),
+            ],
+            [
+                ("        index → working tree ".to_string(), 14),
+                (" parent abc1234 → commit def5678 ".to_string(), 16),
+                (" a.txt → b     ".to_string(), 7),
+            ],
+            "each name takes the longer one's width, with the arrow in the middle",
         );
     }
 

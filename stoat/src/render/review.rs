@@ -3381,6 +3381,17 @@ mod tests {
     }
 
     #[test]
+    fn the_sides_bar_centers_on_the_divider() {
+        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        h.type_keys("j");
+        assert_eq!(
+            top_row_in_both_frames(&mut h).map(|row| row.chars().position(|c| c == '→')),
+            [Some(59), Some(59)],
+            "the arrow sits on the separator column",
+        );
+    }
+
+    #[test]
     fn a_plain_pane_carries_no_sides_bar() {
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
         crate::action_handlers::focused_editor_mut(&mut h.stoat)
