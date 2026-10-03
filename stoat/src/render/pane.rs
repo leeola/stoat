@@ -2455,7 +2455,7 @@ mod tests {
             assert_eq!(
                 [bar("saved"), bar("follow changes off")],
                 [
-                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · hunk -/2 1:1",
+                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · hunk -/1 1:1",
                     "NOR repo diff f.txt follow changes off 1:1",
                 ],
                 "stoatty {stoatty}",

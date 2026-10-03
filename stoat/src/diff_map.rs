@@ -1187,19 +1187,18 @@ impl DiffMap {
             .collect()
     }
 
-    /// How many hunks the map holds, counting each run of staged-mark rows as
-    /// a staged hunk.
+    /// How many hunks the map holds.
     ///
     /// The denominator of the status bar's position, and the live answer for
-    /// the focused file, which the repo-wide tally lags by up to a keystroke.
-    /// The tally counts from HEAD, where a change the index holds is a hunk
-    /// like any other.
+    /// the focused file, which the repo-wide tally lags by up to a keystroke. A
+    /// staged mark does not count, because the diff view's walk, which the
+    /// position reports on, does not stop on one.
     pub fn hunk_count(&self) -> usize {
-        self.hunks.iter().count() + self.staged_rows.len()
+        self.hunks.iter().count()
     }
 
-    /// One-based position of the hunk at buffer `row` among this map's hunks
-    /// and staged-mark runs, or `None` when `row` sits before the first one.
+    /// One-based position of the hunk at buffer `row` among this map's hunks,
+    /// or `None` when `row` sits before the first one.
     ///
     /// A row between two hunks answers the one before it. A jump lands the
     /// cursor inside a hunk, so the previous hunk is where the walk stands
@@ -1211,11 +1210,7 @@ impl DiffMap {
             .iter()
             .take_while(|hunk| hunk.buffer_start_line <= row)
             .count();
-        let marks = self
-            .staged_rows
-            .partition_point(|(rows, _)| rows.start <= row);
-        let at_or_before = hunks + marks;
-        (at_or_before > 0).then_some(at_or_before)
+        (hunks > 0).then_some(hunks)
     }
 
     /// All hunks in buffer-start order.
@@ -2687,20 +2682,20 @@ mod tests {
         assert_eq!(dm.staged_for_line(2), None, "and covers no row to stage");
     }
 
-    /// The status bar's position counts a staged mark as a staged hunk, the way
-    /// the staged tally beside it does.
+    /// The status bar's position reports on the diff view's walk, which passes
+    /// a staged mark. The mark counts in neither the total nor the position.
     #[test]
-    fn staged_marks_count_in_the_hunk_position() {
+    fn staged_marks_stay_out_of_the_hunk_position() {
         let dm = staged_map(
             "b0\nb1\nb2\nb3\n",
             vec![modified_hunk(3..4, 9..12)],
             vec![mark(DiffHunkStatus::Modified, 1..2)],
         );
-        assert_eq!(dm.hunk_count(), 2, "the hunk and the mark");
+        assert_eq!(dm.hunk_count(), 1, "the hunk alone");
         assert_eq!(
             (0..4).map(|row| dm.hunk_index_at(row)).collect::<Vec<_>>(),
-            [None, Some(1), Some(1), Some(2)],
-            "the mark on row 1 comes first, the hunk on row 3 second",
+            [None, None, None, Some(1)],
+            "the mark on row 1 is no position, and the hunk on row 3 is the first",
         );
     }
 

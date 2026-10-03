@@ -42,6 +42,12 @@ pub struct HunkTallies {
     /// absolute. These come straight off the diff deltas, and a list showing
     /// them wants the short form anyway.
     pub per_file: Vec<(PathBuf, usize)>,
+    /// Hunks each file carries between the index and the working tree, sorted
+    /// by path and repo-relative, as [`Self::per_file`] is.
+    ///
+    /// The diff view against the index walks these, where a change the index
+    /// holds is not a stop.
+    pub unstaged_per_file: Vec<(PathBuf, usize)>,
 }
 
 /// One changed path in a repository's working tree or index.

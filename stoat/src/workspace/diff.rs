@@ -812,6 +812,10 @@ fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
 /// focused file through its live diff map rather than through the stored
 /// tally, because the map is what the reader is looking at and the tally is
 /// refreshed a beat later.
+///
+/// Under the index base the count is of unstaged hunks alone, in the focused
+/// file and in the tally. Those hunks are the stops the diff view's walk makes.
+/// Under every other base the tally counts from HEAD.
 pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize)> {
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
         return None;
@@ -825,7 +829,10 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize
         .strip_prefix(&ws.git_root)
         .unwrap_or(path)
         .to_path_buf();
-    let totals = ws.repo_hunk_totals()?;
+    let totals = match ws.diff_base() {
+        None => ws.repo_unstaged_hunk_totals()?,
+        Some(_) => ws.repo_hunk_totals()?,
+    };
 
     let buffer = ws.buffers.get(editor.buffer_id)?;
     let guard = buffer.read().ok()?;
@@ -1533,7 +1540,7 @@ mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, compute_diff_map, diff_sides,
         repo_hunk_position, resolve_base, scan_changed_ranges, BaseHighlightCache,
-        BaseHighlightMemo, DiffBase, DiffBaseText, DIFF_SETTLE,
+        BaseHighlightMemo, DiffBase, DiffBaseText, WorktreeBase, DIFF_SETTLE,
     };
     use crate::{
         action_handlers::{self, movement},
@@ -1731,6 +1738,35 @@ mod tests {
             repo_hunk_position(h.stoat.active_workspace()),
             Some((Some(5), 5)),
             "the second of b.rs's own hunks, offset by the three a.rs carries",
+        );
+    }
+
+    /// Under the index base the position counts the stops the diff view's walk
+    /// makes, and a file whose changes are all staged offers none.
+    #[test]
+    fn the_hunk_position_under_the_index_base_leaves_staged_changes_out() {
+        let mut h = TestHarness::with_size(40, 16);
+        let workdir = PathBuf::from("/position");
+        h.stage_review_scenario(&workdir, &[("b.rs", "one\n", "ONE\n")]);
+        h.fake_git().add_repo(&workdir).staged_file("a.rs", "x\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+
+        let index = repo_hunk_position(h.stoat.active_workspace());
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.settle_diff_jobs();
+        let head = repo_hunk_position(h.stoat.active_workspace());
+
+        assert_eq!(
+            [index, head],
+            [Some((Some(1), 1)), Some((Some(2), 2))],
+            "the staged a.rs counts under HEAD alone",
         );
     }
 

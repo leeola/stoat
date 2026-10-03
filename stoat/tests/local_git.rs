@@ -419,6 +419,11 @@ fn hunk_tallies_split_a_half_staged_file_across_both_sides() {
         vec![(PathBuf::from("a.rs"), 2)],
         "while against HEAD the file still carries both",
     );
+    assert_eq!(
+        tallies.unstaged_per_file,
+        vec![(PathBuf::from("a.rs"), 1)],
+        "and against the index it carries the one edit left unstaged",
+    );
 }
 
 /// An untracked file has no HEAD blob, so its whole content is the work. It

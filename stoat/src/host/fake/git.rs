@@ -1054,17 +1054,25 @@ impl GitRepo for FakeGitRepo {
                 .to_path_buf()
         };
         let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        let mut unstaged_per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
         for change in &state.changed {
             *per_file.entry(relative(&change.file.path)).or_default() += change.hunks;
+            if !change.file.staged {
+                *unstaged_per_file
+                    .entry(relative(&change.file.path))
+                    .or_default() += change.hunks;
+            }
         }
         for path in &state.untracked {
             *per_file.entry(relative(path)).or_default() += 1;
+            *unstaged_per_file.entry(relative(path)).or_default() += 1;
         }
 
         HunkTallies {
             staged: side(true),
             unstaged: side(false) + state.untracked.len(),
             per_file: per_file.into_iter().collect(),
+            unstaged_per_file: unstaged_per_file.into_iter().collect(),
         }
     }
 
@@ -1575,6 +1583,11 @@ mod tests {
                 (PathBuf::from("c.rs"), 1),
             ],
             "and each path carries its own count, repo-relative",
+        );
+        assert_eq!(
+            tallies.unstaged_per_file,
+            vec![(PathBuf::from("a.rs"), 3), (PathBuf::from("c.rs"), 1)],
+            "and the unstaged list leaves the staged b.rs out",
         );
     }
 

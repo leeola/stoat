@@ -973,6 +973,15 @@ impl Workspace {
             .map(|tallies| tallies.per_file.as_slice())
     }
 
+    /// Hunks each file carries over the index, sorted by repo-relative path, or
+    /// `None` before the first tally lands and outside a repo.
+    pub(crate) fn repo_unstaged_hunk_totals(&self) -> Option<&[(PathBuf, usize)]> {
+        self.diff
+            .repo_hunk_tallies
+            .as_ref()
+            .map(|tallies| tallies.unstaged_per_file.as_slice())
+    }
+
     /// Install `diff_map` on `id` as if a job had produced it. See
     /// [`DiffState::install_test`].
     #[cfg(test)]

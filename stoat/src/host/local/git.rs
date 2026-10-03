@@ -216,11 +216,14 @@ impl GitRepo for LocalGitRepo {
                 let _ = diff.find_similar(Some(&mut rename_detection(false)));
                 count_hunks(&diff, &mut |_, _| {})
             });
+        let mut unstaged_per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
         let unstaged = repo
             .diff_index_to_workdir(None, Some(&mut with_untracked()))
             .map_or(0, |mut diff| {
                 let _ = diff.find_similar(Some(&mut rename_detection(true)));
-                count_hunks(&diff, &mut |_, _| {})
+                count_hunks(&diff, &mut |path, hunks| {
+                    *unstaged_per_file.entry(path).or_default() += hunks;
+                })
             });
 
         let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
@@ -237,6 +240,7 @@ impl GitRepo for LocalGitRepo {
             staged,
             unstaged,
             per_file: per_file.into_iter().collect(),
+            unstaged_per_file: unstaged_per_file.into_iter().collect(),
         }
     }
 
