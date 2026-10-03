@@ -1121,6 +1121,12 @@ pub struct Stoat {
     /// Session-only override of the `ui.tab_bar` setting, set by `:tabs`.
     /// `None` leaves the configured mode in force.
     pub(crate) tab_bar_override: Option<TabBarMode>,
+    /// The extent of each tab that the last paint drew in the tab bar.
+    ///
+    /// The extents run in tab order, in sixteenths of a cell from the window's
+    /// left edge, and the list is empty while the bar is hidden. The tab bar's
+    /// press hit test reads it.
+    pub(crate) tab_bar_spans: Vec<Range<u16>>,
     /// The window-right strip band single-minimap mode reserves, stamped every
     /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
     /// on a wide-enough window, and `None` in per-pane and off modes.
@@ -2446,6 +2452,7 @@ impl Stoat {
             syntax_highlight: true,
             minimap_override: None,
             tab_bar_override: None,
+            tab_bar_spans: Vec::new(),
             single_minimap_rect: None,
             lsp_badge_rect: None,
             lsp_status_pinned: false,

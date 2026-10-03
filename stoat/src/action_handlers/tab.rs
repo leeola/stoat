@@ -6,7 +6,7 @@ use crate::{
 use stoat_config::TabBarMode;
 
 /// Switch to the 1-based tab `index`, reporting a miss in the status line.
-pub(super) fn goto_tab(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+pub(crate) fn goto_tab(stoat: &mut Stoat, index: usize) -> UpdateEffect {
     let Some(target) = index.checked_sub(1) else {
         stoat.set_status("no tab 0");
         return UpdateEffect::Redraw;

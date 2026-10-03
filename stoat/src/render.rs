@@ -758,7 +758,9 @@ pub(crate) fn frame(
             width: full.width,
             height: 1,
         };
-        pane::render_tab_bar(ws, bar, frame, buf, scene);
+        pane::render_tab_bar(ws, bar, frame, buf, scene, &mut stoat.tab_bar_spans);
+    } else {
+        stoat.tab_bar_spans.clear();
     }
 
     let paint_generation = stoat.paint_generation;

@@ -30,7 +30,7 @@ pub(crate) mod search;
 pub(crate) mod shell;
 pub(crate) mod split_selection;
 pub(crate) mod surround;
-mod tab;
+pub(crate) mod tab;
 mod terminal;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;

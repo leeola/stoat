@@ -37,12 +37,13 @@ use ratatui::{
 use slotmap::SlotMap;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
     path::Path,
 };
 use stoat_widgets::{
     minimap::Minimap,
     status_bar::{StatusBar, StatusSegment},
-    ApcScene,
+    text_run, ApcScene,
 };
 
 /// Buffer lines the minimap strip draws per vertical cell.
@@ -761,6 +762,9 @@ pub(crate) struct StatusSceneCache {
 /// the recorded frame. Splicing is only sound because
 /// [`StatusBar::draw_components_within`] reads nothing outside those, and
 /// writes nothing but the scene, so a skipped encode leaves no cell unpainted.
+///
+/// Returns whether the row painted as rich components, which tells a hit test
+/// the scale the segments advance at.
 #[allow(clippy::too_many_arguments)]
 fn render_status_segments(
     area: Rect,
@@ -772,7 +776,7 @@ fn render_status_segments(
     buf: &mut Buffer,
     scene: &mut ApcScene,
     cache: Option<&mut StatusSceneCache>,
-) {
+) -> bool {
     let colors = (|| {
         scene.live().then_some(())?;
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
@@ -782,7 +786,7 @@ fn render_status_segments(
 
     let Some((separator, base_bg)) = colors else {
         paint_status_fallback(buf, segments, left, right);
-        return;
+        return false;
     };
 
     let key = status_scene_key(
@@ -798,7 +802,7 @@ fn render_status_segments(
         && cache.key == Some(key)
     {
         scene.buffer().extend_from_slice(&cache.bytes);
-        return;
+        return true;
     }
 
     let rich =
@@ -806,7 +810,7 @@ fn render_status_segments(
 
     let Some((left_rich, right_rich)) = rich else {
         paint_status_fallback(buf, segments, left, right);
-        return;
+        return false;
     };
 
     let start = scene.bytes().len();
@@ -824,6 +828,7 @@ fn render_status_segments(
         cache.bytes.extend_from_slice(&scene.bytes()[start..]);
         cache.key = Some(key);
     }
+    true
 }
 
 /// Hash everything the status bar's APC frame is encoded from into a cache key.
@@ -856,13 +861,19 @@ fn status_scene_key(
 /// addressable by what the bar shows. Painting through the status-bar segment
 /// path means the bar picks up the same scaled-run rendering under stoatty and
 /// the same cell fallback elsewhere.
+///
+/// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
+/// from the left edge of `area`, so a pointer press resolves against the
+/// segments as painted.
 pub(crate) fn render_tab_bar(
     ws: &Workspace,
     area: Rect,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
+    spans: &mut Vec<Range<u16>>,
 ) {
+    spans.clear();
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -885,7 +896,44 @@ pub(crate) fn render_tab_bar(
         })
         .collect();
 
-    render_status_segments(area, area, inactive, frame, &left, &[], buf, scene, None);
+    let rich = render_status_segments(area, area, inactive, frame, &left, &[], buf, scene, None);
+    let scale = if rich {
+        TEXT_SCALE_COMPACT
+    } else {
+        TEXT_SCALE_FULL
+    };
+    tab_spans(
+        left.iter().map(|(text, _)| text.chars().count()),
+        scale,
+        area.width,
+        spans,
+    );
+}
+
+/// Records the extent of each tab bar segment, in sixteenths of a cell from the
+/// bar's left edge.
+///
+/// A segment cut at the bar's right edge ends there, and a segment past the edge
+/// has no entry, so the list holds only the tabs on screen.
+fn tab_spans(
+    chars: impl Iterator<Item = usize>,
+    scale: u16,
+    width: u16,
+    spans: &mut Vec<Range<u16>>,
+) {
+    spans.clear();
+    let limit = (u32::from(width) * 16).min(u32::from(u16::MAX)) as u16;
+    let mut cursor = 0u16;
+    for count in chars {
+        if cursor >= limit {
+            break;
+        }
+        let end = cursor
+            .saturating_add(text_run::advance_sixteenths(count, scale))
+            .min(limit);
+        spans.push(cursor..end);
+        cursor = end;
+    }
 }
 
 /// One built status-bar segment pairing painted text with its cell style.
@@ -1646,7 +1694,9 @@ fn render_image_pane(
 }
 #[cfg(test)]
 mod tests {
-    use super::{diff_base_lead, diff_sides_bar_area, focused_staged_label, status_filename};
+    use super::{
+        diff_base_lead, diff_sides_bar_area, focused_staged_label, status_filename, tab_spans,
+    };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
         agent_ipc::AgentControl,
@@ -2790,6 +2840,30 @@ mod tests {
             painted(false),
             ["pic.png - 640x480 px", "image display needs stoatty"],
             "and one that cannot is told why the picture is missing",
+        );
+    }
+
+    /// The scale is a literal, because `TEXT_SCALE_COMPACT` equals the full
+    /// scale under `cfg(test)`.
+    #[test]
+    fn tab_spans_follow_the_scale_and_stop_at_the_bar_edge() {
+        let spans_at = |(scale, width): (u16, u16)| {
+            let mut spans = Vec::new();
+            tab_spans([5, 7].into_iter(), scale, width, &mut spans);
+            spans
+                .iter()
+                .map(|span| (span.start, span.end))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [(160, 20), (256, 20), (160, 6), (160, 3)].map(spans_at),
+            [
+                vec![(0, 50), (50, 120)],
+                vec![(0, 80), (80, 192)],
+                vec![(0, 50), (50, 96)],
+                vec![(0, 48)],
+            ],
         );
     }
 }

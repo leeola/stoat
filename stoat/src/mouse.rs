@@ -27,6 +27,7 @@ use crate::{
 };
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+use std::ops::Range;
 use stoat_config::MinimapMode;
 use stoat_text::{Bias, SelectionGoal};
 use stoat_widgets::minimap;
@@ -870,7 +871,7 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
     // editor, leaving the buffer selection and cursor untouched.
     // A press outside closes the popup and falls through, so the frame still
     // owes a repaint even when nothing below the fall-through consumes the
-    // press. The two exits after this carry that debt.
+    // press. The exits through closed_effect carry that debt.
     let mut hover_closed = false;
     if stoat.pending_hover.is_some() {
         if let Some(effect) = handle_hover_selection_mouse(stoat, mouse) {
@@ -878,11 +879,22 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         }
         hover_closed = stoat.pending_hover.is_none();
     }
+    let closed_effect = |effect| match effect {
+        UpdateEffect::None if hover_closed => UpdateEffect::Redraw,
+        other => other,
+    };
 
     // A press or drag over a pane's minimap strip scrubs that pane, ahead of
     // focus_at and the text-area handlers so the strip owns the gesture.
     if let Some(effect) = handle_minimap_mouse(stoat, mouse) {
         return effect;
+    }
+
+    // A press on the tab bar row is the bar's. Ahead of focus_at and the pane
+    // handlers, which read a row above every pane as the focused pane's first
+    // row.
+    if let Some(effect) = handle_tab_bar_mouse(stoat, mouse) {
+        return closed_effect(effect);
     }
 
     // Every button focuses the pane under the pointer, not just the left.
@@ -900,10 +912,6 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         }
         focus_at(stoat, mouse.column, mouse.row);
     }
-    let closed_effect = |effect| match effect {
-        UpdateEffect::None if hover_closed => UpdateEffect::Redraw,
-        other => other,
-    };
 
     let Some((col, row)) = translate_mouse_to_focused(stoat, mouse.column, mouse.row) else {
         return closed_effect(UpdateEffect::None);
@@ -1059,6 +1067,38 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
         editor.scroll_offset = prev as f32;
     }
     editor.scroll_glide = ScrollGlide::Page;
+}
+
+/// Claims a button press on the tab bar row, switching to the tab under a left
+/// press.
+///
+/// Returns `None` for an event that is not a press on the visible bar. Every
+/// press on the row is claimed, on a tab or not, because the row is above every
+/// pane and an unclaimed press there reaches the focused pane as a press on its
+/// first row.
+fn handle_tab_bar_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
+    let MouseEventKind::Down(button) = mouse.kind else {
+        return None;
+    };
+    let bar = stoat.size();
+    if !stoat.tab_bar_visible() || mouse.row != bar.y {
+        return None;
+    }
+
+    let hit = tab_at(&stoat.tab_bar_spans, mouse.column.saturating_sub(bar.x));
+    match (button, hit) {
+        (MouseButton::Left, Some(idx)) => Some(action_handlers::tab::goto_tab(stoat, idx + 1)),
+        _ => Some(UpdateEffect::None),
+    }
+}
+
+/// The tab whose painted extent holds the center of the bar-relative cell
+/// `column`.
+fn tab_at(spans: &[Range<u16>], column: u16) -> Option<usize> {
+    let center = u32::from(column) * 16 + 8;
+    spans
+        .iter()
+        .position(|span| (u32::from(span.start)..u32::from(span.end)).contains(&center))
 }
 
 /// Route a left-button press over the open hover popup to its text
@@ -2022,7 +2062,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_action::{OpenFile, SplitDown, SplitRight};
+    use stoat_action::{MoveDown, NewTab, OpenFile, SplitDown, SplitRight};
     /// A buffer with `count` single-line diagnostics on consecutive rows,
     /// painted once so the pane areas and the render's span cache exist.
     fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
@@ -3047,7 +3087,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(120, 40);
         h.seed_focused_buffer("alpha\nbeta\ngamma\n");
         action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        action_handlers::dispatch(&mut h.stoat, &MoveDown);
         action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
         h.snapshot();
@@ -3081,6 +3121,77 @@ mod tests {
             crate::test_harness::editor::head_offsets(&mut h.stoat),
             before,
             "a bottom-line prompt does not take the pointer"
+        );
+    }
+
+    /// The column where `label` starts on the composited tab bar row.
+    fn tab_label_col(h: &mut crate::test_harness::TestHarness, label: &str) -> u16 {
+        let buf = h.render_composited();
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        row.find(label).expect("the label is painted") as u16
+    }
+
+    #[test]
+    fn a_left_press_on_a_tab_switches_to_it() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &NewTab);
+        let active_after_press = |h: &mut crate::test_harness::TestHarness, label: &str| {
+            let column = tab_label_col(h, label);
+            h.stoat.update(mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                column,
+                0,
+            ));
+            h.stoat.active_workspace().active_tab
+        };
+
+        assert_eq!(
+            [
+                active_after_press(&mut h, "1:"),
+                active_after_press(&mut h, "2:"),
+            ],
+            [0, 1],
+        );
+    }
+
+    /// The bar row sits above every pane, so a press there that switches no tab
+    /// still stays off the focused pane's first row.
+    #[test]
+    fn a_press_that_switches_no_tab_stops_at_the_bar() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &NewTab);
+        h.seed_focused_buffer("alpha\nbeta\ngamma\n");
+        action_handlers::dispatch(&mut h.stoat, &MoveDown);
+        let state = |h: &mut crate::test_harness::TestHarness| {
+            (
+                h.stoat.active_workspace().active_tab,
+                crate::test_harness::editor::head_offsets(&mut h.stoat),
+            )
+        };
+        let before = state(&mut h);
+        let first_tab = tab_label_col(&mut h, "1:");
+        let edge = h.stoat.size().width - 1;
+
+        let after = [
+            (MouseButton::Left, edge),
+            (MouseButton::Right, first_tab),
+            (MouseButton::Middle, first_tab),
+        ]
+        .map(|(button, column)| {
+            h.stoat
+                .update(mouse_event(MouseEventKind::Down(button), column, 0));
+            state(&mut h)
+        });
+
+        assert_eq!(after, [before.clone(), before.clone(), before]);
+    }
+
+    #[test]
+    fn a_press_resolves_by_its_cell_center() {
+        let spans = [0..50, 50..120];
+        assert_eq!(
+            [2, 3, 7].map(|column| tab_at(&spans, column)),
+            [Some(0), Some(1), None],
         );
     }
 
