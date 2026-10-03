@@ -196,9 +196,24 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Socket path for the session called `name`, under the Stoat state dir.
+/// Socket path for the session called `name`, in the directory
+/// [`stoat_log::socket_dir`] picks with the Stoat state directory first.
+///
+/// The client and the server of a session resolve the path from its name here,
+/// so they agree on it.
+///
+/// See also:
+/// - [`bind_socket_path`] for the server, which binds the socket.
 pub fn socket_path(name: &str) -> io::Result<PathBuf> {
-    Ok(socket_path_in(&stoat_log::state_dir()?, name))
+    let file = socket_name(name);
+    Ok(stoat_log::socket_dir(stoat_log::state_dir()?, &file).join(file))
+}
+
+/// [`socket_path`], with its directory ready for this process to bind in, as
+/// [`stoat_log::socket_bind_dir`] prepares it.
+pub fn bind_socket_path(name: &str) -> io::Result<PathBuf> {
+    let file = socket_name(name);
+    Ok(stoat_log::socket_bind_dir(stoat_log::state_dir()?, &file)?.join(file))
 }
 
 /// Socket path for `name` under `dir`.
@@ -207,7 +222,12 @@ pub fn socket_path(name: &str) -> io::Result<PathBuf> {
 /// directory of its own resolves the same name without touching the real
 /// environment.
 pub fn socket_path_in(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!("attach-{name}.sock"))
+    dir.join(socket_name(name))
+}
+
+/// The file name of the socket for the session called `name`.
+fn socket_name(name: &str) -> String {
+    format!("attach-{name}.sock")
 }
 
 #[cfg(test)]

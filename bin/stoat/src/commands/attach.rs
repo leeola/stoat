@@ -422,7 +422,7 @@ fn client_output(mut stream: UnixStream) -> bool {
 /// terminal that outlives every client. fd 2 is left alone, since the log
 /// redirect already owns it.
 pub fn serve(name: &str) -> Result<AttachServer, Whatever> {
-    let path = attach::socket_path(name).whatever_context("resolve the attach socket path")?;
+    let path = attach::bind_socket_path(name).whatever_context("resolve the attach socket path")?;
 
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;

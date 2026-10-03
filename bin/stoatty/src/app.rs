@@ -3512,19 +3512,29 @@ fn open_window_event_socket() -> (
 /// in `dir`. Per-pid so concurrent stoatty processes never collide.
 #[cfg(unix)]
 fn window_socket_path(dir: &Path, pid: u32) -> PathBuf {
-    dir.join(format!("stoatty-win-{pid}.sock"))
+    dir.join(window_socket_name(pid))
+}
+
+/// The file name of the window-event socket for the stoatty process `pid`.
+#[cfg(unix)]
+fn window_socket_name(pid: u32) -> String {
+    format!("stoatty-win-{pid}.sock")
 }
 
 /// Bind the per-pid window-event socket under the log directory and spawn the
 /// thread forwarding queued events to the connected child.
+///
+/// A log directory too long for the socket path gives way to the directory
+/// that [`stoat_log::socket_bind_dir`] prepares.
 // Creating the log directory and clearing a stale socket are socket lifecycle,
 // and the terminal holds no FsHost to route them through.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 fn bind_window_socket() -> io::Result<(WindowSocket, Sender<String>, Arc<AtomicBool>)> {
-    let dir = stoat_log::log_dir()?;
+    let pid = std::process::id();
+    let dir = stoat_log::socket_bind_dir(stoat_log::log_dir()?, &window_socket_name(pid))?;
     std::fs::create_dir_all(&dir)?;
-    let path = window_socket_path(&dir, std::process::id());
+    let path = window_socket_path(&dir, pid);
     // A prior process at this pid may have left its socket behind, and bind
     // fails on an existing path, so clear a stale one first.
     let _ = std::fs::remove_file(&path);

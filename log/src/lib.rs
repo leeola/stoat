@@ -21,10 +21,14 @@
 
 pub mod ident;
 pub mod paths;
+#[cfg(unix)]
+mod sockets;
 pub mod text_proto;
 
 pub use paths::{data_dir, state_dir, workspace_state_dir};
 use snafu::{ResultExt, Snafu};
+#[cfg(unix)]
+pub use sockets::{socket_bind_dir, socket_dir};
 use std::{fs, io, path::PathBuf};
 pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{

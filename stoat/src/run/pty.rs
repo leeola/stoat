@@ -5,12 +5,7 @@ use crate::{
     workspace::WorkspaceUid,
 };
 use std::{
-    fs::{self, DirBuilder},
-    io::{Error, ErrorKind},
-    os::unix::{
-        fs::{DirBuilderExt, MetadataExt},
-        net::SocketAddr,
-    },
+    io::Error,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -369,97 +364,35 @@ pub fn agent_socket_path(uid: WorkspaceUid) -> std::io::Result<PathBuf> {
 /// directory of its own resolves the same name without touching the real
 /// environment. [`crate::Stoat::set_agent_socket_dir`] is that caller.
 pub fn agent_socket_path_in(dir: &Path, uid: WorkspaceUid) -> PathBuf {
-    dir.join(format!("agent-{uid}.sock"))
+    dir.join(agent_socket_name(uid))
 }
 
-/// Directory holding the per-session agent sockets.
+/// The directory that holds the per-session agent sockets, as
+/// [`stoat_log::socket_dir`] picks it with the Stoat state directory first.
 ///
-/// It is the Stoat state directory when a socket path there fits in a Unix
-/// socket address. That address holds 104 bytes on macOS and 108 on Linux.
-/// Otherwise it is a directory of this user's own in the runtime directory:
-/// `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` elsewhere, and `/tmp` without either.
-///
-/// Every process that binds a socket or reaches one by its session uid
-/// resolves the directory here, so they agree on the path. Creates nothing.
+/// Every uid prints as 16 hex digits, so all session sockets have one name
+/// length and the pick is the same for each of them. Every process that binds
+/// a socket or reaches one by its session uid resolves the directory here, so
+/// they agree on the path.
 ///
 /// See also:
 /// - [`agent_socket_bind_dir`] to make the directory ready for a bind.
 pub fn agent_socket_dir() -> std::io::Result<PathBuf> {
-    Ok(agent_socket_dir_in(
+    Ok(stoat_log::socket_dir(
         stoat_log::state_dir()?,
-        runtime_dir(),
-        user_id(),
+        &agent_socket_name(WorkspaceUid(0)),
     ))
 }
 
-/// [`agent_socket_dir`], ready for this process to bind sockets in.
-///
-/// A directory in the runtime directory is created private to this user. An
-/// existing one is refused when another user owns it or other users have
-/// access to it. Any user with access to the directory controls the sockets in
-/// it. The state directory is used as found.
+/// [`agent_socket_dir`], ready for this process to bind sockets in, as
+/// [`stoat_log::socket_bind_dir`] prepares it.
 pub fn agent_socket_bind_dir() -> std::io::Result<PathBuf> {
-    let state = stoat_log::state_dir()?;
-    let user = user_id();
-    let dir = agent_socket_dir_in(state.clone(), runtime_dir(), user);
-    if dir != state {
-        ensure_private_dir(&dir, user)?;
-    }
-    Ok(dir)
+    stoat_log::socket_bind_dir(stoat_log::state_dir()?, &agent_socket_name(WorkspaceUid(0)))
 }
 
-/// The directory [`agent_socket_dir`] picks from the state directory, the
-/// runtime directory, and the user id that names the fallback.
-fn agent_socket_dir_in(state: PathBuf, runtime: Option<PathBuf>, user: u32) -> PathBuf {
-    // Every uid prints as 16 hex digits, so one socket path's length is the
-    // length of all of them.
-    if SocketAddr::from_pathname(agent_socket_path_in(&state, WorkspaceUid(0))).is_ok() {
-        return state;
-    }
-    runtime
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(format!("stoat-{user}"))
-}
-
-/// The runtime directory the environment names, `$TMPDIR` on macOS and
-/// `$XDG_RUNTIME_DIR` elsewhere.
-// The env read is the blessed boundary. It hands its value straight to
-// agent_socket_dir_in, which is pure and unit-tested.
-#[allow(clippy::disallowed_methods)]
-fn runtime_dir() -> Option<PathBuf> {
-    let var = if cfg!(target_os = "macos") {
-        "TMPDIR"
-    } else {
-        "XDG_RUNTIME_DIR"
-    };
-    std::env::var_os(var).map(PathBuf::from)
-}
-
-/// The real user id of this process.
-fn user_id() -> u32 {
-    // SAFETY: `getuid` takes no arguments and always succeeds.
-    unsafe { libc::getuid() }
-}
-
-/// Create `dir` private to `user`, or make sure that it is private already.
-///
-/// An existing directory passes when `user` owns it and no other user has
-/// access to it. Anything else is a [`ErrorKind::PermissionDenied`] error.
-// The directory holds the sockets the listeners bind. That is socket lifecycle,
-// not the user-file IO that FsHost abstracts, and no fake host binds a socket.
-fn ensure_private_dir(dir: &Path, user: u32) -> std::io::Result<()> {
-    match DirBuilder::new().mode(0o700).create(dir) {
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => {},
-        created => return created,
-    }
-    let meta = fs::symlink_metadata(dir)?;
-    if meta.is_dir() && meta.uid() == user && meta.mode() & 0o077 == 0 {
-        return Ok(());
-    }
-    Err(Error::new(
-        ErrorKind::PermissionDenied,
-        format!("{} is not private to this user", dir.display()),
-    ))
+/// The file name of the agent hook socket for `uid`.
+fn agent_socket_name(uid: WorkspaceUid) -> String {
+    format!("agent-{uid}.sock")
 }
 
 /// The spawn arguments for an owned Claude subshell.
@@ -558,7 +491,6 @@ async fn reader_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{self as unix_fs, PermissionsExt};
 
     /// Without a socket directory there is no instance to name, but the agent
     /// still composes prompts through the editor bridge.
@@ -669,66 +601,6 @@ mod tests {
         assert_eq!(
             agent_socket_path_in(Path::new("/state"), WorkspaceUid(0xABCD)),
             Path::new("/state/agent-000000000000abcd.sock"),
-        );
-    }
-
-    /// A socket path the state directory has no room for moves to a directory
-    /// of this user's own in the runtime directory, or in `/tmp` without one.
-    #[test]
-    fn a_long_state_dir_moves_the_sockets_to_the_runtime_dir() {
-        let long = PathBuf::from(format!("/{}", "s".repeat(100)));
-        let runtime = Some(PathBuf::from("/run/user/7"));
-        assert_eq!(
-            [
-                agent_socket_dir_in(PathBuf::from("/state"), runtime.clone(), 7),
-                agent_socket_dir_in(long.clone(), runtime, 7),
-                agent_socket_dir_in(long, None, 7),
-            ],
-            [
-                PathBuf::from("/state"),
-                PathBuf::from("/run/user/7/stoat-7"),
-                PathBuf::from("/tmp/stoat-7"),
-            ],
-        );
-    }
-
-    /// Other users share the runtime directory, so a socket directory there is
-    /// one this user creates private or finds private.
-    #[test]
-    fn a_runtime_socket_dir_is_private_to_its_user() {
-        let root = tempfile::tempdir().unwrap();
-        let user = root.path().metadata().unwrap().uid();
-        let created = root.path().join("created");
-        let open = root.path().join("open");
-        fs::create_dir(&open).unwrap();
-        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
-        let link = root.path().join("link");
-
-        let first = ensure_private_dir(&created, user);
-        unix_fs::symlink(&created, &link).unwrap();
-        let kinds = [
-            first,
-            ensure_private_dir(&created, user),
-            ensure_private_dir(&created, user + 1),
-            ensure_private_dir(&open, user),
-            ensure_private_dir(&link, user),
-        ]
-        .map(|result| result.map_err(|err| err.kind()));
-        let mode = created.metadata().unwrap().mode() & 0o777;
-
-        assert_eq!(
-            (kinds, mode),
-            (
-                [
-                    Ok(()),
-                    Ok(()),
-                    Err(ErrorKind::PermissionDenied),
-                    Err(ErrorKind::PermissionDenied),
-                    Err(ErrorKind::PermissionDenied),
-                ],
-                0o700,
-            ),
-            "created, its own, another owner, open to others, a planted link",
         );
     }
 
