@@ -2363,16 +2363,22 @@ mod tests {
             "the HEAD base names the commit it measures from"
         );
         assert_eq!(
-            diff_base_lead(&DiffBase::Rev {
-                sha: Some("abc1234def5678".into())
-            }),
-            "diff vs abc1234",
-            "a revision shows its short sha"
+            diff_base_lead(&DiffBase::parent_of(
+                "def5678abc1234",
+                Some("abc1234def5678".into())
+            )),
+            "diff vs parent abc1234",
+            "a review names the parent it measures from"
         );
         assert_eq!(
-            diff_base_lead(&DiffBase::Rev { sha: None }),
+            diff_base_lead(&DiffBase::parent_of("def5678abc1234", None)),
             "diff vs empty",
             "a root commit's parent is the empty tree"
+        );
+        assert_eq!(
+            diff_base_lead(&DiffBase::named("main", "abc1234def5678".into())),
+            "diff vs main abc1234",
+            "a typed revision keeps its name"
         );
         assert_eq!(
             diff_base_lead(&DiffBase::Memory {

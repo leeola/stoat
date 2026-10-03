@@ -63,7 +63,7 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
     let ws = stoat.active_workspace();
     let base_sha = match ws.diff_base() {
         None | Some(DiffBase::Head) => return AmendRoute::Index,
-        Some(DiffBase::Rev { sha }) => sha.clone(),
+        Some(DiffBase::Rev { sha, .. }) => sha.clone(),
         // An agent's proposal sits under no commit, so there is nothing to
         // amend it into.
         Some(DiffBase::Memory { .. }) => return AmendRoute::Refused(REFUSED_BADGE),
@@ -384,6 +384,7 @@ mod tests {
         git_jobs,
         rebase::{ActiveRebase, RebasePause},
         test_harness::{CommitSpec, TestHarness},
+        workspace::diff,
     };
     use std::{
         collections::{HashMap, VecDeque},
@@ -521,6 +522,29 @@ mod tests {
             ),
             (head.as_str(), &head[..7]),
             "the walk names the commit the amend left behind, badge included",
+        );
+    }
+
+    /// The sides bar follows the amend onto the commit it left behind, as the
+    /// walk does.
+    #[test]
+    fn an_amend_renames_the_commit_the_sides_name() {
+        let mut h = walking_the_tip();
+        cursor_to(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        h.settle();
+
+        let repo = h
+            .stoat
+            .git_host
+            .discover(&PathBuf::from("/repo"))
+            .expect("repo");
+        let head = repo.resolve_rev("HEAD").expect("HEAD");
+        assert_eq!(
+            diff::diff_sides(h.stoat.active_workspace().diff_base()).1,
+            format!("commit {}", &head[..7]),
+            "the right side names the commit the amend left behind",
         );
     }
 
@@ -855,9 +879,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
         h.stoat
             .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Rev {
-                sha: Some("c2".to_string()),
-            }));
+            .set_diff_base(Some(DiffBase::parent_of("c3", Some("c2".to_string()))));
         h.settle();
 
         assert_eq!(

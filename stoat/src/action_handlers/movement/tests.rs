@@ -776,9 +776,7 @@ fn next_change_crosses_into_a_file_changed_only_against_the_base() {
 
     h.stoat
         .active_workspace_mut()
-        .set_diff_base(Some(DiffBase::Rev {
-            sha: Some("base0".to_string()),
-        }));
+        .set_diff_base(Some(DiffBase::named("base0", "base0".into())));
     h.settle_diff_jobs();
     {
         let editor = focused_editor_mut(&mut h.stoat).expect("editor");

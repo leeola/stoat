@@ -1016,9 +1016,7 @@ fn land_walk(
 ) {
     stoat
         .active_workspace_mut()
-        .set_diff_base(Some(DiffBase::Rev {
-            sha: landing.parent,
-        }));
+        .set_diff_base(Some(DiffBase::parent_of(sha, landing.parent)));
     super::review::emit_review_info_badge(stoat, standing);
 
     if kind == WalkLandingKind::Walkthrough {
@@ -1086,7 +1084,7 @@ mod tests {
         commit_picker::CommitPickerRole,
         git_jobs::{self, GitJobKey},
         test_harness::TestHarness,
-        workspace::diff::DiffBase,
+        workspace::diff::{self, DiffBase},
     };
     use std::path::{Path, PathBuf};
 
@@ -1133,7 +1131,7 @@ mod tests {
 
     fn diff_base(h: &TestHarness) -> Option<Option<String>> {
         match h.stoat.active_workspace().diff_base() {
-            Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+            Some(DiffBase::Rev { sha, .. }) => Some(sha.clone()),
             _ => None,
         }
     }
@@ -1937,6 +1935,28 @@ mod tests {
         );
     }
 
+    /// A landing names the commit's parent on the left and the commit on the
+    /// right. A root commit's parent is the empty tree.
+    #[test]
+    fn a_landing_names_the_parent_and_the_commit() {
+        let mut h = harness();
+        start_walk(&mut h);
+        let root = diff::diff_sides(h.stoat.active_workspace().diff_base());
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        let child = diff::diff_sides(h.stoat.active_workspace().diff_base());
+
+        assert_eq!(
+            [root, child],
+            [
+                ("empty", "commit a1b2c3d"),
+                ("parent a1b2c3d", "commit b2c3d4e")
+            ]
+            .map(|(left, right)| (left.to_string(), right.to_string())),
+        );
+    }
+
     /// A step onto a file the reader already has open shows the text the
     /// checkout wrote. The open hands back the buffer the file already has, so
     /// without a re-read the step shows the last commit's text against the new
@@ -2334,7 +2354,7 @@ mod tests {
     /// The sha the workspace diffs against, which a landed step moves.
     fn diff_base_sha(h: &TestHarness) -> Option<String> {
         match h.stoat.active_workspace().diff_base() {
-            Some(DiffBase::Rev { sha }) => sha.clone(),
+            Some(DiffBase::Rev { sha, .. }) => sha.clone(),
             _ => None,
         }
     }

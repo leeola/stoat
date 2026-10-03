@@ -1941,7 +1941,7 @@ mod tests {
     /// The sha a revision base names, or `None` for the working tree's own base.
     fn diff_base(h: &TestHarness) -> Option<Option<String>> {
         match h.stoat.active_workspace().diff_base() {
-            Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+            Some(DiffBase::Rev { sha, .. }) => Some(sha.clone()),
             _ => None,
         }
     }

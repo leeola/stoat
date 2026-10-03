@@ -92,7 +92,11 @@ pub(crate) enum DiffBase {
     Head,
     /// The tree at `sha`. `None` is the empty tree, which is what a root
     /// commit's parent amounts to.
-    Rev { sha: Option<String> },
+    Rev {
+        sha: Option<String>,
+        /// How the revision became the base, which is what names the two sides.
+        origin: RevOrigin,
+    },
     /// Base text supplied directly, keyed by absolute path. A path the map
     /// does not carry falls back to the index, so an untouched file still
     /// diffs normally.
@@ -113,6 +117,39 @@ pub(crate) enum DiffBase {
         /// which is how the diff drive knows the base moved.
         base_version: u64,
     },
+}
+
+impl DiffBase {
+    /// The revision the reader named as `name`, which resolved to `sha`.
+    pub(crate) fn named(name: &str, sha: String) -> Self {
+        Self::Rev {
+            sha: Some(sha),
+            origin: RevOrigin::Named(name.to_string()),
+        }
+    }
+
+    /// The parent of `commit`, as the base of a review that checked `commit`
+    /// out.
+    ///
+    /// A `parent` of `None` is the empty tree under a root commit.
+    pub(crate) fn parent_of(commit: &str, parent: Option<String>) -> Self {
+        Self::Rev {
+            sha: parent,
+            origin: RevOrigin::ParentOf(commit.to_string()),
+        }
+    }
+}
+
+/// How a [`DiffBase::Rev`] became the base.
+///
+/// The sides bar names the two columns from it.
+#[derive(Clone)]
+pub(crate) enum RevOrigin {
+    /// The reader named the revision, spelled as typed.
+    Named(String),
+    /// The revision is the parent of this commit, which a review checked out
+    /// under the buffers. It holds the commit's full sha.
+    ParentOf(String),
 }
 
 /// Which of its two own bases the working tree diffs against, picked by the
@@ -752,18 +789,37 @@ fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
 /// The names of what the diff view's left and right columns hold under
 /// `base`, as `(left, right)`.
 ///
-/// A commit review names the commit's parent on the left and the working tree
-/// on the right. The review checks the commit out under the buffers, and the
-/// review badge names that commit. A pair names its two files.
+/// A commit review names the commit's parent on the left and the commit on the
+/// right, because the review checks that commit out under the buffers. A
+/// revision the reader named keeps its spelling beside the short sha it
+/// resolved to. A pair names its two files.
 pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, String) {
     match base {
         None => ("index".to_string(), "working tree".to_string()),
         Some(DiffBase::Head) => ("HEAD".to_string(), "working tree".to_string()),
-        Some(DiffBase::Rev { sha: Some(sha) }) => {
-            (sha.chars().take(7).collect(), "working tree".to_string())
+        Some(DiffBase::Rev { sha, origin }) => {
+            let base = match sha {
+                Some(sha) => short_sha(sha),
+                // A root commit's parent, against which every line reads added.
+                None => "empty".to_string(),
+            };
+            match origin {
+                RevOrigin::Named(name) => {
+                    let left = match sha {
+                        Some(sha) if sha.starts_with(name.as_str()) => base,
+                        _ => format!("{name} {base}"),
+                    };
+                    (left, "working tree".to_string())
+                },
+                RevOrigin::ParentOf(commit) => {
+                    let left = match sha {
+                        Some(_) => format!("parent {base}"),
+                        None => base,
+                    };
+                    (left, format!("commit {}", short_sha(commit)))
+                },
+            }
         },
-        // A root commit's parent, against which every line reads added.
-        Some(DiffBase::Rev { sha: None }) => ("empty".to_string(), "working tree".to_string()),
         // An agent's proposal sits under no revision. The base is the file as
         // it stood before the proposal, which is what "original" names.
         Some(DiffBase::Memory { .. }) => ("original".to_string(), "proposal".to_string()),
@@ -801,6 +857,12 @@ fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
             .into_owned()
     };
     (below(base_path), below(path))
+}
+
+/// The first seven chars of `sha`, the length the sides bar and the base
+/// prompt show.
+pub(crate) fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 /// Where the cursor sits among every hunk in the repository, as
@@ -1179,7 +1241,7 @@ pub(crate) fn base_texts(
     base_override: Option<&DiffBase>,
 ) -> Option<DiffBaseText> {
     match base_override {
-        Some(DiffBase::Rev { sha }) => {
+        Some(DiffBase::Rev { sha, .. }) => {
             let rev = match sha {
                 Some(sha) => repo.content_at(sha, path).unwrap_or_default(),
                 None => String::new(),
@@ -3355,9 +3417,7 @@ mod tests {
     #[test]
     fn a_rev_base_diffs_against_the_named_commit() {
         let dm = based_harness(
-            Some(DiffBase::Rev {
-                sha: Some("base1".into()),
-            }),
+            Some(DiffBase::parent_of("c1", Some("base1".into()))),
             "old\n",
             "mid\n",
             "new\n",
@@ -3374,9 +3434,7 @@ mod tests {
     #[test]
     fn a_rev_base_reads_in_commit_hunks_staged_and_worktree_edits_unstaged() {
         let dm = based_harness(
-            Some(DiffBase::Rev {
-                sha: Some("base1".into()),
-            }),
+            Some(DiffBase::parent_of("c1", Some("base1".into()))),
             "a\nx\nb\n",
             "A\nx\nb\n",
             "A\nx\nB\n",
@@ -3390,7 +3448,12 @@ mod tests {
 
     #[test]
     fn a_rev_base_with_no_sha_diffs_against_nothing() {
-        let dm = based_harness(Some(DiffBase::Rev { sha: None }), "old\n", "mid\n", "new\n");
+        let dm = based_harness(
+            Some(DiffBase::parent_of("c1", None)),
+            "old\n",
+            "mid\n",
+            "new\n",
+        );
         assert_eq!(
             dm.base_text().map(|t| t.as_str()),
             Some(""),
@@ -3437,9 +3500,6 @@ mod tests {
 
     #[test]
     fn every_base_names_both_sides() {
-        let rev = |sha: Option<&str>| DiffBase::Rev {
-            sha: sha.map(str::to_string),
-        };
         let memory = DiffBase::Memory {
             files: HashMap::new(),
         };
@@ -3452,8 +3512,13 @@ mod tests {
         let sides = [
             diff_sides(None),
             diff_sides(Some(&DiffBase::Head)),
-            diff_sides(Some(&rev(Some("abc1234def5678")))),
-            diff_sides(Some(&rev(None))),
+            diff_sides(Some(&DiffBase::named("main", "abc1234def5678".into()))),
+            diff_sides(Some(&DiffBase::named("abc12", "abc1234def5678".into()))),
+            diff_sides(Some(&DiffBase::parent_of(
+                "def5678abc1234",
+                Some("abc1234def5678".into()),
+            ))),
+            diff_sides(Some(&DiffBase::parent_of("def5678abc1234", None))),
             diff_sides(Some(&memory)),
             diff_sides(Some(&pair("/p/a.txt", "/p/b.txt"))),
             diff_sides(Some(&pair("/p/x/conf.toml", "/p/y/conf.toml"))),
@@ -3465,12 +3530,34 @@ mod tests {
             [
                 ("index", "working tree"),
                 ("HEAD", "working tree"),
+                ("main abc1234", "working tree"),
                 ("abc1234", "working tree"),
-                ("empty", "working tree"),
+                ("parent abc1234", "commit def5678"),
+                ("empty", "commit def5678"),
                 ("original", "proposal"),
                 ("a.txt", "b.txt"),
                 ("x/conf.toml", "y/conf.toml"),
             ],
+        );
+    }
+
+    /// An amend renames the reviewed commit only where the base names the
+    /// commit that the amend rewrote.
+    #[test]
+    fn an_amend_renames_only_the_commit_it_rewrote() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        ws.set_diff_base(Some(DiffBase::parent_of("c1", Some("c0".into()))));
+
+        let sides = ["c9", "c1"].map(|old_sha| {
+            ws.follow_amended_commit(old_sha, "c2");
+            diff_sides(ws.diff_base()).1
+        });
+
+        assert_eq!(
+            sides,
+            ["commit c1", "commit c2"],
+            "an amend of another commit leaves the name"
         );
     }
 
@@ -3507,7 +3594,7 @@ mod tests {
 
         h.stoat
             .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Rev { sha: None }));
+            .set_diff_base(Some(DiffBase::parent_of("c1", None)));
         assert!(
             !h.stoat
                 .active_workspace()

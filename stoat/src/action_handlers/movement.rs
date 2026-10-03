@@ -4640,7 +4640,7 @@ fn scan_changed_file_jump(
     // revision to list against and the working tree's own list is the closest
     // true answer.
     let listed = match stop_base.base {
-        Some(DiffBase::Rev { sha: Some(sha) }) => repo.changed_files_from(sha.as_str()),
+        Some(DiffBase::Rev { sha: Some(sha), .. }) => repo.changed_files_from(sha.as_str()),
         _ => {
             // A moved file lists as changed while owning no hunk, so a hop into
             // it lands on no row at all. The same holds for a mode-only change

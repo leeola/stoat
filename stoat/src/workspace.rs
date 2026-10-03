@@ -30,7 +30,8 @@ use crate::{
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermLocation, TermSession},
     workspace::diff::{
-        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState, WorktreeBase,
+        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState, RevOrigin,
+        WorktreeBase,
     },
 };
 use codegraph::{CodeGraph, FileId};
@@ -935,6 +936,21 @@ impl Workspace {
     pub(crate) fn set_worktree_base(&mut self, base: WorktreeBase) {
         self.diff.worktree_base = base;
         self.set_diff_base(None);
+    }
+
+    /// Name `new_sha` as the commit under review where the base names `old_sha`.
+    ///
+    /// An amend rewrites the reviewed commit over the same parent. The base text
+    /// does not change, so every diff map stays valid.
+    pub(crate) fn follow_amended_commit(&mut self, old_sha: &str, new_sha: &str) {
+        if let Some(DiffBase::Rev {
+            origin: RevOrigin::ParentOf(commit),
+            ..
+        }) = &mut self.diff.base_override
+            && *commit == old_sha
+        {
+            *commit = new_sha.to_string();
+        }
     }
 
     /// What buffers diff against, `None` for the index.

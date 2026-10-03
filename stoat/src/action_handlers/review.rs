@@ -19,7 +19,9 @@ use crate::{
     },
     review_session::DiffDocument,
     workspace::{
-        diff::{self, compute_base_highlights, BaseHighlightCache, DiffBase, WorktreeBase},
+        diff::{
+            self, compute_base_highlights, BaseHighlightCache, DiffBase, RevOrigin, WorktreeBase,
+        },
         Workspace,
     },
 };
@@ -184,7 +186,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
 
     stoat
         .active_workspace_mut()
-        .set_diff_base(Some(DiffBase::Rev { sha: Some(sha) }));
+        .set_diff_base(Some(DiffBase::named(rev, sha)));
     // Turned on rather than toggled. Naming a revision asks to look at it, so a
     // second `:diff <rev>` re-targets the view rather than closing it; only the
     // bare command closes.
@@ -250,15 +252,21 @@ pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
 /// reader to retype.
 ///
 /// Enter runs the ordinary `:diff <rev>`, so a revision, `index`, or `HEAD`
-/// points the diff at it, and Escape changes nothing. A base with no revision
-/// name to retype, the empty parent of a root commit, an agent proposal, or a
-/// pair of files, seeds a bare `diff `.
+/// points the diff at it, and Escape changes nothing. A revision the reader
+/// named seeds as typed, and a review seeds its parent's short sha. A base with
+/// no revision name to retype, the empty parent of a root commit, an agent
+/// proposal, or a pair of files, seeds a bare `diff `.
 pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     let seed = match stoat.active_workspace().diff_base() {
-        Some(DiffBase::Rev { sha: None } | DiffBase::Memory { .. } | DiffBase::Pair { .. }) => {
+        Some(DiffBase::Rev {
+            origin: RevOrigin::Named(name),
+            ..
+        }) => format!("diff {name}"),
+        Some(DiffBase::Rev { sha: Some(sha), .. }) => format!("diff {}", diff::short_sha(sha)),
+        Some(DiffBase::Rev { sha: None, .. } | DiffBase::Memory { .. } | DiffBase::Pair { .. }) => {
             "diff ".to_string()
         },
-        base => format!("diff {}", diff::diff_sides(base).0),
+        base @ (None | Some(DiffBase::Head)) => format!("diff {}", diff::diff_sides(base).0),
     };
     super::palette::open_palette_seeded(stoat, &seed)
 }
@@ -808,7 +816,7 @@ fn marked_run_at(
 /// nothing. A pair base names no commit either.
 fn review_rev(ws: &Workspace) -> Option<Option<String>> {
     match ws.diff_base() {
-        Some(DiffBase::Rev { sha }) => Some(sha.clone()),
+        Some(DiffBase::Rev { sha, .. }) => Some(sha.clone()),
         None
         | Some(DiffBase::Head)
         | Some(DiffBase::Memory { .. })
@@ -818,7 +826,8 @@ fn review_rev(ws: &Workspace) -> Option<Option<String>> {
 
 /// Report a landed staging press, and stale the gutter's map when git moved.
 ///
-/// An amend also moves the walk onto the commit it rewrote.
+/// An amend also moves the walk and the base's commit name onto the commit it
+/// rewrote.
 fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: StageOutcome) {
     let status = match outcome {
         StageOutcome::Unchanged(status) => status,
@@ -834,6 +843,9 @@ fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: Stag
             status,
         } => {
             amend::anchor_walk_to(stoat, &old_sha, &new_sha);
+            stoat
+                .active_workspace_mut()
+                .follow_amended_commit(&old_sha, &new_sha);
             stoat
                 .active_workspace_mut()
                 .invalidate_diff(buffer_id, path);
@@ -1252,7 +1264,7 @@ mod tests {
         review_session::DiffDocument,
         test_harness::TestHarness,
         theme::Theme,
-        workspace::diff::{BaseHighlightCache, BaseHighlightMemo, DiffBase},
+        workspace::diff::{self, BaseHighlightCache, BaseHighlightMemo, DiffBase},
     };
     use std::{
         path::{Path, PathBuf},
@@ -1420,7 +1432,7 @@ mod tests {
     /// layout, and which file is open.
     fn diff_state(h: &TestHarness) -> (Option<String>, bool, Option<PathBuf>) {
         let base = match h.stoat.active_workspace().diff_base() {
-            Some(DiffBase::Rev { sha }) => sha.clone(),
+            Some(DiffBase::Rev { sha, .. }) => sha.clone(),
             _ => None,
         };
         let panes = &h.stoat.active_workspace().panes;
@@ -1452,6 +1464,32 @@ mod tests {
         assert_eq!(
             diff_state(&h),
             (Some("base0".to_string()), true, Some(workdir.join("b.rs")),),
+        );
+    }
+
+    /// The sides bar names a revision as the reader typed it, beside the short
+    /// sha it resolved to. A typed sha needs no second spelling.
+    #[test]
+    fn diff_with_a_rev_names_the_base_as_typed() {
+        let (mut h, workdir) = diff_rev_harness();
+        h.fake_git().add_repo(&workdir).branch("main", "base0");
+
+        let sides = ["main", "base0"].map(|rev| {
+            crate::action_handlers::dispatch(
+                &mut h.stoat,
+                &stoat_action::Diff {
+                    rev: Some(rev.to_string()),
+                },
+            );
+            h.settle();
+            diff::diff_sides(h.stoat.active_workspace().diff_base())
+        });
+
+        assert_eq!(
+            sides,
+            [("main base0", "working tree"), ("base0", "working tree")]
+                .map(|(left, right)| (left.to_string(), right.to_string())),
+            "a branch keeps its name, and a typed sha shows once",
         );
     }
 
@@ -1551,9 +1589,7 @@ mod tests {
         run(&mut h, &stoat_action::DiffAgainstHead);
         h.stoat
             .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Rev {
-                sha: Some("base0".into()),
-            }));
+            .set_diff_base(Some(DiffBase::named("base0", "base0".into())));
         run(&mut h, &stoat_action::Diff { rev: None });
 
         assert_eq!(head_base_and_view(&mut h), (true, false));
@@ -1564,9 +1600,7 @@ mod tests {
         let mut h = half_staged_harness();
         h.stoat
             .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Rev {
-                sha: Some("base0".into()),
-            }));
+            .set_diff_base(Some(DiffBase::named("base0", "base0".into())));
         run(&mut h, &stoat_action::DiffAgainstHead);
 
         assert_eq!(
@@ -1615,9 +1649,7 @@ mod tests {
         let mut h = half_staged_harness();
         h.stoat
             .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Rev {
-                sha: Some("base0".into()),
-            }));
+            .set_diff_base(Some(DiffBase::named("base0", "base0".into())));
         run(&mut h, &stoat_action::DiffBaseToggle);
 
         assert_eq!(
@@ -1667,18 +1699,25 @@ mod tests {
         let mut seeds = vec![base_edit_seed(&mut h)];
         run(&mut h, &stoat_action::DiffAgainstHead);
         seeds.push(base_edit_seed(&mut h));
-        for sha in [Some("base0"), None] {
-            h.stoat
-                .active_workspace_mut()
-                .set_diff_base(Some(DiffBase::Rev {
-                    sha: sha.map(str::to_string),
-                }));
+        for base in [
+            DiffBase::parent_of("c1", Some("base0".into())),
+            DiffBase::parent_of("c1", None),
+            DiffBase::named("main", "base0".into()),
+        ] {
+            h.stoat.active_workspace_mut().set_diff_base(Some(base));
             seeds.push(base_edit_seed(&mut h));
         }
 
         assert_eq!(
             seeds,
-            ["diff index", "diff HEAD", "diff base0", "diff "].map(|seed| Some(seed.to_string())),
+            [
+                "diff index",
+                "diff HEAD",
+                "diff base0",
+                "diff ",
+                "diff main"
+            ]
+            .map(|seed| Some(seed.to_string())),
         );
     }
 
@@ -2663,9 +2702,7 @@ mod tests {
         h.fake_fs().insert_file("/work/a.rs", working.as_bytes());
         {
             let ws = h.stoat.active_workspace_mut();
-            ws.set_diff_base(Some(DiffBase::Rev {
-                sha: Some("c0".to_string()),
-            }));
+            ws.set_diff_base(Some(DiffBase::parent_of("c1", Some("c0".to_string()))));
             ws.rebase_active = Some(paused_rebase(&workdir));
         }
         h.open_file(&workdir.join("a.rs"));
@@ -2685,9 +2722,7 @@ mod tests {
         h.fake_git().add_repo(&workdir).commit("c1", &[]);
         h.stoat
             .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Rev {
-                sha: Some("c1".to_string()),
-            }));
+            .set_diff_base(Some(DiffBase::parent_of("c2", Some("c1".to_string()))));
         h.open_file(&workdir.join("a.rs"));
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 1);
