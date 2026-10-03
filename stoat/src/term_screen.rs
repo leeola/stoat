@@ -16,7 +16,7 @@ use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
-    index::{Column, Line},
+    index::{Column, Line, Point},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
         Config, TermMode,
@@ -403,6 +403,46 @@ impl TermScreen {
         }
         text.truncate(text.trim_end_matches('\n').len());
         text
+    }
+
+    /// The text from viewport cell `start` through cell `end`, as a copy of
+    /// that span reads.
+    ///
+    /// Each cell is `(row, col)`, and `start` comes first in reading order. A
+    /// cell past the viewport reads as the nearest cell inside it.
+    ///
+    /// A wide character reads once, also from its second column, and a
+    /// combining mark stays with its base. A tab reads as a tab, not as the
+    /// blank columns up to its stop. The empty cells at the end of a row drop,
+    /// and a row the program wrapped joins the next one with no line break.
+    pub fn span_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
+        let last_row = self.rows() - 1;
+        let last_col = self.cols() - 1;
+        let end_row = end.0.min(last_row);
+        let mut end_col = end.1.min(last_col);
+
+        // `bounds_to_string` looks on the row above for the character that a
+        // wrapped wide spacer stands for. The top row of a screen with no
+        // history has no row above it. The spacer reads as nothing and its row
+        // wraps, so a span that stops short of it loses no text and no line
+        // break.
+        let line = &self.term.grid()[Line(end_row as i32)];
+        if end_col == last_col
+            && end_col > 0
+            && line[Column(end_col)]
+                .flags
+                .contains(TermFlags::LEADING_WIDE_CHAR_SPACER)
+        {
+            end_col -= 1;
+        }
+
+        self.term.bounds_to_string(
+            Point::new(
+                Line(start.0.min(last_row) as i32),
+                Column(start.1.min(last_col)),
+            ),
+            Point::new(Line(end_row as i32), Column(end_col)),
+        )
     }
 
     /// The cursor cell, or `None` when the program has hidden it.

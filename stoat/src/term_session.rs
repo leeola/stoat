@@ -148,32 +148,12 @@ impl TermSession {
     /// The selected text, or `None` when nothing is selected or the selection
     /// covers only blank cells.
     ///
-    /// Each row's selected span is read from the screen with its trailing blanks
-    /// trimmed, then the rows are joined with newlines, matching how a terminal
-    /// copies a multi-line selection.
+    /// The selection reads as [`TermScreen::span_text`] reads a span, which is
+    /// how a terminal copies a selection.
     pub fn selection_text(&self) -> Option<String> {
-        let ((start_row, start_col), (end_row, end_col)) = self.selection?.ordered();
-        let cols = self.term.cols();
-
-        let mut out = String::new();
-        for row in start_row..=end_row {
-            let cells = self.term.row(row);
-            let from = if row == start_row { start_col } else { 0 };
-            let to = if row == end_row {
-                (end_col + 1).min(cols)
-            } else {
-                cols
-            };
-            let span = cells.get(from..to.min(cells.len())).unwrap_or(&[]);
-            let line: String = span.iter().map(|cell| cell.ch).collect();
-
-            if row != start_row {
-                out.push('\n');
-            }
-            out.push_str(line.trim_end());
-        }
-
-        (!out.trim().is_empty()).then_some(out)
+        let (start, end) = self.selection?.ordered();
+        let text = self.term.span_text(start, end);
+        (!text.trim().is_empty()).then_some(text)
     }
 
     /// Resize the emulator and its PTY to `rows` by `cols` so the child reflows
@@ -265,5 +245,49 @@ mod tests {
         let mut session = session_with(b"");
         session.selection = Some(selection((0, 0), (0, 5)));
         assert_eq!(session.selection_text(), None);
+    }
+
+    /// A copy reads each character once with its marks, and a tab as the tab
+    /// the program wrote, up to the next tab stop.
+    #[test]
+    fn selection_text_reads_characters_as_written() {
+        assert_eq!(
+            [
+                read_span("a\u{4e2d}b", (0, 0), (0, 3)),
+                read_span("\u{4e2d}b", (0, 1), (0, 2)),
+                read_span("e\u{301}x", (0, 0), (0, 1)),
+                read_span("a\t  b", (0, 0), (0, 10)),
+            ],
+            ["a\u{4e2d}b", "\u{4e2d}b", "e\u{301}x", "a\t  b"].map(|text| Some(text.to_string())),
+            "a wide character, one from its second column, a combining mark, a tab",
+        );
+    }
+
+    /// A row the program wrapped joins the next one with no line break. A span
+    /// that ends on the spacer a wrapped wide character leaves at the end of the
+    /// top row reads up to that spacer.
+    #[test]
+    fn selection_text_joins_a_wrapped_row() {
+        let wide = format!("{}\u{4e2d}", "x".repeat(19));
+        assert_eq!(
+            [
+                read_span(&"x".repeat(25), (0, 0), (1, 4)),
+                read_span(&wide, (0, 0), (1, 1)),
+                read_span(&wide, (0, 0), (0, 19)),
+            ],
+            [
+                Some("x".repeat(25)),
+                Some(wide.clone()),
+                Some("x".repeat(19))
+            ],
+        );
+    }
+
+    /// The text a selection from `anchor` to `head` copies on a screen fed
+    /// `text`.
+    fn read_span(text: &str, anchor: (usize, usize), head: (usize, usize)) -> Option<String> {
+        let mut session = session_with(text.as_bytes());
+        session.selection = Some(selection(anchor, head));
+        session.selection_text()
     }
 }
