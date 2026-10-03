@@ -19,7 +19,7 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     editor_state::{EditorId, EditorState},
     pane::{FocusTarget, PaneId, View},
-    workspace::{Workspace, WorkspaceId},
+    workspace::{BridgeWaiter, Workspace, WorkspaceId},
 };
 use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
 use std::{
@@ -54,6 +54,12 @@ pub(crate) struct PendingFileOpen {
     disk_mtime: Option<SystemTime>,
     _task: Task<()>,
     result: Arc<Mutex<Option<std::io::Result<OpenContent>>>>,
+    /// The commands parked on this open, which wait on the buffer the read
+    /// installs as.
+    ///
+    /// A read that installs no buffer drops them, which releases each command
+    /// as closed.
+    waiters: Vec<BridgeWaiter>,
 }
 
 pub(crate) fn open_file_in_pane(
@@ -61,11 +67,7 @@ pub(crate) fn open_file_in_pane(
     target: PaneId,
     path: &Path,
 ) -> Option<BufferId> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        stoat.active_workspace().git_root.join(path)
-    };
+    let absolute = absolute_path(stoat, path);
 
     let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
     let disk_mtime = meta.map(|m| m.modified);
@@ -85,6 +87,15 @@ pub(crate) fn open_file_in_pane(
     };
     let workspace = stoat.active_workspace;
     install_content(stoat, workspace, target, &absolute, content, disk_mtime)
+}
+
+/// `path` as an absolute path, where a relative one starts at the active
+/// workspace's root.
+fn absolute_path(stoat: &Stoat, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    stoat.active_workspace().git_root.join(path)
 }
 
 /// Show what a read found, as the buffer or the image it turned out to be.
@@ -209,6 +220,7 @@ fn spawn_pending_open(
         disk_mtime,
         _task: task,
         result,
+        waiters: Vec::new(),
     });
 
     let ws = stoat.active_workspace_mut();
@@ -234,11 +246,43 @@ pub(crate) fn pane_awaits_open(stoat: &Stoat, pane: PaneId) -> bool {
         .any(|p| p.workspace == stoat.active_workspace && p.target == pane)
 }
 
+/// Park `waiter` on the pending open of `path`, so it waits on the buffer the
+/// read installs as.
+///
+/// Answers whether the active workspace has such an open. Without one, the
+/// waiter drops. `path` resolves as [`open_file_in_pane`] resolves it.
+pub(crate) fn hold_pending_open(stoat: &mut Stoat, path: &Path, waiter: BridgeWaiter) -> bool {
+    let absolute = absolute_path(stoat, path);
+    let workspace = stoat.active_workspace;
+    let Some(pending) = stoat
+        .pending_file_opens
+        .iter_mut()
+        .find(|p| p.path == absolute && p.workspace == workspace)
+    else {
+        return false;
+    };
+    pending.waiters.push(waiter);
+    true
+}
+
+/// Drop every waiter that connection `client` parked on a pending open of
+/// `workspace`, since the command that waited through it no longer runs.
+pub(crate) fn drop_pending_waiters(stoat: &mut Stoat, workspace: WorkspaceId, client: u64) {
+    for pending in stoat
+        .pending_file_opens
+        .iter_mut()
+        .filter(|p| p.workspace == workspace)
+    {
+        pending.waiters.retain(|waiter| waiter.client != client);
+    }
+}
+
 /// Install every pending open whose read has finished.
 ///
 /// Called from [`Stoat::drive_background`]. Drops an open whose target pane
 /// vanished while it read, and clears the [`BadgeSource::FileOpen`] badge once
-/// none remain.
+/// none remain. The commands parked on an open then wait on the buffer it
+/// installs as.
 pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
     let mut ready = Vec::new();
     let mut i = 0;
@@ -278,7 +322,7 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
         if !ws.panes.contains(pending.target) {
             continue;
         }
-        install_content(
+        let installed = install_content(
             stoat,
             pending.workspace,
             pending.target,
@@ -286,6 +330,13 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
             content,
             pending.disk_mtime,
         );
+        if let Some(buffer) = installed
+            && let Some(ws) = stoat.workspaces.get_mut(pending.workspace)
+        {
+            for waiter in pending.waiters {
+                ws.hold_buffer(buffer, waiter);
+            }
+        }
     }
 
     // The badge belongs to whichever workspace raised it, which is not

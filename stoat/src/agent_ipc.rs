@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn a_held_open_in_term_that_opens_nothing_holds_nothing() {
         let mut h = TestHarness::with_size(80, 24);
-        let path = seed_huge_file(&mut h);
+        let path = seed_unreadable_file(&mut h);
         let (_, token) = terminal_in_focused_pane(&mut h);
 
         let (mut done_rx, mut hold_rx) = open_in_term_held(&mut h, token, vec![path]);
@@ -891,12 +891,80 @@ mod tests {
         }
     }
 
+    /// A file that reads on the blocking pool holds the caller from the start.
+    /// The buffer the read installs as releases the caller when it leaves the
+    /// editor.
+    #[test]
+    fn a_held_open_in_term_waits_for_a_file_read_on_the_pool() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = seed_huge_file(&mut h);
+        let (_, token) = terminal_in_focused_pane(&mut h);
+
+        let (mut done_rx, mut hold_rx) = open_in_term_held(&mut h, token, vec![path]);
+        let opened = (done_rx.try_recv(), hold_rx.try_recv());
+
+        h.settle();
+        crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
+        let buffer = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("the read lands in the terminal's pane")
+            .buffer_id;
+        let labels = h.stoat.active_workspace().held_buffer_labels();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Quit);
+        let after_quit = [hold_rx.try_recv(), hold_rx.try_recv()];
+
+        assert_eq!(
+            (opened, labels, after_quit),
+            (
+                (Ok(true), Err(TryRecvError::Empty)),
+                vec![(buffer, "shell".to_string())],
+                [Ok(BridgeOutcome::Closed), Err(TryRecvError::Disconnected)],
+            ),
+        );
+    }
+
+    /// A caller that goes away while its file still reads leaves no waiter on
+    /// the buffer the read installs as.
+    #[test]
+    fn a_held_client_gone_before_its_read_lands_parks_nothing() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = seed_huge_file(&mut h);
+        let (_, token) = terminal_in_focused_pane(&mut h);
+        let term_pane = h.stoat.active_workspace().panes.focus();
+        let (_done_rx, mut hold_rx) = open_in_term_held(&mut h, token, vec![path.clone()]);
+
+        let uid = h.stoat.active_workspace().uid();
+        h.stoat
+            .handle_agent_control(AgentControl::ClientGone { uid, client: 0 });
+        h.settle();
+        crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
+
+        assert_eq!(
+            (
+                shown_path(&h, term_pane),
+                h.stoat.active_workspace().held_buffer_labels(),
+                hold_rx.try_recv(),
+            ),
+            (Some(path), Vec::new(), Err(TryRecvError::Disconnected)),
+        );
+    }
+
     /// Seed a file past the inline-read ceiling, so its open lands on the pool
     /// and the pane still shows the shell when the handler returns.
     fn seed_huge_file(h: &mut TestHarness) -> PathBuf {
         let root = PathBuf::from("/big");
         let path = root.join("huge.txt");
         h.fake_fs().insert_file(&path, vec![b'x'; (1 << 20) + 16]);
+        h.stoat.active_workspace_mut().git_root = root;
+        path
+    }
+
+    /// Seed a small file whose bytes are not UTF-8, so its read fails and its
+    /// open opens nothing.
+    fn seed_unreadable_file(h: &mut TestHarness) -> PathBuf {
+        let root = PathBuf::from("/latin1");
+        let path = root.join("cafe.txt");
+        h.fake_fs().insert_file(&path, b"caf\xe9\n");
         h.stoat.active_workspace_mut().git_root = root;
         path
     }

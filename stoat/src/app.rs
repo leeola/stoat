@@ -7469,56 +7469,65 @@ impl Stoat {
                     let _ = done.send(false);
                     return UpdateEffect::None;
                 };
-                // FIXME: A file past the inline-read ceiling opens on the pool and
-                // holds no client, so its command returns at once
-                let mut opened: Vec<BufferId> = Vec::new();
-                opened.extend(crate::buffer_lifecycle::open_file_in_pane(
-                    self, target, first,
-                ));
+                let mut opens = vec![(
+                    first,
+                    crate::buffer_lifecycle::open_file_in_pane(self, target, first),
+                )];
                 for path in rest {
                     let split = self
                         .active_workspace_mut()
                         .panes
                         .split(crate::pane::Axis::Vertical);
-                    opened.extend(crate::buffer_lifecycle::open_file_in_pane(
-                        self, split, path,
+                    opens.push((
+                        path,
+                        crate::buffer_lifecycle::open_file_in_pane(self, split, path),
                     ));
                 }
 
                 // The original sender drops with the match, so the clones on
-                // the buffers are the only ones and the command returns when
-                // the last buffer leaves the editor.
+                // the buffers and on the reads still on the pool are the only
+                // ones. The command returns when the last buffer leaves the
+                // editor.
                 let held = match hold {
-                    Some(hold) if !opened.is_empty() => {
-                        let ws = self.active_workspace_mut();
-                        let label = ws
+                    Some(hold) => {
+                        let label = self
+                            .active_workspace()
                             .terms
                             .values()
                             .find(|session| session.token == term)
                             .and_then(|session| session.session.foreground_process_name())
                             .unwrap_or_else(|| "shell".to_string());
-                        for id in opened {
-                            ws.hold_buffer(
-                                id,
-                                BridgeWaiter {
-                                    client,
-                                    label: label.clone(),
-                                    done: hold.clone(),
+                        let mut held = false;
+                        for (path, opened) in opens {
+                            let waiter = BridgeWaiter {
+                                client,
+                                label: label.clone(),
+                                done: hold.clone(),
+                            };
+                            held |= match opened {
+                                Some(id) => {
+                                    self.active_workspace_mut().hold_buffer(id, waiter);
+                                    true
                                 },
-                            );
+                                None => {
+                                    crate::buffer_lifecycle::hold_pending_open(self, path, waiter)
+                                },
+                            };
                         }
-                        true
+                        held
                     },
-                    _ => false,
+                    None => false,
                 };
                 let _ = done.send(held);
                 UpdateEffect::Redraw
             },
             AgentControl::ClientGone { uid, client } => {
-                let Some((_, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == uid) else {
+                let Some((id, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == uid)
+                else {
                     return UpdateEffect::None;
                 };
                 ws.drop_client_waiters(client);
+                crate::buffer_lifecycle::drop_pending_waiters(self, id, client);
                 UpdateEffect::Redraw
             },
             AgentControl::Query {
