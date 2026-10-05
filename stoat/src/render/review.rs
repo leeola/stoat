@@ -598,6 +598,15 @@ impl DiffColumns {
 /// A wide inner rect lays out base text left and buffer text right. A narrow one
 /// collapses to a single unified column. See [`DiffColumns`] for the geometry.
 ///
+/// Text with no token color falls back to a color that says what changed. On
+/// the base side that is the removed color. On the live side it is the added
+/// color for an added or a modified row, and the moved color for a moved row.
+/// With syntax off, this fallback covers every char of a changed row.
+///
+/// A modified row's live side takes the added color and not the modified one.
+/// The base side beside it already reads removed, so the pair reads as a
+/// removal and an addition. An unchanged row keeps `fallback_style`.
+///
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
@@ -655,6 +664,8 @@ pub(crate) fn paint_diff_rows(
 
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
+    let add_style = fallback_style.patch(theme.get(s::DIFF_ADDED));
+    let moved_style = fallback_style.patch(theme.get(s::DIFF_MOVED));
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
 
     let tints = resolve_diff_tints(theme);
@@ -787,6 +798,11 @@ pub(crate) fn paint_diff_rows(
                     DiffStatus::Moved => tints.as_ref().map(|t| t.moved),
                     DiffStatus::Unchanged => None,
                 };
+                let row_fallback = match status {
+                    DiffStatus::Added | DiffStatus::Modified => add_style,
+                    DiffStatus::Moved => moved_style,
+                    DiffStatus::Unchanged => fallback_style,
+                };
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -794,7 +810,7 @@ pub(crate) fn paint_diff_rows(
                     y,
                     right_content_w,
                     buf,
-                    fallback_style,
+                    row_fallback,
                     inlay_style,
                     changes,
                     tints.as_ref(),
@@ -3259,6 +3275,72 @@ mod tests {
         assert!(
             colors.len() >= 2,
             "the right column is syntax highlighted with distinct token colors: {colors:?}"
+        );
+    }
+
+    /// `editor` rendered unfocused and 120 wide on [`rgb_diff_theme`] over a
+    /// pane `fallback`, with softening off so no soften or lift moves a color.
+    fn render_over_fallback(editor: &mut EditorState, fallback: Style) -> Buffer {
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            editor,
+            area,
+            fallback,
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            None,
+            DiffDials {
+                soften_scale: 0.0,
+                ..DiffDials::shipped()
+            },
+        );
+        buf
+    }
+
+    /// The fg of the first right-column text cell on the row whose right column
+    /// starts with `needle`.
+    fn right_fg(buf: &Buffer, needle: &str) -> Option<Color> {
+        let rx = right_text_x(buf.area);
+        buf[(rx, row_holding(buf, rx..buf.area.width, needle))]
+            .style()
+            .fg
+    }
+
+    /// With syntax off, or in a file with no grammar, no token colors a live
+    /// row. Its status color then says the row changed, as the removed color
+    /// does on the base side.
+    #[test]
+    fn a_changed_live_row_falls_back_to_its_status_color() {
+        let mut editor = diff_editor("a\nb\n", "a\nB\nc\n");
+        let buf = render_over_fallback(&mut editor, Style::default().fg(Color::Rgb(1, 2, 3)));
+        assert_eq!(
+            ["a", "B", "c"].map(|needle| right_fg(&buf, needle)),
+            [
+                Some(Color::Rgb(1, 2, 3)),
+                Some(Color::Rgb(0, 255, 0)),
+                Some(Color::Rgb(0, 255, 0)),
+            ],
+            "the unchanged row keeps the pane color, and the modified and added \
+             rows take the added color",
+        );
+    }
+
+    /// A moved line keeps its own color on the live side, so with no token
+    /// color it reads as a move and not as new text.
+    #[test]
+    fn a_moved_live_row_falls_back_to_the_moved_color() {
+        let mut editor = moved_line_editor();
+        let buf = render_over_fallback(&mut editor, Style::default().fg(Color::Rgb(1, 2, 3)));
+        assert_eq!(
+            ["b", "e"].map(|needle| right_fg(&buf, needle)),
+            [Some(Color::Rgb(0, 0, 255)), Some(Color::Rgb(1, 2, 3))],
+            "the moved row takes the moved color, and the unchanged row keeps \
+             the pane color",
         );
     }
 
