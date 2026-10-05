@@ -1155,18 +1155,17 @@ fn desaturate_style(style: Style, amount: f32) -> Style {
 
 /// The status color a change span tints toward.
 ///
-/// `base_side` is what splits a novel span. The left column carries the base
-/// text, where novel content is what the change removed, and the right column
-/// carries the live text, where it is what the change added. A replaced or
-/// moved span reads the same from both sides.
+/// `base_side` splits a novel and a replaced span. The left column carries the
+/// base text, where both are text the change removed, so both read deleted. The
+/// right column carries the live text, where novel content is what the change
+/// added and replaced content is what changed. Only a moved span reads the same
+/// from both sides.
 fn span_tint_color(tints: &DiffTints, kind: &ChangeKind, base_side: bool) -> Color {
     match kind {
         ChangeKind::Moved => tints.moved,
-        ChangeKind::Replaced => tints.modified,
-        ChangeKind::Novel => match base_side {
-            true => tints.deleted,
-            false => tints.added,
-        },
+        ChangeKind::Replaced if !base_side => tints.modified,
+        ChangeKind::Novel if !base_side => tints.added,
+        ChangeKind::Replaced | ChangeKind::Novel => tints.deleted,
     }
 }
 
@@ -5104,14 +5103,14 @@ mod tests {
         );
         assert_eq!(
             paint(0.5),
-            [blend(tints.modified), blend(tints.deleted), syntax],
-            "a mid level leans a replaced span toward modified and a base novel \
-             span toward deleted, and leaves the chars outside them alone",
+            [blend(tints.deleted), blend(tints.deleted), syntax],
+            "a mid level leans a replaced and a novel base span toward deleted, \
+             and leaves the chars outside them alone",
         );
         assert_eq!(
             paint(1.0),
-            [Some(tints.modified), Some(tints.deleted), syntax],
-            "the top level hands each span its status color outright",
+            [Some(tints.deleted), Some(tints.deleted), syntax],
+            "the top level hands each base span the deleted color outright",
         );
     }
 
@@ -5261,22 +5260,22 @@ mod tests {
         assert_eq!(
             paint(0.5),
             [
-                blend(tints.modified),
+                blend(tints.deleted),
                 blend(tints.deleted),
                 blend(tints.deleted)
             ],
-            "each span leans toward its own kind from the syntax color, and the \
-             char outside them leans toward the row's status",
+            "each base span leans toward deleted from the syntax color once, and \
+             the char outside them leans toward the row's status",
         );
         assert_eq!(
             paint(1.0),
             [
-                Some(tints.modified),
+                Some(tints.deleted),
                 Some(tints.deleted),
                 Some(tints.deleted)
             ],
-            "the top level hands each span its kind and every other char the \
-             row status",
+            "the top level hands each base span the deleted color and every \
+             other char the row status",
         );
     }
 
@@ -5409,12 +5408,12 @@ mod tests {
             (
                 vec![Some(tints.modified); 3],
                 vec![Some(tints.modified); 9],
-                vec![Some(tints.modified); 3],
+                vec![Some(tints.deleted); 3],
                 vec![fallback.fg; 9],
             ),
-            "the replaced word reads modified in both columns, the live chars \
-             around it read modified, and the unchanged base chars keep the \
-             pane color",
+            "the replaced word reads modified on the right and deleted on the \
+             left, the live chars around it read modified, and the unchanged \
+             base chars keep the pane color",
         );
     }
 
