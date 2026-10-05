@@ -166,10 +166,10 @@ pub enum BufferOp {
 /// or a whole insert-mode session, plus the editor selections to restore when
 /// the group is undone or redone.
 ///
-/// Grouping is an in-session overlay on the flat [`BufferOp`] log, which still
-/// records each edit and undo individually, so it is not persisted -- a
-/// restored buffer replays every edit as its own singleton group.
-struct UndoGroup {
+/// The tree of groups persists through [`BufferHistory::revisions`], beside the
+/// flat [`BufferOp`] log that still records each edit and undo for replay.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct UndoGroup {
     /// Edit timestamps in application order. Undo toggles them in reverse.
     edits: Vec<u64>,
     /// Editor selections captured when the group opened, restored on undo.
@@ -213,6 +213,15 @@ pub struct BufferHistory {
     /// file is next reopened via [`TextBuffer::with_text`].
     #[serde(default)]
     pub undo_floor: usize,
+    /// Persisted [`TextBuffer::revisions`], the undo tree.
+    ///
+    /// Empty on a file that predates the field and on a compacted history. The
+    /// replay's singleton groups then stand.
+    #[serde(default)]
+    pub(crate) revisions: Vec<UndoGroup>,
+    /// Persisted [`TextBuffer::current`], the revision the text reflects.
+    #[serde(default)]
+    pub(crate) current: usize,
     /// Whether [`Self::ops`] is a compacted seed rather than the buffer's own
     /// log. This describes how the value was produced rather than what it
     /// holds, so it is not part of the on-disk format. A history read back from
@@ -245,6 +254,8 @@ struct BufferHistoryRecord<'a> {
     ops: Cow<'a, [BufferOp]>,
     saved_marker: Option<u64>,
     undo_floor: usize,
+    revisions: &'a [UndoGroup],
+    current: usize,
 }
 
 impl Serialize for BufferHistory {
@@ -264,6 +275,8 @@ impl Serialize for BufferHistory {
             ops,
             saved_marker: self.saved_marker,
             undo_floor: self.undo_floor,
+            revisions: &self.revisions,
+            current: self.current,
         }
         .serialize(serializer)
     }
@@ -1463,8 +1476,9 @@ impl TextBuffer {
 
     /// Replay a [`BufferOp::UndoGroup`] from a persisted log.
     ///
-    /// Grouping is not persisted, so a replayed log lands every edit as its own
-    /// singleton group. The op names the timestamps one live undo or redo
+    /// A replayed log lands every edit as its own singleton group, and
+    /// [`Self::from_history`] installs the persisted tree over them once the
+    /// replay ends. The op names the timestamps one live undo or redo
     /// covered, and this moves that many singletons across so the two histories
     /// stay the same depth. It toggles them in one batch, which is what makes a
     /// replayed log burn the undo timestamps the live session burned and so
@@ -1495,6 +1509,48 @@ impl TextBuffer {
 
         self.apply_undo_toggles(edits.to_vec());
         self.recompute_dirty();
+    }
+
+    /// Whether `revisions`, with `current` the revision the text reflects,
+    /// describes the buffer the replay of its op log produced.
+    ///
+    /// [`Self::from_history`] asks this before it installs a persisted tree
+    /// over the replay's singleton groups. A tree that fails is dropped, and
+    /// the buffer undoes edit by edit as the replay grouped it.
+    fn revisions_fit(&self, revisions: &[UndoGroup], current: usize) -> bool {
+        let Some(root) = revisions.first() else {
+            return false;
+        };
+        if current >= revisions.len() || !root.edits.is_empty() || root.parent != 0 {
+            return false;
+        }
+        let shape_holds = revisions.iter().enumerate().all(|(i, rev)| {
+            (i == 0 || rev.parent < i)
+                && rev.last_child.is_none_or(|child| {
+                    child > i && child < revisions.len() && revisions[child].parent == i
+                })
+                && rev.edits.iter().all(|&edit| edit < self.next_timestamp)
+        });
+        if !shape_holds {
+            return false;
+        }
+
+        let mut on_path = vec![false; revisions.len()];
+        let mut at = current;
+        loop {
+            on_path[at] = true;
+            if at == 0 {
+                break;
+            }
+            at = revisions[at].parent;
+        }
+        // The tree must describe the edits the replay applied, so an edit
+        // reads applied exactly when its revision lies on the current path.
+        revisions.iter().zip(&on_path).all(|(rev, &on)| {
+            rev.edits
+                .iter()
+                .all(|&edit| self.snapshot.undo_map.is_undone(edit) != on)
+        })
     }
 
     /// Place a named marker at the current op-log position. The returned
@@ -1693,6 +1749,8 @@ impl TextBuffer {
             ops: self.ops.clone(),
             saved_marker: self.saved_marker,
             undo_floor: self.undo_floor,
+            revisions: self.revisions.clone(),
+            current: self.current,
             compacted: false,
             seed: self.seed_text.clone(),
         }
@@ -1713,6 +1771,8 @@ impl TextBuffer {
             }],
             saved_marker: (!self.dirty).then_some(SEED_TIMESTAMP),
             undo_floor: 1,
+            revisions: Vec::new(),
+            current: 0,
             compacted: true,
             seed: Some(self.snapshot.visible_text.clone()),
         }
@@ -1721,6 +1781,11 @@ impl TextBuffer {
     /// Reconstruct a [`TextBuffer`] by replaying `history` on a fresh buffer.
     /// Sequential timestamp assignment means anchors from the original buffer
     /// resolve to identical byte offsets in the reconstructed one.
+    ///
+    /// The replay groups every edit alone. The undo tree the history carries
+    /// then replaces that grouping when it fits the replayed buffer, so undo
+    /// takes the steps the saved session took. A tree that does not fit is
+    /// dropped with a warning.
     pub fn from_history(buffer_id: BufferId, history: &BufferHistory) -> Self {
         let mut buf = Self::new(buffer_id);
         // A history built in memory carries its seed as a rope beside an
@@ -1741,6 +1806,20 @@ impl TextBuffer {
                     buf.redo();
                 },
             }
+        }
+        // Installed before the dirty check, which reads the frontier through
+        // this tree.
+        if buf.revisions_fit(&history.revisions, history.current) {
+            buf.revisions = history.revisions.clone();
+            buf.current = history.current;
+        } else if !history.revisions.is_empty() {
+            tracing::warn!(
+                target: "stoat::buffer",
+                ?buffer_id,
+                revisions = history.revisions.len(),
+                current = history.current,
+                "persisted undo tree does not fit the replayed buffer; keeping singleton groups",
+            );
         }
         buf.saved_marker = history.saved_marker;
         buf.undo_floor = history.undo_floor;
@@ -4610,56 +4689,150 @@ mod tests {
         }
     }
 
-    /// A replay hands back one undo step per edit, not one per session, and the
-    /// floor that protects the seed content still lands in the right place.
-    ///
-    /// Grouping is a session overlay that is never persisted, so the same
-    /// history that undid an insert in one step undoes it in as many steps as
-    /// it had edits. The floor is the sharper half: it counts groups, and the
-    /// replay changes how many groups the same edits make, so a floor off by
-    /// one would either undo the seed content away or refuse an undo that
-    /// should have been allowed.
-    #[test]
-    fn a_replayed_buffer_undoes_edit_by_edit_and_keeps_its_floor() {
+    /// A buffer seeded with `seed\n` that took one session of three edits,
+    /// then undid and redid it, so its history ends in the edited state.
+    fn one_session_of_three_edits() -> TextBuffer {
         let mut b = buf("seed\n");
-
         b.begin_group(Arc::from([]));
         b.edit(5..5, "one\n");
         b.edit(9..9, "two\n");
         b.edit(13..13, "three\n");
         b.seal_group(Arc::from([]));
-        let edited = b.snapshot.visible_text.to_string();
-        assert_eq!(edited, "seed\none\ntwo\nthree\n");
 
         assert!(b.undo().is_some(), "the session's three edits undo as one");
-        assert_eq!(b.snapshot.visible_text.to_string(), "seed\n");
-        assert!(
-            b.undo().is_none(),
-            "and the floor refuses to undo the seed content away",
-        );
-
-        // Back to the edited state, so the history the replay reads is the one
-        // the session saved rather than one already unwound.
+        assert!(b.undo().is_none(), "and the floor holds the seed content");
         b.redo();
-        assert_eq!(b.snapshot.visible_text.to_string(), edited);
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "seed\none\ntwo\nthree\n"
+        );
+        b
+    }
 
-        let mut restored = TextBuffer::from_history(BufferId::new(0), &b.history());
-        assert_eq!(restored.snapshot.visible_text.to_string(), edited);
-
+    /// The replay of [`one_session_of_three_edits`] undoes one edit at a time,
+    /// as the replay grouped it, with the floor still on the seed.
+    fn assert_undoes_edit_by_edit(mut restored: TextBuffer) {
         for want in ["seed\none\ntwo\n", "seed\none\n", "seed\n"] {
             assert!(
                 restored.undo().is_some(),
                 "the replay still has {want:?} to reach"
             );
-            assert_eq!(
-                restored.snapshot.visible_text.to_string(),
-                want,
-                "the replay steps through the states the session skipped",
-            );
+            assert_eq!(restored.snapshot.visible_text.to_string(), want);
         }
+        assert!(restored.undo().is_none(), "the floor still holds the seed");
+    }
+
+    /// A replay hands back the steps the session took, one per dispatched
+    /// action or insert session, and the floor that protects the seed content
+    /// still lands in the right place.
+    ///
+    /// The floor is the sharper half. It counts groups, so a replay that
+    /// regrouped the same edits either undoes the seed content away or refuses
+    /// an undo it has to allow.
+    #[test]
+    fn a_replayed_buffer_undoes_group_by_group_and_keeps_its_floor() {
+        let b = one_session_of_three_edits();
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &b.history());
+
+        assert!(
+            restored.undo().is_some(),
+            "the session's three edits undo as one"
+        );
+        assert_eq!(restored.snapshot.visible_text.to_string(), "seed\n");
         assert!(
             restored.undo().is_none(),
-            "the floor carried across the regrouping and still holds the seed",
+            "the floor carried across and still holds the seed",
+        );
+    }
+
+    /// A file written before the undo tree persisted carries no revisions, so
+    /// the replay's own grouping stands.
+    #[test]
+    fn a_history_without_revisions_replays_as_singleton_groups() {
+        let mut history = one_session_of_three_edits().history();
+        history.revisions.clear();
+        assert_undoes_edit_by_edit(TextBuffer::from_history(BufferId::new(0), &history));
+    }
+
+    /// A tree that does not describe the replayed buffer is dropped rather
+    /// than installed over it.
+    #[test]
+    fn revisions_that_do_not_fit_fall_back_to_singleton_groups() {
+        let mut history = one_session_of_three_edits().history();
+        history.current = history.revisions.len();
+        assert_undoes_edit_by_edit(TextBuffer::from_history(BufferId::new(0), &history));
+    }
+
+    /// A group's selections persist with it, so undo and redo in a restored
+    /// buffer put the cursor where each step left it. The ron round trip is
+    /// the path a state file takes.
+    #[test]
+    fn a_replayed_buffer_restores_the_selections_a_group_captured() {
+        let cursor = |b: &TextBuffer, offset: usize| -> Arc<[Selection<Anchor>]> {
+            let anchor = b.anchor_at(offset, Bias::Right);
+            Arc::from([Selection {
+                id: 0,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }])
+        };
+        let mut b = buf("seed\n");
+        b.begin_group(cursor(&b, 2));
+        b.edit(5..5, "more\n");
+        b.seal_group(cursor(&b, 6));
+
+        let body = ron::to_string(&b.history()).expect("history serializes");
+        let history: BufferHistory = ron::from_str(&body).expect("history parses");
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &history);
+
+        let undone = restored
+            .undo()
+            .map(|selections| restored.resolve_anchor(&selections[0].start));
+        let redone = restored
+            .redo()
+            .map(|selections| restored.resolve_anchor(&selections[0].start));
+        assert_eq!(
+            (undone, redone),
+            (Some(2), Some(6)),
+            "undo restores the cursor the group opened with, and redo the one \
+             it sealed with",
+        );
+    }
+
+    /// Undoing and then editing leaves the first group on a branch of its own,
+    /// and a walk by creation order still reaches it after a restart.
+    ///
+    /// Group A takes two edits, so the replay's singleton grouping holds a
+    /// state between them that the session never had as a step. The walk
+    /// passes over it only when the persisted tree is in place.
+    #[test]
+    fn a_replayed_buffer_keeps_an_undone_branch() {
+        let mut b = buf("seed\n");
+        b.begin_group(Arc::from([]));
+        b.edit(5..5, "a1\n");
+        b.edit(8..8, "a2\n");
+        b.seal_group(Arc::from([]));
+        b.undo();
+        b.begin_group(Arc::from([]));
+        b.edit(5..5, "b\n");
+        b.seal_group(Arc::from([]));
+
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &b.history());
+        let mut texts = Vec::new();
+        for earlier in [true, true, false, false] {
+            match earlier {
+                true => restored.earlier(),
+                false => restored.later(),
+            };
+            texts.push(restored.snapshot.visible_text.to_string());
+        }
+        assert_eq!(
+            texts,
+            ["seed\na1\na2\n", "seed\n", "seed\na1\na2\n", "seed\nb\n"],
+            "two steps earlier then two later walk group by group through the \
+             undone branch and back",
         );
     }
 

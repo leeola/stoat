@@ -820,11 +820,9 @@ impl BufferRegistry {
     /// rebuilding the fragment tree, the text, and the dirty state as they stood
     /// at save time.
     ///
-    /// Undo history comes back edit by edit rather than intact. Grouping is an
-    /// in-session overlay that is never persisted, so every edit returns as its
-    /// own singleton group and the selections each group captured are gone. A
-    /// restored buffer therefore undoes in smaller steps than the one that was
-    /// saved.
+    /// Undo history returns with its groups and the selections each group
+    /// captured, so a restored buffer undoes in the steps the saved one took.
+    /// Only a file written before the groups persisted returns it edit by edit.
     ///
     /// The on-disk file is not read. Were it to have drifted, something would
     /// have to choose between it and the saved edits, and the saved edits win
