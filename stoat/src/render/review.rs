@@ -162,7 +162,9 @@ impl DiffDials {
 /// The right column runs the same highlighted pipeline as a plain editor, so the
 /// buffer stays fully editable and colored. The left column shows removed and
 /// modified base lines (as spliced block rows) in the diff-deleted style and
-/// mirrors unchanged lines dimmed. Added and modified new lines leave it blank.
+/// mirrors unchanged lines dimmed. A refined modified line keeps the deleted
+/// style for its changed chars alone. Added and modified new lines leave it
+/// blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
 ///
 /// Both columns soft-wrap at the narrower one's width, which the caller sets on
@@ -743,7 +745,7 @@ pub(crate) fn paint_diff_rows(
                     BaseRow::segment(snapshot, text, segment),
                     &base_changes,
                     tints.as_ref(),
-                    (del_style, dim_style),
+                    (del_style, dim_style, fallback_style),
                     theme,
                     dials,
                 );
@@ -930,6 +932,7 @@ pub(crate) fn paint_diff_rows(
                         snapshot.tab_snapshot().tab_size(),
                         token_spans,
                         dim_style,
+                        dim_style,
                         &[],
                         tints.as_ref(),
                         soften_row,
@@ -967,7 +970,7 @@ pub(crate) fn paint_diff_rows(
                         BaseRow::segment(snapshot, text, line_row),
                         &base_changes,
                         tints.as_ref(),
-                        (del_style, dim_style),
+                        (del_style, dim_style, fallback_style),
                         theme,
                         dials,
                     );
@@ -1207,7 +1210,9 @@ fn gap_style(
 ///
 /// A byte inside a token span takes that token's color. Bytes outside every
 /// span fall back to `fallback`, the deletion or context color, so the gaps
-/// between tokens still read as part of the diff.
+/// between tokens still read as part of the diff. This function uses
+/// `fallback` inside and outside the change spans. The diff view gives the
+/// unchanged bytes of a refined base line the text color instead.
 ///
 /// `change_spans` mark the changed chars of a modified or moved base line, as
 /// line-local base byte ranges tagged by [`ChangeKind`]. On a theme that can
@@ -1271,6 +1276,7 @@ pub(crate) fn paint_base_row(
         tab_size,
         token_spans,
         fallback,
+        fallback,
         change_spans,
         tints,
         soften_row,
@@ -1287,6 +1293,11 @@ pub(crate) fn paint_base_row(
 /// from the line's start rather than the window's, so a segment keeps the
 /// columns the whole line gives its tabs, as the right column's segments do.
 /// `token_spans` and `change_spans` index the whole line.
+///
+/// `gap_fallback` takes the place of `fallback` for a byte outside every token
+/// span and every change span. A refined line passes the text style there, so
+/// its unchanged bytes read as unchanged text and its changed bytes keep the
+/// removed color.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_segment(
     buf: &mut Buffer,
@@ -1298,6 +1309,7 @@ fn paint_base_segment(
     tab_size: u32,
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
+    gap_fallback: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
     tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
@@ -1322,6 +1334,16 @@ fn paint_base_segment(
     let mut token_cursor = 0;
     let mut span_cursor = 0;
     let mut style_at = |byte_idx: usize| {
+        while change_spans
+            .get(span_cursor)
+            .is_some_and(|(r, ..)| r.end <= byte_idx)
+        {
+            span_cursor += 1;
+        }
+        let in_span = change_spans
+            .get(span_cursor)
+            .is_some_and(|(range, ..)| range.start <= byte_idx);
+
         while token_spans
             .get(token_cursor)
             .is_some_and(|(r, _)| r.end <= byte_idx)
@@ -1330,7 +1352,8 @@ fn paint_base_segment(
         }
         let mut style = match token_spans.get(token_cursor) {
             Some((range, hs)) if range.start <= byte_idx => hs.to_ratatui_style(),
-            _ => fallback,
+            _ if in_span => fallback,
+            _ => gap_fallback,
         };
         if let Some(bg) = soften_row.filter(|_| dials.soften_scale > 0.0) {
             style = soften_style(
@@ -1345,12 +1368,6 @@ fn paint_base_segment(
             style = desaturate_style(style, dials.tint_amount);
         }
 
-        while change_spans
-            .get(span_cursor)
-            .is_some_and(|(r, ..)| r.end <= byte_idx)
-        {
-            span_cursor += 1;
-        }
         match change_spans.get(span_cursor) {
             Some((range, kind, prose)) if range.start <= byte_idx => {
                 let tint = span_tints.map(|t| (span_tint_color(t, kind, true), dials.tint_amount));
@@ -1529,9 +1546,10 @@ impl<'a> BaseRow<'a> {
 
 /// Paint one row of a base line into the left column.
 ///
-/// The row takes its part of the line's text under the removed style with the
-/// base change-span washes. The line's first row also takes the line number and
-/// the staged status.
+/// The row takes its part of the line's text with the base change-span washes.
+/// A line the change removed whole reads in the removed style, and a refined
+/// line reads in it only inside its change spans. The line's first row also
+/// takes the line number and the staged status.
 ///
 /// Both sides of the diff reach here. A block row is a base line with no live
 /// row beside it, and a paired modified row is one that has both, so the two
@@ -1539,7 +1557,7 @@ impl<'a> BaseRow<'a> {
 /// from.
 ///
 /// `columns` is `(number, status, text, content width)` for the left side, and
-/// `styles` is `(removed, dim)`.
+/// `styles` is `(removed, dim, text)`.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_side(
     snapshot: &DisplaySnapshot,
@@ -1553,12 +1571,12 @@ fn paint_base_side(
     row: BaseRow<'_>,
     base_changes: &crate::diff_map::BaseChangeSpans,
     tints: Option<&DiffTints>,
-    styles: (Style, Style),
+    styles: (Style, Style, Style),
     theme: &crate::theme::Theme,
     dials: DiffDials,
 ) {
     let (num_x, status_x, text_x, content_w) = columns;
-    let (del_style, dim_style) = styles;
+    let (del_style, dim_style, text_style) = styles;
 
     if row.first {
         draw_diff_num(
@@ -1581,15 +1599,25 @@ fn paint_base_side(
     let staged = snapshot
         .diff_map()
         .and_then(|dm| dm.base_line_staged(base_line));
-    // A base line on this side is gone from the working tree either way, so
-    // the row takes a status color entire. Moved wins over deleted on the same
-    // test the gutter bar below uses, which keeps the two agreeing.
-    let tint_row = match changes
+    let refined = snapshot
+        .diff_map()
+        .is_some_and(|dm| dm.base_line_refined(base_line));
+    // A base line the change removed whole is gone from the working tree, so
+    // the row takes its status color entire. A refined line leaves that to its
+    // spans, because the chars outside them are unchanged text. Moved wins over
+    // deleted on the same test the gutter bar below uses, which keeps the two
+    // agreeing.
+    let moved = changes
         .iter()
-        .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
-    {
-        true => tints.map(|t| t.moved),
-        false => tints.map(|t| t.deleted),
+        .any(|(_, k, _)| matches!(k, ChangeKind::Moved));
+    let tint_row = match (refined, moved) {
+        (true, _) => None,
+        (false, true) => tints.map(|t| t.moved),
+        (false, false) => tints.map(|t| t.deleted),
+    };
+    let gap_fallback = match refined {
+        true => text_style,
+        false => del_style,
     };
     paint_base_segment(
         buf,
@@ -1601,6 +1629,7 @@ fn paint_base_side(
         snapshot.tab_snapshot().tab_size(),
         token_spans,
         del_style,
+        gap_fallback,
         changes,
         tints,
         None,
@@ -3375,7 +3404,7 @@ mod tests {
         }
         assert!(
             colors.len() >= 2,
-            "the base column carries token colors plus the deletion fallback: {colors:?}"
+            "the base column carries token colors plus the text fallback: {colors:?}"
         );
     }
 
@@ -5328,18 +5357,18 @@ mod tests {
         );
     }
 
-    /// The two columns of one modified line take different row statuses. The
-    /// base side is gone from the working tree whatever replaced it, so it
-    /// reads deleted while the live side reads modified.
+    /// A refined base line names its changed chars, so the tint dial colors
+    /// those alone on the left, and the chars around them stay unchanged text
+    /// in the pane color. The live side reads modified whole.
     ///
     /// Rendered with softening off, which turns the contrast lift off with it,
     /// so each cell reads its status color exactly rather than a lifted one.
     #[test]
-    fn a_full_tint_paints_each_column_of_a_refined_row_its_own_status() {
+    fn a_full_tint_leaves_the_unchanged_chars_of_a_refined_base_row_untinted() {
         let tints = rgb_tints();
         let theme = rgb_diff_theme();
         let area = Rect::new(0, 0, 120, 6);
-        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let fallback = Style::default().fg(Color::Rgb(200, 200, 200));
 
         let mut editor = diff_editor("keep\nold mid tail\n", "keep\nnew mid tail\n");
         let mut buf = Buffer::empty(area);
@@ -5381,10 +5410,51 @@ mod tests {
                 vec![Some(tints.modified); 3],
                 vec![Some(tints.modified); 9],
                 vec![Some(tints.modified); 3],
-                vec![Some(tints.deleted); 9],
+                vec![fallback.fg; 9],
             ),
-            "the replaced word reads modified in both columns, and the chars \
-             around it read each column's own row status",
+            "the replaced word reads modified in both columns, the live chars \
+             around it read modified, and the unchanged base chars keep the \
+             pane color",
+        );
+    }
+
+    /// With the dial off, a refined base line marks its changed chars red and
+    /// paints the rest as the unchanged text it is, not as removed text.
+    #[test]
+    fn a_refined_base_row_paints_its_unchanged_chars_in_the_text_color() {
+        let area = Rect::new(0, 0, 120, 6);
+        let mut editor = diff_editor("keep\nold mid tail\n", "keep\nnew mid tail\n");
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default().fg(Color::Rgb(200, 200, 200)),
+            &rgb_diff_theme(),
+            &mut buf,
+            true,
+            None,
+            None,
+            false,
+            None,
+            DiffDials {
+                soften_scale: 0.0,
+                ..DiffDials::shipped()
+            },
+        );
+
+        let row = (0..area.height)
+            .find(|&y| buffer_text(&buf, y).contains("old mid tail"))
+            .expect("the base line renders");
+        let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let colors: Vec<_> = (lx..lx + 12).map(|x| buf[(x, row)].style().fg).collect();
+        assert_eq!(
+            (&colors[..3], &colors[3..]),
+            (
+                &[Some(Color::Rgb(255, 0, 0)); 3][..],
+                &[Some(Color::Rgb(200, 200, 200)); 9][..],
+            ),
+            "the replaced word reads removed, and the rest of the line reads as \
+             the pane's text",
         );
     }
 

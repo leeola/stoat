@@ -382,7 +382,18 @@ pub type BaseHighlights = Vec<Vec<(Range<usize>, HighlightStyle)>>;
 /// span by kind and by whether it sits in unstructured text.
 pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind, bool)>>;
 
-type BaseStaged = BTreeMap<u32, bool>;
+/// What the diff view's left column knows of a base line a hunk removed or
+/// replaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BaseLineMark {
+    /// The hunk's git-index staged state, per [`DiffHunk::staged`].
+    staged: bool,
+    /// Whether the hunk names the line's changed chars, which leaves the chars
+    /// outside its spans as unchanged text.
+    refined: bool,
+}
+
+type BaseStaged = BTreeMap<u32, BaseLineMark>;
 
 /// A change the base text holds over the text behind it, in base-line
 /// coordinates.
@@ -413,10 +424,10 @@ pub struct DiffMap {
     /// behind `Arc` so the per-frame accessor hands out a handle instead of
     /// rebuilding the map.
     base_changes: Arc<BaseChangeSpans>,
-    /// Git-index staged state keyed by base line, for the diff view's removed
-    /// (left-column) rows. Resolved once at construction alongside
-    /// [`Self::base_changes`], mapping each base line a hunk removed to that
-    /// hunk's [`DiffHunk::staged`]. Added hunks contribute no base line.
+    /// The [`BaseLineMark`] of each base line a hunk removed or replaced, for
+    /// the diff view's removed (left-column) rows. Resolved once at
+    /// construction alongside [`Self::base_changes`]. Added hunks contribute
+    /// no base line.
     base_staged: Arc<BaseStaged>,
     /// The changes the base text holds over the text behind it, sorted by
     /// `base_lines`. Empty unless [`Self::set_staged_marks`] set them.
@@ -1285,7 +1296,16 @@ impl DiffMap {
     /// Serves the diff view's removed left-column rows, whose base lines have no
     /// buffer counterpart for [`Self::staged_for_line`] to resolve.
     pub(crate) fn base_line_staged(&self, line: u32) -> Option<bool> {
-        self.base_staged.get(&line).copied()
+        self.base_staged.get(&line).map(|mark| mark.staged)
+    }
+
+    /// Whether the hunk that replaced base `line` names the line's changed
+    /// chars, so the chars outside its spans are unchanged text.
+    ///
+    /// `false` when no hunk covers `line`, and when the hunk removed the line
+    /// whole.
+    pub(crate) fn base_line_refined(&self, line: u32) -> bool {
+        self.base_staged.get(&line).is_some_and(|mark| mark.refined)
     }
 
     /// The status of the staged mark at base `line`, or `None` when no mark
@@ -1992,13 +2012,19 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
         .collect()
 }
 
-/// Map each base line a hunk removed to that hunk's staged state.
+/// Map each base line a hunk removed to that hunk's [`BaseLineMark`].
 ///
 /// A hunk's [`DiffHunk::base_byte_range`] spans the base content it removed,
 /// including the trailing newline, so the covered line count comes from
 /// [`str::lines`] rather than the byte-to-line range, which would over-count by
 /// one at a newline boundary. Added hunks have an empty base range and map no
 /// line.
+///
+/// A line is refined when its hunk is `Modified` and carries token detail, an
+/// empty one included. [`merge_structural_detail`] gives every `Modified` hunk
+/// a detail, and an empty one means a whitespace-only change, so no char of the
+/// line changed. A `Deleted` or `Moved` hunk, and a `Modified` hunk with no
+/// detail, removed the line whole.
 fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>>) -> BaseStaged {
     let Some(base_text) = base_text else {
         return BTreeMap::new();
@@ -2009,9 +2035,12 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
         if hunk.base_byte_range.is_empty() {
             continue;
         }
-        let staged = hunk.staged();
+        let mark = BaseLineMark {
+            staged: hunk.staged(),
+            refined: hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some(),
+        };
         for line in hunk_base_lines(hunk, &starts, base_text) {
-            out.insert(line, staged);
+            out.insert(line, mark);
         }
     }
     out
@@ -3043,6 +3072,44 @@ mod tests {
                 (1, 0, 4, ChangeKind::Replaced)
             ],
             "alpha on line 0, beta on line 1"
+        );
+    }
+
+    #[test]
+    fn a_base_line_is_refined_only_under_a_modified_hunk_with_detail() {
+        // Base line 1 is the hunk's line, and base line 0 is one no hunk covers.
+        let refined = |status: DiffHunkStatus, token_detail: Option<Arc<TokenDetail>>| {
+            let rows = match status {
+                DiffHunkStatus::Deleted => 1..1,
+                _ => 1..2,
+            };
+            let mut dm = DiffMap::default();
+            dm.set_base_text(Arc::new("keep\nold\n".to_string()));
+            dm.push_hunk(DiffHunk {
+                status,
+                buffer_start_line: rows.start,
+                buffer_line_range: rows,
+                base_byte_range: 5..9,
+                anchor_range: None,
+                token_detail,
+                unstaged_lines: Vec::new(),
+                marked_rows: Vec::new(),
+            });
+            [dm.base_line_refined(1), dm.base_line_refined(0)]
+        };
+        let empty = TokenDetail {
+            buffer_spans: Vec::new(),
+            base_spans: Vec::new(),
+        };
+
+        assert_eq!(
+            [
+                refined(DiffHunkStatus::Modified, Some(Arc::new(empty))),
+                refined(DiffHunkStatus::Modified, None),
+                refined(DiffHunkStatus::Deleted, None),
+            ],
+            [[true, false], [false, false], [false, false]],
+            "only a modified hunk with detail refines its base line",
         );
     }
 
