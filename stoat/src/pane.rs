@@ -209,9 +209,11 @@ pub struct Pane {
     /// of the pane it splits from. A workspace-wide most-recent list answers
     /// with buffers the pane never displayed.
     ///
-    /// `serde(skip)`: navigation scratch like [`Self::jumplist`], so a restored
-    /// session starts with nothing to switch back to.
-    #[serde(skip)]
+    /// The history persists with the layout, so a restored session switches
+    /// back among the buffers each pane showed before the save. The ids stay
+    /// valid because the buffer registry snapshot keeps each buffer's id. A
+    /// file written before the field reads as an empty history.
+    #[serde(default)]
     pub(crate) buffer_history: Vec<BufferId>,
 }
 
@@ -1346,6 +1348,15 @@ mod tests {
         assert_eq!(tree.pane_count(), 1);
         assert_eq!(tree.pane(tree.focus()).placement, Placement::Split);
         assert_eq!(tree.pane(tree.focus()).area, area());
+    }
+
+    /// A pane saved before the navigation fields existed still parses, with
+    /// nothing to switch back to.
+    #[test]
+    fn a_pane_written_without_navigation_fields_reads_them_empty() {
+        let pane: Pane = ron::from_str("(view:Label(\"x\"),placement:Split,index:0)")
+            .expect("a pane without the navigation fields parses");
+        assert!(pane.buffer_history.is_empty());
     }
 
     #[test]

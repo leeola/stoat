@@ -927,6 +927,42 @@ mod tests {
         );
     }
 
+    /// A pane's buffer history is what `goto_last_accessed` and a buffer close
+    /// return through, so each pane in each tab keeps its own across a restart.
+    #[test]
+    fn round_trip_keeps_each_panes_buffer_history() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/history");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id_a, _) = ws.buffers.open(&ws_dir.join("a.txt"), "alpha\n");
+        let (id_b, _) = ws.buffers.open(&ws_dir.join("b.txt"), "beta\n");
+        let (id_c, _) = ws.buffers.open(&ws_dir.join("c.txt"), "gamma\n");
+
+        let first = ws.panes.focus();
+        ws.panes.pane_mut(first).record_shown(id_a);
+        ws.panes.pane_mut(first).record_shown(id_b);
+        ws.new_tab(&exec);
+        let second = ws.panes.focus();
+        ws.panes.pane_mut(second).record_shown(id_c);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        let parked = fresh.tabs[0].parked.as_ref().expect("tab 0 parks");
+        assert_eq!(
+            (
+                parked.pane(parked.focus()).buffer_history.clone(),
+                fresh.panes.pane(fresh.panes.focus()).buffer_history.clone(),
+            ),
+            (vec![id_a, id_b], vec![id_c]),
+            "each tab's focused pane keeps the buffers it showed",
+        );
+    }
+
     /// A rename is per-tab state that must survive a restart, and the second
     /// (parked) tab is the one whose name travels through the `tab_names` vec
     /// rather than being read off the active tree.
