@@ -130,6 +130,9 @@ pub(super) fn show_terminal(
 /// Respawn a fresh shell for every persisted terminal pane and dock whose
 /// backing session did not survive, then repoint the view at it.
 ///
+/// The panes of every tab count, a parked one included, so a tab shows a live
+/// shell when the reader next switches to it.
+///
 /// Terminal panes ride `PaneTree` serde as [`View::Terminal`], but the session
 /// is a live OS resource that is not persisted, so the id is dead after a
 /// restore or a workspace copy. Each dead pane and dock gets its own fresh
@@ -138,13 +141,17 @@ pub(super) fn show_terminal(
 pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
-        ws.panes
-            .split_pane_ids()
-            .into_iter()
-            .filter(|&id| {
-                matches!(ws.panes.pane(id).view, View::Terminal(t) if !ws.terms.contains_key(t))
+        let dead = |view: &View| matches!(view, View::Terminal(t) if !ws.terms.contains_key(*t));
+        ws.pane_trees()
+            .enumerate()
+            .flat_map(|(tree, panes)| {
+                panes
+                    .split_pane_ids()
+                    .into_iter()
+                    .filter(move |&id| dead(&panes.pane(id).view))
+                    .map(move |id| (tree, id))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<(usize, PaneId)>>()
     };
     let dead_docks = {
         let ws = stoat.active_workspace();
@@ -156,9 +163,13 @@ pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
             .collect::<Vec<_>>()
     };
 
-    for pane_id in dead_panes {
+    // `pane_trees_mut` walks the trees in the order `pane_trees` does, so the
+    // index collected above names the same tree here.
+    for (tree, pane_id) in dead_panes {
         let view = spawn_terminal_view(stoat);
-        stoat.active_workspace_mut().panes.pane_mut(pane_id).view = view;
+        if let Some(panes) = stoat.active_workspace_mut().pane_trees_mut().nth(tree) {
+            panes.pane_mut(pane_id).view = view;
+        }
     }
     for dock_id in dead_docks {
         let view = spawn_terminal_view(stoat);
@@ -736,5 +747,39 @@ mod tests {
         };
         assert_ne!(new_id, dead_id, "respawned with a fresh session id");
         assert!(ws.terms.contains_key(new_id), "fresh session is stored");
+    }
+
+    #[test]
+    fn respawn_reaches_a_terminal_in_a_parked_tab() {
+        use crate::term_session::TermId;
+
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.allow_host_swap();
+
+        // The terminal sits in tab 0, which parks once a second tab opens.
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        ws.panes.pane_mut(pane).view = View::Terminal(TermId::default());
+        ws.new_tab(&executor);
+
+        respawn_terminal_panes(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        let parked = ws.tabs[0].parked.as_ref().expect("tab 0 parks");
+        let View::Terminal(id) = parked.pane(pane).view else {
+            panic!("the parked terminal pane stays a terminal");
+        };
+        assert_eq!(
+            (
+                id != TermId::default(),
+                ws.terms.contains_key(id),
+                ws.terms.len()
+            ),
+            (true, true, 1),
+            "the parked pane names a fresh live session, the only one",
+        );
     }
 }

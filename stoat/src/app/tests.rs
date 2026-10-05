@@ -3392,6 +3392,37 @@ fn a_restored_session_starts_the_servers_its_buffers_call_for() {
     );
 }
 
+/// The session saves the fact that a pane held a terminal, in every tab, so
+/// a tab parked at the save shows a live shell when the reader returns to it.
+#[test]
+fn a_restored_session_reopens_the_terminal_of_a_parked_tab() {
+    let mut h = Stoat::test();
+    let executor = h.stoat.executor.clone();
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        ws.panes.pane_mut(pane).view = View::Terminal(TermId::default());
+        ws.new_tab(&executor);
+    }
+    let state_path = PathBuf::from("/state/session.ron");
+    h.stoat
+        .active_workspace()
+        .save_state(&state_path, &*h.stoat.fs_host)
+        .expect("save state");
+
+    restore_into_a_fresh_workspace(&mut h, state_path);
+    let ws = h.stoat.active_workspace_mut();
+    assert!(ws.switch_tab(0), "the restored session parks tab 0");
+
+    let View::Terminal(id) = ws.panes.pane(ws.panes.focus()).view else {
+        panic!("tab 0 shows its terminal pane");
+    };
+    assert!(
+        ws.terms.contains_key(id),
+        "the terminal names a live session"
+    );
+}
+
 #[test]
 fn async_session_restore_drops_when_the_target_was_edited() {
     let mut h = Stoat::test();
