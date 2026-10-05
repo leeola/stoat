@@ -3316,6 +3316,82 @@ fn async_session_restore_installs_into_a_fresh_workspace() {
     );
 }
 
+/// Saves the active workspace, with `restored.txt` open in it, as a session
+/// file, and returns the file's path and the session's.
+fn save_a_session(h: &mut crate::test_harness::TestHarness) -> (PathBuf, PathBuf) {
+    let file = h.write_file("restored.txt", "alpha\nbeta\n");
+    h.open_file(&file);
+    h.settle();
+
+    let state_path = PathBuf::from("/state/session.ron");
+    h.stoat
+        .active_workspace()
+        .save_state(&state_path, &*h.stoat.fs_host)
+        .expect("save state");
+    (file, state_path)
+}
+
+/// Restores `state_path` into a fresh workspace made active first, then lets
+/// the restore and the work it starts finish.
+fn restore_into_a_fresh_workspace(h: &mut crate::test_harness::TestHarness, state_path: PathBuf) {
+    let target = h.create_workspace();
+    h.set_active_workspace(target);
+    h.stoat.spawn_workspace_restore(target, state_path);
+    h.settle();
+    h.stoat.drive_background();
+    h.settle();
+}
+
+/// A restored buffer never passed through the file-open path, so the restore
+/// itself must send it to the server, or no LSP action answers in it.
+#[test]
+fn a_restored_session_opens_its_files_with_the_language_server() {
+    let mut h = Stoat::test();
+    let (file, state_path) = save_a_session(&mut h);
+    restore_into_a_fresh_workspace(&mut h, state_path);
+
+    let opens = h
+        .fake_lsp()
+        .observed_opens()
+        .iter()
+        .filter(|open| open.text_document.uri.as_str().ends_with("/restored.txt"))
+        .count();
+    let restored = h
+        .stoat
+        .active_workspace()
+        .buffers
+        .id_for_path(&file)
+        .expect("the restored buffer");
+    assert_eq!(
+        (opens, h.stoat.lsp_opened.contains(&restored)),
+        (2, true),
+        "the launch open and the restore each send the file, and the restored \
+         buffer counts as open",
+    );
+}
+
+/// A session restored at launch is the first thing to call for a server, so
+/// the restore must start the servers its buffers call for.
+#[test]
+fn a_restored_session_starts_the_servers_its_buffers_call_for() {
+    let mut h = Stoat::test();
+    h.allow_host_swap();
+    h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+    let (_, state_path) = save_a_session(&mut h);
+
+    // In-process, so the spawn this drives opens no process.
+    h.stoat.settings.lsp_globals = Some(vec!["stcfg-ls".to_string()]);
+    h.stoat.set_lsp_auto_spawn(true);
+    let before = h.stoat.lsp_registry.spawn_attempted("stcfg-ls");
+    restore_into_a_fresh_workspace(&mut h, state_path);
+
+    assert_eq!(
+        (before, h.stoat.lsp_registry.spawn_attempted("stcfg-ls")),
+        (false, true),
+        "the restore starts the global server its restored file calls for",
+    );
+}
+
 #[test]
 fn async_session_restore_drops_when_the_target_was_edited() {
     let mut h = Stoat::test();

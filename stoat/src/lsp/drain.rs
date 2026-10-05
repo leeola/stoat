@@ -263,8 +263,19 @@ fn install_ready_server(
         },
     };
 
-    // Ropes rather than strings, because this runs over every buffer the server
-    // covers in one turn and a rope clone is a refcount bump where
+    reopen_buffers(stoat, language.as_deref());
+}
+
+/// Re-send `did_open` for the active workspace's path-bound buffers, every one
+/// of them or only `language`'s.
+///
+/// Each buffer leaves [`Stoat::lsp_opened`] first. A host that never saw a
+/// buffer then receives it, and a buffer that calls for a server not yet
+/// started starts it. A server that just came up and a restored session both
+/// need this, because no `did_open` for their buffers reached that server.
+pub(crate) fn reopen_buffers(stoat: &mut Stoat, language: Option<&str>) {
+    // Ropes rather than strings, because this runs over every buffer it
+    // reopens in one turn and a rope clone is a refcount bump where
     // materializing each buffer is not.
     let reopen: Vec<(BufferId, PathBuf, Rope)> = {
         let buffers = &stoat.active_workspace().buffers;
@@ -273,9 +284,9 @@ fn install_ready_server(
             .into_iter()
             .filter_map(|path| {
                 let id = buffers.id_for_path(&path)?;
-                if let Some(language) = &language
+                if let Some(language) = language
                     && crate::lsp::session::lsp_language_name(buffers, id).as_deref()
-                        != Some(language.as_str())
+                        != Some(language)
                 {
                     return None;
                 }

@@ -4497,8 +4497,9 @@ impl Stoat {
     /// read or parse error logs and leaves the fresh workspace in place. A
     /// target the user edited while the restore ran, no longer
     /// [`Workspace::is_fresh`], is left untouched so live state is never
-    /// clobbered. Otherwise the buffers and panes install and, when the target
-    /// is still active, terminals respawn.
+    /// clobbered. Otherwise the buffers and panes install. When the target is
+    /// still active, the restored files open with their language servers and
+    /// terminals respawn.
     fn install_pending_workspace_restore(&mut self) {
         let pending = self
             .pending_workspace_restore
@@ -4549,7 +4550,10 @@ impl Stoat {
             ws.install_restored(buffers, state, &executor);
             ws.assign_languages_from_paths(&registry);
         }
+        // FIXME: A restore that lands while another workspace is active starts no
+        // language server for the restored buffers
         if self.active_workspace == workspace {
+            crate::lsp::drain::reopen_buffers(self, None);
             action_handlers::respawn_terminal_panes(self);
             if self.active_workspace().remote.is_some() {
                 self.remote_pending = true;
