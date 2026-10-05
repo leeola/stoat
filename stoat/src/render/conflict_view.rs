@@ -342,6 +342,7 @@ fn paint_conflict_rows(
                     cols.center_w,
                     buf,
                     fallback_style,
+                    fallback_style,
                     inlay_style,
                     &[],
                     // No change span reaches a conflict row, so the span mark

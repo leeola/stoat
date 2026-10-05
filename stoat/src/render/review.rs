@@ -305,6 +305,15 @@ pub(crate) struct DiffRowState {
     /// A continuation carries the row's text and nothing else: no line number,
     /// no status glyph, and no base line of its own.
     pub(crate) continuation: bool,
+    /// Whether a `Modified` hunk with token detail covers this `Modified` row,
+    /// so the chars outside its change spans are unchanged text.
+    ///
+    /// An empty detail counts, so a whitespace-only row reads as text whole.
+    /// The test is the hunk and not a non-empty [`Self::change_spans`]. A wrap
+    /// continuation of a refined line holds no span when the change falls on
+    /// another of its rows, and its chars are still unchanged text. False for a
+    /// block row.
+    pub(crate) refined: bool,
     /// Display-column ranges to mark, each with its kind and its
     /// [`crate::diff_map::ChangeSpan::prose`] flag. Empty for a row no hunk
     /// refines.
@@ -404,6 +413,7 @@ fn build_diff_row_states(
                     staged: None,
                     paired: false,
                     continuation: segment > 0,
+                    refined: false,
                     change_spans: Vec::new(),
                 };
             },
@@ -419,10 +429,16 @@ fn build_diff_row_states(
             &mut change_spans,
         );
         let status = snapshot.line_diff_status(buffer_row);
+        // Read before `paired_with_base`, which refills the scratch.
+        let refined = status == DiffStatus::Modified
+            && hunk_scratch
+                .iter()
+                .any(|hunk| hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some());
         DiffRowState {
             kind,
             status,
             continuation: snapshot.is_wrap_continuation(display_row),
+            refined,
             paired: status == DiffStatus::Modified
                 && paired_with_base(snapshot, buffer_row, &mut hunk_scratch),
             staged: marked
@@ -603,11 +619,13 @@ impl DiffColumns {
 /// Text with no token color falls back to a color that says what changed. On
 /// the base side that is the removed color. On the live side it is the added
 /// color for an added or a modified row, and the moved color for a moved row.
-/// With syntax off, this fallback covers every char of a changed row.
+/// A modified row's live side takes the added color and not the modified one,
+/// so the pair reads as a removal and an addition.
 ///
-/// A modified row's live side takes the added color and not the modified one.
-/// The base side beside it already reads removed, so the pair reads as a
-/// removal and an addition. An unchanged row keeps `fallback_style`.
+/// A refined modified line names its changed chars, so on both sides it falls
+/// back to the status color only inside its change spans. The chars outside
+/// them are unchanged text, so they keep `fallback_style` and take no row
+/// tint. An unchanged row keeps `fallback_style` whole.
 ///
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
@@ -791,11 +809,13 @@ pub(crate) fn paint_diff_rows(
                     DiffStatus::Modified | DiffStatus::Moved => tints.as_ref().map(|t| t.bg),
                     _ => None,
                 };
-                // One row reads one status family, so a changed row takes its
-                // own status color entire and the refined spans inside it lead
-                // by their span kind rather than by being the only color.
+                // A changed row takes its own status color entire, and the
+                // refined spans inside it lead by their span kind. A refined
+                // row leaves its status to its spans, because the chars outside
+                // them are unchanged text, as on the base side.
                 let tint_row = match status {
                     DiffStatus::Added => tints.as_ref().map(|t| t.added),
+                    DiffStatus::Modified if row_state.refined => None,
                     DiffStatus::Modified => tints.as_ref().map(|t| t.modified),
                     DiffStatus::Moved => tints.as_ref().map(|t| t.moved),
                     DiffStatus::Unchanged => None,
@@ -805,6 +825,10 @@ pub(crate) fn paint_diff_rows(
                     DiffStatus::Moved => moved_style,
                     DiffStatus::Unchanged => fallback_style,
                 };
+                let gap_fallback = match row_state.refined {
+                    true => fallback_style,
+                    false => row_fallback,
+                };
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -813,6 +837,7 @@ pub(crate) fn paint_diff_rows(
                     right_content_w,
                     buf,
                     row_fallback,
+                    gap_fallback,
                     inlay_style,
                     changes,
                     tints.as_ref(),
@@ -1770,6 +1795,10 @@ fn mirror_window(
 /// the span instead, per [`mark_span`]. Columns, not byte offsets, are used
 /// because the chunks expand tabs, so the counter tracks display cells.
 ///
+/// A cell with no token color takes `fallback_style` inside a change span and
+/// `gap_fallback` outside every span. A refined row passes the text style as
+/// `gap_fallback`, so its unchanged cells read as unchanged text.
+///
 /// `soften_row` recedes the whole row behind the changed rows around it, by
 /// blending every foreground toward the given background per [`soften_style`].
 /// Pass the editor background for an unchanged row and `None` for a changed one.
@@ -1804,6 +1833,7 @@ pub(crate) fn paint_highlighted_row(
     max_cols: usize,
     buf: &mut Buffer,
     fallback_style: Style,
+    gap_fallback: Style,
     inlay_style: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
     tints: Option<&DiffTints>,
@@ -1823,18 +1853,7 @@ pub(crate) fn paint_highlighted_row(
     // Only a changed cell lifts, and only against a receding surround: with
     // softening off nothing recedes, so nothing has to stand off it.
     let lift_bg = tints.map(|t| t.bg).filter(|_| dials.soften_scale > 0.0);
-    let mut col = 0usize;
-    let mut span_cursor = 0;
-    for chunk in snapshot.row_chunks(display_row, row_cursor) {
-        let style = if chunk.is_inlay {
-            inlay_style
-        } else {
-            chunk
-                .highlight_style
-                .as_ref()
-                .map(|hs| hs.to_ratatui_style())
-                .unwrap_or(fallback_style)
-        };
+    let recede = |style: Style| {
         let style = match soften_row.filter(|_| dials.soften_scale > 0.0) {
             Some(bg) => soften_style(
                 style,
@@ -1845,14 +1864,26 @@ pub(crate) fn paint_highlighted_row(
         };
         // Unfiltered, because the gray answers the tint dial rather than the
         // soften one, so it holds with softening turned off.
-        let style = match soften_row.is_some() {
+        match soften_row.is_some() {
             true => desaturate_style(style, dials.tint_amount),
             false => style,
+        }
+    };
+    let mut col = 0usize;
+    let mut span_cursor = 0;
+    for chunk in snapshot.row_chunks(display_row, row_cursor) {
+        let token = match chunk.is_inlay {
+            true => Some(inlay_style),
+            false => chunk
+                .highlight_style
+                .as_ref()
+                .map(|hs| hs.to_ratatui_style()),
         };
+        let style = recede(token.unwrap_or(fallback_style));
         // Resolved per chunk rather than per cell, because a chunk's cells
         // differ only in which side of a change span they fall on.
         let gap_style = gap_style(
-            style,
+            recede(token.unwrap_or(gap_fallback)),
             tint_row,
             dials.tint_amount,
             soften_gaps,
@@ -5356,14 +5387,14 @@ mod tests {
         );
     }
 
-    /// A refined base line names its changed chars, so the tint dial colors
-    /// those alone on the left, and the chars around them stay unchanged text
-    /// in the pane color. The live side reads modified whole.
+    /// A refined modified line names its changed chars, so the tint dial
+    /// colors those alone on both sides, and the chars around them stay
+    /// unchanged text in the pane color.
     ///
     /// Rendered with softening off, which turns the contrast lift off with it,
     /// so each cell reads its status color exactly rather than a lifted one.
     #[test]
-    fn a_full_tint_leaves_the_unchanged_chars_of_a_refined_base_row_untinted() {
+    fn a_full_tint_leaves_the_unchanged_chars_of_a_refined_row_untinted() {
         let tints = rgb_tints();
         let theme = rgb_diff_theme();
         let area = Rect::new(0, 0, 120, 6);
@@ -5407,20 +5438,21 @@ mod tests {
             ),
             (
                 vec![Some(tints.modified); 3],
-                vec![Some(tints.modified); 9],
+                vec![fallback.fg; 9],
                 vec![Some(tints.deleted); 3],
                 vec![fallback.fg; 9],
             ),
             "the replaced word reads modified on the right and deleted on the \
-             left, the live chars around it read modified, and the unchanged \
-             base chars keep the pane color",
+             left, and both sides keep the pane color outside it",
         );
     }
 
-    /// With the dial off, a refined base line marks its changed chars red and
-    /// paints the rest as the unchanged text it is, not as removed text.
-    #[test]
-    fn a_refined_base_row_paints_its_unchanged_chars_in_the_text_color() {
+    /// The colors of 12 cells of the refined pair `old mid tail` and `new mid
+    /// tail`, from the column `x0` gives for the area.
+    ///
+    /// Rendered 120 wide with the tint dial and softening off, over a pane
+    /// color of `(200, 200, 200)`.
+    fn refined_pair_colors(x0: impl Fn(Rect) -> u16) -> Vec<Option<Color>> {
         let area = Rect::new(0, 0, 120, 6);
         let mut editor = diff_editor("keep\nold mid tail\n", "keep\nnew mid tail\n");
         let mut buf = Buffer::empty(area);
@@ -5442,10 +5474,36 @@ mod tests {
         );
 
         let row = (0..area.height)
-            .find(|&y| buffer_text(&buf, y).contains("old mid tail"))
-            .expect("the base line renders");
-        let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
-        let colors: Vec<_> = (lx..lx + 12).map(|x| buf[(x, row)].style().fg).collect();
+            .find(|&y| buffer_text(&buf, y).contains("new mid tail"))
+            .expect("the refined pair renders");
+        let x0 = x0(area);
+        (x0..x0 + 12).map(|x| buf[(x, row)].style().fg).collect()
+    }
+
+    /// With the dial off, a refined live line marks its changed chars with the
+    /// added color and paints the rest as the unchanged text it is, as its base
+    /// side does.
+    #[test]
+    fn a_refined_live_row_paints_its_unchanged_chars_in_the_text_color() {
+        let colors = refined_pair_colors(right_text_x);
+        assert_eq!(
+            (&colors[..3], &colors[3..]),
+            (
+                &[Some(Color::Rgb(0, 255, 0)); 3][..],
+                &[Some(Color::Rgb(200, 200, 200)); 9][..],
+            ),
+            "the replaced word reads added, and the rest of the line reads as \
+             the pane's text",
+        );
+    }
+
+    /// With the dial off, a refined base line marks its changed chars red and
+    /// paints the rest as the unchanged text it is, not as removed text.
+    #[test]
+    fn a_refined_base_row_paints_its_unchanged_chars_in_the_text_color() {
+        let colors = refined_pair_colors(|area| {
+            DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x
+        });
         assert_eq!(
             (&colors[..3], &colors[3..]),
             (
