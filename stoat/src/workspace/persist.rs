@@ -37,7 +37,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
-use stoat_text::Bias;
+use stoat_text::{Anchor, Bias};
 
 /// On-disk shape of [`FocusTarget`], preserving the pre-unit-variant wire format
 /// so older and newer state.ron files stay mutually readable.
@@ -260,9 +260,9 @@ impl WorkspaceStateV1 {
     /// Idempotent, since a resolved list is empty and every entry point calls
     /// this before reading the state.
     pub(crate) fn resolve_reanchors(&mut self) {
-        // One seed at a time, because the pending list groups every editor of
-        // a buffer together. An ungrouped list rebuilds on each switch, which
-        // costs more and stays correct.
+        // One seed at a time, because the pending list groups every editor and
+        // jump of a buffer together. An ungrouped list rebuilds on each switch,
+        // which costs more and stays correct.
         let mut held: Option<(BufferId, TextBuffer)> = None;
         for pending in std::mem::take(&mut self.pending_reanchors) {
             if held.as_ref().is_none_or(|(id, _)| *id != pending.buffer) {
@@ -281,18 +281,32 @@ impl WorkspaceStateV1 {
                 continue;
             };
 
-            let Some((_, editor)) = self
-                .editors
-                .iter_mut()
-                .find(|(id, _)| *id == pending.editor)
-            else {
-                continue;
-            };
             let mut endpoints = pending.endpoints.into_iter();
-            editor.selections.reanchor(|_| match endpoints.next() {
+            let remap = |_: &Anchor| match endpoints.next() {
                 Some((offset, bias)) => seed.anchor_at(offset, bias),
                 None => unreachable!("an endpoint was resolved for every anchor"),
-            });
+            };
+            match pending.target {
+                ReanchorTarget::Editor(editor_id) => {
+                    let Some((_, editor)) =
+                        self.editors.iter_mut().find(|(id, _)| *id == editor_id)
+                    else {
+                        continue;
+                    };
+                    editor.selections.reanchor(remap);
+                },
+                ReanchorTarget::Jump { tab, pane, entry } => {
+                    let tree = if tab == self.active_tab {
+                        &mut self.panes
+                    } else {
+                        let Some(tree) = self.tabs.get_mut(tab).and_then(Option::as_mut) else {
+                            continue;
+                        };
+                        tree
+                    };
+                    tree.pane_mut(pane).jumplist.reanchor_entry(entry, remap);
+                },
+            }
         }
     }
 }
@@ -308,7 +322,13 @@ impl Workspace {
             .collect();
 
         let buffers = self.buffers.snapshot();
-        let pending_reanchors = pending_reanchors(&self.buffers, &buffers, &editors);
+        let trees: Vec<(usize, &PaneTree)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| (i, tab.parked.as_ref().unwrap_or(&self.panes)))
+            .collect();
+        let pending_reanchors = pending_reanchors(&self.buffers, &buffers, &editors, &trees);
 
         let rebase_active = self
             .rebase_active
@@ -544,21 +564,40 @@ pub(crate) fn write_state(
     super::registry::write_meta(meta, path, fs)
 }
 
-/// One editor's selection endpoints, resolved against the live buffer and
-/// waiting to be re-taken against the seed that will replace it.
+/// The selection endpoints of one editor or one jump, resolved against the
+/// live buffer and waiting to be re-taken against the seed that will replace
+/// it.
 ///
-/// The offsets are in the order [`SelectionsCollection::anchors`] yields them,
-/// which is the order [`SelectionsCollection::reanchor`] consumes them, so the
-/// two halves pair up positionally.
+/// The offsets run start then end of each selection, in selection order. That
+/// is the order [`SelectionsCollection::anchors`] yields an editor's and the
+/// order both [`SelectionsCollection::reanchor`] and
+/// [`JumpList::reanchor_entry`](crate::jumplist::JumpList::reanchor_entry)
+/// consume them, so the two halves pair up positionally.
 #[derive(Debug)]
 pub(crate) struct PendingReanchor {
-    editor: EditorId,
+    target: ReanchorTarget,
     buffer: BufferId,
     endpoints: Vec<(usize, Bias)>,
 }
 
+/// What a [`PendingReanchor`]'s endpoints are re-taken into.
+#[derive(Debug)]
+enum ReanchorTarget {
+    /// An editor's selection set.
+    Editor(EditorId),
+    /// One entry of a pane's jumplist. `tab` indexes
+    /// [`WorkspaceStateV1::tabs`], and the active tab's tree is
+    /// [`WorkspaceStateV1::panes`].
+    Jump {
+        tab: usize,
+        pane: PaneId,
+        entry: usize,
+    },
+}
+
 /// Resolve the selections of every editor showing a buffer whose history is
-/// persisting compacted.
+/// persisting compacted, and of every jump into such a buffer from any pane of
+/// any tab in `trees`.
 ///
 /// A selection endpoint is an anchor naming an insertion in the fragment tree
 /// the op log builds, and a compacted history replays a seed instead of that
@@ -577,6 +616,7 @@ fn pending_reanchors(
     registry: &BufferRegistry,
     snap: &BufferRegistrySnapshot,
     editors: &[(EditorId, EditorStateSnapshot)],
+    trees: &[(usize, &PaneTree)],
 ) -> Vec<PendingReanchor> {
     let mut pending = Vec::new();
     for entry in snap.entries.iter().filter(|e| e.history.compacted) {
@@ -587,7 +627,7 @@ fn pending_reanchors(
 
         for (id, editor) in editors.iter().filter(|(_, ed)| ed.buffer_id == entry.id) {
             pending.push(PendingReanchor {
-                editor: *id,
+                target: ReanchorTarget::Editor(*id),
                 buffer: entry.id,
                 endpoints: editor
                     .selections
@@ -595,6 +635,36 @@ fn pending_reanchors(
                     .map(|anchor| (live.resolve_anchor(anchor), anchor.bias))
                     .collect(),
             });
+        }
+
+        // Pushed in the same per-buffer pass as the editors, because
+        // `resolve_reanchors` builds one seed per run of a buffer's pendings.
+        for &(tab, tree) in trees {
+            for (pane_id, pane) in tree.all_panes() {
+                for (index, jump) in pane.jumplist.entries().iter().enumerate() {
+                    if jump.buffer_id != entry.id {
+                        continue;
+                    }
+                    pending.push(PendingReanchor {
+                        target: ReanchorTarget::Jump {
+                            tab,
+                            pane: pane_id,
+                            entry: index,
+                        },
+                        buffer: entry.id,
+                        endpoints: jump
+                            .selections
+                            .iter()
+                            .flat_map(|s| {
+                                [
+                                    (live.resolve_anchor(&s.start), s.start.bias),
+                                    (live.resolve_anchor(&s.end), s.end.bias),
+                                ]
+                            })
+                            .collect(),
+                    });
+                }
+            }
         }
     }
     pending
@@ -706,10 +776,12 @@ mod tests {
     use super::*;
     use crate::{
         host::FakeFs,
+        jumplist::{JumpEntry, JumpList},
         pane::{Axis, DockSide, DockVisibility, Placement},
     };
     use std::{sync::Arc, time::Duration};
     use stoat_scheduler::TestScheduler;
+    use stoat_text::{Selection, SelectionGoal};
 
     fn executor() -> Executor {
         Arc::new(TestScheduler::new()).executor()
@@ -960,6 +1032,122 @@ mod tests {
             ),
             (vec![id_a, id_b], vec![id_c]),
             "each tab's focused pane keeps the buffers it showed",
+        );
+    }
+
+    /// A single-cursor jump at `offset` in buffer `id`, anchored the way a live
+    /// jump is.
+    fn jump_at(buffers: &BufferRegistry, id: BufferId, offset: usize) -> JumpEntry {
+        let buffer = buffers.get(id).expect("buffer open");
+        let anchor = buffer
+            .read()
+            .expect("buffer poisoned")
+            .anchor_at(offset, Bias::Right);
+        JumpEntry {
+            buffer_id: id,
+            selections: vec![Selection {
+                id: 0,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }],
+        }
+    }
+
+    /// The offset each entry of `jumplist` starts at, resolved against the
+    /// buffers of `ws`.
+    fn jump_offsets(ws: &Workspace, jumplist: &JumpList) -> Vec<usize> {
+        jumplist
+            .entries()
+            .iter()
+            .map(|jump| {
+                let buffer = ws.buffers.get(jump.buffer_id).expect("buffer restores");
+                let guard = buffer.read().expect("buffer poisoned");
+                guard.resolve_anchor(&jump.selections[0].start)
+            })
+            .collect()
+    }
+
+    /// The jumplist is what `Ctrl-o` and `Ctrl-i` walk, so its entries, its
+    /// cursor, and its push count all survive a restart.
+    #[test]
+    fn round_trip_keeps_each_panes_jumplist() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/jumps");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id, _) = ws
+            .buffers
+            .open(&ws_dir.join("a.txt"), "0123456789abcdefghij");
+        let root = ws.panes.focus();
+        for offset in [1, 5, 9] {
+            let entry = jump_at(&ws.buffers, id, offset);
+            ws.panes.pane_mut(root).jumplist.push(entry, &ws.buffers);
+        }
+        ws.panes.pane_mut(root).jumplist.set_cursor(1);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        let jumplist = &fresh.panes.pane(fresh.panes.focus()).jumplist;
+        assert_eq!(
+            (
+                jump_offsets(&fresh, jumplist),
+                jumplist.cursor(),
+                jumplist.generation(),
+            ),
+            (vec![1, 5, 9], 1, 3),
+            "the entries, the cursor, and the push count survive",
+        );
+    }
+
+    /// A jump into a buffer whose history saves compacted names an insertion
+    /// the seed does not hold, so the save re-anchors it as it does an
+    /// editor's cursor, in a parked tab as in the active one. The jump inside
+    /// the appended run is the discriminating one.
+    #[test]
+    fn a_compacted_buffer_keeps_its_jumps_in_every_tab() {
+        use crate::buffer::OPS_COMPACT_THRESHOLD;
+
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id, buffer) = ws.buffers.open(&ws_dir.join("long.txt"), "abcdefghij\n");
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            for _ in 0..OPS_COMPACT_THRESHOLD {
+                let end = guard.rope().len();
+                guard.edit(end..end, "x");
+            }
+        }
+
+        let first = ws.panes.focus();
+        let entry = jump_at(&ws.buffers, id, 3);
+        ws.panes.pane_mut(first).jumplist.push(entry, &ws.buffers);
+        ws.new_tab(&exec);
+        let second = ws.panes.focus();
+        let entry = jump_at(&ws.buffers, id, OPS_COMPACT_THRESHOLD);
+        ws.panes.pane_mut(second).jumplist.push(entry, &ws.buffers);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        let parked = fresh.tabs[0].parked.as_ref().expect("tab 0 parks");
+        assert_eq!(
+            (
+                jump_offsets(&fresh, &parked.pane(first).jumplist),
+                jump_offsets(&fresh, &fresh.panes.pane(second).jumplist),
+            ),
+            (vec![3], vec![OPS_COMPACT_THRESHOLD]),
+            "each jump resolves where it stood live",
         );
     }
 

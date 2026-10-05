@@ -15,6 +15,7 @@
 //! the current spot.
 
 use crate::{buffer_registry::BufferRegistry, nav_list::NavList};
+use serde::{Deserialize, Serialize};
 use stoat_text::{Anchor, BufferId, Selection};
 
 /// Retained-entry cap. Once exceeded, the oldest entries drop from the front,
@@ -23,7 +24,7 @@ const JUMP_LIST_CAPACITY: usize = 30;
 
 /// One recorded position, a buffer plus the selection set that was live there,
 /// held as anchors so it tracks edits until resolved at jump time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct JumpEntry {
     pub(crate) buffer_id: BufferId,
     pub(crate) selections: Vec<Selection<Anchor>>,
@@ -41,7 +42,7 @@ pub(crate) struct ChangeLanding {
 }
 
 /// Cross-buffer jump history over the shared [`NavList`] cursor primitive.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct JumpList {
     list: NavList<JumpEntry>,
     /// The number of positions recorded since the list was made.
@@ -70,6 +71,28 @@ impl JumpList {
     /// walk from a chosen entry.
     pub(crate) fn set_cursor(&mut self, cursor: usize) {
         self.list.set_cursor(cursor);
+    }
+
+    /// Rewrite the endpoints of the entry at `index` through `remap`, start
+    /// then end of each selection in selection order.
+    ///
+    /// Moves an entry onto a buffer state whose fragment tree was rebuilt
+    /// rather than edited. Its anchors name insertions the rebuilt tree does
+    /// not hold, and there they resolve to unrelated positions. Ordinary edits
+    /// need nothing of the sort, since anchors are built to ride those. An
+    /// absent `index` does nothing.
+    pub(crate) fn reanchor_entry(
+        &mut self,
+        index: usize,
+        mut remap: impl FnMut(&Anchor) -> Anchor,
+    ) {
+        let Some(entry) = self.list.entry_mut(index) else {
+            return;
+        };
+        for selection in &mut entry.selections {
+            selection.start = remap(&selection.start);
+            selection.end = remap(&selection.end);
+        }
     }
 
     /// Record `entry` as the newest position, dropping forward history and

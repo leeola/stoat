@@ -11,9 +11,11 @@
 //! walks the cursor, stopping without moving at either end. [`NavList::retain`]
 //! filters entries while keeping the cursor over the same surviving position.
 
+use serde::{Deserialize, Serialize};
+
 /// Generic cursor-tracked list. `E` is the recorded position type (a jump
 /// entry, a trail symbol). See the module docs for the cursor model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct NavList<E> {
     entries: Vec<E>,
     cursor: usize,
@@ -31,6 +33,10 @@ impl<E> Default for NavList<E> {
 impl<E> NavList<E> {
     pub(crate) fn entries(&self) -> &[E] {
         &self.entries
+    }
+
+    pub(crate) fn entry_mut(&mut self, index: usize) -> Option<&mut E> {
+        self.entries.get_mut(index)
     }
 
     pub(crate) fn cursor(&self) -> usize {

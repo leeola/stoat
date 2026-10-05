@@ -166,17 +166,21 @@ pub struct Pane {
     /// Cross-buffer jump history for this pane, surviving the `EditorState`
     /// swaps a cross-file open performs.
     ///
-    /// `serde(skip)`: navigation scratch rather than persisted layout, so a
-    /// restored session starts with an empty history.
-    #[serde(skip)]
+    /// The list persists with the layout, so a restored session walks the
+    /// jumps the pane recorded before the save. An entry into a buffer whose
+    /// history saves compacted is re-anchored on save, because its anchors
+    /// name insertions the compacted history does not hold. A file written
+    /// before the field reads as an empty list.
+    #[serde(default)]
     pub(crate) jumplist: JumpList,
     /// What the last change walk in this pane landed on, read by `DiffBack`
     /// and `DiffForward`.
     ///
     /// Per pane because the jumplist it is compared against is per pane.
     ///
-    /// `serde(skip)`: navigation scratch like [`Self::jumplist`], so a restored
-    /// session starts with no landing.
+    /// `serde(skip)`: a landing marks where this session's change walk stands,
+    /// so a restored session starts with none, and `DiffBack` and
+    /// `DiffForward` start from the plain walk.
     #[serde(skip)]
     pub(crate) change_landing: Option<ChangeLanding>,
     /// Whether `:diff` has latched review mode on for this pane, surviving the
@@ -192,8 +196,8 @@ pub struct Pane {
     /// Per pane rather than per workspace, because the widen it engages is per
     /// pane and a second pane stays independent of this one.
     ///
-    /// `serde(skip)`: session intent rather than persisted layout, matching
-    /// [`Self::jumplist`], so a restored session starts unlatched.
+    /// `serde(skip)`: session intent rather than persisted layout, so a
+    /// restored session starts unlatched.
     #[serde(skip)]
     pub(crate) diff_mode: bool,
     /// The buffers this pane has shown, oldest first and each once.
@@ -737,6 +741,15 @@ impl PaneTree {
     /// borrow of `self` across the loop.
     pub fn split_pane_ids(&self) -> Vec<PaneId> {
         self.split_panes().map(|(id, _)| id).collect()
+    }
+
+    /// Every pane with its id, split or windowed.
+    ///
+    /// For a caller that must reach the state of each pane, such as the save
+    /// path re-anchoring each jumplist, where [`Self::split_panes`] misses a
+    /// detached pane.
+    pub(crate) fn all_panes(&self) -> impl Iterator<Item = (PaneId, &Pane)> {
+        self.panes.iter()
     }
 
     /// Every detached pane paired with the aux window it renders into, ordered by
@@ -1356,7 +1369,11 @@ mod tests {
     fn a_pane_written_without_navigation_fields_reads_them_empty() {
         let pane: Pane = ron::from_str("(view:Label(\"x\"),placement:Split,index:0)")
             .expect("a pane without the navigation fields parses");
-        assert!(pane.buffer_history.is_empty());
+        assert_eq!(
+            (pane.buffer_history.len(), pane.jumplist.entries().len()),
+            (0, 0),
+            "both navigation histories read empty",
+        );
     }
 
     #[test]
