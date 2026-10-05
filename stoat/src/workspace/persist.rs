@@ -101,6 +101,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// Index into [`Self::tabs`] of the tab whose tree is in [`Self::panes`].
     #[serde(default)]
     pub active_tab: usize,
+    /// Index into [`Self::tabs`] of the tab a toggle returns to. `None` before
+    /// the first switch, and on files that predate the field.
+    #[serde(default)]
+    pub last_tab: Option<usize>,
     /// One entry per tab in display order, holding each tab's `RenameTab`
     /// override or `None`. Empty or short on files that predate the field, so
     /// missing entries restore as unnamed tabs.
@@ -335,6 +339,7 @@ impl Workspace {
                 .map(|tab| tab.parked.as_ref().map(clone_pane_tree))
                 .collect(),
             active_tab: self.active_tab,
+            last_tab: self.last_tab,
             tab_names: self.tabs.iter().map(|tab| tab.name.clone()).collect(),
             remote: self.remote.clone(),
             pending_reanchors,
@@ -491,6 +496,11 @@ impl Workspace {
                 })
                 .collect();
             self.active_tab = state.active_tab;
+            // A target past the tabs, or on the active one, names no tab to
+            // return to.
+            self.last_tab = state
+                .last_tab
+                .filter(|&tab| tab < self.tabs.len() && tab != state.active_tab);
         } else {
             // The file's tab shape disagrees with itself, and its intent is not
             // recoverable. One tab holding the restored active tree is always a
@@ -500,9 +510,8 @@ impl Workspace {
                 name: None,
             }];
             self.active_tab = 0;
+            self.last_tab = None;
         }
-        // Which tab to toggle back to is session state, not layout.
-        self.last_tab = None;
     }
 }
 
@@ -870,7 +879,7 @@ mod tests {
             fresh.tabs[1].parked.is_none(),
             "the active tab's tree is in ws.panes, not parked"
         );
-        assert_eq!(fresh.last_tab, None, "the toggle target does not persist");
+        assert_eq!(fresh.last_tab, Some(0), "the toggle target persists");
 
         let restored = parked_focus_editor(&fresh, 0).expect("the parked tab shows an editor");
         assert_ne!(
@@ -885,6 +894,36 @@ mod tests {
             fresh.buffers.path_for(state.buffer_id),
             Some(ws_dir.join("a.txt").as_path()),
             "and still holds the buffer it was saved with"
+        );
+        assert_eq!(
+            (fresh.toggle_tab(), fresh.active_tab),
+            (true, 0),
+            "a toggle returns to the tab the save last left",
+        );
+    }
+
+    /// A target past the saved tabs names nothing to return to, so it restores
+    /// as no target rather than as a toggle into a tab that does not exist.
+    #[test]
+    fn an_out_of_range_toggle_target_restores_as_none() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/far-toggle");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.new_tab(&exec);
+        let mut state = ws.to_state();
+        state.last_tab = Some(9);
+        let state_path = ws_dir.join("state.ron");
+        write_state(&state, &ws.meta(), &state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(
+            (fresh.tabs.len(), fresh.last_tab),
+            (2, None),
+            "both tabs restore, and the target past them restores as none",
         );
     }
 
@@ -941,6 +980,7 @@ mod tests {
         assert_eq!(fresh.tabs.len(), 1);
         assert_eq!(fresh.active_tab, 0);
         assert!(fresh.tabs[0].parked.is_none());
+        assert_eq!(fresh.last_tab, None);
     }
 
     #[test]

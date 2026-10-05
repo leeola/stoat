@@ -213,7 +213,8 @@ pub struct Workspace {
     pub(crate) active_tab: usize,
     /// The tab to return to on a toggle, a most-recently-used depth of one.
     /// `None` before the first switch, and cleared when the tab it names is
-    /// closed.
+    /// closed. It persists with the workspace, so a toggle in a restored
+    /// session returns to the tab the saved session last left.
     pub(crate) last_tab: Option<usize>,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
