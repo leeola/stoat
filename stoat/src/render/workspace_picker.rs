@@ -1,7 +1,7 @@
 use crate::{
-    render::text::write_str,
+    render::text::{write_str, write_str_clipped},
     workspace::Workspace,
-    workspace_picker::{PathDisplay, WorkspacePicker, WorkspaceStatus},
+    workspace_picker::{WorkspacePicker, WorkspaceStatus},
 };
 use ratatui::{
     buffer::Buffer,
@@ -62,12 +62,6 @@ pub(crate) fn render_workspace_picker(
     const RUN_W: u16 = 5;
     const EDIT_W: u16 = 6;
 
-    let path_display = picker.path_display();
-    // A remote row keeps the column alive even when every root is the same,
-    // because the host is the one thing that separates those rows.
-    let show_path = !matches!(path_display, PathDisplay::Omit)
-        || picker.entries().iter().any(|e| e.remote_host.is_some());
-
     let edit_col_x = inner.x + inner.width.saturating_sub(1 + EDIT_W);
     let run_col_x = edit_col_x.saturating_sub(RUN_W);
     let buf_col_x = run_col_x.saturating_sub(BUF_W);
@@ -86,9 +80,7 @@ pub(crate) fn render_workspace_picker(
 
     let header_row = inner.y + 2;
     write_str(buf, name_x, header_row, "name", header_style);
-    if show_path {
-        write_str(buf, path_x, header_row, "path", header_style);
-    }
+    write_str(buf, path_x, header_row, "path", header_style);
     write_str(
         buf,
         buf_col_x,
@@ -157,25 +149,25 @@ pub(crate) fn render_workspace_picker(
             }
         }
 
-        if show_path {
-            // Omit means every row shares a root, so the path itself separates
-            // nothing and only the host is worth the column.
-            let path = match &path_display {
-                PathDisplay::Omit => String::new(),
-                PathDisplay::Relative(ancestor) => {
-                    crate::paths::display_relative(&entry.git_root, ancestor)
-                },
-                PathDisplay::TildeAbsolute => {
-                    crate::paths::display_relative(&entry.git_root, Path::new(""))
-                },
-            };
-            let path = match &entry.remote_host {
-                Some(host) => format!("{host}:{path}"),
-                None => path,
-            };
-            let path_trimmed: String = path.chars().take(path_w as usize).collect();
-            write_str(buf, path_x, row, &path_trimmed, base_style);
+        let path = crate::paths::display_relative(&entry.git_root, Path::new(""));
+        let host = entry
+            .remote_host
+            .as_deref()
+            .map(|h| format!("{h}:"))
+            .unwrap_or_default();
+        let path_end = path_x + path_w;
+        write_str_clipped(buf, path_x, row, &host, base_style, path_end);
+
+        let host_w = host.chars().count();
+        let x = path_x + host_w as u16;
+        match tail_within(&path, (path_w as usize).saturating_sub(host_w)) {
+            Some(tail) => {
+                write_str_clipped(buf, x, row, "\u{2026}", base_style, path_end);
+                write_str_clipped(buf, x + 1, row, tail, base_style, path_end);
+            },
+            None => write_str_clipped(buf, x, row, &path, base_style, path_end),
         }
+
         // An inactive row has no live runs or editors, so those counts blank
         // rather than reading a misleading zero.
         let inactive = entry.status == WorkspaceStatus::Inactive;
@@ -202,6 +194,26 @@ pub(crate) fn render_workspace_picker(
             base_style,
         );
     }
+}
+
+/// Returns the tail of `path` to paint after an ellipsis when `path` overflows
+/// `room` characters.
+///
+/// Returns [`None`] when `path` fits, or when `room` has no character left
+/// after the ellipsis. The tail stays, rather than the head, because the last
+/// segments of a root name the project.
+fn tail_within(path: &str, room: usize) -> Option<&str> {
+    let len = path.chars().count();
+    if len <= room || room <= 1 {
+        return None;
+    }
+
+    let dropped = len - (room - 1);
+    let start = path
+        .char_indices()
+        .nth(dropped)
+        .map_or(path.len(), |(byte, _)| byte);
+    Some(&path[start..])
 }
 
 #[cfg(test)]
@@ -370,8 +382,8 @@ mod tests {
         );
     }
 
-    /// Picking a remote row leaves this machine, so the path column says which
-    /// host it goes to. Roots that differ still render below their ancestor.
+    /// Picking a remote row leaves this machine, so the host it goes to leads
+    /// the row's root in the path column.
     #[test]
     fn a_remote_row_carries_its_host_into_the_path_column() {
         let (mut workspaces, active) =
@@ -390,37 +402,73 @@ mod tests {
 
         let painted: Vec<String> = (0..area.height).map(|r| row_text(&buf, r)).collect();
         assert!(
-            painted.iter().any(|line| line.contains("box:ws01")),
-            "the remote row reads host:path: {painted:?}",
+            painted.iter().any(|line| line.contains("box:/tmp/ws01")),
+            "the remote row reads host:root: {painted:?}",
         );
     }
 
-    /// One shared root drops the path column, but a remote row still has to say
-    /// where it goes, so the column survives carrying only the host.
+    /// Sessions of one repository share a root, and their generated names do
+    /// not say where they live, so each row still paints the root.
     #[test]
-    fn a_remote_row_keeps_the_path_column_when_every_root_matches() {
+    fn rows_that_share_a_root_each_paint_it() {
         let (mut workspaces, active) = workspaces_over(2, |_| PathBuf::from("/tmp/same"));
-        let remote = workspaces.keys().find(|id| *id != active).unwrap();
-        workspaces[remote].remote = Some(crate::ssh::RemoteTarget {
-            transport: crate::ssh::Transport::Mosh,
-            host: "box".to_owned(),
-            args: Vec::new(),
-        });
         let mut picker = picker_for(&workspaces, active);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+
+        let (_, inner) = workspace_picker_layout(area, 2).expect("the area hosts the modal");
+        let header: String = row_text(&buf, inner.y + HEADER_ROWS - 1)
+            .chars()
+            .skip(inner.x as usize)
+            .take(inner.width as usize)
+            .collect();
         assert_eq!(
-            picker.path_display(),
-            crate::workspace_picker::PathDisplay::Omit,
-            "the shared root is what would drop the column",
+            header.split_whitespace().collect::<Vec<_>>(),
+            ["name", "path", "buf", "run", "edit"],
+            "the header labels every column",
         );
+
+        let painted: Vec<String> = (0..area.height).map(|r| row_text(&buf, r)).collect();
+        assert_eq!(
+            painted
+                .iter()
+                .filter(|line| line.contains("/tmp/same"))
+                .count(),
+            2,
+            "each row paints the shared root: {painted:?}",
+        );
+    }
+
+    /// The tail of a root names the project, so a root wider than its column
+    /// gives up its head to an ellipsis.
+    #[test]
+    fn a_root_wider_than_its_column_keeps_its_tail() {
+        let root = (0..8)
+            .fold(PathBuf::from("/tmp"), |root, n| {
+                root.join(format!("segment-{n}"))
+            })
+            .join("leaf");
+        let (mut workspaces, active) = workspaces_over(1, |_| root.clone());
+        let mut picker = picker_for(&workspaces, active);
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
         render(&mut picker, &mut workspaces, active, &mut buf, area);
 
         let painted: Vec<String> = (0..area.height).map(|r| row_text(&buf, r)).collect();
+        let row = painted
+            .iter()
+            .find(|line| line.contains("ws00"))
+            .expect("the name column paints ws00");
+        let tail = row
+            .split_once('\u{2026}')
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .unwrap_or_default();
         assert!(
-            painted.iter().any(|line| line.contains("box:")),
-            "the host paints with no path beside it: {painted:?}",
+            tail.ends_with("/leaf") && root.to_string_lossy().ends_with(tail),
+            "an ellipsis leads the root's tail: {row:?}",
         );
     }
 }

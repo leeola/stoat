@@ -1,7 +1,7 @@
 use crate::{
     fuzzy,
     input_view::InputView,
-    paths, picker,
+    picker,
     workspace::{registry::RegistryEntry, Workspace, WorkspaceId, WorkspaceUid},
 };
 use slotmap::SlotMap;
@@ -85,22 +85,6 @@ pub struct PickerEntry {
     /// local. Picking such a row hands the window straight back to that host,
     /// which the path column says by reading `host:path`.
     pub remote_host: Option<String>,
-}
-
-/// Rendering strategy for the picker's per-row path column. Selected once
-/// per open by [`WorkspacePicker::path_display`] based on the relationship
-/// between every entry's `git_root`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathDisplay {
-    /// Every entry shares the same `git_root`; callers should drop the path
-    /// column outright because every row would render identically.
-    Omit,
-    /// Rows share a common ancestor; callers should render each row as the
-    /// suffix of its `git_root` below the stored ancestor.
-    Relative(PathBuf),
-    /// No useful common ancestor; each row renders independently with
-    /// `~/<tail>` abbreviation for paths under the user's home directory.
-    TildeAbsolute,
 }
 
 impl WorkspacePicker {
@@ -385,31 +369,6 @@ impl WorkspacePicker {
 
     fn clamp_selected(&mut self) {
         picker::nav_clamp(self.filtered.len(), &mut self.selected);
-    }
-
-    /// How the per-row path column should render for this picker's entries.
-    ///
-    /// When every row has an identical `git_root`, returns [`PathDisplay::Omit`]
-    /// so callers can drop the column entirely: the basename already carries
-    /// the only distinguishing information. When there's a shared ancestor
-    /// beyond the filesystem root, returns [`PathDisplay::Relative`] so rows
-    /// render as the tail below that ancestor. Otherwise returns
-    /// [`PathDisplay::TildeAbsolute`] so rows render each path independently
-    /// with `~` abbreviation for home.
-    pub fn path_display(&self) -> PathDisplay {
-        let roots: Vec<&Path> = self.entries.iter().map(|e| e.git_root.as_path()).collect();
-
-        let all_same = roots
-            .first()
-            .is_some_and(|first| roots.iter().all(|r| r == first));
-        if all_same {
-            return PathDisplay::Omit;
-        }
-
-        match paths::common_ancestor(roots.iter().copied()) {
-            Some(ancestor) => PathDisplay::Relative(ancestor),
-            None => PathDisplay::TildeAbsolute,
-        }
     }
 }
 
@@ -779,27 +738,6 @@ mod tests {
         }
         let active = first.expect("at least one workspace");
         WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input())
-    }
-
-    #[test]
-    fn path_display_omits_when_all_identical() {
-        let picker = picker_with_roots(&["/tmp/alpha", "/tmp/alpha"]);
-        assert_eq!(picker.path_display(), PathDisplay::Omit);
-    }
-
-    #[test]
-    fn path_display_relative_when_shared_ancestor() {
-        let picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta"]);
-        assert_eq!(
-            picker.path_display(),
-            PathDisplay::Relative(PathBuf::from("/tmp"))
-        );
-    }
-
-    #[test]
-    fn path_display_tilde_when_divergent() {
-        let picker = picker_with_roots(&["/tmp/alpha", "/var/beta"]);
-        assert_eq!(picker.path_display(), PathDisplay::TildeAbsolute);
     }
 
     #[test]
