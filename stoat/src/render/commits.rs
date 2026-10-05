@@ -1,7 +1,7 @@
 use crate::{
     app::{SeparatorAxis, SplitSeparator},
     commit_list::{CommitListState, Preview},
-    diff_map::{BaseHighlights, ChangeKind},
+    diff_map::{BaseHighlights, ChangeKind, ProseChange},
     display_map::DEFAULT_TAB_SIZE,
     host::{CommitFileChange, CommitFileChangeKind},
     pane::Pane,
@@ -439,21 +439,21 @@ fn paint_preview_side(
     context: bool,
     dials: PreviewDials,
     tint_row: Option<Color>,
-    spans: &mut Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
+    spans: &mut Vec<(std::ops::Range<usize>, ChangeKind, ProseChange)>,
 ) {
     spans.clear();
     // A [`ReviewSide`] carries plain ranges, so no span here claims prose. The
-    // session serializes its rows, and the flag would have to cross that format
-    // to reach the preview.
+    // session serializes its rows, and that format holds no prose state for the
+    // preview to read.
     spans.extend(
         side.change_spans
             .iter()
-            .map(|range| (range.clone(), ChangeKind::Replaced, false)),
+            .map(|range| (range.clone(), ChangeKind::Replaced, ProseChange::None)),
     );
     spans.extend(
         side.moved_spans
             .iter()
-            .map(|range| (range.clone(), ChangeKind::Moved, false)),
+            .map(|range| (range.clone(), ChangeKind::Moved, ProseChange::None)),
     );
     spans.sort_by_key(|(range, ..)| range.start);
 
@@ -524,7 +524,7 @@ pub(crate) fn render_commit_preview(
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
     // Reused across rows the way num_text is, since every row rebuilds it.
-    let mut spans: Vec<(std::ops::Range<usize>, ChangeKind, bool)> = Vec::new();
+    let mut spans: Vec<(std::ops::Range<usize>, ChangeKind, ProseChange)> = Vec::new();
 
     let DiffColumns {
         left_num_x,

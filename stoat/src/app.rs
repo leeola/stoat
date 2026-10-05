@@ -835,8 +835,10 @@ pub struct Stoat {
     /// columns.
     ///
     /// Off, a span underlines only on a theme that does not blend, since such a
-    /// theme has no receding to lead against. On, every theme underlines every
-    /// span, so a change stays marked when its color does not stand out.
+    /// theme has no receding to lead against, and where it marks a changed part
+    /// of unstructured text, such as a string or a comment. On, every theme
+    /// underlines every span, so a change stays marked when its color does not
+    /// stand out.
     ///
     /// The ctrl-6 chord is the only writer, and it answers only on a diff
     /// surface.

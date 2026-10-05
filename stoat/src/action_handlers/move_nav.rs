@@ -213,7 +213,7 @@ pub(super) fn navigate(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
 mod tests {
     use super::*;
     use crate::{
-        diff_map::{ChangeKind as DmChangeKind, ChangeSpan, DiffHunk, DiffMap},
+        diff_map::{ChangeKind as DmChangeKind, ChangeSpan, DiffHunk, DiffMap, ProseChange},
         pane::View,
         test_harness::{
             editor::{focused_buffer_path, focused_head_row},
@@ -246,7 +246,7 @@ mod tests {
                 byte_range: 0..0,
                 kind: DmChangeKind::Moved,
                 move_metadata: Some(metadata),
-                prose: false,
+                prose: ProseChange::None,
             }],
             base_spans: Vec::new(),
         });
@@ -300,7 +300,7 @@ mod tests {
             move_metadata: Some(Arc::new(MoveMetadata {
                 sources: vec![source],
             })),
-            prose: false,
+            prose: ProseChange::None,
         };
         let (buffer_spans, base_spans) = if buffer_spans_present {
             (vec![span], Vec::new())
@@ -382,7 +382,7 @@ mod tests {
                 byte_range: 0..0,
                 kind: DmChangeKind::Moved,
                 move_metadata: Some(metadata),
-                prose: false,
+                prose: ProseChange::None,
             }],
             base_spans: Vec::new(),
         });
@@ -500,7 +500,7 @@ mod tests {
                     move_metadata: Some(Arc::new(MoveMetadata {
                         sources: vec![intra_source(0), intra_source(4)],
                     })),
-                    prose: false,
+                    prose: ProseChange::None,
                 }],
                 base_spans: Vec::new(),
             })),

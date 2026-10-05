@@ -55,17 +55,38 @@ pub enum ChangeKind {
     Moved,
 }
 
+/// How a change span sits in unstructured text.
+///
+/// A string, a comment, or a line of a file with no grammar has no token
+/// boundary inside it, so nothing in the text shows where an edit starts and
+/// ends. The diff view marks a span there by how much of its text the edit
+/// rewrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProseChange {
+    /// The span sits in code, where token boundaries frame the edit.
+    None,
+    /// The span covers a string, a comment, or a line run that changed as a
+    /// whole, or one with no counterpart on the other side.
+    ///
+    /// Every letter and digit of the text changed. A comment marker, a quote,
+    /// or a separator that survived does not make the edit partial.
+    Whole,
+    /// The span covers the changed chars inside a string, a comment, or a line
+    /// run that kept some of its letters or digits.
+    Part,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeSpan {
     pub byte_range: Range<usize>,
     pub kind: ChangeKind,
     pub move_metadata: Option<Arc<stoat_language::structural_diff::MoveMetadata>>,
-    /// The span sits inside a string, a comment, or a file with no grammar, so
-    /// no token boundary separates the changed chars from the text around them.
+    /// Whether the span sits inside a string, a comment, or a file with no
+    /// grammar, and how much of that text the edit rewrote.
     ///
-    /// The diff view marks such a span more heavily, having nothing else to
+    /// The diff view marks a prose span more heavily, having nothing else to
     /// lead the eye to it.
-    pub prose: bool,
+    pub prose: ProseChange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -378,9 +399,9 @@ pub type BaseHighlights = Vec<Vec<(Range<usize>, HighlightStyle)>>;
 
 /// Base-side change spans keyed by 0-based base line, each range line-local
 /// within its line and tagged with its [`ChangeKind`] and its
-/// [`ChangeSpan::prose`] flag, so the diff view's left column can mark each
-/// span by kind and by whether it sits in unstructured text.
-pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind, bool)>>;
+/// [`ProseChange`]. The diff view's left column marks each span by its kind
+/// and by how it sits in unstructured text.
+pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind, ProseChange)>>;
 
 /// What the diff view's left column knows of a base line a hunk removed or
 /// replaced.
@@ -1655,7 +1676,7 @@ pub(crate) fn changes_to_hunks(
                     byte_range: changes[*i].byte_range.clone(),
                     kind: ChangeKind::Moved,
                     move_metadata: metadata.clone(),
-                    prose: false,
+                    prose: ProseChange::None,
                 })
                 .collect();
             let base_spans = lhs_indices
@@ -1664,7 +1685,7 @@ pub(crate) fn changes_to_hunks(
                     byte_range: changes[*i].byte_range.clone(),
                     kind: ChangeKind::Moved,
                     move_metadata: metadata.clone(),
-                    prose: false,
+                    prose: ProseChange::None,
                 })
                 .collect();
             hunks.push(DiffHunk {
@@ -1704,7 +1725,7 @@ pub(crate) fn changes_to_hunks(
                     byte_range: changes[*i].byte_range.clone(),
                     kind: ChangeKind::Moved,
                     move_metadata: metadata.clone(),
-                    prose: false,
+                    prose: ProseChange::None,
                 })
                 .collect();
             hunks.push(DiffHunk {
@@ -1759,8 +1780,8 @@ pub(crate) fn changes_to_hunks(
             base_byte_range: lhs_change.byte_range.clone(),
             anchor_range: None,
             token_detail: Some(Arc::new(TokenDetail {
-                buffer_spans: replaced_change_spans(rhs_change),
-                base_spans: replaced_change_spans(lhs_change),
+                buffer_spans: replaced_change_spans(rhs_change, rhs_text),
+                base_spans: replaced_change_spans(lhs_change, lhs_text),
             })),
         });
         consumed[lhs_idx] = true;
@@ -1849,6 +1870,15 @@ pub(crate) fn merge_structural_detail(
 
     let buffer_starts = line_starts(buffer_text);
     let base_starts = line_starts(base_text);
+    // Read once per change, since the loop below tests every change against
+    // every hunk and the read scans the change's text.
+    let prose: Vec<ProseChange> = tree_changes
+        .iter()
+        .map(|change| match change.side {
+            Side::Rhs => prose_change(change, buffer_text),
+            Side::Lhs => prose_change(change, base_text),
+        })
+        .collect();
     for hunk in hunks.iter_mut() {
         let refining = hunk.status == DiffHunkStatus::Modified;
         if !refining && !matches!(hunk.status, DiffHunkStatus::Added | DiffHunkStatus::Deleted) {
@@ -1859,7 +1889,7 @@ pub(crate) fn merge_structural_detail(
         let mut buffer_spans = Vec::new();
         let mut base_spans = Vec::new();
         let mut moved_ranges = Vec::new();
-        for change in tree_changes {
+        for (change, &prose) in tree_changes.iter().zip(&prose) {
             let moved = change.kind == LangChangeKind::Moved;
             // A relocation is not a content change, and inside a Modified hunk
             // it is noise: the tree differ reports every token of a reindented
@@ -1891,7 +1921,7 @@ pub(crate) fn merge_structural_detail(
                     false => span_kind(change),
                 },
                 move_metadata: change.move_metadata.clone(),
-                prose: change.prose,
+                prose,
             }));
         }
 
@@ -1995,7 +2025,13 @@ fn line_range_to_byte_range(
 /// actually differ -- so a one-word edit records only that word. An empty
 /// `refined_spans` means the whole token changed, so the whole `byte_range`
 /// becomes the single span and a full rewrite still marks completely.
-fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -> Vec<ChangeSpan> {
+///
+/// `text` is the full text of the change's side, per [`prose_change`].
+fn replaced_change_spans(
+    change: &stoat_language::structural_diff::DiffChange,
+    text: &str,
+) -> Vec<ChangeSpan> {
+    let prose = prose_change(change, text);
     let ranges = if change.refined_spans.is_empty() {
         std::slice::from_ref(&change.byte_range)
     } else {
@@ -2007,9 +2043,43 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
             byte_range: range.clone(),
             kind: ChangeKind::Replaced,
             move_metadata: None,
-            prose: change.prose,
+            prose,
         })
         .collect()
+}
+
+/// How much of its unstructured text `change` rewrote, read against `text`,
+/// the full text of the change's side.
+///
+/// A change rewrote a part of its text when a letter or a digit of its range
+/// sits outside the chars that differ. A comment marker, a quote, or a
+/// separator carries no content of its own, so one that survived does not
+/// count. Only a prose replacement is ever a part. An added or deleted run has
+/// no counterpart to keep chars against.
+fn prose_change(change: &stoat_language::structural_diff::DiffChange, text: &str) -> ProseChange {
+    use stoat_language::structural_diff::ChangeKind as LangChangeKind;
+    if !change.prose {
+        return ProseChange::None;
+    }
+    if change.kind != LangChangeKind::Replaced {
+        return ProseChange::Whole;
+    }
+
+    let keeps_a_word = |kept: Range<usize>| {
+        text.get(kept)
+            .is_some_and(|kept| kept.chars().any(char::is_alphanumeric))
+    };
+    let mut kept_from = change.byte_range.start;
+    for changed in effective_ranges(change) {
+        if keeps_a_word(kept_from..changed.start) {
+            return ProseChange::Part;
+        }
+        kept_from = changed.end;
+    }
+    match keeps_a_word(kept_from..change.byte_range.end) {
+        true => ProseChange::Part,
+        false => ProseChange::Whole,
+    }
 }
 
 /// Map each base line a hunk removed to that hunk's [`BaseLineMark`].
@@ -2095,7 +2165,7 @@ fn compute_base_change_spans(
 
 /// Split an absolute base-text byte `range` into per-line-local ranges, pushing
 /// each onto `out` under its base line with `mark`, the span's kind and prose
-/// flag.
+/// state.
 ///
 /// `line_starts` gives each base line's byte offset, and `text_len` closes the
 /// last line. A range spanning several lines contributes one clamped sub-range
@@ -2103,7 +2173,7 @@ fn compute_base_change_spans(
 fn distribute_change_span(
     out: &mut BaseChangeSpans,
     range: &Range<usize>,
-    mark: (ChangeKind, bool),
+    mark: (ChangeKind, ProseChange),
     line_starts: &[usize],
     text_len: usize,
 ) {
@@ -2171,7 +2241,8 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, StagedMark, TokenDetail,
+        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, ProseChange, StagedMark,
+        TokenDetail,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -2999,7 +3070,7 @@ mod tests {
                 byte_range: brave.clone(),
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
-                prose: false,
+                prose: ProseChange::None,
             }],
             "buffer spans narrow to the inserted word"
         );
@@ -3009,11 +3080,66 @@ mod tests {
                 byte_range: 8..21,
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
-                prose: false,
+                prose: ProseChange::None,
             }],
             "base spans fall back to the whole replaced literal"
         );
         assert_eq!(&rhs_text[brave], "brave ");
+    }
+
+    /// A literal that kept some of its words is a part. A comment whose every
+    /// word changed is whole, though its marker sits outside the changed chars.
+    #[test]
+    fn a_part_of_a_literal_and_a_whole_literal_report_their_prose_state() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        let lhs_text = "let s = \"one aaa three\";\n// aaa bbb\n";
+        let rhs_text = "let s = \"one zzz three\";\n// zzz yyy\n";
+        let at = |text: &str, needle: &str| {
+            let start = text.find(needle).expect("needle in text");
+            start..start + needle.len()
+        };
+        let pair = |id: u32, side: Side, text: &str, literal: &str, changed: &str| DiffChange {
+            side,
+            byte_range: at(text, literal),
+            kind: LangChangeKind::Replaced,
+            move_metadata: None,
+            pair_id: Some(id),
+            deletion_rhs_anchor: None,
+            refined_spans: vec![at(text, changed)],
+            prose: true,
+        };
+        let changes = vec![
+            pair(0, Side::Lhs, lhs_text, "one aaa three", "aaa"),
+            pair(0, Side::Rhs, rhs_text, "one zzz three", "zzz"),
+            pair(1, Side::Lhs, lhs_text, "// aaa bbb", "aaa bbb"),
+            pair(1, Side::Rhs, rhs_text, "// zzz yyy", "zzz yyy"),
+        ];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            Arc::new(lhs_text.to_string()),
+            rhs_text,
+        );
+
+        let states = |spans: &[ChangeSpan]| spans.iter().map(|s| s.prose).collect::<Vec<_>>();
+        let prose = |line: u32| {
+            let td = dm
+                .token_detail_for_line(line)
+                .expect("modified hunk carries token detail");
+            (states(&td.buffer_spans), states(&td.base_spans))
+        };
+        assert_eq!(
+            (prose(0), prose(1)),
+            (
+                (vec![ProseChange::Part], vec![ProseChange::Part]),
+                (vec![ProseChange::Whole], vec![ProseChange::Whole]),
+            ),
+            "the string keeps words around its edit, the comment keeps only its marker"
+        );
     }
 
     #[test]
@@ -3472,7 +3598,7 @@ mod tests {
                 byte_range: 0..5,
                 kind: ChangeKind::Novel,
                 move_metadata: None,
-                prose: false,
+                prose: ProseChange::None,
             }],
             base_spans: vec![],
         });
@@ -3748,7 +3874,7 @@ mod tests {
                 byte_range: 2..3,
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
-                prose: false,
+                prose: ProseChange::None,
             }])],
             Some(base.clone()),
         );
