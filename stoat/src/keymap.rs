@@ -237,10 +237,21 @@ impl CompiledKey {
         parts.join("-")
     }
 
+    /// The short label the help and the key hints show for this key.
+    ///
+    /// A super modifier shows as `Cmd` on macOS and as `C` elsewhere, which is
+    /// the platform modifier the user presses for it. A key that holds both
+    /// Ctrl and super off macOS shows `C` one time.
     pub fn display_label(&self) -> String {
         let mut parts = Vec::new();
         if self.modifiers.contains(KeyModifiers::CONTROL) {
             parts.push("C".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::SUPER) {
+            let label = platform_modifier_label(cfg!(target_os = "macos"));
+            if !parts.iter().any(|part| part == label) {
+                parts.push(label.to_string());
+            }
         }
         if self.modifiers.contains(KeyModifiers::SHIFT) {
             parts.push("S".to_string());
@@ -275,6 +286,18 @@ impl CompiledKey {
             _ => "?".to_string(),
         });
         parts.join("-")
+    }
+}
+
+/// The label of the platform modifier, which a `Cmd` binding fires on.
+///
+/// stoatty sends each platform chord as super, Cmd on macOS and Ctrl
+/// elsewhere. A `Cmd` binding therefore fires on Ctrl off macOS, and the label
+/// names the key the user presses.
+fn platform_modifier_label(macos: bool) -> &'static str {
+    match macos {
+        true => "Cmd",
+        false => "C",
     }
 }
 
@@ -3512,6 +3535,39 @@ mod tests {
             side_button: None,
         };
         assert_eq!(ck.display_label(), "S-Tab");
+    }
+
+    #[test]
+    fn a_platform_modifier_key_labels_by_platform() {
+        assert_eq!(
+            (
+                platform_modifier_label(true),
+                platform_modifier_label(false)
+            ),
+            ("Cmd", "C"),
+            "macOS names Cmd and every other platform names Ctrl"
+        );
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let label = |keys: Vec<Key>| {
+                CompiledKey::from_key_part(&KeyPart { keys })
+                    .expect("should compile")
+                    .display_label()
+            };
+            assert_eq!(
+                (
+                    label(vec![Key::Named("Cmd".into()), Key::Char('8')]),
+                    label(vec![
+                        Key::Char('C'),
+                        Key::Named("Cmd".into()),
+                        Key::Char('8')
+                    ]),
+                ),
+                ("C-8".to_string(), "C-8".to_string()),
+                "a Cmd binding labels as the Ctrl the user presses, named one time"
+            );
+        }
     }
 
     #[test]
