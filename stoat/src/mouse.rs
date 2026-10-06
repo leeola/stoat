@@ -1667,7 +1667,7 @@ fn focused_editor_target(stoat: &Stoat) -> Option<(EditorId, Rect)> {
 
 /// The focused terminal or agent pane's [`TermId`] and pane area, or `None`
 /// when the focused element is not a terminal-backed pane.
-fn focused_term_target(stoat: &Stoat) -> Option<(TermId, Rect)> {
+pub(crate) fn focused_term_target(stoat: &Stoat) -> Option<(TermId, Rect)> {
     let ws = stoat.active_workspace();
     match ws.focus {
         FocusTarget::SplitPane => {

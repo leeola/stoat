@@ -18,6 +18,9 @@ use crate::{
     app::{Stoat, UpdateEffect},
     display_map::DisplayPoint,
     editor_state::{EditorState, ScrollGlide},
+    mouse,
+    run::vterm::MAX_SCROLLBACK_ROWS,
+    term_session::TermId,
 };
 use std::ops::Range;
 use stoat_text::{cursor_offset, Bias, SelectionGoal};
@@ -64,6 +67,9 @@ fn cursor_row_at_edge(current: u32, scroll_row: u32, viewport: u32, dir: PageDir
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
     let extend = stoat.in_select_mode();
     let count = stoat.take_pending_count().unwrap_or(1);
+    if let Some((term_id, _)) = mouse::focused_term_target(stoat) {
+        return page_term_history(stoat, term_id, dir, half, count);
+    }
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -138,6 +144,45 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         editor.scroll_offset = prev as f32;
     }
     editor.scroll_glide = ScrollGlide::Page;
+    UpdateEffect::Redraw
+}
+
+/// Walk a terminal or agent pane's history by `count` pages, or half pages.
+///
+/// The pane's own height is the page, so a full page shows the next screenful
+/// of history with none of the last one left in view.
+fn page_term_history(
+    stoat: &mut Stoat,
+    term_id: TermId,
+    dir: PageDir,
+    half: bool,
+    count: u32,
+) -> UpdateEffect {
+    let moved = stoat
+        .active_workspace_mut()
+        .terms
+        .get_mut(term_id)
+        .is_some_and(|session| {
+            let rows = session.term.rows();
+            let page = match half {
+                true => rows / 2,
+                false => rows,
+            }
+            .max(1);
+            // The view moves at most the whole history, and the cap keeps a
+            // large count from overflowing the grid's offset arithmetic.
+            let delta = page.saturating_mul(count as usize).min(MAX_SCROLLBACK_ROWS) as i32;
+            session.term.scroll_lines(match dir {
+                PageDir::Up => delta,
+                PageDir::Down => -delta,
+            })
+        });
+    if !moved {
+        return UpdateEffect::None;
+    }
+    // The selection names viewport cells, which show other rows once the view
+    // moves.
+    mouse::clear_term_selection(stoat, term_id);
     UpdateEffect::Redraw
 }
 

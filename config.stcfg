@@ -1039,6 +1039,10 @@ on key {
     !modal && (pane == terminal || pane == agent) && mode == normal {
         Ctrl-a -> SetMode(prefix);
         Ctrl-? -> ToggleKeyHints();
+        # Shift walks the pane's own history, the xterm convention, which
+        # leaves plain PageUp and PageDown with the child.
+        Shift-PageUp -> PageUp();
+        Shift-PageDown -> PageDown();
     }
     modal == finder && mode == insert {
         Up -> PickerPrev();

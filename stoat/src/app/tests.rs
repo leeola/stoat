@@ -4204,8 +4204,42 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
         .collect();
     assert_eq!(
         keys,
-        ["C-a", "C-?"],
+        ["C-a", "C-?", "S-PgUp", "S-PgDn"],
         "a terminal at rest lists only the keys it takes from its child"
+    );
+}
+
+#[test]
+fn shift_page_up_in_a_terminal_pane_walks_a_viewport_of_history() {
+    let (mut stoat, term_id, fake) = stoat_with_focused_term(View::Terminal);
+    let lines: Vec<String> = (0..200).map(|i| format!("l{i}")).collect();
+    stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(lines.join("\r\n").as_bytes());
+    let rows = stoat.active_workspace().terms[term_id].term.rows();
+    let offset = |stoat: &Stoat| {
+        stoat.active_workspace().terms[term_id]
+            .term
+            .display_offset()
+    };
+    let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+
+    stoat.handle_key(shift(KeyCode::PageUp));
+    assert_eq!(
+        (offset(&stoat), fake.sent_bytes()),
+        (rows, Vec::<Vec<u8>>::new()),
+        "a page up walks one viewport back and sends the child nothing",
+    );
+
+    stoat.handle_key(shift(KeyCode::PageDown));
+    assert_eq!(offset(&stoat), 0, "a page down returns to the live screen");
+
+    stoat.handle_key(shift(KeyCode::PageUp));
+    stoat.handle_key(bare(KeyCode::Char('x')));
+    assert_eq!(
+        (offset(&stoat), fake.sent_bytes()),
+        (0, vec![b"x".to_vec()]),
+        "a key to the child returns the view to the live screen",
     );
 }
 

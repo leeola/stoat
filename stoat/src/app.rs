@@ -4920,8 +4920,9 @@ impl Stoat {
             }
             if let Some(agent_id) = self.term_input_target() {
                 mouse::clear_term_selection(self, agent_id);
+                let effect = self.show_term_live_screen(agent_id);
                 self.write_to_term(agent_id, &[0x03]);
-                return UpdateEffect::None;
+                return effect;
             }
             // Ctrl-C with a keymap binding (`pane == run` -> RunInterrupt) routes
             // through the keymap below. An unbound Ctrl-C quits.
@@ -5635,21 +5636,25 @@ impl Stoat {
     /// Every key that reaches here is sent, Escape included. A key with no
     /// encoding is swallowed. A key that a pane-scoped binding takes never
     /// reaches here. See [`Self::passthrough_binding`].
+    ///
+    /// The view returns to the live screen first, so the key lands in sight.
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         mouse::clear_term_selection(self, agent_id);
+        let effect = self.show_term_live_screen(agent_id);
         if let Some(bytes) = encode_key_to_pty(&key) {
             self.write_to_term(agent_id, &bytes);
         }
-        UpdateEffect::None
+        effect
     }
 
     /// Encode a paste of `text` and send it to the terminal's PTY.
     ///
-    /// Returns [`UpdateEffect::None`] on the same reasoning as a forwarded
-    /// keystroke. Nothing on screen changes until the child echoes the text
+    /// Returns [`UpdateEffect::Redraw`] only when the view comes back from
+    /// history. Nothing else on screen changes until the child echoes the text
     /// back, and that read is what asks for the repaint.
     fn route_paste_to_term(&mut self, term_id: TermId, text: &str) -> UpdateEffect {
         mouse::clear_term_selection(self, term_id);
+        let effect = self.show_term_live_screen(term_id);
         let bracketed = self
             .active_workspace()
             .terms
@@ -5657,7 +5662,25 @@ impl Stoat {
             .is_some_and(|session| session.term.bracketed_paste());
 
         self.write_to_term(term_id, &encode_paste_to_pty(text, bracketed));
-        UpdateEffect::None
+        effect
+    }
+
+    /// Return the terminal's view to the live screen, so input sent to the
+    /// child lands in sight.
+    ///
+    /// Answers [`UpdateEffect::Redraw`] when the view was back in history,
+    /// because the jump shows before the child echoes anything, and a key the
+    /// child does not echo asks for no repaint at all.
+    fn show_term_live_screen(&mut self, term_id: TermId) -> UpdateEffect {
+        let moved = self
+            .active_workspace_mut()
+            .terms
+            .get_mut(term_id)
+            .is_some_and(|session| session.term.scroll_to_bottom());
+        match moved {
+            true => UpdateEffect::Redraw,
+            false => UpdateEffect::None,
+        }
     }
 
     /// Write raw bytes to an agent's PTY.
