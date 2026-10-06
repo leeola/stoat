@@ -12,10 +12,13 @@
 //! [`TermScreen::feed`]. The renderer reads the screen back through
 //! [`TermScreen::rows`], [`TermScreen::row`], and [`TermScreen::cursor`].
 
-use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
+use crate::{
+    osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES},
+    run::vterm::MAX_SCROLLBACK_ROWS,
+};
 use alacritty_terminal::{
     event::{Event, EventListener},
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     index::{Column, Line, Point},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
@@ -157,12 +160,12 @@ impl TermScreen {
             title_event: title_event.clone(),
         };
 
-        // No scrollback. The pane exposes no scroll offset, so nothing reads
-        // the default ten thousand rows of history back. They still cost a
-        // full-width allocation each, and every column change reflows all of
-        // them on the run loop.
+        // The history cap matches the run pane's, so both pane kinds keep the
+        // same depth. The grid allocates a history row only when the screen
+        // scrolls one out, and a column change reflows only the rows it holds,
+        // so both costs scale with the output rather than with the cap.
         let config = Config {
-            scrolling_history: 0,
+            scrolling_history: MAX_SCROLLBACK_ROWS,
             ..Config::default()
         };
 
@@ -234,10 +237,12 @@ impl TermScreen {
     /// the live size. Pair it with a PTY resize so the child process learns the
     /// size too.
     ///
-    /// Rows that a shrink pushes off the top are dropped, since the screen
-    /// keeps no history. A later grow adds blank rows below what is left
-    /// rather than bringing the dropped ones back. A full-screen program
-    /// repaints on the size change and fills them.
+    /// On the primary screen, a shrink moves the rows it pushes off the top
+    /// into history, and a grow brings rows back from history above the rest.
+    /// When history runs out, a grow adds blank rows below. The alternate
+    /// screen keeps no history, so there a shrink drops the rows and a grow
+    /// adds blank rows, which the full-screen program fills when it repaints
+    /// at the new size.
     ///
     /// Returns any reply the resize produced, on the same contract as
     /// [`Self::feed`]. In practice a resize emits none.
@@ -324,6 +329,18 @@ impl TermScreen {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    /// Whether a wheel over this screen belongs to the child as arrow keys.
+    ///
+    /// A full-screen program on the alternate screen keeps no history to walk.
+    /// With alternate scroll mode on (DECSET 1007, on by default), a terminal
+    /// sends the program arrow keys for a wheel notch, so a pager or an editor
+    /// scrolls its own text.
+    pub fn alternate_scroll(&self) -> bool {
+        self.term
+            .mode()
+            .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+    }
+
     /// The viewport height in rows.
     pub fn rows(&self) -> usize {
         self.term.screen_lines()
@@ -332,6 +349,42 @@ impl TermScreen {
     /// The viewport width in columns.
     pub fn cols(&self) -> usize {
         self.term.columns()
+    }
+
+    /// How many rows the view sits above the live screen.
+    ///
+    /// Zero while the view shows the live screen. Every reader addresses rows
+    /// of the view, so a scrolled view reads history through the same row
+    /// indices.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Move the view `delta` rows back into history, or toward the live
+    /// screen for a negative `delta`.
+    ///
+    /// The view stops at the oldest history row and at the live screen.
+    /// Output that arrives while the view is in history keeps the view on the
+    /// same rows. Returns whether the view moved, so a caller repaints only on
+    /// a move.
+    pub fn scroll_lines(&mut self, delta: i32) -> bool {
+        self.scroll(Scroll::Delta(delta))
+    }
+
+    /// Return the view to the live screen, and report whether it moved.
+    pub fn scroll_to_bottom(&mut self) -> bool {
+        self.scroll(Scroll::Bottom)
+    }
+
+    fn scroll(&mut self, scroll: Scroll) -> bool {
+        let before = self.display_offset();
+        self.term.scroll_display(scroll);
+
+        let moved = self.display_offset() != before;
+        if moved {
+            self.generation += 1;
+        }
+        moved
     }
 
     /// The styled cells of viewport row `idx`, left to right.
@@ -366,8 +419,7 @@ impl TermScreen {
             return;
         }
 
-        let grid = self.term.grid();
-        let line = &grid[Line(idx as i32)];
+        let line = &self.term.grid()[self.grid_line(idx)];
         out.extend((0..cols).map(|col| convert_cell(&line[Column(col)])));
     }
 
@@ -384,7 +436,7 @@ impl TermScreen {
         let mut row_text = String::new();
         for row in 0..self.rows() {
             row_text.clear();
-            let line = &grid[Line(row as i32)];
+            let line = &grid[self.grid_line(row)];
             for col in 0..self.cols() {
                 let cell = &line[Column(col)];
                 // A wide character holds its second column with a spacer cell,
@@ -422,11 +474,12 @@ impl TermScreen {
         let mut end_col = end.1.min(last_col);
 
         // `bounds_to_string` looks on the row above for the character that a
-        // wrapped wide spacer stands for. The top row of a screen with no
-        // history has no row above it. The spacer reads as nothing and its row
-        // wraps, so a span that stops short of it loses no text and no line
-        // break.
-        let line = &self.term.grid()[Line(end_row as i32)];
+        // wrapped wide spacer stands for. The oldest row the grid holds has no
+        // row above it, and it is the top row of the view when no history
+        // exists or when the view is at the top of history. The spacer reads as
+        // nothing and its row wraps, so a span that stops short of it loses no
+        // text and no line break.
+        let line = &self.term.grid()[self.grid_line(end_row)];
         if end_col == last_col
             && end_col > 0
             && line[Column(end_col)]
@@ -438,10 +491,10 @@ impl TermScreen {
 
         self.term.bounds_to_string(
             Point::new(
-                Line(start.0.min(last_row) as i32),
+                self.grid_line(start.0.min(last_row)),
                 Column(start.1.min(last_col)),
             ),
-            Point::new(Line(end_row as i32), Column(end_col)),
+            Point::new(self.grid_line(end_row), Column(end_col)),
         )
     }
 
@@ -462,12 +515,21 @@ impl TermScreen {
             col: content.cursor.point.column.0,
         })
     }
+
+    /// The grid line that viewport row `idx` shows.
+    ///
+    /// The grid numbers the live screen from zero and history upward from -1,
+    /// so the view's offset moves every viewport row up into history.
+    fn grid_line(&self, idx: usize) -> Line {
+        Line(idx as i32 - self.display_offset() as i32)
+    }
 }
 
 /// Adapts stoat's row/column count to `alacritty_terminal`'s [`Dimensions`].
 ///
-/// `total_lines` equals `screen_lines`. The screen keeps no history, so the
-/// viewport is the whole grid.
+/// `total_lines` equals `screen_lines`, because `Term::new` and `Term::resize`
+/// read only `screen_lines` and `columns`. The history cap comes from the
+/// [`Config`] instead.
 struct GridSize {
     rows: usize,
     cols: usize,
@@ -756,12 +818,12 @@ mod tests {
         assert_eq!(text_row(&term, 0), "hi");
     }
 
-    /// A row scrolled past the top is dropped rather than held, so a shrink
-    /// and a grow back have nothing to restore from and the grow adds blank
-    /// rows below what survived. The cursor stays on the row it occupies at
-    /// both sizes, since a reader indexes it straight into the rows.
+    /// A shrink moves the rows it pushes off the top into history, and a grow
+    /// takes rows back from history above the rest before it adds blank rows
+    /// below. The cursor follows its text at every size, since a reader
+    /// indexes it straight into the rows.
     #[test]
-    fn a_shrink_and_a_grow_recover_no_scrolled_rows() {
+    fn a_grow_brings_back_the_rows_a_shrink_scrolled_out() {
         let rows = |term: &TermScreen| {
             (0..term.rows())
                 .map(|idx| text_row(term, idx))
@@ -773,16 +835,20 @@ mod tests {
         assert_eq!(rows(&term), ["three", "four", "five", "six"]);
 
         term.resize(2, 10);
-        assert_eq!(rows(&term), ["five", "six"], "the shrink drops two rows");
-        assert_eq!(term.cursor().map(|c| c.row), Some(1));
-
-        term.resize(6, 10);
         assert_eq!(
             rows(&term),
-            ["five", "six", "", "", "", ""],
-            "the grow adds blank rows rather than the dropped ones",
+            ["five", "six"],
+            "the shrink scrolls two rows out"
         );
         assert_eq!(term.cursor().map(|c| c.row), Some(1));
+
+        term.resize(8, 10);
+        assert_eq!(
+            rows(&term),
+            ["one", "two", "three", "four", "five", "six", "", ""],
+            "the grow takes all four history rows back, then adds blank rows",
+        );
+        assert_eq!(term.cursor().map(|c| c.row), Some(5));
     }
 
     #[test]
@@ -949,5 +1015,65 @@ mod tests {
 
         let tab = " ".repeat(7);
         assert_eq!(term.text(), format!("a{tab}b\u{4e2d}c e\u{301}"));
+    }
+
+    /// A 4-row screen fed `l0` through `l5`, so `l0` and `l1` are in history.
+    fn six_lines_on_four_rows() -> TermScreen {
+        let mut term = TermScreen::new(4, 10);
+        term.feed(b"l0\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5");
+        term
+    }
+
+    #[test]
+    fn scrolled_out_rows_read_back_from_history() {
+        let mut term = six_lines_on_four_rows();
+        assert_eq!(term.text(), "l2\nl3\nl4\nl5");
+        let generation = term.generation();
+
+        assert!(term.scroll_lines(2));
+        assert_eq!(term.text(), "l0\nl1\nl2\nl3");
+        assert_eq!(text_row(&term, 0), "l0", "a row read follows the view");
+
+        assert!(!term.scroll_lines(5), "the view stops at the oldest row");
+        assert_eq!(term.display_offset(), 2);
+        assert_eq!(
+            term.generation(),
+            generation + 1,
+            "only the move advances the generation"
+        );
+
+        assert!(term.scroll_to_bottom());
+        assert_eq!(term.text(), "l2\nl3\nl4\nl5");
+    }
+
+    #[test]
+    fn output_while_scrolled_back_keeps_the_view() {
+        let mut term = six_lines_on_four_rows();
+        term.scroll_lines(2);
+
+        term.feed(b"\r\nl6");
+
+        assert_eq!(term.text(), "l0\nl1\nl2\nl3");
+        assert_eq!(term.display_offset(), 3);
+    }
+
+    #[test]
+    fn span_text_reads_the_scrolled_rows() {
+        let mut term = six_lines_on_four_rows();
+        term.scroll_lines(2);
+
+        assert_eq!(term.span_text((0, 0), (1, 1)), "l0\nl1");
+    }
+
+    #[test]
+    fn the_alternate_screen_keeps_no_history() {
+        let mut term = TermScreen::new(4, 10);
+        term.feed(b"\x1b[?1049hl0\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5");
+
+        assert!(!term.scroll_lines(2), "no row scrolled into history");
+        assert!(term.alternate_scroll());
+
+        term.feed(b"\x1b[?1049l");
+        assert!(!term.alternate_scroll());
     }
 }
