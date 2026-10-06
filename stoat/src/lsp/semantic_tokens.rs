@@ -468,8 +468,9 @@ fn convert_semantic_tokens(
 fn lsp_token_scope(token_type: &str) -> Option<&'static str> {
     Some(match token_type {
         "function" | "method" => "function",
-        "macro" => "function.special",
+        "macro" | "procMacro" => "function.special",
         "type" | "class" | "enum" | "interface" | "struct" | "typeParameter" => "type",
+        "const" | "static" => "constant",
         "variable" => "variable",
         "parameter" => "variable.parameter",
         "property" | "enumMember" => "property",
@@ -753,6 +754,9 @@ mod tests {
         assert_eq!(lsp_token_scope("method"), Some("function"));
         assert_eq!(lsp_token_scope("parameter"), Some("variable.parameter"));
         assert_eq!(lsp_token_scope("struct"), Some("type"));
+        assert_eq!(lsp_token_scope("const"), Some("constant"));
+        assert_eq!(lsp_token_scope("static"), Some("constant"));
+        assert_eq!(lsp_token_scope("procMacro"), Some("function.special"));
         assert_eq!(lsp_token_scope("regexp"), None);
     }
 
@@ -1481,6 +1485,9 @@ mod tests {
             "function",
             "method",
             "macro",
+            "procMacro",
+            "const",
+            "static",
             "type",
             "class",
             "enum",
