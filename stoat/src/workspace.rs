@@ -173,6 +173,14 @@ pub struct Workspace {
     /// current root. Set once by [`crate::diff_warm::ensure_diff_warm`], reset
     /// when the cwd changes so the new root warms afresh.
     pub(crate) diff_warmed: bool,
+    /// Whether a session restore installed into this workspace while another
+    /// one was active, so its restored buffers and terminal panes still wait to
+    /// start.
+    ///
+    /// A server spawn and a terminal shell read the active workspace's root and
+    /// environment, so they start only once this workspace is active. See
+    /// [`crate::app::Stoat::start_background_restore`].
+    pub(crate) restored_in_background: bool,
     /// Persisted name of the finder scope this workspace last closed in, so
     /// `space p` reopens where the user left off. Holds `"all"`, `"modified"`,
     /// or a named-scope key, and is `None` until a finder closes here. Buffers
@@ -418,6 +426,7 @@ impl Workspace {
             repo_root: None,
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
+            restored_in_background: false,
             last_finder_scope: None,
             remote: None,
             palette_history: InputHistory::default(),

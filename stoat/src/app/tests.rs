@@ -3350,12 +3350,7 @@ fn a_restored_session_opens_its_files_with_the_language_server() {
     let (file, state_path) = save_a_session(&mut h);
     restore_into_a_fresh_workspace(&mut h, state_path);
 
-    let opens = h
-        .fake_lsp()
-        .observed_opens()
-        .iter()
-        .filter(|open| open.text_document.uri.as_str().ends_with("/restored.txt"))
-        .count();
+    let opens = restored_opens(&h);
     let restored = h
         .stoat
         .active_workspace()
@@ -3420,6 +3415,93 @@ fn a_restored_session_reopens_the_terminal_of_a_parked_tab() {
     assert!(
         ws.terms.contains_key(id),
         "the terminal names a live session"
+    );
+}
+
+/// How many `did_open`s for `restored.txt` reached the server.
+fn restored_opens(h: &crate::test_harness::TestHarness) -> usize {
+    h.fake_lsp()
+        .observed_opens()
+        .iter()
+        .filter(|open| open.text_document.uri.as_str().ends_with("/restored.txt"))
+        .count()
+}
+
+/// Restores `state_path` into a fresh workspace that stays in the background,
+/// lets the restore land, and returns that workspace.
+fn restore_into_a_background_workspace(
+    h: &mut crate::test_harness::TestHarness,
+    state_path: PathBuf,
+) -> WorkspaceId {
+    let target = h.create_workspace();
+    h.stoat.spawn_workspace_restore(target, state_path);
+    h.settle();
+    h.stoat.drive_background();
+    h.settle();
+    target
+}
+
+/// A server spawn reads the active workspace's root, so a restore that lands
+/// in the background sends nothing, and the switch to that workspace sends its
+/// files to the server.
+#[test]
+fn a_session_restored_in_the_background_opens_its_files_on_the_switch() {
+    let mut h = Stoat::test();
+    let (file, state_path) = save_a_session(&mut h);
+    let target = restore_into_a_background_workspace(&mut h, state_path);
+    let before = (
+        h.stoat.workspaces[target]
+            .buffers
+            .id_for_path(&file)
+            .is_some(),
+        restored_opens(&h),
+    );
+
+    h.set_active_workspace(target);
+    h.stoat.drive_background();
+    h.settle();
+
+    assert_eq!(
+        (before, restored_opens(&h)),
+        ((true, 1), 2),
+        "the restore lands with only the launch open sent, and the switch \
+         sends the restored file",
+    );
+}
+
+/// A restored terminal pane names a session that died with the last run. A
+/// restore in the background spawns no shell, so the switch to that workspace
+/// gives the pane a live one.
+#[test]
+fn a_session_restored_in_the_background_respawns_its_terminal_on_the_switch() {
+    let mut h = Stoat::test();
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        ws.panes.pane_mut(pane).view = View::Terminal(TermId::default());
+    }
+    let state_path = PathBuf::from("/state/session.ron");
+    h.stoat
+        .active_workspace()
+        .save_state(&state_path, &*h.stoat.fs_host)
+        .expect("save state");
+    let target = restore_into_a_background_workspace(&mut h, state_path);
+    let terminal_live = |h: &crate::test_harness::TestHarness| {
+        let ws = &h.stoat.workspaces[target];
+        match ws.panes.pane(ws.panes.focus()).view {
+            View::Terminal(id) => Some(ws.terms.contains_key(id)),
+            _ => None,
+        }
+    };
+    let before = terminal_live(&h);
+
+    h.set_active_workspace(target);
+    h.stoat.drive_background();
+
+    assert_eq!(
+        (before, terminal_live(&h)),
+        (Some(false), Some(true)),
+        "the restored pane waits on a dead session, and the switch spawns its shell",
     );
 }
 

@@ -4505,7 +4505,8 @@ impl Stoat {
     /// [`Workspace::is_fresh`], is left untouched so live state is never
     /// clobbered. Otherwise the buffers and panes install. When the target is
     /// still active, the restored files open with their language servers and
-    /// terminals respawn.
+    /// terminals respawn. A target the reader switched away from waits for
+    /// [`Self::start_background_restore`] instead.
     fn install_pending_workspace_restore(&mut self) {
         let pending = self
             .pending_workspace_restore
@@ -4556,16 +4557,37 @@ impl Stoat {
             ws.install_restored(buffers, state, &executor);
             ws.assign_languages_from_paths(&registry);
         }
-        // FIXME: A restore that lands while another workspace is active starts no
-        // language server for the restored buffers
-        if self.active_workspace == workspace {
-            crate::lsp::drain::reopen_buffers(self, None);
-            action_handlers::respawn_terminal_panes(self);
-            if self.active_workspace().remote.is_some() {
-                self.remote_pending = true;
-                ssh::reconnect_when_ready(self);
+        if self.active_workspace != workspace {
+            if let Some(ws) = self.workspaces.get_mut(workspace) {
+                ws.restored_in_background = true;
             }
+            return;
         }
+        crate::lsp::drain::reopen_buffers(self, None);
+        action_handlers::respawn_terminal_panes(self);
+        if self.active_workspace().remote.is_some() {
+            self.remote_pending = true;
+            ssh::reconnect_when_ready(self);
+        }
+    }
+
+    /// Start the restored buffers and terminal panes of the active workspace
+    /// when its restore installed while another workspace was active.
+    ///
+    /// A server spawn and a terminal shell read the active workspace's root and
+    /// environment, so this waits for the switch. Running from
+    /// [`Self::drive_background`] serves every path that makes the workspace
+    /// active. The environment load has started by then, so a subprocess
+    /// server still waits for the direnv diff, as at an in-place restore.
+    ///
+    /// The remote reconnect needs no deferral, because every workspace switch
+    /// reconnects a remote workspace.
+    fn start_background_restore(&mut self) {
+        if !std::mem::take(&mut self.active_workspace_mut().restored_in_background) {
+            return;
+        }
+        crate::lsp::drain::reopen_buffers(self, None);
+        action_handlers::respawn_terminal_panes(self);
     }
 
     /// Persist a workspace's state, serializing it off this thread.
@@ -7971,6 +7993,7 @@ impl Stoat {
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
         self.install_pending_workspace_restore();
+        self.start_background_restore();
         crate::session_log::sync(self);
         crate::diff_warm::ensure_diff_warm(self);
         crate::diff_warm::install_finished(self);
