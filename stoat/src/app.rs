@@ -5671,7 +5671,7 @@ impl Stoat {
     /// An error means the session can no longer take bytes at all, which for
     /// the local one means its writer thread has exited. It is warned about and
     /// dropped, since a keystroke has nowhere else to go.
-    fn write_to_term(&self, agent_id: TermId, bytes: &[u8]) {
+    pub(crate) fn write_to_term(&self, agent_id: TermId, bytes: &[u8]) {
         let Some(session) = self
             .active_workspace()
             .terms

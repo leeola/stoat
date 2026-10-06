@@ -4879,6 +4879,83 @@ fn a_click_without_drag_leaves_no_terminal_selection() {
 }
 
 #[test]
+fn a_wheel_over_a_terminal_pane_walks_its_history() {
+    use crossterm::event::MouseButton;
+
+    let mut h = Stoat::test();
+    let lines: Vec<String> = (0..200).map(|i| format!("l{i}")).collect();
+    let term_id = focused_terminal_pane(&mut h, lines.join("\r\n").as_bytes());
+    let rows = h.stoat.active_workspace().terms[term_id].term.rows();
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 0));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0));
+
+    let mut wheel = |kind: MouseEventKind, notches: usize| {
+        for _ in 0..notches {
+            h.stoat.update(mouse_event(kind, 1, 1));
+        }
+        let session = &h.stoat.active_workspace().terms[term_id];
+        let top: String = session.term.row(0).iter().map(|cell| cell.ch).collect();
+        (
+            session.term.display_offset(),
+            session.selection.is_some(),
+            top.trim_end().to_string(),
+        )
+    };
+
+    assert_eq!(
+        wheel(MouseEventKind::ScrollUp, 1),
+        (3, false, format!("l{}", 200 - rows - 3)),
+        "a notch up walks three rows back and clears the selection",
+    );
+    assert_eq!(wheel(MouseEventKind::ScrollUp, 2).0, 9, "two more notches");
+    assert_eq!(
+        wheel(MouseEventKind::ScrollDown, 3),
+        (0, false, format!("l{}", 200 - rows)),
+        "three notches down return to the live screen",
+    );
+    assert_eq!(
+        wheel(MouseEventKind::ScrollDown, 1).0,
+        0,
+        "the live screen is the floor"
+    );
+}
+
+#[test]
+fn a_wheel_on_the_alternate_screen_sends_arrow_keys() {
+    let (mut stoat, term_id, fake) = stoat_with_focused_term(View::Terminal);
+    // A fresh window has no size, so the resize lays out the pane that the
+    // wheel's hit test reads.
+    stoat.update(Event::Resize(80, 24));
+    stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"\x1b[?1049h");
+
+    stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
+    stoat.update(mouse_event(MouseEventKind::ScrollDown, 1, 1));
+
+    assert_eq!(
+        (
+            fake.sent_bytes(),
+            stoat.active_workspace().terms[term_id]
+                .term
+                .display_offset(),
+        ),
+        (
+            vec![
+                b"\x1b[A\x1b[A\x1b[A".to_vec(),
+                b"\x1b[B\x1b[B\x1b[B".to_vec()
+            ],
+            0,
+        ),
+    );
+}
+
+#[test]
 fn palette_over_a_terminal_routes_typing_to_the_palette() {
     let mut h = Stoat::test();
     let fake = Arc::new(crate::host::FakeTerminalSession::new());

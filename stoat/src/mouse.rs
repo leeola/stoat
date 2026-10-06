@@ -33,6 +33,10 @@ use stoat_text::{Bias, SelectionGoal};
 use stoat_widgets::minimap;
 use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind};
 
+/// Rows one wheel notch moves a terminal or agent pane's history, the step the
+/// run pane's scrollback takes.
+const TERM_WHEEL_ROWS: usize = 3;
+
 /// Map an aux window's pointer gesture onto the crossterm event kind the pane
 /// mouse handlers dispatch on. A wheel becomes a scroll. A button gesture keeps
 /// its button.
@@ -1453,6 +1457,10 @@ pub(crate) fn handle_mouse_scroll(
 /// renders, and a trackpad flick of ~100 events must not repaint per event. A
 /// run pane scrolls by whole notches, so its share accrues on the session.
 ///
+/// A terminal or agent pane also steps by whole notches. It walks its history,
+/// or on the alternate screen it sends the child arrow keys, the convention a
+/// pager or an editor scrolls by.
+///
 /// While [`Stoat::diff_wheel_walk`] is on, the focused editor in the diff view
 /// goes through [`diff_wheel::scroll_or_jump`] instead. It scrolls until the
 /// change under the reader passes the jump line, and then walks to the next
@@ -1494,6 +1502,49 @@ pub(crate) fn scroll_view_at(
             for _ in 0..steps.unsigned_abs() {
                 run_state.wheel_scroll(steps > 0, (area.height as usize).saturating_sub(1));
             }
+            UpdateEffect::Redraw
+        },
+        View::Agent(id) | View::Terminal(id) => {
+            let steps = take_whole_notches(stoat, lines);
+            if steps == 0 {
+                return UpdateEffect::None;
+            }
+            let Some(alternate) = stoat
+                .active_workspace()
+                .terms
+                .get(id)
+                .map(|session| session.term.alternate_scroll())
+            else {
+                return UpdateEffect::None;
+            };
+
+            // The child repaints through its own output, so the arrow keys
+            // owe no frame here.
+            if alternate {
+                let arrow: &[u8] = match steps > 0 {
+                    true => b"\x1b[B",
+                    false => b"\x1b[A",
+                };
+                stoat.write_to_term(
+                    id,
+                    &arrow.repeat(TERM_WHEEL_ROWS * steps.unsigned_abs() as usize),
+                );
+                return UpdateEffect::None;
+            }
+
+            // A notch up arrives as negative travel and walks back into
+            // history, which is a positive delta.
+            let moved = stoat
+                .active_workspace_mut()
+                .terms
+                .get_mut(id)
+                .is_some_and(|session| session.term.scroll_lines(-steps * TERM_WHEEL_ROWS as i32));
+            if !moved {
+                return UpdateEffect::None;
+            }
+            // The selection names viewport cells, which show other rows once
+            // the view moves.
+            clear_term_selection(stoat, id);
             UpdateEffect::Redraw
         },
         _ => UpdateEffect::None,
