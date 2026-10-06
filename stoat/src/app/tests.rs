@@ -4209,6 +4209,59 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
     );
 }
 
+#[test]
+fn select_mode_auto_shows_no_hints_box() {
+    let mut h = Stoat::test();
+    h.stoat.keymap = compile_keymap(
+        r#"on key {
+                Ctrl-? -> ToggleKeyHints();
+                mode == normal { v -> SetMode(select); }
+                mode == select {
+                    h -> ExtendLeft();
+                    z -> SetMode(select_z);
+                    Escape -> SetMode(normal);
+                }
+                mode == select_z { z -> [AlignViewCenter(), SetMode(select)]; }
+            }"#,
+    );
+    h.stoat.hints_cache = None;
+    let mut buf = Buffer::empty(h.stoat.size());
+    let hint_keys = |stoat: &Stoat| -> Vec<String> {
+        let rows = &stoat.hints_cache.as_ref().expect("the box paints").rows;
+        rows.iter().map(|row| row.keys.clone()).collect()
+    };
+
+    h.stoat.handle_key(bare(KeyCode::Char('v')));
+    assert_eq!(h.stoat.focused_mode(), "select");
+    h.stoat.paint_into(&mut buf);
+    assert!(
+        h.stoat.hints_cache.is_none(),
+        "select mode auto-shows no box"
+    );
+
+    // `Escape` enters a primary mode, `h` is a plain editor key, and the root
+    // toggle is unguarded, so the chord entry is all that stays.
+    h.stoat.key_hints_visible = true;
+    h.stoat.paint_into(&mut buf);
+    assert_eq!(
+        hint_keys(&h.stoat),
+        ["z"],
+        "the forced box lists only the chord entry"
+    );
+
+    h.stoat.key_hints_visible = false;
+    h.stoat.handle_key(bare(KeyCode::Char('z')));
+    assert_eq!(h.stoat.focused_mode(), "select_z");
+    h.stoat.paint_into(&mut buf);
+    let mut keys = hint_keys(&h.stoat);
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["C-?", "z"],
+        "a select chord sub-mode still auto-shows its whole mode"
+    );
+}
+
 /// Paint a whole frame and return the APC scene it built.
 ///
 /// Read before any flush, so the decoration lane still holds this frame

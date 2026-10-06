@@ -409,7 +409,7 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
     )
 }
 
-pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert"];
+pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert", "select"];
 
 /// Reserve the bottom row for the pane status bar so the which-key hint box,
 /// bottom-anchored over the full-window right edge, never paints over it.
