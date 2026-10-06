@@ -1415,12 +1415,17 @@ fn staged_label_body(
     })
 }
 
-/// What the status bar names an overridden diff base.
+/// What the status bar names a displacing diff base, or `None` for HEAD.
 ///
-/// Every override names itself, so the bar never leaves a reader guessing
-/// which base the hunks on screen were measured against.
-pub(crate) fn diff_base_lead(base: &DiffBase) -> String {
-    format!("diff vs {}", diff::diff_sides(Some(base)).0)
+/// HEAD and the index are the working tree's own picks, so the bar shows the
+/// repo tally under either one, and the diff view's sides bar names the pick.
+/// Every displacing base names itself, so the bar never leaves a reader
+/// guessing which base the hunks on screen were measured against.
+pub(crate) fn diff_base_lead(base: &DiffBase) -> Option<String> {
+    match base {
+        DiffBase::Head => None,
+        base => Some(format!("diff vs {}", diff::diff_sides(Some(base)).0)),
+    }
 }
 
 fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {
@@ -2356,35 +2361,35 @@ mod tests {
     }
 
     #[test]
-    fn every_diff_base_names_itself() {
+    fn every_displacing_base_names_itself() {
         assert_eq!(
             diff_base_lead(&DiffBase::Head),
-            "diff vs HEAD",
-            "the HEAD base names the commit it measures from"
+            None,
+            "the HEAD base is a working-tree pick, so the bar keeps the repo tally"
         );
         assert_eq!(
             diff_base_lead(&DiffBase::parent_of(
                 "def5678abc1234",
                 Some("abc1234def5678".into())
             )),
-            "diff vs parent abc1234",
+            Some("diff vs parent abc1234".to_string()),
             "a review names the parent it measures from"
         );
         assert_eq!(
             diff_base_lead(&DiffBase::parent_of("def5678abc1234", None)),
-            "diff vs empty",
+            Some("diff vs empty".to_string()),
             "a root commit's parent is the empty tree"
         );
         assert_eq!(
             diff_base_lead(&DiffBase::named("main", "abc1234def5678".into())),
-            "diff vs main abc1234",
+            Some("diff vs main abc1234".to_string()),
             "a typed revision keeps its name"
         );
         assert_eq!(
             diff_base_lead(&DiffBase::Memory {
                 files: HashMap::new()
             }),
-            "diff vs original",
+            Some("diff vs original".to_string()),
             "a proposal has no revision, so it names what it replaced"
         );
     }

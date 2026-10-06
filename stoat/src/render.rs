@@ -685,7 +685,7 @@ pub(crate) fn frame(
 
     // Resolved before the frame so the bars carry the text rather than a
     // borrow of the workspace, which the pane loop mutates as it paints.
-    let diff_base_lead = ws.diff_base().map(pane::diff_base_lead);
+    let diff_base_lead = ws.diff_base().and_then(pane::diff_base_lead);
     let diff_sides = diff::diff_sides(ws.diff_base());
     let held_buffers = ws.held_buffer_labels();
 

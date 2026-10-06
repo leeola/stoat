@@ -259,7 +259,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
     let focus_target = ws.focus;
     let focus_id = ws.panes.focus();
 
-    let diff_base_lead = ws.diff_base().map(crate::render::pane::diff_base_lead);
+    let diff_base_lead = ws.diff_base().and_then(crate::render::pane::diff_base_lead);
     let diff_sides = diff::diff_sides(ws.diff_base());
     let held_buffers = ws.held_buffer_labels();
 
