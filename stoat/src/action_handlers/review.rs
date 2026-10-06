@@ -724,11 +724,24 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         // the commit, so after a base move both act on a checkout the captured
         // text and row do not describe.
         if review_rev(stoat.active_workspace()) != pressed_rev {
+            tracing::warn!(
+                target: "stoat::review",
+                path = %path.display(),
+                status = %BASE_MOVED,
+                "staging press refused"
+            );
             stoat.set_status(BASE_MOVED);
             return None;
         }
         let Some(repo) = stoat.git_host.discover(&git_root) else {
-            stoat.set_status("not in a git repository");
+            let why = "not in a git repository";
+            tracing::warn!(
+                target: "stoat::review",
+                path = %path.display(),
+                status = %why,
+                "staging press refused"
+            );
+            stoat.set_status(why);
             return None;
         };
 
@@ -739,6 +752,12 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
             AmendRoute::Index => None,
             AmendRoute::Commit(target) => Some(target),
             AmendRoute::Refused(why) => {
+                tracing::warn!(
+                    target: "stoat::review",
+                    path = %path.display(),
+                    status = %why,
+                    "staging press refused"
+                );
                 stoat.set_status(why);
                 return None;
             },
@@ -829,13 +848,13 @@ fn review_rev(ws: &Workspace) -> Option<Option<String>> {
 /// An amend also moves the walk and the base's commit name onto the commit it
 /// rewrote.
 fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: StageOutcome) {
-    let status = match outcome {
-        StageOutcome::Unchanged(status) => status,
+    let (status, landed) = match outcome {
+        StageOutcome::Unchanged(status) => (status, false),
         StageOutcome::Staged(message) => {
             stoat
                 .active_workspace_mut()
                 .invalidate_diff(buffer_id, path);
-            message.to_string()
+            (message.to_string(), true)
         },
         StageOutcome::Amended {
             old_sha,
@@ -849,9 +868,25 @@ fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: Stag
             stoat
                 .active_workspace_mut()
                 .invalidate_diff(buffer_id, path);
-            status
+            (status, true)
         },
     };
+
+    if landed {
+        tracing::info!(
+            target: "stoat::review",
+            path = %path.display(),
+            %status,
+            "staging press landed"
+        );
+    } else {
+        tracing::warn!(
+            target: "stoat::review",
+            path = %path.display(),
+            %status,
+            "staging press changed nothing"
+        );
+    }
     stoat.set_status(status);
 }
 
