@@ -922,19 +922,16 @@ impl Workspace {
         );
     }
 
-    /// Point every buffer's diff at `base`, or back at the working tree's own
-    /// base with `None`.
+    /// Point every buffer's diff at `base`, or back at the working tree's pick
+    /// with `None`.
     ///
-    /// The working tree's own base is the one the reader picked through
-    /// [`Self::set_worktree_base`], the index until they pick HEAD.
+    /// The working tree's pick is the one the reader made through
+    /// [`Self::set_worktree_base`], HEAD until they pick the index.
     ///
     /// Re-diffs the whole workspace. Every cached blob was read against the
     /// base being replaced, so none of them survive the change.
     pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
-        self.diff.base_override = base.or(match self.diff.worktree_base {
-            WorktreeBase::Index => None,
-            WorktreeBase::Head => Some(DiffBase::Head),
-        });
+        self.diff.base_override = base;
         self.diff.invalidate_all();
     }
 
@@ -963,9 +960,10 @@ impl Workspace {
         }
     }
 
-    /// What buffers diff against, `None` for the index.
+    /// What buffers diff against, `None` while the pick is the index and
+    /// nothing displaces it.
     pub(crate) fn diff_base(&self) -> Option<&DiffBase> {
-        self.diff.base_override.as_ref()
+        self.diff.effective_base()
     }
 
     /// The working tree's own base that [`Self::set_worktree_base`] picked.

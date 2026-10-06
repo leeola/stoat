@@ -170,7 +170,7 @@ define_action!(
      every change since the commit, a staged hunk marked in the staged color \
      and an unstaged one in the unstaged color. The base holds after the \
      diff closes, so the gutter keeps marking against HEAD until \
-     DiffAgainstIndex switches back.",
+     DiffAgainstIndex picks the index.",
     ActionPriority::Normal,
     command_name = "diff-against-head"
 );

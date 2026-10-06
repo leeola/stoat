@@ -3430,7 +3430,7 @@ fn diff_sides_bar_emits_a_compact_run_under_stoatty() {
                 c,
                 Command::TextRun(t) if t.scale == TEXT_SCALE_COMPACT
                     && t.row == 0
-                    && t.text.contains("index → working tree")
+                    && t.text.contains("HEAD → working tree")
             )),
             cmds.iter()
                 .any(|c| matches!(c, Command::Panel(panel) if panel.top == 0)),

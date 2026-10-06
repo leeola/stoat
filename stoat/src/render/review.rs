@@ -3505,24 +3505,24 @@ mod tests {
     fn the_diff_view_names_both_sides_on_its_top_row() {
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
         h.type_keys("j");
-        let index = top_row_in_both_frames(&mut h);
+        let head = top_row_in_both_frames(&mut h);
 
         h.stoat
             .active_workspace_mut()
-            .set_worktree_base(WorktreeBase::Head);
+            .set_worktree_base(WorktreeBase::Index);
         h.settle_diff_jobs();
-        let head = top_row_in_both_frames(&mut h);
+        let index = top_row_in_both_frames(&mut h);
 
         assert_eq!(
             (
+                head.each_ref()
+                    .map(|row| row.contains("HEAD → working tree")),
                 index
                     .each_ref()
                     .map(|row| row.contains("index → working tree")),
-                head.each_ref()
-                    .map(|row| row.contains("HEAD → working tree")),
             ),
             ([true, true], [true, true]),
-            "{index:?} then {head:?}",
+            "{head:?} then {index:?}",
         );
     }
 

@@ -1725,7 +1725,7 @@ mod tests {
         lsp::drain,
         pane::View,
         term_session::TermId,
-        workspace::diff::DiffBase,
+        workspace::diff::{DiffBase, WorktreeBase},
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range};
@@ -2483,6 +2483,9 @@ mod tests {
             );
             h.stoat.set_diff_warm_auto(true);
             h.open_file(Path::new("/repo/f.txt"));
+            h.stoat
+                .active_workspace_mut()
+                .set_worktree_base(WorktreeBase::Index);
             h.settle_diff_jobs();
             focused_editor_mut(&mut h.stoat)
                 .expect("editor")

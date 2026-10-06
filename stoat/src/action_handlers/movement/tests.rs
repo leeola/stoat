@@ -8,6 +8,7 @@ use crate::{
         editor::{focused_buffer_path, focused_cursor_point, focused_head_row, place_cursor},
         stoat, TestHarness,
     },
+    workspace::diff::WorktreeBase,
 };
 use std::sync::Arc;
 use stoat_action::{
@@ -367,6 +368,9 @@ fn a_file_with_only_staged_changes_stops_a_plain_walk_alone() {
         );
         h.stoat.set_diff_warm_auto(true);
         h.open_file(&workdir.join("a.rs"));
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
         h.settle_diff_jobs();
         {
             let editor = focused_editor_mut(&mut h.stoat).expect("editor");
@@ -411,6 +415,9 @@ fn a_latched_pane_hops_past_a_file_with_only_staged_changes() {
     );
     h.stoat.set_diff_warm_auto(true);
     h.open_file(&workdir.join("a.rs"));
+    h.stoat
+        .active_workspace_mut()
+        .set_worktree_base(WorktreeBase::Index);
     h.settle_diff_jobs();
     {
         let ws = h.stoat.active_workspace_mut();
@@ -440,6 +447,9 @@ fn half_staged(diff_view: bool) -> TestHarness {
     );
     h.stoat.set_diff_warm_auto(true);
     h.open_file(&PathBuf::from("/repo/f.txt"));
+    h.stoat
+        .active_workspace_mut()
+        .set_worktree_base(WorktreeBase::Index);
     h.settle_diff_jobs();
     let editor = focused_editor_mut(&mut h.stoat).expect("editor");
     editor.set_diff_view(diff_view);

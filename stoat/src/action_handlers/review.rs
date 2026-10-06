@@ -1586,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_against_index_returns_from_head_to_the_default_base() {
+    fn diff_against_index_returns_from_head_to_the_index() {
         let mut h = half_staged_harness();
         run(&mut h, &stoat_action::DiffAgainstHead);
         run(&mut h, &stoat_action::DiffAgainstIndex);
@@ -1646,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn the_base_toggle_flips_between_the_index_and_head() {
+    fn the_base_toggle_flips_between_head_and_the_index() {
         let mut h = half_staged_harness();
         run(&mut h, &stoat_action::DiffBaseToggle);
         assert_eq!(
@@ -1654,8 +1654,8 @@ mod tests {
                 head_base_and_view(&mut h),
                 h.stoat.pending_message.as_deref()
             ),
-            ((true, false), Some("diff: HEAD → working tree")),
-            "the first press picks HEAD and opens nothing",
+            ((false, false), Some("diff: index → working tree")),
+            "the first press picks the index and opens nothing",
         );
 
         run(&mut h, &stoat_action::DiffBaseToggle);
@@ -1664,8 +1664,8 @@ mod tests {
                 head_base_and_view(&mut h),
                 h.stoat.pending_message.as_deref()
             ),
-            ((false, false), Some("diff: index → working tree")),
-            "the second press returns to the index",
+            ((true, false), Some("diff: HEAD → working tree")),
+            "the second press returns to HEAD",
         );
     }
 
@@ -1674,7 +1674,7 @@ mod tests {
         let mut h = half_staged_harness();
         run(&mut h, &stoat_action::Diff { rev: None });
         run(&mut h, &stoat_action::DiffBaseToggle);
-        assert_eq!(head_base_and_view(&mut h), (true, true));
+        assert_eq!(head_base_and_view(&mut h), (false, true));
     }
 
     /// The first press under a revision lands on the pick with no flip, so one
@@ -1689,10 +1689,10 @@ mod tests {
 
         assert_eq!(
             (
-                h.stoat.active_workspace().diff_base().is_none(),
+                matches!(h.stoat.active_workspace().diff_base(), Some(DiffBase::Head)),
                 h.stoat.pending_message.as_deref(),
             ),
-            (true, Some("diff: index → working tree")),
+            (true, Some("diff: HEAD → working tree")),
         );
     }
 
@@ -1732,7 +1732,7 @@ mod tests {
     fn the_base_edit_seeds_the_palette_with_the_current_base() {
         let mut h = half_staged_harness();
         let mut seeds = vec![base_edit_seed(&mut h)];
-        run(&mut h, &stoat_action::DiffAgainstHead);
+        run(&mut h, &stoat_action::DiffAgainstIndex);
         seeds.push(base_edit_seed(&mut h));
         for base in [
             DiffBase::parent_of("c1", Some("base0".into())),
@@ -1746,8 +1746,8 @@ mod tests {
         assert_eq!(
             seeds,
             [
-                "diff index",
                 "diff HEAD",
+                "diff index",
                 "diff base0",
                 "diff ",
                 "diff main"
@@ -1861,7 +1861,7 @@ mod tests {
         assert_eq!(
             (
                 badge.as_deref(),
-                h.stoat.active_workspace().diff_base().is_none()
+                matches!(h.stoat.active_workspace().diff_base(), Some(DiffBase::Head))
             ),
             (Some("diff pair needs two files in two panes"), true),
         );

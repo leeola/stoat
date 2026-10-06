@@ -78,12 +78,13 @@ pub(crate) struct ChangedRangesScan {
 
 /// What a workspace's buffers diff against, when that is not the index.
 ///
-/// With no override the working tree diffs against its index, and the changes
-/// the index holds over HEAD are staged marks. Reviewing a commit checks it
-/// out and points the diff at the commit's parent, so the base moves off HEAD
-/// while the buffers stay the working tree. An agent's proposed edits have no
-/// commit behind them at all, so they carry their base as text. A pair of files
-/// has no commit behind it either, so it carries the other file's text.
+/// With no displacing base the working tree diffs against HEAD, with the
+/// changes the index holds as staged marks, or against the index when the
+/// reader picks it. Reviewing a commit checks it out and points the diff at the
+/// commit's parent, so the base moves off HEAD while the buffers stay the
+/// working tree. An agent's proposed edits have no commit behind them at all,
+/// so they carry their base as text. A pair of files has no commit behind it
+/// either, so it carries the other file's text.
 #[derive(Clone)]
 pub(crate) enum DiffBase {
     /// The working tree against HEAD, with the index marking which hunks are
@@ -155,16 +156,27 @@ pub(crate) enum RevOrigin {
 /// Which of its two own bases the working tree diffs against, picked by the
 /// reader.
 ///
-/// A revision, a commit review, or an agent proposal displaces the pick while
-/// that base holds. The diff returns to the pick when that base gives way.
+/// HEAD is the default, so a fresh session shows every change since the last
+/// commit. A revision, a commit review, or an agent proposal displaces the
+/// pick while that base holds. The diff returns to the pick when that base
+/// gives way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WorktreeBase {
-    /// The index, with the changes it holds over HEAD as staged marks.
-    #[default]
+    /// The index, with the changes it holds over HEAD as staged marks, for a
+    /// reader who picks only the changes not yet staged.
     Index,
-    /// HEAD, as [`DiffBase::Head`] reads it.
+    /// HEAD, as [`DiffBase::Head`] reads it, with the index marking which
+    /// hunks are staged.
+    #[default]
     Head,
 }
+
+/// The base [`DiffState::effective_base`] answers for the HEAD pick.
+///
+/// A `static` rather than a promoted `&DiffBase::Head`, because the enum
+/// carries a `HashMap` variant and so has drop glue, which blocks rvalue
+/// promotion.
+static HEAD_BASE: DiffBase = DiffBase::Head;
 
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
 /// last one read.
@@ -204,18 +216,20 @@ pub(crate) struct DiffState {
     /// passes, and only a git write turns a path into a rename target, so the
     /// miss is as cacheable as a hit and clears with the rest.
     pub(super) base_text: HashMap<PathBuf, Option<DiffBaseText>>,
-    /// What buffers diff against, `None` for the index.
-    ///
-    /// Holds [`DiffBase::Head`] while the reader's pick is HEAD and no
-    /// revision, review, or proposal displaces it.
+    /// A base that displaces the working tree's pick, `None` while nothing
+    /// does.
     ///
     /// Set through [`super::Workspace::set_diff_base`], which invalidates
     /// every buffer, since a base change moves every diff in the workspace.
+    ///
+    /// See also:
+    /// - [`Self::effective_base`] for the base the buffers diff against.
     pub(super) base_override: Option<DiffBase>,
     /// The base the working tree diffs against when nothing displaces it.
     ///
-    /// [`super::Workspace::set_diff_base`] installs it for `None`, so every
-    /// caller that drops a revision, a review, or a proposal lands on it.
+    /// Every caller that drops a revision, a review, or a proposal lands on
+    /// it, because [`Self::effective_base`] reads it while
+    /// [`Self::base_override`] is `None`.
     pub(super) worktree_base: WorktreeBase,
     /// Parsed trees the structural refinement reuses across settles.
     ///
@@ -266,6 +280,18 @@ pub(crate) struct DiffState {
 }
 
 impl DiffState {
+    /// The base buffers diff against, `None` while the pick is the index and
+    /// nothing displaces it.
+    ///
+    /// A displacing base wins over the pick, and HEAD, the default pick,
+    /// answers [`DiffBase::Head`].
+    pub(super) fn effective_base(&self) -> Option<&DiffBase> {
+        self.base_override.as_ref().or(match self.worktree_base {
+            WorktreeBase::Head => Some(&HEAD_BASE),
+            WorktreeBase::Index => None,
+        })
+    }
+
     /// Force the next drive to recompute `id`'s diff map against fresh blobs,
     /// by dropping its recorded version, any in-flight job, and `path`'s cached
     /// blobs.
@@ -426,7 +452,7 @@ impl DiffState {
         let base = match self.base_text.get(&path) {
             Some(base) => base.clone(),
             None => {
-                let base = resolve_base(&**git_host, git_root, &path, self.base_override.as_ref());
+                let base = resolve_base(&**git_host, git_root, &path, self.effective_base());
                 self.base_text.insert(path.clone(), base.clone());
                 base
             },
@@ -704,7 +730,7 @@ impl DiffState {
                 let syntax_styles = syntax_styles.clone();
                 let base_cache = base_cache.clone();
                 let path = path.clone();
-                let base_override = self.base_override.clone();
+                let diff_base = self.effective_base().cloned();
                 let tree_cache = self.tree_cache.clone();
                 move || {
                     // Materialize the rope only now that the diff is confirmed
@@ -714,7 +740,7 @@ impl DiffState {
                     // the next settle in an untracked buffer walks nothing.
                     let base = match cached_base {
                         Some(base) => base,
-                        None => resolve_base(&*git_host, &git_root, &path, base_override.as_ref()),
+                        None => resolve_base(&*git_host, &git_root, &path, diff_base.as_ref()),
                     };
                     let diff_map = base.as_ref().and_then(|base| {
                         compute_diff_map(
@@ -1813,6 +1839,9 @@ mod tests {
         h.fake_git().add_repo(&workdir).staged_file("a.rs", "x\n");
         h.stoat.set_diff_warm_auto(true);
         h.open_file(&workdir.join("b.rs"));
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
         h.settle_diff_jobs();
         action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
@@ -3035,12 +3064,17 @@ mod tests {
 
     /// The settled diff map of a file whose HEAD holds a/b/c/d, whose index
     /// holds b->B, and whose working tree adds d->D, under `base`.
+    ///
+    /// The working tree's pick is the index, so `None` reads the index.
     fn half_staged_map(base: Option<DiffBase>) -> DiffMap {
         let mut h = TestHarness::with_size(80, 24);
         h.stage_index_scenario(
             "/repo",
             &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
         );
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
         h.stoat.active_workspace_mut().set_diff_base(base);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/f.txt"));
@@ -3060,9 +3094,8 @@ mod tests {
             .collect()
     }
 
-    /// The working tree diffs against its index by default. The index's own
-    /// change is a staged mark beside its base line, and the one hunk is the
-    /// working tree's edit.
+    /// Under the index pick, the index's own change is a staged mark beside its
+    /// base line, and the one hunk is the working tree's edit.
     #[test]
     fn an_index_base_reads_the_index_hunk_as_a_staged_mark() {
         let dm = half_staged_map(None);
@@ -3111,6 +3144,9 @@ mod tests {
         }
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/new.rs"));
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
         h.settle_diff_jobs();
 
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
