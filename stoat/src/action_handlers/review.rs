@@ -2465,6 +2465,40 @@ mod tests {
             "and adds nothing: {patch}"
         );
     }
+
+    /// The change walk lands a deletion on the row the staging keys read it
+    /// from, so a stage press right after the walk takes the deletion.
+    #[test]
+    fn walking_to_a_deletion_then_staging_removes_it() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nGONE\nc\nd\n", "a\nb\nc\nd\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 0);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(
+            crate::test_harness::editor::focused_cursor_point(&mut h.stoat).row,
+            2,
+            "the walk lands on the row after the removed line"
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        assert!(
+            patches[0].contains("-GONE\n"),
+            "removes the base line: {}",
+            patches[0]
+        );
+    }
+
     #[test]
     fn stage_hunk_applies_the_forward_patch_for_the_cursor_hunk() {
         let mut h = TestHarness::with_size(80, 14);

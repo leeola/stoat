@@ -4244,9 +4244,10 @@ fn landed_display_span(
 /// Display rows a stop's buffer `rows` cover, exclusive end.
 ///
 /// A deletion stop holds no buffer rows of its own, so it brackets its seam.
-/// The span runs from the row it landed on through the row after the seam. The
-/// diff view's spliced block sits between those two buffer rows, so the mapped
-/// span covers the removed lines without this reading the block structure.
+/// The span runs from the row above the removed block through the seam row the
+/// stop lands on. The diff view's spliced block sits between those two buffer
+/// rows, so the mapped span covers the removed lines without this reading the
+/// block structure.
 pub(super) fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -> Range<u32> {
     let display_row = |row: u32| snapshot.buffer_to_display(Point::new(row, 0)).row;
     match rows.is_empty() {
@@ -4303,10 +4304,9 @@ pub(super) fn departure_stop(
 /// its start, which is what steps out of the hunk the cursor is already inside
 /// instead of landing on that one again.
 ///
-/// A deletion hunk stores no rows, and [`hunk_span`] lands it on the row above
-/// its seam, so both arms read that row as the one it occupies. A step forward
-/// off a removal the cursor already sits on passes over it, and a step back
-/// from the seam row lands on it.
+/// A deletion hunk stores no rows and occupies its seam row, the row
+/// [`hunk_span`] lands it on. A step forward off that row passes over it, and a
+/// step back from the row below lands on it.
 ///
 /// Both arms split the list at a boundary rather than filter it. The stops a
 /// direction keeps are a run at one end, because the landing row rises across
@@ -4323,19 +4323,18 @@ fn walk_split(hunk_rows: &[Range<u32>], cursor_row: u32, dir: ChangeDir) -> usiz
     match dir {
         ChangeDir::Next => hunk_rows.partition_point(|r| landing_row(r) <= cursor_row),
         ChangeDir::Prev => hunk_rows.partition_point(|r| match r.is_empty() {
-            true => r.start.saturating_sub(1) < cursor_row,
+            true => r.start < cursor_row,
             false => r.end <= cursor_row,
         }),
     }
 }
 
-/// Row a stop puts the cursor on. A deletion holds no rows of its own, so it
-/// lands on the row above the removal.
+/// Row a stop puts the cursor on.
+///
+/// A deletion holds no rows of its own and lands on its seam row, the first row
+/// after the removed lines, where the gutter paints its mark.
 fn landing_row(rows: &Range<u32>) -> u32 {
-    match rows.is_empty() {
-        true => rows.start.saturating_sub(1),
-        false => rows.start,
-    }
+    rows.start
 }
 
 /// Row ranges change navigation stops on, in document order.
@@ -4432,14 +4431,14 @@ fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
 /// Byte span a stop's rows cover, from the first row through the start of the
 /// row after the last.
 ///
-/// A deletion stop holds no rows, so it gets one cell on the row above its
-/// seam. The block cursor has no place to sit in an empty span, and the diff
-/// view splices the deleted block above the seam, so the row above is the last
-/// line the removed text followed. A removal at the top of the file saturates
-/// to row 0.
+/// A deletion stop holds no rows, so it gets one cell on its seam row, the
+/// first row after the removed lines. The block cursor has no place to sit in
+/// an empty span, and the diff view splices the deleted block directly above
+/// the seam row. A removal of a file's last lines with no trailing newline has
+/// its seam row past the last row, so the cell clamps to the last row.
 fn hunk_span(rope: &Rope, rows: Range<u32>) -> Range<usize> {
     let first_row = match rows.is_empty() {
-        true => rows.start.saturating_sub(1),
+        true => rows.start.min(rope.max_point().row),
         false => rows.start,
     };
     let start = rope.point_to_offset(Point::new(first_row, 0));
@@ -4769,10 +4768,10 @@ fn first_hunk_stop(
     // runs and buffer_start_line are both stored coordinates, which is the
     // space this answer travels in, so reading them here needs no shift.
     let stop_row = |hunk: &diff_map::DiffHunk, last: bool| {
-        // A deletion covers no rows and lands on the one above its seam, which
-        // is where the in-file walk puts one through hunk_span.
+        // A deletion covers no rows and lands on its seam row, as the in-file
+        // walk does through hunk_span.
         if hunk.buffer_line_range.is_empty() {
-            return hunk.buffer_start_line.saturating_sub(1);
+            return hunk.buffer_start_line;
         }
         match last {
             true => hunk
@@ -4806,7 +4805,7 @@ fn first_hunk_stop(
 /// text that `hunks` were diffed against.
 ///
 /// A mark lands on its first row. An empty one is a staged deletion, which
-/// lands on the row above it the way a deletion hunk does.
+/// lands on its seam row the way a deletion hunk does.
 fn staged_mark_stops(
     from: &str,
     base: &str,
@@ -4825,10 +4824,7 @@ fn staged_mark_stops(
 
     diff_map::staged_mark_rows(&placed, &diff_map::staged_marks(from, base))
         .into_iter()
-        .map(|(rows, _)| match rows.is_empty() {
-            true => (rows.start.saturating_sub(1), rows),
-            false => (rows.start, rows),
-        })
+        .map(|(rows, _)| (rows.start, rows))
         .collect()
 }
 

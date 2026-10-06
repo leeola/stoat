@@ -74,11 +74,11 @@ fn shrink_containment_refuses_interleaved_ranges() {
     );
 }
 
-/// A deletion holds no rows, so it lands on the row above the removal and
-/// shares that row with whatever hunk owns it. The step forward reads the
-/// shared row as occupied and passes over the deletion, and the step back
-/// reads it as behind and lands on it, which is the pair a split of the list
-/// has to answer the same way a scan of every stop did.
+/// A deletion holds no rows, so it lands on its seam row, the first row after
+/// the removed lines. The step forward reads that row as occupied and passes
+/// over the deletion, and the step back from the row below reads it as behind
+/// and lands on it, which is the pair a split of the list has to answer the
+/// same way a scan of every stop did.
 #[test]
 fn a_change_step_lands_the_stop_the_count_reaches() {
     let stops = [2..5, 7..7, 9..12, 15..16, 20..24];
@@ -93,6 +93,11 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
     );
     assert_eq!(
         next(6, 1),
+        Some(7..7),
+        "a step from the row above a deletion lands it",
+    );
+    assert_eq!(
+        next(7, 1),
         Some(9..12),
         "a step off a deletion's own row passes over it",
     );
@@ -101,7 +106,16 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
     assert_eq!(next(21, 1), None, "a step past the last lands nothing");
 
     assert_eq!(prev(22, 1), Some(15..16), "a step back leaves its own hunk");
-    assert_eq!(prev(7, 1), Some(7..7), "a step back from a seam lands it");
+    assert_eq!(
+        prev(7, 1),
+        Some(2..5),
+        "a step back from a deletion's own row leaves it",
+    );
+    assert_eq!(
+        prev(8, 1),
+        Some(7..7),
+        "a step back from below the seam lands it"
+    );
     assert_eq!(prev(20, 3), Some(7..7), "a count back reaches the deletion");
     assert_eq!(prev(0, 1), None, "a step back from the first lands nothing");
 
@@ -209,8 +223,9 @@ fn next_change_walks_past_a_landing_free_file_to_the_one_beyond_it() {
 }
 
 /// A file gone from the working tree diffs its base against nothing, which is
-/// a whole-file removal. A removal covers no rows, so the landing is the row
-/// above it, row 0 here. The file is reachable rather than skipped.
+/// a whole-file removal. A removal covers no rows and lands on its seam row,
+/// which is row 0 of the empty buffer. The file is reachable rather than
+/// skipped.
 ///
 /// A staged removal also took the file out of the index, which leaves the
 /// base empty and the removal a staged mark against HEAD behind it.
@@ -6640,23 +6655,23 @@ fn a_reversal_alternates_between_neighbor_hunks() {
     );
 }
 
-/// A deletion removed the rows it covers, so it holds none of its own. The
-/// diff view splices the removed block above the seam row, so the cell that
-/// stands for it is the line the removed text followed rather than the line
-/// that closed over it.
+/// A deletion removed the rows it covers, so it holds none of its own. The cell
+/// that stands for it is on its seam row, the first row after the removed
+/// lines, where the gutter paints the deletion mark and the staging keys read
+/// it.
 #[test]
-fn goto_next_change_selects_one_cell_above_a_deletion() {
+fn goto_next_change_selects_one_cell_on_a_deletion_seam_row() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
     h.open_file(&path);
     install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
 
     h.type_keys("] g");
-    assert_eq!(h.selection_spans(), vec![(4, 5, true)]);
+    assert_eq!(h.selection_spans(), vec![(6, 7, true)]);
 }
 
-/// A removal at the top of the file has no line before it, so its landing
-/// saturates onto the first row rather than wrapping to the file's end.
+/// A removal at the top of the file has row 0 as its seam row, so it lands on
+/// the first row.
 #[test]
 fn goto_next_change_lands_a_top_of_file_deletion_on_row_zero() {
     let mut h = TestHarness::with_size(20, 10);
@@ -6669,9 +6684,10 @@ fn goto_next_change_lands_a_top_of_file_deletion_on_row_zero() {
     assert_eq!(h.selection_spans(), vec![(0, 1, true)]);
 }
 
-/// The walk reads a removal as occupying the row it lands on, so a step off
-/// that row passes over it and a step back from the seam row reaches it. Both
-/// arms have to agree with the landing or a press re-lands where it started.
+/// The walk reads a removal as occupying its seam row, the row it lands on, so
+/// a step off that row passes over it and a step back from the row below
+/// reaches it. Both arms have to agree with the landing or a press re-lands
+/// where it started.
 #[test]
 fn the_change_walk_reads_a_deletion_as_the_row_it_lands_on() {
     let mut h = TestHarness::with_size(20, 10);
@@ -6679,19 +6695,19 @@ fn the_change_walk_reads_a_deletion_as_the_row_it_lands_on() {
     h.open_file(&path);
     install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
 
-    set_range(&mut h, 4, 5);
+    set_range(&mut h, 6, 7);
     h.type_keys("] g");
     let off_the_landing = h.selection_spans();
 
-    set_range(&mut h, 6, 7);
+    set_range(&mut h, 8, 9);
     h.type_keys("[ g");
-    let back_from_the_seam = h.selection_spans();
+    let back_from_below = h.selection_spans();
 
     assert_eq!(
-        (off_the_landing, back_from_the_seam),
-        (vec![(12, 14, true)], vec![(4, 5, true)]),
-        "a step forward off the removal reaches the next hunk, and a step back \
-         from the row it was removed above reaches the removal",
+        (off_the_landing, back_from_below),
+        (vec![(12, 14, true)], vec![(6, 7, true)]),
+        "a step forward off the seam row reaches the next hunk, and a step back \
+         from the row below the seam reaches the removal",
     );
 }
 
