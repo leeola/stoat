@@ -787,7 +787,8 @@ pub struct Stoat {
     pub(crate) diff_soften: i8,
     /// How far the diff view shifts a changed row toward its status color, as
     /// a level [`crate::render::review::diff_tint_amount`] turns into a
-    /// fraction. Level 0 is off, and the ctrl-9 and ctrl-0 chords step it.
+    /// fraction. Level 0 is off, and [`stoat_action::DiffTintDown`] and
+    /// [`stoat_action::DiffTintUp`] step it.
     ///
     /// The whole row moves, not only the chars the refinement matched, so an
     /// unchanged token on an added line reads added rather than keeping the
@@ -825,8 +826,8 @@ pub struct Stoat {
     /// any theme, so weight marks each change as well as the receding and the
     /// tint do.
     ///
-    /// The ctrl-7 chord is the only writer, and it answers only on a diff
-    /// surface.
+    /// [`stoat_action::DiffBold`] is the only writer, and it answers only on a
+    /// diff surface.
     ///
     /// Session-scoped and deliberately not persisted, for the same reason as
     /// [`Self::diff_soften`]. It answers what is on screen right now.
@@ -840,8 +841,8 @@ pub struct Stoat {
     /// underlines every span, so a change stays marked when its color does not
     /// stand out.
     ///
-    /// The ctrl-6 chord is the only writer, and it answers only on a diff
-    /// surface.
+    /// [`stoat_action::DiffUnderline`] is the only writer, and it answers only
+    /// on a diff surface.
     ///
     /// Session-scoped and deliberately not persisted, for the same reason as
     /// [`Self::diff_soften`]. It answers what is on screen right now.
@@ -3025,25 +3026,26 @@ impl Stoat {
         mouse::scroll_view_at(self, view, area, lines)
     }
 
-    /// Act on a platform-modifier digit chord.
+    /// Run what the keymap binds to a platform-modifier digit chord.
     ///
-    /// The terminal forwards a chord on the zoom claim rather than on what is
-    /// on screen, so it arrives whatever the user has in front of them, and
-    /// each arm defends its own scope. A digit no arm claims changes nothing,
-    /// which is what leaves it to the keymap on the in-band path.
+    /// The keymap decides what a chord does, so the help and the key hints
+    /// list a chord as they list any other key. The chord resolves as super
+    /// plus the digit, which a `Cmd` binding names. The terminal forwards a
+    /// chord whatever is on screen, so the binding's guard is what scopes it,
+    /// and a digit no binding claims changes nothing.
     ///
     /// Shared by both deliveries. The window socket carries a chord as its own
     /// event, while an in-band claim spells it as super plus the digit down the
-    /// pty, and the two must not drift apart.
+    /// pty. Both reach the lookup here, so the two do not drift apart.
     fn handle_chord(&mut self, ch: char) -> UpdateEffect {
-        match ch {
-            '6' => self.handle_diff_underline_toggle(),
-            '7' => self.handle_diff_bold_toggle(),
-            '8' => self.handle_diff_syntax_toggle(),
-            '9' => self.handle_diff_tint_step(-1),
-            '0' => self.handle_diff_tint_step(1),
-            _ => UpdateEffect::None,
-        }
+        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SUPER);
+        let Some((actions, captured_digit)) = self
+            .keymap_lookup(&key, &mut KeymapLookup::default())
+            .clone()
+        else {
+            return UpdateEffect::None;
+        };
+        self.run_bound_actions(&actions, captured_digit, false)
     }
 
     /// Flip the syntax coloring of whichever diff surface is on screen, or do
@@ -3053,11 +3055,10 @@ impl Stoat {
     /// their rows through the same painter and read the same flag. One key
     /// therefore means one thing wherever a diff is in front of the reader.
     ///
-    /// The chord reaches here whatever is on screen, because the terminal
-    /// forwards it on the zoom claim rather than on what the program is
-    /// showing. Elsewhere there is nothing to toggle, so the flag holds and the
-    /// frame is left alone.
-    fn handle_diff_syntax_toggle(&mut self) -> UpdateEffect {
+    /// Backs [`stoat_action::DiffSyntax`], which the command line runs
+    /// whatever is on screen. Elsewhere there is nothing to toggle, so the flag
+    /// holds and the frame is left alone.
+    pub(crate) fn handle_diff_syntax_toggle(&mut self) -> UpdateEffect {
         if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
@@ -3068,9 +3069,10 @@ impl Stoat {
     /// Flip the bold of every change span on whichever diff surface is on
     /// screen, or do nothing where none is.
     ///
-    /// The chord arrives whatever is on screen, so the flag defends its own
-    /// scope exactly as [`Self::handle_diff_syntax_toggle`] does.
-    fn handle_diff_bold_toggle(&mut self) -> UpdateEffect {
+    /// Backs [`stoat_action::DiffBold`]. The command line runs it whatever is
+    /// on screen, so the flag defends its own scope exactly as
+    /// [`Self::handle_diff_syntax_toggle`] does.
+    pub(crate) fn handle_diff_bold_toggle(&mut self) -> UpdateEffect {
         if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
@@ -3081,9 +3083,10 @@ impl Stoat {
     /// Flip the underline of every change span on whichever diff surface is on
     /// screen, or do nothing where none is.
     ///
-    /// The chord arrives whatever is on screen, so the flag defends its own
-    /// scope exactly as [`Self::handle_diff_syntax_toggle`] does.
-    fn handle_diff_underline_toggle(&mut self) -> UpdateEffect {
+    /// Backs [`stoat_action::DiffUnderline`]. The command line runs it
+    /// whatever is on screen, so the flag defends its own scope exactly as
+    /// [`Self::handle_diff_syntax_toggle`] does.
+    pub(crate) fn handle_diff_underline_toggle(&mut self) -> UpdateEffect {
         if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
@@ -3106,12 +3109,13 @@ impl Stoat {
     /// Step the tint dial by `delta` levels on whichever diff surface is on
     /// screen, or do nothing where none is.
     ///
+    /// Backs [`stoat_action::DiffTintDown`] and [`stoat_action::DiffTintUp`].
     /// Off a diff surface there is no tint to step, so the level holds and the
     /// frame is left alone, exactly as [`Self::handle_diff_syntax_toggle`]
     /// answers there. The level is clamped rather than saturated, so a press
     /// past either end is remembered as the end itself and the next press the
     /// other way moves the paint immediately.
-    fn handle_diff_tint_step(&mut self, delta: i32) -> UpdateEffect {
+    pub(crate) fn handle_diff_tint_step(&mut self, delta: i32) -> UpdateEffect {
         if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
@@ -4913,9 +4917,10 @@ impl Stoat {
         // not, and the keymap would resolve `=` or `-` to whatever the mode
         // binds, which in insert mode is typing the character.
         //
-        // Only the five digits the chord handler acts on. Any other
-        // super-digit falls to the keymap, which binds none, so both deliveries
-        // ignore it alike.
+        // Only the five digits the shipped config binds as diff chords. Any
+        // other super-digit falls to the keymap below, the same lookup the
+        // socket delivery reaches through the chord handler, so both deliveries
+        // treat it alike.
         //
         // Exactly super, not super among others. That is what the host writes,
         // and a press carrying more is a different chord the keymap should get.

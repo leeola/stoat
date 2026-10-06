@@ -106,10 +106,11 @@ use crate::{
         },
         review::{
             Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit, DiffBaseToggle,
-            DiffForward, DiffPair, DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget,
-            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
-            ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
-            ToggleStageLine, UnstageHunk, UnstageLine,
+            DiffBold, DiffForward, DiffPair, DiffSyntax, DiffTintDown, DiffTintUp, DiffUnderline,
+            DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
+            JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone, ReviewNextCommit,
+            ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk, ToggleStageLine, UnstageHunk,
+            UnstageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -324,6 +325,11 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(Diff { rev }))
     });
     add(DiffWheelWalk::DEF, |_| Ok(Box::new(DiffWheelWalk)));
+    add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
+    add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
+    add(DiffSyntax::DEF, |_| Ok(Box::new(DiffSyntax)));
+    add(DiffTintDown::DEF, |_| Ok(Box::new(DiffTintDown)));
+    add(DiffTintUp::DEF, |_| Ok(Box::new(DiffTintUp)));
     add(DiffAgainstIndex::DEF, |_| Ok(Box::new(DiffAgainstIndex)));
     add(DiffAgainstHead::DEF, |_| Ok(Box::new(DiffAgainstHead)));
     add(DiffBaseToggle::DEF, |_| Ok(Box::new(DiffBaseToggle)));
@@ -1354,6 +1360,11 @@ mod tests {
         "FollowChanges",
         "LiveReload",
         "DiffWheelWalk",
+        "DiffUnderline",
+        "DiffBold",
+        "DiffSyntax",
+        "DiffTintDown",
+        "DiffTintUp",
         "DiffAgainstIndex",
         "DiffAgainstHead",
         "DiffBaseToggle",
@@ -1876,7 +1887,8 @@ mod tests {
         // + 1 DiffBaseToggle.
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
-        assert_eq!(all().count(), 432);
+        // + 5 the diff styling dials.
+        assert_eq!(all().count(), 437);
     }
 
     #[test]

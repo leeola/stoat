@@ -423,9 +423,13 @@ mod tests {
         action_caps, group_by_action, render_hints_grouped, HintsCache, HintsFooter, LaidCell,
     };
     use crate::{
+        action_handlers,
+        keymap::CompiledKey,
+        test_harness::TestHarness,
         theme::Theme,
         toggle::{Toggle, ToggleStates},
     };
+    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn row_text(buf: &Buffer, y: u16) -> String {
@@ -668,5 +672,58 @@ mod tests {
 
         let painted = (0..buf.area.height).any(|y| !row_text(&buf, y).trim().is_empty());
         assert!(!painted, "a box too wide for the area paints nothing");
+    }
+
+    /// A dial binding names a view, so the box lists the five chords beside
+    /// the other context keys of a diff surface, and none of them on a plain
+    /// pane, where no dial answers.
+    #[test]
+    fn the_hints_box_lists_the_diff_chords_on_a_diff_surface() {
+        const DIALS: [(char, &str); 5] = [
+            ('6', "toggle underline on diff change spans"),
+            ('7', "toggle bold on diff change spans"),
+            ('8', "toggle syntax colors in the diff view"),
+            ('9', "lower the diff tint"),
+            ('0', "raise the diff tint"),
+        ];
+        let mut h = TestHarness::default();
+        h.stoat.key_hints_visible = true;
+        let mut dial_rows = |diff_view: bool| {
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .set_diff_view(diff_view);
+            h.snapshot();
+            h.stoat
+                .hints_cache
+                .as_ref()
+                .expect("the hints box laid out its rows")
+                .rows
+                .iter()
+                .filter(|row| DIALS.iter().any(|(_, action)| row.action == *action))
+                .map(|row| (row.keys.clone(), row.action.clone()))
+                .collect::<Vec<_>>()
+        };
+        let chord_label = |digit| {
+            CompiledKey {
+                code: KeyCode::Char(digit),
+                modifiers: KeyModifiers::SUPER,
+                any_digit: false,
+                wheel: None,
+                side_button: None,
+            }
+            .display_label()
+        };
+
+        assert_eq!(
+            (dial_rows(true), dial_rows(false)),
+            (
+                DIALS
+                    .iter()
+                    .map(|&(digit, action)| (chord_label(digit), action.to_string()))
+                    .collect::<Vec<_>>(),
+                Vec::new(),
+            ),
+            "the diff view lists each dial under its chord, and a plain pane lists none"
+        );
     }
 }

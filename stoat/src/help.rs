@@ -520,7 +520,10 @@ pub fn format_arg(arg: &ResolvedArg) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_harness::{keys, TestHarness};
+    use crate::{
+        keymap::CompiledKey,
+        test_harness::{keys, TestHarness},
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn active_binding(label: &str, action_name: &str) -> (String, Vec<ResolvedAction>) {
@@ -717,6 +720,32 @@ mod tests {
         open_help_with(&mut h, sample_active());
         type_str(&mut h, "j");
         assert!(filtered_names(&h).contains(&"MoveDown"));
+    }
+
+    /// A dial chord is a binding like any other, so the label of the key the
+    /// user presses finds it on the diff view.
+    #[test]
+    fn a_diff_chord_is_found_by_its_key_label() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+
+        let label = CompiledKey {
+            code: KeyCode::Char('8'),
+            modifiers: KeyModifiers::SUPER,
+            any_digit: false,
+            wheel: None,
+            side_button: None,
+        }
+        .display_label();
+        type_str(&mut h, &label);
+        assert_eq!(
+            filtered_names(&h),
+            ["DiffSyntax"],
+            "{label} names the syntax dial and nothing else"
+        );
     }
 
     #[test]

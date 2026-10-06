@@ -72,6 +72,79 @@ define_action!(
 );
 
 define_action!(
+    DiffUnderlineDef,
+    DiffUnderline,
+    "DiffUnderline",
+    ActionKind::DiffUnderline,
+    "toggle underline on diff change spans",
+    "Toggle the underline on every change span in the diff view and on the \
+     commits screen. While off, a span underlines only on a theme that does \
+     not blend and on a changed part of a string or a comment. The dial \
+     lasts for the session and starts off. The shipped chord is Ctrl-6, or \
+     Cmd-6 on macOS.",
+    ActionPriority::Normal,
+    command_name = "diff-underline"
+);
+
+define_action!(
+    DiffBoldDef,
+    DiffBold,
+    "DiffBold",
+    ActionKind::DiffBold,
+    "toggle bold on diff change spans",
+    "Toggle the bold on every change span in the diff view and on the \
+     commits screen. While off, only a replacement inside a string, a \
+     comment, or a file with no grammar bolds. The dial lasts for the \
+     session and starts off. The shipped chord is Ctrl-7, or Cmd-7 on macOS.",
+    ActionPriority::Normal,
+    command_name = "diff-bold"
+);
+
+define_action!(
+    DiffSyntaxDef,
+    DiffSyntax,
+    "DiffSyntax",
+    ActionKind::DiffSyntax,
+    "toggle syntax colors in the diff view",
+    "Toggle the syntax colors in both columns of the diff view and on the \
+     commits screen. While off, the receding and the bold are the only marks \
+     of a change. The dial lasts for the session and starts on. The shipped \
+     chord is Ctrl-8, or Cmd-8 on macOS.",
+    ActionPriority::Normal,
+    command_name = "diff-syntax"
+);
+
+define_action!(
+    DiffTintDownDef,
+    DiffTintDown,
+    "DiffTintDown",
+    ActionKind::DiffTintDown,
+    "lower the diff tint",
+    "Lower the diff tint by one level in the diff view and on the commits \
+     screen. The tint shifts a changed row toward its status color and \
+     drains the color out of the rows around it. Level 0 is off, and a step \
+     below it holds there. The level lasts for the session and starts off. \
+     The shipped chord is Ctrl-9, or Cmd-9 on macOS.",
+    ActionPriority::Normal,
+    command_name = "diff-tint-down"
+);
+
+define_action!(
+    DiffTintUpDef,
+    DiffTintUp,
+    "DiffTintUp",
+    ActionKind::DiffTintUp,
+    "raise the diff tint",
+    "Raise the diff tint by one level in the diff view and on the commits \
+     screen. The tint shifts a changed row toward its status color and \
+     drains the color out of the rows around it. A step past the top level \
+     holds there. The level lasts for the session and starts off. The \
+     shipped chord is Ctrl-0, or Cmd-0 on macOS.",
+    ActionPriority::Normal,
+    command_name = "diff-tint-up"
+);
+
+define_action!(
     DiffAgainstIndexDef,
     DiffAgainstIndex,
     "DiffAgainstIndex",

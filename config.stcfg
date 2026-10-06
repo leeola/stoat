@@ -885,6 +885,16 @@ on key {
         # The handler reads the mode itself, so the same action extends here.
         . -> [GotoLastModification(), SetMode(select)];
     }
+    # The diff styling dials, which the diff view binds again below with the
+    # reason for Cmd. The commits screen shares them, because its preview
+    # paints rows with the diff view's painter.
+    view == commits {
+        Cmd-6 -> DiffUnderline();
+        Cmd-7 -> DiffBold();
+        Cmd-8 -> DiffSyntax();
+        Cmd-9 -> DiffTintDown();
+        Cmd-0 -> DiffTintUp();
+    }
     view == commits && mode == normal {
         Escape -> CloseCommits();
         q -> CloseCommits();
@@ -964,6 +974,16 @@ on key {
         s -> RebaseConflictSkipEntry();
         Enter -> RebaseConflictApply();
         : -> OpenCommandPalette();
+    }
+    # The diff styling dials. stoatty sends the platform modifier, Ctrl or Cmd
+    # on macOS, as super, which a Cmd binding names, so one binding serves each
+    # platform. No mode guard, because a dial acts on the screen in any mode.
+    view == diff {
+        Cmd-6 -> DiffUnderline();
+        Cmd-7 -> DiffBold();
+        Cmd-8 -> DiffSyntax();
+        Cmd-9 -> DiffTintDown();
+        Cmd-0 -> DiffTintUp();
     }
     # Two atoms against the normal block's one, so the diff view walks changes
     # where a plain buffer walks functions.
