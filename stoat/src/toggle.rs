@@ -18,6 +18,9 @@ pub(crate) enum Toggle {
     FollowChanges,
     LiveReload,
     DiffWheelWalk,
+    DiffUnderline,
+    DiffBold,
+    DiffSyntax,
     KeyHints,
     SyntaxHighlight,
     LspStatus,
@@ -32,10 +35,13 @@ pub(crate) enum Toggle {
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 13] = [
+    pub(crate) const ALL: [Toggle; 16] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
         Toggle::DiffWheelWalk,
+        Toggle::DiffUnderline,
+        Toggle::DiffBold,
+        Toggle::DiffSyntax,
         Toggle::KeyHints,
         Toggle::SyntaxHighlight,
         Toggle::LspStatus,
@@ -55,6 +61,9 @@ impl Toggle {
             ActionKind::FollowChanges => Toggle::FollowChanges,
             ActionKind::LiveReload => Toggle::LiveReload,
             ActionKind::DiffWheelWalk => Toggle::DiffWheelWalk,
+            ActionKind::DiffUnderline => Toggle::DiffUnderline,
+            ActionKind::DiffBold => Toggle::DiffBold,
+            ActionKind::DiffSyntax => Toggle::DiffSyntax,
             ActionKind::ToggleKeyHints => Toggle::KeyHints,
             ActionKind::ToggleSyntaxHighlight => Toggle::SyntaxHighlight,
             ActionKind::ToggleLspStatus => Toggle::LspStatus,
@@ -79,6 +88,9 @@ impl Toggle {
             Toggle::FollowChanges => stoat.follow_changes,
             Toggle::LiveReload => stoat.live_reload,
             Toggle::DiffWheelWalk => stoat.diff_wheel_walk,
+            Toggle::DiffUnderline => stoat.diff_underline,
+            Toggle::DiffBold => stoat.diff_bold,
+            Toggle::DiffSyntax => stoat.diff_syntax,
             Toggle::KeyHints => stoat.key_hints_visible,
             Toggle::SyntaxHighlight => stoat.syntax_highlight,
             Toggle::LspStatus => stoat.lsp_status_pinned,
@@ -203,6 +215,29 @@ mod tests {
         );
     }
 
+    /// The underline, bold, and syntax dials each flip a flag, so their rows
+    /// carry a mark. A tint step moves a level of three states, so it flips no
+    /// toggle.
+    #[test]
+    fn a_diff_dial_binding_reads_as_its_toggle() {
+        assert_eq!(
+            [
+                binding_toggle(&[action("DiffUnderline")]),
+                binding_toggle(&[action("DiffBold")]),
+                binding_toggle(&[action("DiffSyntax")]),
+                binding_toggle(&[action("DiffTintDown")]),
+                binding_toggle(&[action("DiffTintUp")]),
+            ],
+            [
+                Some(Toggle::DiffUnderline),
+                Some(Toggle::DiffBold),
+                Some(Toggle::DiffSyntax),
+                None,
+                None,
+            ],
+        );
+    }
+
     #[test]
     fn toggle_states_read_the_session_flags() {
         let mut h = Stoat::test();
@@ -210,6 +245,7 @@ mod tests {
             on(&h.stoat),
             [
                 Toggle::DiffWheelWalk,
+                Toggle::DiffSyntax,
                 Toggle::SyntaxHighlight,
                 Toggle::Wrap,
                 Toggle::Minimap,
@@ -219,6 +255,9 @@ mod tests {
 
         h.stoat.follow_changes = true;
         h.stoat.live_reload = true;
+        h.stoat.diff_underline = true;
+        h.stoat.diff_bold = true;
+        h.stoat.diff_syntax = false;
         h.stoat.inlay_hints_enabled = true;
         assert_eq!(
             on(&h.stoat),
@@ -226,6 +265,8 @@ mod tests {
                 Toggle::FollowChanges,
                 Toggle::LiveReload,
                 Toggle::DiffWheelWalk,
+                Toggle::DiffUnderline,
+                Toggle::DiffBold,
                 Toggle::SyntaxHighlight,
                 Toggle::InlayHints,
                 Toggle::Wrap,
@@ -249,6 +290,7 @@ mod tests {
             on(&h.stoat),
             [
                 Toggle::DiffWheelWalk,
+                Toggle::DiffSyntax,
                 Toggle::SyntaxHighlight,
                 Toggle::DiffView,
                 Toggle::PaneWiden,
