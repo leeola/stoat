@@ -492,11 +492,11 @@ fn lsp_symbol_kind(token_type: &str) -> Option<LspSymbolKind> {
         "type" | "class" | "struct" | "enum" | "union" | "typeAlias" | "builtinType"
         | "typeParameter" | "selfTypeKeyword" => LspSymbolKind::Type,
         "function" | "method" => LspSymbolKind::Function,
-        "variable" | "parameter" | "property" | "enumMember" | "constParameter" | "selfKeyword" => {
-            LspSymbolKind::Value
-        },
+        "variable" | "parameter" | "property" | "enumMember" | "constParameter" | "selfKeyword"
+        | "const" | "static" => LspSymbolKind::Value,
         "namespace"
         | "macro"
+        | "procMacro"
         | "decorator"
         | "event"
         | "derive"
@@ -695,6 +695,8 @@ fn apply_semantic_tokens(
 mod tests {
     use super::*;
     use crate::{
+        keymap::{KeymapState, StateValue},
+        keymap_state::StoatKeymapState,
         lsp::sync,
         test_fixture::{open_buffer, open_stcfg_with_server, seed},
         test_harness::TestHarness,
@@ -762,12 +764,17 @@ mod tests {
         assert_eq!(lsp_symbol_kind("enum"), Some(LspSymbolKind::Type));
         assert_eq!(lsp_symbol_kind("method"), Some(LspSymbolKind::Function));
         assert_eq!(lsp_symbol_kind("parameter"), Some(LspSymbolKind::Value));
+        assert_eq!(lsp_symbol_kind("const"), Some(LspSymbolKind::Value));
+        assert_eq!(lsp_symbol_kind("static"), Some(LspSymbolKind::Value));
         assert_eq!(lsp_symbol_kind("namespace"), Some(LspSymbolKind::Symbol));
+        assert_eq!(lsp_symbol_kind("procMacro"), Some(LspSymbolKind::Symbol));
         assert_eq!(lsp_symbol_kind("keyword"), None);
         assert_eq!(lsp_symbol_kind("string"), None);
     }
 
-    fn enable_semantic_tokens(h: &TestHarness) {
+    /// [`enable_semantic_tokens`] with `legend` as the server's token types,
+    /// so a test sends a type that the one-type legend lacks.
+    fn enable_semantic_tokens_with_legend(h: &TestHarness, legend: &[&'static str]) {
         use lsp_types::{
             SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
             SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
@@ -776,7 +783,7 @@ mod tests {
             semantic_tokens_provider: Some(
                 SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
                     legend: SemanticTokensLegend {
-                        token_types: vec![SemanticTokenType::new("function")],
+                        token_types: legend.iter().copied().map(SemanticTokenType::new).collect(),
                         token_modifiers: vec![],
                     },
                     full: Some(SemanticTokensFullOptions::Bool(true)),
@@ -786,6 +793,10 @@ mod tests {
             ),
             ..Default::default()
         });
+    }
+
+    fn enable_semantic_tokens(h: &TestHarness) {
+        enable_semantic_tokens_with_legend(h, &["function"]);
     }
 
     /// [`enable_semantic_tokens`] with the server also advertising that it
@@ -1033,6 +1044,49 @@ mod tests {
         h.advance_clock(Duration::from_millis(550));
         assert_eq!(lsp_token_count(&mut h), 1);
         h.assert_snapshot("semantic_tokens_recolor");
+    }
+
+    /// The hover and the other token-guarded LSP keys bind only where the
+    /// cursor's token carries a symbol kind, so a const needs one.
+    #[test]
+    fn a_const_token_binds_the_token_guard() {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens_with_legend(&h, &["const"]);
+        let root = seed(&mut h, &[("main.rs", "const X: u32 = 1;\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![SemanticToken {
+                    delta_line: 0,
+                    delta_start: 6,
+                    length: 1,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                }],
+            }),
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        action_handlers::movement::jump_to_offset(&mut h.stoat, 6);
+
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .lsp_symbol_kind_at(buffer_id, 6),
+            Some(Some(LspSymbolKind::Value)),
+        );
+        assert_eq!(
+            StoatKeymapState::from_stoat(&h.stoat).get("token"),
+            Some(&StateValue::String("value".into())),
+        );
     }
 
     /// Every editor viewing the buffer installs the one channel the reply
