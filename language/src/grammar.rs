@@ -8,6 +8,7 @@ unsafe extern "C" {
     fn tree_sitter_rust() -> *const ();
     fn tree_sitter_json() -> *const ();
     fn tree_sitter_toml() -> *const ();
+    fn tree_sitter_yaml() -> *const ();
     fn tree_sitter_markdown() -> *const ();
     fn tree_sitter_markdown_inline() -> *const ();
 }
@@ -30,6 +31,12 @@ pub fn toml() -> Language {
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_toml) })
 }
 
+pub fn yaml() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
+    Language::new(unsafe { LanguageFn::from_raw(tree_sitter_yaml) })
+}
+
 pub fn markdown() -> Language {
     // SAFETY: from_raw takes a function that returns a tree-sitter language
     // pointer, which is what the grammar's entry point returns.
@@ -44,7 +51,7 @@ pub fn markdown_inline() -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::{json, markdown, markdown_inline, rust, toml};
+    use super::{json, markdown, markdown_inline, rust, toml, yaml};
     use tree_sitter::Parser;
 
     #[test]
@@ -69,6 +76,14 @@ mod tests {
         p.set_language(&toml()).unwrap();
         let tree = p.parse("a = 1\n", None).unwrap();
         assert_eq!(tree.root_node().kind(), "document");
+    }
+
+    #[test]
+    fn loads_yaml() {
+        let mut p = Parser::new();
+        p.set_language(&yaml()).unwrap();
+        let tree = p.parse("a: 1\n", None).unwrap();
+        assert_eq!(tree.root_node().kind(), "stream");
     }
 
     #[test]

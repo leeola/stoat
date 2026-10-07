@@ -1035,6 +1035,12 @@ mod tests {
             .unwrap()
     }
 
+    fn yaml_lang() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(std::path::Path::new("a.yaml"))
+            .unwrap()
+    }
+
     #[test]
     fn identical_sources_emit_no_changes() {
         let lang = rust_lang();
@@ -1491,6 +1497,27 @@ mod tests {
             })
             .collect();
         assert_eq!(covered, ["+", "-"], "the operator is the whole change");
+    }
+
+    #[test]
+    fn a_changed_yaml_scalar_is_the_whole_change() {
+        let lhs = "a: 1\nb: 2\n";
+        let rhs = "a: 1\nb: 3\n";
+        let result = diff_with_language(&yaml_lang(), lhs, rhs).unwrap();
+        assert!(
+            !result.fell_back_to_line_diff,
+            "structural pass must handle this"
+        );
+
+        let covered: Vec<&str> = result
+            .changes
+            .iter()
+            .map(|c| match c.side {
+                Side::Lhs => &lhs[c.byte_range.clone()],
+                Side::Rhs => &rhs[c.byte_range.clone()],
+            })
+            .collect();
+        assert_eq!(covered, ["2", "3"], "the scalar is the whole change");
     }
 
     #[test]

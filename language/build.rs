@@ -7,6 +7,10 @@ fn main() {
     compile_grammar("tree-sitter-rust", "tree-sitter-rust", "src", true);
     compile_grammar("tree-sitter-json", "tree-sitter-json", "src", false);
     compile_grammar("tree-sitter-toml", "tree-sitter-toml", "src", true);
+    // tree-sitter-grammars/tree-sitter-yaml v0.7.2,
+    // 7708026449bed86239b1cd5bce6e3c34dbca6415. The scanner includes
+    // schema.core.c, its default schema, from beside it.
+    compile_grammar("tree-sitter-yaml", "tree-sitter-yaml", "src", true);
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",

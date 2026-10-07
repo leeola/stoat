@@ -422,6 +422,7 @@ impl LanguageRegistry {
                 Arc::new(make_rust()),
                 Arc::new(make_json()),
                 Arc::new(make_toml()),
+                Arc::new(make_yaml()),
                 Arc::new(make_markdown()),
                 Arc::new(make_markdown_inline()),
             ],
@@ -746,6 +747,28 @@ fn make_toml() -> Language {
     )
 }
 
+fn make_yaml() -> Language {
+    make_language(
+        "yaml",
+        &["yaml", "yml"],
+        grammar::yaml(),
+        include_str!("../../vendor/zed/crates/grammars/src/yaml/highlights.scm"),
+        AuxQuerySources {
+            brackets: Some(include_str!(
+                "../../vendor/zed/crates/grammars/src/yaml/brackets.scm"
+            )),
+            outline: Some(include_str!(
+                "../../vendor/zed/crates/grammars/src/yaml/outline.scm"
+            )),
+            textobjects: Some(include_str!(
+                "../../vendor/zed/crates/grammars/src/yaml/textobjects.scm"
+            )),
+            line_comments: &["#"],
+            ..Default::default()
+        },
+    )
+}
+
 fn make_markdown() -> Language {
     // Inline nodes the block grammar emits parse as markdown-inline, for
     // emphasis, links and code spans.
@@ -849,7 +872,14 @@ mod tests {
         );
     }
 
-    const NAMES: [&str; 5] = ["rust", "json", "toml", "markdown", "markdown-inline"];
+    const NAMES: [&str; 6] = [
+        "rust",
+        "json",
+        "toml",
+        "yaml",
+        "markdown",
+        "markdown-inline",
+    ];
 
     /// Each language's name, and whether its highlight and injection queries
     /// are compiled.
@@ -902,6 +932,8 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.rs")).unwrap().name, "rust");
         assert_eq!(reg.for_path(Path::new("a.json")).unwrap().name, "json");
         assert_eq!(reg.for_path(Path::new("a.toml")).unwrap().name, "toml");
+        assert_eq!(reg.for_path(Path::new("a.yaml")).unwrap().name, "yaml");
+        assert_eq!(reg.for_path(Path::new("a.yml")).unwrap().name, "yaml");
         assert_eq!(reg.for_path(Path::new("a.md")).unwrap().name, "markdown");
         assert_eq!(
             reg.for_path(Path::new("a.markdown")).unwrap().name,
@@ -949,7 +981,14 @@ mod tests {
         let names: Vec<&str> = reg.languages().iter().map(|l| l.name).collect();
         assert_eq!(
             names,
-            vec!["rust", "json", "toml", "markdown", "markdown-inline"],
+            vec![
+                "rust",
+                "json",
+                "toml",
+                "yaml",
+                "markdown",
+                "markdown-inline"
+            ],
         );
     }
 
