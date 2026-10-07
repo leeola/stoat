@@ -162,6 +162,38 @@ fn next_change_visits_a_mixed_changeset_in_path_order() {
     );
 }
 
+/// The held review mode reads a count the way normal mode does, so `2 n` walks
+/// two changes, and the mode stays held until Escape.
+#[test]
+fn a_count_walks_that_many_changes_in_the_held_review_mode() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stoat.active_workspace_mut().git_root = workdir.clone();
+    {
+        let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
+        builder.modified("a.rs", "a\nb\nc\nd\ne\nf\ng\n", "a\nB\nc\nD\ne\nF\ng\n");
+    }
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+
+    h.type_keys("space R");
+    h.type_keys("2 n");
+    h.settle();
+    let walked = (
+        focused_cursor_point(&mut h.stoat).row,
+        h.stoat.pending_count,
+        h.stoat.focused_mode().to_string(),
+    );
+    h.type_keys("escape");
+
+    assert_eq!(
+        (walked, h.stoat.focused_mode()),
+        ((3, None, "review".to_string()), "normal"),
+        "two changes from above the first lands the second, and Escape leaves the held mode",
+    );
+}
+
 /// A staged addition has no base blob, so it offers no row to land on. Opening
 /// it anyway drops the cursor at row 0 with nothing under it, and from there
 /// the in-file walk crosses out again on the next press.

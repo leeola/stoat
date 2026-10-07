@@ -1265,8 +1265,9 @@ pub struct Stoat {
     pub(crate) diff_wheel_walk: bool,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
-    /// hits an unbound key in normal mode; consumed once via
-    /// `take_pending_count` and cleared after every action dispatch.
+    /// hits an unbound key in normal or select mode, or in the held review
+    /// and walkthrough modes. Consumed once via `take_pending_count` and
+    /// cleared after every action dispatch.
     pub(crate) pending_count: Option<u32>,
     /// Pending Vim-style find-char prefix (`f`/`F`/`t`/`T`). When
     /// Some, the next printable char keypress runs the matching
@@ -5436,7 +5437,10 @@ impl Stoat {
             "a key guard changed the mode the guards after it were read at"
         );
 
-        let count_active_mode = takes_pending;
+        // The held review and walkthrough modes step by a count as normal mode
+        // does, but none of the chords above arm in them.
+        let count_active_mode =
+            takes_pending || matches!(self.focused_mode(), "review" | "walkthrough");
         if count_active_mode
             && self.pending_count.is_some()
             && key.modifiers.is_empty()
