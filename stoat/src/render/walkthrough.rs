@@ -1088,6 +1088,16 @@ mod tests {
     /// The same tour over `code`, for a test that needs the marks to land on
     /// lines long enough to read under them.
     fn harness_over(annotations: &[(u32, &str)], code: &str) -> TestHarness {
+        harness_with_stops(annotations, code, &[])
+    }
+
+    /// The same tour with a stop on each of `extra` past its two, for a test
+    /// that walks far enough to tell a count from a single step.
+    fn harness_with_stops(
+        annotations: &[(u32, &str)],
+        code: &str,
+        extra: &[Location],
+    ) -> TestHarness {
         let mut h = Stoat::test();
         // Protocol 3 is what decodes a sketch. The harness sets `stoatty` but
         // leaves the version at zero, which is the older-terminal case.
@@ -1113,6 +1123,11 @@ mod tests {
                 None,
             )
             .expect("append");
+        for focus in extra {
+            walkthrough
+                .add_stop(None, "A detour.".to_owned(), focus.clone(), None, None)
+                .expect("append");
+        }
         for (line, label) in annotations {
             walkthrough
                 .add_annotation(
@@ -1192,7 +1207,7 @@ mod tests {
     /// Step onto the next `count` annotations, as a reader pressing `a` does.
     fn reach(h: &mut TestHarness, count: usize) {
         for _ in 0..count {
-            crate::action_handlers::walkthrough::next_annotation(&mut h.stoat);
+            crate::action_handlers::walkthrough::next_annotation(&mut h.stoat, 1);
         }
     }
 
@@ -1233,7 +1248,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         let first = part_id(&h, part::FOCUS_MARK);
 
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
         let second = part_id(&h, part::FOCUS_MARK);
 
         assert_eq!(
@@ -2039,7 +2054,7 @@ mod tests {
         let leaving = part_id(&h, part::CARD);
         frame(&mut h);
 
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
         let emitted = frame(&mut h);
 
         let card = emitted
@@ -2104,7 +2119,7 @@ mod tests {
         // The first frame is what records the parts a step then retires.
         sketches(&mut h);
 
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
         let arriving = part_id(&h, part::FOCUS_MARK);
         let emitted = sketches(&mut h);
 
@@ -2144,7 +2159,7 @@ mod tests {
         let leaving = part_id(&h, part::FOCUS_MARK);
         sketches(&mut h);
 
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
         assert!(
             sketches(&mut h).iter().any(|sketch| sketch.id == leaving),
             "the frame right after the step still un-draws it",
@@ -2169,7 +2184,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         sketches(&mut h);
 
-        crate::action_handlers::walkthrough::next_annotation(&mut h.stoat);
+        crate::action_handlers::walkthrough::next_annotation(&mut h.stoat, 1);
         assert!(
             h.stoat.active_workspace().walkthrough_exit.is_none(),
             "nothing retires",
@@ -2191,7 +2206,7 @@ mod tests {
         reach(&mut h, 2);
         sketches(&mut h);
 
-        crate::action_handlers::walkthrough::prev_annotation(&mut h.stoat);
+        crate::action_handlers::walkthrough::prev_annotation(&mut h.stoat, 1);
         let emitted = sketches(&mut h);
         let declared = |id: u32| -> Vec<(SketchPhase, u8)> {
             emitted
@@ -2226,7 +2241,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         reach(&mut h, 2);
         sketches(&mut h);
-        crate::action_handlers::walkthrough::prev_annotation(&mut h.stoat);
+        crate::action_handlers::walkthrough::prev_annotation(&mut h.stoat, 1);
         sketches(&mut h);
 
         reach(&mut h, 1);
@@ -2249,7 +2264,7 @@ mod tests {
         reach(&mut h, 1);
         sketches(&mut h);
 
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
         let emitted = frame(&mut h);
 
         let exiting: Vec<u32> = emitted
@@ -2273,6 +2288,35 @@ mod tests {
             exiting.contains(&label.follow),
             "fading out with the box it sits in, got follow {} of exiting {exiting:?}",
             label.follow,
+        );
+    }
+
+    /// A count typed in the walkthrough mode steps that many stops, and a count
+    /// past either end lands on the stop at that end.
+    #[test]
+    fn a_count_steps_that_many_stops_and_holds_at_the_ends() {
+        let mut h = harness_with_stops(&[], CODE, &[location(1, (1, 11), "fn one() {}")]);
+        open(&mut h.stoat, "tour");
+        h.type_keys("space W");
+        let progress = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .walkthrough
+                .as_ref()
+                .expect("a tour is playing")
+                .progress()
+        };
+
+        let mut walked = vec![progress(&h)];
+        for keys in ["2 n", "9 p"] {
+            h.type_keys(keys);
+            walked.push(progress(&h));
+        }
+
+        assert_eq!(
+            (walked, h.stoat.pending_count, h.stoat.focused_mode()),
+            (vec![(1, 3), (3, 3), (1, 3)], None, "walkthrough"),
+            "two stops on from the first, then nine back holds on the first",
         );
     }
 
@@ -2368,7 +2412,7 @@ mod tests {
         open(&mut h.stoat, "tour");
 
         let first = card_rect(&mut h);
-        crate::action_handlers::walkthrough::next(&mut h.stoat);
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
         let second = card_rect(&mut h);
 
         assert_eq!(

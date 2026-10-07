@@ -142,7 +142,7 @@ pub(crate) fn arming_count(stoat: &mut Stoat) -> usize {
     stoat.take_pending_count().unwrap_or(1).max(1) as usize
 }
 
-/// [`arming_count`] as a signed row step for the list modals.
+/// [`arming_count`] as a signed step, for the handlers that walk by a delta.
 ///
 /// A typed count saturates far past `i32`, and a cast wraps it into a step the
 /// other way, so a count out of range steps as far as `i32` reaches.
@@ -1028,12 +1028,30 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("WalkthroughOpen action downcast");
             walkthrough::open(stoat, &action.slug)
         },
-        ActionKind::WalkthroughNext => walkthrough::next(stoat),
-        ActionKind::WalkthroughPrev => walkthrough::prev(stoat),
-        ActionKind::WalkthroughNextAnnotation => walkthrough::next_annotation(stoat),
-        ActionKind::WalkthroughPrevAnnotation => walkthrough::prev_annotation(stoat),
-        ActionKind::WalkthroughForward => walkthrough::forward(stoat),
-        ActionKind::WalkthroughBackward => walkthrough::backward(stoat),
+        ActionKind::WalkthroughNext => {
+            let step = arming_step(stoat);
+            walkthrough::next(stoat, step)
+        },
+        ActionKind::WalkthroughPrev => {
+            let step = arming_step(stoat);
+            walkthrough::prev(stoat, step)
+        },
+        ActionKind::WalkthroughNextAnnotation => {
+            let step = arming_step(stoat);
+            walkthrough::next_annotation(stoat, step)
+        },
+        ActionKind::WalkthroughPrevAnnotation => {
+            let step = arming_step(stoat);
+            walkthrough::prev_annotation(stoat, step)
+        },
+        ActionKind::WalkthroughForward => {
+            let step = arming_step(stoat);
+            walkthrough::forward(stoat, step)
+        },
+        ActionKind::WalkthroughBackward => {
+            let step = arming_step(stoat);
+            walkthrough::backward(stoat, step)
+        },
         ActionKind::WalkthroughShowNarration => walkthrough::show_narration_again(stoat),
         ActionKind::WalkthroughDone => walkthrough::done(stoat),
         ActionKind::Hover => crate::lsp::hover::hover(stoat),

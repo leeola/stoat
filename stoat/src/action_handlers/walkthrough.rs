@@ -135,34 +135,35 @@ fn open_commit_tour(stoat: &mut Stoat, run: WalkthroughRun, git_root: &Path) -> 
     UpdateEffect::Redraw
 }
 
-/// Step forward to the next stop.
-pub(crate) fn next(stoat: &mut Stoat) -> UpdateEffect {
-    step(stoat, 1)
+/// Step forward `count` stops.
+pub(crate) fn next(stoat: &mut Stoat, count: i32) -> UpdateEffect {
+    step(stoat, count)
 }
 
-/// Step back to the previous stop.
-pub(crate) fn prev(stoat: &mut Stoat) -> UpdateEffect {
-    step(stoat, -1)
+/// Step back `count` stops.
+pub(crate) fn prev(stoat: &mut Stoat, count: i32) -> UpdateEffect {
+    step(stoat, -count)
 }
 
-/// Step forward to the next annotation of the current stop.
-pub(crate) fn next_annotation(stoat: &mut Stoat) -> UpdateEffect {
-    step_annotation(stoat, 1)
+/// Step forward `count` annotations of the current stop.
+pub(crate) fn next_annotation(stoat: &mut Stoat, count: i32) -> UpdateEffect {
+    step_annotation(stoat, count)
 }
 
-/// Step back toward the stop's focus through its annotations.
-pub(crate) fn prev_annotation(stoat: &mut Stoat) -> UpdateEffect {
-    step_annotation(stoat, -1)
+/// Step back `count` places toward the stop's focus through its annotations.
+pub(crate) fn prev_annotation(stoat: &mut Stoat, count: i32) -> UpdateEffect {
+    step_annotation(stoat, -count)
 }
 
-/// Step forward one attention point of the tour, read as one sequence.
-pub(crate) fn forward(stoat: &mut Stoat) -> UpdateEffect {
-    step_linear(stoat, 1)
+/// Step forward `count` attention points of the tour, read as one sequence.
+pub(crate) fn forward(stoat: &mut Stoat, count: i32) -> UpdateEffect {
+    step_linear(stoat, count)
 }
 
-/// Step back one attention point of the tour, exactly inverting [`forward`].
-pub(crate) fn backward(stoat: &mut Stoat) -> UpdateEffect {
-    step_linear(stoat, -1)
+/// Step back `count` attention points of the tour, exactly inverting
+/// [`forward`].
+pub(crate) fn backward(stoat: &mut Stoat, count: i32) -> UpdateEffect {
+    step_linear(stoat, -count)
 }
 
 /// Take the narration card down, or raise it again.
@@ -1181,21 +1182,21 @@ mod tests {
         let mut stoat = stoat_with_tour(FIRST);
         open(&mut stoat, "tour");
 
-        next(&mut stoat);
+        next(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/b.rs".to_owned(), 0));
         assert_eq!(stoat.pending_message.as_deref(), Some("2/2: second"));
 
-        next(&mut stoat);
+        next(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already on the last stop"),
             "there is nothing past the end to jump to",
         );
 
-        prev(&mut stoat);
+        prev(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/a.rs".to_owned(), 12));
 
-        prev(&mut stoat);
+        prev(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already on the first stop")
@@ -1226,7 +1227,7 @@ mod tests {
     fn a_stop_with_no_narration_shows_no_popup() {
         let mut stoat = stoat_with_tour(FIRST);
         open(&mut stoat, "tour");
-        next(&mut stoat);
+        next(&mut stoat, 1);
 
         assert!(stoat.pending_hover.is_none());
     }
@@ -1349,7 +1350,7 @@ mod tests {
         show_narration_again(&mut stoat);
         assert_eq!(popup_lines(&stoat), ["first - 1/2", "The entry point."]);
 
-        next(&mut stoat);
+        next(&mut stoat, 1);
         show_narration_again(&mut stoat);
         assert!(stoat.pending_hover.is_none());
         assert_eq!(
@@ -1419,7 +1420,7 @@ mod tests {
             .insert(build::file_id("a.rs"), PathBuf::from("a.rs"));
 
         open(&mut stoat, "tour");
-        next(&mut stoat);
+        next(&mut stoat, 1);
 
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1436,7 +1437,7 @@ mod tests {
 
         assert_eq!(trail_progress(&stoat), None, "the first stop follows none");
 
-        next(&mut stoat);
+        next(&mut stoat, 1);
         assert_eq!(
             trail_progress(&stoat),
             Some((1, 2)),
@@ -1458,7 +1459,7 @@ mod tests {
         open(&mut stoat, "tour");
         nav::install_trail(&mut stoat, &[SymbolKey([9u8; 16]), SymbolKey([8u8; 16])]);
 
-        next(&mut stoat);
+        next(&mut stoat, 1);
         assert_eq!(trail_progress(&stoat), None);
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1473,14 +1474,14 @@ mod tests {
         index_the_tour(&mut stoat, true);
         open(&mut stoat, "tour");
 
-        prev_annotation(&mut stoat);
+        prev_annotation(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already on the stop"),
             "the focus heads the walk, so nothing precedes it",
         );
 
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
         assert_eq!(
             cursor(&mut stoat),
             ("/repo/b.rs".to_owned(), 0),
@@ -1493,7 +1494,7 @@ mod tests {
         );
         assert_eq!(trail_progress(&stoat), Some((1, 2)));
 
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/a.rs".to_owned(), 0));
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1502,20 +1503,20 @@ mod tests {
         );
         assert_eq!(trail_progress(&stoat), None);
 
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already on the last annotation")
         );
 
-        prev_annotation(&mut stoat);
+        prev_annotation(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("a1 1/2: the callee"),
             "stepping back off an unindexed annotation lays no trail either",
         );
 
-        prev_annotation(&mut stoat);
+        prev_annotation(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/a.rs".to_owned(), 12));
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1531,14 +1532,14 @@ mod tests {
         let mut stoat = stoat_with_tour(FIRST);
         open(&mut stoat, "tour");
 
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
         assert_eq!(
             popup_lines(&stoat),
             ["the callee - 1/2", "Where the call lands."],
             "the annotation speaks for itself, under its own heading",
         );
 
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
         assert_eq!(
             popup_lines(&stoat),
             ["first - 1/2", "The entry point."],
@@ -1550,7 +1551,7 @@ mod tests {
     fn asking_again_on_an_annotation_brings_its_own_card_back() {
         let mut stoat = stoat_with_tour(FIRST);
         open(&mut stoat, "tour");
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
 
         show_narration_again(&mut stoat);
         assert!(stoat.pending_hover.is_none(), "a card that is up goes down");
@@ -1571,26 +1572,26 @@ mod tests {
         index_the_tour(&mut stoat, true);
         open(&mut stoat, "tour");
 
-        backward(&mut stoat);
+        backward(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already at the start of the tour"),
         );
 
-        forward(&mut stoat);
+        forward(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("a1 1/2: the callee (trail: 2 stops)"),
             "the first point past a focus is the stop's first annotation",
         );
 
-        forward(&mut stoat);
+        forward(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("a2 2/2: the neighbor"),
         );
 
-        forward(&mut stoat);
+        forward(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/b.rs".to_owned(), 0));
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1598,7 +1599,7 @@ mod tests {
             "past the last annotation the walk reaches the next stop's focus",
         );
 
-        forward(&mut stoat);
+        forward(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already at the end of the tour"),
@@ -1612,9 +1613,9 @@ mod tests {
         let mut stoat = stoat_with_tour(FIRST);
         index_the_tour(&mut stoat, true);
         open(&mut stoat, "tour");
-        next(&mut stoat);
+        next(&mut stoat, 1);
 
-        backward(&mut stoat);
+        backward(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/a.rs".to_owned(), 0));
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1628,10 +1629,10 @@ mod tests {
         let mut stoat = stoat_with_tour(FIRST);
         index_the_tour(&mut stoat, true);
         open(&mut stoat, "tour");
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
 
-        next(&mut stoat);
-        prev(&mut stoat);
+        next(&mut stoat, 1);
+        prev(&mut stoat, 1);
         assert_eq!(cursor(&mut stoat), ("/repo/a.rs".to_owned(), 12));
         assert_eq!(
             stoat.pending_message.as_deref(),
@@ -1644,9 +1645,9 @@ mod tests {
     fn a_stop_with_no_annotations_says_so() {
         let mut stoat = stoat_with_tour(FIRST);
         open(&mut stoat, "tour");
-        next(&mut stoat);
+        next(&mut stoat, 1);
 
-        next_annotation(&mut stoat);
+        next_annotation(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("this stop has no annotations")
@@ -1658,7 +1659,7 @@ mod tests {
         let mut stoat = stoat_with_tour(FIRST);
         index_the_tour(&mut stoat, true);
         open(&mut stoat, "tour");
-        next(&mut stoat);
+        next(&mut stoat, 1);
         done(&mut stoat);
 
         assert!(stoat.active_workspace().walkthrough.is_none());
@@ -1669,7 +1670,7 @@ mod tests {
         );
         assert_eq!(stoat.pending_message.as_deref(), Some("walkthrough closed"));
 
-        next(&mut stoat);
+        next(&mut stoat, 1);
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("no walkthrough is playing"),
@@ -2013,7 +2014,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         h.settle();
 
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         assert_eq!(
             (open_path(&h), status(&h)),
             (
@@ -2083,7 +2084,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         h.settle();
 
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         h.settle();
         h.snapshot();
         assert!(
@@ -2100,7 +2101,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         h.settle();
 
-        forward(&mut h.stoat);
+        forward(&mut h.stoat, 1);
         h.settle();
         assert_eq!(
             (checkouts(&h), open_path(&h), status(&h)),
@@ -2120,10 +2121,10 @@ mod tests {
         let mut h = commit_tour_harness();
         open(&mut h.stoat, "tour");
         h.settle();
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         h.settle();
 
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         h.settle();
         assert_eq!(
             (checkouts(&h), open_path(&h), status(&h)),
@@ -2143,10 +2144,10 @@ mod tests {
         let mut h = commit_tour_harness();
         open(&mut h.stoat, "tour");
         h.settle();
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         h.settle();
 
-        prev(&mut h.stoat);
+        prev(&mut h.stoat, 1);
         h.settle();
         assert_eq!(
             (checkouts(&h), diff_base(&h), open_path(&h), status(&h)),
@@ -2297,7 +2298,7 @@ mod tests {
         let mut h = commit_tour_harness();
         git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
         open(&mut h.stoat, "tour");
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         h.settle();
 
         assert_eq!(
@@ -2344,9 +2345,9 @@ mod tests {
         open(&mut h.stoat, "mixed");
         h.settle();
 
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         let second = (open_path(&h), status(&h).map(str::to_owned));
-        next(&mut h.stoat);
+        next(&mut h.stoat, 1);
         h.settle();
 
         assert_eq!(

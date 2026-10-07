@@ -191,7 +191,9 @@ impl WalkthroughRun {
     /// they arrive by opening the tour.
     pub(crate) fn step(&mut self, delta: i32) -> bool {
         let max = (self.walkthrough.stops.len() - 1) as i32;
-        let next = (self.stop_idx as i32 + delta).clamp(0, max) as usize;
+        // A typed count steps by any delta up to `i32::MAX`, so the sum
+        // saturates and does not overflow.
+        let next = (self.stop_idx as i32).saturating_add(delta).clamp(0, max) as usize;
         let moved = next != self.stop_idx;
         self.stop_idx = next;
         if moved {
@@ -225,7 +227,7 @@ impl WalkthroughRun {
         let count = self.current_stop().annotations.len() as i32;
         let at = self.annotation_idx.map_or(0, |idx| idx as i32 + 1);
 
-        let next = (at + delta).clamp(0, count);
+        let next = at.saturating_add(delta).clamp(0, count);
         self.annotation_idx = (next > 0).then(|| (next - 1) as usize);
         next != at
     }
@@ -241,10 +243,16 @@ impl WalkthroughRun {
     pub(crate) fn step_linear(&mut self, delta: i32) -> bool {
         let mut moved = false;
         for _ in 0..delta.unsigned_abs() {
-            moved |= match delta > 0 {
+            let stepped = match delta > 0 {
                 true => self.forward_one(),
                 false => self.backward_one(),
             };
+            // A step that holds at an end holds there on every later try. A
+            // long count stops here and does not make one call per place.
+            if !stepped {
+                break;
+            }
+            moved = true;
         }
         moved
     }
@@ -345,6 +353,10 @@ mod tests {
         assert!(run.step(9));
         assert_eq!(run.progress(), (3, 3), "a long step lands on the last stop");
         assert!(!run.step(1), "there is nothing past the last stop");
+        assert!(
+            !run.step(i32::MAX),
+            "the longest count holds on the last stop"
+        );
     }
 
     /// A stop's focus heads the sequence its annotations continue, so both ends
@@ -375,6 +387,10 @@ mod tests {
         assert!(
             !run.step_annotation(1),
             "nothing follows the last annotation"
+        );
+        assert!(
+            !run.step_annotation(i32::MAX),
+            "the longest count holds on the last annotation"
         );
 
         assert!(run.step_annotation(-9));
@@ -443,6 +459,10 @@ mod tests {
         );
         assert_eq!(position(&run), ("s2".to_owned(), None));
         assert!(!run.step_linear(1), "there is nothing past the last point");
+        assert!(
+            !run.step_linear(i32::MAX),
+            "the longest count holds on the last point"
+        );
 
         assert!(run.step_linear(-9));
         assert_eq!(position(&run), ("s1".to_owned(), None));
