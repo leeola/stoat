@@ -477,6 +477,11 @@ fn reconstruct_path(va: &VertexArena, end: u32) -> Vec<PathStep> {
 /// only because the search chose them, so this is the caller's one
 /// chance to learn the pairing.
 ///
+/// Appends to `pairs` the `(lhs, rhs)` node pair behind every
+/// `UnchangedNode` edge, each a subtree equal on both sides. An entered
+/// delimiter adds no pair, because its list differs and its bracket atoms
+/// are children the path pairs through their own steps.
+///
 /// Mirrors `references/difftastic/src/diff/graph.rs:796-847`
 /// `populate_change_map`.
 pub fn populate_change_map(
@@ -486,6 +491,7 @@ pub fn populate_change_map(
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
     replaced: &mut Vec<(SyntaxId, SyntaxId)>,
+    pairs: &mut Vec<(SyntaxId, SyntaxId)>,
 ) {
     for step in path {
         match step.edge {
@@ -495,6 +501,9 @@ pub fn populate_change_map(
                 }
                 if let Some(rhs_id) = step.rhs {
                     mark_subtree(rhs_arena, rhs_id, rhs_changes, ChangeKind::Unchanged);
+                }
+                if let (Some(lhs_id), Some(rhs_id)) = (step.lhs, step.rhs) {
+                    pairs.push((lhs_id, rhs_id));
                 }
             },
             Edge::EnterUnchangedDelimiter { .. } => {
@@ -713,6 +722,7 @@ mod tests {
             &path,
             &mut lhs_changes,
             &mut rhs_changes,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
         assert_eq!(lhs_changes.get(lhs_root), ChangeKind::Unchanged);

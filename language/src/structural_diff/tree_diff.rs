@@ -29,8 +29,8 @@ use super::{
     moves::{find_moves_changeset, ChangesetMoveRecord, FileMoveInput},
     sliders::fix_all_sliders,
     unchanged::{mark_unchanged, ChangeKind, ChangeMap},
-    BufferRef, ChangeKind as DiffChangeKind, DiffChange, DiffResult, FileDiffInput, MoveMetadata,
-    MoveSource, Side,
+    BufferRef, ChangeKind as DiffChangeKind, DiffChange, DiffResult, FileDiffInput, MatchedPair,
+    MoveMetadata, MoveSource, Side,
 };
 use crate::{parse, Language};
 use std::{
@@ -418,6 +418,10 @@ struct PreparedFile<'a> {
     /// pairs, so a section whose search hit the graph limit contributes none
     /// and its runs stay `Novel`.
     replaced_atoms: Vec<(SyntaxId, SyntaxId)>,
+    /// The node pairs the preprocessing and the search matched whole, each a
+    /// subtree equal on both sides. [`matched_atom_pairs`] expands them into
+    /// the token pairs of the result.
+    matched_nodes: Vec<(SyntaxId, SyntaxId)>,
 }
 
 /// Borrowed view of the arenas + line indices for one prepared file.
@@ -471,6 +475,7 @@ fn prepare_per_file<'a>(
     // mutate the change maps in place.
     let sections = std::mem::take(&mut preprocess.sections);
     let mut replaced_atoms = Vec::new();
+    let mut matched_nodes = std::mem::take(&mut preprocess.pairs);
     for (lhs_run, rhs_run) in &sections {
         // A section empty on one side is a pure insertion or deletion. Its
         // nodes stay Pending, and collect_changes emits them as Novel, so there
@@ -498,6 +503,7 @@ fn prepare_per_file<'a>(
                     &mut preprocess.lhs_changes,
                     &mut preprocess.rhs_changes,
                     &mut replaced_atoms,
+                    &mut matched_nodes,
                 );
             },
             SearchOutcome::ExceededGraphLimit => {},
@@ -519,6 +525,7 @@ fn prepare_per_file<'a>(
         lhs_text: lhs,
         rhs_text: rhs,
         replaced_atoms,
+        matched_nodes,
     })
 }
 
@@ -568,7 +575,64 @@ fn finalize_per_file(
     DiffResult {
         changes,
         fell_back_to_line_diff: false,
+        matched: matched_atom_pairs(prepared, lhs_changes, rhs_changes),
     }
+}
+
+/// Expand each node pair matched whole into the atom pairs beneath it, in lhs
+/// order.
+///
+/// Two matched nodes share one content id, so their subtrees share one shape,
+/// and a lockstep walk pairs each atom with its counterpart. A bracket is an
+/// atom child of its list, so the walk pairs delimiters too. An atom pair also
+/// needs equal text, so a content id collision never pairs unequal tokens.
+///
+/// The slider and move passes retag atoms after the pairs were recorded, so a
+/// pair is dropped when either atom is no longer `Unchanged`. A zero-width atom
+/// marks nothing in [`walk_emit_atoms`] and pairs nothing here.
+fn matched_atom_pairs(
+    prepared: &PreparedFile<'_>,
+    lhs_changes: &ChangeMap,
+    rhs_changes: &ChangeMap,
+) -> Vec<MatchedPair> {
+    let mut matched = Vec::new();
+    let mut stack = Vec::new();
+    for &pair in &prepared.matched_nodes {
+        stack.push(pair);
+        while let Some((lhs_id, rhs_id)) = stack.pop() {
+            match (
+                prepared.lhs_arena.get(lhs_id),
+                prepared.rhs_arena.get(rhs_id),
+            ) {
+                (Syntax::Atom(lhs), Syntax::Atom(rhs)) => {
+                    if lhs.content == rhs.content
+                        && !lhs.byte_range.is_empty()
+                        && lhs_changes.get(lhs_id) == ChangeKind::Unchanged
+                        && rhs_changes.get(rhs_id) == ChangeKind::Unchanged
+                    {
+                        matched.push(MatchedPair {
+                            lhs: lhs.byte_range.clone(),
+                            rhs: rhs.byte_range.clone(),
+                        });
+                    }
+                },
+                (Syntax::List(lhs), Syntax::List(rhs))
+                    if lhs.children.len() == rhs.children.len() =>
+                {
+                    stack.extend(
+                        lhs.children
+                            .iter()
+                            .copied()
+                            .zip(rhs.children.iter().copied()),
+                    );
+                },
+                _ => {},
+            }
+        }
+    }
+
+    matched.sort_by_key(|pair| pair.lhs.start);
+    matched
 }
 
 /// Walk an arena depth-first and emit one [`DiffChange`] per maximal
@@ -978,6 +1042,114 @@ mod tests {
         let result = diff_with_language(&lang, source, source).unwrap();
         assert!(result.changes.is_empty());
         assert!(!result.fell_back_to_line_diff);
+    }
+
+    /// Each matched pair as `(lhs text, rhs text, lhs line, rhs line)`, so a
+    /// test reads which line every kept token landed on.
+    fn matched_lines<'a>(
+        result: &DiffResult,
+        lhs: &'a str,
+        rhs: &'a str,
+    ) -> Vec<(&'a str, &'a str, usize, usize)> {
+        let line = |text: &str, at: usize| text[..at].matches('\n').count();
+        result
+            .matched
+            .iter()
+            .map(|pair| {
+                (
+                    &lhs[pair.lhs.clone()],
+                    &rhs[pair.rhs.clone()],
+                    line(lhs, pair.lhs.start),
+                    line(rhs, pair.rhs.start),
+                )
+            })
+            .collect()
+    }
+
+    /// A call reformatted across lines keeps all its tokens but the added
+    /// argument and two commas, and each kept token pairs with itself on the
+    /// line it moved to.
+    #[test]
+    fn matched_pairs_follow_tokens_across_a_reformat() {
+        let lhs = "fn f() {\n    foo(bar, baz);\n}\n";
+        let rhs = "fn f() {\n    foo(\n        bar,\n        bang,\n        baz,\n    );\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
+        assert_eq!(
+            matched_lines(&result, lhs, rhs),
+            [
+                token("fn", 0, 0),
+                token("f", 0, 0),
+                token("()", 0, 0),
+                token("{", 0, 0),
+                token("foo", 1, 1),
+                token("(", 1, 1),
+                token("bar", 1, 2),
+                token("baz", 1, 4),
+                token(")", 1, 5),
+                token(";", 1, 5),
+                token("}", 2, 6),
+            ],
+            "the slider hands the old comma's partner to the novel run, so the comma pairs nothing",
+        );
+    }
+
+    /// The search matches what the preprocessing leaves, such as a statement
+    /// wrapped in a new block, and those matches pair too.
+    ///
+    /// The wrapped statement is below the move pass's leaf floor, so the pass
+    /// leaves it unchanged rather than retagging it moved.
+    #[test]
+    fn matched_pairs_include_what_the_search_matched() {
+        let lhs = "fn f() {\n    a();\n    b();\n}\n";
+        let rhs = "fn f() {\n    if c {\n        a();\n    }\n    b();\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
+        assert_eq!(
+            matched_lines(&result, lhs, rhs),
+            [
+                token("fn", 0, 0),
+                token("f", 0, 0),
+                token("()", 0, 0),
+                token("{", 0, 0),
+                token("a", 1, 2),
+                token("()", 1, 2),
+                token(";", 1, 2),
+                token("b", 2, 4),
+                token("()", 2, 4),
+                token(";", 2, 4),
+                token("}", 3, 5),
+            ],
+            "the wrapped call pairs on the line it moved to",
+        );
+    }
+
+    /// The move pass runs after the pairs are recorded, and a token it retags
+    /// as moved pairs with nothing, as the reader sees it marked.
+    #[test]
+    fn a_moved_token_carries_no_matched_pair() {
+        let lhs = "fn f() {\n    a();\n}\n";
+        let rhs = "fn f() {\n    if c {\n        a();\n    }\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
+        assert_eq!(
+            matched_lines(&result, lhs, rhs),
+            [token("fn", 0, 0), token("f", 0, 0), token("()", 0, 0)],
+            "the body moved into the if, so its braces and its call pair nothing",
+        );
+    }
+
+    /// A line diff has no tokens, so it names no pairs even over lines it
+    /// holds unchanged.
+    #[test]
+    fn the_line_fallback_carries_no_matched_pairs() {
+        assert!(
+            line_diff::diff_lines("a\nb\n", "a\nc\n").matched.is_empty(),
+            "the unchanged line pairs no tokens",
+        );
     }
 
     /// The painter has no syntax tree to consult, so a change carries down

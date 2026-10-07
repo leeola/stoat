@@ -132,6 +132,17 @@ pub struct DiffChange {
     pub prose: bool,
 }
 
+/// A token the tree diff holds unchanged, as its byte range on each side.
+///
+/// A line diff pairs lines by their text, so a call reformatted across lines
+/// pairs nothing, though every token in it survived. A pair names one surviving
+/// token on both sides, so a consumer aligns lines by the tokens they share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchedPair {
+    pub lhs: Range<usize>,
+    pub rhs: Range<usize>,
+}
+
 /// Provenance for a [`ChangeKind::Moved`] region. `sources` enumerates the
 /// counterpart location(s) on the other side: length 1 for unambiguous
 /// moves and `> 1` when multiple candidate source locations share the
@@ -190,6 +201,11 @@ pub struct FileDiffInput<'a> {
 pub struct DiffResult {
     pub changes: Vec<DiffChange>,
     pub fell_back_to_line_diff: bool,
+    /// Every token pair the tree diff holds unchanged, in lhs order.
+    ///
+    /// The two ranges of a pair hold equal text. The line fallback pairs no
+    /// tokens, so its result leaves this empty.
+    pub matched: Vec<MatchedPair>,
 }
 
 /// Public entry point for callers without a language. Routes to the

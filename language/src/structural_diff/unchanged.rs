@@ -107,6 +107,12 @@ pub struct PreprocessResult {
     pub lhs_changes: ChangeMap,
     pub rhs_changes: ChangeMap,
     pub sections: Vec<(Vec<SyntaxId>, Vec<SyntaxId>)>,
+    /// The `(lhs, rhs)` node pairs matched whole, each a subtree equal on both
+    /// sides.
+    ///
+    /// The change maps say which nodes are unchanged but not what each one
+    /// matched, which a consumer aligning the two sides by content needs.
+    pub pairs: Vec<(SyntaxId, SyntaxId)>,
 }
 
 /// Run the three-phase preprocessing pass on `(lhs_root, rhs_root)`,
@@ -122,24 +128,14 @@ pub fn mark_unchanged(
         lhs_changes: ChangeMap::with_len(lhs_arena.len()),
         rhs_changes: ChangeMap::with_len(rhs_arena.len()),
         sections: Vec::new(),
+        pairs: Vec::new(),
     };
 
     // Top-level: roots are always lists in practice (they wrap the
     // whole document). If they share content_ids, every descendant is
     // unchanged and we can return early.
     if lhs_arena.get(lhs_root).content_id() == rhs_arena.get(rhs_root).content_id() {
-        mark_subtree(
-            lhs_arena,
-            lhs_root,
-            &mut result.lhs_changes,
-            ChangeKind::Unchanged,
-        );
-        mark_subtree(
-            rhs_arena,
-            rhs_root,
-            &mut result.rhs_changes,
-            ChangeKind::Unchanged,
-        );
+        match_subtrees(lhs_arena, rhs_arena, lhs_root, rhs_root, &mut result);
         return result;
     }
 
@@ -151,9 +147,7 @@ pub fn mark_unchanged(
         rhs_arena,
         &lhs_children,
         &rhs_children,
-        &mut result.lhs_changes,
-        &mut result.rhs_changes,
-        &mut result.sections,
+        &mut result,
     );
 
     result
@@ -161,21 +155,20 @@ pub fn mark_unchanged(
 
 /// Pair two child lists via shrink-then-LCS, marking matched subtrees
 /// [`ChangeKind::Unchanged`] and collecting the changed runs between anchors
-/// into `sections`.
+/// into `out.sections`.
 ///
 /// The unmatched run between two consecutive anchors is a changed section. A
 /// run of exactly one same-kind [`Syntax::List`] on each side recurses into
 /// its children instead, so a small edit inside a container drills down to the
 /// changed statement rather than emitting the whole container. Every other
-/// non-empty run is pushed to `sections` for the per-section Dijkstra search.
+/// non-empty run is pushed to `out.sections` for the per-section Dijkstra
+/// search.
 fn pair_children(
     lhs_arena: &SyntaxArena<'_>,
     rhs_arena: &SyntaxArena<'_>,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
-    lhs_changes: &mut ChangeMap,
-    rhs_changes: &mut ChangeMap,
-    sections: &mut Vec<(Vec<SyntaxId>, Vec<SyntaxId>)>,
+    out: &mut PreprocessResult,
 ) {
     // Phase 1a: shrink common prefix.
     let mut prefix = 0usize;
@@ -183,8 +176,7 @@ fn pair_children(
         && prefix < rhs.len()
         && lhs_arena.get(lhs[prefix]).content_id() == rhs_arena.get(rhs[prefix]).content_id()
     {
-        mark_subtree(lhs_arena, lhs[prefix], lhs_changes, ChangeKind::Unchanged);
-        mark_subtree(rhs_arena, rhs[prefix], rhs_changes, ChangeKind::Unchanged);
+        match_subtrees(lhs_arena, rhs_arena, lhs[prefix], rhs[prefix], out);
         prefix += 1;
     }
 
@@ -197,8 +189,7 @@ fn pair_children(
     {
         let lhs_id = lhs[lhs.len() - 1 - suffix];
         let rhs_id = rhs[rhs.len() - 1 - suffix];
-        mark_subtree(lhs_arena, lhs_id, lhs_changes, ChangeKind::Unchanged);
-        mark_subtree(rhs_arena, rhs_id, rhs_changes, ChangeKind::Unchanged);
+        match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
         suffix += 1;
     }
 
@@ -213,17 +204,12 @@ fn pair_children(
         Vec::new()
     };
     for &(lhs_idx, rhs_idx) in &anchors {
-        mark_subtree(
+        match_subtrees(
             lhs_arena,
-            lhs_mid[lhs_idx],
-            lhs_changes,
-            ChangeKind::Unchanged,
-        );
-        mark_subtree(
             rhs_arena,
+            lhs_mid[lhs_idx],
             rhs_mid[rhs_idx],
-            rhs_changes,
-            ChangeKind::Unchanged,
+            out,
         );
     }
 
@@ -242,17 +228,9 @@ fn pair_children(
         if !lhs_run.is_empty() || !rhs_run.is_empty() {
             let recursed = lhs_run.len() == 1
                 && rhs_run.len() == 1
-                && recurse_singleton_lists(
-                    lhs_arena,
-                    rhs_arena,
-                    lhs_run[0],
-                    rhs_run[0],
-                    lhs_changes,
-                    rhs_changes,
-                    sections,
-                );
+                && recurse_singleton_lists(lhs_arena, rhs_arena, lhs_run[0], rhs_run[0], out);
             if !recursed {
-                sections.push((lhs_run.to_vec(), rhs_run.to_vec()));
+                out.sections.push((lhs_run.to_vec(), rhs_run.to_vec()));
             }
         }
         lhs_cursor = lhs_anchor + 1;
@@ -272,9 +250,7 @@ fn recurse_singleton_lists(
     rhs_arena: &SyntaxArena<'_>,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
-    lhs_changes: &mut ChangeMap,
-    rhs_changes: &mut ChangeMap,
-    sections: &mut Vec<(Vec<SyntaxId>, Vec<SyntaxId>)>,
+    out: &mut PreprocessResult,
 ) -> bool {
     if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
         (lhs_arena.get(lhs_id), rhs_arena.get(rhs_id))
@@ -282,19 +258,37 @@ fn recurse_singleton_lists(
     {
         let lhs_grand = lhs_list.children.clone();
         let rhs_grand = rhs_list.children.clone();
-        pair_children(
-            lhs_arena,
-            rhs_arena,
-            &lhs_grand,
-            &rhs_grand,
-            lhs_changes,
-            rhs_changes,
-            sections,
-        );
+        pair_children(lhs_arena, rhs_arena, &lhs_grand, &rhs_grand, out);
         true
     } else {
         false
     }
+}
+
+/// Mark the subtrees `lhs_id` and `rhs_id` [`ChangeKind::Unchanged`] and record
+/// them as a pair in `out.pairs`.
+///
+/// One call does both, so no matched subtree goes unrecorded.
+fn match_subtrees(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_id: SyntaxId,
+    rhs_id: SyntaxId,
+    out: &mut PreprocessResult,
+) {
+    mark_subtree(
+        lhs_arena,
+        lhs_id,
+        &mut out.lhs_changes,
+        ChangeKind::Unchanged,
+    );
+    mark_subtree(
+        rhs_arena,
+        rhs_id,
+        &mut out.rhs_changes,
+        ChangeKind::Unchanged,
+    );
+    out.pairs.push((lhs_id, rhs_id));
 }
 
 /// Mark `id` and every transitive descendant in the same arena as `kind`.

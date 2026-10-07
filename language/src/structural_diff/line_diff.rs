@@ -44,6 +44,7 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
     DiffResult {
         changes,
         fell_back_to_line_diff: true,
+        matched: Vec::new(),
     }
 }
 

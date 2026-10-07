@@ -2992,6 +2992,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3057,6 +3058,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3121,6 +3123,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3178,6 +3181,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3261,6 +3265,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3297,6 +3302,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -4092,6 +4098,7 @@ mod tests {
         let result = DiffResult {
             changes,
             fell_back_to_line_diff: false,
+            matched: Vec::new(),
         };
         let dm = DiffMap::from_structural_changes(result, Arc::new(lhs_text.to_string()), rhs_text);
 
@@ -4172,6 +4179,7 @@ mod tests {
             DiffResult {
                 changes,
                 fell_back_to_line_diff: false,
+                matched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
