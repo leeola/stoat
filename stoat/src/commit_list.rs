@@ -252,6 +252,17 @@ impl CommitListState {
         self.selected != prev
     }
 
+    /// Move selection to `index`, clamping at the last loaded commit.
+    /// Returns true if the position changed.
+    pub(crate) fn move_to(&mut self, index: usize) -> bool {
+        if self.commits.is_empty() {
+            return false;
+        }
+        let prev = self.selected;
+        self.selected = index.min(self.commits.len() - 1);
+        self.selected != prev
+    }
+
     pub(crate) fn move_to_last(&mut self) -> bool {
         if self.commits.is_empty() {
             return false;

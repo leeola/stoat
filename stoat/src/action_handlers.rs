@@ -133,7 +133,7 @@ pub(crate) enum LastMotion {
     },
 }
 
-/// The count typed in front of the chord that arms now, or one.
+/// The count typed in front of the key that dispatches now, or one.
 ///
 /// A chord reads its count here rather than where it runs, because dispatching
 /// the action that arms the chord already cleared the pending count. The chars
@@ -1032,14 +1032,25 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::OpenCommits => commits::open_commits(stoat),
         ActionKind::CloseCommits => commits::close_commits(stoat),
-        ActionKind::CommitsNext => commits::commits_step(stoat, commits::CommitStep::Down(1)),
-        ActionKind::CommitsPrev => commits::commits_step(stoat, commits::CommitStep::Up(1)),
+        ActionKind::CommitsNext => {
+            let count = arming_count(stoat);
+            commits::commits_step(stoat, commits::CommitStep::Down(count))
+        },
+        ActionKind::CommitsPrev => {
+            let count = arming_count(stoat);
+            commits::commits_step(stoat, commits::CommitStep::Up(count))
+        },
         ActionKind::CommitsPageDown => commits::commits_step(stoat, commits::CommitStep::PageDown),
         ActionKind::CommitsPageUp => commits::commits_step(stoat, commits::CommitStep::PageUp),
         ActionKind::CommitsDetailDown => commits::commits_detail_half_page(stoat, 1),
         ActionKind::CommitsDetailUp => commits::commits_detail_half_page(stoat, -1),
         ActionKind::CommitsFirst => commits::commits_step(stoat, commits::CommitStep::First),
-        ActionKind::CommitsLast => commits::commits_step(stoat, commits::CommitStep::Last),
+        ActionKind::CommitsLast => match stoat.take_pending_count() {
+            Some(n) => {
+                commits::commits_step(stoat, commits::CommitStep::Nth(n.max(1) as usize - 1))
+            },
+            None => commits::commits_step(stoat, commits::CommitStep::Last),
+        },
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),

@@ -18,6 +18,8 @@ pub(crate) enum CommitStep {
     PageDown,
     First,
     Last,
+    /// The row at a 0-based index, clamped to the last loaded commit.
+    Nth(usize),
 }
 
 pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
@@ -76,6 +78,7 @@ pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect 
             CommitStep::PageDown => state.move_down(COMMITS_PAGE_STEP),
             CommitStep::First => state.move_to_first(),
             CommitStep::Last => state.move_to_last(),
+            CommitStep::Nth(index) => state.move_to(index),
         };
         let height = state.viewport_rows;
         state.ensure_selected_visible(height);
@@ -566,6 +569,19 @@ mod tests {
             "the list paints, and the diff left no flag, latch, or widen behind"
         );
     }
+
+    /// Returns the sha that the open commits list selects.
+    fn selected(h: &crate::test_harness::TestHarness) -> String {
+        h.stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("commits state")
+            .selected_sha()
+            .expect("selection")
+            .to_string()
+    }
+
     #[test]
     fn the_arrows_step_the_commits_selection() {
         let mut h = Stoat::test();
@@ -579,16 +595,6 @@ mod tests {
         );
         h.open_commits("/repo");
 
-        let selected = |h: &crate::test_harness::TestHarness| {
-            h.stoat
-                .active_workspace()
-                .commits
-                .as_ref()
-                .expect("commits state")
-                .selected_sha()
-                .expect("selection")
-                .to_string()
-        };
         let top = selected(&h);
 
         h.type_keys("down");
@@ -599,6 +605,36 @@ mod tests {
             (after_down, selected(&h)),
             ("a1b2c3d4".to_string(), top),
             "down steps onto the next row and up comes back"
+        );
+    }
+
+    #[test]
+    fn a_count_steps_the_commits_selection_and_g_selects_the_nth() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+                ("c3d4e5f6", "three", &[("a.rs", "3\n")]),
+                ("d4e5f6a7", "four", &[("a.rs", "4\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+
+        let walked: Vec<String> = ["2 j", "9 j", "9 k", "3 G", "G"]
+            .into_iter()
+            .map(|keys| {
+                h.type_keys(keys);
+                selected(&h)
+            })
+            .collect();
+
+        assert_eq!(
+            walked,
+            ["b2c3d4e5", "a1b2c3d4", "d4e5f6a7", "b2c3d4e5", "a1b2c3d4"],
+            "a count steps and clamps, a count before G selects that row, and a bare G selects the last"
         );
     }
 
