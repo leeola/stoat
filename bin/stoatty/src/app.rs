@@ -61,7 +61,7 @@ use stoatty_render::{
         fontdb::Database as FontDatabase, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext,
         PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
     },
-    render,
+    render::{self, background::CursorFill},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -665,7 +665,8 @@ struct State {
     zoom_inband: bool,
     /// Whether the primary window currently holds focus, tracked from
     /// `WindowEvent::Focused`. Combined with each aux window's focus into the
-    /// app-wide DECSET 1004 report via [`reconcile_app_focus`].
+    /// app-wide DECSET 1004 report via [`reconcile_app_focus`]. It also selects
+    /// the cursor fill, so a window without focus draws its cursor hollow.
     focused: bool,
     /// The last app-wide focus state reported to the child (true when the
     /// primary or any aux window is focused). A DECSET 1004 report fires only
@@ -1547,6 +1548,14 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             WindowEvent::Focused(gained) => {
                 state.focused = gained;
+                state.gpu.set_cursor_fill(if gained {
+                    CursorFill::Solid
+                } else {
+                    CursorFill::Hollow
+                });
+                // An idle window draws no frame until something asks for one, so
+                // the new fill paints only on request.
+                state.window.request_redraw();
                 // The app-wide DECSET 1004 report is reconciled in about_to_wait
                 // so a switch between stoatty windows nets no report.
                 if gained {
