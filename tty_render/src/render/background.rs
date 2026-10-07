@@ -124,7 +124,9 @@ struct Globals {
     /// every instance carries alpha 255. A pool composite writes zero, because
     /// it covers the live grid and must paint its default cells.
     skip_color: u32,
-    _pad: [u32; 3],
+    /// Non-zero when the cursor fragment draws the block's outline only.
+    cursor_hollow: u32,
+    _pad: [u32; 2],
     /// The pool regions the live cell fill skips. A pool composite writes
     /// [`Cover::NONE`], since its own cells are what covers the live grid.
     cover: Cover,
@@ -138,6 +140,18 @@ pub struct CursorState {
     pub corners: Option<[[f32; 2]; 4]>,
     /// Block color. The pass applies its own blend alpha.
     pub color: Rgb,
+    /// How much of the block the pass paints. A hollow fill draws the outline
+    /// only, the mark of a window without focus.
+    pub fill: CursorFill,
+}
+
+/// How much of the cursor block the cursor pass paints.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorFill {
+    /// The whole block, tinting every cell it covers.
+    Solid,
+    /// The block's outline, which leaves the text under it untinted.
+    Hollow,
 }
 
 /// The instanced background-fill pipeline and its per-frame buffers, plus a
@@ -406,7 +420,8 @@ impl BackgroundPass {
                 CURSOR_ALPHA,
             ],
             skip_color: packed_color(clear),
-            _pad: [0; 3],
+            cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
+            _pad: [0; 2],
             cover: Cover::new(covered, occluders.len()),
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
@@ -563,7 +578,8 @@ impl BackgroundPass {
             origin_cells,
             cursor_color: [0.0; 4],
             skip_color: 0,
-            _pad: [0; 3],
+            cursor_hollow: 0,
+            _pad: [0; 2],
             cover: Cover::NONE,
         };
         queue.write_buffer(
@@ -656,7 +672,8 @@ impl BackgroundPass {
                 CURSOR_ALPHA,
             ],
             skip_color: 0,
-            _pad: [0; 3],
+            cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
+            _pad: [0; 2],
             cover: Cover::NONE,
         };
         // The cursor's own slot, so this can run after the cell globals are placed
@@ -922,7 +939,7 @@ fn packed_color(rgb: Rgb) -> u32 {
 mod tests {
     use super::{
         build_instances, build_row_instances, damaged_row_runs, row_slot, BackgroundPass,
-        BgInstance, CursorState,
+        BgInstance, CursorFill, CursorState,
     };
     use crate::{
         render::{self, CellMetrics, Occluder, PoolOccluders},
@@ -1185,6 +1202,7 @@ mod tests {
         let cursor = CursorState {
             corners: None,
             color: Rgb::new(0, 0, 0),
+            fill: CursorFill::Solid,
         };
         let mut prepare = |grid: &Grid, damage: &Damage, scrolled_rows: isize| {
             pass.prepare(
@@ -1520,6 +1538,7 @@ mod tests {
         let cursor = CursorState {
             corners: None,
             color: OTHER,
+            fill: CursorFill::Solid,
         };
         pass.prepare(
             device,

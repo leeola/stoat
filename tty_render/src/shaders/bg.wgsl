@@ -31,7 +31,8 @@ struct Globals {
     // Zero culls no cell, since every instance carries alpha 255. The padding
     // matches the Rust side, which aligns cover to 16 bytes by hand.
     skip_color: u32,
-    _pad0: u32,
+    // Non-zero when fs_cursor draws the block's outline only.
+    cursor_hollow: u32,
     _pad1: u32,
     _pad2: u32,
     // The pool regions the live cell fill skips. Zero rects on every other draw.
@@ -156,10 +157,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // Cursor block. One quad, no instance data: its four corners ride in the
 // globals uniform as fractional cell coordinates, so it can sit between cells
 // while it eases and need not stay rectangular. Drawn after the glyphs and
-// alpha-blended, it tints the cells it covers.
+// alpha-blended, it tints the cells it covers. A hollow fill keeps only a stroke
+// along the block's sides, so the text inside stays untinted.
 
 struct CursorVsOut {
     @builtin(position) clip: vec4<f32>,
+    // The fragment's place in the block, (0, 0) at its top-left corner and
+    // (1, 1) at its bottom-right.
+    @location(0) uv: vec2<f32>,
+    // The block's width and height in pixels, which every vertex shares.
+    @location(1) @interpolate(flat) extent: vec2<f32>,
 }
 
 @vertex
@@ -170,10 +177,17 @@ fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
         globals.cursor_corners_23.xy,
         globals.cursor_corners_23.zw
     );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0)
+    );
     // Two triangles over [TL, TR, BL, BR], matching vs_main's winding.
     var indices = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
 
-    let cell = corners[indices[vertex_index]];
+    let corner = indices[vertex_index];
+    let cell = corners[corner];
     let pixel = cell * globals.cell_size + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -182,10 +196,26 @@ fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
 
     var out: CursorVsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = uvs[corner];
+    // Each side scales to pixels before its length is taken, since a warped
+    // block's sides lean across both axes.
+    out.extent = vec2<f32>(
+        length((corners[1] - corners[0]) * globals.cell_size),
+        length((corners[2] - corners[0]) * globals.cell_size)
+    );
     return out;
 }
 
 @fragment
-fn fs_cursor() -> @location(0) vec4<f32> {
+fn fs_cursor(in: CursorVsOut) -> @location(0) vec4<f32> {
+    if globals.cursor_hollow != 0u {
+        // Pixels to the nearest vertical and horizontal side. A fragment farther
+        // than the stroke from both lies inside the outline.
+        let stroke = max(1.0, 0.15 * globals.cell_size.x);
+        let edge = min(in.uv, 1.0 - in.uv) * in.extent;
+        if edge.x > stroke && edge.y > stroke {
+            discard;
+        }
+    }
     return globals.cursor_color;
 }

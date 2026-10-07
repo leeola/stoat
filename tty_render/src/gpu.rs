@@ -16,7 +16,7 @@ pub use crate::render::{
 use crate::{
     perf::FrameProfiler,
     render::{
-        background::{BackgroundPass, CursorState},
+        background::{BackgroundPass, CursorFill, CursorState},
         bar::BarPass,
         decoration::DecorationPass,
         grid_dims,
@@ -293,6 +293,9 @@ pub struct Renderer {
     /// Cursor block color. The cursor pass applies its own blend alpha, so this
     /// is the opaque RGB only.
     cursor_color: Rgb,
+    /// How much of the cursor block the cursor pass paints. Held across frames,
+    /// as the color is, since it follows the window's focus rather than a frame.
+    cursor_fill: CursorFill,
     /// The frame's panel occluders, lent to every pass that occludes. Held here
     /// so a frame builds the list once and reuses the allocation across frames.
     occluders: Vec<Occluder>,
@@ -381,6 +384,7 @@ impl Renderer {
                 metrics,
                 clear_rgb,
                 cursor_color: cursor,
+                cursor_fill: CursorFill::Solid,
                 occluders: Vec::new(),
                 pool_occluders: Vec::new(),
                 riding: Vec::new(),
@@ -456,6 +460,14 @@ impl Renderer {
     pub fn set_theme_colors(&mut self, background: Rgb, cursor: Rgb) {
         self.clear_rgb = background;
         self.cursor_color = cursor;
+    }
+
+    /// Paint the cursor block whole or as its outline from the next draw on.
+    ///
+    /// A window without focus draws the outline, so the cursor stays visible
+    /// while another window takes the keys.
+    pub fn set_cursor_fill(&mut self, fill: CursorFill) {
+        self.cursor_fill = fill;
     }
 
     /// Draw a frame for `grid` into `view`: clear to the default background,
@@ -620,6 +632,7 @@ impl Renderer {
             CursorState {
                 corners: frame.cursor_corners,
                 color: self.cursor_color,
+                fill: self.cursor_fill,
             },
             self.clear_rgb,
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
@@ -1144,6 +1157,7 @@ impl Renderer {
             CursorState {
                 corners,
                 color: self.cursor_color,
+                fill: self.cursor_fill,
             },
             grid_scroll,
         );
@@ -1799,6 +1813,11 @@ impl GpuContext {
     /// shows on the next draw.
     pub fn set_theme_colors(&mut self, background: Rgb, cursor: Rgb) {
         self.renderer.set_theme_colors(background, cursor);
+    }
+
+    /// Paint the cursor block whole or as its outline from the next draw on.
+    pub fn set_cursor_fill(&mut self, fill: CursorFill) {
+        self.renderer.set_cursor_fill(fill);
     }
 
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
