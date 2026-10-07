@@ -31,8 +31,8 @@ const MAX_REFINE_LINE_BYTES: usize = 1024;
 ///
 /// Every paired line costs an interning pass and a diff of its own, so a block
 /// replaced wholesale would run one per line to arrive at spans covering the
-/// block anyway. Leaving the spans empty falls through to the whole-range
-/// display this module's doc describes.
+/// block anyway. Leaving the spans `None` falls through to the whole-range
+/// display [`refine_replaced_pairs`] describes.
 ///
 /// The height is what tells the two cases apart. Refinement exists so a reader
 /// can see the word that changed, which is a question worth asking of an edit
@@ -43,18 +43,22 @@ const MAX_REFINE_PAIR_LINES: usize = 32;
 /// so a scattered edit reads as one span rather than confetti.
 const MERGE_GAP: usize = 3;
 
+/// The spans one refined pair yields, with the lhs side first.
+type PairSpans = (Vec<Range<usize>>, Vec<Range<usize>>);
+
 /// Populate [`DiffChange::refined_spans`](super::DiffChange::refined_spans) for
 /// every prose `Replaced` pair, narrowing both sides to the chars that actually
 /// differ.
 ///
 /// A pair is prose only when both of its sides are, since one code atom brings
-/// a token boundary back to the run. Every other pair is left with empty spans,
-/// so it marks whole.
+/// a token boundary back to the run. Every other pair keeps `None`, so it marks
+/// whole.
 ///
-/// A pair whose two sides char-diff cleanly gets per-line refined spans. A line
-/// that is a full rewrite, unpaired, or too long to char-diff contributes its
-/// whole range, and a change whose refined spans come back empty falls back to
-/// its whole `byte_range` at display time, so a mark never disappears.
+/// A prose pair taller than `MAX_REFINE_PAIR_LINES` keeps `None` too. Any other
+/// prose pair gets `Some` with its per-line spans, where a line that is a full
+/// rewrite, unpaired, or longer than `MAX_REFINE_LINE_BYTES` contributes its
+/// whole range. A pair whose lines all match gets `Some` and empty, because its
+/// lines differ only in their terminators and nothing inside them changed.
 pub fn refine_replaced_pairs(changes: &mut [DiffChange], lhs_text: &str, rhs_text: &str) {
     let mut pairs: HashMap<u32, (Option<usize>, Option<usize>)> = HashMap::new();
     for (i, change) in changes.iter().enumerate() {
@@ -80,33 +84,32 @@ pub fn refine_replaced_pairs(changes: &mut [DiffChange], lhs_text: &str, rhs_tex
         }
         let lhs_range = changes[lhs_idx].byte_range.clone();
         let rhs_range = changes[rhs_idx].byte_range.clone();
-        let (lhs_spans, rhs_spans) = refine_pair(
+        if let Some((lhs_spans, rhs_spans)) = refine_pair(
             &lhs_text[lhs_range.clone()],
             lhs_range.start,
             &rhs_text[rhs_range.clone()],
             rhs_range.start,
-        );
-        changes[lhs_idx].refined_spans = lhs_spans;
-        changes[rhs_idx].refined_spans = rhs_spans;
+        ) {
+            changes[lhs_idx].refined_spans = Some(lhs_spans);
+            changes[rhs_idx].refined_spans = Some(rhs_spans);
+        }
     }
 }
 
 /// Refine one `Replaced` pair. `lhs`/`rhs` are the two sides' changed text;
 /// `lhs_base`/`rhs_base` are their byte offsets in the full inputs, so the
 /// returned spans are absolute.
-fn refine_pair(
-    lhs: &str,
-    lhs_base: usize,
-    rhs: &str,
-    rhs_base: usize,
-) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+///
+/// Returns `None` for a pair taller than [`MAX_REFINE_PAIR_LINES`], which the
+/// refine leaves whole.
+fn refine_pair(lhs: &str, lhs_base: usize, rhs: &str, rhs_base: usize) -> Option<PairSpans> {
     // Counted the way `lines_with_offsets` splits, which always yields a final
     // segment, so the cap is measured against the lines the loop below walks.
     // Counted before splitting, so an over-cap pair does not pay for that
     // either.
     let height = |text: &str| text.bytes().filter(|&b| b == b'\n').count() + 1;
     if height(lhs) > MAX_REFINE_PAIR_LINES || height(rhs) > MAX_REFINE_PAIR_LINES {
-        return (Vec::new(), Vec::new());
+        return None;
     }
 
     let lhs_lines = lines_with_offsets(lhs, lhs_base);
@@ -136,7 +139,7 @@ fn refine_pair(
     for &(text, start) in &rhs_lines[paired..] {
         push_whole_line(&mut rhs_spans, text, start);
     }
-    (lhs_spans, rhs_spans)
+    Some((lhs_spans, rhs_spans))
 }
 
 /// Char-diff two single lines, returning the changed char byte ranges
@@ -280,7 +283,7 @@ mod tests {
     #[test]
     fn a_pair_taller_than_the_cap_refines_to_nothing() {
         // One word changed on the last line, so a refined pair has exactly one
-        // span to find and an unrefined one comes back empty.
+        // span to find and an unrefined one comes back `None`.
         let block = |lines: usize| -> (String, String) {
             let mut lhs = "same\n".repeat(lines - 1);
             let mut rhs = lhs.clone();
@@ -290,7 +293,8 @@ mod tests {
         };
 
         let (lhs, rhs) = block(MAX_REFINE_PAIR_LINES);
-        let (_, rhs_spans) = refine_pair(&lhs, 0, &rhs, 0);
+        let (_, rhs_spans) =
+            refine_pair(&lhs, 0, &rhs, 0).expect("a pair under the cap is refined");
         assert_eq!(
             rhs_spans
                 .iter()
@@ -303,7 +307,7 @@ mod tests {
         let (lhs, rhs) = block(MAX_REFINE_PAIR_LINES + 1);
         assert_eq!(
             refine_pair(&lhs, 0, &rhs, 0),
-            (Vec::new(), Vec::new()),
+            None,
             "one line taller contributes nothing and falls back to the whole range",
         );
 
@@ -316,7 +320,7 @@ mod tests {
         rhs.push('\n');
         assert_eq!(
             refine_pair(&lhs, 0, &rhs, 0),
-            (Vec::new(), Vec::new()),
+            None,
             "the empty line a trailing newline opens counts toward the cap",
         );
     }
@@ -325,7 +329,7 @@ mod tests {
     fn refines_an_inserted_word_to_just_that_word() {
         let lhs = "foo(\"hello world\")";
         let rhs = "foo(\"hello brave world\")";
-        let (_, rhs_spans) = refine_pair(lhs, 0, rhs, 0);
+        let (_, rhs_spans) = refine_pair(lhs, 0, rhs, 0).expect("a pair under the cap is refined");
         assert_eq!(rhs_spans.len(), 1, "one contiguous inserted region");
         assert_eq!(&rhs[rhs_spans[0].clone()], "brave ");
     }
@@ -336,7 +340,8 @@ mod tests {
         // side (a shared prefix/suffix would trim further, as other tests show).
         let lhs = "let x = alpha;";
         let rhs = "let x = OMEGA;";
-        let (lhs_spans, rhs_spans) = refine_pair(lhs, 0, rhs, 0);
+        let (lhs_spans, rhs_spans) =
+            refine_pair(lhs, 0, rhs, 0).expect("a pair under the cap is refined");
         assert_eq!(&lhs[lhs_spans[0].clone()], "alpha");
         assert_eq!(&rhs[rhs_spans[0].clone()], "OMEGA");
     }
@@ -344,7 +349,8 @@ mod tests {
     #[test]
     fn fully_rewritten_line_keeps_the_whole_line() {
         let (lhs, rhs) = ("alpha", "ZZZZZ");
-        let (lhs_spans, rhs_spans) = refine_pair(lhs, 0, rhs, 0);
+        let (lhs_spans, rhs_spans) =
+            refine_pair(lhs, 0, rhs, 0).expect("a pair under the cap is refined");
         assert_eq!(lhs_spans.len(), 1);
         assert_eq!(&lhs[lhs_spans[0].clone()], "alpha");
         assert_eq!(rhs_spans.len(), 1);
@@ -355,7 +361,7 @@ mod tests {
     fn refines_a_multiline_pair_per_zipped_line() {
         let lhs = "old1\nold2";
         let rhs = "new1\nnew2";
-        let (_, rhs_spans) = refine_pair(lhs, 0, rhs, 0);
+        let (_, rhs_spans) = refine_pair(lhs, 0, rhs, 0).expect("a pair under the cap is refined");
         // "old" -> "new" on line 1 (0..3) and line 2 (5..8, after "new1\n").
         assert_eq!(rhs_spans, [0..3, 5..8]);
     }
@@ -363,8 +369,18 @@ mod tests {
     #[test]
     fn absolute_offsets_add_the_base() {
         let rhs = "hello brave world";
-        let (_, rhs_spans) = refine_pair("hello world", 100, rhs, 200);
+        let (_, rhs_spans) =
+            refine_pair("hello world", 100, rhs, 200).expect("a pair under the cap is refined");
         assert_eq!(rhs_spans.len(), 1);
         assert_eq!(rhs_spans[0].start, 200 + 6);
+    }
+
+    #[test]
+    fn a_pair_whose_lines_match_refines_to_empty_spans() {
+        assert_eq!(
+            refine_pair("   -p viewership_http", 0, "   -p viewership_http", 0),
+            Some((Vec::new(), Vec::new())),
+            "lines that match differ only in their terminators, so nothing inside them marks",
+        );
     }
 }

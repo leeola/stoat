@@ -656,7 +656,7 @@ impl Run {
             move_metadata: self.meta.clone(),
             pair_id: None,
             deletion_rhs_anchor: None,
-            refined_spans: Vec::new(),
+            refined_spans: None,
             prose: self.prose,
         }
     }
@@ -1048,6 +1048,7 @@ mod tests {
                     &text[c.byte_range.clone()],
                     c.refined_spans
                         .iter()
+                        .flatten()
                         .map(|r| &text[r.clone()])
                         .collect::<Vec<_>>(),
                 )
@@ -1111,6 +1112,7 @@ mod tests {
                     c.kind,
                     c.refined_spans
                         .iter()
+                        .flatten()
                         .map(|r| &text[r.clone()])
                         .collect::<Vec<_>>(),
                 )
@@ -1168,7 +1170,7 @@ mod tests {
                     c.pair_id,
                     &text[c.byte_range.clone()],
                     c.prose,
-                    c.refined_spans.len(),
+                    c.refined_spans.as_ref().map_or(0, Vec::len),
                 )
             })
             .collect();
@@ -1229,6 +1231,7 @@ mod tests {
             change
                 .refined_spans
                 .iter()
+                .flatten()
                 .map(|range| &text[range.clone()])
                 .collect(),
         )

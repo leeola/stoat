@@ -422,14 +422,13 @@ fn collect_spans_by(
         {
             continue;
         }
-        // A Replaced change carries char-refined sub-ranges. Project those so
-        // the underline narrows to the changed chars. Everything else (and a
-        // full rewrite, whose refined spans come back empty) projects its whole
-        // byte range.
-        let ranges: &[Range<usize>] = if change.refined_spans.is_empty() {
-            std::slice::from_ref(&change.byte_range)
-        } else {
-            &change.refined_spans
+        // A refined Replaced change carries char-refined sub-ranges. Project
+        // those so the underline narrows to the changed chars. A refined pair
+        // whose lines differ only in their terminators projects nothing, and an
+        // unrefined change projects its whole byte range.
+        let ranges: &[Range<usize>] = match &change.refined_spans {
+            None => std::slice::from_ref(&change.byte_range),
+            Some(spans) => spans.as_slice(),
         };
         for cr in ranges {
             if cr.start >= cr.end {
@@ -1005,7 +1004,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
-            refined_spans: Vec::new(),
+            refined_spans: None,
             prose: false,
         }];
         assert_eq!(
@@ -1025,7 +1024,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
-            refined_spans: Vec::new(),
+            refined_spans: None,
             prose: false,
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
@@ -1043,7 +1042,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
-            refined_spans: vec![0..3, 8..13],
+            refined_spans: Some(vec![0..3, 8..13]),
             prose: false,
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);

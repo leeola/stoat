@@ -1979,13 +1979,13 @@ fn line_is_blank(starts: &[usize], text: &str, line: u32) -> bool {
 
 /// The byte ranges a change actually marks.
 ///
-/// `refined_spans` when the differ narrowed the change to the characters that
-/// differ, else the whole `byte_range`, the same preference
-/// [`replaced_change_spans`] makes.
+/// `refined_spans` when the differ refined the change, else the whole
+/// `byte_range`, the same preference [`replaced_change_spans`] makes. A present
+/// empty `refined_spans` marks nothing, so the change's text paints unchanged.
 fn effective_ranges(change: &stoat_language::structural_diff::DiffChange) -> &[Range<usize>] {
-    match change.refined_spans.is_empty() {
-        true => std::slice::from_ref(&change.byte_range),
-        false => change.refined_spans.as_slice(),
+    match &change.refined_spans {
+        None => std::slice::from_ref(&change.byte_range),
+        Some(spans) => spans.as_slice(),
     }
 }
 
@@ -2022,9 +2022,11 @@ fn line_range_to_byte_range(
 /// [`ChangeKind::Replaced`] [`ChangeSpan`]s.
 ///
 /// Prefers the structural diff's `refined_spans` -- the char ranges that
-/// actually differ -- so a one-word edit records only that word. An empty
-/// `refined_spans` means the whole token changed, so the whole `byte_range`
-/// becomes the single span and a full rewrite still marks completely.
+/// actually differ -- so a one-word edit records only that word. An absent
+/// `refined_spans` means the refine never narrowed the change, so the whole
+/// `byte_range` becomes the single span and a full rewrite still marks
+/// completely. A present empty one yields no span, so the side's text paints
+/// unchanged.
 ///
 /// `text` is the full text of the change's side, per [`prose_change`].
 fn replaced_change_spans(
@@ -2032,10 +2034,9 @@ fn replaced_change_spans(
     text: &str,
 ) -> Vec<ChangeSpan> {
     let prose = prose_change(change, text);
-    let ranges = if change.refined_spans.is_empty() {
-        std::slice::from_ref(&change.byte_range)
-    } else {
-        change.refined_spans.as_slice()
+    let ranges = match &change.refined_spans {
+        None => std::slice::from_ref(&change.byte_range),
+        Some(spans) => spans.as_slice(),
     };
     ranges
         .iter()
@@ -2953,7 +2954,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -2963,7 +2964,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(1),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -2973,7 +2974,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -2983,7 +2984,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(1),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
         ];
@@ -3038,7 +3039,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -3048,7 +3049,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
-                refined_spans: vec![brave.clone()],
+                refined_spans: Some(vec![brave.clone()]),
                 prose: false,
             },
         ];
@@ -3107,7 +3108,7 @@ mod tests {
             move_metadata: None,
             pair_id: Some(id),
             deletion_rhs_anchor: None,
-            refined_spans: vec![at(text, changed)],
+            refined_spans: Some(vec![at(text, changed)]),
             prose: true,
         };
         let changes = vec![
@@ -3159,7 +3160,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -3169,7 +3170,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
         ];
@@ -3253,7 +3254,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: Some(1),
-            refined_spans: Vec::new(),
+            refined_spans: None,
             prose: false,
         }];
         let dm = DiffMap::from_structural_changes(
@@ -3289,7 +3290,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
-            refined_spans: Vec::new(),
+            refined_spans: None,
             prose: false,
         }];
         let dm = DiffMap::from_structural_changes(
@@ -4074,7 +4075,7 @@ mod tests {
                 move_metadata: Some(lhs_meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -4084,7 +4085,7 @@ mod tests {
                 move_metadata: Some(rhs_meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
         ];
@@ -4143,7 +4144,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: None,
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -4153,7 +4154,7 @@ mod tests {
                 move_metadata: Some(meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
             DiffChange {
@@ -4163,7 +4164,7 @@ mod tests {
                 move_metadata: Some(meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: false,
             },
         ];

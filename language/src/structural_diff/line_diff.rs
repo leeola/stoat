@@ -152,7 +152,7 @@ impl Sink for ChangeSink<'_> {
                 move_metadata: None,
                 pair_id,
                 deletion_rhs_anchor,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 // The line pass runs where no grammar parsed, so nothing in
                 // the file carries a token boundary to mark an edit against.
                 prose: true,
@@ -166,7 +166,7 @@ impl Sink for ChangeSink<'_> {
                 move_metadata: None,
                 pair_id,
                 deletion_rhs_anchor: None,
-                refined_spans: Vec::new(),
+                refined_spans: None,
                 prose: true,
             });
         }
@@ -325,6 +325,22 @@ mod tests {
         assert_eq!(rhs_change.kind, ChangeKind::Replaced);
         assert_eq!(&lhs[lhs_change.byte_range.clone()], "beta");
         assert_eq!(&rhs[rhs_change.byte_range.clone()], "BETA");
+    }
+
+    #[test]
+    fn a_pair_that_differs_only_by_its_terminator_has_no_changed_chars() {
+        let summary: Vec<_> = changes("a\nb", "a\nb\n")
+            .iter()
+            .map(|c| (c.side, c.kind, c.refined_spans.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Side::Lhs, ChangeKind::Replaced, Some(Vec::new())),
+                (Side::Rhs, ChangeKind::Replaced, Some(Vec::new())),
+            ],
+            "the gained newline pairs the line with itself, and no char inside it changed"
+        );
     }
 
     #[test]

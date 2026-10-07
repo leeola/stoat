@@ -104,19 +104,24 @@ pub struct DiffChange {
     /// logically belongs; used to anchor deleted content at the right
     /// position in the buffer view. `None` for any other kind.
     pub deletion_rhs_anchor: Option<u32>,
-    /// For a prose [`ChangeKind::Replaced`] change, the sub-ranges of
-    /// [`byte_range`](Self::byte_range) whose characters actually differ from
-    /// the counterpart, so a one-word edit marks only the changed chars rather
-    /// than the whole token or line run. Empty means the whole `byte_range`
-    /// changed (a full rewrite, an unpaired line, or a non-`Replaced` change).
+    /// The chars of a prose [`ChangeKind::Replaced`] change that differ from its
+    /// counterpart, so a one-word edit marks only that word.
     ///
-    /// Always empty when [`prose`](Self::prose) is false. A code atom has a
+    /// `Some` with ranges holds the sub-ranges of [`byte_range`](Self::byte_range)
+    /// whose chars differ from the counterpart. `Some` and empty is a pair the
+    /// refine compared line by line and found no differing char in, which is a
+    /// pair whose lines differ only in their terminators, so nothing inside it
+    /// marks. `None` is a change the refine never narrowed, such as a
+    /// non-`Replaced` change, a code atom, or a pair over the height cap, and it
+    /// marks its whole `byte_range`.
+    ///
+    /// Always `None` when [`prose`](Self::prose) is false. A code atom has a
     /// token boundary of its own, so a mark inside one claims an edit the
     /// reader never made.
     ///
     /// This is supplementary display data only. It never alters `byte_range`,
     /// the pair structure, or hunk extents.
-    pub refined_spans: Vec<Range<usize>>,
+    pub refined_spans: Option<Vec<Range<usize>>>,
     /// Every atom in the run is a string or comment atom, or the change comes
     /// from a line diff, so the changed chars sit inside text with no token
     /// boundary to mark them.

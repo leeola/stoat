@@ -2843,6 +2843,18 @@ mod tests {
         (h, buffer_id)
     }
 
+    /// Open `buffer` as a file with no language diffed against `base`, and
+    /// settle the line pass that diffs it.
+    fn settled_plain_diff(base: &str, buffer: &str) -> (TestHarness, BufferId) {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.unknownext", base, buffer)]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.unknownext"));
+        h.settle_diff_jobs();
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        (h, buffer_id)
+    }
+
     /// A reindent under a new block is what the structural pass exists for. The
     /// line differ sees every moved line's prefix rewritten and washes it; the
     /// tree differ sees unchanged statements and marks only the braces.
@@ -3038,19 +3050,41 @@ mod tests {
     /// stay the line pass's char-refined spans.
     #[test]
     fn a_file_with_no_language_keeps_the_char_refined_spans() {
-        let (h, buffer_id) = {
-            let mut h = TestHarness::with_size(80, 24);
-            h.stage_review_scenario("/repo", &[("a.unknownext", "alpha\n", "alPHa\n")]);
-            h.stoat.set_diff_warm_auto(true);
-            h.open_file(Path::new("/repo/a.unknownext"));
-            h.settle_diff_jobs();
-            let id = h.stoat.focused_editor_ids().expect("focused editor").1;
-            (h, id)
-        };
+        let (h, buffer_id) = settled_plain_diff("alpha\n", "alPHa\n");
         let spans = detail_spans_of(&h, buffer_id);
         assert!(
             spans.iter().any(|(_, count)| *count > 0),
             "the line pass still refines the changed characters: {spans:?}"
+        );
+    }
+
+    /// A newline added after the last line pairs that line with itself, so the
+    /// row keeps its gutter mark and neither side washes any of its text.
+    #[test]
+    fn a_newline_added_at_the_end_of_a_file_with_no_language_washes_nothing() {
+        let (h, buffer_id) = settled_plain_diff("alpha", "alpha\n");
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        let modified: Vec<_> = dm
+            .hunks()
+            .filter(|hunk| hunk.status == DiffHunkStatus::Modified)
+            .collect();
+        assert_eq!(modified.len(), 1, "one modified hunk: {modified:?}");
+
+        let detail = modified[0]
+            .token_detail
+            .as_ref()
+            .expect("the line pass details its modified hunk");
+        assert_eq!(
+            (
+                detail.buffer_spans.len(),
+                detail.base_spans.len(),
+                dm.base_line_refined(0)
+            ),
+            (0, 0, true),
+            "a terminator-only change names no changed chars, and the base row keeps its text"
         );
     }
     /// The base text of `buffer_id`'s installed diff map.
