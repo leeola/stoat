@@ -11,7 +11,8 @@ define_action!(
     ActionKind::OpenCommits,
     "browse commit history",
     "Open the commit-list view: a left pane of commits on the current \
-     branch with a right-pane preview of the selected commit's changes.",
+     branch with a right-pane preview of the selected commit's changes. \
+     The list takes the full editor width while it is open.",
     ActionPriority::Common,
     command_name = "commits"
 );
@@ -22,7 +23,8 @@ define_action!(
     "CloseCommits",
     ActionKind::CloseCommits,
     "close the commit-list view",
-    "Drop the active commit-list state and return to normal mode."
+    "Drop the active commit-list state, restore the pane layout the list \
+     widened, and return to normal mode."
 );
 
 define_action!(

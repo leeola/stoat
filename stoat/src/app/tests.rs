@@ -543,6 +543,9 @@ fn a_zoom_step_on_the_commits_screen_tunes_the_soften() {
     h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
     h.open_commits("/repo");
     h.stoat.handle_window_ipc(zoom(-1));
+    // The list widens its pane, which hides the split's widths until the list
+    // closes and the natural layout returns.
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseCommits);
 
     assert_eq!(
         (h.stoat.diff_soften, widths(&h)),

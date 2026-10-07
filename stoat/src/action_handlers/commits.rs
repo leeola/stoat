@@ -38,7 +38,8 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     // The commits screen ranks below the diff screen, so a list installed over
     // an open diff would never paint. Leaving the diff first is what the user
     // otherwise does by hand. The helper gates itself, so a plain pane, widened
-    // or not, is untouched.
+    // or not, is untouched. The list then takes the full width the diff gives
+    // up.
     super::review::exit_diff_view(stoat);
 
     let mut state = CommitListState::new(workdir, repo.clone());
@@ -51,6 +52,10 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     ));
 
     stoat.active_workspace_mut().commits = Some(state);
+    let panes = &mut stoat.active_workspace_mut().panes;
+    let focus = panes.focus();
+    panes.widen(focus);
+
     drain_commits_tasks(stoat);
     ensure_selected_preview(stoat);
     drain_commits_tasks(stoat);
@@ -61,6 +66,10 @@ pub(super) fn close_commits(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     if ws.commits.take().is_none() {
         return UpdateEffect::None;
+    }
+    let focus = ws.panes.focus();
+    if ws.panes.widened() == Some(focus) {
+        ws.panes.unwiden();
     }
     stoat.set_focused_mode("normal".to_string());
     UpdateEffect::Redraw
@@ -565,8 +574,62 @@ mod tests {
                 latched,
                 widened.is_some()
             ),
-            (Some("commits"), false, false, false),
-            "the list paints, and the diff left no flag, latch, or widen behind"
+            (Some("commits"), false, false, true),
+            "the list paints widened, and the diff left no flag or latch behind"
+        );
+    }
+
+    #[test]
+    fn closing_the_commits_list_restores_the_layout() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.open_commits("/repo");
+        let focus = h.stoat.active_workspace().panes.focus();
+        let while_open = h.stoat.active_workspace().panes.widened();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseCommits);
+
+        assert_eq!(
+            (while_open, h.stoat.active_workspace().panes.widened()),
+            (Some(focus), None),
+            "the list widens the focused pane, and closing it restores the split"
+        );
+    }
+
+    #[test]
+    fn leaving_a_diff_over_the_list_keeps_the_list_widened() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.seed_focused_buffer("changed\n");
+        h.open_commits("/repo");
+
+        let mut views = Vec::new();
+        for _ in 0..2 {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+            h.settle();
+            views.push(h.stoat.current_view());
+        }
+
+        assert_eq!(
+            (views, h.stoat.active_workspace().panes.widened().is_some()),
+            (vec![Some("diff"), Some("commits")], true),
+            "the diff opens over the list, and its exit leaves the widen to the list"
         );
     }
 

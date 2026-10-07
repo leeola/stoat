@@ -433,6 +433,9 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
 /// and touches nothing when no editor is focused or neither half is set, so a
 /// caller can offer the exit unconditionally.
 ///
+/// While a commits list is open beneath the diff, the widen belongs to the list
+/// and stays until the list closes.
+///
 /// Either half being set counts as on, so this leaves a latched pane showing a
 /// clean file as readily as a diff itself.
 pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
@@ -440,6 +443,7 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
         let panes = &stoat.active_workspace().panes;
         panes.pane(panes.focus()).diff_mode
     };
+    let commits_open = stoat.active_workspace().commits.is_some();
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return false;
     };
@@ -451,7 +455,7 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
     let panes = &mut stoat.active_workspace_mut().panes;
     let focus = panes.focus();
     panes.pane_mut(focus).diff_mode = false;
-    if panes.widened() == Some(focus) {
+    if !commits_open && panes.widened() == Some(focus) {
         panes.unwiden();
     }
     true
