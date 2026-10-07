@@ -1349,11 +1349,7 @@ on key {
                 J -> [GotoDeclaration(), SetMode(normal)];
                 r -> [RenameSymbol(), SetMode(normal)];
                 i -> [Hover(), SetMode(normal)];
-            }
-            !token_known || token == value || token == symbol {
                 k -> [GotoTypeDefinition(), SetMode(normal)];
-            }
-            !token_known || token == trait || token == type {
                 t -> [GotoImplementation(), SetMode(normal)];
             }
         }

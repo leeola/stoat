@@ -1813,6 +1813,11 @@ mod lsp_filter_tests {
             ws.buffers.store_lsp_symbol_kinds(buffer_id, kinds);
         }
 
+        let goto_rows_list = |text: &str| {
+            text.contains(short_desc("GotoTypeDefinition"))
+                && text.contains(short_desc("GotoImplementation"))
+        };
+
         // The cursor starts on "Foo", the trait.
         h.type_keys("space l");
         let over_trait = box_text(&mut h);
@@ -1823,6 +1828,10 @@ mod lsp_filter_tests {
         assert!(
             !over_trait.contains("caller of the symbol"),
             "the caller row is hidden over a trait"
+        );
+        assert!(
+            goto_rows_list(&over_trait),
+            "the Helix goto rows list over every token kind"
         );
 
         // Move onto "bar", the function.
@@ -1837,6 +1846,10 @@ mod lsp_filter_tests {
         assert!(
             !over_function.contains("implementor of the trait"),
             "the implementors row is hidden over a function"
+        );
+        assert!(
+            goto_rows_list(&over_function),
+            "the Helix goto rows list over every token kind"
         );
     }
 
