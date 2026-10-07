@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     display_map::syntax_theme::SyntaxStyles,
+    keymap_state,
     review_session::DiffDocument,
     workspace::diff::BaseHighlightCache,
 };
@@ -24,6 +25,18 @@ pub(crate) enum CommitStep {
 
 pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     use crate::commit_list::CommitListState;
+
+    // The bare command toggles the screen, as `:diff` does, and `CommitsRefresh`
+    // stays the reload. A diff opened from the list stands over it, so there the
+    // command leaves the diff, and the installed list returns with its selection
+    // and loaded pages intact.
+    if stoat.active_workspace().commits.is_some() {
+        if keymap_state::view_predicate(stoat.active_workspace()) == Some("commits") {
+            return close_commits(stoat);
+        }
+        super::review::exit_diff_view(stoat);
+        return UpdateEffect::Redraw;
+    }
 
     let git_root = stoat.active_workspace().git_root.clone();
     let Some(repo) = stoat.git_host.discover(&git_root) else {
@@ -630,6 +643,63 @@ mod tests {
             (views, h.stoat.active_workspace().panes.widened().is_some()),
             (vec![Some("diff"), Some("commits")], true),
             "the diff opens over the list, and its exit leaves the widen to the list"
+        );
+    }
+
+    #[test]
+    fn a_second_commits_command_closes_the_list() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+        let opened = h.stoat.current_view();
+
+        h.open_commits("/repo");
+
+        assert_eq!(
+            (
+                opened,
+                h.stoat.current_view(),
+                h.stoat.active_workspace().commits.is_none()
+            ),
+            (Some("commits"), Some("file"), true),
+            "the first command opens the list and the second closes it"
+        );
+    }
+
+    /// A diff opened from the list stands over it, so the command leaves the
+    /// diff rather than closing the list beneath, and the list keeps its
+    /// selection because it is the same list rather than a reload.
+    #[test]
+    fn the_commits_command_over_a_diff_returns_to_the_list() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.seed_focused_buffer("changed\n");
+        h.open_commits("/repo");
+        h.type_keys("j");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        h.settle();
+        let over_diff = h.stoat.current_view();
+
+        h.open_commits("/repo");
+
+        assert_eq!(
+            (over_diff, h.stoat.current_view(), selected(&h)),
+            (Some("diff"), Some("commits"), "a1b2c3d4".to_string()),
+            "the command over the diff returns to the list with its selection intact"
         );
     }
 

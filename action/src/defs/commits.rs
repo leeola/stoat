@@ -12,7 +12,8 @@ define_action!(
     "browse commit history",
     "Open the commit-list view: a left pane of commits on the current \
      branch with a right-pane preview of the selected commit's changes. \
-     The list takes the full editor width while it is open.",
+     The list takes the full editor width while it is open. A second run \
+     closes it.",
     ActionPriority::Common,
     command_name = "commits"
 );
