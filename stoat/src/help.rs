@@ -929,6 +929,29 @@ mod tests {
     }
 
     #[test]
+    fn a_count_steps_the_help_list_and_g_selects_the_nth() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.type_keys("escape");
+        let last = help_ref(&h).filtered().len() - 1;
+
+        let walked: Vec<usize> = ["2 j", "G", "3 G", "9 k", "9 9 9 9 9 9 9 9 9 9 j"]
+            .into_iter()
+            .map(|keys| {
+                h.type_keys(keys);
+                help_ref(&h).selected()
+            })
+            .collect();
+
+        assert_eq!(
+            walked,
+            [2, last, 2, 0, last],
+            "a count steps and clamps, a bare G selects the last row, and a count before G \
+             selects that row"
+        );
+    }
+
+    #[test]
     fn help_detail_lists_the_follow_changes_binding_and_condition() {
         let mut h = crate::Stoat::test();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);

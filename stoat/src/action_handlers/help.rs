@@ -58,6 +58,10 @@ pub(super) fn help_jump_first(stoat: &mut Stoat) -> UpdateEffect {
     apply_to_help(stoat, |h| h.jump_selection(0))
 }
 
+pub(super) fn help_jump_nth(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+    apply_to_help(stoat, |h| h.jump_selection(index))
+}
+
 pub(super) fn help_jump_last(stoat: &mut Stoat) -> UpdateEffect {
     apply_to_help(stoat, |h| {
         let last = h.filtered().len().saturating_sub(1);

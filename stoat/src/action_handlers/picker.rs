@@ -152,6 +152,18 @@ pub(super) fn picker_end(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     }
 }
 
+/// Move the open list modal's selection to the row at 0-based `index`, clamped
+/// to its last row.
+///
+/// A count before G lands here, so only help reaches it, for the reason
+/// [`picker_end`] gives.
+pub(super) fn picker_nth(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::Help) => super::help::help_jump_nth(stoat, index),
+        _ => UpdateEffect::None,
+    }
+}
+
 /// Page the jumplist picker's selection by half its visible rows in `dir`.
 pub(super) fn jumplist_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     if let Some(picker) = stoat.jumplist_picker.as_mut() {

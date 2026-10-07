@@ -142,6 +142,14 @@ pub(crate) fn arming_count(stoat: &mut Stoat) -> usize {
     stoat.take_pending_count().unwrap_or(1).max(1) as usize
 }
 
+/// [`arming_count`] as a signed row step for the list modals.
+///
+/// A typed count saturates far past `i32`, and a cast wraps it into a step the
+/// other way, so a count out of range steps as far as `i32` reaches.
+fn arming_step(stoat: &mut Stoat) -> i32 {
+    i32::try_from(arming_count(stoat)).unwrap_or(i32::MAX)
+}
+
 /// Run the last recorded motion again, this key's count deciding how many
 /// times.
 ///
@@ -709,13 +717,22 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenWorkspaceDiagnosticsPicker => {
             picker::open_workspace_diagnostics_picker(stoat)
         },
-        ActionKind::PickerNext => picker::picker_step(stoat, 1),
-        ActionKind::PickerPrev => picker::picker_step(stoat, -1),
+        ActionKind::PickerNext => {
+            let step = arming_step(stoat);
+            picker::picker_step(stoat, step)
+        },
+        ActionKind::PickerPrev => {
+            let step = arming_step(stoat);
+            picker::picker_step(stoat, -step)
+        },
         ActionKind::PickerPageDown => picker::picker_page(stoat, 1),
         ActionKind::PickerPageUp => picker::picker_page(stoat, -1),
         ActionKind::PickerComplete => picker::picker_complete(stoat),
         ActionKind::PickerFirst => picker::picker_end(stoat, false),
-        ActionKind::PickerLast => picker::picker_end(stoat, true),
+        ActionKind::PickerLast => match stoat.take_pending_count() {
+            Some(n) => picker::picker_nth(stoat, n.max(1) as usize - 1),
+            None => picker::picker_end(stoat, true),
+        },
         ActionKind::PickerDetailDown => picker::picker_detail(stoat, 1),
         ActionKind::PickerDetailUp => picker::picker_detail(stoat, -1),
         ActionKind::PickerDelete => picker::picker_delete(stoat),

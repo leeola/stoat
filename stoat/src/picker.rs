@@ -76,7 +76,9 @@ pub(crate) fn nav_move(len: usize, selected: &mut usize, delta: i32) {
         return;
     }
     let max = (len - 1) as i32;
-    *selected = (*selected as i32 + delta).clamp(0, max) as usize;
+    // A typed count steps by any delta up to `i32::MAX`, so the sum saturates
+    // rather than overflowing.
+    *selected = (*selected as i32).saturating_add(delta).clamp(0, max) as usize;
 }
 
 /// Rows a page key should move the cursor, given the list's rendered height.
@@ -2319,6 +2321,11 @@ mod tests {
             walk(4, 1, &[99, -99]),
             [3, 0],
             "a page-sized jump lands on the end it overshot"
+        );
+        assert_eq!(
+            walk(4, 1, &[i32::MAX, i32::MIN]),
+            [3, 0],
+            "a count at the limit of the step's range lands on the end too"
         );
     }
 
