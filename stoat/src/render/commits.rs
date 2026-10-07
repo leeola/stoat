@@ -401,6 +401,15 @@ fn base_row_tint(side: &ReviewSide, tints: &DiffTints) -> Color {
     }
 }
 
+/// Whether a changed row's side marks a change or a move on its text.
+///
+/// The row walk pairs lines by text, so a reformatted line sometimes lands
+/// beside a line it shares no change with. Such a side marks nothing, and it
+/// paints as context, as `:diff` paints the same line as plain text.
+fn side_is_marked(side: &ReviewSide) -> bool {
+    !side.change_spans.is_empty() || !side.moved_spans.is_empty()
+}
+
 /// The status color a live-side changed row takes whole under the tint dial.
 ///
 /// `no_base` marks a row with nothing beside it on the base side, which is an
@@ -673,9 +682,9 @@ pub(crate) fn render_commit_preview(
                                         left_content_w,
                                         file.base_highlights.as_deref(),
                                         tints,
-                                        false,
+                                        !side_is_marked(l),
                                         dials,
-                                        Some(base_row_tint(l, tints)),
+                                        side_is_marked(l).then(|| base_row_tint(l, tints)),
                                         &mut spans,
                                     ),
                                     None => render_side_text(
@@ -713,9 +722,10 @@ pub(crate) fn render_commit_preview(
                                         right_content_w,
                                         file.buffer_highlights.as_deref(),
                                         tints,
-                                        false,
+                                        !side_is_marked(r),
                                         dials,
-                                        Some(live_row_tint(r, left.is_none(), tints)),
+                                        side_is_marked(r)
+                                            .then(|| live_row_tint(r, left.is_none(), tints)),
                                         &mut spans,
                                     ),
                                     None => render_side_text(
@@ -763,7 +773,11 @@ mod tests {
         layout::Rect,
         style::{Color, Modifier},
     };
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+    use stoat_language::{Language, LanguageRegistry};
 
     /// The same RGB theme the diff-view tests use, so the washes engage.
     fn rgb_theme() -> Theme {
@@ -788,11 +802,22 @@ mod tests {
     /// A document over one file, with `highlights` covering the first `lines`
     /// lines of both sides at [`TOKEN_FG`] across the whole line.
     fn session(base: &str, buffer: &str, highlights: bool) -> DiffDocument {
+        session_in(None, base, buffer, highlights)
+    }
+
+    /// [`session`] diffed under `language`, for a case that needs the tree
+    /// differ's token pairs rather than a line diff.
+    fn session_in(
+        language: Option<Arc<Language>>,
+        base: &str,
+        buffer: &str,
+        highlights: bool,
+    ) -> DiffDocument {
         let mut doc = DiffDocument::default();
         doc.add_files(vec![ReviewFileInput {
             path: PathBuf::from("/w/a.rs"),
             rel_path: "a.rs".into(),
-            language: None,
+            language,
             base_text: Arc::new(base.to_string()),
             buffer_text: Arc::new(buffer.to_string()),
         }]);
@@ -953,6 +978,44 @@ mod tests {
             "it stands above the color the theme wrote, which already stands above \
              the receded context: {:?} over {TOKEN_FG:?} over {context:?}",
             [r, g, b],
+        );
+    }
+
+    /// A call reformatted across lines puts its old line beside the new first
+    /// line by position, and the tree differ marks neither. Both sides of that
+    /// row recede like context, so only the new argument leads.
+    #[test]
+    fn a_paired_side_without_spans_paints_as_context() {
+        let rust = LanguageRegistry::standard().for_path(Path::new("/w/a.rs"));
+        let base = "fn f() {\n    foo(bar, baz);\n}\n";
+        let buffer = "fn f() {\n    foo(\n        bar,\n        bang,\n        baz,\n    );\n}\n";
+        let buf = rendered(&session_in(rust, base, buffer, true), &rgb_theme());
+        let half = |row: u16, columns: std::ops::Range<u16>| -> String {
+            columns.map(|x| buf[(x, row)].symbol()).collect()
+        };
+        let row_with = |text: &str, columns: std::ops::Range<u16>| {
+            (0..buf.area().height)
+                .find(|&row| half(row, columns.clone()).contains(text))
+                .unwrap_or_else(|| panic!("no row paints {text:?}"))
+        };
+        let paired = row_with("foo(bar, baz);", 0..60);
+        let added = row_with("bang,", 60..120);
+
+        let changed = {
+            let canonical = session("ctx\nold\n", "ctx\nnew\n", true);
+            cell_with(&rendered(&canonical, &rgb_theme()), 2, "n").style()
+        };
+        let context = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN);
+        let context = Some(Color::Rgb(context[0], context[1], context[2]));
+        assert_eq!(
+            (
+                half(paired, 60..120).trim_end().ends_with("foo("),
+                cell_in(&buf, paired, "f", 0..60).style().fg,
+                cell_in(&buf, paired, "f", 60..120).style().fg,
+                cell_in(&buf, added, "g", 60..120).style(),
+            ),
+            (true, context, context, changed),
+            "the old call sits beside foo( and both recede, while bang paints as a change",
         );
     }
 
