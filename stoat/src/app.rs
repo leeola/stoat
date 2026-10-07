@@ -3676,12 +3676,15 @@ impl Stoat {
         // render thread has released it, so a redraw reuses one allocation rather
         // than allocating a fresh ~screen-sized buffer per frame.
         let mut recycled: Option<RenderFrame> = None;
+        let mut timer_won = false;
 
         loop {
             let animating = self.is_animating();
             let building = self.minimap_build_pending;
             let dirty = self.pty_dirty;
             let spinning = self.lsp_progress.current().is_some() || self.diff_warm_busy();
+            let timer_sits_out = std::mem::take(&mut timer_won);
+            let timer_armed = (animating || building || dirty || spinning) && !timer_sits_out;
             if !animating && !spinning {
                 last_tick = None;
             }
@@ -3711,7 +3714,14 @@ impl Stoat {
                 // channels non-empty would otherwise starve the timer for as
                 // long as it runs. Terminal output only marks the screen dirty,
                 // so this arm is what turns a flood into frames.
-                _ = frame_timer.tick(), if animating || building || dirty || spinning => {
+                //
+                // A turn that runs past the frame period leaves the timer due at
+                // the next select. In this place it then wins every turn and
+                // starves every arm below it. So after a win it sits out one
+                // select, and the no-op arm at the bottom ends that select when
+                // no other arm is ready.
+                _ = frame_timer.tick(), if timer_armed => {
+                    timer_won = true;
                     let now = std::time::Instant::now();
                     let dt = last_tick
                         .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
@@ -3781,13 +3791,13 @@ impl Stoat {
                     }
                 }
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
-                // Last, because the pty is the one arm whose producer can
-                // saturate. A biased select returns at its first ready arm, so
-                // an arm ahead of the others that is never empty starves every
-                // one of them for as long as the flood lasts, and the fs-watch
-                // drain below only runs from its own arm. Every arm above this
-                // costs one poll of an empty receiver per turn, which is
-                // nanoseconds against that.
+                // Last but the no-op arm, because the pty is the one arm whose
+                // producer can saturate. A biased select returns at its first
+                // ready arm, so an arm ahead of the others that is never empty
+                // starves every one of them for as long as the flood lasts, and
+                // the fs-watch drain below only runs from its own arm. Every arm
+                // above this costs one poll of an empty receiver per turn, which
+                // is nanoseconds against that.
                 //
                 // Terminal output keeps its throughput either way: a biased
                 // select reaches the last arm whenever none above it is ready,
@@ -3796,6 +3806,9 @@ impl Stoat {
                     let Some(notif) = notif else { continue };
                     self.handle_pty_notification(notif)
                 }
+                // Ends a select the timer sits out when no other arm is ready, so
+                // the timer competes again on the next turn at its own pace.
+                _ = std::future::ready(()), if timer_sits_out => UpdateEffect::None,
             };
 
             let (drained, coalesced) = self.drain_pending(&mut events);
