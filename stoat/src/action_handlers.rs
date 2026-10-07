@@ -1117,8 +1117,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             conflict::conflict_set(stoat, conflict::ConflictChoice::Theirs)
         },
         ActionKind::RebaseConflictSkipEntry => conflict::conflict_skip_entry(stoat),
-        ActionKind::RebaseConflictNextFile => conflict::conflict_step(stoat, true),
-        ActionKind::RebaseConflictPrevFile => conflict::conflict_step(stoat, false),
+        ActionKind::RebaseConflictNextFile => {
+            let count = arming_count(stoat);
+            conflict::conflict_step(stoat, true, count)
+        },
+        ActionKind::RebaseConflictPrevFile => {
+            let count = arming_count(stoat);
+            conflict::conflict_step(stoat, false, count)
+        },
         ActionKind::RebaseConflictApply => conflict::conflict_apply(stoat),
         ActionKind::RebaseConflictAbort => conflict::conflict_abort(stoat),
         ActionKind::Dump => {

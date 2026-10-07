@@ -73,7 +73,8 @@ pub(crate) fn conflict_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
+/// Step the paused conflict's file selection `count` files, clamped to the list.
+pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool, count: usize) -> UpdateEffect {
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return UpdateEffect::None;
     };
@@ -90,13 +91,10 @@ pub(crate) fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
         return UpdateEffect::None;
     }
     let before = *selected;
-    if down {
-        if *selected + 1 < files.len() {
-            *selected += 1;
-        }
-    } else if *selected > 0 {
-        *selected -= 1;
-    }
+    *selected = match down {
+        true => selected.saturating_add(count).min(files.len() - 1),
+        false => selected.saturating_sub(count),
+    };
     if *selected == before {
         return UpdateEffect::None;
     }

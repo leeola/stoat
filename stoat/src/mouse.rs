@@ -1386,7 +1386,7 @@ pub(crate) fn handle_mouse_scroll(
                 ScreenKind::RebaseConflict => {
                     let mut effect = UpdateEffect::None;
                     for _ in 0..by {
-                        effect = action_handlers::conflict::conflict_step(stoat, steps > 0);
+                        effect = action_handlers::conflict::conflict_step(stoat, steps > 0, 1);
                     }
                     effect
                 },
@@ -2998,17 +2998,23 @@ mod tests {
     /// Seed a rebase that stops on a conflict over two files, and hand back
     /// the harness plus the file list rect the paint uses.
     fn conflict_harness() -> (crate::test_harness::TestHarness, Rect) {
+        conflict_harness_over(
+            &[("a.rs", "a0\n"), ("b.rs", "b0\n")],
+            &[("a.rs", "a1\n"), ("b.rs", "b1\n")],
+        )
+    }
+
+    /// [`conflict_harness`] over the files of `root` and `tip`.
+    ///
+    /// The fake conflicts on every path the two trees disagree about, so a file
+    /// both carry with different text makes one row of the list.
+    fn conflict_harness_over(
+        root: &[(&str, &str)],
+        tip: &[(&str, &str)],
+    ) -> (crate::test_harness::TestHarness, Rect) {
         let mut h = crate::test_harness::TestHarness::with_size(120, 40);
         h.seed_focused_buffer(&"line\n".repeat(200));
-        // The fake conflicts on every path the two trees disagree about, so
-        // both commits carry two files to make the list two rows long.
-        h.seed_linear_history(
-            "/repo",
-            &[
-                ("c0", "c0: root", &[("a.rs", "a0\n"), ("b.rs", "b0\n")]),
-                ("c1", "c1: tip", &[("a.rs", "a1\n"), ("b.rs", "b1\n")]),
-            ],
-        );
+        h.seed_linear_history("/repo", &[("c0", "c0: root", root), ("c1", "c1: tip", tip)]);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c1");
         h.open_commits("/repo");
         h.type_keys("G");
@@ -3051,6 +3057,24 @@ mod tests {
             panic!("the pause is not a conflict")
         };
         (files.len(), *selected, resolutions.len())
+    }
+
+    #[test]
+    fn a_count_steps_the_conflict_file_list() {
+        let (mut h, _) = conflict_harness_over(
+            &[("a.rs", "a0\n"), ("b.rs", "b0\n"), ("c.rs", "c0\n")],
+            &[("a.rs", "a1\n"), ("b.rs", "b1\n"), ("c.rs", "c1\n")],
+        );
+
+        h.type_keys("2 j");
+        let down = conflict_state(&h);
+        h.type_keys("9 k");
+
+        assert_eq!(
+            (down, conflict_state(&h)),
+            ((3, 2, 0), (3, 0, 0)),
+            "a count steps that many files and stops at either end"
+        );
     }
 
     #[test]
