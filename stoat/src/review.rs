@@ -13,6 +13,8 @@ use stoat_language::{
     Language,
 };
 
+mod token_align;
+
 /// One file's contribution to a diff. Used both by the changeset entry point
 /// [`extract_review_hunks_changeset`] and as the input shape for
 /// [`crate::review_session::DiffDocument::add_files`].
@@ -261,7 +263,12 @@ fn walk_plans_with<T>(
         provenance: &rhs_prov,
     };
 
-    let plans = structural_walk(&lhs, &rhs);
+    // The line fallback matches no tokens, and neither does a file the tree
+    // diff found nothing equal in, so those align by line text.
+    let plans = match diff_result.matched.is_empty() {
+        true => structural_walk(&lhs, &rhs),
+        false => token_align::token_aligned_plans(&lhs, &rhs, &diff_result.matched),
+    };
     consume(&plans, &lhs, &rhs)
 }
 
@@ -797,6 +804,102 @@ mod tests {
             matches!(changed, ReviewRow::Changed { left: Some(l), right: Some(r) }
                 if l.text == "    draw(a, b);" && r.text == "    draw(a, b, None);"),
             "the change pairs the old call with the new one, got {changed:?}"
+        );
+    }
+
+    /// A row side as its text and change spans.
+    type SideShape<'a> = Option<(&'a str, Vec<Range<usize>>)>;
+
+    /// Each hunk's rows as `(left, right, changed)`.
+    fn shapes(hunks: &[ReviewHunk]) -> Vec<Vec<(SideShape<'_>, SideShape<'_>, bool)>> {
+        fn side(side: &ReviewSide) -> (&str, Vec<Range<usize>>) {
+            (side.text.as_str(), side.change_spans.clone())
+        }
+
+        hunks
+            .iter()
+            .map(|hunk| {
+                hunk.rows
+                    .iter()
+                    .map(|row| match row {
+                        ReviewRow::Context { left, right } => {
+                            (Some(side(left)), Some(side(right)), false)
+                        },
+                        ReviewRow::Changed { left, right } => {
+                            (left.as_ref().map(side), right.as_ref().map(side), true)
+                        },
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A call reformatted across lines with one added argument pairs its old
+    /// line with the new first line, and each line holding only new tokens
+    /// stands alone. Pairing by line text puts `}` beside `bar,` instead, since
+    /// no other line matches.
+    #[test]
+    fn a_reformatted_call_aligns_by_its_tokens() {
+        let base = "fn f() {\n    foo(bar, baz);\n}\n";
+        let buffer = "fn f() {\n    foo(\n        bar,\n        bang,\n        baz,\n    );\n}\n";
+
+        let side = |text, span: Option<Range<usize>>| Some((text, span.into_iter().collect()));
+        assert_eq!(
+            shapes(&hunks_rust(base, buffer, 1)),
+            [[
+                (side("fn f() {", None), side("fn f() {", None), false),
+                (
+                    side("    foo(bar, baz);", None),
+                    side("    foo(", None),
+                    true
+                ),
+                (None, side("        bar,", Some(11..12)), true),
+                (None, side("        bang,", Some(8..12)), true),
+                (None, side("        baz,", Some(11..12)), true),
+                (None, side("    );", None), true),
+                (side("}", None), side("}", None), false),
+            ]],
+            "the old call pairs with its first new line, and the new lines stand alone",
+        );
+    }
+
+    /// A removed item between two blank lines pairs the blank after it with the
+    /// live blank, so every line after the removal stays beside its
+    /// counterpart. The blank before the removal goes with the item.
+    #[test]
+    fn a_removed_block_between_two_blank_lines_keeps_the_lines_after_it_aligned() {
+        let base = "struct A;\n\n/// doc\n#[repr(C)]\nstruct Gone;\n\nimpl A {\n    fn f() {}\n}\n";
+        let buffer = "struct A;\n\nimpl A {\n    fn f() {}\n}\n";
+        let hunks = hunks_rust(base, buffer, 4);
+
+        let rows: Vec<Vec<_>> = shapes(&hunks)
+            .into_iter()
+            .map(|hunk| {
+                hunk.into_iter()
+                    .map(|(left, right, changed)| {
+                        (
+                            left.map(|(text, _)| text),
+                            right.map(|(text, _)| text),
+                            changed,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [[
+                (Some("struct A;"), Some("struct A;"), false),
+                (Some(""), None, true),
+                (Some("/// doc"), None, true),
+                (Some("#[repr(C)]"), None, true),
+                (Some("struct Gone;"), None, true),
+                (Some(""), Some(""), false),
+                (Some("impl A {"), Some("impl A {"), false),
+                (Some("    fn f() {}"), Some("    fn f() {}"), false),
+                (Some("}"), Some("}"), false),
+            ]],
+            "the blank after the removed item pairs with the live blank",
         );
     }
 
