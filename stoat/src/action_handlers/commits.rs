@@ -638,6 +638,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_commits_status_bar_paints_the_pending_count() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+
+        let status_row = |h: &mut crate::test_harness::TestHarness| {
+            h.snapshot();
+            let ws = h.stoat.active_workspace();
+            let row = ws.panes.pane(ws.panes.focus()).area.bottom() - 1;
+            h.rendered_text()
+                .lines()
+                .nth(usize::from(row))
+                .expect("the pane's status row")
+                .to_string()
+        };
+        let before = status_row(&mut h);
+        h.type_keys("4 0");
+        let counted = status_row(&mut h);
+        h.type_keys("j");
+        let after = status_row(&mut h);
+
+        assert_eq!(
+            [&before, &counted, &after].map(|row| row.ends_with(" 40")),
+            [false, true, false],
+            "the count holds the bar's right edge until j consumes it:\n{counted}"
+        );
+    }
+
     /// Rows scrolled past do not each get a build of their own.
     ///
     /// A dropped task keeps running on the blocking pool, so one build per

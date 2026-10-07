@@ -487,8 +487,9 @@ fn dim_memoized(
 }
 
 /// Minimal status bar for overlay panes (commits/rebase/reword/conflict).
-/// Does not know about editors or buffers; shows only mode + workspace +
-/// a short label identifying the overlay. Matches the visual style of
+/// Does not know about editors or buffers. Shows mode + workspace + a short
+/// label identifying the overlay on the left, and the pending count and the
+/// status message on the right. Matches the visual style of
 /// [`render_pane_status`] for a focused pane.
 pub(crate) fn render_overlay_status(
     area: Rect,
@@ -515,6 +516,14 @@ pub(crate) fn render_overlay_status(
     let segments = status_segments_area(area, frame.badge_cover);
     let left = overlay_status_segments(is_focused, segments, frame);
     let mut right: Vec<StatusSeg> = Vec::new();
+    // The first right segment takes the bar's right edge, which is where the
+    // pane bar paints the count.
+    if is_focused && let Some(count) = frame.pending_count {
+        right.push((
+            format!(" {count} "),
+            base_style.add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(message) = frame.status_message {
         right.push((
             message.to_string(),
