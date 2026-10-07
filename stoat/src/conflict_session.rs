@@ -336,6 +336,29 @@ mod tests {
             .conflicted_file("b.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"));
     }
 
+    /// Seed one file carrying three conflict chunks, at rows 1, 7, and 13 of the
+    /// opened view, so a count of two from the first lands past the second.
+    fn seed_three_chunks(h: &mut TestHarness) {
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("a\nb\nc\nd\ne\nf\ng\n"),
+            Some("a\nB\nc\nD\ne\nF\ng\n"),
+            Some("a\nX\nc\nY\ne\nZ\ng\n"),
+        );
+    }
+
+    /// Seed three conflicted files, each a single chunk, so a count of two from
+    /// the first file lands past the second.
+    fn seed_three_files(h: &mut TestHarness) {
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git()
+            .add_repo(git_root)
+            .conflicted_file("a.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"))
+            .conflicted_file("b.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"))
+            .conflicted_file("c.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"));
+    }
+
     fn current_file(h: &TestHarness) -> usize {
         h.stoat
             .active_workspace()
@@ -672,6 +695,47 @@ mod tests {
 
         pick(&mut h, &ConflictPrevChunk);
         assert_eq!(cursor_row(&mut h), 1, "p at the first chunk does not wrap");
+    }
+
+    #[test]
+    fn a_count_steps_that_many_chunks_and_stops_at_the_farthest() {
+        let mut h = Stoat::test();
+        seed_three_chunks(&mut h);
+        dispatch_conflict(&mut h);
+
+        // `] g` is the editor's change walk, which hands its count to the chunk
+        // walk inside the conflict view.
+        let mut rows = vec![cursor_row(&mut h)];
+        for keys in ["2 n", "9 p", "2 ] g"] {
+            h.type_keys(keys);
+            rows.push(cursor_row(&mut h));
+        }
+
+        assert_eq!(
+            rows,
+            [1, 13, 1, 13],
+            "a count steps that many chunks and stops at the farthest one in its direction"
+        );
+    }
+
+    #[test]
+    fn a_count_steps_that_many_files_and_stops_at_either_end() {
+        let mut h = Stoat::test();
+        seed_three_files(&mut h);
+        dispatch_conflict(&mut h);
+
+        let mut files = vec![current_file(&h)];
+        for keys in ["2 N", "9 P"] {
+            h.type_keys(keys);
+            h.settle();
+            files.push(current_file(&h));
+        }
+
+        assert_eq!(
+            files,
+            [0, 2, 0],
+            "a count steps that many files and stops at either end"
+        );
     }
 
     #[test]

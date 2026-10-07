@@ -460,19 +460,23 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ConflictNextChunk => {
-            conflict_view::conflict_step_chunk(stoat, true);
+            let count = arming_count(stoat);
+            conflict_view::conflict_step_chunk(stoat, true, count);
             UpdateEffect::Redraw
         },
         ActionKind::ConflictPrevChunk => {
-            conflict_view::conflict_step_chunk(stoat, false);
+            let count = arming_count(stoat);
+            conflict_view::conflict_step_chunk(stoat, false, count);
             UpdateEffect::Redraw
         },
         ActionKind::ConflictNextFile => {
-            conflict_view::conflict_step_file(stoat, true);
+            let count = arming_count(stoat);
+            conflict_view::conflict_step_file(stoat, true, count);
             UpdateEffect::Redraw
         },
         ActionKind::ConflictPrevFile => {
-            conflict_view::conflict_step_file(stoat, false);
+            let count = arming_count(stoat);
+            conflict_view::conflict_step_file(stoat, false, count);
             UpdateEffect::Redraw
         },
         ActionKind::ConflictApply => {

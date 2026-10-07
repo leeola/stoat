@@ -4100,7 +4100,11 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     // the session, so a plain diff pane open alongside a conflict still walks its
     // own hunks.
     if focused_editor_mut(stoat).is_some_and(|editor| editor.conflict_view.is_some()) {
-        super::conflict_view::conflict_step_chunk(stoat, matches!(dir, ChangeDir::Next));
+        super::conflict_view::conflict_step_chunk(
+            stoat,
+            matches!(dir, ChangeDir::Next),
+            count as usize,
+        );
         return UpdateEffect::Redraw;
     }
 

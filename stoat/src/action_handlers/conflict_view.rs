@@ -486,9 +486,12 @@ pub(super) fn disarm_clobber_unless_pick(stoat: &mut Stoat, kind: ActionKind) {
     }
 }
 
-/// Land the cursor on the next (`forward`) or previous conflict chunk, stopping
-/// at the last or first chunk rather than wrapping.
-pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
+/// Land the cursor `count` conflict chunks forward or back, stopping at the last
+/// or first chunk rather than wrapping.
+///
+/// A count past the end lands on the farthest chunk in that direction. With no
+/// chunk in that direction, the cursor stays and the status bar says so.
+pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool, count: usize) {
     let (editor_id, anchors) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
@@ -510,10 +513,20 @@ pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
         (cursor, starts)
     };
 
+    let count = count.max(1);
     let target = if forward {
-        starts.into_iter().find(|&start| start > cursor)
+        starts
+            .into_iter()
+            .filter(|&start| start > cursor)
+            .take(count)
+            .last()
     } else {
-        starts.into_iter().rev().find(|&start| start < cursor)
+        starts
+            .into_iter()
+            .rev()
+            .filter(|&start| start < cursor)
+            .take(count)
+            .last()
     };
     let Some(offset) = target else {
         stoat.set_status("no more conflicts");
@@ -524,18 +537,24 @@ pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
     scroll_cursor_into_view(stoat, editor_id);
 }
 
-/// Step to the next (`forward`) or previous conflicted file. Stops at the last
-/// or first file rather than wrapping.
-pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool) {
+/// Step `count` conflicted files forward or back. Stops at the last or first
+/// file rather than wrapping.
+pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool, count: usize) {
     let target = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
         };
-        match (forward, session.current) {
-            (true, c) if c + 1 < session.files.len() => c + 1,
-            (false, c) if c > 0 => c - 1,
-            _ => return,
+        let current = session.current;
+        let target = match forward {
+            true => current
+                .saturating_add(count)
+                .min(session.files.len().saturating_sub(1)),
+            false => current.saturating_sub(count),
+        };
+        if target == current {
+            return;
         }
+        target
     };
     switch_to_file(stoat, target);
 }
