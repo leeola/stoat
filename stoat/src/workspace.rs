@@ -22,6 +22,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::GitHost,
     input_history::InputHistory,
+    keymap_state,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, text, walkthrough::SlideParts},
@@ -80,7 +81,8 @@ const INLINE_PARSE_MAX_BYTES: usize = 256 * 1024;
 /// loop, which the abort does at the cost of the time already spent.
 const INLINE_PARSE_BUDGET: Duration = Duration::from_millis(1);
 
-/// The widest a terminal or an agent title gets as a tab's name.
+/// The widest a terminal title, an agent title, or a diff's two sides get as a
+/// tab's name.
 ///
 /// A shell commonly titles itself with its user, host, and directory, and a
 /// few such titles uncut take the whole tab bar. 24 columns holds a typical
@@ -562,10 +564,13 @@ impl Workspace {
     /// What tab `idx` calls itself in the tab bar, taken from its focused
     /// pane's view.
     ///
-    /// An editor names its file, or reads as scratch when it has none. A
-    /// terminal or an agent names itself by the title its child set, cut to
-    /// [`TAB_TITLE_MAX_COLS`], and by its kind until the child sets one. A run
-    /// pane names its kind. An out-of-range index is empty.
+    /// A pane in the diff view names the diff by its two sides, as the sides
+    /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. The active tab under the
+    /// commits screen reads `commits`. An editor otherwise names its file, or
+    /// reads as scratch when it has none. A terminal or an agent names itself
+    /// by the title its child set, cut the same way, and by its kind until the
+    /// child sets one. A run pane names its kind. An out-of-range index is
+    /// empty.
     ///
     /// The kind names match the `pane` keymap predicate's, so what the bar
     /// shows and what a binding condition matches on read the same.
@@ -585,6 +590,19 @@ impl Workspace {
         let Some(tree) = tree else {
             return String::new();
         };
+
+        if let View::Editor(id) = &tree.pane(tree.focus()).view
+            && self.editors.get(*id).is_some_and(|editor| editor.diff_view)
+        {
+            let (left, right) = diff::diff_sides(self.diff_base());
+            return text::truncate_to_cols(&format!("{left} → {right}"), TAB_TITLE_MAX_COLS);
+        }
+
+        // The rebase screens open from the commits list and leave it set
+        // beneath them. The screen in front decides the name, not the list.
+        if idx == self.active_tab && keymap_state::view_predicate(self) == Some("commits") {
+            return "commits".to_string();
+        }
 
         match &tree.pane(tree.focus()).view {
             View::Editor(id) => self

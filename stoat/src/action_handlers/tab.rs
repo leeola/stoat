@@ -359,6 +359,91 @@ mod tests {
         assert_eq!(ws.tab_title(9), "", "an out-of-range index is empty");
     }
 
+    /// A pane in the diff view names the diff by its two sides, as the sides
+    /// bar over it does. The view lives on the editor, so a parked tab keeps
+    /// the name, and closing the view gives the tab back to its file.
+    #[test]
+    fn a_tab_in_the_diff_view_is_named_by_the_diffs_sides() {
+        let mut h = Stoat::test();
+        h.stage_review_scenario("/repo", &[("a.rs", "fn a() {}\n", "fn a() { 1 }\n")]);
+        dispatch(&mut h, &stoat_action::NewTab);
+        h.type_text(":diff");
+        h.type_keys("enter");
+        h.settle();
+
+        dispatch(&mut h, &stoat_action::NewTab);
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            [ws.tab_title(1), ws.tab_title(2)],
+            ["HEAD → working tree", "scratch"],
+            "a parked diff tab keeps the diff's name and the fresh tab reads scratch",
+        );
+
+        dispatch(&mut h, &stoat_action::PrevTab);
+        h.type_text(":diff");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            h.stoat.active_workspace().tab_title(1),
+            "a.rs",
+            "closing the view names the file the view crossed into",
+        );
+    }
+
+    /// The commits screen covers the active tab's focused pane, so that tab
+    /// reads as the list. A parked tab never shows the list and keeps its file.
+    #[test]
+    fn a_tab_under_the_commits_screen_reads_commits() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[("aaaa1111", "feat: add a.rs", &[("a.rs", "fn a() {}\n")])],
+        );
+        let path = h.write_file("notes.md", "hello");
+        h.open_file(&path);
+        dispatch(&mut h, &stoat_action::NewTab);
+        h.open_commits("/repo");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            [ws.tab_title(0), ws.tab_title(1)],
+            ["notes.md", "commits"],
+            "the overlay names the active tab and leaves the parked one its file",
+        );
+
+        dispatch(&mut h, &stoat_action::CloseCommits);
+        assert_eq!(
+            h.stoat.active_workspace().tab_title(1),
+            "scratch",
+            "the empty scratch names the tab once it is the visible item",
+        );
+    }
+
+    /// The rebase todo opens from the commits list and leaves the list set
+    /// beneath it. The tab names what the todo covers, as for the other
+    /// rebase screens, and not the list out of sight.
+    #[test]
+    fn a_tab_under_the_rebase_screen_keeps_its_panes_name() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("aaaa1111", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                ("bbbb2222", "feat: grow a.rs", &[("a.rs", "fn a() { 1 }\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.rebase.is_some(), ws.commits.is_some(), ws.tab_title(0)),
+            (true, true, "scratch".to_string()),
+            "the todo stands over the list, and the tab keeps its pane's name",
+        );
+    }
+
     /// A tab on a shell or an agent reads as what the child says it runs. A
     /// parked tab follows its session too, and the cut keeps a long title from
     /// filling the bar.
