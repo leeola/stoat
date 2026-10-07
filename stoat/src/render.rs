@@ -1957,8 +1957,16 @@ mod lsp_filter_tests {
     }
 
     #[test]
-    fn space_lsp_box_gates_lsp_and_diagnostic_rows() {
+    fn space_lsp_box_lists_the_diagnostic_steps_and_gates_lsp_and_picker_rows() {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+        // The whole text, since the workspace picker's row, which always lists,
+        // starts the same way.
+        let picker_row = "open the diagnostics picker for the focused buffer";
+        let steps_list = |text: &str| {
+            text.contains("jump to the next diagnostic")
+                && text.contains("jump to the previous diagnostic")
+        };
 
         let mut h = TestHarness::with_size(150, 50);
 
@@ -1975,8 +1983,12 @@ mod lsp_filter_tests {
             "the format row is hidden without a language server"
         );
         assert!(
-            !scratch.contains("jump to the next diagnostic"),
-            "the diagnostics row is hidden without a diagnostic"
+            steps_list(&scratch),
+            "the diagnostic steps list without a diagnostic"
+        );
+        assert!(
+            !scratch.contains(picker_row),
+            "the picker row is hidden without a diagnostic"
         );
 
         // The sole fake client serves the rust buffer, so lsp rows appear.
@@ -1989,8 +2001,12 @@ mod lsp_filter_tests {
             "the format row shows once a server serves the buffer"
         );
         assert!(
-            !served.contains("jump to the next diagnostic"),
-            "the diagnostics row stays hidden until a diagnostic exists"
+            steps_list(&served),
+            "the diagnostic steps list in a served buffer without a diagnostic"
+        );
+        assert!(
+            !served.contains(picker_row),
+            "the picker row stays hidden until a diagnostic exists"
         );
 
         h.type_keys("escape");
@@ -2011,8 +2027,8 @@ mod lsp_filter_tests {
         h.type_keys("space l");
         let with_diag = box_text(&mut h);
         assert!(
-            with_diag.contains("jump to the next diagnostic"),
-            "the diagnostics row shows once a diagnostic is seeded"
+            with_diag.contains(picker_row),
+            "the picker row shows once a diagnostic is seeded"
         );
     }
 }

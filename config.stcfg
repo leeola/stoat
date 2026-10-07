@@ -1330,10 +1330,10 @@ on key {
         x -> [TrailClear(), SetMode(normal)];
         D -> [SetMode(normal), OpenWorkspaceDiagnosticsPicker()];
         l -> [ToggleLspStatus(), SetMode(normal)];
+        w -> [GotoNextDiagnostic(), SetMode(normal)];
+        W -> [GotoPrevDiagnostic(), SetMode(normal)];
 
         diags {
-            w -> [GotoNextDiagnostic(), SetMode(normal)];
-            W -> [GotoPrevDiagnostic(), SetMode(normal)];
             d -> [SetMode(normal), OpenDiagnosticsPicker()];
         }
 

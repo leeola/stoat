@@ -571,6 +571,19 @@ fn space_l_w_jumps_to_next_diagnostic() {
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
+#[test]
+fn space_l_w_with_no_diagnostic_returns_to_normal() {
+    let mut h = TestHarness::with_size(80, 24);
+    let root = seed(&mut h, &[("a.rs", "abc\n")]);
+    open_buffer(&mut h, root.join("a.rs"));
+    h.type_keys("space l w");
+    assert_eq!(
+        (cursor_offset(&mut h), h.stoat.focused_mode()),
+        (0, "normal"),
+        "the step finds nothing to move to and still leaves the space mode"
+    );
+}
+
 /// A diagnostic several columns wide, since the shared one-column helper
 /// leaves a span a bare block cursor reads the same as.
 fn wide_diag(line: u32, col: u32, width: u32) -> lsp_types::Diagnostic {
