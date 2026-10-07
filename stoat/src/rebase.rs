@@ -238,6 +238,15 @@ mod tests {
         ("c3", "c3: tip", &[("a.rs", "line1\nline2\nline3\n")]),
     ];
 
+    /// One commit past [`THREE_COMMITS`], so a todo opened on the root holds
+    /// three entries and a count of two lands short of either end.
+    const FOUR_COMMITS: &[CommitSpec<'static>] = &[
+        ("c1", "c1: root", &[("a.rs", "line1\n")]),
+        ("c2", "c2: middle", &[("a.rs", "line1\nline2\n")]),
+        ("c3", "c3: upper", &[("a.rs", "line1\nline2\nline3\n")]),
+        ("c4", "c4: tip", &[("a.rs", "line1\nline2\nline3\nline4\n")]),
+    ];
+
     #[test]
     fn snapshot_rebase_open_todo() {
         let mut h = Stoat::test();
@@ -264,6 +273,46 @@ mod tests {
         h.type_keys("j");
         h.type_keys("d");
         h.assert_snapshot("rebase_set_ops");
+    }
+
+    #[test]
+    fn a_count_steps_and_reorders_the_rebase_todo() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", FOUR_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+
+        let todo_and_selection = |h: &TestHarness| {
+            let rebase = h
+                .stoat
+                .active_workspace()
+                .rebase
+                .as_ref()
+                .expect("the rebase screen is open");
+            let shas: Vec<String> = rebase.todo.iter().map(|e| e.commit.sha.clone()).collect();
+            (shas, rebase.selected)
+        };
+        let walked: Vec<_> = ["2 j", "5 k", "2 J", "9 K"]
+            .into_iter()
+            .map(|keys| {
+                h.type_keys(keys);
+                todo_and_selection(&h)
+            })
+            .collect();
+
+        let todo = |shas: [&str; 3]| shas.map(String::from).to_vec();
+        assert_eq!(
+            walked,
+            [
+                (todo(["c2", "c3", "c4"]), 2),
+                (todo(["c2", "c3", "c4"]), 0),
+                (todo(["c3", "c4", "c2"]), 2),
+                (todo(["c2", "c3", "c4"]), 0),
+            ],
+            "a count steps and reorders that many times and stops at either end"
+        );
     }
 
     #[test]

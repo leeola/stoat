@@ -1377,7 +1377,7 @@ pub(crate) fn handle_mouse_scroll(
                     };
                     let mut effect = UpdateEffect::None;
                     for _ in 0..by {
-                        effect = action_handlers::rebase::rebase_move(stoat, step);
+                        effect = action_handlers::rebase::rebase_move(stoat, step, 1);
                     }
                     effect
                 },

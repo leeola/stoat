@@ -1073,10 +1073,22 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
         ActionKind::ExecuteRebase => rebase::execute_rebase(stoat),
-        ActionKind::RebaseNext => rebase::rebase_move(stoat, rebase::RebaseMove::Next),
-        ActionKind::RebasePrev => rebase::rebase_move(stoat, rebase::RebaseMove::Prev),
-        ActionKind::RebaseMoveUp => rebase::rebase_move(stoat, rebase::RebaseMove::SwapUp),
-        ActionKind::RebaseMoveDown => rebase::rebase_move(stoat, rebase::RebaseMove::SwapDown),
+        ActionKind::RebaseNext => {
+            let count = arming_count(stoat);
+            rebase::rebase_move(stoat, rebase::RebaseMove::Next, count)
+        },
+        ActionKind::RebasePrev => {
+            let count = arming_count(stoat);
+            rebase::rebase_move(stoat, rebase::RebaseMove::Prev, count)
+        },
+        ActionKind::RebaseMoveUp => {
+            let count = arming_count(stoat);
+            rebase::rebase_move(stoat, rebase::RebaseMove::SwapUp, count)
+        },
+        ActionKind::RebaseMoveDown => {
+            let count = arming_count(stoat);
+            rebase::rebase_move(stoat, rebase::RebaseMove::SwapDown, count)
+        },
         ActionKind::SetRebaseOpPick => {
             rebase::rebase_set_op(stoat, crate::host::RebaseTodoOp::Pick)
         },

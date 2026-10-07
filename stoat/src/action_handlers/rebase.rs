@@ -94,16 +94,27 @@ pub(crate) fn rebase_select(stoat: &mut Stoat, index: usize) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(crate) fn rebase_move(stoat: &mut Stoat, step: RebaseMove) -> UpdateEffect {
+/// Step or reorder the todo selection `count` times.
+///
+/// Each step refuses at the end of the list, so the walk stops there and a
+/// count past the end clamps.
+pub(crate) fn rebase_move(stoat: &mut Stoat, step: RebaseMove, count: usize) -> UpdateEffect {
     let Some(state) = stoat.active_workspace_mut().rebase.as_mut() else {
         return UpdateEffect::None;
     };
-    let moved = match step {
-        RebaseMove::Next => state.move_down(),
-        RebaseMove::Prev => state.move_up(),
-        RebaseMove::SwapUp => state.swap_up(),
-        RebaseMove::SwapDown => state.swap_down(),
-    };
+    let mut moved = false;
+    for _ in 0..count {
+        let stepped = match step {
+            RebaseMove::Next => state.move_down(),
+            RebaseMove::Prev => state.move_up(),
+            RebaseMove::SwapUp => state.swap_up(),
+            RebaseMove::SwapDown => state.swap_down(),
+        };
+        if !stepped {
+            break;
+        }
+        moved = true;
+    }
     if moved {
         UpdateEffect::Redraw
     } else {
