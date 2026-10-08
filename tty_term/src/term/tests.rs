@@ -2869,6 +2869,39 @@ fn a_terminal_cell_size_change_resizes_a_terminal_pool_in_place() {
     );
 }
 
+/// A terminal pool composes its one page whole, at its own grid, and composes
+/// nothing until that page is buffered.
+#[test]
+fn a_terminal_pool_composes_its_page_at_its_grid() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    terminal.set_cell_pixels(10, 20);
+    terminal.set_terminal_cell_pixels(8, 16);
+    declare_terminal_pool(&mut terminal, 1, 10, 40);
+    let mut out = Grid::new(1, 1);
+    let composed = |terminal: &Terminal, out: &mut Grid| {
+        let composed = terminal.project_terminal_pool(1, out);
+        let text: String = (0..out.cols().min(2))
+            .map(|col| out.get(0, col).ch)
+            .collect();
+        (composed, (out.rows(), out.cols()), text)
+    };
+    let before = composed(&terminal, &mut out);
+
+    let mut stream = encode_fill(&FillCommand { pool: 1, index: 0 });
+    stream.extend_from_slice(b"hi");
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+
+    assert_eq!(
+        (before, composed(&terminal, &mut out)),
+        (
+            (false, (1, 1), " ".to_owned()),
+            (true, (12, 50), "hi".to_owned())
+        ),
+        "an unbuffered page leaves the grid alone, and a buffered one fills it",
+    );
+}
+
 #[test]
 fn a_fill_on_a_window_pool_marks_the_window_dirty_once() {
     let mut terminal = Terminal::new(4, 8, Theme::default());

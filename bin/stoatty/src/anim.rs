@@ -14,7 +14,7 @@ use std::{
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
 use stoatty_render::gpu::{HostRide, SketchReveal};
 use stoatty_term::{
-    grid::{self, Grid, Overlay, PoolRegion, Rgb, Sketch},
+    grid::{self, Grid, Overlay, PoolKind, PoolRegion, Rgb, Sketch},
     term::{Cursor, CursorShape, Damage, PoolView, Terminal},
 };
 
@@ -602,7 +602,7 @@ pub(crate) struct PoolFrame {
     pub(crate) anims: BTreeMap<u32, PoolAnim>,
     /// The pool snapshot of the last projection, kept so that the composite
     /// build after the lock reads the same list the projection stepped.
-    pools: Vec<PoolView>,
+    pub(crate) pools: Vec<PoolView>,
     active: Vec<ActivePool>,
     rides: Vec<AnchorRide>,
 }
@@ -652,6 +652,10 @@ pub(crate) struct FrameProjection {
 ///
 /// Drops the animation of every pool that the terminal no longer lists, and
 /// turns every anchored pool whose host moved this frame into a ride.
+///
+/// A terminal pool does not glide. It composites on every frame its page is
+/// buffered while the terminal shows the alternate screen, see
+/// [`resident_pool`], and neither asks for frames nor counts as moved.
 ///
 /// [`FrameProjection::active`] and [`FrameProjection::rides`] reuse the buffers
 /// of `frame`. Hand them back with [`PoolFrame::recycle`] once the frame is
@@ -713,11 +717,29 @@ pub(crate) fn project_frame(
     // Which pools moved this frame. The anchored pass below reads it to tell
     // an anchor whose host rides from one whose host sits still.
     let mut glided: Vec<u32> = Vec::new();
+    // A terminal pool is a full-screen program's surface. A program that crashes
+    // or stops leaves its pools declared, and off the alternate screen such a
+    // pool draws over whatever the shell prints, on every frame. It composites
+    // only while a full-screen program holds the screen.
+    let full_screen = terminal.is_alt_screen();
     for pool in &pools {
         let anim = frame
             .anims
             .entry(pool.id)
             .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
+        let resident = pool.region.kind == PoolKind::Terminal;
+        // A pool declared again under its id as the other kind starts over. A
+        // glide and a terminal pool hold grids of different sizes, and neither
+        // describes the other.
+        if anim.last_version.is_some() != resident {
+            *anim = PoolAnim::new(pool.scroll_target.pages());
+        }
+        if resident {
+            if full_screen {
+                active.extend(resident_pool(anim, pool, terminal));
+            }
+            continue;
+        }
         let reposition = terminal.take_reposition(pool.id);
         let step = advance_pool_glide(anim, pool, terminal, reposition, dt);
         if matches!(step, PoolStep::Settled) {
@@ -932,6 +954,14 @@ pub(crate) struct PoolAnim {
     /// on a resize (which reshapes the grid) or a settled handoff (after which
     /// the live grid owns the region).
     pub(crate) held_frac: Option<f32>,
+    /// The content version a terminal pool last saw, which composes it again
+    /// only when the version moves.
+    ///
+    /// `None` until a terminal pool's first frame, and always for a gliding
+    /// pool, which reads its rows off [`Self::last_top`] and
+    /// [`Self::last_stamp`] instead. [`project_frame`] reads it to tell which
+    /// kind of pool the state last served.
+    pub(crate) last_version: Option<u64>,
 }
 
 impl PoolAnim {
@@ -948,6 +978,7 @@ impl PoolAnim {
             last_region_dims: None,
             last_buffered: false,
             held_frac: None,
+            last_version: None,
         }
     }
 }
@@ -1195,6 +1226,38 @@ pub(crate) fn advance_pool_glide(
         // keeps ticking until the app's fill lands.
         PoolStep::Degraded
     }
+}
+
+/// The tile that composites terminal pool `pool` this frame, composing its page
+/// into `anim.document_grid` first when its content version moved.
+///
+/// A terminal pool never glides. It is drawn at another font size than the live
+/// grid beneath its region, so it composites on every frame rather than handing
+/// the region back, and it asks for no frames of its own.
+///
+/// A page the pool no longer buffers, such as one a resize emptied, holds the
+/// last composite until the program fills it again, as a gliding pool holds its
+/// last good one. A pool that never composed has nothing to show, and `None`
+/// leaves its region to the live grid.
+pub(crate) fn resident_pool(
+    anim: &mut PoolAnim,
+    pool: &PoolView,
+    terminal: &Terminal,
+) -> Option<ActivePool> {
+    let moved = anim.last_version != Some(pool.content_version);
+    anim.last_version = Some(pool.content_version);
+    let composed = moved && terminal.project_terminal_pool(pool.id, &mut anim.document_grid);
+    if composed {
+        anim.held_frac = Some(0.0);
+    }
+
+    anim.held_frac.map(|frac| ActivePool {
+        id: pool.id,
+        region: pool.region,
+        frac,
+        content_changed: composed,
+        scrolled_rows: None,
+    })
 }
 
 /// How long a sketch id survives without being declared before its clock is

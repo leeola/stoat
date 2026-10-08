@@ -16,8 +16,8 @@ use crate::{
         cursor_position, forced_damage, intersect_scissor, project_frame,
         refresh_popover_overflows, region_scissor, seed_settle_flight, shift_scissor, step_cursor,
         step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        ActivePool, FrameProjection, PoolAnim, PoolFrame, PoolStep, PopoverScroll, SketchClocks,
-        EASE_BASELINE_FRAME, MAX_EASE_DT,
+        ActivePool, AnchorRide, FrameProjection, PoolAnim, PoolFrame, PoolStep, PopoverScroll,
+        SketchClocks, EASE_BASELINE_FRAME, MAX_EASE_DT,
     },
     config::{self, Config, CursorAnimation},
     input::{
@@ -64,7 +64,7 @@ use stoatty_render::{
     render::{self, background::CursorFill},
 };
 use stoatty_term::{
-    grid::{Grid, Rgb},
+    grid::{Grid, PoolKind, Rgb},
     term::{Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
     NON_PANE_POOL_BASE,
@@ -823,6 +823,9 @@ struct State {
     /// would queue for a reader that is not there, so the combo goes back to
     /// stepping the font.
     window_client_connected: Arc<AtomicBool>,
+    /// The grid each terminal pool was last reported at over the window socket,
+    /// by pool id, so a frame reports only a grid that moved.
+    reported_pool_grids: BTreeMap<u32, (usize, usize)>,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -918,7 +921,12 @@ impl ApplicationHandler<PtyEvent> for App {
         let terminal = Arc::new(FairMutex::new(Terminal::new(
             spawn_rows, spawn_cols, self.theme,
         )));
-        update_cell_pixels(&terminal, self.font_size, scale_factor as f32);
+        update_cell_pixels(
+            &terminal,
+            self.font_size,
+            self.terminal_font_size,
+            scale_factor as f32,
+        );
         if let Some(ident) = stoat_log::ident::get() {
             terminal
                 .lock()
@@ -1137,6 +1145,7 @@ impl ApplicationHandler<PtyEvent> for App {
             _window_socket: window_socket,
             window_event_tx,
             window_client_connected,
+            reported_pool_grids: BTreeMap::new(),
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
@@ -1596,7 +1605,12 @@ impl ApplicationHandler<PtyEvent> for App {
                 state
                     .gpu
                     .set_font_size(state.font_size, scale_factor as f32);
-                update_cell_pixels(&state.terminal, state.font_size, scale_factor as f32);
+                update_cell_pixels(
+                    &state.terminal,
+                    state.font_size,
+                    state.terminal_font_size,
+                    scale_factor as f32,
+                );
 
                 // The cell metrics moved with the new density, so the grid has
                 // to be re-derived even though the surface has not changed
@@ -1898,16 +1912,27 @@ impl ApplicationHandler<PtyEvent> for App {
     }
 }
 
-/// Record the physical cell pixel size in the terminal so a CSI 14 t query can
-/// report the text area in pixels.
+/// Record both physical cell pixel sizes in the terminal.
 ///
-/// Re-run whenever the font size or display scale factor changes, since the
-/// cell metrics move with both.
-fn update_cell_pixels(terminal: &FairMutex<Terminal>, font_size: u32, scale_factor: f32) {
-    let [width, height] = render::cell_size(font_size, scale_factor);
-    terminal
-        .lock()
-        .set_cell_pixels(width.round() as u16, height.round() as u16);
+/// The editor font's cell is what a CSI 14 t query reports the text area by.
+/// The terminal font's cell sizes the pages of every terminal pool, which is
+/// how many cells of that font a terminal pane's region holds.
+///
+/// Re-run whenever either font size or the display scale factor changes, since
+/// the cell metrics move with all three.
+fn update_cell_pixels(
+    terminal: &FairMutex<Terminal>,
+    font_size: u32,
+    terminal_font_size: u32,
+    scale_factor: f32,
+) {
+    let pixels = |size| render::cell_size(size, scale_factor).map(|side| side.round() as u16);
+    let ([width, height], [terminal_width, terminal_height]) =
+        (pixels(font_size), pixels(terminal_font_size));
+
+    let mut terminal = terminal.lock();
+    terminal.set_cell_pixels(width, height);
+    terminal.set_terminal_cell_pixels(terminal_width, terminal_height);
 }
 
 /// The text area's pixel extent, which the pty reports so an image client can
@@ -1982,7 +2007,12 @@ fn apply_font_step(state: &mut State, delta: i32) {
     state
         .gpu
         .set_font_size(font_size, state.scale_factor as f32);
-    update_cell_pixels(&state.terminal, font_size, state.scale_factor as f32);
+    update_cell_pixels(
+        &state.terminal,
+        font_size,
+        state.terminal_font_size,
+        state.scale_factor as f32,
+    );
 
     let (rows, cols) = state.gpu.grid_size();
     let (pixel_width, pixel_height) = grid_pixels(font_size, state.scale_factor as f32, rows, cols);
@@ -2175,12 +2205,23 @@ fn apply_config_reload(
     state.terminal.lock().set_theme(*theme);
     state.gpu.set_theme_colors(theme.background, theme.cursor);
 
-    if config.font_size != state.font_size {
-        state.font_size = config.font_size;
+    let font_moved = config.font_size != state.font_size;
+    let terminal_font_moved = config.terminal_font_size != state.terminal_font_size;
+    state.font_size = config.font_size;
+    state.terminal_font_size = config.terminal_font_size;
+    if font_moved || terminal_font_moved {
+        update_cell_pixels(
+            &state.terminal,
+            state.font_size,
+            state.terminal_font_size,
+            state.scale_factor as f32,
+        );
+    }
+
+    if font_moved {
         state
             .gpu
             .set_font_size(state.font_size, state.scale_factor as f32);
-        update_cell_pixels(&state.terminal, state.font_size, state.scale_factor as f32);
 
         // The surface is unchanged, so only the cell metrics moved. Re-read the
         // grid size and resize the rest to match, as the font-zoom path does.
@@ -2193,7 +2234,6 @@ fn apply_config_reload(
             .resize(rows as u16, cols as u16, pixel_width, pixel_height);
     }
 
-    state.terminal_font_size = config.terminal_font_size;
     state.cursor_animation = config.cursor_animation;
     *cursor_animation = config.cursor_animation;
 
@@ -2602,6 +2642,11 @@ fn redraw(state: &mut State) {
         )
     };
 
+    // Read off the pool snapshot the projection just took, so the report costs
+    // no lock of its own. Every change to a pool's grid marks the window dirty
+    // or asks for a frame, so the frame after it carries the report.
+    report_pool_grids(state);
+
     // A program that set OSC 11 recolors the cells, but the gutter
     // past the grid keeps whatever the clear was last set to, so
     // follow the override here rather than only at config reload.
@@ -2794,66 +2839,19 @@ fn redraw(state: &mut State) {
         // pool.
         let [cw, ch] = render::cell_size(state.font_size, state.scale_factor as f32);
 
-        // Floor each edge to the grid-row boundary the renderer lays
-        // cells on, then take the span, so each scissor covers exactly
-        // its region's rows. Flooring width and height on their own
-        // would round the far edge to a different pixel than the
-        // adjacent row, leaking a sliver of one surface into the next.
-        //
         // Unlike the pool, active, and overflow buffers, this one holds
         // borrows into the pool animations. A reused state field needs a
         // self-referential borrow for that, so this one stays freshly allocated.
         let composites = active
             .iter()
             .map(|pool| {
-                let region = pool.region;
-                let x0 = (region.left as f32 * cw) as u32;
-                let y0 = (region.top as f32 * ch) as u32;
-                let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
-                let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
-
-                // An anchored pool rides its host's ease. The shift moves both
-                // the drawn origin and the scissor, and the host's own scissor
-                // then clips it, so the surface slides out of the pane edge
-                // rather than over the neighbour.
-                let ride = rides.iter().find(|ride| ride.pool == pool.id);
-                let (ride_rows, scissor) = match ride {
-                    Some(ride) => {
-                        let dy_px = anchored_shift(
-                            ride.top_rows,
-                            ride.host_scroll,
-                            (ride.host_region.height as f32).max(1.0),
-                            ch,
-                        );
-                        (
-                            dy_px / ch,
-                            intersect_scissor(
-                                shift_scissor([x0, y0, x1 - x0, y1 - y0], dy_px),
-                                region_scissor(ride.host_region, cw, ch),
-                            ),
-                        )
-                    },
-                    None => (0.0, [x0, y0, x1 - x0, y1 - y0]),
-                };
-
-                PoolComposite {
-                    id: pool.id,
-                    grid: &state.pool_frame.anims[&pool.id].document_grid,
-                    font_size: None,
-                    // The ride rides the shift below rather than this origin.
-                    // Every composite shader snaps against the origin and adds
-                    // its shift after, so the two land in the same pixel, while
-                    // an origin left on the whole-cell grid is one the renderer's
-                    // instance cache still recognizes a frame later.
-                    origin_cells: [region.left as f32, region.top as f32],
-                    scissor,
-                    // Snapped once over the sum. Two roundings of two fractions
-                    // land a pixel from where their sum does.
-                    shift_rows: snap_shift_to_pixels(ride_rows - pool.frac, ch),
-                    content_changed: pool.content_changed,
-                    scrolled_rows: pool.scrolled_rows,
-                    occludable: pool.id < NON_PANE_POOL_BASE,
-                }
+                pool_composite(
+                    pool,
+                    &state.pool_frame.anims[&pool.id].document_grid,
+                    rides.iter().find(|ride| ride.pool == pool.id),
+                    [cw, ch],
+                    state.terminal_font_size,
+                )
             })
             .collect::<Vec<_>>();
 
@@ -2972,6 +2970,71 @@ fn redraw(state: &mut State) {
         || hud_streaming
     {
         state.window.request_redraw();
+    }
+}
+
+/// The composite that draws `pool` over the live grid this frame, from `grid`,
+/// the rows the pool composed, on a live grid of `cell`-sized cells.
+///
+/// An anchored pool carries the `ride` of its host's ease. The shift moves both
+/// the drawn origin and the scissor, and the host's own scissor then clips it,
+/// so the surface slides out of the pane edge rather than over the neighbour.
+///
+/// A terminal pool's page holds cells of the terminal font, so it draws at
+/// `terminal_font_size` over the pane its region covers.
+fn pool_composite<'a>(
+    pool: &ActivePool,
+    grid: &'a Grid,
+    ride: Option<&AnchorRide>,
+    [cw, ch]: [f32; 2],
+    terminal_font_size: u32,
+) -> PoolComposite<'a> {
+    // Floor each edge to the grid-row boundary the renderer lays cells on, then
+    // take the span, so each scissor covers exactly its region's rows. Flooring
+    // width and height on their own rounds the far edge to a different pixel
+    // than the adjacent row, which leaks a sliver of one surface into the next.
+    let region = pool.region;
+    let x0 = (region.left as f32 * cw) as u32;
+    let y0 = (region.top as f32 * ch) as u32;
+    let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
+    let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+
+    let (ride_rows, scissor) = match ride {
+        Some(ride) => {
+            let dy_px = anchored_shift(
+                ride.top_rows,
+                ride.host_scroll,
+                (ride.host_region.height as f32).max(1.0),
+                ch,
+            );
+            (
+                dy_px / ch,
+                intersect_scissor(
+                    shift_scissor([x0, y0, x1 - x0, y1 - y0], dy_px),
+                    region_scissor(ride.host_region, cw, ch),
+                ),
+            )
+        },
+        None => (0.0, [x0, y0, x1 - x0, y1 - y0]),
+    };
+
+    PoolComposite {
+        id: pool.id,
+        grid,
+        font_size: (region.kind == PoolKind::Terminal).then_some(terminal_font_size),
+        // The ride rides the shift below rather than this origin. Every
+        // composite shader snaps against the origin and adds its shift after, so
+        // the two land in the same pixel, while an origin left on the whole-cell
+        // grid is one the renderer's instance cache still recognizes a frame
+        // later.
+        origin_cells: [region.left as f32, region.top as f32],
+        scissor,
+        // Snapped once over the sum. Two roundings of two fractions land a pixel
+        // from where their sum does.
+        shift_rows: snap_shift_to_pixels(ride_rows - pool.frac, ch),
+        content_changed: pool.content_changed,
+        scrolled_rows: pool.scrolled_rows,
+        occludable: pool.id < NON_PANE_POOL_BASE,
     }
 }
 
@@ -3401,6 +3464,52 @@ fn send_window_event(state: &State, event: WindowIpcEvent) {
     }
 }
 
+/// Report over the window socket every terminal pool whose grid the program has
+/// not heard yet.
+///
+/// A terminal pool's grid is how many cells of the terminal font its region
+/// holds. Only this side knows the font, so the program sizes that pane's
+/// emulator by the report.
+fn report_pool_grids(state: &mut State) {
+    let reports = pool_grid_reports(&state.pool_frame.pools, &mut state.reported_pool_grids);
+    for event in reports {
+        send_window_event(state, event);
+    }
+}
+
+/// The `pool_sized` events `pools` owes the program, given the grids it has
+/// already heard in `reported`, which is brought up to date.
+///
+/// A terminal pool reports when it first appears and whenever its grid moves.
+/// A pool `pools` no longer lists leaves `reported`, so declaring it again
+/// reports it again. A grid wider or taller than the wire's 16 bits saturates.
+fn pool_grid_reports(
+    pools: &[PoolView],
+    reported: &mut BTreeMap<u32, (usize, usize)>,
+) -> Vec<WindowIpcEvent> {
+    let terminal_pools = || {
+        pools
+            .iter()
+            .filter(|pool| pool.region.kind == PoolKind::Terminal)
+    };
+    reported.retain(|id, _| terminal_pools().any(|pool| pool.id == *id));
+
+    let mut events = Vec::new();
+    for pool in terminal_pools() {
+        if reported.insert(pool.id, pool.grid) == Some(pool.grid) {
+            continue;
+        }
+        let (rows, cols) = pool.grid;
+        let wire = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
+        events.push(WindowIpcEvent::PoolSized {
+            pool: pool.id,
+            cols: wire(cols),
+            rows: wire(rows),
+        });
+    }
+    events
+}
+
 /// Fit every window whose size moved during the event batch just handled.
 ///
 /// Once per batch rather than per event, so a drag pays one swapchain
@@ -3784,9 +3893,10 @@ mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
-        net_font_step, notification_should_show, selection_copy_text, snap_shift_to_pixels,
-        step_popovers, swallow_super_combo, zoom_route, ActivePool, ForceFull, FrameOutcome, Input,
-        PendingResize, PoolView, PtyWrite, TermEvent, Visibility, WindowOpenVerdict, ZoomRoute,
+        net_font_step, notification_should_show, pool_composite, pool_grid_reports,
+        selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo,
+        update_cell_pixels, zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize,
+        PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute,
         MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
@@ -3804,10 +3914,14 @@ mod tests {
     use alacritty_terminal::sync::FairMutex;
     #[cfg(unix)]
     use std::sync::{mpsc, Arc};
-    use std::time::{Duration, Instant};
+    use std::{
+        collections::BTreeMap,
+        time::{Duration, Instant},
+    };
     use stoatty_protocol::command::{
-        encode_fill, encode_fill_end, encode_pool_anchor, encode_pool_region, encode_scroll,
-        FillCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand, ScrollCommand,
+        encode_fill, encode_fill_end, encode_pool_anchor, encode_pool_drop, encode_pool_region,
+        encode_scroll, FillCommand, PoolAnchorCommand, PoolDropCommand, PoolKind,
+        PoolRegionCommand, ScrollCommand,
     };
     use stoatty_term::{
         grid::{Damage, DocumentOffset, Grid, PoolRegion},
@@ -4459,6 +4573,225 @@ mod tests {
             (true, vec![2]),
             "the gliding host asks for frames, and the ride holds",
         );
+    }
+
+    /// A terminal pool composites on every frame at rest, and composes again
+    /// only when its page changes. It never glides, so it asks for no frames
+    /// and moves nothing that rides it.
+    #[test]
+    fn a_terminal_pool_composites_without_a_glide() {
+        let mut terminal = terminal_pooled(b"ab");
+        let mut frame = PoolFrame::default();
+        let mut step = |terminal: &mut Terminal| {
+            let projection = project(terminal, &mut frame);
+            (
+                tiles(&projection),
+                projection.pool_easing,
+                projection.glided,
+                row_text(&frame.anims[&1].document_grid),
+            )
+        };
+
+        let first = step(&mut terminal);
+        let again = step(&mut terminal);
+        fill_page(&mut terminal, 1, 0, b"cd");
+        let refilled = step(&mut terminal);
+
+        assert_eq!(
+            [first, again, refilled],
+            [
+                (vec![(1, true)], false, vec![], "ab".to_owned()),
+                (vec![(1, false)], false, vec![], "ab".to_owned()),
+                (vec![(1, true)], false, vec![], "cd".to_owned()),
+            ],
+            "the pool composites every frame and composes again on a new page",
+        );
+    }
+
+    /// A resize empties a terminal pool's page until the program paints it
+    /// again, and the pool holds its last composite meanwhile rather than
+    /// leaving the live grid to show through.
+    #[test]
+    fn a_terminal_pool_holds_its_composite_while_its_page_refills() {
+        let mut terminal = terminal_pooled(b"ab");
+        let mut frame = PoolFrame::default();
+        project(&mut terminal, &mut frame);
+
+        terminal.resize(9, 8);
+        let projection = project(&mut terminal, &mut frame);
+
+        assert_eq!(
+            (tiles(&projection), row_text(&frame.anims[&1].document_grid)),
+            (vec![(1, false)], "ab".to_owned()),
+            "the emptied page composites what it held before",
+        );
+    }
+
+    /// A terminal pool that a full-screen program left declared composites
+    /// nothing once the terminal is back on the primary screen, where the shell
+    /// draws.
+    #[test]
+    fn a_terminal_pool_composites_only_on_the_alternate_screen() {
+        let mut terminal = terminal_pooled(b"ab");
+        let mut frame = PoolFrame::default();
+        let held = tiles(&project(&mut terminal, &mut frame));
+
+        terminal.advance(b"\x1b[?1049l");
+        let left = tiles(&project(&mut terminal, &mut frame));
+
+        assert_eq!(
+            (held, left),
+            (vec![(1, true)], vec![]),
+            "the pool composites while the program holds the screen",
+        );
+    }
+
+    /// A terminal pool reports its grid once when it appears, again when a font
+    /// change moves it, and again when it is declared after a retire.
+    #[test]
+    fn a_terminal_pool_reports_its_grid() {
+        let terminal = FairMutex::new(terminal_pooled(b"ab"));
+        let mut reported = BTreeMap::new();
+        let mut reports = |font_size, terminal_font_size| {
+            update_cell_pixels(&terminal, font_size, terminal_font_size, 1.0);
+            pool_grid_reports(&terminal.lock().pools(), &mut reported)
+        };
+        let sized = |cols, rows| {
+            vec![WindowIpcEvent::PoolSized {
+                pool: 1,
+                cols,
+                rows,
+            }]
+        };
+
+        // Twenty points is a 12 by 24 cell and ten points a 6 by 12 one, so the
+        // four by two region holds eight by four terminal cells.
+        let declared = reports(20, 10);
+        let held = reports(20, 10);
+        let stepped = reports(20, 20);
+        terminal
+            .lock()
+            .advance(&encode_pool_drop(&PoolDropCommand { pool: 1 }));
+        let retired = reports(20, 20);
+        declare_terminal_pool(&mut terminal.lock());
+        let redeclared = reports(20, 20);
+
+        assert_eq!(
+            [declared, held, stepped, retired, redeclared],
+            [sized(8, 4), vec![], sized(4, 2), vec![], sized(4, 2)],
+            "each grid the program has not heard reports once",
+        );
+    }
+
+    /// A terminal pool composites at the terminal font size over its own region,
+    /// and a grid pool at the live grid's size.
+    #[test]
+    fn a_terminal_pool_composites_at_the_terminal_font_size() {
+        let grid = Grid::new(1, 1);
+        let drawn = |kind| {
+            let tile = ActivePool {
+                id: 1,
+                region: PoolRegion {
+                    pool: 1,
+                    window: 0,
+                    top: 1,
+                    left: 2,
+                    width: 4,
+                    height: 2,
+                    kind,
+                },
+                frac: 0.0,
+                content_changed: true,
+                scrolled_rows: None,
+            };
+            let composite = pool_composite(&tile, &grid, None, [12.0, 24.0], 10);
+            (
+                composite.font_size,
+                composite.origin_cells,
+                composite.scissor,
+            )
+        };
+
+        assert_eq!(
+            (drawn(PoolKind::Terminal), drawn(PoolKind::Grid)),
+            (
+                (Some(10), [2.0, 1.0], [24, 24, 48, 48]),
+                (None, [2.0, 1.0], [24, 24, 48, 48])
+            ),
+            "only the terminal pool takes the terminal size, and both cover their region",
+        );
+    }
+
+    /// A pool declared again under its id as a terminal pool drops what its
+    /// glide held, which is a grid of another size.
+    #[test]
+    fn a_pool_declared_again_as_a_terminal_pool_drops_its_glide() {
+        let mut terminal = pooled_terminal(&[(1, 0, 4)]);
+        terminal.advance(b"\x1b[?1049h");
+        terminal.set_cell_pixels(10, 20);
+        terminal.set_terminal_cell_pixels(5, 10);
+        scroll_pool(&mut terminal, 1, 1, 0);
+        let mut frame = PoolFrame::default();
+        frame.anims.insert(1, PoolAnim::new(0.0));
+        let gliding = tiles(&project(&mut terminal, &mut frame));
+
+        // Twice as many terminal cells fit the region on each axis, so its pages
+        // are rebuilt empty, and the program has not painted the new one yet.
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 4,
+            window: 0,
+            kind: PoolKind::Terminal,
+        }));
+        let declared = tiles(&project(&mut terminal, &mut frame));
+
+        assert_eq!(
+            (gliding, declared),
+            (vec![(1, true)], vec![]),
+            "the terminal pool shows nothing until its own page is painted",
+        );
+    }
+
+    /// A terminal on the alternate screen, as a full-screen program holds it,
+    /// with terminal pool 1 over its top-left four by two cells and `text`
+    /// painted into that pool's one page.
+    fn terminal_pooled(text: &[u8]) -> Terminal {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        terminal.advance(b"\x1b[?1049h");
+        declare_terminal_pool(&mut terminal);
+        fill_page(&mut terminal, 1, 0, text);
+        terminal
+    }
+
+    fn declare_terminal_pool(terminal: &mut Terminal) {
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 2,
+            window: 0,
+            kind: PoolKind::Terminal,
+        }));
+    }
+
+    /// Each composited pool's id and whether its content changed this frame.
+    fn tiles(projection: &FrameProjection) -> Vec<(u32, bool)> {
+        projection
+            .active
+            .iter()
+            .map(|pool| (pool.id, pool.content_changed))
+            .collect()
+    }
+
+    /// The first two cells of `grid`'s first row.
+    fn row_text(grid: &Grid) -> String {
+        (0..grid.cols().min(2))
+            .map(|col| grid.get(0, col).ch)
+            .collect()
     }
 
     /// A terminal whose primary window holds each `(id, top, height)` pool at

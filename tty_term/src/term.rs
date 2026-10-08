@@ -2286,6 +2286,35 @@ impl Terminal {
         Some((frac, top))
     }
 
+    /// Compose terminal-kind pool `id`'s one page into `out`, sized to the
+    /// pool's grid.
+    ///
+    /// A terminal pool never glides, so the compose takes page 0 whole and adds
+    /// no straddle row. [`Self::project_pool`] does add one, and a pool that
+    /// buffers no page past the first never composes there.
+    ///
+    /// Returns `false` for an unknown id, or while page 0 is not buffered.
+    /// `out` is then left as it was, so a caller holding a previous composite
+    /// keeps it.
+    pub fn project_terminal_pool(&self, id: u32, out: &mut Grid) -> bool {
+        let Some(pool) = self.pools.get(&id) else {
+            return false;
+        };
+        let (rows, cols) = pool.grid;
+        if pool.page_pool.page(0).is_none() {
+            return false;
+        }
+
+        if out.rows() != rows || out.cols() != cols {
+            out.resize(rows, cols);
+        }
+        if !pool.page_pool.compose(0, out) {
+            return false;
+        }
+        stamp_pool_decorations(&pool.page_pool, out, 0, rows);
+        true
+    }
+
     /// Compose a straddled scrollback-history window into `out` at the eased
     /// offset, or `None` to fall back to the live grid.
     ///
