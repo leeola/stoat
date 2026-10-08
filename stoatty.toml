@@ -9,6 +9,11 @@
 # (Retina) and a standard display.
 font_size = 14
 
+# Font size in logical points for the terminal and agent panes a stoat child
+# draws, set apart from the editor text. The zoom combo steps both sizes
+# together, so the terminal panes stay smaller by the same amount.
+terminal_font_size = 12
+
 # Ordered cascade of font family names, most preferred first. The renderer shapes
 # text with the first family installed; "monospace" is a generic fallback to the
 # system's default monospace.

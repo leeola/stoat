@@ -23,8 +23,8 @@ use crate::{
     input::{
         alternate_scroll_bytes, cell_at, chord_char, chord_csi_u, encode_key, font_step,
         font_step_target, ipc_button, modifier_bits, paste_bytes, sgr_button_bytes,
-        sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes, swallow_super_combo, wheel_lines,
-        wheel_travel, zoom_csi_u,
+        sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size,
+        swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -263,6 +263,7 @@ fn run_with_config(
         config.theme,
         FontSettings {
             size: config.font_size,
+            terminal_size: config.terminal_font_size,
             family: config.font_family,
             ligatures: config.ligatures,
         },
@@ -337,6 +338,7 @@ enum PtyEvent {
 /// seeds the renderer's [`FontConfig`] with when the window opens.
 struct FontSettings {
     size: u32,
+    terminal_size: u32,
     family: Vec<String>,
     ligatures: bool,
 }
@@ -364,6 +366,7 @@ struct App {
     /// Empty when the config names no theme.
     theme_name: String,
     font_size: u32,
+    terminal_font_size: u32,
     /// Ordered font-family cascade from the config, resolved against the font db
     /// at renderer creation to pick the shaping primary. Read once in `resumed`.
     font_family: Vec<String>,
@@ -427,6 +430,7 @@ impl App {
             theme,
             theme_name,
             font_size: font.size,
+            terminal_font_size: font.terminal_size,
             font_family: font.family,
             ligatures: font.ligatures,
             cursor_animation,
@@ -640,6 +644,10 @@ struct State {
     /// by the platform zoom combo. Drives the renderer's cell metrics on each
     /// change, scaled by [`Self::scale_factor`].
     font_size: u32,
+    /// The live font size in logical points for the terminal and agent panes a
+    /// stoat child draws, seeded from the config and stepped with
+    /// [`Self::font_size`], so the two sizes keep their spacing.
+    terminal_font_size: u32,
     /// Size the primary surface has yet to be fitted to. See [`PendingResize`].
     pending_resize: PendingResize,
     /// The window's display scale factor (physical pixels per logical point),
@@ -1092,6 +1100,7 @@ impl ApplicationHandler<PtyEvent> for App {
             grid,
             pty,
             font_size: self.font_size,
+            terminal_font_size: self.terminal_font_size,
             scale_factor,
             modifiers: ModifiersState::empty(),
             zoom_capture: false,
@@ -1949,13 +1958,15 @@ fn zoom_route(capture: bool, inband: bool, client_connected: bool) -> ZoomRoute 
     }
 }
 
-/// Step the terminal's font size by `delta` and re-fit everything measured in
-/// cells.
+/// Step both font sizes by `delta` and re-fit everything measured in cells.
 ///
 /// Shared by the zoom combo and a child's `font_step` request, so both paths
 /// land the same metrics. The surface itself does not change, only the cell
 /// size, so the grid is re-read and the terminal and pty resized without a
 /// `gpu.resize`.
+///
+/// The terminal pane size steps with the editor size and holds when the editor
+/// size holds at its clamp, so the two stay in step.
 ///
 /// A step that lands on the size it started from returns before any of it. The
 /// chain below resets the metrics of twelve passes, clears both shape caches so
@@ -1967,6 +1978,7 @@ fn apply_font_step(state: &mut State, delta: i32) {
         return;
     };
     state.font_size = font_size;
+    state.terminal_font_size = stepped_font_size(state.terminal_font_size, delta);
     state
         .gpu
         .set_font_size(font_size, state.scale_factor as f32);
@@ -2181,6 +2193,7 @@ fn apply_config_reload(
             .resize(rows as u16, cols as u16, pixel_width, pixel_height);
     }
 
+    state.terminal_font_size = config.terminal_font_size;
     state.cursor_animation = config.cursor_animation;
     *cursor_animation = config.cursor_animation;
 

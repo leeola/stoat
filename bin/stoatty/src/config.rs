@@ -48,6 +48,12 @@ pub struct Config {
     #[serde(default)]
     pub font_size: u32,
 
+    /// Font size in logical points for the terminal and agent panes a stoat
+    /// child draws, which the zoom combo steps together with
+    /// [`Self::font_size`].
+    #[serde(default)]
+    pub terminal_font_size: u32,
+
     /// Ordered cascade of font family names, most preferred first. The renderer
     /// shapes text with the first family it finds installed, so later entries
     /// are fallbacks for when an earlier one is missing.
@@ -482,6 +488,17 @@ mod tests {
     #[test]
     fn embedded_default_sets_the_logical_font_size() {
         assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 14);
+    }
+
+    #[test]
+    fn embedded_default_sets_the_terminal_font_size() {
+        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().terminal_font_size, 12);
+    }
+
+    #[test]
+    fn user_terminal_font_size_overrides_the_default() {
+        let config = settle("terminal_font_size = 12", Some("terminal_font_size = 10")).unwrap();
+        assert_eq!(config.terminal_font_size, 10);
     }
 
     #[test]
