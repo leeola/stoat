@@ -145,7 +145,8 @@ enum OpenBody<'a> {
     Rope { rope: Rope, ending: LineEnding },
 }
 
-/// Point `target` at an image file, replacing whatever it showed.
+/// Point `target` at an image file, releasing whatever it showed as
+/// [`replace_pane_view`] describes.
 ///
 /// No buffer and no editor: there is nothing to edit, nothing to save, and no
 /// language to serve. The pane holds the path and the size, which is everything
@@ -157,16 +158,18 @@ fn show_image(
     absolute: &Path,
     px: (u32, u32),
 ) {
+    let executor = stoat.executor.clone();
     let Some(ws) = stoat.workspaces.get_mut(workspace) else {
         return;
     };
     if !ws.panes.contains(target) {
         return;
     }
-    ws.panes.pane_mut(target).view = View::Image {
+    let image = View::Image {
         path: absolute.to_path_buf(),
         px,
     };
+    replace_pane_view(ws, &executor, target, image);
     stoat.set_status(format!("{} is an image", display_name(absolute)));
 }
 
@@ -496,7 +499,42 @@ pub(crate) fn show_buffer_in_pane(
     Some(buffer_id)
 }
 
-/// Keep the commits list `target` shows behind the editor about to replace it,
+/// Point pane `target` at `view`, releasing the view it showed so no editor,
+/// shell, or commits list outlives every pane that showed it.
+///
+/// A commits list moves behind the new view, as [`show_buffer_in_pane`] keeps
+/// one. Any other view goes as a tab close disposes it: an editor unless
+/// another pane shows it, and a shell unless another view shows it.
+///
+/// A shell the pane already records behind itself stays too. An open-in-term
+/// request records the shell there, then opens its first path into the shell's
+/// pane.
+pub(crate) fn replace_pane_view(
+    ws: &mut Workspace,
+    executor: &Executor,
+    target: PaneId,
+    view: View,
+) {
+    stash_commits_list(ws, target, executor);
+    let (outgoing, recorded) = {
+        let pane = ws.panes.pane_mut(target);
+        let recorded = match pane.prev_view {
+            Some(View::Agent(id) | View::Terminal(id)) => Some(id),
+            _ => None,
+        };
+        (std::mem::replace(&mut pane.view, view), recorded)
+    };
+
+    match outgoing {
+        // The stash above put the list behind the new view, or disposed it when
+        // the slot was taken.
+        View::Commits(_) => {},
+        View::Agent(id) | View::Terminal(id) if recorded == Some(id) || ws.term_shown(id) => {},
+        outgoing => dispose_view(ws, executor, outgoing, EditorDisposal::GcIfUnreferenced),
+    }
+}
+
+/// Keep the commits list `target` shows behind the view about to replace it,
 /// so a walk opened from the list returns to it.
 fn stash_commits_list(ws: &mut Workspace, target: PaneId, executor: &Executor) {
     let View::Commits(list) = ws.panes.pane(target).view else {
@@ -743,7 +781,7 @@ fn prior_live_buffer(
 mod tests {
     use super::*;
     use crate::{
-        action_handlers::dispatch,
+        action_handlers::{commits, dispatch},
         test_harness::{editor, TestHarness},
     };
     use stoat_action::{
@@ -1581,6 +1619,80 @@ mod tests {
     #[test]
     fn opening_an_image_shows_it_rather_than_refusing_it() {
         let mut h = TestHarness::with_size(40, 10);
+        open_a_png(&mut h);
+
+        let ws = h.stoat.active_workspace();
+        let view = &ws.panes.pane(ws.panes.focus()).view;
+        assert!(
+            matches!(view, View::Image { px: (4, 2), .. }),
+            "the pane shows the image and its size, got {view:?}",
+        );
+        assert!(
+            !h.stoat
+                .pending_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cannot open"),
+            "and nothing reports it as unopenable",
+        );
+    }
+
+    /// A walk opened from a commits list opens its first changed file over the
+    /// list, so an image there has to keep the list for the walk to return to.
+    #[test]
+    fn an_image_opened_over_a_commits_list_keeps_the_list_behind_it() {
+        let mut h = TestHarness::with_size(90, 16);
+        h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "1\n")])]);
+        h.open_commits("/repo");
+        let list = h.stoat.active_workspace().focused_commits_id();
+
+        open_a_png(&mut h);
+
+        let ws = h.stoat.active_workspace();
+        let focus = ws.panes.focus();
+        assert_eq!(
+            (
+                list.is_some(),
+                matches!(ws.panes.pane(focus).view, View::Image { .. }),
+                commits::covered_commits(ws, focus)
+            ),
+            (true, true, list),
+            "the image takes the pane, and the live list waits behind it"
+        );
+    }
+
+    /// An open-in-term request records the shell behind its pane before it
+    /// opens its first path there, so an image in that pane leaves the shell
+    /// running for the pane to return to.
+    #[test]
+    fn an_image_opened_over_a_shell_the_pane_records_keeps_the_shell() {
+        let mut h = TestHarness::with_size(40, 10);
+        dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let shell = {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            let View::Terminal(shell) = ws.panes.pane(focus).view else {
+                panic!("the terminal action shows a shell");
+            };
+            ws.panes.pane_mut(focus).prev_view = Some(View::Terminal(shell));
+            shell
+        };
+
+        open_a_png(&mut h);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                matches!(ws.panes.pane(ws.panes.focus()).view, View::Image { .. }),
+                ws.terms.contains_key(shell)
+            ),
+            (true, true),
+            "the image opens in the shell's pane, and the recorded shell lives on"
+        );
+    }
+
+    /// Write a 4x2 PNG to `/repo/pic.png` and open it in the focused pane.
+    fn open_a_png(h: &mut TestHarness) {
         let png = {
             let buffer = image::RgbaImage::from_pixel(4, 2, image::Rgba([1, 2, 3, 255]));
             let mut out = std::io::Cursor::new(Vec::new());
@@ -1599,21 +1711,6 @@ mod tests {
             },
         );
         h.settle();
-
-        let ws = h.stoat.active_workspace();
-        let view = &ws.panes.pane(ws.panes.focus()).view;
-        assert!(
-            matches!(view, View::Image { px: (4, 2), .. }),
-            "the pane shows the image and its size, got {view:?}",
-        );
-        assert!(
-            !h.stoat
-                .pending_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("cannot open"),
-            "and nothing reports it as unopenable",
-        );
     }
 
     /// A background open normalizes and ropes off the run loop, so what

@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer_lifecycle,
     host::terminal::TerminalSession,
     pane::View,
     run::{agent_socket_path_in, spawn_claude, spawn_term_reader},
@@ -19,6 +20,9 @@ const AGENT_COLS: u16 = 80;
 /// Spawns the subshell through the terminal host, stores it alongside a fresh
 /// screen emulator in the workspace's agent collection, and points the focused
 /// pane at the new [`View::Agent`]. A spawn failure leaves the pane unchanged.
+///
+/// The view the pane showed is released as
+/// [`buffer_lifecycle::replace_pane_view`] describes.
 pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     // The agent's hooks call back over this workspace's socket, so bind it
     // before the spawn hands over the path. Repeat calls for a workspace
@@ -61,7 +65,7 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
         TermSession::next_token(),
     ));
     let focused = ws.panes.focus();
-    ws.panes.pane_mut(focused).view = View::Agent(agent_id);
+    buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Agent(agent_id));
 
     spawn_term_reader(&executor, session, agent_id, pty_tx);
     UpdateEffect::Redraw
@@ -81,6 +85,32 @@ mod tests {
             .find(|(key, _)| key == "EDITOR")
             .map(|(_, value)| value.clone())
             .expect("the agent is always handed an editor command")
+    }
+
+    #[test]
+    fn an_agent_ends_the_shell_it_replaces_unless_another_pane_shows_it() {
+        let lives = |split: bool| {
+            let mut h = Stoat::test();
+            h.stoat.set_agent_socket_dir("/state".into());
+            super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+            let ws = h.stoat.active_workspace();
+            let View::Terminal(shell) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the terminal action shows a shell");
+            };
+            if split {
+                super::super::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+            }
+
+            super::super::dispatch(&mut h.stoat, &stoat_action::SpawnClaude);
+
+            h.stoat.active_workspace().terms.contains_key(shell)
+        };
+
+        assert_eq!(
+            (lives(false), lives(true)),
+            (false, true),
+            "the agent ends the shell it replaced, and keeps one another pane shows"
+        );
     }
 
     #[test]

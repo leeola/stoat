@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer_lifecycle,
     pane::View,
     run::{OutputBlock, RunState},
 };
@@ -24,7 +25,7 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
         run_state.shell_handle = Some(handle);
     }
 
-    ws.panes.pane_mut(focused).view = View::Run(run_id);
+    buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Run(run_id));
     stoat.transition_mode("insert".into());
     UpdateEffect::Redraw
 }
@@ -197,5 +198,34 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
             }
             UpdateEffect::None
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{app::Stoat, pane::View};
+
+    #[test]
+    fn a_run_drops_the_editor_it_replaces() {
+        let mut h = Stoat::test();
+        let editor = {
+            let ws = h.stoat.active_workspace();
+            let View::Editor(editor) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the focused pane shows an editor");
+            };
+            editor
+        };
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::OpenRun);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
+                ws.editors.contains_key(editor)
+            ),
+            (true, false),
+            "the run takes the pane, and the editor it replaced goes"
+        );
     }
 }
