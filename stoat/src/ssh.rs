@@ -258,6 +258,11 @@ pub(crate) fn retire_terminal_state(stoat: &mut Stoat) {
 
     let mut out = Vec::new();
     stoat.smooth_scroll.drop_all(&mut out);
+    // The terminal that drew these pools reported their grids. The next one
+    // reports its own, or none, so every term goes back to its pane's cells.
+    for (_, ws) in &mut stoat.workspaces {
+        ws.term_pool_grids.clear();
+    }
     for (_, content) in std::mem::take(&mut stoat.minimap_content) {
         encode_minimap_drop_into(
             &mut out,

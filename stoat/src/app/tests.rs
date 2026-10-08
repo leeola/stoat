@@ -4915,6 +4915,164 @@ fn a_click_without_drag_leaves_no_terminal_selection() {
     );
 }
 
+/// A fresh terminal and the fake shell behind it in the focused split pane,
+/// fit to that pane by a render, and the pane's index, which is its pool id.
+fn pooled_terminal(
+    h: &mut crate::test_harness::TestHarness,
+) -> (TermId, u32, Arc<crate::host::FakeTerminalSession>) {
+    let shell = Arc::new(crate::host::FakeTerminalSession::new());
+    let (term_id, index) = {
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        let session: Arc<dyn crate::host::TerminalSession> = shell.clone();
+        let term_id = ws.terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
+        ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+        (term_id, ws.panes.pane(pane).index)
+    };
+    let _ = h.stoat.render();
+    (term_id, index, shell)
+}
+
+fn pool_sized(pool: u32, cols: u16, rows: u16) -> WindowIpc {
+    WindowIpc::Event(WindowIpcEvent::PoolSized { pool, cols, rows })
+}
+
+/// A `pool_sized` report fits the pane's terminal and its shell to the reported
+/// grid, and the frames after it keep that size. A report for a pool that no
+/// terminal pane draws changes nothing, and neither does a grid with no cells.
+#[test]
+fn a_pool_sized_report_fits_the_terminal_to_the_reported_grid() {
+    let mut h = Stoat::test();
+    let (term_id, index, shell) = pooled_terminal(&mut h);
+
+    let stray = h.stoat.handle_window_ipc(pool_sized(index + 100, 30, 6));
+    let reported = h.stoat.handle_window_ipc(pool_sized(index, 30, 6));
+    let repeated = h.stoat.handle_window_ipc(pool_sized(index, 30, 6));
+    let empty = h.stoat.handle_window_ipc(pool_sized(index, 0, 0));
+    let _ = h.stoat.render();
+    let _ = h.stoat.render();
+
+    let term = &h.stoat.active_workspace().terms[term_id].term;
+    assert_eq!(
+        (
+            stray,
+            reported,
+            repeated,
+            empty,
+            (term.rows(), term.cols()),
+            shell.last_size()
+        ),
+        (
+            UpdateEffect::None,
+            UpdateEffect::Redraw,
+            UpdateEffect::None,
+            UpdateEffect::None,
+            (6, 30),
+            Some((6, 30))
+        ),
+        "the report sizes the emulator and the shell, once",
+    );
+}
+
+/// A terminal that stoatty draws as a pool leaves its live content area blank,
+/// since the pool covers it. Until its grid is reported it draws on the live
+/// grid.
+#[test]
+fn a_pooled_terminal_pane_leaves_its_live_area_blank() {
+    let mut h = Stoat::test();
+    let (term_id, index, _) = pooled_terminal(&mut h);
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"hello");
+    let first_cells = |buf: &Buffer| {
+        (0..5)
+            .map(|x| buf[(x, 0)].symbol().to_owned())
+            .collect::<String>()
+    };
+
+    let live = first_cells(&h.stoat.render());
+    h.stoat.handle_window_ipc(pool_sized(index, 30, 6));
+    let pooled = first_cells(&h.stoat.render());
+
+    assert_eq!(
+        (live, pooled),
+        ("hello".to_owned(), "     ".to_owned()),
+        "the live grid shows the terminal until the pool takes the pane",
+    );
+}
+
+/// A drag over a terminal that stoatty draws at its own font size selects the
+/// terminal cells under the pointer, through the ratio of its cells to the
+/// pane's content cells.
+#[test]
+fn a_drag_over_a_pooled_terminal_selects_through_the_grid_ratio() {
+    use crossterm::event::MouseButton;
+
+    let mut h = Stoat::test();
+    let (term_id, index, _) = pooled_terminal(&mut h);
+    let content = {
+        let ws = h.stoat.active_workspace();
+        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+    };
+    h.stoat
+        .handle_window_ipc(pool_sized(index, content.width * 2, content.height * 2));
+    let _ = h.stoat.render();
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"hello world");
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
+
+    assert_eq!(
+        h.fake_clipboard().writes(),
+        vec!["o wor"],
+        "content cells 2 to 4 cover terminal cells 4 to 8",
+    );
+}
+
+/// A closed terminal's reported grid goes with it.
+#[test]
+fn a_closed_terminal_drops_its_reported_grid() {
+    let mut h = Stoat::test();
+    let (term_id, index, _) = pooled_terminal(&mut h);
+    h.stoat.handle_window_ipc(pool_sized(index, 30, 6));
+
+    h.stoat.active_workspace_mut().terms.remove(term_id);
+    let _ = h.stoat.render();
+
+    assert_eq!(
+        h.stoat.active_workspace().term_pool_grids,
+        std::collections::HashMap::new(),
+        "no grid outlives its terminal",
+    );
+}
+
+/// A terminal that replaces the one that reported the pool grids has reported
+/// none of its own, so every terminal goes back to its pane's cells.
+#[test]
+fn a_replaced_terminal_drops_the_reported_pool_grids() {
+    let mut h = Stoat::test();
+    let (_, index, _) = pooled_terminal(&mut h);
+    h.stoat.handle_window_ipc(pool_sized(index, 30, 6));
+
+    ssh::retire_terminal_state(&mut h.stoat);
+
+    assert_eq!(
+        h.stoat.active_workspace().term_pool_grids,
+        std::collections::HashMap::new(),
+        "the next terminal starts from the panes' own cells",
+    );
+}
+
 #[test]
 fn a_wheel_over_a_terminal_pane_walks_its_history() {
     use crossterm::event::MouseButton;

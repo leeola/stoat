@@ -2947,6 +2947,12 @@ impl Stoat {
             return self.handle_chord(ch);
         }
 
+        // A grid lands beside the pane tree it is looked up through, which the
+        // pane-tree borrow below leaves unreachable.
+        if let WindowIpcEvent::PoolSized { pool, cols, rows } = event {
+            return self.handle_pool_sized(pool, cols, rows);
+        }
+
         // An aux window's own resize drag moves its pane's rectangle the way the
         // terminal's does, and the pools it feeds are the same pools.
         if let WindowIpcEvent::Resized { .. } = event {
@@ -2985,11 +2991,44 @@ impl Stoat {
             // nothing here answers.
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
             WindowIpcEvent::Wheel { .. } => unreachable!("wheel events return above"),
-            // The terminal answers a terminal-kind pool, and this program
-            // declares only grid pools, so no pane waits on the size.
-            WindowIpcEvent::PoolSized { .. } => return UpdateEffect::None,
+            WindowIpcEvent::PoolSized { .. } => unreachable!("pool sizes return above"),
         }
         UpdateEffect::Redraw
+    }
+
+    /// Record the `rows` by `cols` grid stoatty reported for terminal pool
+    /// `pool`, which sizes that pane's emulator from the next frame on.
+    ///
+    /// The pool id is the index of the split pane it draws. A report that names
+    /// no split pane showing a terminal or an agent raced a close or a view
+    /// change, and does nothing. So does a grid with no cells, since an emulator
+    /// holds at least one.
+    fn handle_pool_sized(&mut self, pool: u32, cols: u16, rows: u16) -> UpdateEffect {
+        if rows == 0 || cols == 0 {
+            return UpdateEffect::None;
+        }
+
+        let ws = self.active_workspace_mut();
+        let term_id = ws
+            .panes
+            .split_panes()
+            .find_map(|(_, pane)| match pane.view {
+                View::Terminal(id) | View::Agent(id)
+                    if pane.index == pool && pane.placement == Placement::Split =>
+                {
+                    Some(id)
+                },
+                _ => None,
+            });
+        let Some(term_id) = term_id else {
+            return UpdateEffect::None;
+        };
+
+        let grid = (rows, cols);
+        match ws.term_pool_grids.insert(term_id, grid) == Some(grid) {
+            true => UpdateEffect::None,
+            false => UpdateEffect::Redraw,
+        }
     }
 
     /// Route `lines` of precision wheel travel from `window` at cell `col`,

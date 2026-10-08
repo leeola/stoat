@@ -19,7 +19,7 @@ use crate::{
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
     minimap::{emit::minimap_view_window, LINES_PER_CELL},
-    pane::{FocusTarget, View},
+    pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
     run::GridSelection,
@@ -1892,20 +1892,38 @@ fn handle_editor_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, r
 /// marks the drag moved. `Up` copies the selected text to the clipboard and
 /// keeps it highlighted when the drag moved, and otherwise clears it so a
 /// plain click leaves no selection. Coordinates are pane-relative cells.
+///
+/// A split pane's terminal that stoatty draws at its own font size holds other
+/// cells than the pane's content area, so a content cell maps to the terminal
+/// cell under it through the ratio of the two.
 fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row: u16) -> bool {
-    let Some((term_id, _area)) = focused_term_target(stoat) else {
+    let Some((term_id, area)) = focused_term_target(stoat) else {
         return false;
     };
-    let (rows, cols) = {
+    let (rows, cols, pooled) = {
         let ws = stoat.active_workspace();
         let Some(session) = ws.terms.get(term_id) else {
             return false;
         };
-        (session.term.rows(), session.term.cols())
+        let pooled = matches!(ws.focus, FocusTarget::SplitPane)
+            && ws.panes.pane(ws.panes.focus()).placement == Placement::Split
+            && ws.term_pool_grids.contains_key(&term_id);
+        (session.term.rows(), session.term.cols(), pooled)
     };
     if rows == 0 || cols == 0 {
         return false;
     }
+
+    let (col, row) = match pooled {
+        true => {
+            let (content, _) = crate::render::layout::split_pane_status(area);
+            (
+                terminal_cell(col, cols, content.width),
+                terminal_cell(row, rows, content.height),
+            )
+        },
+        false => (col, row),
+    };
 
     match kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -1971,6 +1989,15 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
         },
         _ => false,
     }
+}
+
+/// The terminal cell under content cell `cell`, for a terminal of `cells` cells
+/// spread over `span` content cells.
+///
+/// Floored, so a content cell maps to the terminal cell at its leading edge,
+/// which is the cell under the pointer to within one terminal cell.
+fn terminal_cell(cell: u16, cells: usize, span: u16) -> u16 {
+    (usize::from(cell) * cells / usize::from(span.max(1))) as u16
 }
 
 /// Drop any mouse selection on `term_id`, so the next keystroke, click, or

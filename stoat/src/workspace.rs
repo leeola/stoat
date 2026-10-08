@@ -232,6 +232,13 @@ pub struct Workspace {
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
     pub(crate) terms: SlotMap<TermId, TermSession>,
+    /// The grid stoatty reported for each terminal pane it draws as a pool at
+    /// the terminal font size, as `(rows, cols)` of that font.
+    ///
+    /// Only the terminal knows how many cells of its own font a pane holds, so
+    /// a term listed here is sized to this grid rather than to its pane's
+    /// content area, and its pane leaves the live grid blank beneath the pool.
+    pub(crate) term_pool_grids: HashMap<TermId, (u16, u16)>,
     /// The app's redraw handle, so editors created after construction reach it.
     ///
     /// Held here rather than passed per call because the two places editors are
@@ -447,6 +454,7 @@ impl Workspace {
             editors,
             runs: SlotMap::with_key(),
             terms: SlotMap::with_key(),
+            term_pool_grids: HashMap::new(),
             redraw_notify: redraw,
             code_graph: CodeGraph::new(),
             index_generation: 0,
@@ -1598,11 +1606,21 @@ impl Workspace {
     /// already at the right size, so a steady layout issues no PTY resizes. The
     /// content area excludes the status row via [`split_pane_status`], matching
     /// the rectangle the renderer composites the emulator into.
+    ///
+    /// A term with a grid in [`Self::term_pool_grids`] takes that grid instead,
+    /// since stoatty draws it at another font size than the content area's
+    /// cells. A closed term's grid is dropped here.
     fn fit_terms_to_panes(&mut self) {
         // The walk reads the pane tree while the fit writes to the terms, so
         // both fields are borrowed apart rather than the ids being collected to
         // get one loop out of the way of the other.
-        let Self { panes, terms, .. } = self;
+        let Self {
+            panes,
+            terms,
+            term_pool_grids,
+            ..
+        } = self;
+        term_pool_grids.retain(|id, _| terms.contains_key(*id));
         for (_, pane) in panes.split_panes() {
             let (View::Agent(id) | View::Terminal(id)) = pane.view else {
                 continue;
@@ -1611,8 +1629,12 @@ impl Workspace {
                 continue;
             }
             let (content, _) = split_pane_status(pane.area);
+            let (rows, cols) = term_pool_grids
+                .get(&id)
+                .copied()
+                .unwrap_or((content.height, content.width));
             if let Some(agent) = terms.get_mut(id) {
-                agent.fit(content.height, content.width);
+                agent.fit(rows, cols);
             }
         }
     }

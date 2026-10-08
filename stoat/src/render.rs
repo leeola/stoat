@@ -102,6 +102,9 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) buffers: &'a BufferRegistry,
     pub(crate) runs: &'a SlotMap<RunId, RunState>,
     pub(crate) terms: &'a SlotMap<TermId, TermSession>,
+    /// The terms stoatty draws as pools at the terminal font size, see
+    /// [`crate::workspace::Workspace::term_pool_grids`].
+    pub(crate) term_pool_grids: &'a HashMap<TermId, (u16, u16)>,
 }
 
 /// The lookup and colors a pane needs to declare its minimap strip.
@@ -807,6 +810,7 @@ pub(crate) fn frame(
                 buffers: &ws.buffers,
                 runs: &ws.runs,
                 terms: &ws.terms,
+                term_pool_grids: &ws.term_pool_grids,
             },
             frame,
             buf,
@@ -938,6 +942,7 @@ pub(crate) fn frame(
                     buffers: &ws.buffers,
                     runs: &ws.runs,
                     terms: &ws.terms,
+                    term_pool_grids: &ws.term_pool_grids,
                 },
                 frame,
                 buf,

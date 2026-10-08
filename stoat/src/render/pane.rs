@@ -4,7 +4,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
-    pane::{Divider, DividerOrientation, Pane, View},
+    pane::{Divider, DividerOrientation, Pane, Placement, View},
     render::{
         chrome,
         editor::{editor_cursor_position, render_editor_with_overlay},
@@ -72,6 +72,7 @@ pub(crate) fn render_pane(
         buffers,
         runs,
         terms,
+        term_pool_grids,
     } = ctx;
 
     match &pane.view {
@@ -182,7 +183,15 @@ pub(crate) fn render_pane(
             }
         },
         View::Agent(term_id) | View::Terminal(term_id) => {
-            if let Some(term) = terms.get(*term_id) {
+            // stoatty draws a split pane's terminal as a pool at the terminal
+            // font size once it reports the grid, which covers this rectangle.
+            // The live grid stays blank, so a change crosses the wire once, in
+            // the page.
+            let pooled =
+                pane.placement == Placement::Split && term_pool_grids.contains_key(term_id);
+            if pooled {
+                crate::render::clear_themed(content_area, buf, theme);
+            } else if let Some(term) = terms.get(*term_id) {
                 render_term_pane(term, theme, content_area, is_focused, buf);
             }
         },

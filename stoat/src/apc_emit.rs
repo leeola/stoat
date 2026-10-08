@@ -26,6 +26,7 @@ use crate::{
         undercurl::UndercurlBatch,
         walkthrough::{self, Spotlight},
     },
+    term_session::{TermId, TermSession},
     workspace::{diff, Workspace},
 };
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -36,7 +37,7 @@ use std::{
 };
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::{
-    pool::{self, MinimapWindowInputs, PageVersions, Refill},
+    pool::{self, MinimapWindowInputs, PageVersions, Refill, SmoothScrollState},
     ApcScene,
 };
 use stoatty_protocol::command::{PoolAnchorCommand, PoolKind, PoolRegionCommand};
@@ -45,6 +46,25 @@ use stoatty_protocol::command::{PoolAnchorCommand, PoolKind, PoolRegionCommand};
 /// terminal ignores the marker and lays the runs after it on the live grid, so
 /// a cursor line change refills its pages whole.
 const FILL_DECORATIONS_PROTOCOL: u32 = 5;
+
+/// The protocol version that composites a terminal-kind pool at the terminal
+/// font size and reports its grid. Under an older terminal a terminal pane
+/// draws on the live grid at the editor's font size.
+const TERMINAL_POOL_PROTOCOL: u32 = 9;
+
+/// A split pane showing a terminal or an agent, as the terminal-kind pool that
+/// draws it at the terminal font size.
+///
+/// The focus and the dim travel with the region because the page paints both,
+/// the cursor cell and the fade an unfocused pane takes, as the live grid does.
+struct TerminalPoolPane {
+    term_id: TermId,
+    region: PoolRegionCommand,
+    is_focused: bool,
+    /// How far the page blends toward the background. Zero for the focused
+    /// pane.
+    dim: f32,
+}
 
 /// Flush the frame's APC decoration scene to the channel, when it changed.
 ///
@@ -369,6 +389,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
                         buffers: &ws.buffers,
                         runs: &ws.runs,
                         terms: &ws.terms,
+                        term_pool_grids: &ws.term_pool_grids,
                     },
                     frame,
                     &mut buf,
@@ -727,8 +748,23 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .then(|| hover_frozen.or_else(|| crate::render::hover::hover_popup_layout(stoat)))
         .flatten();
 
+    let inactive_dim = stoat
+        .settings
+        .ui_inactive_dim
+        .unwrap_or(0.25)
+        .clamp(0.0, 1.0) as f32;
+
+    // A terminal or agent pane draws at the terminal font size as a terminal
+    // pool, which a terminal before that protocol does not know. An overlay
+    // screen hides it with the editors.
+    let terminal_panes = match overlay || stoat.stoatty_protocol < TERMINAL_POOL_PROTOCOL {
+        true => Vec::new(),
+        false => terminal_pool_panes(stoat, inactive_dim),
+    };
+
     let mut out = Vec::new();
     let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
+    active.extend(terminal_panes.iter().map(|pane| pane.region.pool));
     // Each detached pane also keeps a one-row status pool alive.
     for (pool, _, region) in &panes {
         if region.window != 0 {
@@ -831,11 +867,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .settings
         .editor_line_numbers
         .unwrap_or(LineNumbers::Relative);
-    let inactive_dim = stoat
-        .settings
-        .ui_inactive_dim
-        .unwrap_or(0.25)
-        .clamp(0.0, 1.0) as f32;
     let diff_dials = DiffDials::from_stoat(stoat);
     // Relative numbering follows the same pane the live render calls focused:
     // the focused split editor outside insert mode. Resolved before the ws
@@ -1134,6 +1165,26 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
     if anchored_pool.is_some() {
         stoat.pool_cursor_holder = anchored_pool;
+    }
+
+    // A terminal page is the emulator's screen, which is already at hand, so it
+    // fills here rather than off the run loop as an editor page does.
+    {
+        let ws = &stoat.workspaces[stoat.active_workspace];
+        for pane in &terminal_panes {
+            let Some(term) = ws.terms.get(pane.term_id) else {
+                continue;
+            };
+            emit_terminal_pool(
+                &mut out,
+                &mut stoat.smooth_scroll,
+                term,
+                ws.term_pool_grids.get(&pane.term_id).copied(),
+                pane,
+                theme,
+                theme_epoch,
+            );
+        }
     }
 
     if let (Some(list), Some(finder)) = (finder_list, stoat.file_finder.as_ref()) {
@@ -1980,6 +2031,123 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
             ))
         })
         .collect()
+}
+
+/// Every visible split pane showing a terminal or an agent, as the pool that
+/// draws it at the terminal font size.
+///
+/// The pool id is the pane's stable index, as an editor pane's is, so a pane
+/// that changes view keeps its id and the terminal declares it again as the
+/// other kind. The region is the pane's content area, which the pool covers
+/// whatever count of terminal cells it holds.
+fn terminal_pool_panes(stoat: &Stoat, inactive_dim: f32) -> Vec<TerminalPoolPane> {
+    let ws = stoat.active_workspace();
+    let focused = matches!(ws.focus, FocusTarget::SplitPane).then(|| ws.panes.focus());
+    ws.panes
+        .split_panes()
+        .filter_map(|(id, pane)| {
+            if pane.placement != Placement::Split {
+                return None;
+            }
+            let (View::Terminal(term_id) | View::Agent(term_id)) = pane.view else {
+                return None;
+            };
+            ws.terms.get(term_id)?;
+
+            let (content, _) = crate::render::layout::split_pane_status(pane.area);
+            if content.width == 0 || content.height == 0 {
+                return None;
+            }
+
+            let is_focused = focused == Some(id);
+            Some(TerminalPoolPane {
+                term_id,
+                region: PoolRegionCommand {
+                    pool: pane.index,
+                    top: content.y,
+                    left: content.x,
+                    width: content.width,
+                    height: content.height,
+                    window: 0,
+                    kind: PoolKind::Terminal,
+                },
+                is_focused,
+                dim: match is_focused {
+                    true => 0.0,
+                    false => inactive_dim,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Declare `pane`'s pool and fill its one page with `term` drawn at `grid`, the
+/// `(rows, cols)` stoatty reported for it.
+///
+/// A pane whose grid has not been reported yet declares its region alone,
+/// which is what has stoatty report it. A pane whose inputs all held since its
+/// last emit sends nothing.
+fn emit_terminal_pool(
+    out: &mut Vec<u8>,
+    state: &mut SmoothScrollState,
+    term: &TermSession,
+    grid: Option<(u16, u16)>,
+    pane: &TerminalPoolPane,
+    theme: &crate::theme::Theme,
+    theme_epoch: u64,
+) {
+    let version = {
+        let mut hasher = DefaultHasher::new();
+        theme_epoch.hash(&mut hasher);
+        pane.region.hash(&mut hasher);
+        grid.hash(&mut hasher);
+        pane.is_focused.hash(&mut hasher);
+        pane.dim.to_bits().hash(&mut hasher);
+        term.term.generation().hash(&mut hasher);
+        term.selection.hash(&mut hasher);
+        hasher.finish()
+    };
+    if state.already_emitted(pane.region.pool, version) {
+        return;
+    }
+
+    let page = grid.map(|(rows, cols)| terminal_page(term, theme, rows, cols, pane));
+    pool::emit_into(
+        out,
+        state,
+        pane.region,
+        0.0,
+        version,
+        false,
+        |index| match (index, &page) {
+            (0, Some(bytes)) => bytes.clone(),
+            _ => Vec::new(),
+        },
+    );
+}
+
+/// `term`'s screen drawn into a `rows` by `cols` page as the live grid draws
+/// the pane, faded by the pane's dim.
+fn terminal_page(
+    term: &TermSession,
+    theme: &crate::theme::Theme,
+    rows: u16,
+    cols: u16,
+    pane: &TerminalPoolPane,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, cols, rows);
+    let mut buf = crate::smooth_scroll::page_buffer(area, theme);
+    crate::render::term_pane::render_term_pane(term, theme, area, pane.is_focused, &mut buf);
+    if pane.dim > 0.0
+        && let Some(bg) = crate::render::paint::style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|style| style.bg),
+        )
+    {
+        crate::render::pane::dim_pane_content(&mut buf, area, bg, pane.dim);
+    }
+    crate::render::serialize_buffer(&buf)
 }
 
 /// The detached editor panes and their window-bound pool regions.

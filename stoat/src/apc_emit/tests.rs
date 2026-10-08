@@ -1625,6 +1625,193 @@ fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
     );
 }
 
+/// A fresh terminal in the focused split pane, fit to that pane by a render and
+/// then fed `output`, and the pane's index, which is its pool id.
+fn terminal_in_focused_pane(
+    h: &mut crate::test_harness::TestHarness,
+    output: &[u8],
+) -> (TermId, u32) {
+    let session: Arc<dyn crate::host::TerminalSession> =
+        Arc::new(crate::host::FakeTerminalSession::new());
+    let (term_id, index) = {
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        let term_id = ws.terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
+        ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+        (term_id, ws.panes.pane(pane).index)
+    };
+    let _ = h.stoat.render();
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(output);
+    (term_id, index)
+}
+
+/// Everything one [`emit_smooth_scroll`] sends, raw, with what came before it
+/// thrown away.
+fn emit_raw(
+    h: &mut crate::test_harness::TestHarness,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Vec<u8> {
+    while rx.try_recv().is_ok() {}
+    emit_smooth_scroll(&mut h.stoat);
+    let mut bytes = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        bytes.extend(batch);
+    }
+    bytes
+}
+
+/// The commands in `bytes` that declare or fill pool `pool`.
+fn pool_commands(bytes: &[u8], pool: u32) -> Vec<command::Command> {
+    use stoatty_protocol::command::Command;
+
+    command::decode_stream(bytes)
+        .into_iter()
+        .filter(|command| match command {
+            Command::PoolRegion(region) => region.pool == pool,
+            Command::Fill(fill) => fill.pool == pool,
+            _ => false,
+        })
+        .collect()
+}
+
+/// A terminal pane pools as a terminal kind over its content area under a
+/// terminal at protocol 9, and pools nothing under an older one, which draws
+/// the pane on the live grid.
+#[test]
+fn a_terminal_pane_pools_as_a_terminal_kind_under_protocol_nine() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let (_, index) = terminal_in_focused_pane(&mut h, b"");
+    let content = {
+        let ws = h.stoat.active_workspace();
+        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+    };
+
+    h.stoat.stoatty_protocol = 8;
+    let older = pool_commands(&emit_raw(&mut h, &mut rx), index);
+    h.stoat.stoatty_protocol = 9;
+    let current = pool_commands(&emit_raw(&mut h, &mut rx), index);
+
+    assert_eq!(
+        (older, current),
+        (
+            vec![],
+            vec![Command::PoolRegion(PoolRegionCommand {
+                pool: index,
+                top: content.y,
+                left: content.x,
+                width: content.width,
+                height: content.height,
+                window: 0,
+                kind: PoolKind::Terminal,
+            })]
+        ),
+        "only a terminal that composites terminal pools gets one, with no page yet",
+    );
+}
+
+/// A terminal pool sends no page until its grid is reported, then fills page 0
+/// with the emulator drawn at that grid, and sends nothing while nothing moves.
+#[test]
+fn a_terminal_pool_fills_its_page_once_its_grid_is_reported() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 9;
+    let (term_id, index) = terminal_in_focused_pane(&mut h, b"hello");
+    let fills = |bytes: &[u8]| {
+        pool_commands(bytes, index)
+            .into_iter()
+            .filter(|command| matches!(command, Command::Fill(fill) if fill.index == 0))
+            .count()
+    };
+
+    let waiting = emit_raw(&mut h, &mut rx);
+    h.stoat
+        .active_workspace_mut()
+        .term_pool_grids
+        .insert(term_id, (6, 30));
+    let _ = h.stoat.render();
+    let sized = emit_raw(&mut h, &mut rx);
+    let idle = emit_raw(&mut h, &mut rx);
+
+    let page = {
+        let area = Rect::new(0, 0, 30, 6);
+        let mut page = crate::smooth_scroll::page_buffer(area, &h.stoat.theme);
+        let term = &h.stoat.active_workspace().terms[term_id];
+        crate::render::term_pane::render_term_pane(term, &h.stoat.theme, area, true, &mut page);
+        crate::render::serialize_buffer(&page)
+    };
+    assert_eq!(
+        (
+            fills(&waiting),
+            fills(&sized),
+            sized.windows(page.len()).any(|window| window == page),
+            pool_commands(&idle, index)
+        ),
+        (0, 1, true, vec![]),
+        "the page waits for the grid, fills once at it, and then holds",
+    );
+}
+
+/// A terminal page draws its pane as the live grid draws it, the cursor cell
+/// and the fade of an unfocused pane included, when the reported grid is the
+/// pane's own cells.
+#[test]
+fn a_terminal_page_draws_its_pane_as_the_live_grid_does() {
+    let mut h = Stoat::test();
+    h.stoat.theme = Arc::new(rgb_review_theme());
+    h.resize(80, 24);
+    h.type_action("SplitRight()");
+    h.settle();
+    let (term_id, _) = terminal_in_focused_pane(&mut h, b"\x1b[38;2;200;180;40mhi\x1b[0m there");
+
+    let pages_and_live = |h: &mut crate::test_harness::TestHarness| {
+        let live = h.stoat.render();
+        let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
+        let pane = terminal_pool_panes(&h.stoat, inactive_dim)
+            .into_iter()
+            .find(|pane| pane.term_id == term_id)
+            .expect("the terminal pane pools");
+        let region = pane.region;
+        let term = &h.stoat.active_workspace().terms[term_id];
+        let page = terminal_page(term, &h.stoat.theme, region.height, region.width, &pane);
+
+        let area = Rect::new(0, 0, region.width, region.height);
+        let mut live_page = Buffer::empty(area);
+        for y in 0..region.height {
+            for x in 0..region.width {
+                live_page[(x, y)] = live[(region.left + x, region.top + y)].clone();
+            }
+        }
+        (
+            pane.is_focused,
+            page == crate::render::serialize_buffer(&live_page),
+        )
+    };
+
+    let focused = pages_and_live(&mut h);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    let unfocused = pages_and_live(&mut h);
+
+    assert_eq!(
+        (focused, unfocused),
+        ((true, true), (false, true)),
+        "the page and the live grid paint the pane alike, focused or not",
+    );
+}
+
 #[test]
 fn focus_pane_by_number_reaches_and_raises_a_detached_window() {
     use stoatty_protocol::command::Command;
