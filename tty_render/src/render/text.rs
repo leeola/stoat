@@ -405,6 +405,51 @@ struct RunBuild {
     anchor: u32,
 }
 
+/// The text pass's state for one rasterization size.
+///
+/// The baseline and every glyph key the caches hold were derived at
+/// [`Self::metrics`], and neither cache key names the size. A size change
+/// therefore replaces the face whole. A field it left behind keeps answering
+/// for the old size.
+struct SizedFace {
+    metrics: CellMetrics,
+    /// Offset from a cell's top to the text baseline, in physical pixels.
+    baseline: f32,
+    /// Cap height in physical pixels, which off-grid chrome sizes itself by so a
+    /// mark beside a line of code stands as tall as its capitals.
+    cap_height: f32,
+    /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
+    /// alongside the integer cell scales.
+    shape_cache: FxHashMap<(char, u32, u16), Option<CacheKey>>,
+    /// Shaped glyphs of each ligature run, keyed by the run text, so a repainted
+    /// row reuses them instead of rebuilding a cosmic-text buffer and reshaping.
+    ///
+    /// Keyed on text alone because runs only group same-scale primary-covered
+    /// cells in the constant primary family, matching [`Self::shape_cache`]'s
+    /// family-blind invariant. Bounded, evicting the runs nothing has asked for
+    /// lately once it is full.
+    run_shape_cache: RunShapeCache,
+}
+
+impl SizedFace {
+    /// Probe the baseline and cap height of `family` at `metrics`, with nothing
+    /// shaped yet.
+    fn new(
+        font_system: &mut FontSystem,
+        family: Option<&str>,
+        primary_font: Option<&Font>,
+        metrics: CellMetrics,
+    ) -> SizedFace {
+        SizedFace {
+            metrics,
+            baseline: font::probe_baseline(font_system, metrics, font::shape_family(family)),
+            cap_height: font::probe_cap_height(primary_font, metrics),
+            shape_cache: FxHashMap::default(),
+            run_shape_cache: RunShapeCache::default(),
+        }
+    }
+}
+
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
 /// per-frame buffers it draws [`stoatty_term`]'s cell glyphs from.
 ///
@@ -655,23 +700,15 @@ pub struct TextPass {
     /// form across cells. When false, every cell is shaped on its own.
     ligatures: bool,
     swash_cache: SwashCache,
-    /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
-    /// alongside the integer cell scales.
-    shape_cache: FxHashMap<(char, u32, u16), Option<CacheKey>>,
+    /// The size the grid shapes and rasterizes at, with everything that bakes it
+    /// in.
+    face: SizedFace,
     /// Every codepoint some face in the font database maps, built on the first
     /// character both bundled charmaps miss and `None` until then.
     ///
     /// Holds for the database it was built from, so it is dropped wherever that
     /// changes. See [`font::CoveredSet`].
     covered: Option<font::CoveredSet>,
-    /// Shaped glyphs of each ligature run, keyed by the run text, so a repainted
-    /// row reuses them instead of rebuilding a cosmic-text buffer and reshaping.
-    ///
-    /// Keyed on text alone because runs only group same-scale primary-covered
-    /// cells in the constant primary family, matching [`Self::shape_cache`]'s
-    /// family-blind invariant. Bounded, evicting the runs nothing has asked for
-    /// lately once it is full.
-    run_shape_cache: RunShapeCache,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
     /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
@@ -771,11 +808,6 @@ pub struct TextPass {
     /// The cursor cell at the previous frame, so a move can re-shape the row it
     /// left and the row it entered (the cursor breaks ligatures on its cell).
     last_cursor_cell: Option<(usize, usize)>,
-    baseline: f32,
-    /// Cap height in physical pixels, which off-grid chrome sizes itself by so a
-    /// mark beside a line of code stands as tall as its capitals.
-    cap_height: f32,
-    metrics: CellMetrics,
 }
 
 impl TextPass {
@@ -794,13 +826,13 @@ impl TextPass {
         ligatures: bool,
     ) -> TextPass {
         let family = font::resolve_primary_family(&font_system, font_family);
-        let baseline = font::probe_baseline(
-            &mut font_system,
-            metrics,
-            font::shape_family(family.as_deref()),
-        );
         let primary_font = font::resolve_primary_font(&mut font_system, family.as_deref());
-        let cap_height = font::probe_cap_height(primary_font.as_deref(), metrics);
+        let face = SizedFace::new(
+            &mut font_system,
+            family.as_deref(),
+            primary_font.as_deref(),
+            metrics,
+        );
         let substitutable = primary_font
             .as_deref()
             .map(font::substitution_rules)
@@ -1120,9 +1152,8 @@ impl TextPass {
             substitutable,
             ligatures,
             swash_cache,
-            shape_cache: FxHashMap::default(),
+            face,
             covered: None,
-            run_shape_cache: RunShapeCache::default(),
             glyph_row_cache: Vec::new(),
             exposed_from: None,
             plain_row_instances: Vec::new(),
@@ -1149,9 +1180,6 @@ impl TextPass {
             run_cols_scratch: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
-            baseline,
-            cap_height,
-            metrics,
         };
 
         // A face reporting none substitutes nothing, or its table did not
@@ -1169,19 +1197,14 @@ impl TextPass {
     /// Re-derive the text pass for `metrics` so the next frame shapes and
     /// rasterizes glyphs at the new size.
     ///
-    /// Re-probes the baseline at the new size and clears the shape cache, whose
-    /// keys encode the old rasterization size and would otherwise keep glyphs at
-    /// the old size.
+    /// Replaces the face, whose baseline and shape caches hold the old size.
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
-        self.metrics = metrics;
-        self.baseline = font::probe_baseline(
+        self.face = SizedFace::new(
             &mut self.font_system,
+            self.family.as_deref(),
+            self.primary_font.as_deref(),
             metrics,
-            font::shape_family(self.family.as_deref()),
         );
-        self.cap_height = font::probe_cap_height(self.primary_font.as_deref(), metrics);
-        self.shape_cache.clear();
-        self.run_shape_cache.clear();
     }
 
     /// Shape against `scanned` from the next frame on, in place of the database
@@ -1202,22 +1225,20 @@ impl TextPass {
 
         // Re-derived rather than kept. The family resolves to the same face, the
         // bundled ids being unchanged, but nothing here has to rely on that.
-        self.baseline = font::probe_baseline(
-            &mut self.font_system,
-            self.metrics,
-            font::shape_family(self.family.as_deref()),
-        );
         self.primary_font =
             font::resolve_primary_font(&mut self.font_system, self.family.as_deref());
-        self.cap_height = font::probe_cap_height(self.primary_font.as_deref(), self.metrics);
+        self.face = SizedFace::new(
+            &mut self.font_system,
+            self.family.as_deref(),
+            self.primary_font.as_deref(),
+            self.face.metrics,
+        );
         self.substitutable = self
             .primary_font
             .as_deref()
             .map(font::substitution_rules)
             .unwrap_or_default();
 
-        self.shape_cache.clear();
-        self.run_shape_cache.clear();
         self.covered = None;
     }
 
@@ -1228,7 +1249,7 @@ impl TextPass {
     /// the mark sits on the capitals rather than on the cell box, which the
     /// font's ascent and descent do not fill symmetrically.
     pub(crate) fn text_band(&self) -> [f32; 2] {
-        [self.baseline, self.cap_height]
+        [self.face.baseline, self.face.cap_height]
     }
 
     /// Upload one alpha per declared mark, from this frame's reveals.
@@ -1435,7 +1456,7 @@ impl TextPass {
         // and overlays none. Each buffer is sent only when its value moved, so a
         // scroll-only frame refreshes just the uniforms it changed without
         // rebuilding instances, and an idle frame writes none of them.
-        let cell_size = [self.metrics.width, self.metrics.height];
+        let cell_size = [self.face.metrics.width, self.face.metrics.height];
         // Live draws never bypass the seq test, so occlude_all stays zero. Only
         // the static globals' text-run draws occlude, and they do it by seq.
         // The rotation rides the buffer its instances are drawn against. The
@@ -1444,8 +1465,8 @@ impl TextPass {
         // overlay's past the bottom of the screen, so it never wraps.
         let grid_rotation = self.grid_rotation();
         let grid_scroll_y =
-            (scroll.grid + scroll.document + scroll.scrollback) * self.metrics.height;
-        let region_scroll_y = scroll.region * self.metrics.height;
+            (scroll.grid + scroll.document + scroll.scrollback) * self.face.metrics.height;
+        let region_scroll_y = scroll.region * self.face.metrics.height;
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.
@@ -1622,7 +1643,7 @@ impl TextPass {
                 region.height,
                 [0.0, 0.0],
                 resolution,
-                self.metrics,
+                self.face.metrics,
             )
         });
 
@@ -1637,7 +1658,7 @@ impl TextPass {
         // for is part of what has to hold. Scrolling within a line keeps the same
         // window and reuses the base. Crossing a line boundary rebuilds one box's
         // worth of instances rather than all of its content.
-        let metrics = self.metrics;
+        let metrics = self.face.metrics;
         let overlays = grid.overlays();
         let content_epoch = self.atlas.content_epoch();
         let bases_reused = pending_reused
@@ -1906,7 +1927,7 @@ impl TextPass {
         // Held before the composite slot below takes the name.
         let globals_slot = slot;
 
-        let metrics = self.metrics;
+        let metrics = self.face.metrics;
         let rows = grid.rows();
 
         // The pool scrolls on its own clock, so it carries its own rotation. It
@@ -2335,15 +2356,15 @@ impl TextPass {
             // with cell-fill codepoints scaled to the cell box.
             let (pos, dim) = match glyph.source {
                 GlyphSource::Procedural { .. } => {
-                    cell_box_rect(glyph.row, glyph.col, glyph.scale, self.metrics, origin)
+                    cell_box_rect(glyph.row, glyph.col, glyph.scale, self.face.metrics, origin)
                 },
                 GlyphSource::Font(_) => {
                     let pos = glyph_origin(
                         glyph.col,
                         glyph.row,
                         info.placement,
-                        self.baseline * glyph.scale,
-                        self.metrics,
+                        self.face.baseline * glyph.scale,
+                        self.face.metrics,
                         origin,
                     );
                     let dim = [info.size[0] as f32, info.size[1] as f32];
@@ -2353,8 +2374,8 @@ impl TextPass {
                             dim,
                             glyph.row,
                             glyph.scale,
-                            self.baseline,
-                            self.metrics,
+                            self.face.baseline,
+                            self.face.metrics,
                             origin,
                         )
                     } else if info.kind == AtlasKind::Color {
@@ -2374,7 +2395,7 @@ impl TextPass {
                             glyph.col,
                             glyph.scale,
                             span,
-                            self.metrics,
+                            self.face.metrics,
                             origin,
                         );
                         fit_glyph_box(pos, dim, box_origin, box_size)
@@ -2386,7 +2407,7 @@ impl TextPass {
 
             let (texel_origin, texel_size) = pack_atlas_rect(info);
             out.push(TextInstance {
-                pos: [pos[0], pos[1] - glyph.row as f32 * self.metrics.height],
+                pos: [pos[0], pos[1] - glyph.row as f32 * self.face.metrics.height],
                 dim: pack_dim(dim),
                 texel_origin,
                 texel_size,
@@ -2506,7 +2527,7 @@ impl TextPass {
         rects.extend_from_slice(&self.riding_build.rects);
 
         for group in &self.riding_build.groups {
-            let dy = anchored[group.ride].shift_px(group.top_rows, self.metrics.height);
+            let dy = anchored[group.ride].shift_px(group.top_rows, self.face.metrics.height);
             let glyph_span = group.glyphs.start as usize..group.glyphs.end as usize;
             for glyph in &mut glyphs[glyph_span] {
                 glyph.pos[1] += dy;
@@ -2565,16 +2586,16 @@ impl TextPass {
             return None;
         }
         let chars = run.text.chars().count() as f32;
-        if chars * scale * self.metrics.width <= 0.0 {
+        if chars * scale * self.face.metrics.width <= 0.0 {
             return None;
         }
 
         let col = f32::from(run.col) / 16.0;
         let row = f32::from(run.row) / 16.0;
-        let left = snap_cell(col, 0.0, self.metrics.width);
-        let right = snap_cell(col + chars * scale, 0.0, self.metrics.width);
-        let top = snap_cell(row, 0.0, self.metrics.height);
-        let bottom = snap_cell(row + 1.0, 0.0, self.metrics.height);
+        let left = snap_cell(col, 0.0, self.face.metrics.width);
+        let right = snap_cell(col + chars * scale, 0.0, self.face.metrics.width);
+        let top = snap_cell(row, 0.0, self.face.metrics.height);
+        let bottom = snap_cell(row + 1.0, 0.0, self.face.metrics.height);
         Some(RectInstance {
             pos: [left, top],
             dim: [right - left, bottom - top],
@@ -2630,8 +2651,8 @@ impl TextPass {
                 index,
                 scale,
                 info.placement,
-                self.baseline,
-                self.metrics,
+                self.face.baseline,
+                self.face.metrics,
                 origin,
             );
             out.push(TextInstance {
@@ -2792,7 +2813,7 @@ impl TextPass {
             return;
         }
 
-        let metrics = self.metrics;
+        let metrics = self.face.metrics;
         let rotation = self.grid_rotation();
         let mut rewrite_from = self.exposed_from;
         {
@@ -3020,8 +3041,8 @@ impl TextPass {
 
         let mut instances = Vec::new();
         for (line, text) in lines.iter().enumerate() {
-            let line_top = anchor[1] + line as f32 * self.metrics.height * scale;
-            let baseline_y = line_top + self.baseline * scale;
+            let line_top = anchor[1] + line as f32 * self.face.metrics.height * scale;
+            let baseline_y = line_top + self.face.baseline * scale;
             for (index, ch) in text.chars().enumerate() {
                 if ch == ' ' {
                     continue;
@@ -3038,7 +3059,7 @@ impl TextPass {
                 ) else {
                     continue;
                 };
-                let pen_x = anchor[0] + index as f32 * scale * self.metrics.width;
+                let pen_x = anchor[0] + index as f32 * scale * self.face.metrics.width;
                 let (texel_origin, texel_size) = pack_atlas_rect(info);
                 instances.push(TextInstance {
                     pos: [
@@ -3627,39 +3648,40 @@ impl TextPass {
             // Testing the cells instead costs a charmap lookup and a search
             // each, every frame, for a run whose answer never changes.
             let font_system = &mut self.font_system;
-            let shape_cache = &mut self.shape_cache;
+            let shape_cache = &mut self.face.shape_cache;
             let covered = &mut self.covered;
-            let metrics = self.metrics;
+            let metrics = self.face.metrics;
             let primary = shaping.primary;
             let reshapes = shaping.reshapes;
             let cells = &run;
-            let shaped = font::shape_run_cached(&mut self.run_shape_cache, &run_text, |scratch| {
-                if reshapes(cells) {
-                    return font::shape_run(scratch, font_system, &run_text, metrics, primary);
-                }
-
-                // No lookup the face turns on reaches any of these glyphs, so
-                // the run lays out exactly as its characters do alone, which the
-                // per-character cache answers without building a shaping buffer.
-                let mut glyphs = Vec::with_capacity(cells.len());
-                let mut offset = 0;
-                for &(_, ch) in cells {
-                    if let Some(key) = glyph_key_in(
-                        shape_cache,
-                        font_system,
-                        covered,
-                        metrics,
-                        primary,
-                        ch,
-                        1.0,
-                        Weight::NORMAL,
-                    ) {
-                        glyphs.push((offset, key));
+            let shaped =
+                font::shape_run_cached(&mut self.face.run_shape_cache, &run_text, |scratch| {
+                    if reshapes(cells) {
+                        return font::shape_run(scratch, font_system, &run_text, metrics, primary);
                     }
-                    offset += ch.len_utf8();
-                }
-                glyphs
-            });
+
+                    // No lookup the face turns on reaches any of these glyphs, so
+                    // the run lays out exactly as its characters do alone, which the
+                    // per-character cache answers without building a shaping buffer.
+                    let mut glyphs = Vec::with_capacity(cells.len());
+                    let mut offset = 0;
+                    for &(_, ch) in cells {
+                        if let Some(key) = glyph_key_in(
+                            shape_cache,
+                            font_system,
+                            covered,
+                            metrics,
+                            primary,
+                            ch,
+                            1.0,
+                            Weight::NORMAL,
+                        ) {
+                            glyphs.push((offset, key));
+                        }
+                        offset += ch.len_utf8();
+                    }
+                    glyphs
+                });
             for &(offset, key) in shaped {
                 let Some(&glyph_col) = run_cols.get(offset) else {
                     continue;
@@ -3712,7 +3734,7 @@ impl TextPass {
         let (fg, _) = cell.draw_colors();
         let cp = u32::from(cell.ch);
         if powerline::is_geometric(cp) {
-            let (width, height) = cell_fill_pixels(scale, self.metrics);
+            let (width, height) = cell_fill_pixels(scale, self.face.metrics);
             let info =
                 self.atlas
                     .get_or_insert_procedural(device, queue, cp, width, height, || {
@@ -3840,10 +3862,10 @@ impl TextPass {
     /// scale, so the atlas rasterizes each scale of a character separately.
     fn glyph_key(&mut self, ch: char, scale: f32, weight: Weight) -> Option<CacheKey> {
         glyph_key_in(
-            &mut self.shape_cache,
+            &mut self.face.shape_cache,
             &mut self.font_system,
             &mut self.covered,
-            self.metrics,
+            self.face.metrics,
             font::shape_family(self.family.as_deref()),
             ch,
             scale,

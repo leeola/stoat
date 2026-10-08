@@ -855,26 +855,26 @@ fn only_a_run_the_face_reshapes_reaches_the_shaper() {
 
     rasterize_rows_by_coverage(&mut pass, &device, &queue, &["4f2a b91c 0e7d"]);
     assert_eq!(
-        pass.run_shape_cache.cached_texts(),
+        pass.face.run_shape_cache.cached_texts(),
         ["0e7d", "4f2a", "b91c"],
         "every run is cached, so a repaint asks the cache and nothing else",
     );
     assert_eq!(
-        pass.run_shape_cache.shaped_chars(),
+        pass.face.run_shape_cache.shaped_chars(),
         0,
         "hex tokens hold nothing the face reshapes, so none reached the shaper",
     );
 
     rasterize_rows_by_coverage(&mut pass, &device, &queue, &["a => b"]);
     assert_eq!(
-        pass.run_shape_cache.shaped_chars(),
+        pass.face.run_shape_cache.shaped_chars(),
         "=>".len(),
         "and the one run that ligates is the only one the shaper laid out",
     );
 
     rasterize_rows_by_coverage(&mut pass, &device, &queue, &["fn handle(x) { list[i] }"]);
     assert_eq!(
-        pass.run_shape_cache.shaped_chars(),
+        pass.face.run_shape_cache.shaped_chars(),
         "=>".len(),
         "ordinary code holds no rule the face could fire, so it adds nothing",
     );
@@ -892,7 +892,7 @@ fn a_row_caches_one_run_per_word() {
     rasterize_rows(&mut pass, &device, &queue, &["a => b => a"]);
 
     assert_eq!(
-        pass.run_shape_cache.cached_texts(),
+        pass.face.run_shape_cache.cached_texts(),
         ["=>", "a", "b"],
         "the row cached its distinct words, and the repeats reused them"
     );
@@ -905,6 +905,7 @@ fn a_word_shapes_its_ligature_the_same_beside_other_words() {
     let (device, queue, mut pass) = headless_text_pass();
     rasterize_rows(&mut pass, &device, &queue, &["a => b => a"]);
     let beside_words = pass
+        .face
         .run_shape_cache
         .cached_glyphs("=>")
         .expect("the arrow was cached")
@@ -916,6 +917,7 @@ fn a_word_shapes_its_ligature_the_same_beside_other_words() {
     assert_eq!(
         beside_words,
         alone
+            .face
             .run_shape_cache
             .cached_glyphs("=>")
             .expect("the lone arrow was cached"),
@@ -939,7 +941,7 @@ fn a_screen_of_prose_shapes_only_its_distinct_words() {
     let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
     rasterize_rows(&mut pass, &device, &queue, &borrowed);
 
-    let shaped = pass.run_shape_cache.shaped_chars();
+    let shaped = pass.face.run_shape_cache.shaped_chars();
     let on_screen: usize = rows.iter().map(|row| row.chars().count()).sum();
     assert!(
         shaped * 4 < on_screen,
@@ -3225,7 +3227,7 @@ fn a_reusing_composite_still_writes_its_own_globals() {
     assert_eq!(globals.origin_cells, [0.0; 2], "and its own region origin");
     assert_eq!(
         globals.scroll_y,
-        -0.5 * pass.metrics.height,
+        -0.5 * pass.face.metrics.height,
         "and this frame's shift, which is the whole point of the frame",
     );
 }
@@ -3601,7 +3603,7 @@ fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
 
     let want: Vec<f32> = unscrolled
         .iter()
-        .map(|top| top - 0.75 * pass.metrics.height)
+        .map(|top| top - 0.75 * pass.face.metrics.height)
         .collect();
     assert_eq!(
         tops(&pass),
@@ -3928,7 +3930,7 @@ fn merging_the_scan_holds_the_text_band_and_drops_the_shaped_runs() {
     let band = pass.text_band();
 
     assert!(
-        pass.run_shape_cache.cached_glyphs("hello").is_some(),
+        pass.face.run_shape_cache.cached_glyphs("hello").is_some(),
         "the run shaped against the bundled faces is cached",
     );
 
@@ -3940,7 +3942,7 @@ fn merging_the_scan_holds_the_text_band_and_drops_the_shaped_runs() {
         "the scan adds faces without moving the band the bundled family sets",
     );
     assert!(
-        pass.run_shape_cache.cached_glyphs("hello").is_none(),
+        pass.face.run_shape_cache.cached_glyphs("hello").is_none(),
         "a run shaped before the scan reshapes against the full database",
     );
 }

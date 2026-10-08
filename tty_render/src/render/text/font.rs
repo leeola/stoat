@@ -682,17 +682,6 @@ impl RunShapeCache {
 }
 
 impl RunShapeCache {
-    /// Drop every shaped run, so the two halves cannot disagree about what is here.
-    pub(super) fn clear(&mut self) {
-        self.at.clear();
-        self.runs.clear();
-        self.hand = 0;
-        #[cfg(test)]
-        {
-            self.scratch.shaped_chars = 0;
-        }
-    }
-
     /// Store `glyphs` under `text` and return the slot holding them.
     ///
     /// Below the cap this appends. At the cap it evicts through [`Self::sweep`]
@@ -1680,24 +1669,6 @@ mod tests {
         assert!(
             !cache.at.contains_key("run0"),
             "a run nobody asks for again is evicted on a later lap"
-        );
-    }
-
-    /// `clear` has to reset the hand with the two halves. A hand left past the
-    /// end of a refilled ring indexes a slot that is no longer there.
-    #[test]
-    fn clearing_resets_the_eviction_hand() {
-        let mut cache = RunShapeCache::default();
-        for index in 0..RUN_SHAPE_CACHE_CAP + 1 {
-            cache.store(&format!("run{index}"), Vec::new());
-        }
-        assert_ne!(cache.hand, 0, "the overflowing insert moved the hand");
-
-        cache.clear();
-        assert_eq!(
-            (cache.at.len(), cache.runs.len(), cache.hand),
-            (0, 0, 0),
-            "clear empties both halves and takes the hand back to the start"
         );
     }
 
