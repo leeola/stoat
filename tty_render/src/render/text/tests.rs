@@ -1415,6 +1415,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         &device,
         &queue,
         &grid,
+        pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         [640.0, 480.0],
         0.0,
@@ -1438,6 +1439,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         &device,
         &queue,
         &grid,
+        pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         [640.0, 480.0],
         0.0,
@@ -1485,6 +1487,7 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
         &device,
         &queue,
         &grid,
+        pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         [640.0, 480.0],
         0.0,
@@ -2855,6 +2858,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         &device,
         &queue,
         &grid,
+        pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         resolution,
         0.0,
@@ -2872,6 +2876,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         &device,
         &queue,
         &scrolled,
+        pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         resolution,
         0.0,
@@ -2889,6 +2894,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         &device,
         &queue,
         &scrolled,
+        fresh_pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         resolution,
         0.0,
@@ -2948,6 +2954,7 @@ fn a_moved_composite_rebuilds_against_its_new_origin() {
             &device,
             &queue,
             &grid,
+            pass.face.metrics,
             PoolOccluders::new(&[], 0, true),
             resolution,
             0.0,
@@ -3013,6 +3020,7 @@ fn a_sub_cell_drift_leaves_the_instances_a_rebuild_would_hold() {
             &device,
             &queue,
             &grid,
+            pass.face.metrics,
             PoolOccluders::new(&[], 0, true),
             resolution,
             shift,
@@ -3072,6 +3080,7 @@ fn a_composite_whose_runs_held_builds_none_of_them_again() {
             &device,
             &queue,
             grid,
+            pass.face.metrics,
             PoolOccluders::new(&[], 0, true),
             resolution,
             0.0,
@@ -3145,6 +3154,7 @@ fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
             &device,
             &queue,
             grid,
+            pass.face.metrics,
             PoolOccluders::new(&[], 0, true),
             resolution,
             0.0,
@@ -3207,6 +3217,7 @@ fn a_reusing_composite_still_writes_its_own_globals() {
             &device,
             &queue,
             grid,
+            pass.face.metrics,
             PoolOccluders::new(&[], 0, true),
             resolution,
             shift,
@@ -3232,6 +3243,129 @@ fn a_reusing_composite_still_writes_its_own_globals() {
     );
 }
 
+/// Composite `grid` as pool `pool` at `metrics`, at rest and under no box.
+fn composite_at(
+    pass: &mut TextPass,
+    device: &Device,
+    queue: &Queue,
+    grid: &Grid,
+    metrics: CellMetrics,
+    content_changed: bool,
+    pool: u32,
+) {
+    pass.prepare_composite(
+        device,
+        queue,
+        grid,
+        metrics,
+        PoolOccluders::new(&[], 0, true),
+        [640.0, 480.0],
+        0.0,
+        [0.0; 2],
+        content_changed,
+        None,
+        pool,
+        0,
+    );
+}
+
+/// Where each of a pool's glyphs sits and which glyph it is, whose cache key
+/// names the size it rasterized at.
+fn shaped(pass: &TextPass, pool: u32) -> Vec<(usize, usize, GlyphSource)> {
+    pass.composite_glyphs(pool)
+        .iter()
+        .map(|glyph| (glyph.row, glyph.col, glyph.source))
+        .collect()
+}
+
+/// A pool composited at its own size holds what a pass at that size holds.
+///
+/// The pool shapes under a face of its own size, so a pass whose live size is
+/// the pool's builds the same instances byte for byte. Shaping through the live
+/// face instead carries the live size's glyph keys, baseline, and advance.
+#[test]
+fn a_pool_at_its_own_size_composites_what_a_pass_at_that_size_does() {
+    let small = CellMetrics::from_font_size(13, 1.0);
+    let mut grid = Grid::new(2, 10);
+    fill_row(&mut grid, 0, "fn => x_y");
+    fill_row(&mut grid, 1, "\u{2502} \u{e0b0} ok");
+
+    let (device, queue, mut pass) = headless_text_pass();
+    composite_at(&mut pass, &device, &queue, &grid, small, true, 0);
+    let (device, queue, mut native) = headless_text_pass_font(13);
+    composite_at(&mut native, &device, &queue, &grid, small, true, 0);
+
+    assert!(
+        !native.composite_instances(0).is_empty(),
+        "the fixture has to shape something"
+    );
+    assert_eq!(
+        bytemuck::cast_slice::<TextInstance, u8>(&pass.composite_instances(0)),
+        bytemuck::cast_slice::<TextInstance, u8>(&native.composite_instances(0)),
+        "the pool's glyphs land where a pass at its size puts them",
+    );
+
+    let globals = pass.composite_globals[0].expect("slot 0 carries globals");
+    let live = pass.face.metrics;
+    assert_eq!(
+        (globals.cell_size, globals.occluder_cell),
+        ([small.width, small.height], [live.width, live.height]),
+        "the cells take the pool's size and the occluders the live grid's",
+    );
+}
+
+/// A pool at its own size leaves the live face as it found it.
+///
+/// The pool's face stands in for the live one only while the pool prepares. A
+/// live-size pool composited next shapes against caches that hold no glyph of
+/// the pool's size, and the text band still measures the live size.
+#[test]
+fn a_pool_at_its_own_size_leaves_the_live_face_alone() {
+    let mut grid = Grid::new(1, 10);
+    fill_row(&mut grid, 0, "fn => x_y");
+
+    let (device, queue, mut pass) = headless_text_pass();
+    let (live, band) = (pass.face.metrics, pass.text_band());
+    let small = CellMetrics::from_font_size(13, 1.0);
+    composite_at(&mut pass, &device, &queue, &grid, small, true, 0);
+    let band_after = pass.text_band();
+    composite_at(&mut pass, &device, &queue, &grid, live, true, 1);
+
+    let (device, queue, mut fresh) = headless_text_pass();
+    composite_at(&mut fresh, &device, &queue, &grid, live, true, 1);
+
+    assert_eq!(
+        (band_after, shaped(&pass, 1)),
+        (band, shaped(&fresh, 1)),
+        "the band reads the live size again, and the live pool shapes at it",
+    );
+}
+
+/// A pool whose size changed under content that held rebuilds.
+///
+/// The slot's instances bake the size in. Reusing them on a frame that reports
+/// no content change draws the old size's glyphs on the new size's cells.
+#[test]
+fn a_size_change_rebuilds_a_pool_whose_content_held() {
+    let mut grid = Grid::new(1, 10);
+    fill_row(&mut grid, 0, "fn => x_y");
+    let small = CellMetrics::from_font_size(13, 1.0);
+
+    let (device, queue, mut pass) = headless_text_pass();
+    let live = pass.face.metrics;
+    composite_at(&mut pass, &device, &queue, &grid, live, true, 0);
+    composite_at(&mut pass, &device, &queue, &grid, small, false, 0);
+
+    let (device, queue, mut native) = headless_text_pass_font(13);
+    composite_at(&mut native, &device, &queue, &grid, small, true, 0);
+
+    assert_eq!(
+        shaped(&pass, 0),
+        shaped(&native, 0),
+        "the held content shapes again at the new size",
+    );
+}
+
 /// A pack that grows the atlas leaves the globals naming the grown size.
 ///
 /// The instances built here are normalized by the atlas they resolved
@@ -3249,6 +3383,7 @@ fn composite_globals_name_the_atlas_the_pack_grew_to() {
         &device,
         &queue,
         &grid,
+        pass.face.metrics,
         PoolOccluders::new(&[], 0, true),
         [640.0, 480.0],
         0.0,

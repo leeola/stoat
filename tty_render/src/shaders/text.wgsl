@@ -32,7 +32,10 @@ struct Globals {
     // every glyph position. A pool composite is sized to its region, so this is
     // what puts its glyphs on the screen. Zero for every other draw.
     origin_cells: vec2<f32>,
-    pad3: vec2<u32>,
+    // The cell size the occluder rects scale by, which is the live grid's. A
+    // pool composited at its own font size lays its glyphs out at cell_size,
+    // but the boxes over it are cells of the live grid.
+    occluder_cell: vec2<f32>,
     // The pool regions the grid, region, and underline draws skip. Zero rects on
     // every other draw.
     cover: Cover,
@@ -84,7 +87,7 @@ fn occluded(frag: vec2<f32>, seq: u32) -> bool {
                 frag,
                 o.cell,
                 o.size,
-                globals.cell_size,
+                globals.occluder_cell,
                 o.corner_radius,
                 o.inset_x
             );

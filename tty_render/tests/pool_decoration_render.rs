@@ -110,6 +110,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
             &queue,
             &view,
             &pool,
+            None,
             &[],
             full,
             shift,

@@ -28,13 +28,15 @@ struct Globals {
     origin_cells: vec2<f32>,
     cursor_color: vec4<f32>,
     // The packed cell color vs_main culls, being the color the frame cleared to.
-    // Zero culls no cell, since every instance carries alpha 255. The padding
-    // matches the Rust side, which aligns cover to 16 bytes by hand.
+    // Zero culls no cell, since every instance carries alpha 255.
     skip_color: u32,
     // Non-zero when fs_cursor draws the block's outline only.
     cursor_hollow: u32,
-    _pad1: u32,
-    _pad2: u32,
+    // The cell size the occluder rects scale by, which is the live grid's. A
+    // pool composited at its own font size lays its cells out at cell_size, but
+    // the boxes over it are cells of the live grid. With the two fields before
+    // it, it fills the slot that puts cover on its 16-byte boundary.
+    occluder_cell: vec2<f32>,
     // The pool regions the live cell fill skips. Zero rects on every other draw.
     cover: Cover,
 }
@@ -60,7 +62,7 @@ fn occluded(frag: vec2<f32>) -> bool {
                 frag,
                 o.cell,
                 o.size,
-                globals.cell_size,
+                globals.occluder_cell,
                 o.corner_radius,
                 o.inset_x
             );

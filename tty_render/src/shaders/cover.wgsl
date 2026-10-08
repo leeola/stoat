@@ -35,8 +35,8 @@ fn under_pool(lo: vec2<f32>, hi: vec2<f32>) -> bool {
 
     for (var j = 0u; j < globals.cover.occluders; j = j + 1u) {
         let o = occluders[j];
-        let o_lo = o.cell * globals.cell_size;
-        let o_hi = (o.cell + o.size) * globals.cell_size;
+        let o_lo = o.cell * globals.occluder_cell;
+        let o_hi = (o.cell + o.size) * globals.occluder_cell;
         if all(lo < o_hi) && all(hi > o_lo) {
             return false;
         }

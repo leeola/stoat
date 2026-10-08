@@ -91,6 +91,7 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
             &queue,
             &view,
             &pool,
+            None,
             &[],
             full,
             0.0,

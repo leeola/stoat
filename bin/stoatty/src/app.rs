@@ -2839,6 +2839,7 @@ fn redraw(state: &mut State) {
                 PoolComposite {
                     id: pool.id,
                     grid: &state.pool_frame.anims[&pool.id].document_grid,
+                    font_size: None,
                     // The ride rides the shift below rather than this origin.
                     // Every composite shader snaps against the origin and adds
                     // its shift after, so the two land in the same pixel, while
@@ -3099,6 +3100,7 @@ fn redraw_aux(
         .map(|pool| PoolComposite {
             id: pool.id,
             grid: &aux.pool_anims[&pool.id].document_grid,
+            font_size: None,
             origin_cells: [pool.region.left as f32, pool.region.top as f32],
             scissor: region_scissor(pool.region, cw, ch),
             shift_rows: -snap_shift_to_pixels(pool.frac, ch),

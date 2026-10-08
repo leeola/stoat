@@ -1,8 +1,8 @@
 // Stroked-path pass. One instance per path expands to the quad bounding it and
 // the fragment stage resolves a capsule SDF, so a diagonal reads smooth at cell
 // scale and a zero-length segment reads as a round dot. Endpoints are given in
-// cell-fraction units and scaled by the live cell size, so a path tracks font
-// zoom like a bar does.
+// cell-fraction units and scaled by the cell size of the grid they sit on, so a
+// path tracks font zoom like a bar does.
 //
 // The whole path resolves in one fragment, taking the nearest of its segments,
 // because two capsules meeting at a shared endpoint overlap and composite their
@@ -34,7 +34,10 @@ struct Globals {
     // pixel conversion. A pool composite is positioned within its region, so
     // this is what puts it on the screen. Zero for the live grid.
     origin_cells: vec2<f32>,
-    pad1: vec2<u32>,
+    // The cell size the occluder rects scale by, which is the live grid's. A
+    // pool composited at its own font size lays its paths out at cell_size, but
+    // the boxes over it are cells of the live grid.
+    occluder_cell: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -176,7 +179,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 frag,
                 o.cell,
                 o.size,
-                globals.cell_size,
+                globals.occluder_cell,
                 o.corner_radius,
                 o.inset_x
             );

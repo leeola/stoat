@@ -83,8 +83,9 @@ struct BgInstance {
 /// `scroll_y`, `panel_count`, `occlude_all`, and `cols` fill one 16-byte slot,
 /// and the rotation pair with its padding fills another, so `cursor_color` lands
 /// on the 16-byte offset the uniform layout requires. The `vec4` corner pairs
-/// already sit on 16-byte boundaries. `skip_color` and its padding fill one more
-/// slot, which puts [`Cover`] on the 16-byte boundary its rect array requires.
+/// already sit on 16-byte boundaries. `skip_color`, `cursor_hollow`, and
+/// `occluder_cell` fill one more slot, which puts [`Cover`] on the 16-byte
+/// boundary its rect array requires.
 ///
 /// Two pipelines share this uniform, so each write site zeroes the fields its own
 /// pipeline does not read. `panel_count` and `occlude_all` are non-zero only on an
@@ -126,7 +127,11 @@ struct Globals {
     skip_color: u32,
     /// Non-zero when the cursor fragment draws the block's outline only.
     cursor_hollow: u32,
-    _pad: [u32; 2],
+    /// The cell size the occluder rects scale by, which is the live grid's.
+    ///
+    /// A pool composited at its own font size lays its cells out at
+    /// [`Self::cell_size`], but the boxes over it are cells of the live grid.
+    occluder_cell: [f32; 2],
     /// The pool regions the live cell fill skips. A pool composite writes
     /// [`Cover::NONE`], since its own cells are what covers the live grid.
     cover: Cover,
@@ -421,7 +426,7 @@ impl BackgroundPass {
             ],
             skip_color: packed_color(clear),
             cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
-            _pad: [0; 2],
+            occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::new(covered, occluders.len()),
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
@@ -518,6 +523,11 @@ impl BackgroundPass {
     /// carries the frame's whole list and how much of it covers this pool, and
     /// all four of a pool's composite passes are handed the same one.
     ///
+    /// `metrics` is the cell box the pool's grid lays out in, which a pool at its
+    /// own font size does not share with the live grid. The occluders stay cells
+    /// of the live grid, while `origin_cells` and `grid_scroll` count the pool's
+    /// own cells.
+    ///
     /// See also:
     /// - [`PoolOccluders`] for why every pool of a frame reads one list.
     #[allow(clippy::too_many_arguments)]
@@ -526,6 +536,7 @@ impl BackgroundPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        metrics: CellMetrics,
         occluders: PoolOccluders<'_>,
         resolution: [f32; 2],
         grid_scroll: f32,
@@ -566,10 +577,10 @@ impl BackgroundPass {
 
         let globals = Globals {
             resolution,
-            cell_size: [self.metrics.width, self.metrics.height],
+            cell_size: [metrics.width, metrics.height],
             cursor_corners_01: [0.0; 4],
             cursor_corners_23: [0.0; 4],
-            scroll_y: grid_scroll * self.metrics.height,
+            scroll_y: grid_scroll * metrics.height,
             panel_count,
             occlude_all,
             cols: cols as u32,
@@ -579,7 +590,7 @@ impl BackgroundPass {
             cursor_color: [0.0; 4],
             skip_color: 0,
             cursor_hollow: 0,
-            _pad: [0; 2],
+            occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
         };
         queue.write_buffer(
@@ -673,7 +684,7 @@ impl BackgroundPass {
             ],
             skip_color: 0,
             cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
-            _pad: [0; 2],
+            occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
         };
         // The cursor's own slot, so this can run after the cell globals are placed
@@ -1497,6 +1508,7 @@ mod tests {
             device,
             queue,
             grid,
+            pass.metrics,
             PoolOccluders::new(&[], 0, false),
             [TARGET as f32; 2],
             0.0,

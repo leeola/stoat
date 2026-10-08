@@ -546,6 +546,7 @@ impl Renderer {
                 device,
                 queue,
                 pool.grid,
+                self.pool_metrics(pool.font_size),
                 panels,
                 &riding,
                 pool.shift_rows,
@@ -906,6 +907,9 @@ impl Renderer {
     /// `pool` is the terminal's id for this pool, under which each pass keeps its
     /// composite buffers. Two entries sharing an id would have the later one's
     /// instances drawn for both, so callers pass each pool its own.
+    ///
+    /// `font_size` is the logical size `pool_grid` lays out and rasterizes at,
+    /// `None` for the live grid's. See [`PoolComposite::font_size`].
     #[allow(clippy::too_many_arguments)]
     pub fn composite_pool(
         &mut self,
@@ -913,6 +917,7 @@ impl Renderer {
         queue: &Queue,
         view: &TextureView,
         pool_grid: &Grid,
+        font_size: Option<u32>,
         panels: &[Panel],
         scissor: [u32; 4],
         shift_rows: f32,
@@ -931,6 +936,7 @@ impl Renderer {
             device,
             queue,
             pool_grid,
+            self.pool_metrics(font_size),
             panels,
             // A standalone composite has no frame of rides around it.
             &[],
@@ -977,12 +983,17 @@ impl Renderer {
     /// `riding` names the pools this frame's panels are anchored to. A panel
     /// riding one of them draws shifted, after the composites, so the rect it
     /// declared is not where it is and this pool must not occlude against it.
+    ///
+    /// `metrics` is the cell box `pool_grid` lays out in, from
+    /// [`Self::pool_metrics`]. `origin_cells` stays a cell of the live grid, and
+    /// is restated in the pool's own cells for the passes.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_pool(
         &mut self,
         device: &Device,
         queue: &Queue,
         pool_grid: &Grid,
+        metrics: CellMetrics,
         panels: &[Panel],
         riding: &[u32],
         shift_rows: f32,
@@ -994,6 +1005,7 @@ impl Renderer {
         slot: usize,
     ) {
         let resolution = [self.width as f32, self.height as f32];
+        let origin_cells = pool_origin(origin_cells, self.metrics, metrics);
 
         // All four passes occlude this pool against the same panels, so the list
         // is built once here rather than in each of them. It cannot share
@@ -1010,6 +1022,7 @@ impl Renderer {
             device,
             queue,
             pool_grid,
+            metrics,
             occluders,
             resolution,
             shift_rows,
@@ -1023,6 +1036,7 @@ impl Renderer {
             device,
             queue,
             pool_grid,
+            metrics,
             occluders,
             resolution,
             shift_rows,
@@ -1036,6 +1050,7 @@ impl Renderer {
             device,
             queue,
             pool_grid.bars(),
+            metrics,
             occluders,
             resolution,
             shift_rows,
@@ -1048,6 +1063,7 @@ impl Renderer {
             device,
             queue,
             pool_grid.polylines(),
+            metrics,
             occluders,
             resolution,
             shift_rows,
@@ -1062,6 +1078,16 @@ impl Renderer {
     /// falls entirely outside and the pool has nothing to draw.
     pub(crate) fn pool_scissor(&self, scissor: [u32; 4]) -> Option<[u32; 4]> {
         clamp_scissor(scissor, self.width, self.height)
+    }
+
+    /// The cell box a pool drawn at `font_size` lays out in.
+    ///
+    /// `None` gives the live grid's. A size gives that logical size at the live
+    /// display scale, since a pool shares the display the live grid draws on.
+    pub(crate) fn pool_metrics(&self, font_size: Option<u32>) -> CellMetrics {
+        font_size.map_or(self.metrics, |size| {
+            CellMetrics::from_font_size(size, self.metrics.scale_factor)
+        })
     }
 
     /// Issue one pool's composite draws into `render_pass`, clipped to `scissor`.
@@ -1263,6 +1289,13 @@ pub struct PoolComposite<'a> {
     /// The grid holding the pool's composed page rows, sized to its region
     /// rather than to the viewport.
     pub grid: &'a Grid,
+    /// The logical font size [`Self::grid`] lays out and rasterizes at, or
+    /// `None` for the live grid's.
+    ///
+    /// A pool at its own size still starts on the screen cell
+    /// [`Self::origin_cells`] names and ends at the scissor, however many of its
+    /// own cells fall between. The live grid's boxes occlude it where they sit.
+    pub font_size: Option<u32>,
     /// The screen cell [`Self::grid`]'s own (0, 0) draws at, which is the
     /// region's top-left. The passes add it in their vertex stages, so the grid
     /// never has to be copied into a viewport-sized one to be placed.
@@ -1270,8 +1303,8 @@ pub struct PoolComposite<'a> {
     /// The pool's region in screen space, as the clip rectangle
     /// `[x, y, width, height]` in physical pixels.
     pub scissor: [u32; 4],
-    /// The sub-cell document scroll, in rows; a negative value shifts the rows
-    /// up.
+    /// The sub-cell document scroll, in the pool's own rows. A negative value
+    /// shifts the rows up.
     pub shift_rows: f32,
     /// Whether the pool's composed rows differ from the previous frame. `false`
     /// during a pure sub-cell glide, letting the composite reuse the instances
@@ -1318,6 +1351,20 @@ fn clamp_scissor(scissor: [u32; 4], width: u32, height: u32) -> Option<[u32; 4]>
     }
 
     Some([x, y, w, h])
+}
+
+/// Restate `origin`, a cell of the live grid, in the cells of a pool laid out at
+/// `pool`.
+///
+/// Every composite pass scales a pool's origin by the pool's own cell size. A
+/// pool at another font size therefore names the live cell its region starts on
+/// in its own cells, which lands it on that cell's pixel. The ratio is exactly
+/// one for a pool at the live size, which leaves its origin untouched.
+fn pool_origin(origin: [f32; 2], live: CellMetrics, pool: CellMetrics) -> [f32; 2] {
+    [
+        origin[0] * (live.width / pool.width),
+        origin[1] * (live.height / pool.height),
+    ]
 }
 
 /// The scissors of the first [`MAX_COVERED`] `pools` that draw on a
@@ -2188,6 +2235,7 @@ impl GpuContext {
                 &self.device,
                 &self.queue,
                 pool.grid,
+                self.renderer.pool_metrics(pool.font_size),
                 panels,
                 &riding,
                 pool.shift_rows,
@@ -2469,6 +2517,7 @@ mod tests {
             PoolComposite {
                 id: 7,
                 grid: &gray_pool,
+                font_size: None,
                 origin_cells: [0.0; 2],
                 scissor: [0, band, width, band],
                 shift_rows: 0.0,
@@ -2479,6 +2528,7 @@ mod tests {
             PoolComposite {
                 id: 4,
                 grid: &white_pool,
+                font_size: None,
                 origin_cells: [0.0; 2],
                 scissor: [0, band * 2, width, band],
                 shift_rows: 0.0,
@@ -2495,6 +2545,7 @@ mod tests {
                 &device,
                 &queue,
                 pool.grid,
+                renderer.metrics,
                 &[],
                 &[],
                 pool.shift_rows,
@@ -2641,6 +2692,7 @@ mod tests {
             &device,
             &queue,
             &pool,
+            renderer.metrics,
             &[],
             &[],
             0.0,
@@ -2844,6 +2896,7 @@ mod tests {
         PoolComposite {
             id: 3,
             grid,
+            font_size: None,
             origin_cells: [0.0; 2],
             scissor: WHOLE,
             shift_rows: 0.0,

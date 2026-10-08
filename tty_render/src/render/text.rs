@@ -282,8 +282,13 @@ struct TextGlobals {
     /// screen. Zero for every other draw, whose positions already start at the
     /// screen's own origin.
     origin_cells: [f32; 2],
-    /// Puts [`Self::cover`] on the 16-byte boundary its rect array requires.
-    _pad1: [u32; 2],
+    /// The cell size the occluder rects scale by, which is the live grid's.
+    ///
+    /// A pool composited at its own font size lays its glyphs out at
+    /// [`Self::cell_size`], but the boxes over it are cells of the live grid.
+    /// Also puts [`Self::cover`] on the 16-byte boundary its rect array
+    /// requires.
+    occluder_cell: [f32; 2],
     /// The pool regions the grid and region draws skip. Every other draw
     /// carries [`Cover::NONE`], since a pool covers only the live grid.
     cover: Cover,
@@ -346,6 +351,13 @@ struct TextCompositeSlot {
     /// glide therefore reuses the instances it built, where an origin carrying
     /// that drift moved every frame and rebuilt them.
     baked_origin: [f32; 2],
+    /// The cell metrics this slot was prepared at, or `None` before the first
+    /// build.
+    ///
+    /// Glyph keys, positions, and underlines all bake the size in, so a slot
+    /// prepared at one size describes no other. A pool whose font size changed
+    /// under content that held still rebuilds.
+    baked_metrics: Option<CellMetrics>,
     /// How far the caches below are rotated, in rows.
     ///
     /// A scroll moves the pool's rows without changing them. Advancing this and
@@ -411,6 +423,9 @@ struct RunBuild {
 /// [`Self::metrics`], and neither cache key names the size. A size change
 /// therefore replaces the face whole. A field it left behind keeps answering
 /// for the old size.
+///
+/// The live grid shapes under one face, and a pool composited at another size
+/// shapes under one of its own, so neither face's caches answer for the other.
 struct SizedFace {
     metrics: CellMetrics,
     /// Offset from a cell's top to the text baseline, in physical pixels.
@@ -703,6 +718,11 @@ pub struct TextPass {
     /// The size the grid shapes and rasterizes at, with everything that bakes it
     /// in.
     face: SizedFace,
+    /// The face of the last size other than the live one a pool composited at.
+    ///
+    /// One face serves every pool at that size. Pools at two sizes other than the
+    /// live one in a frame build a face for each pool, every frame.
+    pool_face: Option<SizedFace>,
     /// Every codepoint some face in the font database maps, built on the first
     /// character both bundled charmaps miss and `None` until then.
     ///
@@ -1153,6 +1173,7 @@ impl TextPass {
             ligatures,
             swash_cache,
             face,
+            pool_face: None,
             covered: None,
             glyph_row_cache: Vec::new(),
             exposed_from: None,
@@ -1239,6 +1260,7 @@ impl TextPass {
             .map(font::substitution_rules)
             .unwrap_or_default();
 
+        self.pool_face = None;
         self.covered = None;
     }
 
@@ -1857,7 +1879,7 @@ impl TextPass {
                 rows: rotation.rows as u32,
                 _pad0: 0,
                 origin_cells: [0.0; 2],
-                _pad1: [0; 2],
+                occluder_cell: cell_size,
                 cover,
             };
         let cover = Cover::new(covered, occluders.len());
@@ -1905,13 +1927,85 @@ impl TextPass {
     /// the atlas bind group the live draw also binds is recreated afterward.
     /// Covers only plain glyphs and underlines, the two buffers [`Self::draw`]
     /// reads.
+    ///
+    /// `metrics` is the cell box and rasterization size the pool's grid lays out
+    /// at. A size other than the live one shapes under a face of that size, so
+    /// the live face's caches never hold glyphs of a second size. The occluders
+    /// stay cells of the live grid, while `origin_cells` and `shift_rows` count
+    /// the pool's own cells.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        metrics: CellMetrics,
         occluders: PoolOccluders<'_>,
+        resolution: [f32; 2],
+        shift_rows: f32,
+        origin_cells: [f32; 2],
+        content_changed: bool,
+        scrolled_rows: Option<isize>,
+        pool: u32,
+        slot: usize,
+    ) {
+        let occluder_cell = [self.face.metrics.width, self.face.metrics.height];
+        let live = if metrics == self.face.metrics {
+            None
+        } else {
+            let face = self.take_pool_face(metrics);
+            Some(mem::replace(&mut self.face, face))
+        };
+
+        self.prepare_composite_in_face(
+            device,
+            queue,
+            grid,
+            occluders,
+            occluder_cell,
+            resolution,
+            shift_rows,
+            origin_cells,
+            content_changed,
+            scrolled_rows,
+            pool,
+            slot,
+        );
+
+        if let Some(live) = live {
+            self.pool_face = Some(mem::replace(&mut self.face, live));
+        }
+    }
+
+    /// Take the face a pool at `metrics` shapes under.
+    ///
+    /// The face kept from the last pool at another size serves when its size
+    /// matches. Any other size gets a fresh face.
+    fn take_pool_face(&mut self, metrics: CellMetrics) -> SizedFace {
+        match self.pool_face.take() {
+            Some(face) if face.metrics == metrics => face,
+            _ => SizedFace::new(
+                &mut self.font_system,
+                self.family.as_deref(),
+                self.primary_font.as_deref(),
+                metrics,
+            ),
+        }
+    }
+
+    /// The body of [`Self::prepare_composite`], which shapes and lays out under
+    /// [`Self::face`], whatever size it holds.
+    ///
+    /// `occluder_cell` is the live cell the occluder rects scale by, read before
+    /// a pool's own face took the live one's place.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_composite_in_face(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        occluders: PoolOccluders<'_>,
+        occluder_cell: [f32; 2],
         resolution: [f32; 2],
         shift_rows: f32,
         origin_cells: [f32; 2],
@@ -1937,7 +2031,9 @@ impl TextPass {
         let held = self.composite_slots.get(pool);
         let held_offset = held.map_or(0, |target| target.row_offset);
         let reusable = held.is_some_and(|target| {
-            target.epoch == atlas_epoch && target.baked_origin == origin_cells
+            target.epoch == atlas_epoch
+                && target.baked_origin == origin_cells
+                && target.baked_metrics == Some(metrics)
         });
         let carries = reusable
             && held.is_some_and(|target| {
@@ -1966,7 +2062,7 @@ impl TextPass {
             rows: rows as u32,
             _pad0: 0,
             origin_cells,
-            _pad1: [0; 2],
+            occluder_cell,
             cover: Cover::NONE,
         };
 
@@ -2250,6 +2346,7 @@ impl TextPass {
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.epoch = epoch;
         target.baked_origin = origin_cells;
+        target.baked_metrics = Some(metrics);
         target.row_offset = row_offset;
         target.instance_epoch = instance_epoch;
         target.run_build = Some(run_build);
@@ -4120,6 +4217,7 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
         epoch: 0,
         baked_origin: [0.0; 2],
+        baked_metrics: None,
         row_offset: 0,
         glyph_rows: Vec::new(),
         underline_rows: Vec::new(),

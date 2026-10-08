@@ -490,6 +490,7 @@ impl Harness {
             queue,
             &self.view,
             pool,
+            None,
             &[],
             [0, 0, self.width, self.height],
             shift_rows,

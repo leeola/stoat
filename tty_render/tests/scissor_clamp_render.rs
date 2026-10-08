@@ -106,6 +106,7 @@ fn oversized_scissors_are_clamped_not_validated() {
         &queue,
         &view,
         &pool,
+        None,
         &[],
         oversized,
         0.0,

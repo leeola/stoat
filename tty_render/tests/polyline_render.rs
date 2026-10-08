@@ -257,6 +257,7 @@ impl Harness {
             &self.queue,
             &self.view,
             pool,
+            None,
             &[],
             full,
             shift,

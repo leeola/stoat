@@ -1,7 +1,8 @@
 // Color-bar pass. One instance per bar fills a sub-cell rectangle in a solid
 // color, off the cell grid, so a gutter can pack thin status bars and a hairline
 // separator into a fraction of a cell. The rectangle is given in cell-fraction
-// units and scaled by the live cell size, so it tracks font zoom.
+// units and scaled by the cell size of the grid it sits on, so it tracks font
+// zoom.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -18,7 +19,10 @@ struct Globals {
     // pixel conversion. A pool composite is positioned within its region, so
     // this is what puts it on the screen. Zero for the live grid.
     origin_cells: vec2<f32>,
-    pad1: vec2<u32>,
+    // The cell size the occluder rects scale by, which is the live grid's. A
+    // pool composited at its own font size lays its bars out at cell_size, but
+    // the boxes over it are cells of the live grid.
+    occluder_cell: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -106,7 +110,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 frag,
                 o.cell,
                 o.size,
-                globals.cell_size,
+                globals.occluder_cell,
                 o.corner_radius,
                 o.inset_x
             );

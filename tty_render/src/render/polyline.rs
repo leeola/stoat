@@ -3,8 +3,8 @@
 //! Draws each [`Polyline`] as anti-aliased capsule segments off the cell grid,
 //! above the grid with its own z-order. The protocol's only non-axis-aligned
 //! primitive, added so the commit graph can draw lane and merge lines. Endpoints
-//! ride in cell-fraction units and the vertex shader scales them by the live
-//! cell size, so a path tracks font zoom.
+//! ride in cell-fraction units and the vertex shader scales them by the cell
+//! size of the grid they sit on, so a path tracks font zoom.
 
 use crate::render::{
     globals_offset, CellMetrics, CompositeSlot, CompositeSlots, GridVersion, Occluder,
@@ -116,8 +116,13 @@ struct Globals {
     /// than the viewport, so the region's origin is what puts them on the
     /// screen. Zero for the live grid.
     origin_cells: [f32; 2],
-    /// Rounds the struct to the 48 bytes a uniform's 16-byte alignment wants.
-    _pad1: [u32; 2],
+    /// The cell size the occluder rects scale by, which is the live grid's.
+    ///
+    /// A pool composited at its own font size lays its paths out at
+    /// [`Self::cell_size`], but the boxes over it are cells of the live grid.
+    /// Also rounds the struct to the 48 bytes a uniform's 16-byte alignment
+    /// wants.
+    occluder_cell: [f32; 2],
 }
 
 /// The instanced stroked-path pipeline and its per-frame buffers.
@@ -362,7 +367,7 @@ impl PolylinePass {
             shift_rows: 0.0,
             _pad0: 0,
             origin_cells: [0.0; 2],
-            _pad1: [0; 2],
+            occluder_cell: [self.metrics.width, self.metrics.height],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -449,6 +454,11 @@ impl PolylinePass {
     /// frame's whole list and how much of it covers this pool, and all four of a
     /// pool's composite passes are handed the same one.
     ///
+    /// `metrics` is the cell box the paths' cell fractions scale by, which a pool
+    /// at its own font size does not share with the live grid. The occluders
+    /// stay cells of the live grid, while `origin_cells` and `shift_rows` count
+    /// the pool's own cells.
+    ///
     /// See also:
     /// - [`PoolOccluders`] for why every pool of a frame reads one list.
     #[allow(clippy::too_many_arguments)]
@@ -457,6 +467,7 @@ impl PolylinePass {
         device: &Device,
         queue: &Queue,
         polylines: &[Polyline],
+        metrics: CellMetrics,
         occluders: PoolOccluders<'_>,
         resolution: [f32; 2],
         shift_rows: f32,
@@ -470,13 +481,13 @@ impl PolylinePass {
 
         let globals = Globals {
             resolution,
-            cell_size: [self.metrics.width, self.metrics.height],
+            cell_size: [metrics.width, metrics.height],
             panel_count,
             occlude_all,
             shift_rows,
             _pad0: 0,
             origin_cells,
-            _pad1: [0; 2],
+            occluder_cell: [self.metrics.width, self.metrics.height],
         };
         queue.write_buffer(
             &self.globals,
@@ -493,7 +504,7 @@ impl PolylinePass {
 
         build_polyline_instances_into(
             polylines,
-            self.metrics,
+            metrics,
             &mut self.composite_built,
             &mut self.points_scratch,
         );
@@ -1054,6 +1065,7 @@ mod tests {
             device,
             queue,
             paths,
+            pass.metrics,
             PoolOccluders::new(&[], 0, true),
             [TARGET as f32, TARGET as f32],
             0.0,
@@ -1188,6 +1200,7 @@ mod tests {
             &device,
             &queue,
             &first,
+            pass.metrics,
             PoolOccluders::new(&[], 0, true),
             [64.0, 64.0],
             0.0,
@@ -1206,6 +1219,7 @@ mod tests {
             &device,
             &queue,
             &moved,
+            pass.metrics,
             PoolOccluders::new(&[], 0, true),
             [64.0, 64.0],
             -0.5,
