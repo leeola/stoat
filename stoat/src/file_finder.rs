@@ -100,6 +100,22 @@ impl FinderScope {
             _ => None,
         }
     }
+
+    /// The `scope` keymap predicate value for this scope.
+    ///
+    /// The two buffer scopes have names here although they never persist,
+    /// since a binding scoped to the buffer picker has to name them. A named
+    /// scope reads as its config name.
+    pub(crate) fn context_name(&self) -> &str {
+        match self {
+            FinderScope::All => "all",
+            FinderScope::Modified => "modified",
+            FinderScope::Buffers => "buffers",
+            FinderScope::ModifiedBuffers => "modified_buffers",
+            FinderScope::Named(name) => name,
+            FinderScope::AllWorkspaces => "allworkspaces",
+        }
+    }
 }
 
 /// What the finder should do with the selected file when the user submits.
@@ -1366,6 +1382,17 @@ mod tests {
                 vec![root.join("a.rs")],
             ),
         );
+    }
+
+    /// The buffer picker has no path to complete, so Tab flips its scope as
+    /// Shift-Tab does.
+    #[test]
+    fn tab_in_the_buffer_picker_toggles_the_scope() {
+        let mut h = crate::Stoat::test();
+        h.type_keys("space b b");
+        h.type_keys("tab");
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(finder.scope(), &FinderScope::ModifiedBuffers);
     }
 
     #[test]

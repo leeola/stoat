@@ -57,8 +57,8 @@ define_action!(
     "Open the file finder modal scoped to currently-open buffers and terminals. \
      Selecting a buffer row switches the focused pane to that buffer. \
      Selecting a terminal row moves focus to that terminal. \
-     Shift-Tab flips between the open buffers and the buffers with unsaved \
-     edits.",
+     Tab and Shift-Tab flip between the open buffers and the buffers with \
+     unsaved edits.",
     ActionPriority::Normal,
     command_name = "buffers"
 );
@@ -87,7 +87,7 @@ define_action!(
      workspace) and Modified scope (files with uncommitted git changes). \
      In the buffer picker, flip between the open buffers and the buffers \
      with unsaved edits. Bound by default to Shift-Tab while the finder is \
-     open.",
+     open, and to Tab as well in the buffer picker.",
     ActionPriority::Normal,
     palette_visible = false
 );

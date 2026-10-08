@@ -331,6 +331,9 @@ on init {
 #
 # Predicate fields:
 #   mode, pane, view, modal, rebase_exec  editor and chord context
+#   scope          the open file finder's scope (all / modified / buffers /
+#                  modified_buffers / allworkspaces / a named scope), absent
+#                  when no finder is open
 #   token          semantic-token kind under the cursor (trait / type /
 #                  function / value / symbol), absent when on no token
 #   token_known    whether the buffer has a semantic-token index at all
@@ -1057,6 +1060,11 @@ on key {
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
         BackTab -> FileFinderScopeToggle();
+    }
+    # The buffer picker has two scopes and no path to complete, so Tab flips
+    # between them as Shift-Tab does.
+    modal == finder && mode == insert && (scope == buffers || scope == modified_buffers) {
+        Tab -> FileFinderScopeToggle();
     }
     modal == symbols && mode == insert {
         Up -> PickerPrev();

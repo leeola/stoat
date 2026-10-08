@@ -21,6 +21,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "pane",
     "view",
     "modal",
+    "scope",
     "rebase_exec",
     "pair",
     "token",
@@ -61,6 +62,10 @@ pub(crate) struct StoatKeymapState<'a> {
     /// The topmost open modal, absent when none is open. Absence lets bare
     /// `modal` read false and `modal != x` read true.
     modal: Option<StateValue>,
+    /// The open file finder's scope, absent unless the finder is the topmost
+    /// modal. Absence keeps a `scope == x` binding from holding anywhere but
+    /// inside the finder.
+    scope: Option<StateValue>,
     /// The semantic-token kind under the cursor, absent when no index exists or
     /// the cursor sits on no token. Absence lets bare `token` read "on a known
     /// token" (false) and pairs with [`Self::token_known`] for the fail-open
@@ -102,6 +107,7 @@ impl<'a> StoatKeymapState<'a> {
             pane: None,
             view: None,
             modal: None,
+            scope: None,
             token: None,
             token_known: StateValue::Bool(false),
             lsp: StateValue::Bool(false),
@@ -120,6 +126,15 @@ impl<'a> StoatKeymapState<'a> {
     /// it cannot call while holding a workspace borrow.
     pub(crate) fn with_modal(mut self, modal: &str) -> Self {
         self.modal = Some(StateValue::String(modal.into()));
+        self
+    }
+
+    /// Set the `scope` predicate value on an otherwise flag-built state.
+    ///
+    /// Lets the hint-overlay renderer show the bindings of the finder's scope,
+    /// such as Tab in the buffer picker, without a full [`Self::from_stoat`].
+    pub(crate) fn with_scope(mut self, scope: Option<&str>) -> Self {
+        self.scope = scope.map(|s| StateValue::String(s.into()));
         self
     }
 
@@ -183,6 +198,7 @@ impl<'a> StoatKeymapState<'a> {
             pane: pane_predicate(ws).map(|s| StateValue::String(s.into())),
             view: view_predicate(ws).map(|s| StateValue::String(s.into())),
             modal: modal_predicate(stoat).map(|s| StateValue::String(s.into())),
+            scope: scope_predicate(stoat).map(|s| StateValue::String(s.into())),
             user_vars: Some(&stoat.user_vars),
             ..Self::with_flags(stoat.focused_mode(), flags)
         }
@@ -200,6 +216,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
+            "scope" => self.scope.as_ref(),
             "token" => self.token.as_ref(),
             "token_known" => Some(&self.token_known),
             "lsp" => Some(&self.lsp),
@@ -699,6 +716,20 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
     active_modal(stoat).map(ActiveModal::context_str)
 }
 
+/// The open file finder's scope as a `scope` predicate value.
+///
+/// Absent unless the finder is the topmost modal, so a quit prompt over a
+/// finder carries no scope.
+pub(crate) fn scope_predicate(stoat: &Stoat) -> Option<&str> {
+    if active_modal(stoat) != Some(ActiveModal::FileFinder) {
+        return None;
+    }
+    stoat
+        .file_finder
+        .as_ref()
+        .map(|finder| finder.scope().context_name())
+}
+
 /// Strip the `SHIFT` modifier from events where it duplicates information
 /// already carried by the keycode, so bindings written without an explicit
 /// `S-` prefix still match what the terminal emits.
@@ -1128,6 +1159,28 @@ mod tests {
         h.stoat.modal_run = Some(RunId::default());
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "modal"), Some("run".to_string()));
+    }
+
+    /// The `scope` field names the open finder's scope and is absent without a
+    /// finder, so a `scope == x` binding holds only inside the finder.
+    #[test]
+    fn from_stoat_scope_names_the_open_finders_scope() {
+        let scope_after = |actions: &[&dyn Action]| {
+            let mut h = Stoat::test();
+            for action in actions {
+                action_handlers::dispatch(&mut h.stoat, *action);
+            }
+            StoatKeymapState::from_stoat(&h.stoat).get("scope").cloned()
+        };
+        let named = |s: &str| Some(StateValue::String(s.into()));
+        assert_eq!(
+            (
+                scope_after(&[]),
+                scope_after(&[&stoat_action::OpenBufferPicker]),
+                scope_after(&[&stoat_action::OpenFileFinder]),
+            ),
+            (None, named("buffers"), named("all")),
+        );
     }
 
     #[test]

@@ -999,6 +999,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "quit_confirm",
+                    None,
                     Some("quit"),
                     toggles,
                     &stoat.theme,
@@ -1024,6 +1025,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "workspace_picker",
+                    None,
                     Some("picker"),
                     toggles,
                     &stoat.theme,
@@ -1053,6 +1055,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "jumplist",
+                    None,
                     None,
                     toggles,
                     &stoat.theme,
@@ -1085,6 +1088,7 @@ pub(crate) fn frame(
                     mode,
                     "diagnostics",
                     None,
+                    None,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1114,6 +1118,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "commit_picker",
+                    None,
                     None,
                     toggles,
                     &stoat.theme,
@@ -1145,6 +1150,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "location",
+                    None,
                     Some("locations"),
                     toggles,
                     &stoat.theme,
@@ -1175,6 +1181,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "finder",
+                    Some(finder.scope().context_name()),
                     None,
                     toggles,
                     &stoat.theme,
@@ -1205,6 +1212,7 @@ pub(crate) fn frame(
                     mode,
                     "symbols",
                     None,
+                    None,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1234,6 +1242,7 @@ pub(crate) fn frame(
                     mode,
                     "code_search",
                     None,
+                    None,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1262,6 +1271,7 @@ pub(crate) fn frame(
                     mode,
                     "palette",
                     None,
+                    None,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1289,6 +1299,7 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "help",
+                    None,
                     None,
                     toggles,
                     &stoat.theme,
@@ -1340,7 +1351,7 @@ pub(crate) fn frame(
         let pane = pane_predicate(ws);
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
-        let key = hints_cache_key(mode, screen, pane, &flags, token, &focus, None);
+        let key = hints_cache_key(mode, screen, pane, &flags, token, &focus, None, None);
 
         if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
             // The conflict screen rides on normal mode, so scope to its own
@@ -1443,6 +1454,7 @@ pub(crate) fn frame(
 /// Hash the keymap-state inputs that decide which bindings are active into a
 /// cache key. An unchanged key means the same hints list, so the binding walk
 /// and regrouping can be skipped.
+#[allow(clippy::too_many_arguments)]
 fn hints_cache_key(
     mode: &str,
     screen: Option<&str>,
@@ -1451,6 +1463,7 @@ fn hints_cache_key(
     token: Option<Option<crate::lsp::LspSymbolKind>>,
     focus: &FocusFlags,
     modal: Option<&str>,
+    scope: Option<&str>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     mode.hash(&mut hasher);
@@ -1460,21 +1473,28 @@ fn hints_cache_key(
     token.hash(&mut hasher);
     focus.hash(&mut hasher);
     modal.hash(&mut hasher);
+    scope.hash(&mut hasher);
     hasher.finish()
 }
 
-/// Paint a modal's hint box, reusing `cache` when its mode and modal are
-/// unchanged so the scoped keymap walk and regrouping run only on a key miss.
+/// Paint a modal's hint box, reusing `cache` when its mode, modal, and scope
+/// are unchanged so the scoped keymap walk and regrouping run only on a key
+/// miss.
 ///
 /// `modal` names the keymap scope to walk, which is the modal's name in
 /// config. It also titles the box unless `title` overrides it, for the modals
 /// whose config name is not what a reader wants to see over the hints.
+///
+/// `scope` is the file finder's scope, so the box shows the bindings that
+/// hold in it, such as Tab in the buffer picker. Every other modal passes
+/// `None`.
 #[allow(clippy::too_many_arguments)]
 fn cached_modal_hints(
     cache: &mut Option<hints::HintsCache>,
     keymap: &crate::keymap::Keymap,
     mode: &str,
     modal: &'static str,
+    scope: Option<&str>,
     title: Option<&str>,
     toggles: ToggleStates,
     theme: &crate::theme::Theme,
@@ -1490,9 +1510,12 @@ fn cached_modal_hints(
         None,
         &FocusFlags::default(),
         Some(modal),
+        scope,
     );
     if cache.as_ref().map(|c| c.key) != Some(key) {
-        let state = StoatKeymapState::with_flags(mode, Flags::default()).with_modal(modal);
+        let state = StoatKeymapState::with_flags(mode, Flags::default())
+            .with_modal(modal)
+            .with_scope(scope);
         let raw = keymap.scoped_bindings(&state, "modal", modal);
         let bindings: Vec<(&str, String, Option<Toggle>)> = raw
             .iter()
@@ -1702,7 +1725,7 @@ mod dispatch_tests {
         h.stoat.hints_cache.as_ref().map(|c| c.key)
     }
 
-    fn modal_hints_key(mode: &str, modal: &str) -> u64 {
+    fn modal_hints_key(mode: &str, modal: &str, scope: Option<&str>) -> u64 {
         hints_cache_key(
             mode,
             None,
@@ -1711,6 +1734,7 @@ mod dispatch_tests {
             None,
             &FocusFlags::default(),
             Some(modal),
+            scope,
         )
     }
 
@@ -1725,7 +1749,7 @@ mod dispatch_tests {
         let mode = h.stoat.focused_mode().to_string();
         assert_eq!(
             painted_modal_hints(&h),
-            Some(modal_hints_key(&mode, "finder")),
+            Some(modal_hints_key(&mode, "finder", Some("all"))),
             "the finder alone paints the finder"
         );
 
@@ -1750,7 +1774,7 @@ mod dispatch_tests {
         let mode = h.stoat.focused_mode().to_string();
         assert_eq!(
             painted_modal_hints(&h),
-            Some(modal_hints_key(&mode, "location")),
+            Some(modal_hints_key(&mode, "location", None)),
             "and so it is what the frame paints"
         );
     }
