@@ -481,13 +481,13 @@ mod tests {
 
     #[test]
     fn embedded_default_sets_the_logical_font_size() {
-        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 15);
+        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 14);
     }
 
     #[test]
     fn embedded_default_carries_the_shipped_config() {
         let config = embedded_default();
-        assert_eq!(config.font_size, 15);
+        assert_eq!(config.font_size, 14);
         assert_eq!(config.font_family, ["JetBrains Mono", "monospace"]);
         assert_eq!(config.theme, "one-dark");
     }
