@@ -43,8 +43,15 @@ pub enum FinderScope {
     /// Currently-open path-bound buffers from the workspace's
     /// [`BufferRegistry`], then the workspace's shell terminals. Captured at
     /// open time. Reachable only through the dedicated `OpenBufferPicker`
-    /// action; Shift-Tab from this scope flips back to [`FinderScope::All`].
+    /// action. Shift-Tab flips to [`FinderScope::ModifiedBuffers`] and back, so
+    /// the buffer picker never enters a file scope.
     Buffers,
+    /// The open path-bound buffers whose `dirty` flag is set, which are the
+    /// buffers with unsaved edits. Captured at open time like
+    /// [`FinderScope::Buffers`]. A terminal carries no dirty flag, so none is
+    /// listed. Reachable only through the scope toggle from
+    /// [`FinderScope::Buffers`].
+    ModifiedBuffers,
     /// A config-defined named glob scope (`finder.scope.<name>`). Shift-Tab
     /// cycles through these alphabetically after Modified, and the list shows
     /// only files matching the scope's globs.
@@ -61,15 +68,16 @@ impl FinderScope {
     /// The stable name under which this scope is remembered across sessions,
     /// or `None` for a scope that is never persisted.
     ///
-    /// [`FinderScope::Buffers`] returns `None`: it is a dedicated picker, not a
-    /// sticky mode, so closing in it leaves the prior remembered scope intact.
+    /// [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] return
+    /// `None`. They make up a dedicated picker, not a sticky mode, so closing
+    /// in either leaves the prior remembered scope intact.
     pub(crate) fn persist_name(&self) -> Option<String> {
         match self {
             FinderScope::All => Some("all".to_string()),
             FinderScope::Modified => Some("modified".to_string()),
             FinderScope::Named(name) => Some(name.clone()),
             FinderScope::AllWorkspaces => Some("allworkspaces".to_string()),
-            FinderScope::Buffers => None,
+            FinderScope::Buffers | FinderScope::ModifiedBuffers => None,
         }
     }
 
@@ -78,8 +86,8 @@ impl FinderScope {
     ///
     /// A persisted name whose scope has since been removed from config must
     /// not resurrect, so validation returns `None` and the caller falls
-    /// through to its next default. `"buffers"` is intentionally not accepted,
-    /// as it is never a sticky or default scope.
+    /// through to its next default. `"buffers"` and `"modified_buffers"` are
+    /// intentionally not accepted, as neither is ever a sticky or default scope.
     pub(crate) fn from_persist_name(
         name: &str,
         named: &BTreeMap<String, Vec<String>>,
@@ -180,17 +188,21 @@ pub struct FileFinder {
     /// reports back here. `None` once its answer has been taken. The task is
     /// held so dropping the finder drops the query with it.
     modified: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
-    /// Which generation of [`Self::modified_paths`] and [`Self::buffer_paths`]
-    /// the pick list is looking at.
+    /// Which generation of [`Self::modified_paths`], [`Self::buffer_paths`],
+    /// and [`Self::dirty_buffer_paths`] the pick list shows.
     ///
-    /// Both lists are fixed between the moments they are replaced, so the
-    /// picker only has to be told when one is, and can otherwise keep the rows
-    /// it derived from them. Restamped wherever either is rebuilt.
+    /// The lists are fixed between the moments they are replaced, so the
+    /// picker only has to be told when one is, and otherwise keeps the rows it
+    /// derived from them. Restamped wherever one is rebuilt.
     base_generation: u64,
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle. The keys of [`Self::term_rows`] follow
     /// the buffer paths.
     pub(crate) buffer_paths: Vec<PathBuf>,
+    /// Absolute paths of the open buffers with unsaved edits, the
+    /// [`FinderScope::ModifiedBuffers`] base. Captured once at open time like
+    /// [`Self::buffer_paths`].
+    pub(crate) dirty_buffer_paths: Vec<PathBuf>,
     /// The terminal rows of the [`FinderScope::Buffers`] list, captured at
     /// open time like the buffer paths.
     pub(crate) term_rows: Vec<TermRow>,
@@ -204,8 +216,8 @@ pub struct FileFinder {
     /// freshness and so is safe to leave alone.
     pub(crate) walk_epoch: u64,
     /// The shared walk / fuzzy-list / preview core. Its `all_paths` is the
-    /// [`FinderScope::All`] base; Modified/Buffers feed their own vecs through
-    /// [`PathPicker::refilter_with_base`]. A scope toggle
+    /// [`FinderScope::All`] base; Modified and the two buffer scopes feed their
+    /// own vecs through [`PathPicker::refilter_with_base`]. A scope toggle
     /// [`PathPicker::invalidate`]s it to force a re-run under an unchanged
     /// query.
     pub(crate) core: PathPicker,
@@ -232,6 +244,7 @@ pub struct FileFinder {
 const MODIFIED_BASE: u8 = 0;
 const BUFFERS_BASE: u8 = 1;
 const NAMED_BASE: u8 = 2;
+const DIRTY_BUFFERS_BASE: u8 = 3;
 
 /// Name a capped scope's candidate list for [`PathPicker::refilter_with_base`].
 ///
@@ -288,6 +301,7 @@ impl FileFinder {
         walk_epoch: u64,
         modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
         mut buffer_paths: Vec<PathBuf>,
+        dirty_buffer_paths: Vec<PathBuf>,
         term_rows: Vec<TermRow>,
         finder_scopes: &BTreeMap<String, Vec<String>>,
     ) -> Self {
@@ -311,6 +325,7 @@ impl FileFinder {
             modified_paths: Vec::new(),
             modified: Some(modified),
             buffer_paths,
+            dirty_buffer_paths,
             term_rows,
             walk_epoch,
             base_generation: crate::picker::next_generation(),
@@ -373,9 +388,14 @@ impl FileFinder {
     ///
     /// Landing on [`FinderScope::Modified`] wants a fresh git status, but that
     /// query is the caller's to spawn via [`Self::set_modified_source`], since
-    /// it belongs off this thread. From [`FinderScope::Buffers`] the toggle
-    /// returns to [`FinderScope::All`]. The Buffers scope is reachable only
-    /// through the dedicated `OpenBufferPicker` action, not through this toggle.
+    /// it belongs off this thread.
+    ///
+    /// The file scopes and the buffer scopes are separate cycles. The file
+    /// scopes go All -> Modified -> each named scope -> AllWorkspaces -> All.
+    /// [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] flip with
+    /// each other, so the buffer picker never enters a file scope. A finder
+    /// reaches the buffer pair only through the dedicated `OpenBufferPicker`
+    /// action.
     pub(crate) fn toggle_scope(&mut self) {
         self.scope = self.next_scope();
         self.core.picklist.selected = 0;
@@ -422,9 +442,11 @@ impl FileFinder {
         }
     }
 
-    /// The scope Shift-Tab lands on next: All -> Modified -> each named scope
-    /// (alphabetical) -> AllWorkspaces -> All, with Buffers exiting straight to
-    /// All.
+    /// The scope Shift-Tab lands on next.
+    ///
+    /// The file scopes cycle All -> Modified -> each named scope (alphabetical)
+    /// -> AllWorkspaces -> All. Buffers and ModifiedBuffers flip with each
+    /// other.
     fn next_scope(&self) -> FinderScope {
         match &self.scope {
             FinderScope::All => FinderScope::Modified,
@@ -441,7 +463,8 @@ impl FileFinder {
                 .map(|(name, _)| FinderScope::Named(name.clone()))
                 .unwrap_or(FinderScope::AllWorkspaces),
             FinderScope::AllWorkspaces => FinderScope::All,
-            FinderScope::Buffers => FinderScope::All,
+            FinderScope::Buffers => FinderScope::ModifiedBuffers,
+            FinderScope::ModifiedBuffers => FinderScope::Buffers,
         }
     }
 
@@ -493,6 +516,15 @@ impl FileFinder {
                 let id = base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len());
                 self.core.refilter_with_base(&text, &self.buffer_paths, id);
             },
+            FinderScope::ModifiedBuffers => {
+                let id = base_id(
+                    DIRTY_BUFFERS_BASE,
+                    self.base_generation,
+                    self.dirty_buffer_paths.len(),
+                );
+                self.core
+                    .refilter_with_base(&text, &self.dirty_buffer_paths, id);
+            },
             // A glob over the whole walk can keep most of it, so this scans
             // elsewhere like the uncapped scopes. A base small enough not to
             // need it costs one hop through the worker instead.
@@ -540,7 +572,7 @@ impl FileFinder {
                     self.core.settle_scan_with_base(query, &cache.filtered, id);
                 }
             },
-            FinderScope::Modified | FinderScope::Buffers => {},
+            FinderScope::Modified | FinderScope::Buffers | FinderScope::ModifiedBuffers => {},
         }
     }
 
@@ -602,10 +634,11 @@ impl FileFinder {
     /// Sync the preview pane to the current selection. Clears the pane when
     /// nothing is selected.
     ///
-    /// In [`FinderScope::Buffers`] the selection previews the live, possibly
-    /// modified in-memory buffer. Every other scope reads the file from disk. A
-    /// buffer selection whose path has no open buffer falls back to the disk
-    /// file. A terminal row previews the session's screen.
+    /// In [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] the
+    /// selection previews the live, possibly modified in-memory buffer. Every
+    /// other scope reads the file from disk. A buffer selection whose path has
+    /// no open buffer falls back to the disk file. A terminal row previews the
+    /// session's screen.
     pub(crate) fn sync_preview(
         &mut self,
         ws: &mut Workspace,
@@ -623,7 +656,10 @@ impl FileFinder {
         }
         let policy = if self.browse.is_some() {
             PreviewPolicy::File
-        } else if self.scope == FinderScope::Buffers {
+        } else if matches!(
+            self.scope,
+            FinderScope::Buffers | FinderScope::ModifiedBuffers
+        ) {
             PreviewPolicy::LiveBufferThenFile
         } else {
             PreviewPolicy::File
@@ -1246,8 +1282,10 @@ mod tests {
         );
     }
 
+    /// The buffer picker's two scopes flip with each other, so Shift-Tab in the
+    /// picker never lands on a file scope.
     #[test]
-    fn backtab_from_buffer_picker_toggles_to_all() {
+    fn backtab_in_the_buffer_picker_flips_between_all_and_modified_buffers() {
         let mut h = crate::Stoat::test();
         let root = seed_finder_workspace(
             &mut h,
@@ -1257,18 +1295,77 @@ mod tests {
                 ("c.rs", "fn c() {}"),
             ],
         );
+        for rel in ["a.rs", "c.rs"] {
+            crate::action_handlers::dispatch(
+                &mut h.stoat,
+                &stoat_action::OpenFile {
+                    path: root.join(rel),
+                },
+            );
+        }
+        h.settle();
+        edit_in_memory(&h, &root.join("a.rs"));
+
+        let scope_and_base = |h: &TestHarness| {
+            let finder = h.stoat.file_finder.as_ref().expect("finder open");
+            (finder.scope().clone(), finder.core.picklist.base.to_vec())
+        };
+        h.type_keys("space b b");
+        h.type_keys("backtab");
+        let modified = scope_and_base(&h);
+        h.type_keys("backtab");
+
+        assert_eq!(
+            (modified, scope_and_base(&h)),
+            (
+                (FinderScope::ModifiedBuffers, vec![root.join("a.rs")]),
+                (
+                    FinderScope::Buffers,
+                    vec![root.join("a.rs"), root.join("c.rs")]
+                ),
+            ),
+        );
+    }
+
+    /// Give the open buffer at `path` an edit that is not on disk.
+    fn edit_in_memory(h: &TestHarness, path: &Path) {
+        let ws = h.stoat.active_workspace();
+        let id = ws.buffers.id_for_path(path).expect("open buffer");
+        let buffer = ws.buffers.get(id).expect("buffer");
+        buffer.write().expect("poisoned").edit(0..0, "// ");
+    }
+
+    /// A terminal carries no dirty flag, so the modified-buffers scope keeps
+    /// the edited buffer and leaves out the shell that the buffer list shows.
+    #[test]
+    fn the_modified_buffers_scope_lists_no_terminal() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}")]);
         crate::action_handlers::dispatch(
             &mut h.stoat,
             &stoat_action::OpenFile {
                 path: root.join("a.rs"),
             },
         );
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        edit_in_memory(&h, &root.join("a.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
 
-        h.type_keys("space b b");
+        let base = |h: &TestHarness| {
+            let finder = h.stoat.file_finder.as_ref().expect("finder open");
+            finder.core.picklist.base.to_vec()
+        };
+        let buffers = base(&h);
         h.type_keys("backtab");
-        let finder = h.stoat.file_finder.as_ref().unwrap();
-        assert_eq!(finder.scope(), &FinderScope::All);
-        assert_eq!(finder.core.picklist.base.len(), 3);
+
+        assert_eq!(
+            (buffers, base(&h)),
+            (
+                vec![root.join("a.rs"), PathBuf::from("term 1")],
+                vec![root.join("a.rs")],
+            ),
+        );
     }
 
     #[test]
@@ -2075,6 +2172,7 @@ mod tests {
             Some("code")
         );
         assert_eq!(FinderScope::Buffers.persist_name(), None);
+        assert_eq!(FinderScope::ModifiedBuffers.persist_name(), None);
 
         assert_eq!(
             FinderScope::from_persist_name("all", &named),
@@ -2093,6 +2191,11 @@ mod tests {
             FinderScope::from_persist_name("buffers", &named),
             None,
             "buffers is never a sticky or default scope"
+        );
+        assert_eq!(
+            FinderScope::from_persist_name("modified_buffers", &named),
+            None,
+            "modified_buffers is never a sticky or default scope"
         );
     }
 

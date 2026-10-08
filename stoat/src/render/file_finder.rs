@@ -97,6 +97,7 @@ pub(crate) fn render_file_finder(
             FinderScope::All => " file finder (all) ".to_string(),
             FinderScope::Modified => " file finder (modified) ".to_string(),
             FinderScope::Buffers => " file finder (buffers) ".to_string(),
+            FinderScope::ModifiedBuffers => " file finder (modified buffers) ".to_string(),
             FinderScope::Named(name) => format!(" file finder ({name}) "),
             FinderScope::AllWorkspaces => " file finder (all workspaces) ".to_string(),
         }

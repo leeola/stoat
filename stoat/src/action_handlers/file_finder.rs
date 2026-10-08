@@ -204,8 +204,15 @@ pub(super) fn open_file_finder(
 
     let modified = spawn_modified_query(stoat, git_root.clone());
     let buffer_paths = stoat.active_workspace().buffers.open_paths();
-    // Only the Buffers scope reads the rows, and the scope toggle never enters
-    // it, so another scope takes none.
+    let dirty_buffer_paths: Vec<PathBuf> = stoat
+        .active_workspace()
+        .buffers
+        .dirty_buffers()
+        .into_iter()
+        .filter_map(|buffer| buffer.path)
+        .collect();
+    // Only the Buffers scope reads the rows, and the toggle reaches it only from
+    // the other buffer scope, so a finder opened in a file scope takes none.
     let term_rows = match initial_scope {
         FinderScope::Buffers => crate::file_finder::term_rows(stoat.active_workspace()),
         _ => Vec::new(),
@@ -225,6 +232,7 @@ pub(super) fn open_file_finder(
         walk_epoch,
         modified,
         buffer_paths,
+        dirty_buffer_paths,
         term_rows,
         &finder_scopes,
     );
