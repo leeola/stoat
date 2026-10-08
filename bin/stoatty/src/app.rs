@@ -3805,7 +3805,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use stoatty_protocol::command::{
         encode_fill, encode_fill_end, encode_pool_anchor, encode_pool_region, encode_scroll,
-        FillCommand, PoolAnchorCommand, PoolRegionCommand, ScrollCommand,
+        FillCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand, ScrollCommand,
     };
     use stoatty_term::{
         grid::{Damage, DocumentOffset, Grid, PoolRegion},
@@ -4251,6 +4251,7 @@ mod tests {
             width: 2,
             height: 2,
             window: 1,
+            kind: PoolKind::Grid,
         }));
         // A two-row page, and the one below it, since the compose spans a row
         // more than the region is tall.
@@ -4466,6 +4467,7 @@ mod tests {
                 width: 4,
                 height,
                 window: 0,
+                kind: PoolKind::Grid,
             }));
             for page in 0..3 {
                 fill_page(&mut terminal, pool, page, b"....");

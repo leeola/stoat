@@ -1686,7 +1686,7 @@ fn detached_pane_status_badge_continues_the_split_count() {
 #[test]
 fn the_modal_preview_is_pooled_and_retired() {
     use stoat_action::OpenFileFinder;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = crate::test_harness::TestHarness::with_size(160, 40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1714,6 +1714,7 @@ fn the_modal_preview_is_pooled_and_retired() {
         width: preview.width,
         height: preview.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -1808,7 +1809,7 @@ fn a_wheel_over_the_preview_moves_the_pool_scroll_target() {
 #[test]
 fn file_finder_list_is_pooled_and_retired() {
     use stoat_action::OpenFileFinder;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1833,6 +1834,7 @@ fn file_finder_list_is_pooled_and_retired() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -1852,7 +1854,7 @@ fn file_finder_list_is_pooled_and_retired() {
 #[test]
 fn code_search_list_is_pooled_and_retired() {
     use stoat_action::OpenCodeSearch;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1882,6 +1884,7 @@ fn code_search_list_is_pooled_and_retired() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -1970,7 +1973,7 @@ fn a_scrolled_code_search_list_refills_its_pool() {
 
 #[test]
 fn symbol_finder_list_is_pooled_and_retired() {
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2011,6 +2014,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -2107,7 +2111,7 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
 #[test]
 fn finder_pool_region_spans_the_full_window_over_the_band() {
     use stoat_action::OpenFileFinder;
-    use stoatty_protocol::command::{Command, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     h.resize(120, 24);
@@ -2140,6 +2144,7 @@ fn finder_pool_region_spans_the_full_window_over_the_band() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -2150,7 +2155,7 @@ fn finder_pool_region_spans_the_full_window_over_the_band() {
 #[test]
 fn palette_list_is_pooled_and_retired() {
     use stoat_action::OpenCommandPalette;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2173,6 +2178,7 @@ fn palette_list_is_pooled_and_retired() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -2191,7 +2197,7 @@ fn palette_list_is_pooled_and_retired() {
 
 #[test]
 fn palette_arg_list_is_pooled_and_retired() {
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2221,6 +2227,7 @@ fn palette_arg_list_is_pooled_and_retired() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -2240,7 +2247,7 @@ fn palette_arg_list_is_pooled_and_retired() {
 #[test]
 fn palette_filter_to_arg_flip_repools() {
     use stoat_action::OpenCommandPalette;
-    use stoatty_protocol::command::{Command, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2277,6 +2284,7 @@ fn palette_filter_to_arg_flip_repools() {
         width: arg_list.width,
         height: arg_list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -2287,7 +2295,7 @@ fn palette_filter_to_arg_flip_repools() {
 #[test]
 fn completion_popup_is_pooled_and_retired() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2324,6 +2332,7 @@ fn completion_popup_is_pooled_and_retired() {
         width: layout.inner.width,
         height: layout.inner.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -2343,7 +2352,7 @@ fn completion_popup_is_pooled_and_retired() {
 #[test]
 fn help_list_and_detail_are_pooled_and_retired() {
     use stoat_action::OpenHelp;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2363,6 +2372,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
         width: layout.list.width,
         height: layout.list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     let detail = PoolRegionCommand {
         pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
@@ -2371,6 +2381,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
         width: layout.detail.width,
         height: layout.detail.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     let cmds = drain_apc(&mut rx);
     assert!(
@@ -2402,7 +2413,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
 #[test]
 fn commits_list_is_pooled_and_retired() {
     use crate::commit_list::CommitListState;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2439,6 +2450,7 @@ fn commits_list_is_pooled_and_retired() {
         width: list.width,
         height: list.height,
         window: 0,
+        kind: PoolKind::Grid,
     };
     let bytes = rx
         .try_recv()

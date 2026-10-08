@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stoat_config::LineNumbers;
-use stoatty_protocol::command::{self, PoolRegionCommand};
+use stoatty_protocol::command::{self, PoolKind, PoolRegionCommand};
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
@@ -6516,6 +6516,7 @@ fn window_region() -> PoolRegionCommand {
         width: 80,
         height: 23,
         window: 2,
+        kind: PoolKind::Grid,
     }
 }
 
@@ -13900,6 +13901,7 @@ fn pool_region(pool: u32) -> PoolRegionCommand {
         width: 40,
         height: 10,
         window: 0,
+        kind: PoolKind::Grid,
     }
 }
 

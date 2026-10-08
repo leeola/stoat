@@ -1555,7 +1555,7 @@ mod tests {
 
     #[test]
     fn the_diff_preview_is_pooled_and_retired() {
-        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
         let mut h = harness_with_preview();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1570,6 +1570,7 @@ mod tests {
             width: preview.width,
             height: preview.height,
             window: 0,
+            kind: PoolKind::Grid,
         };
         assert!(
             drained_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -1634,7 +1635,7 @@ mod tests {
 
     #[test]
     fn the_commit_table_is_pooled_and_retired() {
-        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
         let mut h = seeded_picker_harness();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1649,6 +1650,7 @@ mod tests {
             width: body.width,
             height: body.height,
             window: 0,
+            kind: PoolKind::Grid,
         };
         assert!(
             drained_apc(&mut rx).contains(&Command::PoolRegion(expected)),

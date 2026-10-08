@@ -145,7 +145,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `scroll_region` | D | 10 B | Eased by the change between declarations |
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
-| `pool_region` | P | 16 B | Declares a smooth-scroll pool |
+| `pool_region` | P | 16 B, 17 B with kind | Declares a smooth-scroll pool |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
@@ -163,6 +163,12 @@ session control. "Head" is the fixed prefix of the first argument.
 | `zoom_capture` | C | 1 B | Claim or release the platform zoom combo |
 | `font_step` | C | 4 B | Step the terminal's font size |
 | `hello` | C | 5 args | Identifies the program; the terminal replies `ident` |
+
+From protocol version 9, a `pool_region` for a terminal pane appends a kind
+byte of 1. The terminal composites that pool every frame at the terminal font
+size and reports the cell grid it holds as a `pool_sized` line on the window
+socket. A grid pool omits the byte, so its frame stays the 16-byte head an
+older terminal reads.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

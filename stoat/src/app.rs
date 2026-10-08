@@ -2985,6 +2985,9 @@ impl Stoat {
             // nothing here answers.
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
             WindowIpcEvent::Wheel { .. } => unreachable!("wheel events return above"),
+            // The terminal answers a terminal-kind pool, and this program
+            // declares only grid pools, so no pane waits on the size.
+            WindowIpcEvent::PoolSized { .. } => return UpdateEffect::None,
         }
         UpdateEffect::Redraw
     }

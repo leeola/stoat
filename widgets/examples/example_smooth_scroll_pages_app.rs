@@ -49,7 +49,7 @@ use stoat_widgets::{
 use stoatty_protocol::command::{
     encode_panel_into, encode_pool_anchor_into, encode_pool_cursor_into, encode_reset_into,
     encode_text_run_into, BorderStyle, PanelCommand, PanelShadow, PoolAnchorCommand,
-    PoolCursorCommand, PoolRegionCommand, TextRunCommand,
+    PoolCursorCommand, PoolKind, PoolRegionCommand, TextRunCommand,
 };
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
@@ -137,6 +137,7 @@ impl Pool {
                 width,
                 height,
                 window: 0,
+                kind: PoolKind::Grid,
             },
             bg,
             label,

@@ -6,6 +6,12 @@
 
 use crate::frame;
 
+/// The kind byte of a [`PoolKind::Terminal`] pool.
+///
+/// A grid pool omits the byte, and a decoder reads any byte but this one, or
+/// none, as a grid pool.
+const POOL_KIND_TERMINAL: u8 = 1;
+
 /// Declare the sub-rectangle a smooth-scroll document pool composites into.
 ///
 /// The pool is `width` by `height` cells with its top-left at (`top`, `left`) in
@@ -32,6 +38,21 @@ pub struct PoolRegionCommand {
     /// aux window `N`, where the coordinates are relative to that window's own
     /// grid.
     pub window: u32,
+    /// How the terminal draws the pool, which rides the frame as a byte after
+    /// the head only for a [`PoolKind::Terminal`] pool.
+    pub kind: PoolKind,
+}
+
+/// How the terminal draws a pool declared by a [`PoolRegionCommand`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PoolKind {
+    /// A smooth-scroll document pool at the grid's own cell size, which the
+    /// terminal composites while it glides.
+    Grid,
+    /// A terminal pane's pool, composited every frame at the terminal font
+    /// size. The terminal reports the cell grid the region holds at that size
+    /// over the window socket, so the program sizes the pane's emulator to it.
+    Terminal,
 }
 
 /// First pool id reserved for non-pane surfaces. Split-pane editor pools
@@ -167,7 +188,13 @@ pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
         w.write_all(&command.left.to_be_bytes())?;
         w.write_all(&command.width.to_be_bytes())?;
         w.write_all(&command.height.to_be_bytes())?;
-        w.write_all(&command.window.to_be_bytes())
+        w.write_all(&command.window.to_be_bytes())?;
+        // A grid pool's frame stays the head an older terminal reads, so the
+        // kind byte rides only on a pool that needs it.
+        match command.kind {
+            PoolKind::Grid => Ok(()),
+            PoolKind::Terminal => w.write_all(&[POOL_KIND_TERMINAL]),
+        }
     });
     frame::end(out);
 }
@@ -408,7 +435,16 @@ pub fn encode_pool_drop_into(out: &mut Vec<u8>, pool: u32) {
 }
 
 pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
-    let arg: &[u8; 16] = args.first()?.get(..16)?.try_into().ok()?;
+    let full = args.first()?;
+    let arg: &[u8; 16] = full.get(..16)?.try_into().ok()?;
+    // A head that stops at the window predates the kind, so it declares a grid
+    // pool. A kind from a later version reads as a grid pool too, which is how
+    // a terminal that predates the byte draws a terminal pool, so an appended
+    // field never makes the frame drop.
+    let kind = match full.get(16).copied() {
+        Some(POOL_KIND_TERMINAL) => PoolKind::Terminal,
+        _ => PoolKind::Grid,
+    };
 
     Some(PoolRegionCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -417,6 +453,7 @@ pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> 
         width: u16::from_be_bytes([arg[8], arg[9]]),
         height: u16::from_be_bytes([arg[10], arg[11]]),
         window: u32::from_be_bytes([arg[12], arg[13], arg[14], arg[15]]),
+        kind,
     })
 }
 
@@ -506,11 +543,65 @@ mod tests {
             width: 76,
             height: 22,
             window: 2,
+            kind: PoolKind::Grid,
         };
 
         assert_eq!(
             decode(&encode_pool_region(&command)),
             Some(Command::PoolRegion(command))
+        );
+    }
+
+    /// A grid pool's frame is the 16-byte head an older terminal reads, so only
+    /// a terminal pool appends its kind, and both decode to what was declared.
+    #[test]
+    fn only_a_terminal_pool_region_appends_its_kind() {
+        let grid = PoolRegionCommand {
+            pool: 4,
+            top: 1,
+            left: 2,
+            width: 76,
+            height: 22,
+            window: 2,
+            kind: PoolKind::Grid,
+        };
+        let terminal = PoolRegionCommand {
+            kind: PoolKind::Terminal,
+            ..grid
+        };
+        let head_len = |command: &PoolRegionCommand| {
+            frame::decode(&encode_pool_region(command)).map(|frame| frame.args[0].len())
+        };
+
+        assert_eq!(
+            (
+                decode(&encode_pool_region(&terminal)),
+                head_len(&grid),
+                head_len(&terminal),
+            ),
+            (Some(Command::PoolRegion(terminal)), Some(16), Some(17)),
+        );
+    }
+
+    /// A head that stops at the window predates the kind and declares a grid
+    /// pool. A kind from a later version also reads as a grid pool, which is how
+    /// a terminal that predates the byte draws a terminal pool.
+    #[test]
+    fn an_older_head_or_an_unknown_kind_is_a_grid_pool() {
+        let head = vec![0, 0, 0, 4, 0, 1, 0, 2, 0, 76, 0, 22, 0, 0, 0, 2];
+        let kind_of = |arg: Vec<u8>| decode_pool_region(&[arg]).map(|region| region.kind);
+
+        assert_eq!(
+            [
+                kind_of(head.clone()),
+                kind_of([head.as_slice(), &[1]].concat()),
+                kind_of([head.as_slice(), &[2]].concat()),
+            ],
+            [
+                Some(PoolKind::Grid),
+                Some(PoolKind::Terminal),
+                Some(PoolKind::Grid),
+            ],
         );
     }
 

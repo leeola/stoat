@@ -60,7 +60,9 @@ the root grid. A surface owns:
 - a set of **off-grid components** bound to it (new).
 
 Everything inside a surface is uniform: one cell size, one grid. Richness lives
-in the components layered over it, never in the cells.
+in the components layered over it, never in the cells. A terminal-kind pool is
+the first surface with cell metrics of its own: a terminal pane's text at the
+terminal font size, composited over the pool's region.
 
 ### (1) Logical-line layout and integer-cell inline expansions
 

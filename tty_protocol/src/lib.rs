@@ -76,9 +76,14 @@
 /// pool. A terminal that predates it ignores those frames whole, and keeps the
 /// anchor until the pool is dropped.
 ///
+/// Version 9 reads the kind byte a `pool_region` appends for a terminal pool,
+/// and answers such a pool with a `pool_sized` line on the window socket. A
+/// terminal that predates it reads the region's head alone, so an emitter
+/// declares terminal pools only to a terminal at version 9 or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 pub mod command;
 pub mod detect;

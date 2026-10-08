@@ -29,7 +29,7 @@ use stoatty_protocol::command::{
     IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
     MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
     PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
-    PoolCursorReleaseCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand, PopoverCommand,
     RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, SketchBounds,
     SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
     TextRunCommand, WindowOpenCommand,
@@ -2741,6 +2741,7 @@ fn declare_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16) {
         width: cols,
         height: rows,
         window: 0,
+        kind: PoolKind::Grid,
     }));
 }
 
@@ -2760,6 +2761,7 @@ fn declare_window_pool(terminal: &mut Terminal, id: u32, window: u32) {
         width: 4,
         height: 2,
         window,
+        kind: PoolKind::Grid,
     }));
 }
 
@@ -4255,6 +4257,7 @@ fn a_pool_region_past_the_viewport_is_clamped() {
         width: u16::MAX,
         height: u16::MAX,
         window: 0,
+        kind: PoolKind::Grid,
     });
     stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
     stream.extend_from_slice(&encode_fill_end());
@@ -4291,6 +4294,7 @@ fn a_page_smaller_than_its_slot_shows_none_of_the_page_before_it() {
         width: 16,
         height: 16,
         window: 1,
+        kind: PoolKind::Grid,
     }));
 
     let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
@@ -4338,6 +4342,7 @@ fn a_fill_is_clamped_when_a_resize_shrinks_the_viewport_under_it() {
         width: 64,
         height: 64,
         window: 0,
+        kind: PoolKind::Grid,
     }));
 
     terminal.resize(2, 2);
@@ -4364,6 +4369,7 @@ fn project_pool_composes_into_the_declared_pool_region() {
         width: 3,
         height: 2,
         window: 0,
+        kind: PoolKind::Grid,
     });
     stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
     stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
@@ -5544,6 +5550,7 @@ fn a_graphics_frame_applies_during_a_page_fill() {
         top: 0,
         width: 8,
         height: 4,
+        kind: PoolKind::Grid,
     }));
     terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
 

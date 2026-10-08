@@ -1438,7 +1438,7 @@ fn earliest_instant(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 mod tests {
     use super::*;
     use stoatty_protocol::command::{
-        encode_fill, encode_fill_end, encode_pool_region, FillCommand, PoolRegionCommand,
+        encode_fill, encode_fill_end, encode_pool_region, FillCommand, PoolKind, PoolRegionCommand,
         SketchBounds, SketchCommand, SketchShape, SketchStyle,
     };
     use stoatty_term::{
@@ -1456,6 +1456,7 @@ mod tests {
             width: 4,
             height: 8,
             window: 0,
+            kind: PoolKind::Grid,
         }));
         let view = PoolView {
             id: 1,

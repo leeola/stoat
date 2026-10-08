@@ -78,7 +78,7 @@ pub use pool::{
     encode_pool_cursor_release, encode_pool_cursor_release_into, encode_pool_drop,
     encode_pool_drop_into, encode_pool_region, encode_pool_region_into, encode_reposition,
     encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key, FillCommand,
-    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand,
+    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
     PoolRegionCommand, RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
 };
 pub use popover::{
@@ -555,6 +555,7 @@ mod tests {
                     width: 4,
                     height: 5,
                     window: 6,
+                    kind: PoolKind::Grid,
                 }),
             ),
             (

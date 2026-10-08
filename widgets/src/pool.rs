@@ -615,7 +615,8 @@ mod tests {
         Refill, SmoothScrollState, WINDOW_PAGES,
     };
     use stoatty_protocol::command::{
-        decode, Command, PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand,
+        decode, Command, PoolDropCommand, PoolKind, PoolRegionCommand, RepositionCommand,
+        ScrollCommand,
     };
 
     fn region(pool: u32, height: u16) -> PoolRegionCommand {
@@ -626,6 +627,7 @@ mod tests {
             width: 76,
             height,
             window: 0,
+            kind: PoolKind::Grid,
         }
     }
 

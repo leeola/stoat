@@ -60,6 +60,13 @@ pub enum WindowIpcEvent {
         mods: u8,
         lines: f32,
     },
+    /// The cell grid a terminal-kind `pool` holds, `cols` by `rows` at the
+    /// terminal font size.
+    ///
+    /// The pool's region is declared in the grid's cells, which are a different
+    /// size, so only the terminal knows how many terminal cells fit in it. A
+    /// program sizes the pane's emulator and PTY to this answer.
+    PoolSized { pool: u32, cols: u16, rows: u16 },
 }
 
 /// A pointer gesture carried by [`WindowIpcEvent::Mouse`].
@@ -165,6 +172,9 @@ impl WindowIpcEvent {
                 mods,
                 lines,
             } => format!("wheel {window} {col} {row} {mods} {lines}"),
+            WindowIpcEvent::PoolSized { pool, cols, rows } => {
+                format!("pool_sized {pool} {cols} {rows}")
+            },
         }
     }
 }
@@ -224,6 +234,11 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
             row: parts.next()?.parse().ok()?,
             mods: parts.next()?.parse().ok()?,
             lines: parts.next()?.parse().ok()?,
+        },
+        "pool_sized" => WindowIpcEvent::PoolSized {
+            pool: parts.next()?.parse().ok()?,
+            cols: parts.next()?.parse().ok()?,
+            rows: parts.next()?.parse().ok()?,
         },
         _ => return None,
     };
@@ -298,6 +313,21 @@ mod tests {
             "zoom 0 -1",
             "a shrink step carries its sign on the wire"
         );
+    }
+
+    #[test]
+    fn pool_sized_events_round_trip() {
+        let event = WindowIpcEvent::PoolSized {
+            pool: 3,
+            cols: 96,
+            rows: 30,
+        };
+
+        assert_eq!(
+            (event.encode_line(), parse_line(&event.encode_line())),
+            ("pool_sized 3 96 30".to_string(), Some(event)),
+        );
+        assert_eq!(parse_line("pool_sized 3 96"), None, "missing rows");
     }
 
     #[test]
