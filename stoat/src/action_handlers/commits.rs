@@ -60,9 +60,9 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     panes.pane_mut(focus).view = View::Commits(id);
     panes.widen(focus);
 
-    drain_commits_tasks(stoat);
-    ensure_selected_preview(stoat);
-    drain_commits_tasks(stoat);
+    drain_commits_tasks(stoat, id);
+    ensure_selected_preview(stoat, id);
+    drain_commits_tasks(stoat, id);
     UpdateEffect::Redraw
 }
 
@@ -149,8 +149,11 @@ pub(crate) fn restore_covered_commits(stoat: &mut Stoat, pane: PaneId) -> bool {
 }
 
 pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect {
+    let Some(id) = stoat.active_workspace().focused_commits_id() else {
+        return UpdateEffect::None;
+    };
     let moved = {
-        let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
+        let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
             return UpdateEffect::None;
         };
         let moved = match step {
@@ -175,9 +178,9 @@ pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect 
     if !moved {
         return UpdateEffect::None;
     }
-    maybe_spawn_next_page(stoat);
-    ensure_selected_preview(stoat);
-    drain_commits_tasks(stoat);
+    maybe_spawn_next_page(stoat, id);
+    ensure_selected_preview(stoat, id);
+    drain_commits_tasks(stoat, id);
     UpdateEffect::Redraw
 }
 
@@ -214,9 +217,13 @@ pub(super) fn commits_detail_half_page(stoat: &mut Stoat, dir: i32) -> UpdateEff
 }
 
 pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(id) = stoat.active_workspace().focused_commits_id() else {
+        return UpdateEffect::None;
+    };
     let Some(repo) = stoat
         .active_workspace()
-        .focused_commits()
+        .commit_lists
+        .get(id)
         .map(|s| s.repo.clone())
     else {
         return UpdateEffect::None;
@@ -229,7 +236,7 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
         stoat.redraw_notify.clone(),
     );
     let ws = stoat.active_workspace_mut();
-    if let Some(state) = ws.focused_commits_mut() {
+    if let Some(state) = ws.commit_lists.get_mut(id) {
         state.commits.clear();
         state.reached_end = false;
         state.selected = 0;
@@ -241,17 +248,19 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
         state.requested_preview = None;
         state.pending_load = Some(task);
     }
-    drain_commits_tasks(stoat);
-    ensure_selected_preview(stoat);
-    drain_commits_tasks(stoat);
+    drain_commits_tasks(stoat, id);
+    ensure_selected_preview(stoat, id);
+    drain_commits_tasks(stoat, id);
     UpdateEffect::Redraw
 }
 
-/// Kick off another page load when the cursor is approaching the tail of
-/// the loaded window. No-op when a load is already in flight or the walk
-/// has hit a root commit.
-fn maybe_spawn_next_page(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace().focused_commits() else {
+/// Start the next page load for list `id` when its selection comes near the
+/// tail of the loaded window.
+///
+/// Does nothing while a load is in flight or after the walk reached a root
+/// commit.
+fn maybe_spawn_next_page(stoat: &mut Stoat, id: CommitListId) {
+    let Some(state) = stoat.active_workspace().commit_lists.get(id) else {
         return;
     };
     if state.pending_load.is_some() || state.reached_end {
@@ -274,22 +283,22 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
         COMMITS_INITIAL_PAGE,
         stoat.redraw_notify.clone(),
     );
-    if let Some(state) = stoat.active_workspace_mut().focused_commits_mut() {
+    if let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) {
         state.pending_load = Some(task);
     }
 }
 
-/// Spawn a background preview build for the current selection if one is
-/// not already cached, and no build is in flight for any commit. The summary
-/// lands with it, out of the same task.
+/// Spawn a background preview build for the selection of list `id` if one is
+/// not already cached, and no build is in flight for any commit of that list.
+/// The summary lands with it, out of the same task.
 ///
-/// Only one build runs at a time. Dropping a [`stoat_scheduler::Task`] leaves
-/// the blocking pool running the closure regardless, so spawning per row would
-/// stack a build for every row scrolled past ahead of the row that matters.
+/// Only one build runs at a time in a list. Dropping a [`stoat_scheduler::Task`]
+/// leaves the blocking pool running the closure regardless, so a build per row
+/// stacks one for every row scrolled past ahead of the row that matters.
 /// [`pump_commits`] returns here once the running build lands, which is what
 /// carries the selection's latest position through.
-fn ensure_selected_preview(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
+fn ensure_selected_preview(stoat: &mut Stoat, id: CommitListId) {
+    let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
         return;
     };
     let Some(sha) = state.selected_sha().map(str::to_string) else {
@@ -311,35 +320,50 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
         PreviewHighlights::from_stoat(stoat),
     );
 
-    if let Some(state) = stoat.active_workspace_mut().focused_commits_mut() {
+    if let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) {
         state.requested_preview = Some(sha.clone());
         state.pending_preview = Some(crate::commit_list::PendingPreview { sha, task });
     }
 }
 
-/// Poll both commit-list pending tasks to completion-or-pending. Called
-/// after every action handler that touches the commit list so tests
-/// which settle the scheduler see consistent state on the next render.
-fn drain_commits_tasks(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
+/// Poll both pending tasks of list `id` once, landing whichever finished.
+///
+/// Every action handler that touches a list calls this, so tests which settle
+/// the scheduler see consistent state on the next render.
+fn drain_commits_tasks(stoat: &mut Stoat, id: CommitListId) {
+    let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
         return;
     };
     state.poll_pending_load();
     state.poll_pending_preview();
 }
 
-/// Pull completed commit-list tasks into state and spawn any follow-up
-/// work unlocked by those completions (e.g. after the first log page
-/// lands we can request a preview for the selected commit). Returns true
-/// when any task landed or a new task was spawned.
+/// Pull the finished tasks of every open list into its state, and spawn the
+/// work those landings unlock, such as the preview a first page makes
+/// possible. Returns true when any task landed or a new task was spawned.
+///
+/// Every list in the active workspace loads, not only the focused one, so a
+/// list in a parked tab or an unfocused pane has its pages and its preview
+/// when the reader comes back.
 ///
 /// Called at the top of every `Stoat::render` tick so the UI reflects
 /// settled state without requiring navigation input. Also called in the
 /// test harness's `settle` loop so `assert_snapshot` sees terminal state
 /// regardless of how many scheduler ticks the work needs.
 pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
+    let ids: Vec<CommitListId> = stoat.active_workspace().commit_lists.keys().collect();
+    let mut changed = false;
+    for id in ids {
+        changed |= pump_commit_list(stoat, id);
+    }
+    changed
+}
+
+/// Land the finished tasks of list `id` and spawn what they unlock, reporting
+/// whether anything landed or started.
+fn pump_commit_list(stoat: &mut Stoat, id: CommitListId) -> bool {
     let landed = {
-        let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
+        let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
             return false;
         };
         let a = state.poll_pending_load();
@@ -347,15 +371,15 @@ pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
         a || b
     };
     let spawned_before = {
-        let Some(state) = stoat.active_workspace().focused_commits() else {
+        let Some(state) = stoat.active_workspace().commit_lists.get(id) else {
             return landed;
         };
         state.pending_load.is_some() || state.pending_preview.is_some()
     };
-    ensure_selected_preview(stoat);
-    maybe_spawn_next_page(stoat);
+    ensure_selected_preview(stoat, id);
+    maybe_spawn_next_page(stoat, id);
     let spawned_after = {
-        let Some(state) = stoat.active_workspace().focused_commits() else {
+        let Some(state) = stoat.active_workspace().commit_lists.get(id) else {
             return landed;
         };
         state.pending_load.is_some() || state.pending_preview.is_some()
@@ -557,7 +581,12 @@ mod tests {
             state.selected_sha().expect("the older commit").to_string()
         };
 
-        super::ensure_selected_preview(&mut h.stoat);
+        let list = h
+            .stoat
+            .active_workspace()
+            .focused_commits_id()
+            .expect("the list pane");
+        super::ensure_selected_preview(&mut h.stoat, list);
 
         let state = h
             .stoat
@@ -790,6 +819,48 @@ mod tests {
             ),
             (2, "a1b2c3d4".to_string(), "b2c3d4e5".to_string()),
             "each tab holds a list of its own, with a selection of its own"
+        );
+    }
+
+    /// The first list opens with nothing settled, so its first page is still
+    /// out when a new tab parks it. One pump pass reaches every list, so the
+    /// pages land together rather than one list behind another.
+    #[test]
+    fn every_open_list_keeps_loading() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommits);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommits);
+
+        h.run_until_parked();
+        super::pump_commits(&mut h.stoat);
+        let first_pass: Vec<bool> = h
+            .stoat
+            .active_workspace()
+            .commit_lists
+            .values()
+            .map(|list| !list.commits.is_empty())
+            .collect();
+        h.settle();
+
+        let loaded: Vec<(bool, bool)> = h
+            .stoat
+            .active_workspace_mut()
+            .commit_lists
+            .values_mut()
+            .map(|list| {
+                let sha = list.selected_sha().map(str::to_string);
+                let previewed = sha.is_some_and(|sha| list.preview_sessions.mark_used(&sha));
+                (!list.commits.is_empty(), previewed)
+            })
+            .collect();
+        assert_eq!(
+            (first_pass, loaded),
+            (vec![true, true], vec![(true, true), (true, true)]),
+            "one pass lands the first page of every list, and the parked tab's list has its \
+             preview as the focused one does"
         );
     }
 
@@ -1266,7 +1337,12 @@ mod tests {
             .expect("commits state")
             .move_down(1);
         assert!(moved, "the list has a row to step onto");
-        super::ensure_selected_preview(&mut h.stoat);
+        let list = h
+            .stoat
+            .active_workspace()
+            .focused_commits_id()
+            .expect("the list pane");
+        super::ensure_selected_preview(&mut h.stoat, list);
         let first = h
             .stoat
             .active_workspace()
@@ -1283,7 +1359,7 @@ mod tests {
             .focused_commits_mut()
             .expect("commits state")
             .move_down(1);
-        super::ensure_selected_preview(&mut h.stoat);
+        super::ensure_selected_preview(&mut h.stoat, list);
 
         assert_eq!(
             h.stoat
