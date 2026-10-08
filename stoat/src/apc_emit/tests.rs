@@ -2619,8 +2619,14 @@ fn commits_list_is_pooled_and_retired() {
                 .discover(std::path::Path::new("/work"))
                 .expect("the repo was just added")
         });
-    h.stoat.active_workspace_mut().commits =
-        Some(CommitListState::new(PathBuf::from("/work"), repo));
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let focus = ws.panes.focus();
+        let mut state = CommitListState::new(PathBuf::from("/work"), repo);
+        state.covered = Some(ws.panes.pane(focus).view.clone());
+        let list = ws.commit_lists.insert(state);
+        ws.panes.pane_mut(focus).view = View::Commits(list);
+    }
 
     emit_smooth_scroll(&mut h.stoat);
     let focused = {
@@ -2646,7 +2652,7 @@ fn commits_list_is_pooled_and_retired() {
         "the commits list declares a pool at its list rect"
     );
 
-    h.stoat.active_workspace_mut().commits = None;
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseCommits);
     emit_smooth_scroll(&mut h.stoat);
     let bytes = rx.try_recv().expect("leaving commits emits a drop");
     assert!(

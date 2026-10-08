@@ -70,7 +70,7 @@ pub(super) fn toggle_tab(stoat: &mut Stoat) -> UpdateEffect {
 /// Editors go through the referenced check rather than being dropped outright,
 /// since tabs share a workspace's editors and another tab may still show one.
 /// A shell that a pane of the tab covered ends with the tab, unless another
-/// view shows it.
+/// view shows it, and so does a commits list a pane covered.
 pub(super) fn close_tab(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
@@ -86,22 +86,26 @@ pub(super) fn close_tab(stoat: &mut Stoat) -> UpdateEffect {
         .collect();
     let covered: Vec<_> = closed
         .split_panes()
-        .filter_map(|(_, pane)| match pane.prev_view {
-            Some(View::Terminal(term_id)) => Some(term_id),
-            _ => None,
-        })
+        .filter_map(|(_, pane)| pane.prev_view.clone())
         .collect();
     for view in views {
         dispose_view(ws, &executor, view, EditorDisposal::GcIfUnreferenced);
     }
-    for term_id in covered {
-        if !ws.term_shown(term_id) {
-            dispose_view(
+    for view in covered {
+        match view {
+            View::Terminal(term_id) if !ws.term_shown(term_id) => dispose_view(
                 ws,
                 &executor,
                 View::Terminal(term_id),
                 EditorDisposal::GcIfUnreferenced,
-            );
+            ),
+            View::Commits(list) => dispose_view(
+                ws,
+                &executor,
+                View::Commits(list),
+                EditorDisposal::GcIfUnreferenced,
+            ),
+            _ => {},
         }
     }
 
@@ -419,9 +423,9 @@ mod tests {
         );
     }
 
-    /// The rebase todo opens from the commits list and leaves the list set
-    /// beneath it. The tab names what the todo covers, as for the other
-    /// rebase screens, and not the list out of sight.
+    /// The rebase todo opens from the commits list and leaves the list in its
+    /// pane beneath it. The tab names what the todo covers, as for the other
+    /// rebase screens, and the todo covers the list.
     #[test]
     fn a_tab_under_the_rebase_screen_keeps_its_panes_name() {
         let mut h = Stoat::test();
@@ -438,8 +442,12 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         assert_eq!(
-            (ws.rebase.is_some(), ws.commits.is_some(), ws.tab_title(0)),
-            (true, true, "scratch".to_string()),
+            (
+                ws.rebase.is_some(),
+                ws.focused_commits().is_some(),
+                ws.tab_title(0)
+            ),
+            (true, true, "commits".to_string()),
             "the todo stands over the list, and the tab keeps its pane's name",
         );
     }

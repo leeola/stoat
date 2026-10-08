@@ -344,7 +344,7 @@ pub struct Availability {
     /// The focused pane is an editor showing the side-by-side diff, so the
     /// move-provenance actions have a hunk to resolve against.
     pub diff_view_open: bool,
-    /// `workspace.commits.is_some()`.
+    /// The focused pane shows a commits list.
     pub commits_open: bool,
     /// `workspace.review_walk.is_some()`: a commit-by-commit review walk is
     /// running, whether or not one of its diffs is currently open.
@@ -392,7 +392,7 @@ impl Availability {
             in_rebase_reword,
             in_conflict,
             diff_view_open,
-            commits_open: ws.commits.is_some(),
+            commits_open: ws.focused_commits().is_some(),
             review_walk_open: ws.review_walk.is_some(),
             walkthrough_open: ws.walkthrough.is_some(),
             run_focused,

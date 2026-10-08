@@ -114,7 +114,7 @@ fn dropped_fields_for(workspace: &Workspace) -> Vec<String> {
     dropped.push("buffers".to_string());
     dropped.push("editors".to_string());
     dropped.push("panes".to_string());
-    if workspace.commits.is_some() {
+    if !workspace.commit_lists.is_empty() {
         dropped.push("commits".to_string());
     }
     dropped

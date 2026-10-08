@@ -33,7 +33,7 @@ enum StepOutcome {
 }
 
 pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(state) = stoat.active_workspace().commits.as_ref() else {
+    let Some(state) = stoat.active_workspace().focused_commits() else {
         return UpdateEffect::None;
     };
     if state.commits.is_empty() {

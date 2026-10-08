@@ -33,7 +33,7 @@ pub(crate) fn render_reword(
     let current_mode = frame.mode;
     let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, buf, scene);
+    render_overlay_status(status_area, is_focused, frame.screen, frame, buf, scene);
     if inner.width < 10 || inner.height < 4 {
         return;
     }

@@ -57,7 +57,10 @@ pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
 pub(crate) use palette::sync_palette_picker;
-pub(crate) use pane::{close_pane_by_id, restore_covered_terminal, restore_pane_after_term_exit};
+pub(crate) use pane::{
+    close_pane_by_id, dispose_view, restore_covered_terminal, restore_pane_after_term_exit,
+    EditorDisposal,
+};
 use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
@@ -1400,7 +1403,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             // A preview session bakes its per-line styles at build, so the
             // cached ones and any build already in flight carry the old theme.
             for (_, ws) in stoat.workspaces.iter_mut() {
-                if let Some(commits) = ws.commits.as_mut() {
+                for commits in ws.commit_lists.values_mut() {
                     commits.preview_sessions.clear();
                     commits.pending_preview = None;
                     commits.requested_preview = None;
@@ -1734,7 +1737,7 @@ mod tests {
 
         {
             let ws = h.stoat.active_workspace_mut();
-            let commits = ws.commits.as_mut().expect("the commits view is open");
+            let commits = ws.focused_commits_mut().expect("the commits view is open");
             let doc = Arc::new(crate::review_session::DiffDocument::default());
             commits.preview_sessions.insert("a1b2c3d4".into(), doc);
             commits.requested_preview = Some("a1b2c3d4".into());
@@ -1752,7 +1755,7 @@ mod tests {
         );
 
         let ws = h.stoat.active_workspace_mut();
-        let commits = ws.commits.as_mut().expect("still open");
+        let commits = ws.focused_commits_mut().expect("still open");
         assert_eq!(
             (
                 commits.preview_sessions.mark_used("a1b2c3d4"),

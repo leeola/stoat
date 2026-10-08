@@ -222,7 +222,15 @@ pub(crate) fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
         View::Editor(id) => id,
         _ => panic!("focused pane is not an editor"),
     };
-    let editor = ws.editors.get_mut(editor_id).expect("focused editor");
+    editor_cursor_buffer_positions(ws.editors.get_mut(editor_id).expect("focused editor"))
+}
+
+/// Buffer-space `(row, column)` of every cursor in `editor`, in selection
+/// order.
+///
+/// Reaches an editor the focused pane does not show, such as the one a commits
+/// list covers.
+pub(crate) fn editor_cursor_buffer_positions(editor: &mut EditorState) -> Vec<(u32, u32)> {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();

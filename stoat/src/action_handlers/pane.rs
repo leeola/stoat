@@ -98,32 +98,32 @@ pub(super) fn toggle_pane_widen(stoat: &mut Stoat) {
 /// `false` when the pane tree refused to close (only one split pane
 /// remains); in that case no state is touched.
 ///
-/// A shell the pane covered ends with it, unless another view shows it.
+/// A shell the pane covered ends with it, unless another view shows it. A
+/// commits list the pane covered ends with it too, since no other pane holds
+/// a list.
 pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let (view, covered) = {
         let pane = ws.panes.pane(id);
-        let covered = match pane.prev_view {
-            Some(View::Terminal(term_id)) => Some(term_id),
-            _ => None,
-        };
-        (pane.view.clone(), covered)
+        (pane.view.clone(), pane.prev_view.clone())
     };
     if !ws.panes.close(id) {
         return false;
     }
 
     dispose_view(ws, &executor, view, EditorDisposal::Remove);
-    if let Some(term_id) = covered
-        && !ws.term_shown(term_id)
-    {
-        dispose_view(
+    match covered {
+        Some(View::Terminal(term_id)) if !ws.term_shown(term_id) => dispose_view(
             ws,
             &executor,
             View::Terminal(term_id),
             EditorDisposal::Remove,
-        );
+        ),
+        Some(View::Commits(list)) => {
+            dispose_view(ws, &executor, View::Commits(list), EditorDisposal::Remove)
+        },
+        _ => {},
     }
     true
 }
@@ -192,8 +192,9 @@ pub(crate) enum EditorDisposal {
     GcIfUnreferenced,
 }
 
-/// Release whatever `view` owned, which is an editor, a run's shell, or a
-/// terminal's PTY child. A label owns nothing.
+/// Release whatever `view` owned, which is an editor, a run's shell, a
+/// terminal's PTY child, or a commits list with the view it covered. A label
+/// owns nothing.
 ///
 /// Shared by pane close and tab close, which differ only in how they treat the
 /// editor. Killing a PTY is spawned onto `executor` rather than awaited, so the
@@ -252,6 +253,13 @@ pub(crate) fn dispose_view(
                     .detach();
             }
         },
+        // A pending page or preview task drops with the state. The view the
+        // list covered is reachable through the list alone, so it goes too.
+        View::Commits(id) => match ws.commit_lists.remove(id).and_then(|list| list.covered) {
+            Some(View::Agent(term_id) | View::Terminal(term_id)) if ws.term_shown(term_id) => {},
+            Some(covered) => dispose_view(ws, executor, covered, EditorDisposal::GcIfUnreferenced),
+            None => {},
+        },
         // An image pane owns nothing to dispose. It holds a path and a size.
         View::Label(_) | View::Image { .. } => {},
     }
@@ -267,36 +275,69 @@ pub(crate) fn dispose_view(
 /// dangling capture falls back to a fresh scratch buffer so the pane never
 /// strands on a dead view.
 pub(crate) fn restore_pane_after_term_exit(stoat: &mut Stoat, pane_id: PaneId) {
+    let prev = stoat
+        .active_workspace_mut()
+        .panes
+        .pane_mut(pane_id)
+        .prev_view
+        .take();
+    show_view_or_scratch(stoat, pane_id, prev);
+}
+
+/// Point pane `pane_id` at `view`, or at a fresh scratch editor when `view` is
+/// `None` or no longer resolves against live workspace state.
+pub(crate) fn show_view_or_scratch(stoat: &mut Stoat, pane_id: PaneId, view: Option<View>) {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-
-    let prev = ws.panes.pane_mut(pane_id).prev_view.take();
-    let restored = prev.filter(|view| match view {
-        View::Editor(id) => ws.editors.contains_key(*id),
-        View::Run(id) => ws.runs.contains_key(*id),
-        View::Agent(id) | View::Terminal(id) => ws.terms.contains_key(*id),
-        // An image pane refers to nothing that could have gone away.
-        View::Image { .. } => true,
-        View::Label(_) => false,
-    });
-
-    let view = restored.unwrap_or_else(|| {
-        let (buffer_id, buffer) = ws.buffers.new_scratch();
-        let editor_id = ws.editors.insert(EditorState::new(
-            buffer_id,
-            buffer,
-            executor,
-            ws.redraw_notify.clone(),
-        ));
-        View::Editor(editor_id)
-    });
+    let view = view
+        .filter(|view| view_is_live(ws, Some(view)))
+        .unwrap_or_else(|| scratch_editor_view(ws, executor));
     ws.panes.pane_mut(pane_id).view = view;
+}
+
+/// Whether `view` names state the workspace still holds, so a pane that shows
+/// it draws something real.
+///
+/// `None` and a `Label` count as dead, so a pane never strands on placeholder
+/// text.
+pub(crate) fn view_is_live(ws: &Workspace, view: Option<&View>) -> bool {
+    match view {
+        Some(View::Editor(id)) => ws.editors.contains_key(*id),
+        Some(View::Run(id)) => ws.runs.contains_key(*id),
+        Some(View::Agent(id) | View::Terminal(id)) => ws.terms.contains_key(*id),
+        Some(View::Commits(id)) => ws.commit_lists.contains_key(*id),
+        // An image pane refers to nothing that goes away.
+        Some(View::Image { .. }) => true,
+        Some(View::Label(_)) | None => false,
+    }
+}
+
+/// A fresh scratch editor in `ws`, as the view of a pane that has nothing else
+/// to show.
+pub(crate) fn scratch_editor_view(ws: &mut Workspace, executor: Executor) -> View {
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    View::Editor(ws.editors.insert(EditorState::new(
+        buffer_id,
+        buffer,
+        executor,
+        ws.redraw_notify.clone(),
+    )))
 }
 
 pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let new_pane_id = ws.panes.split(axis);
+    // A list belongs to one pane, so the split gets an editor of its own. The
+    // source list leaves the leader mode the split was issued from, as a
+    // source editor does below.
+    if let View::Commits(source_list) = ws.panes.pane(new_pane_id).view {
+        ws.panes.pane_mut(new_pane_id).view = scratch_editor_view(ws, executor);
+        if let Some(list) = ws.commit_lists.get_mut(source_list) {
+            list.mode = "normal".into();
+        }
+        return UpdateEffect::Redraw;
+    }
     if let View::Editor(source_editor_id) = ws.panes.pane(new_pane_id).view {
         if let Some(buffer_id) = ws.editors.get(source_editor_id).map(|e| e.buffer_id)
             && let Some(buffer) = ws.buffers.get(buffer_id)
@@ -323,14 +364,7 @@ pub(super) fn split_pane_new(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         View::Editor(id) => Some(id),
         _ => None,
     };
-    let (buffer_id, buffer) = ws.buffers.new_scratch();
-    let new_editor_id = ws.editors.insert(EditorState::new(
-        buffer_id,
-        buffer,
-        executor,
-        ws.redraw_notify.clone(),
-    ));
-    ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
+    ws.panes.pane_mut(new_pane_id).view = scratch_editor_view(ws, executor);
     if let Some(source_editor_id) = source_editor_id {
         clear_split_source_mode(ws, source_editor_id);
     }

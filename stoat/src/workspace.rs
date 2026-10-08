@@ -15,14 +15,13 @@ use crate::{
         build::{reindex_buffer, IndexUpdate, ReindexTarget},
         nav::TrailState,
     },
-    commit_list::CommitListState,
+    commit_list::{CommitListId, CommitListState},
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::GitHost,
     input_history::InputHistory,
-    keymap_state,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, text, walkthrough::SlideParts},
@@ -289,9 +288,12 @@ pub struct Workspace {
     /// workspace level so a resolve outlives the pane showing it. Dropped on
     /// `CloseConflict`.
     pub(crate) conflict: Option<ConflictSession>,
-    /// Active commit-listing state (if any). Populated while the user is in `"commits"` mode and
-    /// dropped on `CloseCommits`.
-    pub(crate) commits: Option<CommitListState>,
+    /// Every open commits list in the workspace, keyed from the
+    /// [`View::Commits`] pane that shows it.
+    ///
+    /// Held here rather than by the pane, as [`Self::terms`] holds a terminal,
+    /// so each tab's list keeps its pages while the tab is parked.
+    pub(crate) commit_lists: SlotMap<CommitListId, CommitListState>,
     /// Active commit-by-commit review walk (if any). Outlives the diff view
     /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
@@ -466,7 +468,7 @@ impl Workspace {
             trail: None,
             walkthrough_exit: None,
             conflict: None,
-            commits: None,
+            commit_lists: SlotMap::with_key(),
             review_walk: None,
             ending_walk: None,
             walkthrough: None,
@@ -569,13 +571,37 @@ impl Workspace {
         }
     }
 
+    /// The list the focused split pane shows, or `None` when focus sits on a
+    /// dock or the focused pane shows something else.
+    pub(crate) fn focused_commits_id(&self) -> Option<CommitListId> {
+        let FocusTarget::SplitPane = self.focus else {
+            return None;
+        };
+        match self.panes.pane(self.panes.focus()).view {
+            View::Commits(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The state of the list the focused split pane shows.
+    pub(crate) fn focused_commits(&self) -> Option<&CommitListState> {
+        self.commit_lists.get(self.focused_commits_id()?)
+    }
+
+    /// The state of the list the focused split pane shows, to change.
+    pub(crate) fn focused_commits_mut(&mut self) -> Option<&mut CommitListState> {
+        let id = self.focused_commits_id()?;
+        self.commit_lists.get_mut(id)
+    }
+
     /// What tab `idx` calls itself in the tab bar, taken from its focused
     /// pane's view.
     ///
     /// A pane in the diff view names the diff by its two sides, as the sides
-    /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. The active tab under the
-    /// commits screen reads `commits`. An editor otherwise names its file, or
-    /// reads as scratch when it has none. A terminal or an agent names itself
+    /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. A pane that shows a commits
+    /// list reads `commits`, in a parked tab too, and so does a rebase screen
+    /// opened over that list. An editor otherwise names its file, or reads as
+    /// scratch when it has none. A terminal or an agent names itself
     /// by the title its child set, cut the same way, and by its kind until the
     /// child sets one. A run pane names its kind. An out-of-range index is
     /// empty.
@@ -606,12 +632,6 @@ impl Workspace {
             return text::truncate_to_cols(&format!("{left} → {right}"), TAB_TITLE_MAX_COLS);
         }
 
-        // The rebase screens open from the commits list and leave it set
-        // beneath them. The screen in front decides the name, not the list.
-        if idx == self.active_tab && keymap_state::view_predicate(self) == Some("commits") {
-            return "commits".to_string();
-        }
-
         match &tree.pane(tree.focus()).view {
             View::Editor(id) => self
                 .editors
@@ -622,6 +642,7 @@ impl Workspace {
                 .unwrap_or_else(|| "scratch".to_string()),
             View::Agent(id) => self.session_tab_title(*id, "agent"),
             View::Terminal(id) => self.session_tab_title(*id, "term"),
+            View::Commits(_) => "commits".to_string(),
             View::Run(_) => "run".to_string(),
             View::Image { path, .. } => path
                 .file_name()
@@ -766,7 +787,7 @@ impl Workspace {
             return false;
         };
 
-        self.commits.is_none()
+        self.commit_lists.is_empty()
             && self.rebase.is_none()
             && self.rebase_active.is_none()
             && self.runs.is_empty()
@@ -1406,6 +1427,7 @@ impl Workspace {
                 | View::Run(_)
                 | View::Agent(_)
                 | View::Terminal(_)
+                | View::Commits(_)
                 | View::Image { .. } => {},
             }
         }

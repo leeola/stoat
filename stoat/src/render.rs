@@ -48,6 +48,7 @@ use crate::{
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
+    commit_list::{CommitListId, CommitListState},
     editor_state::{EditorId, EditorState},
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
@@ -105,6 +106,8 @@ pub(crate) struct PaneCtx<'a> {
     /// The terms stoatty draws as pools at the terminal font size, see
     /// [`crate::workspace::Workspace::term_pool_grids`].
     pub(crate) term_pool_grids: &'a HashMap<TermId, (u16, u16)>,
+    /// Every open commits list, which a [`View::Commits`] pane paints from.
+    pub(crate) commit_lists: &'a mut SlotMap<CommitListId, CommitListState>,
 }
 
 /// The lookup and colors a pane needs to declare its minimap strip.
@@ -649,10 +652,7 @@ pub(crate) fn frame(
 
     let screen = crate::keymap_state::view_predicate(ws);
 
-    let overlay_pane = if matches!(
-        screen,
-        Some("commits" | "rebase" | "reword" | "rebase_conflict")
-    ) {
+    let overlay_pane = if matches!(screen, Some("rebase" | "reword" | "rebase_conflict")) {
         Some(ws.panes.focus())
     } else {
         None
@@ -811,6 +811,7 @@ pub(crate) fn frame(
                 runs: &ws.runs,
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
+                commit_lists: &mut ws.commit_lists,
             },
             frame,
             buf,
@@ -880,11 +881,7 @@ pub(crate) fn frame(
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == pane_id;
-        if screen == Some("commits") {
-            if let Some(state) = ws.commits.as_mut() {
-                commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
-            }
-        } else if screen == Some("rebase") {
+        if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_mut() {
                 rebase::render_rebase(pane, is_focused, state, frame, buf, &mut *scene);
             }
@@ -943,6 +940,7 @@ pub(crate) fn frame(
                     runs: &ws.runs,
                     terms: &ws.terms,
                     term_pool_grids: &ws.term_pool_grids,
+                    commit_lists: &mut ws.commit_lists,
                 },
                 frame,
                 buf,

@@ -568,7 +568,8 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
 /// re-read from the restored tree, or put the walk back if the return failed.
 ///
 /// A return that lands takes the walk's badge down too. The badge names the
-/// commit the walk stood on, and the tree has left it.
+/// commit the walk stood on, and the tree has left it. A commits list the walk
+/// opened from comes back in the focused pane.
 fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>) {
     if let Err(err) = restored {
         restore_walk(stoat, walk);
@@ -582,6 +583,8 @@ fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>
     // the commit, and the base must still name that commit's parent.
     stoat.active_workspace_mut().set_diff_base(None);
     super::review::exit_diff_view(stoat);
+    let focus = stoat.active_workspace().panes.focus();
+    super::commits::restore_covered_commits(stoat, focus);
     stoat
         .active_workspace_mut()
         .badges

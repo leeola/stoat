@@ -42,7 +42,7 @@ pub(crate) fn render_rebase(
 ) {
     let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, buf, scene);
+    render_overlay_status(status_area, is_focused, frame.screen, frame, buf, scene);
 
     let Some(list_area) = rebase_list_rect(pane.area) else {
         return;

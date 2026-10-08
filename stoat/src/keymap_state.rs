@@ -325,6 +325,7 @@ pub(crate) fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
         View::Run(_) => "run",
         View::Agent(_) => "agent",
         View::Terminal(_) => "terminal",
+        View::Commits(_) => "commits",
         View::Image { .. } => "image",
     })
 }
@@ -368,7 +369,7 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     if ws.rebase.is_some() {
         return Some("rebase");
     }
-    if ws.commits.is_some() {
+    if matches!(focused_view(ws), Some(View::Commits(_))) {
         return Some("commits");
     }
     if matches!(focused_view(ws), Some(View::Editor(_))) {

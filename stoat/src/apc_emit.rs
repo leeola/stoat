@@ -390,6 +390,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
                         runs: &ws.runs,
                         terms: &ws.terms,
                         term_pool_grids: &ws.term_pool_grids,
+                        commit_lists: &mut ws.commit_lists,
                     },
                     frame,
                     &mut buf,
@@ -655,7 +656,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     let commits_region = commits_screen
         .then(|| {
             let ws = stoat.active_workspace();
-            ws.commits.as_ref()?;
+            ws.focused_commits()?;
             let pane = ws.panes.pane(ws.panes.focus());
             crate::render::commits::commits_list_rect(pane.area, stoat.commits_split)
         })
@@ -1527,7 +1528,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     if let (Some(list), Some(state)) = (
         commits_region,
-        stoat.workspaces[stoat.active_workspace].commits.as_ref(),
+        stoat.workspaces[stoat.active_workspace].focused_commits(),
     ) {
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMMITS,
@@ -2279,8 +2280,9 @@ pub(crate) fn window_content_version(
             }
             input_view_version(&run.input, ws, &mut hasher)?;
         },
-        // An image pane paints one label, so it feeds no pool.
-        View::Editor(_) | View::Label(_) | View::Image { .. } => return None,
+        // An image pane paints one label, so it feeds no pool. A commits list
+        // pools its rows as a surface of its own rather than as a pane.
+        View::Editor(_) | View::Label(_) | View::Image { .. } | View::Commits(_) => return None,
     }
 
     Some(hasher.finish())

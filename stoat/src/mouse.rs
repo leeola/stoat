@@ -162,7 +162,7 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
     let ws = stoat.active_workspace();
     match crate::keymap_state::view_predicate(ws)? {
         "commits" => {
-            let state = ws.commits.as_ref()?;
+            let state = ws.focused_commits()?;
             let pane = ws.panes.pane(ws.panes.focus()).area;
             Some(ScreenSurfaces {
                 kind: ScreenKind::Commits,
@@ -2789,18 +2789,17 @@ mod tests {
     /// so a gesture the screen claims is never seen underneath it.
     fn hidden_scroll_row(h: &crate::test_harness::TestHarness) -> u32 {
         let ws = h.stoat.active_workspace();
-        let id = match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
+        let covered = ws.focused_commits().and_then(|list| list.covered.as_ref());
+        let Some(View::Editor(id)) = covered else {
+            panic!("the commits list covers no editor");
         };
-        ws.editors[id].scroll_row
+        ws.editors[*id].scroll_row
     }
 
     fn selected_commit(h: &crate::test_harness::TestHarness) -> usize {
         h.stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("the commits screen is open")
             .selected
     }
@@ -2808,8 +2807,7 @@ mod tests {
     fn detail_scroll(h: &crate::test_harness::TestHarness) -> usize {
         h.stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("the commits screen is open")
             .preview_scroll
     }
@@ -2927,8 +2925,7 @@ mod tests {
     #[test]
     fn a_click_below_the_last_commit_changes_nothing() {
         let (mut h, list) = commits_harness(3);
-        let cursors = crate::test_harness::editor::cursor_buffer_positions;
-        let before = (selected_commit(&h), cursors(&mut h.stoat));
+        let before = (selected_commit(&h), hidden_cursors(&mut h));
 
         h.stoat.update(mouse_event(
             MouseEventKind::Down(MouseButton::Left),
@@ -2937,10 +2934,20 @@ mod tests {
         ));
 
         assert_eq!(
-            (selected_commit(&h), cursors(&mut h.stoat)),
+            (selected_commit(&h), hidden_cursors(&mut h)),
             before,
             "an empty row moves neither the list nor the cursor beneath"
         );
+    }
+
+    /// The cursors of the editor the commits list covers.
+    fn hidden_cursors(h: &mut crate::test_harness::TestHarness) -> Vec<(u32, u32)> {
+        let ws = h.stoat.active_workspace_mut();
+        let covered = ws.focused_commits().and_then(|list| list.covered.clone());
+        let Some(View::Editor(id)) = covered else {
+            panic!("the commits list covers no editor");
+        };
+        crate::test_harness::editor::editor_cursor_buffer_positions(&mut ws.editors[id])
     }
 
     /// Seed a repo, open the rebase screen over a long buffer, and hand back

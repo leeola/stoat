@@ -11,8 +11,8 @@
 
 use crate::{
     action_handlers::{
-        file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump, read_open_content,
-        restore_covered_terminal, OpenContent,
+        dispose_view, file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump,
+        read_open_content, restore_covered_terminal, EditorDisposal, OpenContent,
     },
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
@@ -456,6 +456,7 @@ pub(crate) fn show_buffer_in_pane(
         .filter(|editor| editor.pinned || app::is_pinned_mode(&editor.mode))
         .map(|editor| (editor.mode.clone(), editor.pinned));
 
+    stash_commits_list(ws, target, &executor);
     let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
     if let Some((mode, pinned)) = carried_mode {
         editor.mode = mode;
@@ -493,6 +494,25 @@ pub(crate) fn show_buffer_in_pane(
     }
 
     Some(buffer_id)
+}
+
+/// Keep the commits list `target` shows behind the editor about to replace it,
+/// so a walk opened from the list returns to it.
+fn stash_commits_list(ws: &mut Workspace, target: PaneId, executor: &Executor) {
+    let View::Commits(list) = ws.panes.pane(target).view else {
+        return;
+    };
+    let pane = ws.panes.pane_mut(target);
+    if pane.prev_view.is_none() {
+        pane.prev_view = Some(View::Commits(list));
+        return;
+    }
+
+    // The pane records one view behind its front. When that slot already holds
+    // a view, such as a shell the pane covers, the list has no place to wait. A
+    // list nothing reaches holds its pages and tasks for the life of the
+    // workspace, which is worse than a walk that ends on its own file.
+    dispose_view(ws, executor, View::Commits(list), EditorDisposal::Remove);
 }
 
 /// Show the buffer the focused pane displayed before its current one.

@@ -1,4 +1,5 @@
 use crate::{
+    commit_list::CommitListId,
     editor_state::EditorId,
     jumplist::{ChangeLanding, JumpList},
     run::RunId,
@@ -78,6 +79,10 @@ pub enum View {
     Run(RunId),
     Agent(TermId),
     Terminal(TermId),
+    /// A commits list, whose state lives in the workspace's list collection
+    /// rather than in the pane, so a parked tab's id stays valid while the tab
+    /// is out of sight.
+    Commits(CommitListId),
 }
 
 /// How a pane is presented on screen.

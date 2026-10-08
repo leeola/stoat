@@ -1,7 +1,9 @@
 use crate::{
     host::{CommitFileChange, CommitInfo, GitRepo},
+    pane::View,
     review_session::DiffDocument,
 };
+use slotmap::new_key_type;
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
@@ -19,8 +21,18 @@ use stoat_scheduler::Task;
 /// covers.
 const PREVIEW_CACHE_CAP: usize = 8;
 
-/// Commit-listing state owned by a [`crate::workspace::Workspace`] while
-/// the user is in `"commits"` mode.
+new_key_type! {
+    /// Workspace-scoped key for a [`CommitListState`] in the workspace's list
+    /// collection, which a [`View::Commits`] pane names.
+    pub struct CommitListId;
+}
+
+/// One commits list, which a pane shows through [`View::Commits`] and a
+/// [`crate::workspace::Workspace`] holds in its list collection.
+///
+/// Held by the workspace rather than by the pane, as a terminal session is, so
+/// a parked tab's list keeps its pages and its selection while the tab is out
+/// of sight.
 ///
 /// The log is virtualized: `commits` holds only the pages fetched so
 /// far, and a [`CommitListState::pending_load`] task is spawned when
@@ -67,6 +79,15 @@ pub(crate) struct CommitListState {
     /// are both known. Reset to zero whenever the selection moves, because the
     /// offset belongs to the diff under it rather than to the pane.
     pub preview_scroll: usize,
+    /// The input mode while the list's pane is focused, which the keymap's
+    /// `mode == normal` guard on the commits bindings reads.
+    ///
+    /// The list's own, as a terminal session holds its own, so a chord left
+    /// pending on another pane never carries into the list.
+    pub mode: String,
+    /// The view the list replaced in its pane, which closing the list puts
+    /// back.
+    pub covered: Option<View>,
 }
 
 pub(crate) struct PendingPreview {
@@ -209,6 +230,8 @@ impl CommitListState {
             pending_preview: None,
             requested_preview: None,
             preview_scroll: 0,
+            mode: "normal".to_string(),
+            covered: None,
         }
     }
 
@@ -468,8 +491,7 @@ mod tests {
         let state = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state installed");
         assert_eq!(state.selected, 0);
         assert_eq!(
@@ -566,8 +588,7 @@ mod tests {
         let state = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state");
         assert_eq!(state.selected, 1);
         let sha = state.commits[state.selected].sha.clone();

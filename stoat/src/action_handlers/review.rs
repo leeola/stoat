@@ -77,10 +77,14 @@ pub(super) fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Op
 }
 
 pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((workdir, commit)) = stoat.active_workspace().commits.as_ref().and_then(|state| {
-        let commit = state.commits.get(state.selected)?;
-        Some((state.workdir.clone(), commit.clone()))
-    }) else {
+    let Some((workdir, commit)) = stoat
+        .active_workspace()
+        .focused_commits()
+        .and_then(|state| {
+            let commit = state.commits.get(state.selected)?;
+            Some((state.workdir.clone(), commit.clone()))
+        })
+    else {
         return UpdateEffect::None;
     };
     super::review_walk::walk_one_commit(stoat, workdir, commit)
@@ -433,8 +437,8 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
 /// and touches nothing when no editor is focused or neither half is set, so a
 /// caller can offer the exit unconditionally.
 ///
-/// While a commits list is open beneath the diff, the widen belongs to the list
-/// and stays until the list closes.
+/// While the focused pane covers a commits list beneath the diff, the widen
+/// belongs to the list and stays until the list closes.
 ///
 /// Either half being set counts as on, so this leaves a latched pane showing a
 /// clean file as readily as a diff itself.
@@ -443,7 +447,10 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
         let panes = &stoat.active_workspace().panes;
         panes.pane(panes.focus()).diff_mode
     };
-    let commits_open = stoat.active_workspace().commits.is_some();
+    let commits_open = {
+        let ws = stoat.active_workspace();
+        super::commits::covered_commits(ws, ws.panes.focus()).is_some()
+    };
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return false;
     };

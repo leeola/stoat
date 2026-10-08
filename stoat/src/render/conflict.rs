@@ -59,7 +59,14 @@ pub(crate) fn render_conflict(
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, buf, &mut *scene);
+    render_overlay_status(
+        status_area,
+        is_focused,
+        frame.screen,
+        frame,
+        buf,
+        &mut *scene,
+    );
     let Some(list_area) = conflict_list_rect(pane.area) else {
         return;
     };

@@ -6,7 +6,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, Placement, View},
     render::{
-        chrome,
+        chrome, commits,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         paint::{dim_rgb, style_rgb},
@@ -73,6 +73,7 @@ pub(crate) fn render_pane(
         runs,
         terms,
         term_pool_grids,
+        commit_lists,
     } = ctx;
 
     match &pane.view {
@@ -195,18 +196,18 @@ pub(crate) fn render_pane(
                 render_term_pane(term, theme, content_area, is_focused, buf);
             }
         },
+        // The list paints a status row of its own, so the pane status and the
+        // LSP popout above it stay off this view.
+        View::Commits(id) => {
+            if let Some(state) = commit_lists.get_mut(*id) {
+                commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
+            }
+            dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            return;
+        },
     }
 
-    if !is_focused
-        && frame.inactive_dim > 0.0
-        && let Some(bg) = style_rgb(
-            theme
-                .try_get(crate::theme::scope::UI_BACKGROUND)
-                .and_then(|s| s.bg),
-        )
-    {
-        dim_pane_content(buf, content_area, bg, frame.inactive_dim);
-    }
+    dim_unfocused_pane(content_area, is_focused, frame, buf);
 
     render_pane_status(
         &pane.view,
@@ -328,6 +329,22 @@ pub(crate) fn render_pane(
                 );
             }
         }
+    }
+}
+
+/// Dim `area` toward the theme background when the pane is unfocused, so the
+/// focused pane reads as the one keys reach.
+fn dim_unfocused_pane(area: Rect, is_focused: bool, frame: FrameCtx<'_>, buf: &mut Buffer) {
+    if !is_focused
+        && frame.inactive_dim > 0.0
+        && let Some(bg) = style_rgb(
+            frame
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+    {
+        dim_pane_content(buf, area, bg, frame.inactive_dim);
     }
 }
 
@@ -500,9 +517,13 @@ fn dim_memoized(
 /// label identifying the overlay on the left, and the pending count and the
 /// status message on the right. Matches the visual style of
 /// [`render_pane_status`] for a focused pane.
+///
+/// `screen` picks the label. A commits pane names itself, because an
+/// unfocused list is not the screen the frame reports.
 pub(crate) fn render_overlay_status(
     area: Rect,
     is_focused: bool,
+    screen: Option<&str>,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -523,7 +544,7 @@ pub(crate) fn render_overlay_status(
     }
 
     let segments = status_segments_area(area, frame.badge_cover);
-    let left = overlay_status_segments(is_focused, segments, frame);
+    let left = overlay_status_segments(is_focused, segments, screen, frame);
     let mut right: Vec<StatusSeg> = Vec::new();
     // The first right segment takes the bar's right edge, which is where the
     // pane bar paints the count.
@@ -549,7 +570,12 @@ pub(crate) fn render_overlay_status(
 /// Mode and workspace show only when focused, then a screen label that shows
 /// unconditionally, left-padded when it leads. The screen segment differs from
 /// the pane status's focus-gated one.
-fn overlay_status_segments(is_focused: bool, area: Rect, frame: FrameCtx<'_>) -> Vec<StatusSeg> {
+fn overlay_status_segments(
+    is_focused: bool,
+    area: Rect,
+    screen: Option<&str>,
+    frame: FrameCtx<'_>,
+) -> Vec<StatusSeg> {
     let theme = frame.theme;
     let base_style = if is_focused {
         theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
@@ -578,7 +604,7 @@ fn overlay_status_segments(is_focused: bool, area: Rect, frame: FrameCtx<'_>) ->
             base_style.add_modifier(Modifier::BOLD),
         );
     }
-    if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
+    if let Some((screen_label, screen_color)) = screen_segment(screen, theme) {
         let left_pad = if cursor == area.x { " " } else { "" };
         push_left(
             &mut left,
@@ -1635,6 +1661,7 @@ fn pane_status_info(
                 .unwrap_or("[term]"),
         ),
         View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
+        View::Commits(_) => owned("[commits]"),
         View::Label(label) => owned(label),
     }
 }

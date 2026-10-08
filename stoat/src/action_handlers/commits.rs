@@ -1,9 +1,11 @@
+use super::pane::EditorDisposal;
 use crate::{
     app::{Stoat, UpdateEffect},
+    commit_list::{CommitListId, CommitListState},
     display_map::syntax_theme::SyntaxStyles,
-    keymap_state,
+    pane::{PaneId, View},
     review_session::DiffDocument,
-    workspace::diff::BaseHighlightCache,
+    workspace::{diff::BaseHighlightCache, Workspace},
 };
 use std::sync::Arc;
 
@@ -23,50 +25,39 @@ pub(crate) enum CommitStep {
     Nth(usize),
 }
 
+/// Show a commits list in the focused pane, over the view the pane showed.
+///
+/// The bare command toggles the list, as `:diff` does, and `CommitsRefresh`
+/// stays the reload. A diff opened from the list stands over it, so there the
+/// command leaves the diff, and the covered list returns with its selection and
+/// loaded pages intact.
+///
+/// Each pane opens a list of its own, so a list in another pane or another tab
+/// keeps its place. Outside a git repository nothing changes.
 pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::commit_list::CommitListState;
-
-    // The bare command toggles the screen, as `:diff` does, and `CommitsRefresh`
-    // stays the reload. A diff opened from the list stands over it, so there the
-    // command leaves the diff, and the installed list returns with its selection
-    // and loaded pages intact.
-    if stoat.active_workspace().commits.is_some() {
-        if keymap_state::view_predicate(stoat.active_workspace()) == Some("commits") {
-            return close_commits(stoat);
-        }
+    if stoat.active_workspace().focused_commits_id().is_some() {
+        return close_commits(stoat);
+    }
+    let focus = stoat.active_workspace().panes.focus();
+    if covered_commits(stoat.active_workspace(), focus).is_some() {
         super::review::exit_diff_view(stoat);
+        restore_covered_commits(stoat, focus);
         return UpdateEffect::Redraw;
     }
 
-    let git_root = stoat.active_workspace().git_root.clone();
-    let Some(repo) = stoat.git_host.discover(&git_root) else {
-        tracing::warn!("open_commits: not inside a git repository");
-        return UpdateEffect::None;
-    };
-    let Some(workdir) = repo.workdir() else {
-        tracing::warn!("open_commits: git repo has no workdir");
+    let covered = stoat.active_workspace().panes.pane(focus).view.clone();
+    let Some(id) = spawn_commit_list(stoat, Some(covered)) else {
         return UpdateEffect::None;
     };
 
-    // The commits screen ranks below the diff screen, so a list installed over
-    // an open diff would never paint. Leaving the diff first is what the user
-    // otherwise does by hand. The helper gates itself, so a plain pane, widened
-    // or not, is untouched. The list then takes the full width the diff gives
-    // up.
+    // The diff ends before the list covers its editor, as the user ends one by
+    // hand, so the editor comes back plain when the list closes. The helper
+    // gates itself, so a plain pane, widened or not, is untouched. It reads the
+    // focused editor, which is why it runs before the list takes the pane.
     super::review::exit_diff_view(stoat);
 
-    let mut state = CommitListState::new(workdir, repo.clone());
-    state.pending_load = Some(spawn_commit_log_load(
-        &stoat.executor,
-        repo,
-        None,
-        COMMITS_INITIAL_PAGE,
-        stoat.redraw_notify.clone(),
-    ));
-
-    stoat.active_workspace_mut().commits = Some(state);
     let panes = &mut stoat.active_workspace_mut().panes;
-    let focus = panes.focus();
+    panes.pane_mut(focus).view = View::Commits(id);
     panes.widen(focus);
 
     drain_commits_tasks(stoat);
@@ -75,22 +66,91 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Start a commits list over the active workspace's repository, with its first
+/// page loading, and add it to the workspace's lists.
+///
+/// `covered` is the view the list replaces in its pane, which closing the list
+/// puts back. Returns `None` and adds nothing outside a git repository.
+fn spawn_commit_list(stoat: &mut Stoat, covered: Option<View>) -> Option<CommitListId> {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        tracing::warn!("open_commits: not inside a git repository");
+        return None;
+    };
+    let Some(workdir) = repo.workdir() else {
+        tracing::warn!("open_commits: git repo has no workdir");
+        return None;
+    };
+
+    let mut state = CommitListState::new(workdir, repo.clone());
+    state.covered = covered;
+    state.pending_load = Some(spawn_commit_log_load(
+        &stoat.executor,
+        repo,
+        None,
+        COMMITS_INITIAL_PAGE,
+        stoat.redraw_notify.clone(),
+    ));
+    Some(stoat.active_workspace_mut().commit_lists.insert(state))
+}
+
+/// Close the list the focused pane shows and put back the view it covered.
+///
+/// A covered view that is gone closes the pane instead. The pane tree keeps
+/// its last pane, so a last pane gets a fresh scratch editor.
 pub(super) fn close_commits(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    if ws.commits.take().is_none() {
+    let Some(id) = ws.focused_commits_id() else {
         return UpdateEffect::None;
-    }
+    };
+    let covered = ws.commit_lists.remove(id).and_then(|list| list.covered);
     let focus = ws.panes.focus();
     if ws.panes.widened() == Some(focus) {
         ws.panes.unwiden();
+    }
+
+    if super::pane::view_is_live(ws, covered.as_ref()) {
+        super::pane::show_view_or_scratch(stoat, focus, covered);
+    } else if !super::pane::close_pane_by_id(stoat, focus) {
+        super::pane::show_view_or_scratch(stoat, focus, None);
     }
     stoat.set_focused_mode("normal".to_string());
     UpdateEffect::Redraw
 }
 
+/// The live list pane `pane` covers, where a diff opened from the list stands
+/// in front of it.
+pub(crate) fn covered_commits(ws: &Workspace, pane: PaneId) -> Option<CommitListId> {
+    match ws.panes.pane(pane).prev_view {
+        Some(View::Commits(id)) if ws.commit_lists.contains_key(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// Put the list pane `pane` covers back on screen, in place of the editor a
+/// diff opened from the list put in front of it.
+///
+/// Returns `false` and changes nothing when the pane covers no live list. The
+/// editor in front goes unless another pane shows it, and the pane widens
+/// again, since the widen belongs to the list.
+pub(crate) fn restore_covered_commits(stoat: &mut Stoat, pane: PaneId) -> bool {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = covered_commits(ws, pane) else {
+        return false;
+    };
+
+    let shown = ws.panes.pane_mut(pane);
+    shown.prev_view = None;
+    let front = std::mem::replace(&mut shown.view, View::Commits(id));
+    super::pane::dispose_view(ws, &executor, front, EditorDisposal::GcIfUnreferenced);
+    ws.panes.widen(pane);
+    true
+}
+
 pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect {
     let moved = {
-        let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
+        let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
             return UpdateEffect::None;
         };
         let moved = match step {
@@ -128,7 +188,7 @@ pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect 
 /// long the diff is, and a second answer to that question drifts from the
 /// render's.
 pub(crate) fn commits_detail_scroll(stoat: &mut Stoat, rows: i32) -> UpdateEffect {
-    let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
+    let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
         return UpdateEffect::None;
     };
     let by = rows.unsigned_abs() as usize;
@@ -156,8 +216,7 @@ pub(super) fn commits_detail_half_page(stoat: &mut Stoat, dir: i32) -> UpdateEff
 pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
     let Some(repo) = stoat
         .active_workspace()
-        .commits
-        .as_ref()
+        .focused_commits()
         .map(|s| s.repo.clone())
     else {
         return UpdateEffect::None;
@@ -170,7 +229,7 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
         stoat.redraw_notify.clone(),
     );
     let ws = stoat.active_workspace_mut();
-    if let Some(state) = ws.commits.as_mut() {
+    if let Some(state) = ws.focused_commits_mut() {
         state.commits.clear();
         state.reached_end = false;
         state.selected = 0;
@@ -192,7 +251,7 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
 /// the loaded window. No-op when a load is already in flight or the walk
 /// has hit a root commit.
 fn maybe_spawn_next_page(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace().commits.as_ref() else {
+    let Some(state) = stoat.active_workspace().focused_commits() else {
         return;
     };
     if state.pending_load.is_some() || state.reached_end {
@@ -215,7 +274,7 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
         COMMITS_INITIAL_PAGE,
         stoat.redraw_notify.clone(),
     );
-    if let Some(state) = stoat.active_workspace_mut().commits.as_mut() {
+    if let Some(state) = stoat.active_workspace_mut().focused_commits_mut() {
         state.pending_load = Some(task);
     }
 }
@@ -230,7 +289,7 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
 /// [`pump_commits`] returns here once the running build lands, which is what
 /// carries the selection's latest position through.
 fn ensure_selected_preview(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
+    let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
         return;
     };
     let Some(sha) = state.selected_sha().map(str::to_string) else {
@@ -252,7 +311,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
         PreviewHighlights::from_stoat(stoat),
     );
 
-    if let Some(state) = stoat.active_workspace_mut().commits.as_mut() {
+    if let Some(state) = stoat.active_workspace_mut().focused_commits_mut() {
         state.requested_preview = Some(sha.clone());
         state.pending_preview = Some(crate::commit_list::PendingPreview { sha, task });
     }
@@ -262,7 +321,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
 /// after every action handler that touches the commit list so tests
 /// which settle the scheduler see consistent state on the next render.
 fn drain_commits_tasks(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
+    let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
         return;
     };
     state.poll_pending_load();
@@ -280,7 +339,7 @@ fn drain_commits_tasks(stoat: &mut Stoat) {
 /// regardless of how many scheduler ticks the work needs.
 pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
     let landed = {
-        let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
+        let Some(state) = stoat.active_workspace_mut().focused_commits_mut() else {
             return false;
         };
         let a = state.poll_pending_load();
@@ -288,7 +347,7 @@ pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
         a || b
     };
     let spawned_before = {
-        let Some(state) = stoat.active_workspace().commits.as_ref() else {
+        let Some(state) = stoat.active_workspace().focused_commits() else {
             return landed;
         };
         state.pending_load.is_some() || state.pending_preview.is_some()
@@ -296,7 +355,7 @@ pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
     ensure_selected_preview(stoat);
     maybe_spawn_next_page(stoat);
     let spawned_after = {
-        let Some(state) = stoat.active_workspace().commits.as_ref() else {
+        let Some(state) = stoat.active_workspace().focused_commits() else {
             return landed;
         };
         state.pending_load.is_some() || state.pending_preview.is_some()
@@ -401,7 +460,7 @@ fn spawn_commit_preview_load(
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, commit_list::Preview};
+    use crate::{app::Stoat, commit_list::Preview, pane::View, run::pty::PtyNotification};
 
     /// The commits view shares the picker's preview cache, and shared the same
     /// defect: a commit that changed nothing produced no document, the answer
@@ -433,8 +492,7 @@ mod tests {
         let state = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state");
         assert_eq!(
             state.selected_sha(),
@@ -493,8 +551,7 @@ mod tests {
             let state = h
                 .stoat
                 .active_workspace_mut()
-                .commits
-                .as_mut()
+                .focused_commits_mut()
                 .expect("commits state");
             state.selected = 1;
             state.selected_sha().expect("the older commit").to_string()
@@ -505,8 +562,7 @@ mod tests {
         let state = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state");
         assert_eq!(
             (
@@ -529,8 +585,7 @@ mod tests {
         let state = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state");
         let sha = state.selected_sha().expect("a selected commit");
 
@@ -544,10 +599,9 @@ mod tests {
         );
     }
 
-    /// The commits screen ranks below the diff screen, so a list opened over an
-    /// open diff would install its state and never paint. Opening the list
-    /// exits the diff first, which is the close-then-see the user had to do by
-    /// hand.
+    /// A list opened over a diff ends the diff first, as the user ends one by
+    /// hand. The editor under the list keeps no flag and the pane keeps no
+    /// latch, so the editor comes back plain when the list closes.
     #[test]
     fn opening_the_commits_list_exits_an_open_diff() {
         let mut h = Stoat::test();
@@ -575,11 +629,10 @@ mod tests {
         let ws = h.stoat.active_workspace();
         let latched = ws.panes.pane(ws.panes.focus()).diff_mode;
         let widened = ws.panes.widened();
-        let diff_view = h
-            .stoat
-            .focused_editor_ids()
-            .and_then(|(id, _)| h.stoat.active_workspace().editors.get(id))
-            .is_some_and(|editor| editor.diff_view);
+        let diff_view = match ws.focused_commits().and_then(|list| list.covered.as_ref()) {
+            Some(View::Editor(id)) => ws.editors.get(*id).map(|editor| editor.diff_view),
+            _ => None,
+        };
         assert_eq!(
             (
                 h.stoat.current_view(),
@@ -587,8 +640,8 @@ mod tests {
                 latched,
                 widened.is_some()
             ),
-            (Some("commits"), false, false, true),
-            "the list paints widened, and the diff left no flag or latch behind"
+            (Some("commits"), Some(false), false, true),
+            "the list paints widened over its editor, and the diff left no flag or latch behind"
         );
     }
 
@@ -621,20 +674,15 @@ mod tests {
     fn leaving_a_diff_over_the_list_keeps_the_list_widened() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        h.seed_linear_history(
-            "/repo",
-            &[
-                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
-                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
-            ],
-        );
+        seed_two_commits_on_main(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
-        h.seed_focused_buffer("changed\n");
         h.open_commits("/repo");
 
         let mut views = Vec::new();
-        for _ in 0..2 {
-            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        let review: [&dyn stoat_action::Action; 2] =
+            [&stoat_action::CommitsOpenReview, &stoat_action::ReviewDone];
+        for action in review {
+            crate::action_handlers::dispatch(&mut h.stoat, action);
             h.settle();
             views.push(h.stoat.current_view());
         }
@@ -666,7 +714,7 @@ mod tests {
             (
                 opened,
                 h.stoat.current_view(),
-                h.stoat.active_workspace().commits.is_none()
+                h.stoat.active_workspace().focused_commits().is_none()
             ),
             (Some("commits"), Some("file"), true),
             "the first command opens the list and the second closes it"
@@ -680,6 +728,397 @@ mod tests {
     fn the_commits_command_over_a_diff_returns_to_the_list() {
         let mut h = Stoat::test();
         h.resize(90, 16);
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("j");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitsOpenReview);
+        h.settle();
+        let over_diff = h.stoat.current_view();
+
+        h.open_commits("/repo");
+
+        assert_eq!(
+            (
+                over_diff,
+                h.stoat.current_view(),
+                selected(&h),
+                h.stoat.active_workspace().commit_lists.len()
+            ),
+            (Some("diff"), Some("commits"), "a1b2c3d4".to_string(), 1),
+            "the command over the diff returns to the list with its selection intact, \
+             and opens no second list"
+        );
+    }
+
+    #[test]
+    fn a_new_tab_shows_its_own_editor_beside_an_open_list() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        let new_tab = (
+            h.stoat.current_view(),
+            h.stoat.active_workspace().focused_commits().is_none(),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+
+        assert_eq!(
+            (new_tab, h.stoat.current_view()),
+            ((Some("file"), true), Some("commits")),
+            "the new tab shows its own editor, and the list waits in the tab that opened it"
+        );
+    }
+
+    #[test]
+    fn each_tab_opens_a_list_of_its_own() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.open_commits("/repo");
+        h.type_keys("j");
+        let here = selected(&h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().commit_lists.len(),
+                here,
+                selected(&h)
+            ),
+            (2, "a1b2c3d4".to_string(), "b2c3d4e5".to_string()),
+            "each tab holds a list of its own, with a selection of its own"
+        );
+    }
+
+    #[test]
+    fn closing_the_list_returns_the_pane_to_the_buffer_it_covered() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.seed_focused_buffer("covered\n");
+        let covered = h.stoat.focused_editor_ids().expect("a focused editor");
+        h.open_commits("/repo");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseCommits);
+
+        assert_eq!(
+            h.stoat.focused_editor_ids(),
+            Some(covered),
+            "the pane shows the editor the list covered"
+        );
+    }
+
+    #[test]
+    fn a_walk_opened_from_the_list_returns_to_it() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        walk_from_the_list(&mut h);
+        let walking = h.stoat.current_view();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                walking,
+                h.stoat.current_view(),
+                ws.panes.widened().is_some(),
+                ws.editors.len(),
+                ws.panes.pane(ws.panes.focus()).prev_view.is_none()
+            ),
+            (Some("diff"), Some("commits"), true, 1, true),
+            "the walk's diff stands over the list, and the walk's end returns to the \
+             list with the walk's editor gone and no record of the list left behind"
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_drops_its_list() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.open_commits("/repo");
+        let open = h.stoat.active_workspace().commit_lists.len();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseTab);
+
+        assert_eq!(
+            (open, h.stoat.active_workspace().commit_lists.len()),
+            (1, 0),
+            "the list closes with its tab"
+        );
+    }
+
+    #[test]
+    fn closing_a_list_pane_drops_the_editor_the_list_covered() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let (covered, _) = h.stoat.focused_editor_ids().expect("a focused editor");
+        h.open_commits("/repo");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.commit_lists.len(), ws.editors.contains_key(covered)),
+            (0, false),
+            "the list and the editor it covered close with the pane"
+        );
+    }
+
+    #[test]
+    fn turning_off_a_diff_over_the_list_keeps_the_widen() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        walk_from_the_list(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.stoat.active_workspace().panes.widened().is_some()
+            ),
+            (Some("file"), true),
+            "the diff closes, and the widen stays with the list beneath"
+        );
+    }
+
+    #[test]
+    fn the_list_comes_back_widened_after_the_walk_drops_the_widen() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        walk_from_the_list(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
+        let dropped = h.stoat.active_workspace().panes.widened().is_none();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert_eq!(
+            (
+                dropped,
+                h.stoat.current_view(),
+                h.stoat.active_workspace().panes.widened().is_some()
+            ),
+            (true, Some("commits"), true),
+            "the list takes the full width again when it comes back"
+        );
+    }
+
+    #[test]
+    fn closing_a_list_over_a_label_closes_the_pane_or_falls_back_to_a_scratch() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+
+        let mut closed = Vec::new();
+        for _ in 0..2 {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).view = View::Label("label".into());
+            h.open_commits("/repo");
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseCommits);
+            closed.push((
+                h.stoat.active_workspace().panes.split_pane_ids().len(),
+                h.stoat.current_view(),
+            ));
+        }
+
+        assert_eq!(
+            closed,
+            [(1, Some("file")), (1, Some("file"))],
+            "a list over a label closes its pane, and the last pane gets a scratch editor"
+        );
+    }
+
+    #[test]
+    fn a_walk_over_a_list_that_covers_a_shell_drops_the_list() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let shell = {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            let pane = ws.panes.pane_mut(focus);
+            let covering = pane
+                .prev_view
+                .take()
+                .expect("the view the terminal replaced");
+            let View::Terminal(shell) = std::mem::replace(&mut pane.view, covering) else {
+                panic!("the terminal action shows a terminal");
+            };
+            pane.prev_view = Some(View::Terminal(shell));
+            shell
+        };
+
+        walk_from_the_list(&mut h);
+
+        let ws = h.stoat.active_workspace();
+        let behind = &ws.panes.pane(ws.panes.focus()).prev_view;
+        assert_eq!(
+            (
+                ws.commit_lists.len(),
+                matches!(behind, Some(View::Terminal(id)) if *id == shell)
+            ),
+            (0, true),
+            "the pane keeps its shell behind the walk, and the list it has no slot for goes"
+        );
+    }
+
+    #[test]
+    fn closing_a_list_pane_keeps_a_shell_another_pane_shows() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let ws = h.stoat.active_workspace();
+        let View::Terminal(shell) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the split shows the shell too");
+        };
+        h.open_commits("/repo");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.commit_lists.len(), ws.terms.contains_key(shell)),
+            (0, true),
+            "the list closes with its pane, and the shell another pane shows lives on"
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_under_a_walk_drops_the_list_beneath() {
+        list_beneath_a_walk_closes_with(&stoat_action::ClosePane);
+    }
+
+    #[test]
+    fn closing_a_tab_under_a_walk_drops_the_list_beneath() {
+        list_beneath_a_walk_closes_with(&stoat_action::CloseTab);
+    }
+
+    #[test]
+    fn a_shell_over_the_list_gives_the_list_back_when_it_exits() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let ws = h.stoat.active_workspace();
+        let View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the terminal action shows a terminal");
+        };
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("commits"),
+            "the list comes back when the shell over it exits"
+        );
+    }
+
+    #[test]
+    fn splitting_a_list_pane_gives_the_new_pane_an_editor() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+        let list = h
+            .stoat
+            .active_workspace()
+            .focused_commits_id()
+            .expect("the list pane");
+
+        h.type_keys("space a s");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                ws.commit_lists.len(),
+                ws.commit_lists[list].mode.as_str()
+            ),
+            (Some("file"), 1, "normal"),
+            "the split opens an editor beside the list, and the list leaves the leader mode"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_list_dims_and_names_itself() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.open_commits("/repo");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
+        let list_pane = h.stoat.active_workspace().panes.focus();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+
+        let mut first_rows = Vec::new();
+        for dim in [0.0, 0.6] {
+            h.stoat.settings.ui_inactive_dim = Some(dim);
+            h.snapshot();
+            let area = h.stoat.active_workspace().panes.pane(list_pane).area;
+            let buf = h.rendered_buffer();
+            let row: Vec<_> = (area.x..area.right())
+                .map(|x| buf[(x, area.y)].style())
+                .collect();
+            first_rows.push(row);
+        }
+        let area = h.stoat.active_workspace().panes.pane(list_pane).area;
+        let status: String = h
+            .rendered_text()
+            .lines()
+            .nth(usize::from(area.bottom() - 1))
+            .expect("the list's status row")
+            .chars()
+            .skip(usize::from(area.x))
+            .collect();
+
+        assert_eq!(
+            (first_rows[0] != first_rows[1], status.contains("commits")),
+            (true, true),
+            "an unfocused list dims and names itself in its status row:\n{status}"
+        );
+    }
+
+    /// Walk from a list in one of two split panes of a second tab, dispatch
+    /// `action`, and assert that the list beneath the walk goes with it.
+    fn list_beneath_a_walk_closes_with(action: &dyn stoat_action::Action) {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        walk_from_the_list(&mut h);
+        let open = h.stoat.active_workspace().commit_lists.len();
+
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+
+        assert_eq!(
+            (open, h.stoat.active_workspace().commit_lists.len()),
+            (1, 0),
+            "the list beneath the walk closes with what held it"
+        );
+    }
+
+    /// Open the list over `/repo` and walk the selected commit, which puts the
+    /// commit's diff in front of the list.
+    fn walk_from_the_list(h: &mut crate::test_harness::TestHarness) {
+        h.open_commits("/repo");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitsOpenReview);
+        h.settle();
+    }
+
+    /// Seed `/repo` with two commits and HEAD on `main` at the newer one, so a
+    /// walk opened from the list has a branch to return to.
+    fn seed_two_commits_on_main(h: &mut crate::test_harness::TestHarness) {
         h.seed_linear_history(
             "/repo",
             &[
@@ -687,28 +1126,18 @@ mod tests {
                 ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
             ],
         );
-        h.seed_focused_buffer("changed\n");
-        h.open_commits("/repo");
-        h.type_keys("j");
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
-        h.settle();
-        let over_diff = h.stoat.current_view();
-
-        h.open_commits("/repo");
-
-        assert_eq!(
-            (over_diff, h.stoat.current_view(), selected(&h)),
-            (Some("diff"), Some("commits"), "a1b2c3d4".to_string()),
-            "the command over the diff returns to the list with its selection intact"
-        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "b2c3d4e5")
+            .set_head_branch("main");
+        h.fake_fs().insert_file("/repo/a.rs", b"2\n");
     }
 
     /// Returns the sha that the open commits list selects.
     fn selected(h: &crate::test_harness::TestHarness) -> String {
         h.stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state")
             .selected_sha()
             .expect("selection")
@@ -833,8 +1262,7 @@ mod tests {
         let moved = h
             .stoat
             .active_workspace_mut()
-            .commits
-            .as_mut()
+            .focused_commits_mut()
             .expect("commits state")
             .move_down(1);
         assert!(moved, "the list has a row to step onto");
@@ -842,8 +1270,7 @@ mod tests {
         let first = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .and_then(|s| s.pending_preview.as_ref())
             .map(|p| p.sha.clone());
         assert!(
@@ -853,8 +1280,7 @@ mod tests {
 
         h.stoat
             .active_workspace_mut()
-            .commits
-            .as_mut()
+            .focused_commits_mut()
             .expect("commits state")
             .move_down(1);
         super::ensure_selected_preview(&mut h.stoat);
@@ -862,8 +1288,7 @@ mod tests {
         assert_eq!(
             h.stoat
                 .active_workspace()
-                .commits
-                .as_ref()
+                .focused_commits()
                 .and_then(|s| s.pending_preview.as_ref())
                 .map(|p| p.sha.clone()),
             first,
@@ -875,8 +1300,7 @@ mod tests {
         let state = h
             .stoat
             .active_workspace()
-            .commits
-            .as_ref()
+            .focused_commits()
             .expect("commits state");
         let selected = state.selected_sha().expect("selection").to_string();
         assert!(

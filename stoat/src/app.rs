@@ -6153,9 +6153,10 @@ impl Stoat {
     ///
     /// The target is resolved the way [`Self::focused_editor_ids`] resolves it.
     /// A topmost open input modal, or else a focused editor or run pane,
-    /// supplies its editor's [`EditorState::mode`]. A focused terminal or agent
-    /// pane supplies its [`TermSession::mode`]. With no such target the mode
-    /// falls back to [`Self::fallback_mode`].
+    /// supplies its editor's [`EditorState::mode`]. A focused commits pane
+    /// supplies its list's mode, and a focused terminal or agent pane its
+    /// [`TermSession::mode`]. With no such target the mode falls back to
+    /// [`Self::fallback_mode`].
     pub(crate) fn focused_mode(&self) -> &str {
         #[cfg(test)]
         self.focused_mode_reads
@@ -6166,6 +6167,9 @@ impl Stoat {
             && let Some(editor) = ws.editors.get(editor_id)
         {
             return &editor.mode;
+        }
+        if let Some(list) = ws.focused_commits() {
+            return &list.mode;
         }
         if let Some(term_id) = self.focused_term_id()
             && let Some(term) = ws.terms.get(term_id)
@@ -6212,6 +6216,10 @@ impl Stoat {
             && let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id)
         {
             editor.mode = mode;
+            return;
+        }
+        if let Some(list) = self.active_workspace_mut().focused_commits_mut() {
+            list.mode = mode;
             return;
         }
         if let Some(term_id) = self.focused_term_id()
