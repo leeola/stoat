@@ -14,6 +14,10 @@ fn main() {
     // tree-sitter-grammars/tree-sitter-ron,
     // 78938553b93075e638035f624973083451b29055.
     compile_grammar("tree-sitter-ron", "tree-sitter-ron", "src", true);
+    // weartist/rainbow-csv-tree-sitter,
+    // d3dbf916446131417e4c2ea9eb8591b23b466d27. The grammar is named csv, so
+    // its entry point is tree_sitter_csv though its repo has another name.
+    compile_grammar("tree-sitter-csv", "rainbow-csv-tree-sitter", "src", false);
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",

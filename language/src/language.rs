@@ -424,6 +424,7 @@ impl LanguageRegistry {
                 Arc::new(make_toml()),
                 Arc::new(make_yaml()),
                 Arc::new(make_ron()),
+                Arc::new(make_csv()),
                 Arc::new(make_markdown()),
                 Arc::new(make_markdown_inline()),
             ],
@@ -784,6 +785,18 @@ fn make_ron() -> Language {
     )
 }
 
+fn make_csv() -> Language {
+    // CSV has no comment syntax and no auxiliary query, so the defaults are the
+    // whole configuration.
+    make_language(
+        "csv",
+        &["csv"],
+        grammar::csv(),
+        include_str!("../../vendor/helix/runtime/queries/csv/highlights.scm"),
+        AuxQuerySources::default(),
+    )
+}
+
 fn make_markdown() -> Language {
     // Inline nodes the block grammar emits parse as markdown-inline, for
     // emphasis, links and code spans.
@@ -887,12 +900,13 @@ mod tests {
         );
     }
 
-    const NAMES: [&str; 7] = [
+    const NAMES: [&str; 8] = [
         "rust",
         "json",
         "toml",
         "yaml",
         "ron",
+        "csv",
         "markdown",
         "markdown-inline",
     ];
@@ -951,6 +965,7 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.yaml")).unwrap().name, "yaml");
         assert_eq!(reg.for_path(Path::new("a.yml")).unwrap().name, "yaml");
         assert_eq!(reg.for_path(Path::new("a.ron")).unwrap().name, "ron");
+        assert_eq!(reg.for_path(Path::new("a.csv")).unwrap().name, "csv");
         assert_eq!(reg.for_path(Path::new("a.md")).unwrap().name, "markdown");
         assert_eq!(
             reg.for_path(Path::new("a.markdown")).unwrap().name,
@@ -1004,6 +1019,7 @@ mod tests {
                 "toml",
                 "yaml",
                 "ron",
+                "csv",
                 "markdown",
                 "markdown-inline"
             ],
