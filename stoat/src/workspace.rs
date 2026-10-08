@@ -15,7 +15,7 @@ use crate::{
         build::{reindex_buffer, IndexUpdate, ReindexTarget},
         nav::TrailState,
     },
-    commit_list::{CommitListId, CommitListState},
+    commit_list::{CommitListId, CommitListSnap, CommitListState},
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
     display_map::syntax_theme::SyntaxStyles,
@@ -294,6 +294,11 @@ pub struct Workspace {
     /// Held here rather than by the pane, as [`Self::terms`] holds a terminal,
     /// so each tab's list keeps its pages while the tab is parked.
     pub(crate) commit_lists: SlotMap<CommitListId, CommitListState>,
+    /// The saved place of each commits list a restore brought back, keyed by
+    /// the dead id its pane names, until
+    /// [`respawn_commits_panes`](crate::action_handlers::respawn_commits_panes)
+    /// gives that pane a live list.
+    pub(crate) restored_commit_lists: HashMap<CommitListId, CommitListSnap>,
     /// Active commit-by-commit review walk (if any). Outlives the diff view
     /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
@@ -469,6 +474,7 @@ impl Workspace {
             walkthrough_exit: None,
             conflict: None,
             commit_lists: SlotMap::with_key(),
+            restored_commit_lists: HashMap::new(),
             review_walk: None,
             ending_walk: None,
             walkthrough: None,

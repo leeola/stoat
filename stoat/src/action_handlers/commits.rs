@@ -1,7 +1,7 @@
 use super::pane::EditorDisposal;
 use crate::{
     app::{Stoat, UpdateEffect},
-    commit_list::{CommitListId, CommitListState},
+    commit_list::{CommitListId, CommitListSnap, CommitListState},
     display_map::syntax_theme::SyntaxStyles,
     pane::{PaneId, View},
     review_session::DiffDocument,
@@ -75,36 +75,64 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
 /// A commits pane rides `PaneTree` serde as [`View::Commits`], but the list is
 /// live state the session file does not hold, so the id is dead after a restore
 /// or a workspace copy. Each dead pane gets a list of its own with its first
-/// page loading. The selection, the scroll, and the view the list covered start
-/// over, and a pane outside a git repository gets a `Commits (closed)` label.
+/// page loading, at the place the session saved for that id. The selection
+/// returns to its commit and row once a page holds it, and the view the list
+/// covered stays for a close to return to.
 pub(crate) fn respawn_commits_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
-        let dead =
-            |view: &View| matches!(view, View::Commits(id) if !ws.commit_lists.contains_key(*id));
         ws.pane_trees()
             .enumerate()
             .flat_map(|(tree, panes)| {
                 panes
                     .split_pane_ids()
                     .into_iter()
-                    .filter(move |&id| dead(&panes.pane(id).view))
-                    .map(move |id| (tree, id))
+                    .filter_map(move |id| match panes.pane(id).view {
+                        View::Commits(list) if !ws.commit_lists.contains_key(list) => {
+                            Some((tree, id, list))
+                        },
+                        _ => None,
+                    })
             })
-            .collect::<Vec<(usize, PaneId)>>()
+            .collect::<Vec<(usize, PaneId, CommitListId)>>()
     };
 
     // `pane_trees_mut` walks the trees in the order `pane_trees` does, so the
     // index collected above names the same tree here.
-    for (tree, pane_id) in dead_panes {
-        let view = match spawn_commit_list(stoat, None) {
-            Some(id) => View::Commits(id),
-            None => View::Label("Commits (closed)".into()),
-        };
+    for (tree, pane_id, dead) in dead_panes {
+        let place = stoat
+            .active_workspace_mut()
+            .restored_commit_lists
+            .remove(&dead)
+            .unwrap_or_default();
+        let view = respawned_list_view(stoat, place);
         if let Some(panes) = stoat.active_workspace_mut().pane_trees_mut().nth(tree) {
             panes.pane_mut(pane_id).view = view;
         }
     }
+
+    // A place no pane claims belongs to a list that stood behind a diff when
+    // the session saved. A pane's `prev_view` is not saved, so nothing reaches
+    // that list again.
+    stoat.active_workspace_mut().restored_commit_lists.clear();
+}
+
+/// The view a respawned commits pane shows, which is a fresh list at the saved
+/// `place`.
+///
+/// Outside a git repository the pane shows the view the list covered, as
+/// closing the list does, or a `Commits (closed)` label when the place holds
+/// none. A restore keeps a covered view only when it resolves, so the view is
+/// live here.
+fn respawned_list_view(stoat: &mut Stoat, place: CommitListSnap) -> View {
+    let covered = place.covered.clone();
+    let Some(id) = spawn_commit_list(stoat, place.covered) else {
+        return covered.unwrap_or_else(|| View::Label("Commits (closed)".into()));
+    };
+    if let Some(list) = stoat.active_workspace_mut().commit_lists.get_mut(id) {
+        list.pending_selection = place.selection;
+    }
+    View::Commits(id)
 }
 
 /// Start a commits list over the active workspace's repository, with its first
@@ -197,6 +225,9 @@ pub(crate) fn commits_step(stoat: &mut Stoat, step: CommitStep) -> UpdateEffect 
         let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
             return UpdateEffect::None;
         };
+        // A step leaves the saved place, so a restore still waiting on its page
+        // no longer moves the selection out from under the reader.
+        state.pending_selection = None;
         let moved = match step {
             CommitStep::Up(n) => state.move_up(n),
             CommitStep::Down(n) => state.move_down(n),
@@ -296,7 +327,8 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Start the next page load for list `id` when its selection comes near the
-/// tail of the loaded window.
+/// tail of the loaded window, or while a restored selection waits for the page
+/// that holds its commit.
 ///
 /// Does nothing while a load is in flight or after the walk reached a root
 /// commit.
@@ -311,8 +343,9 @@ fn maybe_spawn_next_page(stoat: &mut Stoat, id: CommitListId) {
     if loaded == 0 {
         return;
     }
+    // A restored selection keeps the pages coming until one holds its commit.
     let within_prefetch = state.selected + COMMITS_PREFETCH_GAP >= loaded;
-    if !within_prefetch {
+    if !within_prefetch && state.pending_selection.is_none() {
         return;
     }
     let last_sha = state.commits[loaded - 1].sha.clone();
@@ -527,10 +560,11 @@ fn spawn_commit_preview_load(
 mod tests {
     use crate::{
         app::Stoat,
-        commit_list::{CommitListId, Preview},
+        commit_list::{CommitListId, CommitListSnap, Preview, SavedSelection},
         pane::View,
         run::pty::PtyNotification,
     };
+    use slotmap::SlotMap;
 
     /// The commits view shares the picker's preview cache, and shared the same
     /// defect: a commit that changed nothing produced no document, the answer
@@ -1206,6 +1240,37 @@ mod tests {
         );
     }
 
+    /// A reader who steps before a restored page lands has left the saved
+    /// place, so the page that holds it moves nothing.
+    #[test]
+    fn a_step_drops_a_waiting_selection() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+        h.stoat
+            .active_workspace_mut()
+            .focused_commits_mut()
+            .expect("commits state")
+            .pending_selection = Some(SavedSelection {
+            sha: "a1b2c3d4".into(),
+            row: 0,
+        });
+
+        h.type_keys("j r");
+        h.settle();
+
+        let waiting = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .and_then(|list| list.pending_selection.clone());
+        assert_eq!(
+            (selected(&h), waiting),
+            ("b2c3d4e5".to_string(), None),
+            "the reload lands on the top commit, not on the place the step left"
+        );
+    }
+
     #[test]
     fn a_respawn_leaves_a_live_list_alone() {
         let mut h = Stoat::test();
@@ -1220,6 +1285,39 @@ mod tests {
             (ws.focused_commits_id(), ws.commit_lists.len()),
             (live, 1),
             "the pane keeps its list, and no second list starts"
+        );
+    }
+
+    #[test]
+    fn a_respawn_outside_a_repository_shows_the_view_the_list_covered() {
+        let mut h = Stoat::test();
+        let mut ids = SlotMap::<CommitListId, ()>::with_key();
+        let (dead, unclaimed) = (ids.insert(()), ids.insert(()));
+        let ws = h.stoat.active_workspace_mut();
+        ws.git_root = "/nowhere".into();
+        let focus = ws.panes.focus();
+        let View::Editor(editor) = ws.panes.pane(focus).view else {
+            panic!("the focused pane shows an editor");
+        };
+        ws.panes.pane_mut(focus).view = View::Commits(dead);
+        for id in [dead, unclaimed] {
+            let place = CommitListSnap {
+                selection: None,
+                covered: Some(View::Editor(editor)),
+            };
+            ws.restored_commit_lists.insert(id, place);
+        }
+
+        super::respawn_commits_panes(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                matches!(ws.panes.pane(focus).view, View::Editor(id) if id == editor),
+                ws.restored_commit_lists.len()
+            ),
+            (true, 0),
+            "the pane shows the editor its list covered, and no saved place outlives the respawn"
         );
     }
 

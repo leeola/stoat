@@ -3466,6 +3466,56 @@ fn a_session_restored_in_the_background_respawns_its_commits_list_on_the_switch(
     );
 }
 
+/// The selection sits past the first page and above the viewport's last row,
+/// so the restore has to load a second page to find it and has to keep its row
+/// rather than scroll it into view from the bottom.
+///
+/// A file opened before the covered one leaves the covered editor in a reused
+/// slot, so its saved id differs from the id the restore gives it.
+#[test]
+fn a_restored_list_keeps_the_readers_place() {
+    let mut h = Stoat::test();
+    let shas: Vec<String> = (0..70).map(|i| format!("c{i:07}")).collect();
+    let specs: Vec<_> = shas
+        .iter()
+        .map(|sha| (sha.as_str(), "commit", &[("a.rs", "1\n")][..]))
+        .collect();
+    h.seed_linear_history("/repo", &specs);
+    let earlier = h.write_file("earlier.md", "first\n");
+    h.open_file(&earlier);
+    let file = h.write_file("notes.md", "hello\n");
+    h.open_file(&file);
+    h.open_commits("/repo");
+    h.type_keys("G");
+    h.settle();
+    h.type_keys("G k k k");
+    let place = |h: &crate::test_harness::TestHarness| {
+        let list = h.stoat.active_workspace().focused_commits()?;
+        Some((list.selected_sha()?.to_string(), list.scroll_top))
+    };
+    let saved = place(&h);
+    let state_path = PathBuf::from("/state/session.ron");
+    h.stoat
+        .active_workspace()
+        .save_state(&state_path, &*h.stoat.fs_host)
+        .expect("save state");
+
+    restore_into_a_fresh_workspace(&mut h, state_path);
+    let restored = place(&h);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseCommits);
+    let shown = h.stoat.focused_editor_ids().and_then(|(_, buffer)| {
+        let path = h.stoat.active_workspace().buffers.path_for(buffer)?;
+        Some(path.to_path_buf())
+    });
+
+    assert_eq!(
+        (saved.as_ref().map(|(sha, _)| sha.as_str()), restored, shown),
+        (Some("c0000003"), saved.clone(), Some(file)),
+        "the list returns to the commit and the row it stood on, and closing it \
+         returns to the file it covered"
+    );
+}
+
 /// Saves a session whose parked tab 1 shows a commits list over `/repo`, and
 /// returns the session file.
 fn save_a_session_with_a_parked_list(h: &mut crate::test_harness::TestHarness) -> PathBuf {

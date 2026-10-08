@@ -19,6 +19,7 @@
 use crate::{
     buffer::{BufferId, TextBuffer},
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
+    commit_list::{CommitListId, CommitListSnap},
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
     host::FsHost,
@@ -115,6 +116,11 @@ pub(crate) struct WorkspaceStateV1 {
     /// predate the field.
     #[serde(default)]
     pub remote: Option<RemoteTarget>,
+    /// The place of each open commits list, keyed by the id its pane names, so
+    /// a restored list returns the reader to the commit they stood on. Empty on
+    /// files that predate the field.
+    #[serde(default)]
+    pub commit_lists: Vec<(CommitListId, CommitListSnap)>,
     /// Selection endpoints owed a re-take against a compacted buffer's seed,
     /// resolved but not yet re-anchored.
     ///
@@ -362,6 +368,11 @@ impl Workspace {
             last_tab: self.last_tab,
             tab_names: self.tabs.iter().map(|tab| tab.name.clone()).collect(),
             remote: self.remote.clone(),
+            commit_lists: self
+                .commit_lists
+                .iter()
+                .map(|(id, list)| (id, list.snapshot()))
+                .collect(),
             pending_reanchors,
         }
     }
@@ -496,6 +507,18 @@ impl Workspace {
         self.palette_history = InputHistory::from_entries(state.palette_history);
         self.search_history = InputHistory::from_entries(state.search_history);
         self.code_search_history = InputHistory::from_entries(state.code_search_history);
+
+        // A covered editor comes back under a fresh id, as a pane's editor does.
+        self.restored_commit_lists = state
+            .commit_lists
+            .into_iter()
+            .map(|(id, mut snap)| {
+                if let Some(View::Editor(old)) = snap.covered {
+                    snap.covered = editor_id_map.get(&old).map(|&new| View::Editor(new));
+                }
+                (id, snap)
+            })
+            .collect();
 
         // Exactly the active slot may be empty, since that tree is in `panes`.
         let coherent = parked.len() > 1

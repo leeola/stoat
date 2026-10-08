@@ -3,6 +3,7 @@ use crate::{
     pane::View,
     review_session::DiffDocument,
 };
+use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 use std::{
     collections::{HashMap, VecDeque},
@@ -39,14 +40,9 @@ new_key_type! {
 /// the cursor approaches the tail. Previews are likewise lazy: each
 /// selected sha triggers a background build of a [`DiffDocument`] that
 /// the right pane paints.
-// FIXME: Commit list selection/scroll not persisted across workspace
-// save/load. `commits: Vec<CommitInfo>` is fetched asynchronously on open, so
-// save/restore must persist the saved selected commit's SHA (not its index),
-// and on load defer scroll restoration until the initial fetch reaches a page
-// containing that SHA. `pending_load` / `pending_preview` are in-flight task
-// handles and are intentionally not restorable. `covered` is not persisted
-// either, so closing a restored list closes its pane, or leaves a scratch
-// editor in a last pane, instead of returning to the view the list covered.
+///
+/// A saved session keeps a list as a [`CommitListSnap`], the reader's place
+/// without the pages, which reload.
 pub(crate) struct CommitListState {
     pub workdir: PathBuf,
     /// The repository the list walks, held rather than rediscovered.
@@ -90,11 +86,43 @@ pub(crate) struct CommitListState {
     /// The view the list replaced in its pane, which closing the list puts
     /// back.
     pub covered: Option<View>,
+    /// The saved selection a restored list moves onto once a loaded page
+    /// holds its commit.
+    ///
+    /// The next page keeps loading while it waits, and the walk's end drops it
+    /// when the commit is gone from the history.
+    pub pending_selection: Option<SavedSelection>,
 }
 
 pub(crate) struct PendingPreview {
     pub sha: String,
     pub task: Task<PreviewLoad>,
+}
+
+/// Where a list's selection stood when its session was saved.
+///
+/// The commit is a sha rather than an index, because new commits on top shift
+/// the indices, and a restored list loads its pages in the background.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SavedSelection {
+    pub sha: String,
+    /// The selection's row below the top of the list, so the commit comes
+    /// back where it stood on screen.
+    pub row: usize,
+}
+
+/// What a saved session keeps of one commits list, keyed in the session file
+/// by the id its pane names.
+///
+/// The pages and the previews reload from the repository, so only the reader's
+/// place survives.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct CommitListSnap {
+    pub selection: Option<SavedSelection>,
+    /// The view the list covered. Only an editor, an image, or a label is
+    /// kept, because any other view names a live session the restore does not
+    /// bring back, and a fresh session gives its id to an unrelated one.
+    pub covered: Option<View>,
 }
 
 /// What one background preview build produces.
@@ -234,6 +262,25 @@ impl CommitListState {
             preview_scroll: 0,
             mode: "normal".to_string(),
             covered: None,
+            pending_selection: None,
+        }
+    }
+
+    /// The list's place as a saved session keeps it.
+    ///
+    /// A selection still waiting on its page is the place, since the reader
+    /// has not left it.
+    pub(crate) fn snapshot(&self) -> CommitListSnap {
+        CommitListSnap {
+            selection: self.pending_selection.clone().or_else(|| {
+                self.selected_sha().map(|sha| SavedSelection {
+                    sha: sha.to_string(),
+                    row: self.selected.saturating_sub(self.scroll_top),
+                })
+            }),
+            covered: self.covered.clone().filter(|view| {
+                matches!(view, View::Editor(_) | View::Image { .. } | View::Label(_))
+            }),
         }
     }
 
@@ -299,7 +346,10 @@ impl CommitListState {
 
     /// Poll the in-flight log-load task. On completion, appends results
     /// to `commits` and updates `reached_end`. Returns true when a
-    /// result landed (caller should redraw).
+    /// result landed, which tells the caller to redraw.
+    ///
+    /// A landed page that holds the pending selection's commit moves the
+    /// selection onto it.
     pub(crate) fn poll_pending_load(&mut self) -> bool {
         let Some(mut task) = self.pending_load.take() else {
             return false;
@@ -313,6 +363,7 @@ impl CommitListState {
                 } else {
                     self.commits.extend(page);
                 }
+                self.resolve_pending_selection();
                 true
             },
             Poll::Pending => {
@@ -320,6 +371,24 @@ impl CommitListState {
                 false
             },
         }
+    }
+
+    /// Select the pending selection's commit on the row it stood on, once the
+    /// loaded pages hold it.
+    ///
+    /// The wait ends without a move when the walk reached its end, so a commit
+    /// gone from the history leaves the selection where it is.
+    fn resolve_pending_selection(&mut self) {
+        let Some(pending) = &self.pending_selection else {
+            return;
+        };
+        if let Some(index) = self.commits.iter().position(|c| c.sha == pending.sha) {
+            self.selected = index;
+            self.scroll_top = index.saturating_sub(pending.row);
+        } else if !self.reached_end {
+            return;
+        }
+        self.pending_selection = None;
     }
 
     /// Poll the in-flight preview task. On completion, caches the
@@ -353,10 +422,12 @@ impl CommitListState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Preview, PreviewCache, PREVIEW_CACHE_CAP};
+    use super::{Preview, PreviewCache, SavedSelection, PREVIEW_CACHE_CAP};
     use crate::{
         app::Stoat,
+        pane::View,
         review_session::DiffDocument,
+        term_session::TermId,
         test_harness::{CommitSpec, TestHarness},
     };
     use std::sync::Arc;
@@ -482,6 +553,69 @@ mod tests {
         h.fake_git().add_repo("/repo");
         h.open_commits("/repo");
         h.assert_snapshot("commits_empty_history");
+    }
+
+    #[test]
+    fn a_snapshot_keeps_a_waiting_selection_and_drops_a_session_view() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history("/repo", HISTORY);
+        h.open_commits("/repo");
+        let waiting = SavedSelection {
+            sha: "c1000001".into(),
+            row: 2,
+        };
+        let state = h
+            .stoat
+            .active_workspace_mut()
+            .focused_commits_mut()
+            .expect("commits state");
+        state.pending_selection = Some(waiting.clone());
+        state.covered = Some(View::Terminal(TermId::default()));
+
+        let snap = state.snapshot();
+
+        assert_eq!(
+            (snap.selection, snap.covered.is_none()),
+            (Some(waiting), true),
+            "the snapshot keeps the place a restore still waits on, and no shell id"
+        );
+    }
+
+    /// A saved commit the history no longer holds loads every page once and
+    /// then stops waiting, so a later reload does not walk the history again.
+    #[test]
+    fn a_saved_selection_gone_from_the_history_stops_waiting_at_the_end() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history("/repo", HISTORY);
+        h.open_commits("/repo");
+        h.stoat
+            .active_workspace_mut()
+            .focused_commits_mut()
+            .expect("commits state")
+            .pending_selection = Some(SavedSelection {
+            sha: "c9999999".into(),
+            row: 0,
+        });
+
+        h.type_keys("r");
+        h.settle();
+
+        let state = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("commits state");
+        assert_eq!(
+            (
+                state.pending_selection.clone(),
+                state.selected,
+                state.reached_end
+            ),
+            (None, 0, true),
+            "the walk reaches its end without the commit and drops the wait"
+        );
     }
 
     #[test]
