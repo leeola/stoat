@@ -1467,11 +1467,13 @@ mod tests {
                 left: 0,
                 width: 4,
                 height: 8,
+                kind: PoolKind::Grid,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
             anchor: None,
             content_version: 0,
+            grid: (8, 4),
         };
         (view, terminal)
     }
@@ -1661,6 +1663,7 @@ mod tests {
             width: 4,
             height: 5,
             window: 0,
+            kind: PoolKind::Grid,
         };
         let at = |col, row| {
             cursor_in_region(
@@ -1728,11 +1731,13 @@ mod tests {
                 left,
                 width: 20,
                 height: 40,
+                kind: PoolKind::Grid,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
             anchor: None,
             content_version: 0,
+            grid: (40, 20),
         };
         let (glided, still) = (view(1, 0), view(2, 20));
         let anims = BTreeMap::from([(1, PoolAnim::new(0.25)), (2, PoolAnim::new(0.5))]);

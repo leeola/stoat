@@ -4267,11 +4267,13 @@ mod tests {
                 left: 0,
                 width: 2,
                 height: 2,
+                kind: PoolKind::Grid,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
             anchor: None,
             content_version: 0,
+            grid: (2, 2),
         }];
         (terminal, pools)
     }
@@ -4305,6 +4307,7 @@ mod tests {
             left: 0,
             width: 40,
             height: 12,
+            kind: PoolKind::Grid,
         };
         let pool = PoolView {
             id: 1,
@@ -4313,6 +4316,7 @@ mod tests {
             cursor_anchor: None,
             anchor: None,
             content_version: 7,
+            grid: (12, 40),
         };
         let covered = vec![ActivePool {
             id: 1,
@@ -4364,6 +4368,7 @@ mod tests {
             left: 0,
             width: 4,
             height: 4,
+            kind: PoolKind::Grid,
         };
         let rides: Vec<_> = projection
             .rides

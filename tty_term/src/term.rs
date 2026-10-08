@@ -47,8 +47,8 @@ use stoatty_protocol::{
     command::{
         self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
         LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
-        PolylineCommand, PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
-        SketchCommand, TextRunCommand, WindowOpenCommand,
+        PolylineCommand, PoolKind, PoolRegionCommand, PopoverCommand, ScaleCommand,
+        ScrollRegionCommand, SketchCommand, TextRunCommand, WindowOpenCommand,
     },
     frame::FrameScratch,
     iterm, kitty,
@@ -476,6 +476,12 @@ pub struct Terminal {
     /// `(0, 0)` until the app calls [`Self::set_cell_pixels`]. A query is left
     /// unanswered while unset, since a zero-size reply is worse than none.
     cell_pixels: (u16, u16),
+    /// Physical pixel size of one cell at the terminal font size, which a
+    /// terminal-kind pool's pages are measured in.
+    ///
+    /// `(0, 0)` until the app calls [`Self::set_terminal_cell_pixels`], and a
+    /// terminal pool sizes its pages in grid cells while either size is unset.
+    terminal_cell_pixels: (u16, u16),
     /// Decoration commands deferred while a DEC 2026 synchronized update buffers,
     /// applied in arrival order once it ends.
     ///
@@ -788,6 +794,12 @@ pub struct PoolView {
     /// Bumped whenever the pooled page bytes change, so a renderer can tell a
     /// pure sub-cell glide from a frame whose composed content actually changed.
     pub content_version: u64,
+    /// The `(rows, cols)` the pool's pages are built at.
+    ///
+    /// A grid pool's pages match its region. A terminal pool's hold the
+    /// terminal-size cells its region fits, which [`PoolRegion::kind`] marks, so
+    /// a renderer reads its pages at that size rather than the region's.
+    pub grid: (usize, usize),
 }
 
 /// One smooth-scroll surface the document pool tracks.
@@ -798,6 +810,10 @@ pub struct PoolView {
 struct Pool {
     region: PoolRegion,
     page_pool: PagePool,
+    /// The `(rows, cols)` [`Self::page_pool`]'s pages are built at, per
+    /// [`pool_grid`]. Held because the page pool does not answer its own size,
+    /// and a re-declare compares against it to tell whether the pages move.
+    grid: (usize, usize),
     scroll_target: DocumentOffset,
     /// A pending discontinuous-jump destination from `Gstoatty;reposition`,
     /// taken once via [`Terminal::take_reposition`].
@@ -824,14 +840,11 @@ struct Pool {
 }
 
 impl Pool {
-    /// Create a pool for `region`, its page buffer sized to the region.
-    fn new(region: PoolRegion) -> Pool {
+    /// Create a pool for `region`, its page buffer built at `grid`.
+    fn new(region: PoolRegion, grid: (usize, usize)) -> Pool {
         Pool {
-            page_pool: PagePool::new(
-                region.height.max(1) as usize,
-                region.width.max(1) as usize,
-                PAGE_POOL_CAPACITY,
-            ),
+            page_pool: PagePool::new(grid.0, grid.1, PAGE_POOL_CAPACITY),
+            grid,
             region,
             scroll_target: DocumentOffset::default(),
             reposition: None,
@@ -840,6 +853,41 @@ impl Pool {
             anchor: None,
         }
     }
+}
+
+/// The `(rows, cols)` a pool over `region` builds its pages at.
+///
+/// A grid pool's pages match its region. A terminal pool's hold the cells of
+/// `terminal_cell_pixels` that fit the pixels its region spans in cells of
+/// `cell_pixels`, floored and at least one each way. While either size has a
+/// zero side, the terminal pool takes the grid answer, because the ratio of the
+/// two cells is unknown until the app sets both.
+fn pool_grid(
+    region: &PoolRegion,
+    cell_pixels: (u16, u16),
+    terminal_cell_pixels: (u16, u16),
+) -> (usize, usize) {
+    let rows = usize::from(region.height.max(1));
+    let cols = usize::from(region.width.max(1));
+    let sizes = [
+        cell_pixels.0,
+        cell_pixels.1,
+        terminal_cell_pixels.0,
+        terminal_cell_pixels.1,
+    ];
+    if region.kind == PoolKind::Grid || sizes.contains(&0) {
+        return (rows, cols);
+    }
+
+    let (cell_w, cell_h) = (usize::from(cell_pixels.0), usize::from(cell_pixels.1));
+    let (term_w, term_h) = (
+        usize::from(terminal_cell_pixels.0),
+        usize::from(terminal_cell_pixels.1),
+    );
+    (
+        (rows * cell_h / term_h).max(1),
+        (cols * cell_w / term_w).max(1),
+    )
 }
 
 /// The isolated VT context a `Gstoatty;fill` redirect paints a page into.
@@ -1026,6 +1074,7 @@ impl Terminal {
             capture: None,
             pending_events: Vec::new(),
             cell_pixels: (0, 0),
+            terminal_cell_pixels: (0, 0),
             sync_staged: Vec::new(),
         }
     }
@@ -1342,8 +1391,57 @@ impl Terminal {
     ///
     /// The app recomputes this whenever the font size or display scale factor
     /// changes. Until it is called, a pixel-size query goes unanswered.
+    ///
+    /// A terminal-kind pool measures its region in these cells, so a change
+    /// rebuilds every such pool whose grid moves, as [`Self::set_terminal_cell_pixels`]
+    /// does.
     pub fn set_cell_pixels(&mut self, width: u16, height: u16) {
         self.cell_pixels = (width, height);
+        self.resize_terminal_pools();
+    }
+
+    /// Record the physical pixel size of one cell at the terminal font size.
+    ///
+    /// A terminal-kind pool sizes its pages to the cells of this size its
+    /// region holds. A change rebuilds every such pool whose grid moves and
+    /// empties its pages for the app to refill, so a font step re-sizes the
+    /// pools without the app declaring them again.
+    pub fn set_terminal_cell_pixels(&mut self, width: u16, height: u16) {
+        self.terminal_cell_pixels = (width, height);
+        self.resize_terminal_pools();
+    }
+
+    /// Rebuild each terminal-kind pool whose grid moved under the current cell
+    /// sizes.
+    ///
+    /// A page painting into such a pool was sized for the old grid, so it is
+    /// doomed the way a re-declare that resizes the pool dooms it.
+    fn resize_terminal_pools(&mut self) {
+        let (cell, terminal_cell) = (self.cell_pixels, self.terminal_cell_pixels);
+        let mut rebuilt = Vec::new();
+        for pool in self
+            .pools
+            .values_mut()
+            .filter(|pool| pool.region.kind == PoolKind::Terminal)
+        {
+            let grid = pool_grid(&pool.region, cell, terminal_cell);
+            if pool.grid == grid {
+                continue;
+            }
+            pool.grid = grid;
+            pool.page_pool.rebuild(grid.0, grid.1);
+            pool.content_version = pool.content_version.wrapping_add(1);
+            rebuilt.push((pool.region.pool, pool.region.window));
+        }
+
+        for (id, window) in rebuilt {
+            if let Some(fill) = &mut self.fill
+                && fill.pool == id
+            {
+                fill.discard = true;
+            }
+            self.mark_window_dirty(window);
+        }
     }
 
     /// Swap the color set the projection resolves against.
@@ -1538,19 +1636,17 @@ impl Terminal {
                 let region =
                     grid::from_command::pool_region_from_command(self.clamp_region(region));
                 let window = region.window;
+                let grid = pool_grid(&region, self.cell_pixels, self.terminal_cell_pixels);
                 // Whether the declare left the pool's pages newly built or
                 // rebuilt, so a page painting into them lost the slot it started
-                // on. A re-declare at the size already held moves nothing.
+                // on. A re-declare at the grid already held moves nothing.
                 let pages_replaced = match self.pools.get_mut(&region.pool) {
                     Some(pool) => {
-                        let resized = pool.region.width != region.width
-                            || pool.region.height != region.height;
+                        let resized = pool.grid != grid;
                         pool.region = region;
                         if resized {
-                            pool.page_pool.rebuild(
-                                region.height.max(1) as usize,
-                                region.width.max(1) as usize,
-                            );
+                            pool.grid = grid;
+                            pool.page_pool.rebuild(grid.0, grid.1);
                         }
                         resized
                     },
@@ -1559,7 +1655,7 @@ impl Terminal {
                             self.warn_pool_cap(region.pool);
                             return;
                         }
-                        self.pools.insert(region.pool, Pool::new(region));
+                        self.pools.insert(region.pool, Pool::new(region, grid));
                         true
                     },
                 };
@@ -2120,6 +2216,7 @@ impl Terminal {
             cursor_anchor: pool.cursor_anchor,
             anchor: pool.anchor,
             content_version: pool.content_version,
+            grid: pool.grid,
         }
     }
 
@@ -2381,10 +2478,7 @@ impl Terminal {
         // A pool's region is already clamped, so this only bounds the fallback
         // and any pool declared before a resize shrank the viewport under it.
         let (rows, cols) = match self.pools.get(&pool) {
-            Some(pool) => (
-                pool.region.height.max(1) as usize,
-                pool.region.width.max(1) as usize,
-            ),
+            Some(pool) => pool.grid,
             None => (self.term.screen_lines(), self.term.columns()),
         };
         let rows = rows.min(self.term.screen_lines() * MAX_REGION_VIEWPORTS);

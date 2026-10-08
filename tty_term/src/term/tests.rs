@@ -2790,6 +2790,85 @@ fn window_bound_pool_is_excluded_from_the_primary_composite() {
     );
 }
 
+/// Declare terminal-kind pool `id` over a `rows` by `cols` region at the origin.
+fn declare_terminal_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16) {
+    terminal.advance(&encode_pool_region(&PoolRegionCommand {
+        pool: id,
+        top: 0,
+        left: 0,
+        width: cols,
+        height: rows,
+        window: 0,
+        kind: PoolKind::Terminal,
+    }));
+}
+
+/// Pool `id`'s page grid as its view reports it, the size of the page a fill
+/// then paints, and how many cells of that page's first two rows a fill of one
+/// full-width line marks.
+///
+/// The line fits row 0 only when the page paints through a context as wide as
+/// the page, so a narrower one wraps it onto row 1.
+fn pool_grids(terminal: &mut Terminal, id: u32) -> ((usize, usize), (usize, usize), [usize; 2]) {
+    let grid = terminal
+        .pools()
+        .into_iter()
+        .find(|view| view.id == id)
+        .expect("pool declared")
+        .grid;
+    let mut stream = encode_fill(&FillCommand { pool: id, index: 0 });
+    stream.extend_from_slice("x".repeat(grid.1).as_bytes());
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+
+    let page = pool_page(terminal, id, 0);
+    let marked = |row: usize| page.row(row).iter().filter(|cell| cell.ch == 'x').count();
+    (grid, (page.rows(), page.cols()), [marked(0), marked(1)])
+}
+
+/// A 40 by 10 region of 10 by 20 pixel cells spans 400 by 200 pixels, which
+/// holds 50 by 12 terminal cells of 8 by 16.
+#[test]
+fn a_terminal_pool_sizes_its_pages_at_the_terminal_cell_size() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    terminal.set_cell_pixels(10, 20);
+    terminal.set_terminal_cell_pixels(8, 16);
+    declare_terminal_pool(&mut terminal, 1, 10, 40);
+
+    assert_eq!(pool_grids(&mut terminal, 1), ((12, 50), (12, 50), [50, 0]));
+}
+
+#[test]
+fn a_grid_pool_ignores_the_terminal_cell_size() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    terminal.set_cell_pixels(10, 20);
+    terminal.set_terminal_cell_pixels(8, 16);
+    declare_pool(&mut terminal, 1, 10, 40);
+
+    assert_eq!(pool_grids(&mut terminal, 1), ((10, 40), (10, 40), [40, 0]));
+}
+
+/// A font step changes the terminal cell size, and a terminal pool re-sizes its
+/// pages without the app declaring it again. Its content version moves, so a
+/// renderer reads it as changed.
+#[test]
+fn a_terminal_cell_size_change_resizes_a_terminal_pool_in_place() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    terminal.set_cell_pixels(10, 20);
+    terminal.set_terminal_cell_pixels(8, 16);
+    declare_terminal_pool(&mut terminal, 1, 10, 40);
+    let before = terminal.pool_content_version(1);
+
+    terminal.set_terminal_cell_pixels(10, 20);
+    let after = terminal.pool_content_version(1);
+
+    assert_eq!(
+        (pool_grids(&mut terminal, 1), after == before),
+        (((10, 40), (10, 40), [40, 0]), false),
+        "the pages follow the new cell size and the pool reads as changed",
+    );
+}
+
 #[test]
 fn a_fill_on_a_window_pool_marks_the_window_dirty_once() {
     let mut terminal = Terminal::new(4, 8, Theme::default());

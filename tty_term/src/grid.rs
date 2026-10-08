@@ -26,7 +26,7 @@ pub(crate) mod from_command;
 /// Not projected into a grid type like the colors around it, because a run
 /// carries nothing wire-specific to project. It is a start column, a length,
 /// and a palette class, which is what the renderer reads either way.
-pub use stoatty_protocol::command::{LineSummary, MinimapRun};
+pub use stoatty_protocol::command::{LineSummary, MinimapRun, PoolKind};
 
 /// Hands out [`Grid::id`], one per grid built for the life of the process.
 ///
@@ -1807,6 +1807,9 @@ pub struct PoolRegion {
     pub left: u16,
     pub width: u16,
     pub height: u16,
+    /// Whether the pool's pages hold grid cells or terminal-pane cells at the
+    /// terminal font size, which sets the cell grid its pages are built at.
+    pub kind: PoolKind,
 }
 
 /// A fixed renderer-drawn status icon composited above the cells.

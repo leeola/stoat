@@ -119,6 +119,7 @@ pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion
         left: command.left,
         width: command.width,
         height: command.height,
+        kind: command.kind,
     }
 }
 
