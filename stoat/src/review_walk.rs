@@ -36,12 +36,11 @@ impl ReviewWalk {
         &self.commits[self.cursor]
     }
 
-    /// Move the cursor by `delta`, clamped at both ends. Returns whether it
-    /// moved, so a step off the end can be a no-op rather than wrapping around
-    /// to the other end of the history.
+    /// Move the cursor by `delta`, wrapping past either end to the other.
+    /// Returns whether it moved, which a walk of one commit never does.
     pub(crate) fn step(&mut self, delta: i32) -> bool {
-        let max = (self.commits.len() - 1) as i32;
-        let next = (self.cursor as i32 + delta).clamp(0, max) as usize;
+        let len = self.commits.len() as i32;
+        let next = (self.cursor as i32 + delta).rem_euclid(len) as usize;
         let moved = next != self.cursor;
         self.cursor = next;
         moved
@@ -96,14 +95,16 @@ mod tests {
     }
 
     #[test]
-    fn step_clamps_at_both_ends_without_wrapping() {
+    fn step_wraps_past_both_ends() {
         let mut w = walk(2);
-        assert!(!w.step(-1), "already at the oldest commit");
-        assert_eq!(w.cursor, 0);
+        let past_the_base = (w.step(-1), w.cursor);
+        let past_the_tip = (w.step(1), w.cursor);
 
-        assert!(w.step(1));
-        assert!(!w.step(1), "already at the tip");
-        assert_eq!(w.cursor, 1);
+        assert_eq!(
+            (past_the_base, past_the_tip),
+            ((true, 1), (true, 0)),
+            "a step past the base lands on the tip, and one past the tip on the base"
+        );
     }
 
     #[test]

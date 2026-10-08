@@ -2263,7 +2263,7 @@ mod tests {
     }
 
     #[test]
-    fn stepping_checks_each_commit_out_and_clamps_at_the_tip() {
+    fn stepping_checks_each_commit_out_and_wraps_at_the_tip() {
         let mut h = harness();
         start_walk(&mut h);
 
@@ -2283,8 +2283,19 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
         h.settle();
-        assert_eq!(walk_cursor(&h), Some(2), "a step past the tip is a no-op");
-        assert_eq!(checkouts(&h).len(), 3, "and checks nothing else out");
+        assert_eq!(
+            (walk_cursor(&h), checkouts(&h)),
+            (
+                Some(0),
+                vec![
+                    "detached:a1b2c3d4".to_string(),
+                    "detached:b2c3d4e5".to_string(),
+                    "detached:c3d4e5f6".to_string(),
+                    "detached:a1b2c3d4".to_string(),
+                ]
+            ),
+            "a step past the tip wraps to the base and checks it out"
+        );
     }
 
     /// A checkout walks the tree and writes files, and the dirty guard ahead of
@@ -2375,7 +2386,11 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewPrevCommit);
         h.settle();
-        assert_eq!(walk_cursor(&h), Some(0), "a step past the base is a no-op");
+        assert_eq!(
+            (walk_cursor(&h), checkouts(&h).last().map(String::as_str)),
+            (Some(2), Some("detached:c3d4e5f6")),
+            "a step past the base wraps to the tip"
+        );
     }
 
     #[test]

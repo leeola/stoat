@@ -397,7 +397,7 @@ define_action!(
     ActionKind::ReviewNextCommit,
     "review the next commit",
     "Step a review walk one commit toward the ref tip, checking that commit \
-     out and showing its diff. Does nothing at the tip. Refuses while the \
+     out and showing its diff. Wraps to the base past the tip. Refuses while the \
      working tree has uncommitted changes to tracked files.",
     ActionPriority::Rare,
     command_name = "review-next-commit"
@@ -410,7 +410,7 @@ define_action!(
     ActionKind::ReviewPrevCommit,
     "review the previous commit",
     "Step a review walk one commit back toward its base, checking that commit \
-     out and showing its diff. Does nothing at the base. Refuses while the \
+     out and showing its diff. Wraps to the tip past the base. Refuses while the \
      working tree has uncommitted changes to tracked files.",
     ActionPriority::Rare,
     command_name = "review-prev-commit"
