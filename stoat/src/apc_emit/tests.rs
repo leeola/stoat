@@ -2621,7 +2621,6 @@ fn commits_list_is_pooled_and_retired() {
         });
     h.stoat.active_workspace_mut().commits =
         Some(CommitListState::new(PathBuf::from("/work"), repo));
-    h.stoat.set_focused_mode("commits".to_string());
 
     emit_smooth_scroll(&mut h.stoat);
     let focused = {
@@ -2647,7 +2646,6 @@ fn commits_list_is_pooled_and_retired() {
         "the commits list declares a pool at its list rect"
     );
 
-    h.stoat.set_focused_mode("normal".to_string());
     h.stoat.active_workspace_mut().commits = None;
     emit_smooth_scroll(&mut h.stoat);
     let bytes = rx.try_recv().expect("leaving commits emits a drop");

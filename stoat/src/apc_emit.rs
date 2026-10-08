@@ -648,9 +648,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             )
         });
 
-    // The commits overlay renders into the focused pane; its left list pools
-    // as a non-pane surface while editor panes stay suppressed in this mode.
-    let commits_region = (stoat.focused_mode() == "commits")
+    // The commits screen renders into the focused pane. Its left list pools as
+    // a non-pane surface, while the editor panes stay suppressed under it.
+    let commits_screen =
+        crate::keymap_state::view_predicate(stoat.active_workspace()) == Some("commits");
+    let commits_region = commits_screen
         .then(|| {
             let ws = stoat.active_workspace();
             ws.commits.as_ref()?;
