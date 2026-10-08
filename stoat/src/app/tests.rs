@@ -3421,6 +3421,67 @@ fn a_restored_session_reopens_the_terminal_of_a_parked_tab() {
     );
 }
 
+/// A restored commits pane names a list that died with the last run, so the
+/// restore gives a pane in a parked tab a live list of its own, as it gives a
+/// terminal pane a shell.
+#[test]
+fn a_restored_session_reopens_the_commits_list_of_a_parked_tab() {
+    let mut h = Stoat::test();
+    let state_path = save_a_session_with_a_parked_list(&mut h);
+
+    restore_into_a_fresh_workspace(&mut h, state_path);
+
+    let ws = h.stoat.active_workspace_mut();
+    let switched = ws.switch_tab(1);
+    let live = match ws.panes.pane(ws.panes.focus()).view {
+        View::Commits(id) => ws.commit_lists.contains_key(id),
+        _ => false,
+    };
+    assert_eq!(
+        (switched, live, ws.commit_lists.len()),
+        (true, true, 1),
+        "the parked tab's pane names a live list, the only one"
+    );
+}
+
+/// A list reads the root of the active workspace, so a restore in the
+/// background starts none, and the switch to that workspace gives its commits
+/// pane a live list.
+#[test]
+fn a_session_restored_in_the_background_respawns_its_commits_list_on_the_switch() {
+    let mut h = Stoat::test();
+    let state_path = save_a_session_with_a_parked_list(&mut h);
+    let target = restore_into_a_background_workspace(&mut h, state_path);
+    let lists =
+        |h: &crate::test_harness::TestHarness| h.stoat.workspaces[target].commit_lists.len();
+    let before = lists(&h);
+
+    h.set_active_workspace(target);
+    h.stoat.drive_background();
+
+    assert_eq!(
+        (before, lists(&h)),
+        (0, 1),
+        "the restore waits for the switch to start the list"
+    );
+}
+
+/// Saves a session whose parked tab 1 shows a commits list over `/repo`, and
+/// returns the session file.
+fn save_a_session_with_a_parked_list(h: &mut crate::test_harness::TestHarness) -> PathBuf {
+    h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "1\n")])]);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    h.open_commits("/repo");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::PrevTab);
+
+    let state_path = PathBuf::from("/state/session.ron");
+    h.stoat
+        .active_workspace()
+        .save_state(&state_path, &*h.stoat.fs_host)
+        .expect("save state");
+    state_path
+}
+
 /// How many `did_open`s for `restored.txt` reached the server.
 fn restored_opens(h: &crate::test_harness::TestHarness) -> usize {
     h.fake_lsp()

@@ -42,10 +42,11 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     stoat.workspaces[id].id = id;
     switch_active_workspace(stoat, id);
 
-    // The copy round-trips through to_state/apply_state, so any terminal pane
-    // arrives with a dead session id. Respawn gives the copy its own shells
-    // rather than dangling references into the source workspace.
+    // The copy round-trips through to_state/apply_state, so any terminal or
+    // commits pane arrives with a dead id. Respawn gives the copy its own shells
+    // and lists rather than dangling references into the source workspace.
     super::respawn_terminal_panes(stoat);
+    super::respawn_commits_panes(stoat);
     UpdateEffect::Redraw
 }
 

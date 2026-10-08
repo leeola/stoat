@@ -66,6 +66,47 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Start a fresh list for every commits pane of the active workspace whose list
+/// did not survive, then point the pane at it.
+///
+/// The panes of every tab count, a parked one included, so a tab shows a live
+/// list when the reader next switches to it.
+///
+/// A commits pane rides `PaneTree` serde as [`View::Commits`], but the list is
+/// live state the session file does not hold, so the id is dead after a restore
+/// or a workspace copy. Each dead pane gets a list of its own with its first
+/// page loading. The selection, the scroll, and the view the list covered start
+/// over, and a pane outside a git repository gets a `Commits (closed)` label.
+pub(crate) fn respawn_commits_panes(stoat: &mut Stoat) {
+    let dead_panes = {
+        let ws = stoat.active_workspace();
+        let dead =
+            |view: &View| matches!(view, View::Commits(id) if !ws.commit_lists.contains_key(*id));
+        ws.pane_trees()
+            .enumerate()
+            .flat_map(|(tree, panes)| {
+                panes
+                    .split_pane_ids()
+                    .into_iter()
+                    .filter(move |&id| dead(&panes.pane(id).view))
+                    .map(move |id| (tree, id))
+            })
+            .collect::<Vec<(usize, PaneId)>>()
+    };
+
+    // `pane_trees_mut` walks the trees in the order `pane_trees` does, so the
+    // index collected above names the same tree here.
+    for (tree, pane_id) in dead_panes {
+        let view = match spawn_commit_list(stoat, None) {
+            Some(id) => View::Commits(id),
+            None => View::Label("Commits (closed)".into()),
+        };
+        if let Some(panes) = stoat.active_workspace_mut().pane_trees_mut().nth(tree) {
+            panes.pane_mut(pane_id).view = view;
+        }
+    }
+}
+
 /// Start a commits list over the active workspace's repository, with its first
 /// page loading, and add it to the workspace's lists.
 ///
@@ -74,11 +115,11 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
 fn spawn_commit_list(stoat: &mut Stoat, covered: Option<View>) -> Option<CommitListId> {
     let git_root = stoat.active_workspace().git_root.clone();
     let Some(repo) = stoat.git_host.discover(&git_root) else {
-        tracing::warn!("open_commits: not inside a git repository");
+        tracing::warn!("spawn_commit_list: not inside a git repository");
         return None;
     };
     let Some(workdir) = repo.workdir() else {
-        tracing::warn!("open_commits: git repo has no workdir");
+        tracing::warn!("spawn_commit_list: git repo has no workdir");
         return None;
     };
 
@@ -484,7 +525,12 @@ fn spawn_commit_preview_load(
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, commit_list::Preview, pane::View, run::pty::PtyNotification};
+    use crate::{
+        app::Stoat,
+        commit_list::{CommitListId, Preview},
+        pane::View,
+        run::pty::PtyNotification,
+    };
 
     /// The commits view shares the picker's preview cache, and shared the same
     /// defect: a commit that changed nothing produced no document, the answer
@@ -1157,6 +1203,44 @@ mod tests {
             (first_rows[0] != first_rows[1], status.contains("commits")),
             (true, true),
             "an unfocused list dims and names itself in its status row:\n{status}"
+        );
+    }
+
+    #[test]
+    fn a_respawn_leaves_a_live_list_alone() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        h.open_commits("/repo");
+        let live = h.stoat.active_workspace().focused_commits_id();
+
+        super::respawn_commits_panes(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.focused_commits_id(), ws.commit_lists.len()),
+            (live, 1),
+            "the pane keeps its list, and no second list starts"
+        );
+    }
+
+    #[test]
+    fn a_respawn_outside_a_repository_leaves_a_closed_label() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        ws.git_root = "/nowhere".into();
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).view = View::Commits(CommitListId::default());
+
+        super::respawn_commits_panes(&mut h.stoat);
+
+        let label = match &h.stoat.active_workspace().panes.pane(focus).view {
+            View::Label(label) => Some(label.clone()),
+            _ => None,
+        };
+        assert_eq!(
+            label.as_deref(),
+            Some("Commits (closed)"),
+            "a pane outside a repository shows that its list closed"
         );
     }
 

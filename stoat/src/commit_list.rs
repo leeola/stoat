@@ -44,7 +44,9 @@ new_key_type! {
 // save/restore must persist the saved selected commit's SHA (not its index),
 // and on load defer scroll restoration until the initial fetch reaches a page
 // containing that SHA. `pending_load` / `pending_preview` are in-flight task
-// handles and are intentionally not restorable.
+// handles and are intentionally not restorable. `covered` is not persisted
+// either, so closing a restored list closes its pane, or leaves a scratch
+// editor in a last pane, instead of returning to the view the list covered.
 pub(crate) struct CommitListState {
     pub workdir: PathBuf,
     /// The repository the list walks, held rather than rediscovered.

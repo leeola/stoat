@@ -4560,9 +4560,9 @@ impl Stoat {
     /// target the user edited while the restore ran, no longer
     /// [`Workspace::is_fresh`], is left untouched so live state is never
     /// clobbered. Otherwise the buffers and panes install. When the target is
-    /// still active, the restored files open with their language servers and
-    /// terminals respawn. A target the reader switched away from waits for
-    /// [`Self::start_background_restore`] instead.
+    /// still active, the restored files open with their language servers, and
+    /// terminals and commits lists respawn. A target the reader switched away
+    /// from waits for [`Self::start_background_restore`] instead.
     fn install_pending_workspace_restore(&mut self) {
         let pending = self
             .pending_workspace_restore
@@ -4621,17 +4621,20 @@ impl Stoat {
         }
         crate::lsp::drain::reopen_buffers(self, None);
         action_handlers::respawn_terminal_panes(self);
+        action_handlers::respawn_commits_panes(self);
         if self.active_workspace().remote.is_some() {
             self.remote_pending = true;
             ssh::reconnect_when_ready(self);
         }
     }
 
-    /// Start the restored buffers and terminal panes of the active workspace
-    /// when its restore installed while another workspace was active.
+    /// Start the restored buffers, terminal panes, and commits panes of the
+    /// active workspace when its restore installed while another workspace was
+    /// active.
     ///
-    /// A server spawn and a terminal shell read the active workspace's root and
-    /// environment, so this waits for the switch. Running from
+    /// A server spawn, a terminal shell, and a commits list read the active
+    /// workspace's root, and the first two its environment, so this waits for
+    /// the switch. Running from
     /// [`Self::drive_background`] serves every path that makes the workspace
     /// active. The environment load has started by then, so a subprocess
     /// server still waits for the direnv diff, as at an in-place restore.
@@ -4644,6 +4647,7 @@ impl Stoat {
         }
         crate::lsp::drain::reopen_buffers(self, None);
         action_handlers::respawn_terminal_panes(self);
+        action_handlers::respawn_commits_panes(self);
     }
 
     /// Persist a workspace's state, serializing it off this thread.

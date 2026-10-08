@@ -52,7 +52,7 @@ use crate::{
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace::diff::WorktreeBase,
 };
-pub(crate) use commits::pump_commits;
+pub(crate) use commits::{pump_commits, respawn_commits_panes};
 pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
@@ -3031,6 +3031,31 @@ mod tests {
         assert_ne!(
             source_uid, copy_uid,
             "copy must have its own uid so both workspaces can persist",
+        );
+    }
+
+    #[test]
+    fn copy_workspace_gives_a_commits_pane_a_list_of_its_own() {
+        let mut h = Stoat::test();
+        h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "1\n")])]);
+        h.open_commits("/repo");
+        let source = h.stoat.active_workspace;
+
+        dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
+
+        let copy = h.stoat.active_workspace();
+        let live = match copy.panes.pane(copy.panes.focus()).view {
+            View::Commits(id) => copy.commit_lists.contains_key(id),
+            _ => false,
+        };
+        assert_eq!(
+            (
+                live,
+                copy.commit_lists.len(),
+                h.stoat.workspaces[source].commit_lists.len()
+            ),
+            (true, 1, 1),
+            "the copy's commits pane names a list of its own, and the source keeps its list"
         );
     }
 
