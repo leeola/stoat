@@ -4145,7 +4145,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
                 .offset_to_point(cursor_offset(rope, tail_off, head_off))
                 .row;
             let rows = nth_hunk_rows(&hunk_rows, cursor_row, dir, count)?;
-            Some((sel.id, hunk_span(rope, rows.clone()), rows))
+            Some((sel.id, stop_landing_cell(rope, rows.clone()), rows))
         })
         .collect();
 
@@ -4185,16 +4185,13 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             let (start, end, reversed) = if extend {
                 extend_span(rope, tail_offset, target)
             } else {
-                // One landing point per hunk, whichever way the walk arrived:
-                // the selection covers the stop and the cursor sits on its
-                // first row. A hunk that presented two faces made a reversal
-                // land the same hunk again rather than step to its neighbor.
-                //
-                // The repeat still steps out from that row. `Next` keeps stops
-                // starting past the cursor, and a stop's own start never is,
-                // while `Prev` keeps stops ending at or before it, which a
-                // non-empty stop's own end never is.
-                (target.start, target.end, true)
+                // One landing cell per stop, whichever way the walk arrived, so
+                // a reversal steps to the neighbor rather than re-landing the
+                // stop in hand. The repeat still steps out: `Next` keeps stops
+                // starting past the cursor row, and a stop's own first row
+                // never is, while `Prev` keeps stops ending at or before it,
+                // which a non-empty stop's own end never is.
+                (target.start, target.end, false)
             };
 
             Selection {
@@ -4309,7 +4306,7 @@ pub(super) fn departure_stop(
 /// instead of landing on that one again.
 ///
 /// A deletion hunk stores no rows and occupies its seam row, the row
-/// [`hunk_span`] lands it on. A step forward off that row passes over it, and a
+/// [`stop_landing_cell`] lands it on. A step forward off that row passes over it, and a
 /// step back from the row below lands on it.
 ///
 /// Both arms split the list at a boundary rather than filter it. The stops a
@@ -4387,7 +4384,7 @@ pub(super) fn goto_last_change(stoat: &mut Stoat) -> UpdateEffect {
     goto_edge_change(stoat, true)
 }
 
-/// Select the buffer's first or last change hunk.
+/// Put the cursor on the first row of the buffer's first or last change hunk.
 ///
 /// Nothing at all happens where there is no hunk, the origin included, so a
 /// press in an unchanged buffer leaves the jumplist as it was.
@@ -4408,7 +4405,7 @@ fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
             true => rows.last().cloned(),
             false => rows.first().cloned(),
         };
-        rows.map(|rows| hunk_span(buffer_snapshot.rope(), rows))
+        rows.map(|rows| stop_landing_cell(buffer_snapshot.rope(), rows))
     };
     let Some(target) = target else {
         return UpdateEffect::None;
@@ -4423,35 +4420,27 @@ fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     editor.selections.set_single_range(
         buffer_snapshot.anchor_at(target.start, Bias::Left),
         buffer_snapshot.anchor_at(target.end, Bias::Right),
-        // The same one landing point the stepping walk lands: the cursor on the
-        // stop's first row, so an edge jump and a step onto the same hunk leave
-        // the reader in the same place.
-        true,
+        // The same one landing cell the stepping walk lands, so an edge jump
+        // and a step onto the same hunk leave the reader in the same place.
+        false,
         SelectionGoal::None,
     );
     UpdateEffect::Redraw
 }
 
-/// Byte span a stop's rows cover, from the first row through the start of the
-/// row after the last.
+/// The one cell a walk lands on, the first grapheme of the stop's first row.
 ///
-/// A deletion stop holds no rows, so it gets one cell on its seam row, the
-/// first row after the removed lines. The block cursor has no place to sit in
-/// an empty span, and the diff view splices the deleted block directly above
-/// the seam row. A removal of a file's last lines with no trailing newline has
-/// its seam row past the last row, so the cell clamps to the last row.
-fn hunk_span(rope: &Rope, rows: Range<u32>) -> Range<usize> {
+/// A removal has no rows of its own, so it lands on the row after the removed
+/// lines, where the diff view splices the deleted block. A removal of a file's
+/// last lines with no trailing newline has no row after them, so the cell
+/// clamps to the last row.
+fn stop_landing_cell(rope: &Rope, rows: Range<u32>) -> Range<usize> {
     let first_row = match rows.is_empty() {
         true => rows.start.min(rope.max_point().row),
         false => rows.start,
     };
     let start = rope.point_to_offset(Point::new(first_row, 0));
-    let end = if rows.is_empty() {
-        rope.next_grapheme_boundary(start)
-    } else {
-        rope.point_to_offset(Point::new(rows.end, 0))
-    };
-    start..end
+    start..rope.next_grapheme_boundary(start)
 }
 
 /// A cross-file changed hop whose scan has not landed yet.
@@ -4773,7 +4762,7 @@ fn first_hunk_stop(
     // space this answer travels in, so reading them here needs no shift.
     let stop_row = |hunk: &diff_map::DiffHunk, last: bool| {
         // A deletion covers no rows and lands on its seam row, as the in-file
-        // walk does through hunk_span.
+        // walk does through stop_landing_cell.
         if hunk.buffer_line_range.is_empty() {
             return hunk.buffer_start_line;
         }

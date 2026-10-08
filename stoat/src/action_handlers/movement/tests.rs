@@ -6305,24 +6305,24 @@ fn goto_last_change_reaches_the_end_past_the_cursor() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 6, true)],
+        vec![(4, 5, false)],
         "test setup: on the first hunk",
     );
 
     dispatch(&mut h.stoat, &stoat_action::GotoLastChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
 
     dispatch(&mut h.stoat, &stoat_action::GotoFirstChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 6, true)],
+        vec![(4, 5, false)],
         "and the first reaches back",
     );
 
     dispatch(&mut h.stoat, &stoat_action::JumpBackward);
     assert_eq!(
         h.selection_spans(),
-        vec![(10, 12, true)],
+        vec![(10, 11, false)],
         "the origin went on the jumplist before the landing",
     );
 }
@@ -6363,13 +6363,13 @@ fn goto_next_change_jumps_forward() {
     install_diff_hunks(&mut h, &[2, 5]);
 
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(4, 6, true)]);
+    assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(10, 12, true)],
+        vec![(10, 11, false)],
         "the last hunk holds when there is no next one",
     );
 }
@@ -6406,7 +6406,7 @@ fn goto_next_change_lands_on_the_gutter_row_after_an_insert_above() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(14, 16, true)],
+        vec![(14, 15, false)],
         "and the jump lands on that row, not the one the diff recorded",
     );
 }
@@ -6425,12 +6425,12 @@ fn repeat_last_motion_replays_a_change_jump() {
     h.type_keys("f c");
     assert_eq!(h.primary_head_offset(), 4, "the find lands first");
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
 
     dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
     assert_eq!(
         h.selection_spans(),
-        vec![(12, 14, true)],
+        vec![(12, 13, false)],
         "the next hunk, not the c the earlier find would have reached",
     );
 }
@@ -6446,7 +6446,7 @@ fn goto_next_change_uses_a_background_populated_diff_map() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(2, 4, true)],
+        vec![(2, 3, false)],
         "the background-populated diff map drives GotoNextChange to the modified row",
     );
 }
@@ -6460,13 +6460,13 @@ fn goto_prev_change_jumps_backward() {
     h.type_keys("g j");
 
     dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
-    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
     dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
-    assert_eq!(h.selection_spans(), vec![(4, 6, true)]);
+    assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
     dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 6, true)],
+        vec![(4, 5, false)],
         "the first hunk holds when there is no earlier one",
     );
 }
@@ -6498,7 +6498,7 @@ fn count_prefix_goto_next_change_jumps_n_changes() {
     h.open_file(&path);
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("2 ] g");
-    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
 }
 
 /// `]c` means comment, where change keeps `]g` to itself.
@@ -6540,7 +6540,7 @@ fn count_prefix_goto_prev_change_jumps_back_n_changes() {
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("g j");
     h.type_keys("2 [ g");
-    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
 }
 
 #[test]
@@ -6550,11 +6550,11 @@ fn count_prefix_goto_next_change_clamps_at_last() {
     h.open_file(&path);
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("9 ] g");
-    assert_eq!(h.selection_spans(), vec![(16, 18, true)]);
+    assert_eq!(h.selection_spans(), vec![(16, 17, false)]);
 }
 
 #[test]
-fn goto_next_change_selects_a_multi_line_hunk_whole() {
+fn goto_next_change_lands_on_the_first_row_of_a_multi_line_hunk() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
     h.open_file(&path);
@@ -6563,8 +6563,8 @@ fn goto_next_change_selects_a_multi_line_hunk_whole() {
     h.type_keys("] g");
     assert_eq!(
         h.selection_spans(),
-        vec![(4, 10, true)],
-        "rows 2 through 4, not the first row alone",
+        vec![(4, 5, false)],
+        "the first row of rows 2 through 4, one cell wide",
     );
 }
 
@@ -6659,9 +6659,9 @@ fn a_landing_has_one_edge() {
 
     assert_eq!(
         (hunk("g k", "] g"), hunk("g j", "[ g")),
-        (vec![(4, 10, true)], vec![(4, 10, true)]),
-        "the hunk over rows 2 through 4 lands its first row from above and \
-         from below alike",
+        (vec![(4, 5, false)], vec![(4, 5, false)]),
+        "the hunk over rows 2 through 4 lands one cell on its first row from above \
+         and from below alike",
     );
 }
 
@@ -6687,13 +6687,30 @@ fn a_reversal_alternates_between_neighbor_hunks() {
     assert_eq!(
         (first, second, back, forward_again),
         (
-            vec![(4, 6, true)],
-            vec![(10, 12, true)],
-            vec![(4, 6, true)],
-            vec![(10, 12, true)],
+            vec![(4, 5, false)],
+            vec![(10, 11, false)],
+            vec![(4, 5, false)],
+            vec![(10, 11, false)],
         ),
         "each press steps to the neighbor, and the reversal returns to the \
          hunk before it rather than re-landing the one in hand",
+    );
+}
+
+#[test]
+fn a_walk_in_select_mode_extends_to_the_landing_cell() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, std::slice::from_ref(&(2..5)));
+
+    h.type_keys("v");
+    h.type_keys("] g");
+
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 5, false)],
+        "the anchor stays at the top and the head reaches the landing cell, not the hunk's end",
     );
 }
 
@@ -6702,14 +6719,14 @@ fn a_reversal_alternates_between_neighbor_hunks() {
 /// lines, where the gutter paints the deletion mark and the staging keys read
 /// it.
 #[test]
-fn goto_next_change_selects_one_cell_on_a_deletion_seam_row() {
+fn goto_next_change_lands_one_cell_on_a_deletion_seam_row() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
     h.open_file(&path);
     install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
 
     h.type_keys("] g");
-    assert_eq!(h.selection_spans(), vec![(6, 7, true)]);
+    assert_eq!(h.selection_spans(), vec![(6, 7, false)]);
 }
 
 /// A removal at the top of the file has row 0 as its seam row, so it lands on
@@ -6723,7 +6740,7 @@ fn goto_next_change_lands_a_top_of_file_deletion_on_row_zero() {
     set_range(&mut h, 4, 5);
 
     h.type_keys("[ g");
-    assert_eq!(h.selection_spans(), vec![(0, 1, true)]);
+    assert_eq!(h.selection_spans(), vec![(0, 1, false)]);
 }
 
 /// The walk reads a removal as occupying its seam row, the row it lands on, so
@@ -6747,7 +6764,7 @@ fn the_change_walk_reads_a_deletion_as_the_row_it_lands_on() {
 
     assert_eq!(
         (off_the_landing, back_from_below),
-        (vec![(12, 14, true)], vec![(6, 7, true)]),
+        (vec![(12, 13, false)], vec![(6, 7, false)]),
         "a step forward off the seam row reaches the next hunk, and a step back \
          from the row below the seam reaches the removal",
     );
@@ -6770,7 +6787,7 @@ fn goto_prev_change_steps_out_of_the_hunk_it_sits_in() {
     h.type_keys("[ g");
     assert_eq!(
         h.selection_spans(),
-        vec![(0, 2, true)],
+        vec![(0, 1, false)],
         "the earlier hunk, not the one row 3 is inside",
     );
 }
@@ -6783,7 +6800,7 @@ fn select_mode_next_change_extends_to_the_hunk() {
     install_diff_hunks(&mut h, &[5]);
 
     h.type_keys("v ] g");
-    assert_eq!(h.selection_spans(), vec![(0, 12, false)]);
+    assert_eq!(h.selection_spans(), vec![(0, 11, false)]);
 }
 
 #[test]
@@ -6811,7 +6828,7 @@ fn select_mode_next_change_extends_from_a_reversed_anchor() {
     h.type_keys("v ] g");
     assert_eq!(
         h.selection_spans(),
-        vec![(7, 12, false)],
+        vec![(7, 11, false)],
         "the span starts at the anchor, not at the head it just left",
     );
 }
@@ -6843,7 +6860,7 @@ fn goto_next_change_walks_every_cursor_to_its_own_hunk() {
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
         h.selection_spans(),
-        vec![(2, 4, true), (10, 12, true)],
+        vec![(2, 3, false), (10, 11, false)],
         "row 0 reaches the first hunk, row 1 the second",
     );
 }
