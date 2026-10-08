@@ -105,12 +105,12 @@ use crate::{
             SetRebaseOpSquash,
         },
         review::{
-            Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit, DiffBaseToggle,
-            DiffBold, DiffForward, DiffPair, DiffSyntax, DiffTintDown, DiffTintUp, DiffUnderline,
-            DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
-            JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone, ReviewNextCommit,
-            ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk, ToggleStageLine, UnstageHunk,
-            UnstageLine,
+            ChangeWalkWrap, Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
+            DiffBaseToggle, DiffBold, DiffForward, DiffPair, DiffSyntax, DiffTintDown, DiffTintUp,
+            DiffUnderline, DiffWheelWalk, GitReview, JumpToMoveSource, JumpToMoveTarget,
+            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
+            ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
+            ToggleStageLine, UnstageHunk, UnstageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -325,6 +325,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(Diff { rev }))
     });
     add(DiffWheelWalk::DEF, |_| Ok(Box::new(DiffWheelWalk)));
+    add(ChangeWalkWrap::DEF, |_| Ok(Box::new(ChangeWalkWrap)));
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
     add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
     add(DiffSyntax::DEF, |_| Ok(Box::new(DiffSyntax)));
@@ -1360,6 +1361,7 @@ mod tests {
         "FollowChanges",
         "LiveReload",
         "DiffWheelWalk",
+        "ChangeWalkWrap",
         "DiffUnderline",
         "DiffBold",
         "DiffSyntax",
@@ -1882,13 +1884,14 @@ mod tests {
         // + 1 FollowChanges.
         // + 1 LiveReload.
         // + 1 DiffWheelWalk.
+        // + 1 ChangeWalkWrap.
         // + 2 DiffAgainstIndex/DiffAgainstHead.
         // + 2 DiffBack/DiffForward.
         // + 1 DiffBaseToggle.
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        assert_eq!(all().count(), 437);
+        assert_eq!(all().count(), 438);
     }
 
     #[test]

@@ -668,6 +668,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoNextChange => movement::goto_change(stoat, movement::ChangeDir::Next),
         ActionKind::GotoPrevChange => movement::goto_change(stoat, movement::ChangeDir::Prev),
         ActionKind::DiffWheelWalk => diff_wheel::toggle_walk(stoat),
+        ActionKind::ChangeWalkWrap => movement::toggle_change_wrap(stoat),
         ActionKind::DiffUnderline => stoat.handle_diff_underline_toggle(),
         ActionKind::DiffBold => stoat.handle_diff_bold_toggle(),
         ActionKind::DiffSyntax => stoat.handle_diff_syntax_toggle(),

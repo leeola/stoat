@@ -2623,6 +2623,7 @@ mod tests {
                 pressed(KeyCode::Char('p')),
                 pressed(KeyCode::Char('w')),
                 pressed(KeyCode::Char('b')),
+                pressed(KeyCode::Char('c')),
             ),
             (
                 only("Diff"),
@@ -2630,6 +2631,7 @@ mod tests {
                 only("GotoPrevChange"),
                 only("DiffWheelWalk"),
                 only("DiffBaseToggle"),
+                only("ChangeWalkWrap"),
             ),
             "a hop resets no mode, so a second press hops again",
         );

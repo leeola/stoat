@@ -72,6 +72,21 @@ define_action!(
 );
 
 define_action!(
+    ChangeWalkWrapDef,
+    ChangeWalkWrap,
+    "ChangeWalkWrap",
+    ActionKind::ChangeWalkWrap,
+    "toggle the change walk's wrap past the ends",
+    "Toggle whether the change walk wraps round. While on, a step past the \
+     last changed file lands on the first and a step before the first lands \
+     on the last, with the status \"wrapped\". While off, the walk stops at \
+     either end with the status \"no more changes\". A second run turns the \
+     wrap back on. The wrap lasts for the session and starts on.",
+    ActionPriority::Normal,
+    command_name = "change-walk-wrap"
+);
+
+define_action!(
     DiffUnderlineDef,
     DiffUnderline,
     "DiffUnderline",

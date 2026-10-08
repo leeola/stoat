@@ -73,6 +73,7 @@ action_kinds! {
     OpenHelp,
     Diff,
     DiffWheelWalk,
+    ChangeWalkWrap,
     DiffUnderline,
     DiffBold,
     DiffSyntax,

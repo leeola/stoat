@@ -1263,6 +1263,12 @@ pub struct Stoat {
     /// start, never persisted, because it answers how the reader reads the
     /// diff now.
     pub(crate) diff_wheel_walk: bool,
+    /// Whether the change walk wraps from the last changed file to the first and
+    /// back.
+    ///
+    /// The `ChangeWalkWrap` action is the only writer. Session-scoped and on at
+    /// start, never persisted, for the reason [`Self::diff_wheel_walk`] gives.
+    pub(crate) change_walk_wrap: bool,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal or select mode, or in the held review
@@ -2486,6 +2492,7 @@ impl Stoat {
             diff_wheel_travel: 0.0,
             diff_wheel_last: None,
             diff_wheel_walk: true,
+            change_walk_wrap: true,
             pending_count: None,
             pending_find: None,
             pending_mark: None,

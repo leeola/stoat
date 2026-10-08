@@ -4293,8 +4293,14 @@ fn the_git_chord_marks_its_toggles() {
         .collect();
     assert_eq!(
         marks,
-        [(4, inactive), (4, inactive), (10, active), (4, inactive)],
-        "the key hints toggle, d, and R are off, and f is on",
+        [
+            (4, inactive),
+            (4, inactive),
+            (10, active),
+            (10, active),
+            (4, inactive)
+        ],
+        "the key hints toggle, d, and R are off, and c and f are on",
     );
 }
 

@@ -1569,7 +1569,7 @@ define_action!(
     "GotoNextChange",
     ActionKind::GotoNextChange,
     "goto next change",
-    "Move the primary cursor to the start line of the next diff hunk strictly after the cursor's row. No-op when the buffer has no diff map or no hunk lies after the cursor. Primary-cursor only.",
+    "Move the primary cursor to the start line of the next diff hunk strictly after the cursor's row. Past the file's last hunk it crosses into the next changed file, and past the last changed file it wraps to the first while ChangeWalkWrap is on. Primary-cursor only.",
     ActionPriority::Rare
 );
 
@@ -1579,7 +1579,7 @@ define_action!(
     "GotoPrevChange",
     ActionKind::GotoPrevChange,
     "goto previous change",
-    "Move the primary cursor to the start line of the previous diff hunk strictly before the cursor's row. No-op when the buffer has no diff map or no hunk lies before the cursor. Primary-cursor only.",
+    "Move the primary cursor to the start line of the previous diff hunk strictly before the cursor's row. Past the file's first hunk it crosses into the previous changed file, and past the first changed file it wraps to the last while ChangeWalkWrap is on. Primary-cursor only.",
     ActionPriority::Rare
 );
 

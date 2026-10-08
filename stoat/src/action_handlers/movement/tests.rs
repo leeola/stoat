@@ -947,6 +947,74 @@ fn next_change_wraps_from_the_last_file_with_a_message() {
 }
 
 #[test]
+fn with_the_wrap_off_the_last_file_reports_no_more_changes() {
+    assert_eq!(
+        step_past_the_end_with_the_wrap_off("b.rs", 1, ChangeDir::Next),
+        (
+            PathBuf::from("/repo/b.rs"),
+            Some("no more changes".to_string())
+        ),
+        "the walk stays in the last changed file"
+    );
+}
+
+#[test]
+fn with_the_wrap_off_the_first_file_reports_no_more_changes() {
+    assert_eq!(
+        step_past_the_end_with_the_wrap_off("a.rs", 0, ChangeDir::Prev),
+        (
+            PathBuf::from("/repo/a.rs"),
+            Some("no more changes".to_string())
+        ),
+        "the walk stays in the first changed file"
+    );
+}
+
+/// Step `dir` from `row` of `file` in the two-file fixture with the wrap
+/// turned off, and return the file the walk leaves the reader in and the
+/// status it reports.
+fn step_past_the_end_with_the_wrap_off(
+    file: &str,
+    row: u32,
+    dir: ChangeDir,
+) -> (PathBuf, Option<String>) {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join(file));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), row);
+    dispatch(&mut h.stoat, &stoat_action::ChangeWalkWrap);
+
+    goto_change(&mut h.stoat, dir);
+    h.settle();
+
+    (
+        focused_buffer_path(&h.stoat),
+        h.stoat.pending_message.clone(),
+    )
+}
+
+#[test]
+fn a_second_wrap_toggle_turns_the_wrap_back_on() {
+    let mut h = TestHarness::with_size(40, 20);
+    dispatch(&mut h.stoat, &stoat_action::ChangeWalkWrap);
+    let off = (h.stoat.change_walk_wrap, h.stoat.pending_message.clone());
+    dispatch(&mut h.stoat, &stoat_action::ChangeWalkWrap);
+
+    assert_eq!(
+        (
+            off,
+            (h.stoat.change_walk_wrap, h.stoat.pending_message.clone())
+        ),
+        (
+            (false, Some("change wrap off".to_string())),
+            (true, Some("change wrap on".to_string()))
+        ),
+        "the first run turns the wrap off and the second turns it back on"
+    );
+}
+
+#[test]
 fn next_change_with_one_changed_file_reports_no_more_changes() {
     let mut h = TestHarness::with_size(40, 20);
     let workdir = PathBuf::from("/repo");

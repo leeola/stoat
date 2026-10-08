@@ -4088,6 +4088,22 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     goto_change_impl(stoat, dir, count)
 }
 
+/// Flip the change walk's wrap past the ends, backing the `ChangeWalkWrap`
+/// action.
+///
+/// The status line reports the state the flip leaves. While the wrap is off, a
+/// step past the last changed file, or before the first, stops with "no more
+/// changes".
+pub(crate) fn toggle_change_wrap(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.change_walk_wrap = !stoat.change_walk_wrap;
+    stoat.set_status(if stoat.change_walk_wrap {
+        "change wrap on"
+    } else {
+        "change wrap off"
+    });
+    UpdateEffect::Redraw
+}
+
 /// [`goto_change`] with its count supplied rather than read from the pending
 /// keypress, so a replay repeats the count the motion was made with.
 pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) -> UpdateEffect {
@@ -4493,6 +4509,15 @@ struct StopBase<'a> {
     diff_walk: bool,
 }
 
+/// Which way a hop steps through the changed files.
+#[derive(Clone, Copy)]
+struct HopStep {
+    dir: ChangeDir,
+    /// Whether a step past the last changed file wraps to the first and back,
+    /// which the `ChangeWalkWrap` action turns off.
+    wrap: bool,
+}
+
 /// Jump to the adjacent changed file when the focused buffer has no further
 /// hunk in `dir`.
 ///
@@ -4516,6 +4541,7 @@ fn goto_change_across_files(
     let git_host = stoat.git_host.clone();
     let fs_host = stoat.fs_host.clone();
     let base = stoat.active_workspace().diff_base().cloned();
+    let wrap = stoat.change_walk_wrap;
     // The hop reads the tally the workspace already holds rather than walking
     // the repository again, which is what every `n` across a file used to cost.
     let tally = stoat
@@ -4531,7 +4557,7 @@ fn goto_change_across_files(
             &fs_host,
             &git_root,
             current_path,
-            dir,
+            HopStep { dir, wrap },
             StopBase {
                 base: base.as_ref(),
                 diff_walk,
@@ -4600,8 +4626,10 @@ fn files_with_hunks(
         .collect()
 }
 
-/// Pick the changed file `dir` leads to from `current_path`, and the row in it
-/// to land on.
+/// Pick the changed file `step` leads to from `current_path`, and the row in
+/// it to land on.
+///
+/// With the step's wrap off the scan stops at the list's end.
 ///
 /// The walk passes over any file that offers no row to land on -- a file that
 /// reads as non-UTF8, or one whose texts all agree -- and keeps going to the
@@ -4618,7 +4646,7 @@ fn scan_changed_file_jump(
     fs_host: &Arc<dyn FsHost>,
     git_root: &Path,
     current_path: Option<PathBuf>,
-    dir: ChangeDir,
+    step: HopStep,
     stop_base: StopBase<'_>,
     tally: Option<Vec<(PathBuf, usize)>>,
 ) -> ChangedFileJump {
@@ -4670,7 +4698,7 @@ fn scan_changed_file_jump(
     // whether reaching it crossed the end of the list. A candidate that turns
     // out to hold no landing row is passed over, so the order has to run past
     // the adjacent file rather than stop at it.
-    let candidates: Vec<(usize, bool)> = match (current_index, dir) {
+    let candidates: Vec<(usize, bool)> = match (current_index, step.dir) {
         (Some(i), ChangeDir::Next) => (i + 1..changed.len())
             .map(|c| (c, false))
             .chain((0..i).map(|c| (c, true)))
@@ -4684,7 +4712,12 @@ fn scan_changed_file_jump(
         (None, ChangeDir::Prev) => (0..changed.len()).rev().map(|c| (c, false)).collect(),
     };
 
-    for (index, wrapped) in candidates {
+    // With the wrap off, the candidates past the list's end are not visited, and
+    // the walk ends where the list does.
+    for (index, wrapped) in candidates
+        .into_iter()
+        .filter(|&(_, wrapped)| step.wrap || !wrapped)
+    {
         let path = &changed[index];
         // A hop exists to leave the file. Landing back on the one the reader
         // is already in restarts the walk at its first hunk, which reads as
@@ -4697,7 +4730,7 @@ fn scan_changed_file_jump(
         {
             return ChangedFileJump::NoMoreChanges;
         }
-        let Some((line, rows)) = first_hunk_stop(&*repo, fs_host, path, dir, stop_base) else {
+        let Some((line, rows)) = first_hunk_stop(&*repo, fs_host, path, step.dir, stop_base) else {
             continue;
         };
         return ChangedFileJump::To {
