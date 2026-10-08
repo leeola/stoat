@@ -693,6 +693,9 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 
 /// Capture a staging press and queue its git work.
 ///
+/// The row is the block cursor's cell, so a cursor resting on a line's last
+/// cell stages that line, not the next.
+///
 /// The text is a rope handle, so the press copies nothing that grows with the
 /// file. The review base is read now and again at the job's turn. A walk step
 /// or a `:review-done` checkout that lands ahead of the job moves the tree the
@@ -709,8 +712,11 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
         let sel = editor.selections.newest_anchor().clone();
+        let tail = buffer_snapshot.resolve_anchor(&sel.tail());
         let head = buffer_snapshot.resolve_anchor(&sel.head());
-        let cursor_row = buffer_snapshot.rope().offset_to_point(head).row;
+        let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail, head);
+        let cursor_row = buffer_snapshot.rope().offset_to_point(cursor).row;
+
         let unit = match unit {
             AmendUnit::Hunk => marked_run_at(&snapshot, buffer_snapshot, cursor_row)
                 .map_or(AmendUnit::Hunk, AmendUnit::Rows),
@@ -1318,6 +1324,7 @@ mod tests {
     };
     use stoat_action::Action;
     use stoat_language::{structural_diff::TreeCache, LanguageRegistry};
+    use stoat_text::Point;
 
     /// The text of the buffer open at `path`, which lets a test read a proposal
     /// that landed in a file the pane no longer shows.
@@ -2374,12 +2381,24 @@ mod tests {
     /// Press `action` on the second hunk of [`SHIFT_BUFFER`] over an index that
     /// holds `index`, and return the one patch the press applied.
     fn press_on_the_second_hunk(index: &str, action: &dyn Action) -> String {
+        press_with_cursor(index, action, |h| {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 7);
+        })
+    }
+
+    /// Press `action` in [`SHIFT_BUFFER`] over an index that holds `index`, with
+    /// the cursor `place` puts, and return the one patch the press applied.
+    fn press_with_cursor(
+        index: &str,
+        action: &dyn Action,
+        place: impl FnOnce(&mut TestHarness),
+    ) -> String {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = PathBuf::from("/work");
         h.stage_index_scenario(&workdir, &[("a.rs", SHIFT_HEAD, index, SHIFT_BUFFER)]);
         h.open_file(&workdir.join("a.rs"));
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        crate::action_handlers::movement::set_cursor_row(editor, 7);
+        place(&mut h);
 
         crate::action_handlers::dispatch(&mut h.stoat, action);
 
@@ -2418,6 +2437,33 @@ mod tests {
             press_on_the_second_hunk("a\nZ1\nZ2\nc\nd\ne\nf\ng\nh\n", &stoat_action::StageHunk),
             "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -5,5 +5,5 @@\n d\n e\n f\n-g\n+Y\n h\n",
         );
+    }
+
+    /// Escape after typing a line, `g l`, and `A` leave the block cursor on the
+    /// line's newline cell. Its head is the start of the next line, and the
+    /// press stages the line the cursor is drawn on.
+    #[test]
+    fn a_cursor_on_a_lines_last_cell_stages_that_line() {
+        let patch = press_with_cursor(SHIFT_HEAD, &stoat_action::StageHunk, |h| {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let bs = snapshot.buffer_snapshot();
+            let offset = bs.rope().point_to_offset(Point::new(7, 1));
+            editor.selections.set_block_cursor(offset, bs);
+        });
+        assert_eq!(patch, SECOND_HUNK_STAGE);
+    }
+
+    /// A line selected with `x` heads at the start of the next line, and the
+    /// press stages the selected line.
+    #[test]
+    fn a_line_selection_stages_the_selected_line() {
+        let patch = press_with_cursor(SHIFT_HEAD, &stoat_action::StageLine, |h| {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 7);
+            h.type_keys("x");
+        });
+        assert_eq!(patch, SECOND_HUNK_STAGE);
     }
 
     #[test]
