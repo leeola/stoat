@@ -2190,6 +2190,15 @@ fn snapshot_open_yaml_file_highlights() {
 }
 
 #[test]
+fn snapshot_open_ron_file_highlights() {
+    let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+    let path = h.write_file("sample.ron", "Foo(\n  a: 1,\n)\n");
+
+    h.open_file(&path);
+    h.assert_snapshot("snapshot_open_ron_file_highlights");
+}
+
+#[test]
 fn snapshot_open_markdown_file_highlights() {
     let mut h = crate::test_harness::TestHarness::with_size(40, 6);
     let path = h.write_file("sample.md", "# Title\n\nbody\n");

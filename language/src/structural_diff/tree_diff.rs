@@ -1041,6 +1041,12 @@ mod tests {
             .unwrap()
     }
 
+    fn ron_lang() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(std::path::Path::new("a.ron"))
+            .unwrap()
+    }
+
     #[test]
     fn identical_sources_emit_no_changes() {
         let lang = rust_lang();
@@ -1518,6 +1524,27 @@ mod tests {
             })
             .collect();
         assert_eq!(covered, ["2", "3"], "the scalar is the whole change");
+    }
+
+    #[test]
+    fn a_changed_ron_value_is_the_whole_change() {
+        let lhs = "Foo(a: 1)";
+        let rhs = "Foo(a: 2)";
+        let result = diff_with_language(&ron_lang(), lhs, rhs).unwrap();
+        assert!(
+            !result.fell_back_to_line_diff,
+            "structural pass must handle this"
+        );
+
+        let covered: Vec<&str> = result
+            .changes
+            .iter()
+            .map(|c| match c.side {
+                Side::Lhs => &lhs[c.byte_range.clone()],
+                Side::Rhs => &rhs[c.byte_range.clone()],
+            })
+            .collect();
+        assert_eq!(covered, ["1", "2"], "the value is the whole change");
     }
 
     #[test]

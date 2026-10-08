@@ -11,6 +11,9 @@ fn main() {
     // 7708026449bed86239b1cd5bce6e3c34dbca6415. The scanner includes
     // schema.core.c, its default schema, from beside it.
     compile_grammar("tree-sitter-yaml", "tree-sitter-yaml", "src", true);
+    // tree-sitter-grammars/tree-sitter-ron,
+    // 78938553b93075e638035f624973083451b29055.
+    compile_grammar("tree-sitter-ron", "tree-sitter-ron", "src", true);
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",

@@ -423,6 +423,7 @@ impl LanguageRegistry {
                 Arc::new(make_json()),
                 Arc::new(make_toml()),
                 Arc::new(make_yaml()),
+                Arc::new(make_ron()),
                 Arc::new(make_markdown()),
                 Arc::new(make_markdown_inline()),
             ],
@@ -769,6 +770,20 @@ fn make_yaml() -> Language {
     )
 }
 
+fn make_ron() -> Language {
+    make_language(
+        "ron",
+        &["ron"],
+        grammar::ron(),
+        include_str!("../../vendor/helix/runtime/queries/ron/highlights.scm"),
+        AuxQuerySources {
+            line_comments: &["//"],
+            block_comments: Some(("/*", "*/")),
+            ..Default::default()
+        },
+    )
+}
+
 fn make_markdown() -> Language {
     // Inline nodes the block grammar emits parse as markdown-inline, for
     // emphasis, links and code spans.
@@ -872,11 +887,12 @@ mod tests {
         );
     }
 
-    const NAMES: [&str; 6] = [
+    const NAMES: [&str; 7] = [
         "rust",
         "json",
         "toml",
         "yaml",
+        "ron",
         "markdown",
         "markdown-inline",
     ];
@@ -934,6 +950,7 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.toml")).unwrap().name, "toml");
         assert_eq!(reg.for_path(Path::new("a.yaml")).unwrap().name, "yaml");
         assert_eq!(reg.for_path(Path::new("a.yml")).unwrap().name, "yaml");
+        assert_eq!(reg.for_path(Path::new("a.ron")).unwrap().name, "ron");
         assert_eq!(reg.for_path(Path::new("a.md")).unwrap().name, "markdown");
         assert_eq!(
             reg.for_path(Path::new("a.markdown")).unwrap().name,
@@ -986,6 +1003,7 @@ mod tests {
                 "json",
                 "toml",
                 "yaml",
+                "ron",
                 "markdown",
                 "markdown-inline"
             ],
