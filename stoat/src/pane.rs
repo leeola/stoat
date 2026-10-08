@@ -219,9 +219,11 @@ pub struct Pane {
     /// with buffers the pane never displayed.
     ///
     /// The history persists with the layout, so a restored session switches
-    /// back among the buffers each pane showed before the save. The ids stay
-    /// valid because the buffer registry snapshot keeps each buffer's id. A
-    /// file written before the field reads as an empty history.
+    /// back among the buffers each pane showed before the save. The save keeps
+    /// the buffers an editor holds and the buffers with unsaved edits, so a
+    /// restored switch reaches those and passes over the rest, as it passes
+    /// over a closed buffer. A file written before the field reads as an empty
+    /// history.
     #[serde(default)]
     pub(crate) buffer_history: Vec<BufferId>,
 }

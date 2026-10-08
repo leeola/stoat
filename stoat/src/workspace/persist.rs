@@ -32,7 +32,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
@@ -70,6 +70,9 @@ pub(crate) struct WorkspaceStateV1 {
     /// remapped to fresh keys in the rehydrated slotmap and pane/dock
     /// `View::Editor` references are rewritten to match.
     pub editors: Vec<(EditorId, EditorStateSnapshot)>,
+    /// The buffers an editor holds and the buffers with unsaved edits. A buffer
+    /// a pane moved off and did not edit is not saved, so a restart starts each
+    /// pane's history from what was on screen, as a Helix launch does.
     pub buffers: BufferRegistrySnapshot,
     pub rebase: Option<RebaseState>,
     pub rebase_active: Option<ActiveRebaseSnap>,
@@ -327,7 +330,16 @@ impl Workspace {
             .map(|(id, state)| (id, state.snapshot()))
             .collect();
 
-        let buffers = self.buffers.snapshot();
+        let buffers = {
+            let held: HashSet<BufferId> = self
+                .editors
+                .values()
+                .map(|editor| editor.buffer_id)
+                .collect();
+            self.buffers
+                .snapshot_retaining(|id, buffer| held.contains(&id) || buffer.dirty)
+        };
+
         let trees: Vec<(usize, &PaneTree)> = self
             .tabs
             .iter()
@@ -858,6 +870,19 @@ mod tests {
         ws
     }
 
+    /// Opens `path` with an editor holding it, as a file a pane shows, so a save
+    /// keeps the buffer.
+    fn open_held(ws: &mut Workspace, path: &Path, text: &str, exec: &Executor) -> BufferId {
+        let (id, buffer) = ws.buffers.open(path, text);
+        ws.editors.insert(EditorState::new(
+            id,
+            buffer,
+            exec.clone(),
+            crate::test_notify(),
+        ));
+        id
+    }
+
     /// A save that serializes later must still record the workspace as it was
     /// when the snapshot was taken.
     ///
@@ -872,13 +897,13 @@ mod tests {
         let exec = executor();
         let ws_dir = PathBuf::from("/deferred");
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        ws.buffers.open(&ws_dir.join("before.txt"), "before\n");
+        open_held(&mut ws, &ws_dir.join("before.txt"), "before\n", &exec);
 
         let (state, meta) = (ws.to_state(), ws.meta());
 
         // Everything after this point is what the user did while the write was
         // still queued, and none of it belongs in the file.
-        ws.buffers.open(&ws_dir.join("after.txt"), "after\n");
+        open_held(&mut ws, &ws_dir.join("after.txt"), "after\n", &exec);
         ws.name = "renamed".to_string();
 
         let deferred = ws_dir.join("deferred.ron");
@@ -1063,6 +1088,33 @@ mod tests {
         );
     }
 
+    /// A restart lists what was on screen rather than every file the workspace
+    /// ever showed, so a save drops a clean buffer that no editor holds. A
+    /// buffer with unsaved edits stays, so the save loses no edit.
+    #[test]
+    fn a_save_keeps_held_and_dirty_buffers_and_drops_hidden_clean_ones() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/hidden");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        open_held(&mut ws, &ws_dir.join("a.txt"), "alpha\n", &exec);
+        let (id_b, buffer_b) = ws.buffers.open(&ws_dir.join("b.txt"), "beta\n");
+        buffer_b.write().expect("buffer poisoned").edit(0..0, "x");
+        ws.buffers.open(&ws_dir.join("c.txt"), "gamma\n");
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(
+            (fresh.buffers.open_paths(), buffer_is_dirty(&fresh, id_b)),
+            (vec![ws_dir.join("a.txt"), ws_dir.join("b.txt")], true),
+            "the held and the edited buffers restore, and the hidden clean one does not",
+        );
+    }
+
     /// A single-cursor jump at `offset` in buffer `id`, anchored the way a live
     /// jump is.
     fn jump_at(buffers: &BufferRegistry, id: BufferId, offset: usize) -> JumpEntry {
@@ -1106,9 +1158,12 @@ mod tests {
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (id, _) = ws
-            .buffers
-            .open(&ws_dir.join("a.txt"), "0123456789abcdefghij");
+        let id = open_held(
+            &mut ws,
+            &ws_dir.join("a.txt"),
+            "0123456789abcdefghij",
+            &exec,
+        );
         let root = ws.panes.focus();
         for offset in [1, 5, 9] {
             let entry = jump_at(&ws.buffers, id, offset);
@@ -1589,8 +1644,8 @@ mod tests {
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (a, _) = ws.buffers.open(&ws_dir.join("a.txt"), "alpha\n");
-        let (b, _) = ws.buffers.open(&ws_dir.join("b.txt"), "beta\n");
+        let a = open_held(&mut ws, &ws_dir.join("a.txt"), "alpha\n", &exec);
+        let b = open_held(&mut ws, &ws_dir.join("b.txt"), "beta\n", &exec);
 
         let state = ws.to_state();
         // A buffer loaded empty pushed no op and so stands in for nothing. The
@@ -1622,7 +1677,7 @@ mod tests {
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (id, _) = ws.buffers.open(&file, "hello world\n");
+        let id = open_held(&mut ws, &file, "hello world\n", &exec);
         assert!(!buffer_is_dirty(&ws, id));
 
         let state_path = ws_dir.join("state.ron");
@@ -1894,7 +1949,7 @@ mod tests {
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (id, _) = ws.buffers.open(&file, "one\ntwo\n");
+        let id = open_held(&mut ws, &file, "one\ntwo\n", &exec);
         ws.buffers.set_line_ending(id, LineEnding::Crlf);
         ws.buffers.set_disk_mtime(id, mtime);
 
@@ -1920,7 +1975,7 @@ mod tests {
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (id, _) = ws.buffers.open(&file, "one\n");
+        let id = open_held(&mut ws, &file, "one\n", &exec);
         ws.buffers.set_line_ending(id, LineEnding::Crlf);
 
         let state_path = ws_dir.join("state.ron");

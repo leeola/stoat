@@ -783,19 +783,28 @@ impl BufferRegistry {
         }
     }
 
-    /// Capture the registry state for persistence. Each entry carries a
-    /// [`BufferHistory`] whose replay reconstructs the buffer's text and, for a
-    /// log short enough to persist whole, its fragment tree and anchors too.
-    /// Scratch buffers (no path) are included so their edit history also
-    /// round-trips.
+    /// A snapshot of the buffers `keep` accepts.
+    ///
+    /// Each entry carries a [`BufferHistory`] whose replay reconstructs the
+    /// buffer's text and, for a log short enough to persist whole, its fragment
+    /// tree and anchors too. `keep` sees scratch buffers (no path) as well, so a
+    /// kept scratch's edit history also round-trips.
+    ///
+    /// The ids of the dropped buffers stay reserved through `next_id`, so a
+    /// restored pane history or jumplist that names one resolves to no buffer
+    /// rather than to another.
     ///
     /// An entry whose history came back compacted has no anchors to restore.
     /// See [`TextBuffer::history`] for what compaction gives up and who is
     /// responsible for the anchors it invalidates.
-    pub(crate) fn snapshot(&self) -> BufferRegistrySnapshot {
+    pub(crate) fn snapshot_retaining(
+        &self,
+        keep: impl Fn(BufferId, &TextBuffer) -> bool,
+    ) -> BufferRegistrySnapshot {
         let mut entries: Vec<BufferEntrySnap> = self
             .buffers
             .iter()
+            .filter(|(id, entry)| keep(**id, &entry.buffer.read().expect("buffer poisoned")))
             .map(|(id, entry)| BufferEntrySnap {
                 id: *id,
                 path: entry.path.clone(),
