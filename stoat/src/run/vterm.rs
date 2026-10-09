@@ -717,8 +717,9 @@ pub struct OutputBlock {
     /// Active selection over [`Self::grid`], which the run-pane renderer paints
     /// in reverse video. `None` means no selection.
     ///
-    /// A drag sets it and leaves it in place after release. A plain click sets
-    /// a one-cell selection that its release clears, so a click leaves none.
+    /// A drag sets it, and the release that copies its text clears it. A plain
+    /// click's release clears it too, so only a drag over blank cells, which
+    /// copies nothing, stays highlighted after release.
     pub selection: Option<GridSelection>,
 }
 

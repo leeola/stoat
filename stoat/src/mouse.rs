@@ -1627,7 +1627,9 @@ fn handle_run_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row:
                 ClipboardKind::System,
                 &text,
             );
-            false
+            block.selection = None;
+            stoat.set_status(copy_status(&text));
+            true
         },
         _ => false,
     }

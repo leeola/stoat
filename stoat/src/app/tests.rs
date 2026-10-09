@@ -9578,6 +9578,44 @@ fn a_plain_click_release_clears_the_run_pane_selection() {
 }
 
 #[test]
+fn a_run_pane_drag_copies_and_drops_its_selection() {
+    let mut h = Stoat::test();
+    let run_id = open_run_with_output(&mut h, b"hello\n");
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 1));
+    let release = h
+        .stoat
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 1));
+    let selection = h
+        .stoat
+        .active_workspace()
+        .runs
+        .get(run_id)
+        .expect("run state exists")
+        .active_block()
+        .expect("active block exists")
+        .selection;
+
+    assert_eq!(
+        (
+            h.fake_clipboard().writes(),
+            selection,
+            h.stoat.pending_message.as_deref(),
+            release
+        ),
+        (
+            vec!["hello".to_string()],
+            None,
+            Some("copied 1 line to clipboard"),
+            UpdateEffect::Redraw
+        ),
+        "the release copies, drops the highlight, reports the copy, and repaints"
+    );
+}
+
+#[test]
 fn mouse_down_outside_active_block_does_not_select() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
