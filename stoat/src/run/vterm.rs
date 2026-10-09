@@ -697,6 +697,12 @@ impl GridSelection {
             true
         }
     }
+
+    /// Whether the head sits on the anchor cell, as it does after a click that
+    /// no drag extended.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
 }
 
 pub struct OutputBlock {
@@ -708,9 +714,11 @@ pub struct OutputBlock {
     pub finished: bool,
     pub exit_status: Option<i32>,
     pub error: Option<String>,
-    /// Active selection over [`Self::grid`]. `None` means no selection;
-    /// populated by mouse-drag handlers and consumed by the run-pane
-    /// renderer to paint reverse-video over the covered cells.
+    /// Active selection over [`Self::grid`], which the run-pane renderer paints
+    /// in reverse video. `None` means no selection.
+    ///
+    /// A drag sets it and leaves it in place after release. A plain click sets
+    /// a one-cell selection that its release clears, so a click leaves none.
     pub selection: Option<GridSelection>,
 }
 

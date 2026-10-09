@@ -1613,8 +1613,9 @@ fn handle_run_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row:
             let Some(sel) = block.selection.as_ref() else {
                 return false;
             };
-            if sel.anchor == sel.head {
-                return false;
+            if sel.is_empty() {
+                block.selection = None;
+                return true;
             }
             let text = block.grid.text_for_selection(sel);
             if text.is_empty() {

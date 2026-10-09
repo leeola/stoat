@@ -9526,12 +9526,13 @@ fn mouse_drag_updates_run_pane_selection_head() {
 }
 
 #[test]
-fn mouse_up_leaves_run_pane_selection_in_place() {
+fn a_plain_click_release_clears_the_run_pane_selection() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1));
-    h.stoat
+    let release = h
+        .stoat
         .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
     let block = h
         .stoat
@@ -9542,11 +9543,9 @@ fn mouse_up_leaves_run_pane_selection_in_place() {
         .active_block()
         .expect("active block exists");
     assert_eq!(
-        block.selection,
-        Some(GridSelection {
-            anchor: (3, 0),
-            head: (3, 0),
-        }),
+        (block.selection, release),
+        (None, UpdateEffect::Redraw),
+        "the release drops the one-cell selection and repaints without it"
     );
 }
 
