@@ -72,7 +72,6 @@ action_kinds! {
     OpenCommandPalette,
     OpenHelp,
     Diff,
-    DiffWheelWalk,
     ChangeWalkWrap,
     DiffUnderline,
     DiffBold,

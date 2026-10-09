@@ -1317,17 +1317,15 @@ on key {
     # Reading a diff is a run of hops rather than one, so `space R` holds this
     # mode instead of running a single arm. d opens the diff and a second d
     # closes it. n, p, and the Alt notches walk the changes, and the side
-    # buttons walk changes or retrace a jump out of one. w turns the plain
-    # wheel's walk off and on. c turns the walk's wrap past the last
-    # changed file off and on. b flips the diff base between the index and
-    # HEAD. No arm here chains SetMode(normal), which is what holds the mode,
-    # and Escape leaves it.
+    # buttons walk changes or retrace a jump out of one. c turns the walk's
+    # wrap past the last changed file off and on. b flips the diff base
+    # between the index and HEAD. No arm here chains SetMode(normal), which is
+    # what holds the mode, and Escape leaves it.
     mode == review {
         Escape -> SetMode(normal);
         d -> Diff();
         n -> GotoNextChange();
         p -> GotoPrevChange();
-        w -> DiffWheelWalk();
         c -> ChangeWalkWrap();
         b -> DiffBaseToggle();
         MouseBack -> DiffBack();

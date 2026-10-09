@@ -17,7 +17,6 @@ use stoat_config::WrapMode;
 pub(crate) enum Toggle {
     FollowChanges,
     LiveReload,
-    DiffWheelWalk,
     ChangeWalkWrap,
     DiffUnderline,
     DiffBold,
@@ -36,10 +35,9 @@ pub(crate) enum Toggle {
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 17] = [
+    pub(crate) const ALL: [Toggle; 16] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
-        Toggle::DiffWheelWalk,
         Toggle::ChangeWalkWrap,
         Toggle::DiffUnderline,
         Toggle::DiffBold,
@@ -62,7 +60,6 @@ impl Toggle {
         Some(match kind {
             ActionKind::FollowChanges => Toggle::FollowChanges,
             ActionKind::LiveReload => Toggle::LiveReload,
-            ActionKind::DiffWheelWalk => Toggle::DiffWheelWalk,
             ActionKind::ChangeWalkWrap => Toggle::ChangeWalkWrap,
             ActionKind::DiffUnderline => Toggle::DiffUnderline,
             ActionKind::DiffBold => Toggle::DiffBold,
@@ -90,7 +87,6 @@ impl Toggle {
         match self {
             Toggle::FollowChanges => stoat.follow_changes,
             Toggle::LiveReload => stoat.live_reload,
-            Toggle::DiffWheelWalk => stoat.diff_wheel_walk,
             Toggle::ChangeWalkWrap => stoat.change_walk_wrap,
             Toggle::DiffUnderline => stoat.diff_underline,
             Toggle::DiffBold => stoat.diff_bold,
@@ -248,7 +244,6 @@ mod tests {
         assert_eq!(
             on(&h.stoat),
             [
-                Toggle::DiffWheelWalk,
                 Toggle::ChangeWalkWrap,
                 Toggle::DiffSyntax,
                 Toggle::SyntaxHighlight,
@@ -269,7 +264,6 @@ mod tests {
             [
                 Toggle::FollowChanges,
                 Toggle::LiveReload,
-                Toggle::DiffWheelWalk,
                 Toggle::ChangeWalkWrap,
                 Toggle::DiffUnderline,
                 Toggle::DiffBold,
@@ -295,7 +289,6 @@ mod tests {
         assert_eq!(
             on(&h.stoat),
             [
-                Toggle::DiffWheelWalk,
                 Toggle::ChangeWalkWrap,
                 Toggle::DiffSyntax,
                 Toggle::SyntaxHighlight,

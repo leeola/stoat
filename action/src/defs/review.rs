@@ -26,11 +26,7 @@ define_action_def!(
      workspace at that commit, so every file diffs against it and the change \
      list spans everything committed since. `index` and `HEAD` name the \
      working tree's two bases rather than revisions. Running it again closes \
-     the diff, and a revision gives way to the working tree's base. While the \
-     diff is open, the plain wheel scrolls until the change under the cursor \
-     passes the editor.diff_wheel_jump line. The next notch then walks to \
-     the next change, and a notch up walks back. DiffWheelWalk turns that \
-     walk off and on.",
+     the diff, and a revision gives way to the working tree's base.",
     ActionPriority::Common,
     params = DIFF_PARAMS
 );
@@ -54,22 +50,6 @@ impl Action for Diff {
         self
     }
 }
-
-define_action!(
-    DiffWheelWalkDef,
-    DiffWheelWalk,
-    "DiffWheelWalk",
-    ActionKind::DiffWheelWalk,
-    "toggle the wheel walk in the diff view",
-    "Toggle the wheel walk in the diff view. While on, the plain wheel \
-     scrolls until the change under the cursor passes the \
-     editor.diff_wheel_jump line, and the next notch walks to the next \
-     change. While off, the wheel scrolls the pane as in any other editor, \
-     and the change keys and Alt-wheel still walk. A second run turns the \
-     walk back on. The walk lasts for the session and starts on.",
-    ActionPriority::Normal,
-    command_name = "diff-wheel-walk"
-);
 
 define_action!(
     ChangeWalkWrapDef,

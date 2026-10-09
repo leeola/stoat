@@ -4333,26 +4333,6 @@ pub(super) fn nearest_hunk_rows(
     Some((nearest.clone(), false))
 }
 
-/// The stop a walk in `dir` from `cursor_row` sets out from, or `None` when no
-/// stop sits on that side of the cursor.
-///
-/// It is the neighbor of the stop a one-step walk lands, on the cursor's side
-/// of the split. That makes it the change the cursor is on. Between changes,
-/// it is the nearest change behind the cursor in the walk's direction. The diff
-/// view's wheel reads it as the change the reader is on, so a wheel walk leaves
-/// the same stop a keyboard walk does.
-pub(super) fn departure_stop(
-    hunk_rows: &[Range<u32>],
-    cursor_row: u32,
-    dir: ChangeDir,
-) -> Option<&Range<u32>> {
-    let split = walk_split(hunk_rows, cursor_row, dir);
-    match dir {
-        ChangeDir::Next => hunk_rows.get(split.checked_sub(1)?),
-        ChangeDir::Prev => hunk_rows.get(split),
-    }
-}
-
 /// Index that splits `hunk_rows` at `cursor_row` for a walk in `dir`.
 ///
 /// A forward walk takes the stops from the split on, and a backward walk takes
