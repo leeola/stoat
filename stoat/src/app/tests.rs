@@ -4879,6 +4879,53 @@ fn ctrl_a_ctrl_e_and_a_digit_pick_a_pane_from_a_terminal() {
 }
 
 #[test]
+fn a_split_from_a_terminal_opens_a_fresh_shell() {
+    let mut h = Stoat::test();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+    let source = h.stoat.active_workspace().panes.focus();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitDown);
+
+    let ws = h.stoat.active_workspace();
+    let split = ws.panes.focus();
+    let (View::Terminal(source_term), View::Terminal(split_term)) =
+        (&ws.panes.pane(source).view, &ws.panes.pane(split).view)
+    else {
+        panic!("both panes show a terminal");
+    };
+    assert_eq!(
+        (
+            h.fake_terminal_host().spawns().len(),
+            split != source,
+            source_term != split_term
+        ),
+        (2, true, true),
+        "the split pane takes focus and a shell of its own",
+    );
+}
+
+#[test]
+fn a_split_from_an_agent_opens_a_plain_shell() {
+    let mut h = Stoat::test();
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let agent = insert_term_session(ws);
+        ws.panes.pane_mut(focused).view = View::Agent(agent);
+    }
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitDown);
+
+    let ws = h.stoat.active_workspace();
+    assert_eq!(
+        (
+            matches!(ws.panes.pane(ws.panes.focus()).view, View::Terminal(_)),
+            h.fake_terminal_host().spawns().len()
+        ),
+        (true, 1),
+        "the split from an agent pane runs a plain shell",
+    );
+}
+
+#[test]
 fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
     let mut h = Stoat::test();
     let (editor_pane, term_pane) = {

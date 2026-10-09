@@ -186,7 +186,7 @@ pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
 /// program and arguments from the `terminal.shell` / `terminal.args` settings
 /// (falling back to `$SHELL`, then `/bin/sh`), stores the session alongside a
 /// fresh screen emulator, and starts its reader.
-fn spawn_terminal_view(stoat: &mut Stoat) -> View {
+pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let (program, args) = resolve_shell(
         stoat.settings.terminal_shell.as_deref(),
         stoat.settings.terminal_args.as_deref(),

@@ -561,7 +561,7 @@ mod tests {
     use crate::{
         app::Stoat,
         commit_list::{CommitListId, CommitListSnap, Preview, SavedSelection},
-        pane::View,
+        pane::{Axis, View},
         run::pty::PtyNotification,
     };
     use slotmap::SlotMap;
@@ -1128,8 +1128,10 @@ mod tests {
         let mut h = Stoat::test();
         seed_two_commits_on_main(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
-        let ws = h.stoat.active_workspace();
+        // The split action runs a shell of its own, so the tree split, which
+        // copies the view, is what puts a second pane over this one shell.
+        let ws = h.stoat.active_workspace_mut();
+        ws.panes.split(Axis::Vertical);
         let View::Terminal(shell) = ws.panes.pane(ws.panes.focus()).view else {
             panic!("the split shows the shell too");
         };

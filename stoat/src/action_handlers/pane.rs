@@ -338,6 +338,20 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         }
         return UpdateEffect::Redraw;
     }
+    // A PTY has one reader, and two views over one session fight for its
+    // input, so the split runs a shell of its own.
+    if matches!(
+        ws.panes.pane(new_pane_id).view,
+        View::Terminal(_) | View::Agent(_)
+    ) {
+        let view = super::terminal::spawn_terminal_view(stoat);
+        stoat
+            .active_workspace_mut()
+            .panes
+            .pane_mut(new_pane_id)
+            .view = view;
+        return UpdateEffect::Redraw;
+    }
     if let View::Editor(source_editor_id) = ws.panes.pane(new_pane_id).view {
         if let Some(buffer_id) = ws.editors.get(source_editor_id).map(|e| e.buffer_id)
             && let Some(buffer) = ws.buffers.get(buffer_id)
