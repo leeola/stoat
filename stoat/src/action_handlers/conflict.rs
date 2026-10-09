@@ -193,7 +193,7 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
         )
     };
 
-    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+    let job = GitJob::new("conflict apply", None, move |stoat: &mut Stoat| {
         if !conflict_paused_on(stoat, &source_sha) {
             return None;
         }

@@ -72,7 +72,7 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let message = new_message.trim().to_string();
-    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+    let job = GitJob::new("reword", None, move |stoat: &mut Stoat| {
         if !reword_paused_on(stoat, &picked_sha) {
             return None;
         }

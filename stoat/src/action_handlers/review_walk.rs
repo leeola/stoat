@@ -363,49 +363,53 @@ pub(super) fn queue_walk_start(
     commits: Vec<CommitInfo>,
     kind: WalkLandingKind,
 ) {
-    let job = GitJob::new(Some(GitJobKey::WalkLanding), move |stoat: &mut Stoat| {
-        let tour = kind == WalkLandingKind::Walkthrough;
-        // A tour closed before this turn asked for nothing. Whatever tour plays
-        // at this turn is not the one that queued the walk.
-        if tour
-            && !stoat
-                .active_workspace()
-                .walkthrough
-                .as_ref()
-                .is_some_and(|run| run.spans_commits())
-        {
-            return None;
-        }
-
-        let return_ref = if stoat.active_workspace().review_walk.is_some() {
-            None
-        } else {
-            walk_return_ref(stoat, &workdir).ok()
-        };
-        let Some(return_ref) = return_ref else {
-            if tour {
-                super::walkthrough::abandon_commit_tour(stoat);
+    let job = GitJob::new(
+        "walk start",
+        Some(GitJobKey::WalkLanding),
+        move |stoat: &mut Stoat| {
+            let tour = kind == WalkLandingKind::Walkthrough;
+            // A tour closed before this turn asked for nothing. Whatever tour plays
+            // at this turn is not the one that queued the walk.
+            if tour
+                && !stoat
+                    .active_workspace()
+                    .walkthrough
+                    .as_ref()
+                    .is_some_and(|run| run.spans_commits())
+            {
+                return None;
             }
-            return None;
-        };
 
-        if stoat
-            .commit_picker
-            .as_ref()
-            .is_some_and(|picker| picker.role == CommitPickerRole::PickBase)
-        {
-            commit_picker_close(stoat);
-        }
-        stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
-            workdir,
-            commits,
-            cursor: 0,
-            return_ref,
-        });
+            let return_ref = if stoat.active_workspace().review_walk.is_some() {
+                None
+            } else {
+                walk_return_ref(stoat, &workdir).ok()
+            };
+            let Some(return_ref) = return_ref else {
+                if tour {
+                    super::walkthrough::abandon_commit_tour(stoat);
+                }
+                return None;
+            };
 
-        let (workdir, sha, standing) = walk_position(stoat)?;
-        walk_checkout_work(stoat, kind, workdir, sha, standing)
-    });
+            if stoat
+                .commit_picker
+                .as_ref()
+                .is_some_and(|picker| picker.role == CommitPickerRole::PickBase)
+            {
+                commit_picker_close(stoat);
+            }
+            stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+                workdir,
+                commits,
+                cursor: 0,
+                return_ref,
+            });
+
+            let (workdir, sha, standing) = walk_position(stoat)?;
+            walk_checkout_work(stoat, kind, workdir, sha, standing)
+        },
+    );
     git_jobs::enqueue(stoat, job);
 }
 
@@ -544,7 +548,7 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
     stoat.git_jobs.drop_queued(GitJobKey::WalkLanding);
     stoat.active_workspace_mut().ending_walk = Some(walk);
 
-    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+    let job = GitJob::new("review done", None, move |stoat: &mut Stoat| {
         let walk = stoat.active_workspace_mut().ending_walk.take()?;
         let Some(repo) = stoat.git_host.discover(&walk.workdir) else {
             restore_walk(stoat, walk);
@@ -915,9 +919,11 @@ pub(super) fn queue_walk_landing(
     sha: String,
     standing: String,
 ) {
-    let job = GitJob::new(Some(GitJobKey::WalkLanding), move |stoat: &mut Stoat| {
-        walk_checkout_work(stoat, kind, workdir, sha, standing)
-    });
+    let job = GitJob::new(
+        "walk landing",
+        Some(GitJobKey::WalkLanding),
+        move |stoat: &mut Stoat| walk_checkout_work(stoat, kind, workdir, sha, standing),
+    );
     git_jobs::enqueue(stoat, job);
 }
 

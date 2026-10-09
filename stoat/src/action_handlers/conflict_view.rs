@@ -735,7 +735,7 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) {
     else {
         return;
     };
-    let job = GitJob::new(None, move |_: &mut Stoat| {
+    let job = GitJob::new("conflict view apply", None, move |_: &mut Stoat| {
         Some(Box::new(move || {
             let marked = repo.mark_resolved(&path).map_err(|err| err.to_string());
             Box::new(move |stoat: &mut Stoat| land_resolved(stoat, current, &path, marked))

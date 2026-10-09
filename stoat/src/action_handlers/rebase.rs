@@ -143,7 +143,7 @@ pub(super) fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
-    let job = GitJob::new(None, |stoat: &mut Stoat| {
+    let job = GitJob::new("rebase continue", None, |stoat: &mut Stoat| {
         // The job of an earlier press already resumed the plan.
         if !edit_paused(stoat) {
             return None;
@@ -260,30 +260,34 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
 /// every earlier job landed, so the entry stacks onto what those jobs built. A
 /// start after an abort finds no rebase and refuses.
 fn queue_rebase_step(stoat: &mut Stoat, entry: RebaseEntry) {
-    let job = GitJob::new(Some(GitJobKey::RebaseStep), move |stoat: &mut Stoat| {
-        let active = stoat.active_workspace().rebase_active.as_ref()?;
-        let workdir = active.workdir.clone();
-        let last_message = active.last_message.clone().unwrap_or_default();
-        let base = match entry.op {
-            RebaseTodoOp::Squash | RebaseTodoOp::Fixup => active.last_pick_sha.clone(),
-            _ => Some(active.current_head.clone()),
-        };
+    let job = GitJob::new(
+        "rebase step",
+        Some(GitJobKey::RebaseStep),
+        move |stoat: &mut Stoat| {
+            let active = stoat.active_workspace().rebase_active.as_ref()?;
+            let workdir = active.workdir.clone();
+            let last_message = active.last_message.clone().unwrap_or_default();
+            let base = match entry.op {
+                RebaseTodoOp::Squash | RebaseTodoOp::Fixup => active.last_pick_sha.clone(),
+                _ => Some(active.current_head.clone()),
+            };
 
-        let Some(base) = base else {
-            emit_rebase_error(stoat, "squash/fixup without preceding pick", None);
-            return None;
-        };
-        let Some(repo) = stoat.git_host.discover(&workdir) else {
-            emit_rebase_error(stoat, "git repo not found", None);
-            return None;
-        };
+            let Some(base) = base else {
+                emit_rebase_error(stoat, "squash/fixup without preceding pick", None);
+                return None;
+            };
+            let Some(repo) = stoat.git_host.discover(&workdir) else {
+                emit_rebase_error(stoat, "git repo not found", None);
+                return None;
+            };
 
-        Some(Box::new(move || {
-            let outcome = run_rebase_step(&*repo, &entry, &base, &last_message);
-            Box::new(move |stoat: &mut Stoat| land_rebase_step(stoat, entry, workdir, outcome))
-                as GitLanding
-        }) as GitWork)
-    });
+            Some(Box::new(move || {
+                let outcome = run_rebase_step(&*repo, &entry, &base, &last_message);
+                Box::new(move |stoat: &mut Stoat| land_rebase_step(stoat, entry, workdir, outcome))
+                    as GitLanding
+            }) as GitWork)
+        },
+    );
     git_jobs::enqueue(stoat, job);
 }
 
@@ -400,7 +404,7 @@ fn land_rebase_step(stoat: &mut Stoat, entry: RebaseEntry, workdir: PathBuf, out
 /// The job has no key. A keyed job that waits in the queue gives its place to
 /// a later plan's keyed step, and HEAD then never moves.
 fn queue_rebase_finish(stoat: &mut Stoat, final_head: String) {
-    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+    let job = GitJob::new("rebase finish", None, move |stoat: &mut Stoat| {
         let repo = stoat.git_host.discover(&stoat.active_workspace().git_root);
         Some(Box::new(move || {
             if let Some(repo) = repo {
@@ -446,7 +450,7 @@ pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
     // A keyed check that waits in the queue gives its place to the next plan's
     // keyed check, which drops this plan with no report. So the check has no
     // key.
-    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+    let job = GitJob::new("rebase start", None, move |stoat: &mut Stoat| {
         let Some(repo) = stoat.git_host.discover(&plan.workdir) else {
             emit_rebase_error(stoat, "git repo not found", None);
             return None;

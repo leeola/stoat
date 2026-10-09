@@ -13,6 +13,7 @@ use crate::app::Stoat;
 use std::{
     collections::VecDeque,
     sync::mpsc::{self, TryRecvError},
+    time::Instant,
 };
 use stoat_scheduler::Task;
 
@@ -28,7 +29,11 @@ type GitStart = Box<dyn FnOnce(&mut Stoat) -> Option<GitWork>>;
 
 /// One git write the loop started.
 pub(crate) struct GitJob {
+    label: &'static str,
     key: Option<GitJobKey>,
+    /// When the job was built. [`enqueue`] rebuilds each job it queues, so for
+    /// a queued job this is when it entered the queue.
+    queued: Instant,
     start: GitStart,
 }
 
@@ -38,12 +43,19 @@ impl GitJob {
     /// `start` returns `None` to refuse, and the queue moves on to the next
     /// job. A job with a `key` takes the place of a queued job with the same
     /// key, since the later press makes the earlier one stale.
+    ///
+    /// `label` names the write in the session log. When the job lands, the log
+    /// gets one line with the label, the time the job waited in the queue, and
+    /// the time its work ran.
     pub(crate) fn new(
+        label: &'static str,
         key: Option<GitJobKey>,
         start: impl FnOnce(&mut Stoat) -> Option<GitWork> + 'static,
     ) -> Self {
         Self {
+            label,
             key,
+            queued: Instant::now(),
             start: Box::new(start),
         }
     }
@@ -83,7 +95,12 @@ impl GitJobs {
 
 /// The job whose work is out on the pool.
 struct RunningGitJob {
+    label: &'static str,
     key: Option<GitJobKey>,
+    queued: Instant,
+    /// When the work went out to the pool, which ends the job's wait in the
+    /// queue.
+    started: Instant,
     rx: mpsc::Receiver<GitLanding>,
     _task: Task<()>,
 }
@@ -99,8 +116,10 @@ struct RunningGitJob {
 /// write completes and the landing does nothing.
 pub(crate) fn enqueue(stoat: &mut Stoat, job: GitJob) {
     let workspace = stoat.active_workspace;
-    let GitJob { key, start } = job;
-    let job = GitJob::new(key, move |stoat: &mut Stoat| {
+    let GitJob {
+        label, key, start, ..
+    } = job;
+    let job = GitJob::new(label, key, move |stoat: &mut Stoat| {
         let work = stoat.in_workspace(workspace, start).flatten()?;
         Some(Box::new(move || {
             let landing = work();
@@ -134,6 +153,13 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         Err(TryRecvError::Empty) => return false,
         Err(TryRecvError::Disconnected) => None,
     };
+    tracing::info!(
+        target: "stoat::git",
+        label = running.label,
+        queued_ms = running.started.duration_since(running.queued).as_millis() as u64,
+        work_ms = running.started.elapsed().as_millis() as u64,
+        "git job landed"
+    );
 
     // The job's work is done, so the slot clears before its landing runs. A job
     // the landing queues then starts at once, before the landing returns.
@@ -168,7 +194,10 @@ fn start_next(stoat: &mut Stoat) {
             "a git job's start queued another job"
         );
         stoat.git_jobs.running = Some(RunningGitJob {
+            label: job.label,
             key: job.key,
+            queued: job.queued,
+            started: Instant::now(),
             rx,
             _task: task,
         });
@@ -179,7 +208,7 @@ fn start_next(stoat: &mut Stoat) {
 /// behind a running one.
 #[cfg(test)]
 pub(crate) fn idle_job(key: Option<GitJobKey>) -> GitJob {
-    GitJob::new(key, |_| {
+    GitJob::new("test", key, |_| {
         Some(Box::new(|| Box::new(|_: &mut Stoat| {}) as GitLanding) as GitWork)
     })
 }
@@ -195,7 +224,7 @@ mod tests {
     /// A job whose work and landing each append their name to `log`.
     fn recorded(log: &Log, name: &'static str, key: Option<GitJobKey>) -> GitJob {
         let log = Arc::clone(log);
-        GitJob::new(key, move |_| {
+        GitJob::new("test", key, move |_| {
             Some(Box::new(move || {
                 log.lock().unwrap().push(format!("{name} work"));
                 Box::new(move |_: &mut Stoat| {
@@ -214,7 +243,7 @@ mod tests {
         let refused = Arc::clone(&log);
         enqueue(
             &mut h.stoat,
-            GitJob::new(None, move |_| {
+            GitJob::new("test", None, move |_| {
                 refused.lock().unwrap().push("refused start".to_string());
                 None
             }),
@@ -296,7 +325,7 @@ mod tests {
         enqueue(&mut h.stoat, idle_job(None));
         let job = {
             let records = Arc::clone(&records);
-            GitJob::new(None, move |stoat| {
+            GitJob::new("test", None, move |stoat| {
                 records
                     .lock()
                     .unwrap()

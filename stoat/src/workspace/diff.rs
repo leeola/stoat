@@ -607,18 +607,26 @@ impl DiffState {
         self.refresh_pair_base(buffers, executor, redraw_notify);
 
         let waker = futures::task::noop_waker();
-        let mut completed: Vec<(DiffJobOutput, bool)> = Vec::new();
+        let mut completed: Vec<(DiffJobOutput, bool, bool, Instant)> = Vec::new();
         self.jobs.retain(|_, job| {
             let mut cx = Context::from_waker(&waker);
             match Pin::new(&mut job.task).poll(&mut cx) {
                 Poll::Ready(out) => {
-                    completed.push((out, job.superseded));
+                    completed.push((out, job.superseded, job.base_moved, job.started));
                     false
                 },
                 Poll::Pending => true,
             }
         });
-        for (out, superseded) in completed {
+        for (out, superseded, base_moved, started) in completed {
+            if base_moved {
+                tracing::info!(
+                    target: "stoat::diff",
+                    path = %out.path.display(),
+                    ms = started.elapsed().as_millis() as u64,
+                    "diff job landed after its base moved"
+                );
+            }
             // A superseded job read blobs that a git write has since moved, so
             // neither its blobs nor its version is filed. Its map still paints,
             // and the unrecorded version owes the buffer a re-run.
@@ -698,9 +706,8 @@ impl DiffState {
             }
             // The buffer is still at the version its last diff read, so only its
             // blobs moved. There is no typing burst to wait out.
-            if self.diffed.get(&buffer_id) != Some(&cur_version)
-                && !self.settled(executor, redraw_notify, buffer_id, cur_version)
-            {
+            let base_moved = self.diffed.get(&buffer_id) == Some(&cur_version);
+            if !base_moved && !self.settled(executor, redraw_notify, buffer_id, cur_version) {
                 continue;
             }
 
@@ -773,6 +780,8 @@ impl DiffState {
                     target_version: cur_version,
                     task,
                     superseded: false,
+                    base_moved,
+                    started: Instant::now(),
                 },
             );
         }
@@ -785,6 +794,12 @@ pub(super) struct DiffJob {
     /// A `.git` write landed after the job read its blobs, so its map still
     /// paints and its version and blobs do not count.
     pub(super) superseded: bool,
+    /// The buffer held the text its last diff read, so only the base moved,
+    /// through a git write or a switch of base. Such a job skips the settle
+    /// window, and its landing logs how long it ran, which measures how long a
+    /// stage takes to reach the gutter.
+    pub(super) base_moved: bool,
+    pub(super) started: Instant,
 }
 
 pub(super) struct DiffJobOutput {
@@ -2748,6 +2763,51 @@ mod tests {
             staged_on_row_one(&h, buffer_id),
             Some(true),
             "the diff the landing started reads the staged blob"
+        );
+    }
+
+    /// Only a job whose base moved under unchanged text skips the settle window
+    /// and logs its duration. A keystroke's job waits the window out.
+    #[test]
+    fn only_a_diff_job_after_a_write_reads_its_base_as_moved() {
+        let (mut h, buffer_id) = open_unstaged_change();
+        let base_moved = |h: &TestHarness| -> Vec<bool> {
+            h.stoat
+                .active_workspace()
+                .diff
+                .jobs
+                .values()
+                .map(|job| job.base_moved)
+                .collect()
+        };
+
+        movement::set_cursor_row(
+            action_handlers::focused_editor_mut(&mut h.stoat).expect("editor"),
+            1,
+        );
+        action_handlers::dispatch(&mut h.stoat, &StageHunk);
+        h.fake_git().add_repo("/repo").index_file("a.txt", "a\nc\n");
+        h.stoat.drive_background();
+        let after_write = base_moved(&h);
+
+        h.settle();
+        h.stoat.drive_background();
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.stoat.drive_background();
+        h.advance_clock(DIFF_SETTLE + std::time::Duration::from_millis(1));
+        h.stoat.drive_background();
+
+        assert_eq!(
+            (after_write, base_moved(&h)),
+            (vec![true], vec![false]),
+            "the write's job skips the settle window, and the keystroke's waits it out",
         );
     }
 

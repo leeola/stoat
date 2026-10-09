@@ -737,7 +737,7 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
     let git_root = stoat.active_workspace().git_root.clone();
     let pressed_rev = review_rev(stoat.active_workspace());
 
-    let job = GitJob::new(None, move |stoat: &mut Stoat| {
+    let job = GitJob::new("stage", None, move |stoat: &mut Stoat| {
         // The index route diffs against HEAD and the amend route writes into
         // the commit, so after a base move both act on a checkout the captured
         // text and row do not describe.
