@@ -1890,9 +1890,10 @@ fn handle_editor_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, r
 ///
 /// `Down` anchors a selection at the clicked cell and arms
 /// [`Stoat::terminal_drag`]. `Drag` extends the head, clamped to the grid, and
-/// marks the drag moved. `Up` copies the selected text to the clipboard and
-/// keeps it highlighted when the drag moved, and otherwise clears it so a
-/// plain click leaves no selection. Coordinates are pane-relative cells.
+/// marks the drag moved. `Up` after a moved drag copies the selected text to
+/// the clipboard, clears the selection, and shows a status line that names the
+/// copied line count. `Up` after a plain click clears the selection and copies
+/// nothing. Coordinates are pane-relative cells.
 ///
 /// A split pane's terminal that stoatty draws at its own font size holds other
 /// cells than the pane's content area, so a content cell maps to the terminal
@@ -1985,8 +1986,10 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
                     ClipboardKind::System,
                     &text,
                 );
+                stoat.set_status(copy_status(&text));
             }
-            false
+            clear_term_selection(stoat, term_id);
+            true
         },
         _ => false,
     }
@@ -2007,6 +2010,13 @@ pub(crate) fn clear_term_selection(stoat: &mut Stoat, term_id: TermId) {
     if let Some(session) = stoat.active_workspace_mut().terms.get_mut(term_id) {
         session.selection = None;
     }
+}
+
+/// The status line a mouse copy shows, naming how many lines it copied.
+fn copy_status(text: &str) -> String {
+    let lines = text.lines().count().max(1);
+    let plural = if lines == 1 { "" } else { "s" };
+    format!("copied {lines} line{plural} to clipboard")
 }
 
 pub(crate) fn editor_screen_to_offset(

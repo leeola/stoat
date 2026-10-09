@@ -114,8 +114,8 @@ pub struct TermSession {
     /// selected.
     ///
     /// A press sets a zero-width selection at its cell, which paints and copies
-    /// nothing until a drag extends it. A drag stays highlighted after release
-    /// for the copy, and the next keystroke, click, or drag clears it.
+    /// nothing until a drag extends it. The release that copies a drag clears
+    /// it, and so do the next keystroke, click, or wheel notch, and a new drag.
     pub selection: Option<TermSelection>,
     /// The pane's input mode.
     ///

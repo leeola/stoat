@@ -4944,15 +4944,43 @@ fn dragging_over_a_terminal_pane_selects_and_copies() {
         .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
 
     assert_eq!(h.fake_clipboard().writes(), vec!["hello"]);
-    assert!(
-        h.stoat.active_workspace().terms[term_id]
-            .selection
-            .is_some(),
-        "the selection stays highlighted after release",
+    assert_eq!(
+        (
+            h.stoat.active_workspace().terms[term_id]
+                .selection
+                .is_none(),
+            h.stoat.pending_message.as_deref()
+        ),
+        (true, Some("copied 1 line to clipboard")),
+        "the release that copies drops the selection and reports the copy",
     );
     assert!(
         h.stoat.terminal_drag.is_none(),
         "the drag clears on release"
+    );
+}
+
+#[test]
+fn a_multi_line_terminal_copy_reports_its_line_count() {
+    let mut h = Stoat::test();
+    let _ = focused_terminal_pane(&mut h, b"ab\r\ncd\r\nef");
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 2));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 2));
+
+    assert_eq!(
+        (
+            h.fake_clipboard().writes(),
+            h.stoat.pending_message.as_deref()
+        ),
+        (
+            vec!["ab\ncd\nef".to_string()],
+            Some("copied 3 lines to clipboard")
+        ),
     );
 }
 
@@ -5034,6 +5062,8 @@ fn a_repeated_terminal_drag_on_the_settled_cell_costs_no_frame() {
     assert_eq!(h.fake_clipboard().writes(), vec!["hello"]);
 }
 
+/// The drag stays live, since the release that copies clears the selection on
+/// its own.
 #[test]
 fn a_keystroke_clears_the_terminal_selection() {
     use crossterm::event::MouseButton;
@@ -5045,8 +5075,6 @@ fn a_keystroke_clears_the_terminal_selection() {
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
-    h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
     assert!(h.stoat.active_workspace().terms[term_id]
         .selection
         .is_some());
@@ -5242,6 +5270,8 @@ fn a_replaced_terminal_drops_the_reported_pool_grids() {
     );
 }
 
+/// The drag stays live, since the release that copies clears the selection on
+/// its own.
 #[test]
 fn a_wheel_over_a_terminal_pane_walks_its_history() {
     use crossterm::event::MouseButton;
@@ -5255,8 +5285,6 @@ fn a_wheel_over_a_terminal_pane_walks_its_history() {
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 0));
-    h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0));
 
     let mut wheel = |kind: MouseEventKind, notches: usize| {
         for _ in 0..notches {
