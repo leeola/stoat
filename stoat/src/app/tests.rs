@@ -4956,6 +4956,58 @@ fn dragging_over_a_terminal_pane_selects_and_copies() {
     );
 }
 
+#[test]
+fn a_single_click_on_a_terminal_pane_paints_no_cell() {
+    let mut h = Stoat::test();
+    let _ = focused_terminal_pane(&mut h, b"hello world");
+    let before = h.stoat.render();
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0));
+
+    assert_eq!(
+        h.stoat.render(),
+        before,
+        "the click leaves the frame as it was"
+    );
+}
+
+/// The child's cursor sits after `hello`, at column 5, outside the dragged
+/// run, so the cell shows whether the painter drew the cursor.
+#[test]
+fn a_terminal_drag_hides_the_child_cursor() {
+    let mut h = Stoat::test();
+    let _ = focused_terminal_pane(&mut h, b"hello");
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 0));
+    let during = h.stoat.render()[(5, 0)]
+        .modifier
+        .contains(Modifier::REVERSED);
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    let after = h.stoat.render()[(5, 0)]
+        .modifier
+        .contains(Modifier::REVERSED);
+
+    assert_eq!(
+        (during, after),
+        (false, true),
+        "the cursor hides for the drag and returns with the next key"
+    );
+}
+
+#[test]
+fn a_zero_width_terminal_selection_reads_no_text() {
+    let mut h = Stoat::test();
+    let term_id = focused_terminal_pane(&mut h, b"hello");
+    let session = &mut h.stoat.active_workspace_mut().terms[term_id];
+    session.selection = Some(TermSelection::new(0, 0));
+
+    assert_eq!(session.selection_text(), None);
+}
+
 /// The terminal arm drops the same repeats the editor arm does, and for the
 /// same reason. A release after them still copies, so the dedupe costs the
 /// selection nothing.

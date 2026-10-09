@@ -14,12 +14,15 @@ use ratatui::{
 /// `area` are clipped so a momentarily-oversized emulator cannot scribble
 /// outside its pane.
 ///
-/// When `is_focused`, the emulator's cursor cell is drawn as a reversed block,
-/// matching how the editor shows its caret only in the focused pane.
+/// When `is_focused` and no selection marks cells, the emulator's cursor cell is
+/// drawn as a reversed block, matching how the editor shows its caret only in
+/// the focused pane. A drag hides it, so the pane never shows a second cursor
+/// beside the selection.
 ///
 /// A mouse selection over the pane ([`TermSession::selection`]) tints its cells
 /// with the theme's selection style so the highlight follows the drag and
-/// persists until it is cleared.
+/// persists until it is cleared. The zero-width selection a click leaves paints
+/// nothing, so a click draws no cell that reads as a cursor.
 pub(crate) fn render_term_pane(
     agent: &TermSession,
     theme: &crate::theme::Theme,
@@ -34,7 +37,7 @@ pub(crate) fn render_term_pane(
     let term = &agent.term;
     let rows = term.rows().min(area.height as usize);
     let cols = term.cols().min(area.width as usize);
-    let selection = agent.selection;
+    let selection = agent.selection.filter(|sel| !sel.is_empty());
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION);
 
     let mut cells = Vec::new();
@@ -59,6 +62,7 @@ pub(crate) fn render_term_pane(
     }
 
     if is_focused
+        && selection.is_none()
         && let Some(cursor) = term.cursor()
         && cursor.row < rows
         && cursor.col < cols

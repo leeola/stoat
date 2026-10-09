@@ -60,6 +60,14 @@ impl TermSelection {
         moved
     }
 
+    /// Whether the reaching end sits on the anchor cell.
+    ///
+    /// That is the state a press leaves, and a drag that returns to its start.
+    /// Either way the selection marks no text, so it paints and copies nothing.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
     /// The endpoints in reading order, `(start, end)` with `start <= end`.
     fn ordered(&self) -> ((usize, usize), (usize, usize)) {
         if self.anchor <= self.head {
@@ -103,8 +111,11 @@ pub struct TermSession {
     pub term: TermScreen,
     pub session: Arc<dyn TerminalSession>,
     /// The active mouse selection over the screen, or `None` when nothing is
-    /// selected. Set while dragging, kept highlighted after release for the copy,
-    /// and cleared by the next keystroke, click, or new drag.
+    /// selected.
+    ///
+    /// A press sets a zero-width selection at its cell, which paints and copies
+    /// nothing until a drag extends it. A drag stays highlighted after release
+    /// for the copy, and the next keystroke, click, or drag clears it.
     pub selection: Option<TermSelection>,
     /// The pane's input mode.
     ///
@@ -145,13 +156,15 @@ impl TermSession {
         }
     }
 
-    /// The selected text, or `None` when nothing is selected or the selection
-    /// covers only blank cells.
+    /// The selected text, or `None` when nothing is selected, when no drag
+    /// extended the selection past its anchor, or when the selection covers only
+    /// blank cells.
     ///
     /// The selection reads as [`TermScreen::span_text`] reads a span, which is
     /// how a terminal copies a selection.
     pub fn selection_text(&self) -> Option<String> {
-        let (start, end) = self.selection?.ordered();
+        let selection = self.selection.filter(|sel| !sel.is_empty())?;
+        let (start, end) = selection.ordered();
         let text = self.term.span_text(start, end);
         (!text.trim().is_empty()).then_some(text)
     }
