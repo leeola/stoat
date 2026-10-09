@@ -44,6 +44,7 @@ use crate::{
     apc_emit,
     app::{Stoat, UpdateEffect},
     auto_reload,
+    buffer_registry::OpenOrigin,
     command_palette::CommandPalette,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
@@ -344,7 +345,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .as_any()
                 .downcast_ref::<OpenFile>()
                 .expect("OpenFile action downcast");
-            file::open_file(stoat, &open.path);
+            file::open_file(stoat, &open.path, OpenOrigin::Named);
             UpdateEffect::Redraw
         },
         ActionKind::OpenConfig => {
@@ -384,7 +385,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .as_any()
                 .downcast_ref::<OpenBuffer>()
                 .expect("OpenBuffer action downcast");
-            file::open_file(stoat, &open.path);
+            file::open_file(stoat, &open.path, OpenOrigin::Named);
             UpdateEffect::Redraw
         },
         ActionKind::OpenFileFinder => {

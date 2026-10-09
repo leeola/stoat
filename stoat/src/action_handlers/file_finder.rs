@@ -203,7 +203,10 @@ pub(super) fn open_file_finder(
     };
 
     let modified = spawn_modified_query(stoat, git_root.clone());
-    let buffer_paths = stoat.active_workspace().buffers.open_paths();
+    let buffer_paths = {
+        let ws = stoat.active_workspace();
+        ws.buffers.listed_paths(&ws.held_buffers())
+    };
     let dirty_buffer_paths: Vec<PathBuf> = stoat
         .active_workspace()
         .buffers

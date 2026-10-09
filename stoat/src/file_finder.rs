@@ -933,7 +933,7 @@ mod tests {
 
     // ----- TestHarness integration tests -----
 
-    use crate::{debounce, test_harness::TestHarness};
+    use crate::{buffer_registry::OpenOrigin, debounce, test_harness::TestHarness};
 
     /// Insert `files` into the harness' [`crate::host::FakeFs`] under a
     /// fixed virtual root and point the active workspace at it. Returns the
@@ -1101,6 +1101,77 @@ mod tests {
         assert!(base.iter().any(|p| p.ends_with("c.rs")));
         assert!(!base.iter().any(|p| p.ends_with("b.rs")));
         assert_eq!(h.snapshot().mode, "insert");
+    }
+
+    /// A finder workspace over `a.rs`, `b.rs`, and `c.rs`, with `a.rs` opened by
+    /// name and then `b.rs` reached by a navigation in the same pane.
+    fn named_a_then_visited_b(h: &mut TestHarness) -> PathBuf {
+        let root = seed_finder_workspace(
+            h,
+            &[
+                ("a.rs", "fn a() {}"),
+                ("b.rs", "fn b() {}"),
+                ("c.rs", "fn c() {}"),
+            ],
+        );
+        open_named(h, root.join("a.rs"));
+        let pane = h.stoat.active_workspace().panes.focus();
+        crate::buffer_lifecycle::open_file_in_pane(
+            &mut h.stoat,
+            pane,
+            &root.join("b.rs"),
+            OpenOrigin::Visited,
+        );
+        root
+    }
+
+    fn open_named(h: &mut TestHarness, path: PathBuf) {
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
+    }
+
+    /// The file names the buffer picker lists after `space b b`.
+    fn buffer_picker_names(h: &mut TestHarness) -> Vec<String> {
+        h.type_keys("space b b");
+        let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
+        finder
+            .core
+            .picklist
+            .base
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .expect("a file path")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_buffer_picker_omits_a_file_a_navigation_only_visited() {
+        let mut h = crate::Stoat::test();
+        let root = named_a_then_visited_b(&mut h);
+        open_named(&mut h, root.join("c.rs"));
+
+        assert_eq!(buffer_picker_names(&mut h), ["a.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn the_buffer_picker_lists_a_visited_file_while_a_pane_shows_it() {
+        let mut h = crate::Stoat::test();
+        named_a_then_visited_b(&mut h);
+
+        assert_eq!(buffer_picker_names(&mut h), ["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn the_buffer_picker_lists_a_visited_file_with_unsaved_edits() {
+        let mut h = crate::Stoat::test();
+        let root = named_a_then_visited_b(&mut h);
+        h.type_keys("i x <esc>");
+        open_named(&mut h, root.join("c.rs"));
+
+        assert_eq!(buffer_picker_names(&mut h), ["a.rs", "b.rs", "c.rs"]);
     }
 
     /// A terminal has no path, so the buffer list names it by its place among

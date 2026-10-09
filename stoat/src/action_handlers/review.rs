@@ -5,6 +5,7 @@ use super::{
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    buffer_registry::OpenOrigin,
     diff_cache::{DiffCache, DiffCacheKey},
     diff_map::{hunk_base_lines, line_starts},
     display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot},
@@ -117,7 +118,7 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
         // Join rather than test for absoluteness, since an absolute proposal
         // path comes back from the join unchanged.
         let path = git_root.join(&edit.path);
-        let Some(buffer_id) = super::file::open_file(stoat, &path) else {
+        let Some(buffer_id) = super::file::open_file(stoat, &path, OpenOrigin::Named) else {
             continue;
         };
         let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
@@ -139,7 +140,7 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
     stoat
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::Memory { files: base_texts }));
-    super::file::open_file(stoat, &first);
+    super::file::open_file(stoat, &first, OpenOrigin::Named);
     reopen_diff_view(stoat);
     stoat.set_status("agent edits: save accepts, :reload rejects");
 }

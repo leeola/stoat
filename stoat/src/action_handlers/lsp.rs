@@ -12,6 +12,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    buffer_registry::OpenOrigin,
     display_map::InlayKind,
     editor_state::ScrollGlide,
     host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
@@ -1978,7 +1979,7 @@ pub(crate) fn open_workspace_symbol_target(
     encoding: OffsetEncoding,
 ) {
     let focused = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, path);
+    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, path, OpenOrigin::Visited);
 
     let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
         return;
@@ -2253,7 +2254,7 @@ pub(crate) fn apply_jump(
         crate::action_handlers::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
 
     let focused = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, path);
+    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, path, OpenOrigin::Visited);
     super::movement::jump_to_offset(stoat, offset);
 
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);

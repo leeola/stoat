@@ -685,6 +685,16 @@ impl Workspace {
             .chain(self.tabs.iter_mut().filter_map(|t| t.parked.as_mut()))
     }
 
+    /// The buffers an editor holds, in any tab or dock.
+    ///
+    /// The save keeps these buffers, and the buffer picker lists them.
+    pub(crate) fn held_buffers(&self) -> std::collections::HashSet<BufferId> {
+        self.editors
+            .values()
+            .map(|editor| editor.buffer_id)
+            .collect()
+    }
+
     /// Whether any pane, in any tab, shows `editor_id`.
     pub(crate) fn editor_referenced(&self, editor_id: EditorId) -> bool {
         self.pane_trees().any(|tree| {

@@ -6,7 +6,7 @@ use crate::{
 use lsp_types::SemanticToken;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -74,6 +74,25 @@ pub(crate) enum AutoReloadMode {
     Follow,
 }
 
+/// How a buffer came into the registry, which decides whether the buffer
+/// picker lists it.
+///
+/// A navigation that lands on a file registers it as well, so the registry
+/// holds every file a jump, a walk, or a follow passed through. The picker
+/// lists only the files the reader asked for, plus the ones still on screen or
+/// carrying edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenOrigin {
+    /// A command named the file, such as an open by path, a launch argument,
+    /// `:logs`, the agent-edit review, or a session restore.
+    ///
+    /// Once set, a later visit does not undo it.
+    Named,
+    /// A navigation landed on the file, such as a definition jump, a walk, a
+    /// mark, or a follow.
+    Visited,
+}
+
 #[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
@@ -123,6 +142,7 @@ struct BufferEntry {
     /// callers evict the buffer via [`BufferRegistry::remove`] on
     /// close so registry growth stays bounded.
     preview: bool,
+    origin: OpenOrigin,
     /// On-disk modification time recorded when the file was last read
     /// into or written from this buffer. The save path compares it to
     /// the file's current mtime to detect an external edit and refuse
@@ -234,6 +254,7 @@ impl BufferRegistry {
                 lsp_symbol_kinds: None,
                 diff: None,
                 preview,
+                origin: OpenOrigin::Visited,
                 disk_mtime: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
@@ -287,6 +308,7 @@ impl BufferRegistry {
                 lsp_symbol_kinds: None,
                 diff: None,
                 preview: false,
+                origin: OpenOrigin::Visited,
                 disk_mtime: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
@@ -403,6 +425,26 @@ impl BufferRegistry {
     /// ordering matches what the file finder shows for the All scope.
     pub(crate) fn open_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = self.path_to_id.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    /// The paths the buffer picker lists, in lexicographic order.
+    ///
+    /// A path-bound buffer is listed when a command opened it by name, when
+    /// `held` names it, or when it carries unsaved edits. A buffer that a
+    /// navigation only passed through drops out once no editor holds it.
+    pub(crate) fn listed_paths(&self, held: &HashSet<BufferId>) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .buffers
+            .iter()
+            .filter(|(id, entry)| {
+                entry.origin == OpenOrigin::Named
+                    || held.contains(id)
+                    || entry.buffer.read().expect("buffer poisoned").dirty
+            })
+            .filter_map(|(_, entry)| entry.path.clone())
+            .collect();
         paths.sort();
         paths
     }
@@ -663,6 +705,18 @@ impl BufferRegistry {
         }
     }
 
+    /// Record that an open from `origin` reached `id`.
+    ///
+    /// A [`OpenOrigin::Named`] open promotes a buffer a navigation registered.
+    /// A visit leaves a named buffer named.
+    pub(crate) fn note_origin(&mut self, id: BufferId, origin: OpenOrigin) {
+        if origin == OpenOrigin::Named
+            && let Some(entry) = self.buffers.get_mut(&id)
+        {
+            entry.origin = OpenOrigin::Named;
+        }
+    }
+
     /// Evict retained highlight state from the least-recently-shown hidden
     /// buffers, keeping at most `cap` of them beyond the `visible` set. Returns
     /// the evicted ids.
@@ -865,6 +919,7 @@ impl BufferRegistry {
                     lsp_symbol_kinds: None,
                     diff: None,
                     preview: false,
+                    origin: OpenOrigin::Named,
                     disk_mtime: entry.disk_mtime,
                     auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
@@ -946,6 +1001,34 @@ mod tests {
         let (id1, _) = reg.new_scratch();
         let (id2, _) = reg.new_scratch();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn a_named_open_promotes_a_visited_buffer() {
+        let mut reg = BufferRegistry::new();
+        let (id, _) = reg.open(Path::new("/a.txt"), "hello");
+        let visited = reg.listed_paths(&HashSet::new());
+        reg.note_origin(id, OpenOrigin::Visited);
+        let still_visited = reg.listed_paths(&HashSet::new());
+        reg.note_origin(id, OpenOrigin::Named);
+        let named = reg.listed_paths(&HashSet::new());
+        reg.note_origin(id, OpenOrigin::Visited);
+
+        assert_eq!(
+            (
+                visited,
+                still_visited,
+                named,
+                reg.listed_paths(&HashSet::new())
+            ),
+            (
+                Vec::<PathBuf>::new(),
+                Vec::new(),
+                vec![PathBuf::from("/a.txt")],
+                vec![PathBuf::from("/a.txt")]
+            ),
+            "a clean visit is unlisted until a named open, and a later visit keeps it listed",
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ use crate::{
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
+    buffer_registry::OpenOrigin,
     editor_state::{EditorId, EditorState},
     pane::{FocusTarget, PaneId, View},
     workspace::{BridgeWaiter, Workspace, WorkspaceId},
@@ -52,6 +53,7 @@ pub(crate) struct PendingFileOpen {
     workspace: WorkspaceId,
     target: PaneId,
     disk_mtime: Option<SystemTime>,
+    origin: OpenOrigin,
     _task: Task<()>,
     result: Arc<Mutex<Option<std::io::Result<OpenContent>>>>,
     /// The commands parked on this open, which wait on the buffer the read
@@ -62,17 +64,20 @@ pub(crate) struct PendingFileOpen {
     waiters: Vec<BridgeWaiter>,
 }
 
+/// Open `path` in pane `target`, recording `origin` as how the buffer was
+/// reached, which decides whether the buffer picker lists it.
 pub(crate) fn open_file_in_pane(
     stoat: &mut Stoat,
     target: PaneId,
     path: &Path,
+    origin: OpenOrigin,
 ) -> Option<BufferId> {
     let absolute = absolute_path(stoat, path);
 
     let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
     let disk_mtime = meta.map(|m| m.modified);
     if meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES {
-        spawn_pending_open(stoat, target, absolute, disk_mtime);
+        spawn_pending_open(stoat, target, absolute, disk_mtime, origin);
         return None;
     }
 
@@ -86,7 +91,9 @@ pub(crate) fn open_file_in_pane(
         },
     };
     let workspace = stoat.active_workspace;
-    install_content(stoat, workspace, target, &absolute, content, disk_mtime)
+    install_content(
+        stoat, workspace, target, &absolute, content, disk_mtime, origin,
+    )
 }
 
 /// `path` as an absolute path, where a relative one starts at the active
@@ -110,6 +117,7 @@ fn install_content(
     absolute: &Path,
     content: OpenContent,
     disk_mtime: Option<SystemTime>,
+    origin: OpenOrigin,
 ) -> Option<BufferId> {
     match content {
         OpenContent::Text(text) => finish_open(
@@ -119,6 +127,7 @@ fn install_content(
             absolute,
             OpenBody::Text(&text),
             disk_mtime,
+            origin,
         ),
         OpenContent::Rope { rope, ending } => finish_open(
             stoat,
@@ -127,6 +136,7 @@ fn install_content(
             absolute,
             OpenBody::Rope { rope, ending },
             disk_mtime,
+            origin,
         ),
         OpenContent::Image { px } => {
             show_image(stoat, workspace, target, absolute, px);
@@ -185,13 +195,19 @@ fn spawn_pending_open(
     target: PaneId,
     absolute: PathBuf,
     disk_mtime: Option<SystemTime>,
+    origin: OpenOrigin,
 ) {
     let workspace = stoat.active_workspace;
-    if stoat
+    if let Some(pending) = stoat
         .pending_file_opens
-        .iter()
-        .any(|p| p.path == absolute && p.workspace == workspace)
+        .iter_mut()
+        .find(|p| p.path == absolute && p.workspace == workspace)
     {
+        // The read already under way serves this open too, and a named open
+        // promotes it the way it promotes a registered buffer.
+        if origin == OpenOrigin::Named {
+            pending.origin = OpenOrigin::Named;
+        }
         return;
     }
 
@@ -221,6 +237,7 @@ fn spawn_pending_open(
         workspace,
         target,
         disk_mtime,
+        origin,
         _task: task,
         result,
         waiters: Vec::new(),
@@ -332,6 +349,7 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
             &pending.path,
             content,
             pending.disk_mtime,
+            pending.origin,
         );
         if let Some(buffer) = installed
             && let Some(ws) = stoat.workspaces.get_mut(pending.workspace)
@@ -357,8 +375,8 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
 /// `target`.
 ///
 /// The shared tail of the sync and background open paths. It registers the
-/// buffer (deduping on path), applies mtime and language, notifies LSP, records
-/// the pane switch, and installs the editor.
+/// buffer (deduping on path), records `origin` on it, applies mtime and
+/// language, notifies LSP, records the pane switch, and installs the editor.
 ///
 /// `workspace` is named rather than taken as the active one because the
 /// background path installs a read that may have finished after the user
@@ -370,6 +388,7 @@ fn finish_open(
     absolute: &Path,
     content: OpenBody<'_>,
     disk_mtime: Option<SystemTime>,
+    origin: OpenOrigin,
 ) -> Option<BufferId> {
     let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
@@ -390,6 +409,7 @@ fn finish_open(
             ),
             OpenBody::Rope { rope, ending } => (ending, ws.buffers.open_rope(absolute, rope)),
         };
+        ws.buffers.note_origin(buffer_id, origin);
         if !existed {
             ws.buffers.set_line_ending(buffer_id, ending);
             if let Some(mtime) = disk_mtime {

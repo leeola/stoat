@@ -1,6 +1,7 @@
 use super::focused_pane_jumplist;
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer_registry::OpenOrigin,
     keymap_state::{active_modal, ActiveModal},
     pane::{FocusTarget, View},
 };
@@ -245,7 +246,7 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     super::jump::push_jump(stoat);
     let offset = match path {
         Some(path) => {
-            super::file::open_file(stoat, &path);
+            super::file::open_file(stoat, &path, OpenOrigin::Visited);
             stoat
                 .offset_for_focused_point(line, column, encoding)
                 .unwrap_or(0)

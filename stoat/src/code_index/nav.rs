@@ -8,6 +8,7 @@ use crate::{
     action_handlers,
     app::{Stoat, UpdateEffect},
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
+    buffer_registry::OpenOrigin,
     code_index::build,
     editor_state::EditorState,
     nav_list::NavList,
@@ -467,7 +468,7 @@ pub(crate) fn jump_to_symbol(stoat: &mut Stoat, key: SymbolKey) -> UpdateEffect 
 
     action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, target, &path);
+    crate::buffer_lifecycle::open_file_in_pane(stoat, target, &path, OpenOrigin::Visited);
     action_handlers::movement::jump_to_offset(stoat, def_start)
 }
 

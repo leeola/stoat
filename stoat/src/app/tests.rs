@@ -2851,9 +2851,13 @@ fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
     stoat.set_fs_host(fs);
 
     let pane = stoat.active_workspace().panes.focus();
-    let buffer_id =
-        crate::buffer_lifecycle::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
-            .expect("open the buffer");
+    let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+        &mut stoat,
+        pane,
+        Path::new("/repo/src/a.rs"),
+        OpenOrigin::Named,
+    )
+    .expect("open the buffer");
 
     // A parse arms the index debounce rather than extracting, so the
     // extract lands on a later pass once the buffer has gone quiet. The
@@ -2930,9 +2934,13 @@ fn a_save_reindexes_with_persist_where_an_edit_does_not() {
     stoat.set_fs_host(fs);
 
     let pane = stoat.active_workspace().panes.focus();
-    let buffer_id =
-        crate::buffer_lifecycle::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
-            .expect("open the buffer");
+    let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+        &mut stoat,
+        pane,
+        Path::new("/repo/src/a.rs"),
+        OpenOrigin::Named,
+    )
+    .expect("open the buffer");
 
     // Nothing drains here, so the updates queue up and each phase reads the
     // ones it produced. A drain resolves the index directory, which is the
@@ -3006,9 +3014,13 @@ fn two_parses_inside_the_debounce_window_extract_once() {
     stoat.set_fs_host(fs);
 
     let pane = stoat.active_workspace().panes.focus();
-    let buffer_id =
-        crate::buffer_lifecycle::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
-            .expect("open the buffer");
+    let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+        &mut stoat,
+        pane,
+        Path::new("/repo/src/a.rs"),
+        OpenOrigin::Named,
+    )
+    .expect("open the buffer");
 
     let parse = |stoat: &mut Stoat| {
         stoat.drive_parse_jobs();

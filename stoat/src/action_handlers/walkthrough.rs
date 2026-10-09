@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::{self, read_string_via_host, review_walk::WalkLandingKind},
     app::{Stoat, UpdateEffect},
+    buffer_registry::OpenOrigin,
     code_index::{build, nav},
     host::CommitInfo,
     render::{
@@ -675,7 +676,7 @@ fn jump_to_range(
     // mode. The mode belongs to the reader rather than to whichever buffer a
     // jump puts under them, so a tour read in walkthrough mode keeps it.
     let mode = stoat.focused_mode().to_owned();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, target, path);
+    crate::buffer_lifecycle::open_file_in_pane(stoat, target, path, OpenOrigin::Visited);
     stoat.set_focused_mode(mode);
 
     let offset = focused_offset_of(stoat, range.start)?;

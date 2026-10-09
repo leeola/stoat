@@ -2,6 +2,7 @@ use crate::{
     apc_emit,
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    buffer_registry::OpenOrigin,
     host::LanguageServerFeature,
     lsp::sync,
     workspace::WorkspaceId,
@@ -794,9 +795,9 @@ fn disk_changed_since_open(stoat: &Stoat, buffer_id: BufferId, path: &Path) -> b
     current > recorded
 }
 
-pub(crate) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
+pub(crate) fn open_file(stoat: &mut Stoat, path: &Path, origin: OpenOrigin) -> Option<BufferId> {
     let target = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, target, path)
+    crate::buffer_lifecycle::open_file_in_pane(stoat, target, path, origin)
 }
 
 /// Open a user config in the focused pane.
@@ -834,7 +835,7 @@ pub(crate) fn open_config_at(stoat: &mut Stoat, path: &Path, seed: &str) {
             tracing::error!("failed to seed user config {}: {}", path.display(), err);
         }
     }
-    open_file(stoat, path);
+    open_file(stoat, path, OpenOrigin::Named);
 }
 
 #[cfg(test)]

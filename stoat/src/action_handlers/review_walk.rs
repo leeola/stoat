@@ -2,6 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     auto_reload,
     badge::BadgeSource,
+    buffer_registry::OpenOrigin,
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
@@ -1036,7 +1037,7 @@ fn land_walk(
     // A commit that changed nothing has no file to open onto, so whatever the
     // last step showed stays up and only the base moves.
     if let Some(rel_path) = landing.first_path {
-        super::file::open_file(stoat, &workdir.join(rel_path));
+        super::file::open_file(stoat, &workdir.join(rel_path), OpenOrigin::Visited);
         super::review::reopen_diff_view(stoat);
     }
 }

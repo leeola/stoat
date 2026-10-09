@@ -19,6 +19,7 @@
 use super::{focused_editor_mut, movement};
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer_registry::OpenOrigin,
     diff_map::{DiffHunkStatus, TokenDetail},
 };
 use stoat_language::structural_diff::BufferRef;
@@ -197,7 +198,14 @@ pub(super) fn navigate(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
 
     if let Some(buffer_ref) = target_ref.buffer.as_ref() {
         let focused = stoat.active_workspace().panes.focus();
-        if crate::buffer_lifecycle::open_file_in_pane(stoat, focused, &buffer_ref.path).is_none() {
+        if crate::buffer_lifecycle::open_file_in_pane(
+            stoat,
+            focused,
+            &buffer_ref.path,
+            OpenOrigin::Visited,
+        )
+        .is_none()
+        {
             return UpdateEffect::None;
         }
     }

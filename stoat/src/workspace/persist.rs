@@ -32,7 +32,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
@@ -331,11 +331,7 @@ impl Workspace {
             .collect();
 
         let buffers = {
-            let held: HashSet<BufferId> = self
-                .editors
-                .values()
-                .map(|editor| editor.buffer_id)
-                .collect();
+            let held = self.held_buffers();
             self.buffers
                 .snapshot_retaining(|id, buffer| held.contains(&id) || buffer.dirty)
         };
@@ -819,7 +815,7 @@ mod tests {
         jumplist::{JumpEntry, JumpList},
         pane::{Axis, DockSide, DockVisibility, Placement},
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::HashSet, sync::Arc, time::Duration};
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Selection, SelectionGoal};
 
@@ -1112,6 +1108,31 @@ mod tests {
             (fresh.buffers.open_paths(), buffer_is_dirty(&fresh, id_b)),
             (vec![ws_dir.join("a.txt"), ws_dir.join("b.txt")], true),
             "the held and the edited buffers restore, and the hidden clean one does not",
+        );
+    }
+
+    /// A restore brings back the buffers the save kept, which were held or
+    /// edited when it ran, so the picker lists each one whatever holds it now.
+    #[test]
+    fn restored_buffers_are_listed_by_the_picker() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/listed");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        open_held(&mut ws, &ws_dir.join("a.txt"), "alpha\n", &exec);
+        let (_, buffer_b) = ws.buffers.open(&ws_dir.join("b.txt"), "beta\n");
+        buffer_b.write().expect("buffer poisoned").edit(0..0, "x");
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(
+            fresh.buffers.listed_paths(&HashSet::new()),
+            vec![ws_dir.join("a.txt"), ws_dir.join("b.txt")],
+            "the clean restored buffer is listed with no editor holding it",
         );
     }
 

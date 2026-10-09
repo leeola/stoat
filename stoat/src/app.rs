@@ -5,6 +5,7 @@ use crate::{
     apc_emit,
     badge::BadgeTray,
     buffer::BufferId,
+    buffer_registry::OpenOrigin,
     code_index::{
         build::IndexUpdate,
         store::{IndexWrites, ManifestEdit},
@@ -7556,7 +7557,12 @@ impl Stoat {
                     label: "agent".to_string(),
                     done,
                 };
-                let held = match crate::buffer_lifecycle::open_file_in_pane(self, new_pane, &path) {
+                let held = match crate::buffer_lifecycle::open_file_in_pane(
+                    self,
+                    new_pane,
+                    &path,
+                    OpenOrigin::Named,
+                ) {
                     Some(buffer_id) => {
                         self.active_workspace_mut().hold_buffer(buffer_id, waiter);
                         true
@@ -7609,7 +7615,12 @@ impl Stoat {
                 };
                 let mut opens = vec![(
                     first,
-                    crate::buffer_lifecycle::open_file_in_pane(self, target, first),
+                    crate::buffer_lifecycle::open_file_in_pane(
+                        self,
+                        target,
+                        first,
+                        OpenOrigin::Named,
+                    ),
                 )];
                 for path in rest {
                     let split = self
@@ -7618,7 +7629,12 @@ impl Stoat {
                         .split(crate::pane::Axis::Vertical);
                     opens.push((
                         path,
-                        crate::buffer_lifecycle::open_file_in_pane(self, split, path),
+                        crate::buffer_lifecycle::open_file_in_pane(
+                            self,
+                            split,
+                            path,
+                            OpenOrigin::Named,
+                        ),
                     ));
                 }
 

@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::{focused_editor_mut, movement},
     app::{Stoat, UpdateEffect},
+    buffer_registry::OpenOrigin,
 };
 use std::path::PathBuf;
 use stoat_text::{cursor_offset, Bias, Point};
@@ -120,7 +121,9 @@ fn goto_global(
 
     if !already_focused {
         let target = stoat.active_workspace().panes.focus();
-        if crate::buffer_lifecycle::open_file_in_pane(stoat, target, &path).is_none() {
+        if crate::buffer_lifecycle::open_file_in_pane(stoat, target, &path, OpenOrigin::Visited)
+            .is_none()
+        {
             return UpdateEffect::None;
         }
     }

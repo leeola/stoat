@@ -26,7 +26,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::{BufferId, SharedBuffer},
     buffer_lifecycle,
-    buffer_registry::AutoReloadMode,
+    buffer_registry::{AutoReloadMode, OpenOrigin},
     debounce::FS_WATCH_DEBOUNCE,
     editor_state::{EditorId, EditorState},
     keymap_state,
@@ -735,7 +735,7 @@ pub(crate) fn open_log_buffer(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let Some(id) = open_file(stoat, path) else {
+    let Some(id) = open_file(stoat, path, OpenOrigin::Named) else {
         return UpdateEffect::Redraw;
     };
     stoat
@@ -917,7 +917,7 @@ fn follow_change_now(stoat: &mut Stoat, path: &Path) -> bool {
         return false;
     }
 
-    buffer_lifecycle::open_file_in_pane(stoat, target, path);
+    buffer_lifecycle::open_file_in_pane(stoat, target, path, OpenOrigin::Visited);
     review::enter_diff_view(stoat);
     movement::goto_first_change(stoat);
     true

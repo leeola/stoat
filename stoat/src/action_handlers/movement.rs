@@ -2,6 +2,7 @@ use super::{split_selection, surround, view, LastMotion};
 use crate::{
     action_handlers::{focused_editor_mut, input_target_editor_mut},
     app::{Stoat, UpdateEffect},
+    buffer_registry::OpenOrigin,
     diff_map,
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
@@ -4882,7 +4883,9 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
     };
 
     let focused_pane = stoat.active_workspace().panes.focus();
-    if crate::buffer_lifecycle::open_file_in_pane(stoat, focused_pane, &path).is_none() {
+    if crate::buffer_lifecycle::open_file_in_pane(stoat, focused_pane, &path, OpenOrigin::Visited)
+        .is_none()
+    {
         return true;
     }
 
