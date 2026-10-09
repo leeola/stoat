@@ -1769,8 +1769,7 @@ pub(crate) fn changes_to_hunks(
     for (lhs_idx, rhs_idx) in by_pair.values().filter_map(|p| Some((p.0?, p.1?))) {
         let lhs_change = &changes[lhs_idx];
         let rhs_change = &changes[rhs_idx];
-        let line_range =
-            byte_range_to_line_range(&rhs_starts, rhs_text.len(), &rhs_change.byte_range);
+        let line_range = change_line_range(&rhs_starts, rhs_text.len(), &rhs_change.byte_range);
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
             unstaged_lines: Vec::new(),
@@ -1794,8 +1793,7 @@ pub(crate) fn changes_to_hunks(
         }
         match cur.side {
             Side::Rhs => {
-                let line_range =
-                    byte_range_to_line_range(&rhs_starts, rhs_text.len(), &cur.byte_range);
+                let line_range = change_line_range(&rhs_starts, rhs_text.len(), &cur.byte_range);
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
                     unstaged_lines: Vec::new(),
@@ -2085,11 +2083,8 @@ fn prose_change(change: &stoat_language::structural_diff::DiffChange, text: &str
 
 /// Map each base line a hunk removed to that hunk's [`BaseLineMark`].
 ///
-/// A hunk's [`DiffHunk::base_byte_range`] spans the base content it removed,
-/// including the trailing newline, so the covered line count comes from
-/// [`str::lines`] rather than the byte-to-line range, which would over-count by
-/// one at a newline boundary. Added hunks have an empty base range and map no
-/// line.
+/// The lines come from [`hunk_base_lines`], so a removed blank line maps too,
+/// and an `Added` hunk maps none.
 ///
 /// A line is refined when its hunk is `Modified` and carries token detail, an
 /// empty one included. [`merge_structural_detail`] gives every `Modified` hunk
@@ -2103,9 +2098,6 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
     let starts = line_starts(base_text);
     let mut out = BTreeMap::new();
     for hunk in hunks.iter() {
-        if hunk.base_byte_range.is_empty() {
-            continue;
-        }
         let mark = BaseLineMark {
             staged: hunk.staged(),
             refined: hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some(),
@@ -2120,16 +2112,26 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
 /// The base lines `hunk` removed or replaced, against the [`line_starts`] of
 /// `base_text`.
 ///
-/// Empty for a hunk that removed nothing, at the base line its added rows go
-/// before. The count comes from [`str::lines`] over the removed bytes, which
-/// hold the trailing newline, so it does not over-count at a newline boundary.
+/// The line differ ends a base range before its last line's terminator, so the
+/// last line is the one the end byte sits on. An empty range on a `Deleted` or
+/// `Modified` hunk is one blank line. On any other hunk an empty range covers no
+/// line.
+///
+/// A whole-file removal's range runs past the final newline to the end of the
+/// text. The empty tail after that newline holds no line, so the range stops
+/// at the text's last line.
 pub(crate) fn hunk_base_lines(hunk: &DiffHunk, starts: &[usize], base_text: &str) -> Range<u32> {
-    let start = line_of(starts, hunk.base_byte_range.start);
-    if hunk.base_byte_range.is_empty() {
-        return start..start;
+    let range = &hunk.base_byte_range;
+    let start = line_of(starts, range.start);
+    if range.is_empty() {
+        let removed = matches!(
+            hunk.status,
+            DiffHunkStatus::Deleted | DiffHunkStatus::Modified
+        );
+        return start..start + u32::from(removed);
     }
-    let count = base_text[hunk.base_byte_range.clone()].lines().count() as u32;
-    start..start + count
+    let last = line_of(starts, range.end.min(base_text.len().saturating_sub(1)));
+    start..last + 1
 }
 
 /// Distribute every hunk's base change spans across the base lines they cover,
@@ -2215,6 +2217,23 @@ fn byte_range_to_line_range(
         return start_line..start_line;
     }
     start_line..(line_of(line_starts, end_byte) + 1)
+}
+
+/// The rows a line-differ change covers, from its byte range.
+///
+/// The line differ ends a run before its last line's terminator, so a run of
+/// one blank line is the only change with an empty range, and it covers one
+/// row.
+fn change_line_range(
+    line_starts: &[usize],
+    text_len: usize,
+    byte_range: &Range<usize>,
+) -> Range<u32> {
+    let rows = byte_range_to_line_range(line_starts, text_len, byte_range);
+    if rows.is_empty() {
+        return rows.start..rows.start + 1;
+    }
+    rows
 }
 
 /// Byte offset at the start of each line, line 0 at offset 0. Precomputed once
@@ -2747,7 +2766,7 @@ mod tests {
     fn a_staged_mark_under_an_unstaged_hunk_yields_to_it() {
         let dm = staged_map(
             "b0\nb1\nb2\nb3\n",
-            vec![modified_hunk(1..2, 3..6)],
+            vec![modified_hunk(1..2, 3..5)],
             vec![mark(DiffHunkStatus::Modified, 1..3)],
         );
         let text = "b0\nX1\nb2\nb3\n";
@@ -2806,7 +2825,7 @@ mod tests {
     fn staged_marks_are_change_stops_and_not_hunk_stops() {
         let dm = staged_map(
             "b0\nb1\nb2\nb3\nb4\n",
-            vec![modified_hunk(1..2, 3..6)],
+            vec![modified_hunk(1..2, 3..5)],
             vec![mark(DiffHunkStatus::Modified, 4..5)],
         );
         let live = dm.live_hunks(&buffer_holding("b0\nX1\nb2\nb3\nb4\n").snapshot());
@@ -3924,6 +3943,71 @@ mod tests {
             flags,
             vec![(1, true), (3, false)],
             "line-1 change staged, line-3 change unstaged"
+        );
+    }
+
+    #[test]
+    fn an_added_blank_line_is_a_one_row_hunk() {
+        let dm = DiffMap::from_structural_changes(
+            stoat_language::structural_diff::diff("a\nb\n", "a\n\nb\n"),
+            Arc::new("a\nb\n".to_string()),
+            "a\n\nb\n",
+        );
+        let hunks: Vec<(DiffHunkStatus, std::ops::Range<u32>)> = dm
+            .hunks_in_range(0..u32::MAX)
+            .iter()
+            .map(|h| (h.status, h.buffer_line_range.clone()))
+            .collect();
+        assert_eq!(hunks, [(DiffHunkStatus::Added, 1..2)]);
+    }
+
+    #[test]
+    fn a_deleted_blank_line_counts_one_base_line() {
+        let base_lines =
+            |base: &str, buffer: &str| -> Vec<(DiffHunkStatus, std::ops::Range<u32>)> {
+                let result = stoat_language::structural_diff::diff(base, buffer);
+                let starts = super::line_starts(base);
+                super::changes_to_hunks(&result.changes, base, buffer)
+                    .iter()
+                    .map(|hunk| (hunk.status, super::hunk_base_lines(hunk, &starts, base)))
+                    .collect()
+            };
+        assert_eq!(
+            base_lines("a\n\nb\n", "a\nb\n"),
+            [(DiffHunkStatus::Deleted, 1..2)],
+            "a lone blank line"
+        );
+        assert_eq!(
+            base_lines("a\nb\n\nc\n", "a\nc\n"),
+            [(DiffHunkStatus::Deleted, 1..3)],
+            "a run that ends in a blank line"
+        );
+    }
+
+    /// A whole-file removal's range runs past the final newline, and the empty
+    /// tail there is no line of the base.
+    #[test]
+    fn a_whole_file_removal_counts_each_base_line_once() {
+        let base = "a\nb\n";
+        let starts = super::line_starts(base);
+        assert_eq!(
+            super::hunk_base_lines(&deleted_hunk(0, 0..4), &starts, base),
+            0..2
+        );
+    }
+
+    /// The tree pass turns an `Added` hunk it finds relocated into a `Moved`
+    /// one, and that hunk keeps the empty base range it had as an addition.
+    #[test]
+    fn a_moved_hunk_with_an_empty_base_range_counts_no_base_line() {
+        let base = "a\nb\n";
+        let moved = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            ..added_hunk(1..3)
+        };
+        assert_eq!(
+            super::hunk_base_lines(&moved, &super::line_starts(base), base),
+            0..0
         );
     }
 

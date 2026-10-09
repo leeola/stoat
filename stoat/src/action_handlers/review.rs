@@ -6,13 +6,14 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     diff_cache::{DiffCache, DiffCacheKey},
+    diff_map::{hunk_base_lines, line_starts},
     display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot},
     editor_state::EditorId,
     git_jobs::{self, GitJob, GitLanding, GitWork},
     host::GitRepo,
     multi_buffer::MultiBufferSnapshot,
     pane::{FocusTarget, View},
-    review::{line_count, ReviewFileInput, ReviewHunk},
+    review::{ReviewFileInput, ReviewHunk},
     review_apply::{
         base_line_range, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
         HUNK_CONTEXT,
@@ -1160,15 +1161,16 @@ fn ranges_meet(a: &Range<u32>, b: &Range<u32>) -> bool {
 ///
 /// Each index-vs-buffer hunk fully above the cursor shifts buffer rows past the
 /// index by its added-minus-removed line count, so subtracting that shift
-/// recovers the index row. The `index_text` slicing keys off each hunk's base
-/// byte range to count its index lines.
+/// recovers the index row. The removed count comes from [`hunk_base_lines`],
+/// the count the staging patches place their hunks by, so the two agree on
+/// where each hunk sits.
 fn map_buffer_row_to_index(index_text: &str, buffer_text: &str, cursor_row: u32) -> u32 {
+    let starts = line_starts(index_text);
     let mut shift: i64 = 0;
     for hunk in line_hunks(index_text, buffer_text) {
         if hunk.buffer_line_range.end <= cursor_row {
             let buffer_len = (hunk.buffer_line_range.end - hunk.buffer_line_range.start) as i64;
-            let index_len =
-                line_count(index_text.get(hunk.base_byte_range.clone()).unwrap_or("")) as i64;
+            let index_len = hunk_base_lines(&hunk, &starts, index_text).len() as i64;
             shift += buffer_len - index_len;
         }
     }
@@ -2939,6 +2941,28 @@ mod tests {
         let patch = &patches[0];
         assert!(patch.contains("-B\n"), "reverts the staged line: {patch}");
         assert!(patch.contains("+b\n"), "restores the HEAD line: {patch}");
+    }
+
+    /// The blank line the buffer adds above the cursor is not in the index, so
+    /// the cursor's index row sits one row above its buffer row.
+    #[test]
+    fn unstage_line_below_an_added_blank_line_reverts_its_own_row() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(
+            &workdir,
+            &[("a.rs", "a\nb\nc\nd\n", "a\nb\nc\nD\n", "a\n\nb\nc\nD\n")],
+        );
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 4);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+
+        assert_eq!(
+            h.fake_git().applied_patches(&workdir),
+            ["diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,4 +1,4 @@\n a\n b\n c\n-D\n+d\n"],
+        );
     }
 
     #[test]

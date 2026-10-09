@@ -7,7 +7,7 @@
 //! of a file's chunks independently.
 
 use crate::{
-    diff_map::DiffHunk,
+    diff_map::{hunk_base_lines, line_starts, DiffHunk},
     review::{line_count, ReviewRow, ReviewSide},
 };
 use std::{ops::Range, path::Path};
@@ -20,17 +20,18 @@ pub(crate) const HUNK_CONTEXT: u32 = 3;
 
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 
-/// 0-based base line that hunk `k` starts at.
+/// 0-based base line that hunk `k` starts at, against the [`line_starts`] of
+/// `base_text`.
 ///
 /// [`DiffHunk`] records buffer rows and base bytes but no base line, so the
 /// anchor comes from the buffer start less every line the prior hunks added or
 /// removed. An `Added` hunk contributes nothing to that walk, which is what
 /// makes the anchor right for a pure insertion.
-fn base_line_start(base_text: &str, hunks: &[DiffHunk], k: usize) -> u32 {
+fn base_line_start(base_text: &str, starts: &[usize], hunks: &[DiffHunk], k: usize) -> u32 {
     let mut delta: i64 = 0;
     for prior in &hunks[..k] {
         let buffer_len = prior.buffer_line_range.end - prior.buffer_line_range.start;
-        let base_len = base_span_lines(base_text, prior);
+        let base_len = hunk_base_lines(prior, starts, base_text).len() as u32;
         delta += i64::from(buffer_len) - i64::from(base_len);
     }
     let start = hunks.get(k).map_or(0, |hunk| hunk.buffer_line_range.start);
@@ -43,10 +44,11 @@ fn base_line_start(base_text: &str, hunks: &[DiffHunk], k: usize) -> u32 {
 /// a hunk by index row reads this the way the gutter reads
 /// [`DiffHunk::buffer_line_range`].
 pub(crate) fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> Range<u32> {
-    let start = base_line_start(base_text, hunks, k);
-    let len = hunks
-        .get(k)
-        .map_or(0, |hunk| base_span_lines(base_text, hunk));
+    let starts = line_starts(base_text);
+    let start = base_line_start(base_text, &starts, hunks, k);
+    let len = hunks.get(k).map_or(0, |hunk| {
+        hunk_base_lines(hunk, &starts, base_text).len() as u32
+    });
     start..start + len
 }
 
@@ -85,8 +87,9 @@ pub(crate) fn hunk_rows(
     let base_lines: Vec<&str> = split_lines(base_text);
     let buffer_lines: Vec<&str> = split_lines(buffer_text);
 
-    let base_start = base_line_start(base_text, hunks, k);
-    let base_len = base_span_lines(base_text, hunk);
+    let starts = line_starts(base_text);
+    let base_start = base_line_start(base_text, &starts, hunks, k);
+    let base_len = hunk_base_lines(hunk, &starts, base_text).len() as u32;
     let buffer_start = hunk.buffer_line_range.start;
     let buffer_len = hunk.buffer_line_range.end - buffer_start;
 
@@ -165,18 +168,6 @@ pub(crate) fn hunk_to_patch(
 ) -> Option<String> {
     let rows = hunk_rows(base_text, buffer_text, hunks, k, HUNK_CONTEXT)?;
     Some(rows_to_unified_diff(rel, base_text, buffer_text, &rows))
-}
-
-/// Lines the hunk covers on the base side.
-///
-/// Derived from the byte range rather than stored, and zero for an `Added`
-/// hunk, whose base range is empty.
-fn base_span_lines(base_text: &str, hunk: &DiffHunk) -> u32 {
-    let range = &hunk.base_byte_range;
-    if range.is_empty() {
-        return 0;
-    }
-    line_count(&base_text[range.clone()])
 }
 
 /// The text's lines without their terminators, and without the empty tail a
@@ -531,5 +522,52 @@ mod tests {
             .apply_to_index(&patch)
             .expect("the second hunk applies with the first unstaged");
         assert_eq!(staged_text(&repo), "a\nb\nc\nd\ne\nf\nY\nh\n");
+    }
+
+    /// The buffer rows of each line hunk between `base` and `buffer`.
+    fn buffer_rows(base: &str, buffer: &str) -> Vec<Range<u32>> {
+        hunks(base, buffer)
+            .into_iter()
+            .map(|hunk| hunk.buffer_line_range)
+            .collect()
+    }
+
+    /// The index text after hunk `k` stages over a HEAD and index at `base`.
+    fn stage_hunk(base: &str, buffer: &str, k: usize) -> String {
+        let (_dir, repo, host_repo) = index_repo(base, buffer);
+        let patch = hunk_to_patch(Path::new("a.rs"), base, buffer, &hunks(base, buffer), k)
+            .expect("the hunk exists");
+        host_repo
+            .apply_to_index(&patch)
+            .expect("the hunk patch applies to real libgit2");
+        staged_text(&repo)
+    }
+
+    /// The line differ gives a lone blank line an empty byte range, and the
+    /// hunk below it still sits one index line above its buffer row.
+    #[test]
+    fn a_hunk_below_an_added_blank_line_stages() {
+        const BASE: &str = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        const BUFFER: &str = "a\nb\n\nc\nd\ne\nf\nY\nh\n";
+        assert_eq!(buffer_rows(BASE, BUFFER), [2..3, 7..8]);
+        assert_eq!(stage_hunk(BASE, BUFFER, 1), "a\nb\nc\nd\ne\nf\nY\nh\n");
+    }
+
+    #[test]
+    fn a_hunk_below_a_deleted_blank_line_stages() {
+        const BASE: &str = "a\nb\n\nc\nd\ne\nf\ng\nh\n";
+        const BUFFER: &str = "a\nb\nc\nd\ne\nf\nY\nh\n";
+        assert_eq!(buffer_rows(BASE, BUFFER), [2..2, 6..7]);
+        assert_eq!(stage_hunk(BASE, BUFFER, 1), "a\nb\n\nc\nd\ne\nf\nY\nh\n");
+    }
+
+    #[test]
+    fn a_deleted_run_that_ends_in_a_blank_line_stages_whole() {
+        assert_eq!(stage_hunk("a\nb\n\nc\n", "a\nc\n", 0), "a\nc\n");
+    }
+
+    #[test]
+    fn an_added_blank_line_stages_on_its_own() {
+        assert_eq!(stage_hunk("a\nb\n", "a\n\nb\n", 0), "a\n\nb\n");
     }
 }
