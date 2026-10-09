@@ -1439,6 +1439,17 @@ on key {
         # the same reason.
         Ctrl-v -> [SetMode(normal), SplitDown()];
         Ctrl-s -> [SetMode(normal), SplitRight()];
+        # The focus moves of `space a`, for the same reason, with Ctrl-w for its
+        # w. The chord ends first, so the pane focus leaves is at rest.
+        Ctrl-w -> [SetMode(normal), FocusNext()];
+        h -> [SetMode(normal), FocusLeft()];
+        Left -> [SetMode(normal), FocusLeft()];
+        j -> [SetMode(normal), FocusDown()];
+        Down -> [SetMode(normal), FocusDown()];
+        k -> [SetMode(normal), FocusUp()];
+        Up -> [SetMode(normal), FocusUp()];
+        l -> [SetMode(normal), FocusRight()];
+        Right -> [SetMode(normal), FocusRight()];
         c -> [SetMode(normal), NewTab()];
         x -> [SetMode(normal), CloseTab()];
         num -> [SetMode(normal), GotoTab($num)];

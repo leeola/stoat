@@ -4957,6 +4957,37 @@ fn ctrl_a_ctrl_v_from_a_terminal_splits_into_a_fresh_shell() {
 }
 
 #[test]
+fn ctrl_a_h_from_a_terminal_focuses_the_editor_and_rests_the_terminal() {
+    let mut h = Stoat::test();
+    let (editor_pane, term_pane) = split_editor_and_terminal(&mut h);
+    h.type_action("FocusRight()");
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(bare(KeyCode::Char('h'))));
+    assert_eq!(
+        (
+            h.stoat.active_workspace().panes.focus(),
+            term_mode(&h.stoat, term_pane),
+            h.fake_terminal().sent_bytes()
+        ),
+        (editor_pane, "normal".to_string(), Vec::<Vec<u8>>::new()),
+        "Ctrl-a h focuses the editor, and the terminal it left rests",
+    );
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('w')));
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    assert_eq!(
+        (
+            h.stoat.active_workspace().panes.focus(),
+            h.fake_terminal().sent_bytes()
+        ),
+        (term_pane, vec![b"x".to_vec()]),
+        "Ctrl-a Ctrl-w from the editor focuses the terminal, and its keys reach the child",
+    );
+}
+
+#[test]
 fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
     let mut h = Stoat::test();
     let (editor_pane, term_pane) = {

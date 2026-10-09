@@ -2970,27 +2970,68 @@ mod tests {
         }
     }
 
+    /// The actions `code` with `modifiers` resolves to in the `Ctrl-a` prefix.
+    fn prefix_calls(
+        keymap: &Keymap,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<Vec<(String, Vec<Value>)>> {
+        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+        keymap
+            .lookup(&prefix, &key_event(code, modifiers))
+            .map(|actions| action_calls(&actions))
+    }
+
+    /// `SetMode(normal)` followed by `action`, which is how a prefix chord that
+    /// acts on panes ends the chord before it acts.
+    fn chord_end_then(action: &str) -> Option<Vec<(String, Vec<Value>)>> {
+        Some(vec![
+            ("SetMode".to_string(), vec![Value::Ident("normal".into())]),
+            (action.to_string(), Vec::new()),
+        ])
+    }
+
     #[test]
     fn ca_ctrl_v_and_ctrl_s_split_the_pane() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
-        let keymap = Keymap::compile(&config);
-        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
-        let calls = |c: char| {
-            keymap
-                .lookup(&prefix, &key_event(KeyCode::Char(c), KeyModifiers::CONTROL))
-                .map(|actions| action_calls(&actions))
-        };
-        let split = |name: &str| {
-            Some(vec![
-                ("SetMode".to_string(), vec![Value::Ident("normal".into())]),
-                (name.to_string(), Vec::new()),
-            ])
-        };
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let ctrl = |c| prefix_calls(&keymap, KeyCode::Char(c), KeyModifiers::CONTROL);
 
         assert_eq!(
-            (calls('v'), calls('s')),
-            (split("SplitDown"), split("SplitRight")),
+            (ctrl('v'), ctrl('s')),
+            (chord_end_then("SplitDown"), chord_end_then("SplitRight")),
             "the chord leaves the prefix, then splits below or to the right",
+        );
+    }
+
+    #[test]
+    fn ca_focus_keys_move_focus_and_end_the_chord() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let plain = |code| prefix_calls(&keymap, code, KeyModifiers::NONE);
+
+        assert_eq!(
+            [
+                prefix_calls(&keymap, KeyCode::Char('w'), KeyModifiers::CONTROL),
+                plain(KeyCode::Char('h')),
+                plain(KeyCode::Left),
+                plain(KeyCode::Char('j')),
+                plain(KeyCode::Down),
+                plain(KeyCode::Char('k')),
+                plain(KeyCode::Up),
+                plain(KeyCode::Char('l')),
+                plain(KeyCode::Right),
+            ],
+            [
+                chord_end_then("FocusNext"),
+                chord_end_then("FocusLeft"),
+                chord_end_then("FocusLeft"),
+                chord_end_then("FocusDown"),
+                chord_end_then("FocusDown"),
+                chord_end_then("FocusUp"),
+                chord_end_then("FocusUp"),
+                chord_end_then("FocusRight"),
+                chord_end_then("FocusRight"),
+            ],
+            "each focus key leaves the prefix, then moves focus",
         );
     }
 
