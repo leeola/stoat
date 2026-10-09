@@ -2,7 +2,7 @@
 //!
 //! A walk or a rebase edit stop checks a commit out and points `:diff` at its
 //! parent, which makes the commit itself the staged side of every hunk on
-//! screen. The keys that cross that line are the same `s` and `u` that drive
+//! screen. The keys that cross that line are the same `s` and `S` that drive
 //! the git index elsewhere, so this is where they go instead.
 
 use super::review::{HunkStage, StageOutcome};
@@ -29,7 +29,7 @@ pub(super) struct AmendTarget {
     branch: Option<String>,
 }
 
-/// Where `s` and `u` send a hunk, given what the workspace diffs against.
+/// Where `s` sends a hunk, given what the workspace diffs against.
 pub(super) enum AmendRoute {
     /// The workspace diffs against its own HEAD-plus-index, so the keys drive
     /// the index the way they do in any ordinary buffer.
@@ -52,7 +52,7 @@ pub(super) const REFUSED_BADGE: &str =
 /// another file fits neither the index nor a commit.
 pub(super) const PAIR_REFUSED: &str = "no staging while the diff compares two files";
 
-/// Whether `s` and `u` rewrite the checked-out commit rather than the index.
+/// Whether `s` rewrites the checked-out commit rather than the index.
 ///
 /// The commit is rewritable only where nothing is built on it yet. That means
 /// a rebase edit stop, where the stepper replays whatever follows the rewrite,
@@ -268,12 +268,12 @@ fn amended_content(
 /// How much of the hunk under the cursor one keypress moves.
 #[derive(Clone)]
 pub(super) enum AmendUnit {
-    /// The whole hunk, which is what `s` and `u` move.
+    /// The whole hunk, which is what `s` moves.
     Hunk,
-    /// The cursor's line alone, which is what `S` and `U` move.
+    /// The cursor's line alone, which is what `S` moves.
     Line,
     /// The live buffer rows of the marked run under the cursor, which is what
-    /// `s` and `u` move inside a hunk the tree pass narrowed.
+    /// `s` moves inside a hunk the tree pass narrowed.
     Rows(Range<u32>),
 }
 

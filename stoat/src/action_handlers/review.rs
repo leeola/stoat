@@ -2326,8 +2326,8 @@ mod tests {
     /// index, which leaves the reindented lines and the second run staged.
     const REINDENT_IF_UNSTAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,7 +1,6 @@\n fn f() {\n-    if x {\n         let a = 1;\n         let b = 2;\n         let c = 4;\n     }\n }\n";
 
-    /// Under the HEAD base a staged reindent shows as a narrowed hunk, so `u`
-    /// on its first run unstages that run alone.
+    /// Under the HEAD base a staged reindent shows as a narrowed hunk, so
+    /// `UnstageHunk` on its first run unstages that run alone.
     #[test]
     fn unstaging_a_narrowed_hunk_moves_only_the_run_under_the_cursor() {
         let mut h = TestHarness::with_size(80, 14);
@@ -2851,7 +2851,7 @@ mod tests {
 
     /// A base with nothing safe to rewrite under it gets the transport's own
     /// refusal rather than the line-granularity one, since the commit is out of
-    /// reach for `s` and `u` as well.
+    /// reach for `s` as well.
     #[test]
     fn stage_line_reports_the_transport_refusal_below_the_tip() {
         let mut h = TestHarness::with_size(80, 14);
@@ -3106,6 +3106,42 @@ mod tests {
             h.stoat.focused_mode(),
             "normal",
             "the one-shot git mode returns to normal after acting"
+        );
+    }
+
+    /// The patches `keys` applies with the cursor on the second hunk of
+    /// [`SHIFT_BUFFER`], over an index that holds `index`.
+    fn chord_on_the_second_hunk(index: &str, keys: &str) -> Vec<String> {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(&workdir, &[("a.rs", SHIFT_HEAD, index, SHIFT_BUFFER)]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 7);
+        h.type_keys(keys);
+        h.fake_git().applied_patches(&workdir)
+    }
+
+    #[test]
+    fn space_capital_g_s_unstages_a_staged_hunk_from_a_plain_editor() {
+        assert_eq!(
+            chord_on_the_second_hunk(SHIFT_BUFFER, "space G s"),
+            [SECOND_HUNK_UNSTAGE]
+        );
+    }
+
+    #[test]
+    fn space_capital_g_capital_s_toggles_the_line_from_a_plain_editor() {
+        assert_eq!(
+            (
+                chord_on_the_second_hunk(SHIFT_HEAD, "space G S"),
+                chord_on_the_second_hunk(SHIFT_BUFFER, "space G S")
+            ),
+            (
+                vec![SECOND_HUNK_STAGE.to_string()],
+                vec![SECOND_HUNK_UNSTAGE.to_string()]
+            ),
+            "the line key stages an unstaged line and unstages a staged one",
         );
     }
 

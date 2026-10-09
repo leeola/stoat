@@ -3268,7 +3268,7 @@ mod tests {
 
         for (key, action) in [
             ('n', "GotoNextChange"),
-            ('s', "StageHunk"),
+            ('s', "ToggleStageHunk"),
             ('r', "ReloadAll"),
             ('b', "DiffBaseToggle"),
         ] {
