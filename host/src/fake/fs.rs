@@ -681,6 +681,14 @@ impl FsHost for FakeFs {
     ) {
         crate::fs::manual_walk_streaming(self, root, on_batch);
     }
+
+    fn walk_all_files_streaming(
+        &self,
+        root: &Path,
+        on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+    ) {
+        crate::fs::manual_walk_all_streaming(self, root, on_batch);
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1274,41 @@ mod tests {
         combined.sort();
         let expected = fs.walk_workspace_files(&root);
         assert_eq!(combined, expected);
+    }
+
+    #[test]
+    fn walk_all_files_streaming_yields_ignored_files_but_not_dot_git() {
+        let fs = FakeFs::new();
+        let root = PathBuf::from("/repo");
+        fs.insert_files([
+            ("/repo/.git/HEAD", "ref: refs/heads/main".as_bytes()),
+            ("/repo/.gitignore", "*.log\n".as_bytes()),
+            ("/repo/a.log", "log".as_bytes()),
+            ("/repo/src/main.rs", "fn main() {}".as_bytes()),
+            ("/repo/target/debug/app", "bin".as_bytes()),
+        ]);
+
+        let mut paths = Vec::new();
+        fs.walk_all_files_streaming(&root, &mut |batch| {
+            paths.extend(batch);
+            ControlFlow::Continue(())
+        });
+        paths.sort();
+        let relative: Vec<&Path> = paths
+            .iter()
+            .map(|path| path.strip_prefix(&root).expect("under the root"))
+            .collect();
+
+        assert_eq!(
+            relative,
+            [
+                Path::new(".gitignore"),
+                Path::new("a.log"),
+                Path::new("src/main.rs"),
+                Path::new("target/debug/app"),
+            ],
+            "the files the repo's .gitignore and the defaults exclude, and none under .git",
+        );
     }
 
     #[test]

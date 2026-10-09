@@ -1,7 +1,7 @@
 use compact_str::CompactString;
 use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
-    Match, WalkBuilder,
+    Match, Walk, WalkBuilder,
 };
 use std::{
     io,
@@ -189,6 +189,26 @@ pub trait FsHost: Send + Sync {
     ) {
         self.walk_workspace_files_streaming(root, &mut |batch| on_batch(batch));
     }
+
+    /// Streams every file under `root`, the ignored ones included.
+    ///
+    /// No ignore rule applies. The walk reads no `.gitignore`, `.stoatignore`,
+    /// or `.ignore` file, consults no global excludes, and skips none of the
+    /// trees the workspace walk always excludes, such as `target/`. The walk
+    /// skips an entry named `.git`, as a directory or a file, because the
+    /// repository's own store holds nothing a user opens.
+    ///
+    /// Batches hold up to [`WALK_BATCH_SIZE`] paths and arrive in walker order,
+    /// unsorted. Returning [`ControlFlow::Break`] from `on_batch` stops the
+    /// walk before the next batch.
+    ///
+    /// See also:
+    /// - [`Self::walk_workspace_files_streaming`] for the walk that honors the ignore rules.
+    fn walk_all_files_streaming(
+        &self,
+        root: &Path,
+        on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+    );
 }
 
 /// One parallel-walk visitor's in-flight batch.
@@ -256,6 +276,23 @@ pub fn manual_walk_streaming(
     let mut stack: Vec<Gitignore> = Vec::new();
     let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
     let flow = walk_dir_streaming(fs, root, &defaults, &mut stack, &mut buffer, on_batch);
+    if flow.is_continue() && !buffer.is_empty() {
+        let _ = on_batch(buffer);
+    }
+}
+
+/// The in-memory form of [`FsHost::walk_all_files_streaming`], for hosts that
+/// walk their own state.
+///
+/// It is [`manual_walk_streaming`] with no ignore rule applied, and it skips an
+/// entry named `.git`, as the trait method requires.
+pub fn manual_walk_all_streaming(
+    fs: &dyn FsHost,
+    root: &Path,
+    on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+) {
+    let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
+    let flow = walk_all_dir_streaming(fs, root, &mut buffer, on_batch);
     if flow.is_continue() && !buffer.is_empty() {
         let _ = on_batch(buffer);
     }
@@ -400,6 +437,39 @@ fn walk_dir_streaming(
     }
 
     stack.truncate(stack.len() - pushed);
+    flow
+}
+
+fn walk_all_dir_streaming(
+    fs: &dyn FsHost,
+    dir: &Path,
+    buffer: &mut Vec<PathBuf>,
+    on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    let Ok(entries) = fs.list_dir(dir) else {
+        return ControlFlow::Continue(());
+    };
+
+    let mut flow = ControlFlow::Continue(());
+    for entry in entries {
+        if entry.name == ".git" {
+            continue;
+        }
+
+        let path = dir.join(entry.name.as_str());
+        if entry.is_dir {
+            flow = walk_all_dir_streaming(fs, &path, buffer, on_batch);
+        } else {
+            buffer.push(path);
+            if buffer.len() >= WALK_BATCH_SIZE {
+                let batch = std::mem::replace(buffer, Vec::with_capacity(WALK_BATCH_SIZE));
+                flow = on_batch(batch);
+            }
+        }
+        if flow.is_break() {
+            break;
+        }
+    }
     flow
 }
 
@@ -589,23 +659,19 @@ impl FsHost for LocalFs {
         root: &Path,
         on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
     ) {
-        let walker = workspace_walk_builder(root).build();
+        stream_files(workspace_walk_builder(root).build(), on_batch);
+    }
 
-        let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
-        for entry in walker.flatten() {
-            if entry.file_type().is_some_and(|t| t.is_file()) {
-                buffer.push(entry.into_path());
-                if buffer.len() >= WALK_BATCH_SIZE {
-                    let batch = std::mem::replace(&mut buffer, Vec::with_capacity(WALK_BATCH_SIZE));
-                    if on_batch(batch).is_break() {
-                        return;
-                    }
-                }
-            }
-        }
-        if !buffer.is_empty() {
-            let _ = on_batch(buffer);
-        }
+    fn walk_all_files_streaming(
+        &self,
+        root: &Path,
+        on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+    ) {
+        let walker = WalkBuilder::new(root)
+            .standard_filters(false)
+            .filter_entry(|entry| entry.file_name() != ".git")
+            .build();
+        stream_files(walker, on_batch);
     }
 
     fn walk_workspace_files_parallel(
@@ -648,6 +714,29 @@ impl FsHost for LocalFs {
                 }
             })
         });
+    }
+}
+
+/// Streams the files `walker` yields in batches of up to [`WALK_BATCH_SIZE`],
+/// for the two streaming walks of [`LocalFs`].
+///
+/// An entry that is not a regular file never reaches a batch. The walkers
+/// follow no links, so that drops a symlink too.
+fn stream_files(walker: Walk, on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>) {
+    let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
+    for entry in walker.flatten() {
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            buffer.push(entry.into_path());
+            if buffer.len() >= WALK_BATCH_SIZE {
+                let batch = std::mem::replace(&mut buffer, Vec::with_capacity(WALK_BATCH_SIZE));
+                if on_batch(batch).is_break() {
+                    return;
+                }
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        let _ = on_batch(buffer);
     }
 }
 
@@ -766,6 +855,7 @@ mod tests {
     use super::{process_umask, FsHost, LocalFs};
     use std::{
         fs,
+        ops::ControlFlow,
         os::unix::fs::{MetadataExt, PermissionsExt},
         path::Path,
     };
@@ -1024,6 +1114,53 @@ mod tests {
             relative,
             [Path::new(""), Path::new("src"), Path::new("src/deep")],
             "the root and its source directories only",
+        );
+    }
+
+    /// The production counterpart of the in-memory walk's test.
+    ///
+    /// The seeded `.git` makes the root a repository. With the standard filters
+    /// on, a walker honors the `.gitignore` there and drops the dotfiles. This
+    /// walk lists them all, enters the trees the workspace walk always excludes,
+    /// and still skips `.git`.
+    #[test]
+    fn walk_all_files_streaming_enters_the_built_trees() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        for (file, contents) in [
+            (".gitignore", "*.log\n"),
+            ("a.log", "log"),
+            ("src/a.rs", "fn a() {}"),
+            ("target/debug/b", "bin"),
+            ("node_modules/pkg/c.js", "js"),
+            (".git/HEAD", "ref: refs/heads/main"),
+        ] {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().expect("parent")).expect("seed tree");
+            fs::write(&path, contents).expect("seed file");
+        }
+
+        let mut files = Vec::new();
+        LocalFs.walk_all_files_streaming(root, &mut |batch| {
+            files.extend(batch);
+            ControlFlow::Continue(())
+        });
+        files.sort();
+        let relative: Vec<&Path> = files
+            .iter()
+            .map(|file| file.strip_prefix(root).expect("under the root"))
+            .collect();
+
+        assert_eq!(
+            relative,
+            [
+                Path::new(".gitignore"),
+                Path::new("a.log"),
+                Path::new("node_modules/pkg/c.js"),
+                Path::new("src/a.rs"),
+                Path::new("target/debug/b"),
+            ],
+            "every file outside .git, the ignored and the built ones included",
         );
     }
 }
