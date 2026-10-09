@@ -1038,6 +1038,12 @@ fn land_walk(
     // last step showed stays up and only the base moves.
     if let Some(rel_path) = landing.first_path {
         super::file::open_file(stoat, &workdir.join(rel_path), OpenOrigin::Visited);
+        // A step reads the commit's file from its first change, so the view
+        // opens on the change nearest the top rather than nearest the cursor
+        // the last step left.
+        if let Some(editor) = super::focused_editor_mut(stoat) {
+            super::movement::set_cursor_row(editor, 0);
+        }
         super::review::reopen_diff_view(stoat);
     }
 }
@@ -1986,6 +1992,40 @@ mod tests {
                 (CHECKED_OUT_A.to_string(), false)
             ),
             "the step lands on a.rs with the checked-out text, clean",
+        );
+    }
+
+    /// The focused cursor as a `(row, column)` pair.
+    fn cursor_cell(h: &mut TestHarness) -> (u32, u32) {
+        let (id, offset) = h.stoat.focused_cursor_pos().expect("a cursor");
+        let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+        let point = buffer
+            .read()
+            .expect("poisoned")
+            .rope()
+            .offset_to_point(offset);
+        (point.row, point.column)
+    }
+
+    /// The step's file holds one change, rows 1 and 2. The cursor waits inside
+    /// it at column 3, a cell the reload keeps, so only a step that reads from
+    /// the top moves it onto the change's first cell.
+    #[test]
+    fn a_step_reads_its_file_from_the_first_change() {
+        let mut h = harness();
+        start_walk(&mut h);
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("an editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+        h.type_keys("l l l");
+        let before = cursor_cell(&mut h);
+        h.fake_fs().insert_file("/repo/a.rs", CHECKED_OUT_A);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(
+            (before, cursor_cell(&mut h)),
+            ((1, 3), (1, 0)),
+            "the step lands on the first cell of the file's first change",
         );
     }
 

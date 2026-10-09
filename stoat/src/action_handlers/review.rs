@@ -478,9 +478,10 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
 /// no scratch buffer -- the editor stays the real, editable file buffer, so
 /// re-pressing toggles the two columns off again.
 ///
-/// Opening the view lands the cursor on the focused buffer's first change chunk
-/// (the hunk `n` reaches from the top of the file) and pushes the pre-jump
-/// position to the jumplist, so the usual jump-back returns. When the focused
+/// Opening the view lands the cursor on the change nearest the cursor's row,
+/// with a tie going to the change below, and pushes the pre-jump position to
+/// the jumplist, so the usual jump-back returns. A cursor that already sits on
+/// a change stays where it is, with no jump and no scroll. When the focused
 /// buffer has no changes of its own, opening the view instead crosses into the
 /// first changed file and lands on its first hunk. Toggling the view off leaves
 /// the cursor untouched.
@@ -501,24 +502,31 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
 
     enter_diff_view(stoat);
 
-    let jumped = super::focused_editor_mut(stoat).is_some_and(|editor| {
+    // `Some(true)` when the cursor moved onto a change, `Some(false)` when it
+    // already sat on one, and `None` when the buffer has no change at all.
+    let landing = super::focused_editor_mut(stoat).and_then(|editor| {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        // The first stop rather than the first hunk, so opening over a refined
-        // block lands on the row that changed instead of the block's top.
-        let target_row = display_snapshot.diff_map().and_then(|diff_map| {
-            diff_map
-                .live_hunks(buffer_snapshot)
-                .hunk_stops()
-                .first()
-                .map(|stop| stop.start)
-        });
-        let Some(target_row) = target_row else {
-            return false;
+        let cursor_row = {
+            let sel = editor.selections.newest_anchor();
+            let tail = buffer_snapshot.resolve_anchor(&sel.tail());
+            let head = buffer_snapshot.resolve_anchor(&sel.head());
+            let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail, head);
+            buffer_snapshot.rope().offset_to_point(cursor).row
         };
+        // The stops rather than the hunks, so opening over a refined block
+        // lands on the row that changed instead of the block's top.
+        let hunk_stops = display_snapshot
+            .diff_map()?
+            .live_hunks(buffer_snapshot)
+            .hunk_stops();
+        let (rows, holds) = super::movement::nearest_hunk_rows(&hunk_stops, cursor_row)?;
+        if holds {
+            return Some(false);
+        }
         let target_offset = buffer_snapshot
             .rope()
-            .point_to_offset(Point::new(target_row, 0));
+            .point_to_offset(Point::new(rows.start, 0));
         editor.selections.transform(buffer_snapshot, |sel| {
             crate::selection::land_block_cursor(
                 sel.id,
@@ -528,8 +536,9 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
                 buffer_snapshot,
             )
         });
-        true
+        Some(true)
     });
+    let jumped = landing == Some(true);
 
     // The jump only moves the selection. Pull the view onto it here so a
     // non-key dispatch (the `stoat review` startup, a mouse palette accept)
@@ -548,7 +557,7 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     // A buffer with no changes of its own has no hunk to land on, so cross into
     // the first changed file. This makes `:diff` from a scratch or unchanged
     // buffer open a real diff instead of silently toggling empty columns.
-    if !jumped {
+    if landing.is_none() {
         let _ = super::movement::goto_change(stoat, ChangeDir::Next);
     }
 }

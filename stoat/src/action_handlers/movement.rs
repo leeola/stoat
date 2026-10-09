@@ -4293,6 +4293,46 @@ fn nth_hunk_rows(
     }
 }
 
+/// The stop the diff view opens on, and whether the cursor already sits on it.
+///
+/// Distance is the count of rows from `cursor_row` to the stop's nearest row,
+/// where a removal's seam counts as its start row. A tie goes to the stop
+/// below, the one `n` reaches next. `None` when there is no stop.
+pub(super) fn nearest_hunk_rows(
+    hunk_rows: &[Range<u32>],
+    cursor_row: u32,
+) -> Option<(Range<u32>, bool)> {
+    let split = walk_split(hunk_rows, cursor_row, ChangeDir::Next);
+    let above = split.checked_sub(1).map(|i| &hunk_rows[i]);
+    let below = hunk_rows.get(split);
+
+    if let Some(above) = above
+        && match above.is_empty() {
+            true => above.start == cursor_row,
+            false => above.contains(&cursor_row),
+        }
+    {
+        return Some((above.clone(), true));
+    }
+
+    let above = above.map(|rows| {
+        (
+            cursor_row - rows.end.saturating_sub(1).max(rows.start),
+            rows,
+        )
+    });
+    let below = below.map(|rows| (rows.start - cursor_row, rows));
+    let nearest = match (above, below) {
+        (Some((up, above)), Some((down, below))) => match up < down {
+            true => above,
+            false => below,
+        },
+        (Some((_, rows)), None) | (None, Some((_, rows))) => rows,
+        (None, None) => return None,
+    };
+    Some((nearest.clone(), false))
+}
+
 /// The stop a walk in `dir` from `cursor_row` sets out from, or `None` when no
 /// stop sits on that side of the cursor.
 ///

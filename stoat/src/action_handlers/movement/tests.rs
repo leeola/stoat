@@ -128,6 +128,30 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
     );
 }
 
+/// Row 6 sits four rows from the first stop's last row and four from the
+/// second stop's first row, so it is the tie that goes below.
+#[test]
+fn nearest_hunk_rows_picks_by_row_distance() {
+    let stops = [2..3, 10..12, 20..20];
+    let nearest = |row| nearest_hunk_rows(&stops, row);
+
+    assert_eq!(
+        [0, 2, 5, 6, 7, 11, 16, 20, 40].map(nearest),
+        [
+            Some((2..3, false)),
+            Some((2..3, true)),
+            Some((2..3, false)),
+            Some((10..12, false)),
+            Some((10..12, false)),
+            Some((10..12, true)),
+            Some((20..20, false)),
+            Some((20..20, true)),
+            Some((20..20, false)),
+        ],
+    );
+    assert_eq!(nearest_hunk_rows(&[], 4), None, "no stop, no landing");
+}
+
 /// The changed list groups staged files before unstaged ones, so a staged file
 /// late in the alphabet sits ahead of an unstaged file early in it. Walking
 /// that order sends `n` backward through the alphabet and reports a wrap that

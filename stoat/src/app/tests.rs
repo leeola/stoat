@@ -8695,11 +8695,20 @@ fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8])
     run_id
 }
 
-#[test]
-fn opening_diff_view_jumps_cursor_to_the_first_hunk() {
-    let mut h = Stoat::test();
-    open_scratch_file(&mut h, "keep\nnew\ntail\n");
+/// A scratch file whose diff map marks two changes, on rows 1 and 5.
+fn open_two_change_diff(h: &mut crate::test_harness::TestHarness) {
+    open_scratch_file(h, "keep\nnew\nmid\nmid\nmid\nnew2\ntail\n");
+    install_two_change_map(h);
+}
 
+/// Install the two-change map on the focused buffer.
+///
+/// Closing the diff view drops its base, which stales the map, and a scratch
+/// file has no repository to diff again, so a test that reopens the view puts
+/// the map back first.
+fn install_two_change_map(h: &mut crate::test_harness::TestHarness) {
+    let base = "keep\nold\nmid\nmid\nmid\nold2\ntail\n";
+    let text = "keep\nnew\nmid\nmid\nmid\nnew2\ntail\n";
     let buffer_id = {
         let ws = h.stoat.active_workspace();
         match ws.panes.pane(ws.panes.focus()).view {
@@ -8707,41 +8716,70 @@ fn opening_diff_view_jumps_cursor_to_the_first_hunk() {
             _ => panic!("focused pane is not an editor"),
         }
     };
-    {
-        let base = "keep\nold\ntail\n";
-        let text = "keep\nnew\ntail\n";
-        let dm = crate::diff_map::DiffMap::from_structural_changes(
-            stoat_language::structural_diff::diff(base, text),
-            Arc::new(base.to_string()),
-            text,
-        );
-        h.stoat
-            .active_workspace_mut()
-            .install_test_diff_map(buffer_id, dm);
-    }
-
-    let cursor_row = |stoat: &mut Stoat| {
-        let (buffer_id, offset) = stoat.focused_cursor_pos().expect("focused cursor");
-        let ws = stoat.active_workspace();
-        let buffer = ws.buffers.get(buffer_id).expect("buffer");
-        let guard = buffer.read().expect("poisoned");
-        guard.rope().offset_to_point(offset).row
-    };
-
-    assert_eq!(cursor_row(&mut h.stoat), 0, "cursor starts at the top");
-
-    h.stoat.toggle_diff_view();
-    assert_eq!(
-        cursor_row(&mut h.stoat),
-        1,
-        "opening the diff view lands the cursor on the first hunk",
+    let dm = crate::diff_map::DiffMap::from_structural_changes(
+        stoat_language::structural_diff::diff(base, text),
+        Arc::new(base.to_string()),
+        text,
     );
+    h.stoat
+        .active_workspace_mut()
+        .install_test_diff_map(buffer_id, dm);
+}
+
+fn focused_cursor_row(stoat: &mut Stoat) -> u32 {
+    let (buffer_id, offset) = stoat.focused_cursor_pos().expect("focused cursor");
+    let ws = stoat.active_workspace();
+    let buffer = ws.buffers.get(buffer_id).expect("buffer");
+    let guard = buffer.read().expect("poisoned");
+    guard.rope().offset_to_point(offset).row
+}
+
+fn set_focused_cursor_row(stoat: &mut Stoat, row: u32) {
+    let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+    action_handlers::movement::set_cursor_row(editor, row);
+}
+
+#[test]
+fn opening_diff_view_lands_on_the_nearest_change() {
+    let mut h = Stoat::test();
+    open_two_change_diff(&mut h);
 
     h.stoat.toggle_diff_view();
+    let from_the_top = focused_cursor_row(&mut h.stoat);
+    h.stoat.toggle_diff_view();
+    let after_closing = focused_cursor_row(&mut h.stoat);
+    set_focused_cursor_row(&mut h.stoat, 4);
+    install_two_change_map(&mut h);
+    h.stoat.toggle_diff_view();
+
     assert_eq!(
-        cursor_row(&mut h.stoat),
-        1,
-        "toggling the view off leaves the cursor in place",
+        (
+            from_the_top,
+            after_closing,
+            focused_cursor_row(&mut h.stoat)
+        ),
+        (1, 1, 5),
+        "the view opens on the change nearest the cursor, and closing it leaves the cursor",
+    );
+}
+
+#[test]
+fn opening_diff_view_keeps_a_cursor_that_sits_on_a_change() {
+    let mut h = Stoat::test();
+    open_two_change_diff(&mut h);
+    set_focused_cursor_row(&mut h.stoat, 5);
+    let jumps = |stoat: &Stoat| {
+        let ws = stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
+    };
+    let jumps_before = jumps(&h.stoat);
+
+    h.stoat.toggle_diff_view();
+
+    assert_eq!(
+        (focused_cursor_row(&mut h.stoat), jumps(&h.stoat)),
+        (5, jumps_before),
+        "the cursor stays on its change, and no jump is recorded",
     );
 }
 
