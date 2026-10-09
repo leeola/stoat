@@ -288,6 +288,7 @@ fn render_palette_arg_picker(
         list,
         start_row,
         theme,
+        theme.get(crate::theme::scope::UI_TEXT),
         buf,
     );
 }

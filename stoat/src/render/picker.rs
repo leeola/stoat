@@ -19,6 +19,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     widgets::{Block, Borders},
 };
 use std::{collections::BTreeMap, path::Path};
@@ -185,6 +186,10 @@ pub(crate) mod test_support {
 /// it from the selection while the smooth-scroll pool paints absolute pages, and
 /// both render identical rows. Rows are read from `picklist.base`, which every
 /// caller keeps in sync with its display set on refilter.
+///
+/// `row_style` paints every row but the selected one, which takes the theme's
+/// selection style. A caller passes its own style to set a whole list apart,
+/// such as a list of ignored files.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
@@ -194,13 +199,13 @@ pub(crate) fn paint_path_rows(
     area: Rect,
     start_row: usize,
     theme: &Theme,
+    row_style: Style,
     buf: &mut Buffer,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
         return;
     }
-    let row_style = theme.get(scope::UI_TEXT);
     let selected_style = theme.get(scope::UI_SELECTION);
     let match_style = theme.get(scope::UI_SEARCH_MATCH);
 
@@ -442,6 +447,7 @@ mod tests {
             area,
             0,
             &Theme::empty(),
+            Style::default(),
             &mut buf,
         );
 
@@ -474,6 +480,7 @@ mod tests {
             area,
             0,
             &match_theme(),
+            Style::default(),
             &mut buf,
         );
 
@@ -505,6 +512,7 @@ mod tests {
                 area,
                 0,
                 &Theme::empty(),
+                Style::default(),
                 &mut buf,
             );
             row_text(&buf, 0, area).trim().to_string()
@@ -532,6 +540,7 @@ mod tests {
             area,
             0,
             &Theme::empty(),
+            Style::default(),
             &mut buf,
         );
 
@@ -557,7 +566,17 @@ mod tests {
         );
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        paint_path_rows(&list, git_root, None, "", area, 0, &match_theme(), &mut buf);
+        paint_path_rows(
+            &list,
+            git_root,
+            None,
+            "",
+            area,
+            0,
+            &match_theme(),
+            Style::default(),
+            &mut buf,
+        );
 
         let match_fg = Color::Rgb(255, 0, 0);
         let highlighted: Vec<u16> = (area.x..area.x + area.width)
@@ -599,6 +618,7 @@ mod tests {
             area,
             deep,
             &match_theme(),
+            Style::default(),
             &mut buf,
         );
 
@@ -640,6 +660,7 @@ mod tests {
             area,
             550,
             &match_theme(),
+            Style::default(),
             &mut buf,
         );
 
@@ -651,6 +672,40 @@ mod tests {
             highlighted,
             vec![1, 2, 3, 4],
             "the anchor's four characters highlight on a row past the block"
+        );
+    }
+
+    #[test]
+    fn unselected_rows_take_the_caller_style() {
+        let mut list = list_of(
+            vec![PathBuf::from("/r/a.rs"), PathBuf::from("/r/b.rs")],
+            vec![vec![], vec![]],
+        );
+        list.selected = 1;
+        let area = Rect::new(0, 0, 8, 2);
+        let mut buf = Buffer::empty(area);
+        let muted = Color::Rgb(1, 2, 3);
+        paint_path_rows(
+            &list,
+            Path::new("/r"),
+            None,
+            "",
+            area,
+            0,
+            &Theme::empty(),
+            Style::default().fg(muted),
+            &mut buf,
+        );
+
+        let fg = |row: u16| -> Vec<Color> {
+            (area.x..area.x + area.width)
+                .map(|c| buf[(c, row)].fg)
+                .collect()
+        };
+        assert_eq!(
+            (fg(0), fg(1)),
+            (vec![muted; 8], vec![Color::Reset; 8]),
+            "the plain row paints in the caller's style and the selected row in the theme's",
         );
     }
 

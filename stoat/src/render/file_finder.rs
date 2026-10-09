@@ -181,6 +181,7 @@ pub(crate) fn paint_finder_rows(
         area,
         start_row,
         theme,
+        theme.get(crate::theme::scope::UI_TEXT),
         buf,
     );
 }

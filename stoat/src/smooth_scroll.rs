@@ -693,6 +693,7 @@ pub(crate) fn render_arg_page(
                 area,
                 start_row,
                 theme,
+                theme.get(crate::theme::scope::UI_TEXT),
                 buf,
             )
         },
