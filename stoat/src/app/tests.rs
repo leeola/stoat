@@ -4988,6 +4988,28 @@ fn ctrl_a_h_from_a_terminal_focuses_the_editor_and_rests_the_terminal() {
 }
 
 #[test]
+fn ctrl_a_e_x_from_a_terminal_closes_its_pane() {
+    let mut h = Stoat::test();
+    let (editor_pane, _) = split_editor_and_terminal(&mut h);
+    h.type_action("FocusRight()");
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(bare(KeyCode::Char('e'))));
+    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+
+    let ws = h.stoat.active_workspace();
+    assert_eq!(
+        (
+            ws.panes.split_panes().count(),
+            ws.panes.focus(),
+            h.fake_terminal().sent_bytes()
+        ),
+        (1, editor_pane, Vec::<Vec<u8>>::new()),
+        "Ctrl-a e x closes the terminal's pane, and no key reaches the child",
+    );
+}
+
+#[test]
 fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
     let mut h = Stoat::test();
     let (editor_pane, term_pane) = {

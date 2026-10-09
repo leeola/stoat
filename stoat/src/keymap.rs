@@ -2970,15 +2970,16 @@ mod tests {
         }
     }
 
-    /// The actions `code` with `modifiers` resolves to in the `Ctrl-a` prefix.
-    fn prefix_calls(
+    /// The actions `code` with `modifiers` resolves to in `mode`.
+    fn mode_calls(
         keymap: &Keymap,
+        mode: &str,
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<Vec<(String, Vec<Value>)>> {
-        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+        let state = TestState::new().set("mode", StateValue::String(mode.into()));
         keymap
-            .lookup(&prefix, &key_event(code, modifiers))
+            .lookup(&state, &key_event(code, modifiers))
             .map(|actions| action_calls(&actions))
     }
 
@@ -2994,7 +2995,7 @@ mod tests {
     #[test]
     fn ca_ctrl_v_and_ctrl_s_split_the_pane() {
         let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
-        let ctrl = |c| prefix_calls(&keymap, KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl = |c| mode_calls(&keymap, "prefix", KeyCode::Char(c), KeyModifiers::CONTROL);
 
         assert_eq!(
             (ctrl('v'), ctrl('s')),
@@ -3006,11 +3007,11 @@ mod tests {
     #[test]
     fn ca_focus_keys_move_focus_and_end_the_chord() {
         let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
-        let plain = |code| prefix_calls(&keymap, code, KeyModifiers::NONE);
+        let plain = |code| mode_calls(&keymap, "prefix", code, KeyModifiers::NONE);
 
         assert_eq!(
             [
-                prefix_calls(&keymap, KeyCode::Char('w'), KeyModifiers::CONTROL),
+                mode_calls(&keymap, "prefix", KeyCode::Char('w'), KeyModifiers::CONTROL),
                 plain(KeyCode::Char('h')),
                 plain(KeyCode::Left),
                 plain(KeyCode::Char('j')),
@@ -3178,6 +3179,62 @@ mod tests {
             .expect("Ctrl-a is bound in prefix_move mode");
         assert_eq!(ctrl_a[0].name, "SetMode");
         assert_eq!(ctrl_a[0].args[0].value, Value::Ident("normal".into()));
+    }
+
+    #[test]
+    fn ca_e_pane_mode_chords_end_the_chord() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let pane = |code, modifiers| mode_calls(&keymap, "prefix_pane", code, modifiers);
+        let plain = |code| pane(code, KeyModifiers::NONE);
+        let set_mode = |mode: &str| {
+            Some(vec![(
+                "SetMode".to_string(),
+                vec![Value::Ident(mode.into())],
+            )])
+        };
+
+        assert_eq!(
+            mode_calls(&keymap, "prefix", KeyCode::Char('e'), KeyModifiers::NONE),
+            set_mode("prefix_pane"),
+            "e in the prefix opens the pane mode",
+        );
+        assert_eq!(
+            [
+                plain(KeyCode::Char('h')),
+                plain(KeyCode::Left),
+                plain(KeyCode::Char('j')),
+                plain(KeyCode::Down),
+                plain(KeyCode::Char('k')),
+                plain(KeyCode::Up),
+                plain(KeyCode::Char('l')),
+                plain(KeyCode::Right),
+                plain(KeyCode::Tab),
+                plain(KeyCode::Char('d')),
+                plain(KeyCode::Char('r')),
+                plain(KeyCode::Char('x')),
+                plain(KeyCode::Char('f')),
+                plain(KeyCode::Esc),
+                pane(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            ],
+            [
+                chord_end_then("FocusLeft"),
+                chord_end_then("FocusLeft"),
+                chord_end_then("FocusDown"),
+                chord_end_then("FocusDown"),
+                chord_end_then("FocusUp"),
+                chord_end_then("FocusUp"),
+                chord_end_then("FocusRight"),
+                chord_end_then("FocusRight"),
+                chord_end_then("FocusNext"),
+                chord_end_then("SplitDown"),
+                chord_end_then("SplitRight"),
+                chord_end_then("ClosePane"),
+                chord_end_then("TogglePaneWiden"),
+                set_mode("normal"),
+                set_mode("normal"),
+            ],
+            "each pane key ends the chord before it acts, and Escape and Ctrl-a only leave",
+        );
     }
 
     /// The pin key holds the mode it is already in, so the chord's own arms

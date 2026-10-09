@@ -1456,6 +1456,7 @@ on key {
         0 -> [SetMode(normal), GotoTab(10)];
         t -> SetMode(prefix_tab);
         m -> SetMode(prefix_move);
+        e -> SetMode(prefix_pane);
     }
     mode == prefix_tab {
         Escape -> SetMode(normal);
@@ -1489,5 +1490,26 @@ on key {
         n -> MovePaneNext();
         Tab -> MovePaneNext();
         p -> MovePanePrev();
+    }
+    # The pane keys behind `Ctrl-a e`. A mode belongs to the focused pane and
+    # does not follow focus, so a mode that held across a focus move would stay
+    # on the pane focus left. Each key therefore ends the chord before it acts.
+    # `prefix_move` holds only because the moved content keeps focus.
+    mode == prefix_pane {
+        Escape -> SetMode(normal);
+        Ctrl-a -> SetMode(normal);
+        h -> [SetMode(normal), FocusLeft()];
+        Left -> [SetMode(normal), FocusLeft()];
+        j -> [SetMode(normal), FocusDown()];
+        Down -> [SetMode(normal), FocusDown()];
+        k -> [SetMode(normal), FocusUp()];
+        Up -> [SetMode(normal), FocusUp()];
+        l -> [SetMode(normal), FocusRight()];
+        Right -> [SetMode(normal), FocusRight()];
+        Tab -> [SetMode(normal), FocusNext()];
+        d -> [SetMode(normal), SplitDown()];
+        r -> [SetMode(normal), SplitRight()];
+        x -> [SetMode(normal), ClosePane()];
+        f -> [SetMode(normal), TogglePaneWiden()];
     }
 }
