@@ -435,7 +435,6 @@ fn run_tui(
         mouse_capture: None,
         scrolloff: None,
         jump_scrolloff: None,
-        diff_wheel_jump: None,
         editor_line_numbers: None,
         editor_minimap: None,
         editor_auto_pairs: None,

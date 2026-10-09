@@ -3476,7 +3476,6 @@ mod tests {
                 mouse_capture: Some(MouseCapturePolicy::Auto),
                 scrolloff: Some(3),
                 jump_scrolloff: Some(0),
-                diff_wheel_jump: Some(0.25),
                 editor_line_numbers: Some(LineNumbers::Relative),
                 editor_minimap: None,
                 editor_auto_pairs: Some(true),
