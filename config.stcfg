@@ -1435,6 +1435,10 @@ on key {
         # The pane picker, for a pane where `space a e` is out of reach, since a
         # terminal sends space to its child.
         Ctrl-e -> SetMode(space_pane_display);
+        # The splits of `space a v` and `space a s`, below and to the right, for
+        # the same reason.
+        Ctrl-v -> [SetMode(normal), SplitDown()];
+        Ctrl-s -> [SetMode(normal), SplitRight()];
         c -> [SetMode(normal), NewTab()];
         x -> [SetMode(normal), CloseTab()];
         num -> [SetMode(normal), GotoTab($num)];

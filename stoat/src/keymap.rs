@@ -2971,6 +2971,30 @@ mod tests {
     }
 
     #[test]
+    fn ca_ctrl_v_and_ctrl_s_split_the_pane() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+        let calls = |c: char| {
+            keymap
+                .lookup(&prefix, &key_event(KeyCode::Char(c), KeyModifiers::CONTROL))
+                .map(|actions| action_calls(&actions))
+        };
+        let split = |name: &str| {
+            Some(vec![
+                ("SetMode".to_string(), vec![Value::Ident("normal".into())]),
+                (name.to_string(), Vec::new()),
+            ])
+        };
+
+        assert_eq!(
+            (calls('v'), calls('s')),
+            (split("SplitDown"), split("SplitRight")),
+            "the chord leaves the prefix, then splits below or to the right",
+        );
+    }
+
+    #[test]
     fn ca_prefix_chords_resolve_tab_actions() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);

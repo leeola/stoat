@@ -4926,6 +4926,37 @@ fn a_split_from_an_agent_opens_a_plain_shell() {
 }
 
 #[test]
+fn ctrl_a_ctrl_v_from_a_terminal_splits_into_a_fresh_shell() {
+    let mut h = Stoat::test();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+    let source = h.stoat.active_workspace().panes.focus();
+
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('v')));
+
+    let split = h.stoat.active_workspace().panes.focus();
+    assert_eq!(
+        (
+            h.fake_terminal_host().spawns().len(),
+            h.stoat.active_workspace().panes.split_panes().count(),
+            split != source,
+            term_mode(&h.stoat, source),
+            term_mode(&h.stoat, split),
+            h.fake_terminal().sent_bytes()
+        ),
+        (
+            2,
+            2,
+            true,
+            "normal".to_string(),
+            "normal".to_string(),
+            Vec::<Vec<u8>>::new()
+        ),
+        "the chord splits into a fresh shell, and neither pane keeps the chord or sends a key",
+    );
+}
+
+#[test]
 fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
     let mut h = Stoat::test();
     let (editor_pane, term_pane) = {
