@@ -61,6 +61,12 @@ pub struct WorkspacePicker {
     /// [`Self::page`]. `None` until the first frame, since the modal sizes
     /// itself to its entries and only render knows how many fit.
     pub(crate) viewport_rows: Option<usize>,
+    /// The open workspace whose row [`Self::omit_active`] dropped.
+    ///
+    /// The row is omitted only for a workspace that holds nothing and that no
+    /// saved session restores into. A switch away from such a workspace leaves
+    /// it with no row, no save, and no way back.
+    pub(crate) omitted_workspace: Option<WorkspaceId>,
 }
 
 /// One row in the picker. Built up-front from the workspace slotmap so the
@@ -179,6 +185,7 @@ impl WorkspacePicker {
             selected,
             last_filter_query: None,
             viewport_rows: None,
+            omitted_workspace: None,
         };
         picker.refilter("");
         picker
@@ -308,6 +315,7 @@ impl WorkspacePicker {
         };
 
         self.selected = 0;
+        self.omitted_workspace = self.entries[idx].id;
         self.remove_entry(idx);
     }
 

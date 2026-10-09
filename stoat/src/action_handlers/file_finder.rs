@@ -672,3 +672,43 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        action_handlers::workspace,
+        app::Stoat,
+        workspace::{
+            registry::{RegistryEntry, WorkspaceMeta},
+            WorkspaceUid,
+        },
+    };
+    use std::{path::PathBuf, time::UNIX_EPOCH};
+
+    /// A bare launch at `/home` enters a saved session through the picker, and
+    /// the cross-workspace walk then covers the session's root alone.
+    #[test]
+    fn the_all_workspaces_walk_skips_a_launch_workspace_a_session_replaced() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().git_root = PathBuf::from("/home");
+        let session = RegistryEntry {
+            meta: WorkspaceMeta {
+                uid: WorkspaceUid(424242),
+                name: "proj".to_string(),
+                git_root: PathBuf::from("/proj"),
+                buffer_count: 1,
+                remote_host: None,
+            },
+            state_path: PathBuf::from("/state/hash/1.ron"),
+            mtime: UNIX_EPOCH,
+        };
+
+        workspace::open_workspace_picker_over(&mut harness.stoat, vec![session]);
+        workspace::workspace_picker_select(&mut harness.stoat);
+
+        assert_eq!(
+            super::collect_workspace_roots(&harness.stoat),
+            [PathBuf::from("/proj")]
+        );
+    }
+}

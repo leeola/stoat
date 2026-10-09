@@ -215,7 +215,10 @@ pub(crate) fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// [`open_workspace_picker`] over an explicit list of saved sessions.
-fn open_workspace_picker_over(stoat: &mut Stoat, inactive: Vec<RegistryEntry>) -> UpdateEffect {
+pub(super) fn open_workspace_picker_over(
+    stoat: &mut Stoat,
+    inactive: Vec<RegistryEntry>,
+) -> UpdateEffect {
     let omit_active = {
         let ws = stoat.active_workspace();
         ws.is_fresh() && !inactive.iter().any(|reg| reg.meta.uid == ws.uid)
@@ -264,6 +267,9 @@ pub(crate) fn sync_workspace_picker(stoat: &mut Stoat) {
 /// An open row switches focus directly. An inactive on-disk row is brought back
 /// into the instance via [`activate_inactive_workspace`]. A selection on the
 /// already-active workspace or an empty picker just closes the picker.
+///
+/// An untouched active workspace whose row the picker omitted leaves the
+/// instance with the switch, since no row shows it and no save keeps it.
 pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.workspace_picker.take() else {
         return UpdateEffect::None;
@@ -291,6 +297,17 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         (None, None) => return UpdateEffect::Redraw,
     }
 
+    // The omit rule judged the workspace active when the picker opened, so the
+    // drop names that workspace rather than the one active now. Its freshness
+    // is read again, because a workspace that holds something is no orphan.
+    let orphan = picker
+        .omitted_workspace
+        .filter(|&id| id != stoat.active_workspace)
+        .filter(|&id| stoat.workspaces.get(id).is_some_and(Workspace::is_fresh));
+    if let Some(id) = orphan {
+        stoat.pending_workspace_saves.remove(&id);
+        stoat.workspaces.remove(id);
+    }
     UpdateEffect::Redraw
 }
 
@@ -793,6 +810,145 @@ mod tests {
             picker_rows(stoat),
             ["alpha", "proj"],
             "a workspace whose restore is in flight keeps its row"
+        );
+    }
+
+    #[test]
+    fn entering_a_session_from_a_fresh_launch_drops_the_launch_workspace() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+
+        open_workspace_picker_over(stoat, vec![saved_session(WorkspaceUid(424242), "proj")]);
+        workspace_picker_select(stoat);
+
+        let active = stoat.active_workspace();
+        assert_eq!(
+            (
+                stoat.workspaces.len(),
+                active.uid,
+                active.git_root.as_path()
+            ),
+            (1, WorkspaceUid(424242), Path::new("/proj")),
+            "the session replaces the launch workspace rather than joining it"
+        );
+    }
+
+    #[test]
+    fn entering_a_session_from_a_touched_launch_keeps_the_launch_workspace() {
+        let mut harness = Stoat::test();
+        harness.edit_focused(0..0, "x");
+        let stoat = &mut harness.stoat;
+
+        open_workspace_picker_over(stoat, vec![saved_session(WorkspaceUid(424242), "proj")]);
+        stoat
+            .workspace_picker
+            .as_mut()
+            .expect("picker open")
+            .select_next();
+        workspace_picker_select(stoat);
+
+        assert_eq!(
+            (stoat.workspaces.len(), stoat.active_workspace().uid),
+            (2, WorkspaceUid(424242)),
+            "an edited launch workspace stays open behind the session"
+        );
+    }
+
+    /// The picker omitted the row while the workspace was untouched, and the
+    /// content it took while the picker was up makes it worth keeping.
+    #[test]
+    fn entering_a_session_keeps_a_launch_workspace_edited_behind_the_picker() {
+        let mut harness = Stoat::test();
+        open_workspace_picker_over(
+            &mut harness.stoat,
+            vec![saved_session(WorkspaceUid(424242), "proj")],
+        );
+        harness.edit_focused(0..0, "x");
+        workspace_picker_select(&mut harness.stoat);
+
+        assert_eq!(
+            (
+                harness.stoat.workspaces.len(),
+                harness.stoat.active_workspace().uid
+            ),
+            (2, WorkspaceUid(424242)),
+            "a workspace that took content behind the picker stays open"
+        );
+    }
+
+    #[test]
+    fn entering_a_session_keeps_a_fresh_workspace_whose_restore_is_in_flight() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+        let uid = stoat.active_workspace().uid;
+
+        open_workspace_picker_over(
+            stoat,
+            vec![
+                saved_session(uid, "shadow"),
+                saved_session(WorkspaceUid(424242), "proj"),
+            ],
+        );
+        stoat
+            .workspace_picker
+            .as_mut()
+            .expect("picker open")
+            .select_next();
+        workspace_picker_select(stoat);
+
+        assert_eq!(
+            (stoat.workspaces.len(), stoat.active_workspace().uid),
+            (2, WorkspaceUid(424242)),
+            "a workspace a saved session restores into stays open"
+        );
+    }
+
+    #[test]
+    fn switching_from_a_fresh_launch_to_an_open_workspace_drops_the_launch_workspace() {
+        let mut harness = Stoat::test();
+        let other = harness.create_workspace();
+        let stoat = &mut harness.stoat;
+
+        open_workspace_picker_over(stoat, Vec::new());
+        workspace_picker_select(stoat);
+
+        assert_eq!(
+            (stoat.workspaces.len(), stoat.active_workspace),
+            (1, other),
+            "the switch leaves only the workspace it entered"
+        );
+    }
+
+    /// The active workspace changed while the picker was up, and the workspace
+    /// whose row the picker omitted is still the one that leaves.
+    #[test]
+    fn entering_a_session_drops_the_omitted_workspace_and_not_the_one_active_at_select() {
+        let mut harness = Stoat::test();
+        let launch = harness.stoat.active_workspace;
+        let other = harness.create_workspace();
+
+        open_workspace_picker_over(
+            &mut harness.stoat,
+            vec![saved_session(WorkspaceUid(424242), "proj")],
+        );
+        harness.set_active_workspace(other);
+        harness
+            .stoat
+            .workspace_picker
+            .as_mut()
+            .expect("picker open")
+            .select_next();
+        workspace_picker_select(&mut harness.stoat);
+
+        let stoat = &harness.stoat;
+        assert_eq!(
+            (
+                stoat.workspaces.contains_key(launch),
+                stoat.workspaces.contains_key(other),
+                stoat.active_workspace().uid
+            ),
+            (false, true, WorkspaceUid(424242)),
+            "the launch workspace leaves and the one active at the press stays"
         );
     }
 
