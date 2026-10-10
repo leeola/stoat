@@ -607,7 +607,8 @@ fn write_state(
 /// holds when a close or a delete removes the session files also writes them
 /// again. Each save takes a sequence number with its snapshot, and each write
 /// holds the gate while it writes, so a write older than the last one written,
-/// or one for a retired workspace, lands nothing.
+/// one a move of the session superseded, or one for a retired workspace, lands
+/// nothing.
 ///
 /// See also:
 /// - [`write_state_gated`] for the write that reads the gate.
@@ -633,10 +634,22 @@ impl SaveGate {
     pub(crate) fn retire(&mut self) {
         self.retired = true;
     }
+
+    /// Skip every write issued so far, before the session file they name is
+    /// removed and the workspace saves under another path.
+    ///
+    /// A `:cd` moves the session to the new root's file, and a write issued
+    /// before it names the old one. The caller holds the gate's lock, so a
+    /// write in progress finishes before the removal, and every later save
+    /// takes a newer sequence and still lands.
+    pub(crate) fn supersede(&mut self) {
+        self.written = self.issued;
+    }
 }
 
 /// [`write_state`] for the save numbered `seq`, unless a newer save of the
-/// workspace already landed or the workspace is retired.
+/// workspace already landed, a move of its session superseded the save, or the
+/// workspace is retired.
 ///
 /// Holds `gate` for the whole write, so two writes of one workspace never
 /// overlap. Returns whether the write ran.
@@ -649,7 +662,7 @@ pub(crate) fn write_state_gated(
     fs: &dyn FsHost,
 ) -> io::Result<bool> {
     let mut gate = gate.lock().expect("save gate poisoned");
-    if gate.retired || seq < gate.written {
+    if gate.retired || seq <= gate.written {
         return Ok(false);
     }
     write_state(state, meta, path, fs)?;

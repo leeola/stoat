@@ -395,6 +395,10 @@ pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
 /// `$HOME`), or a non-directory leaves the root untouched.
 ///
 /// The new root is watched, so writes under it reach the diff and follow.
+///
+/// A session file is keyed by its root, so the saved session moves with the
+/// workspace. The file under the old root goes, and the workspace saves under
+/// the new one.
 pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
     let path = path.trim();
     if path.is_empty() {
@@ -425,6 +429,7 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
                 .is_some_and(|m| m.is_dir) =>
         {
             let ws_id = stoat.active_workspace;
+            let carried = session_to_carry(stoat);
             {
                 let ws = stoat.active_workspace_mut();
                 ws.git_root = abs;
@@ -433,6 +438,9 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
                 // The old root's direnv diff must never leak into spawns under
                 // the new root, so drop it. A reload below repopulates it.
                 ws.env = crate::project_env::WorkspaceEnv::default();
+            }
+            if let Some(old) = carried {
+                carry_session(stoat, ws_id, &old);
             }
             stoat.watch_active_root();
 
@@ -453,6 +461,39 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
             stoat.set_status(format!("cd: cannot resolve {}: {e}", candidate.display()));
         },
     }
+}
+
+/// The session file of the active workspace that a `:cd` carries to the new
+/// root, read before the root changes.
+///
+/// [`None`] with persistence off, and for a fresh workspace. A picker restore
+/// into a fresh workspace reads the file under its uid until the restore
+/// lands, so the file stays where it is.
+fn session_to_carry(stoat: &Stoat) -> Option<PathBuf> {
+    let ws = stoat.active_workspace();
+    if stoat.persistence_disabled || ws.is_fresh() {
+        return None;
+    }
+    state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host).ok()
+}
+
+/// Move the session of workspace `ws_id` from `old` to the file its new root
+/// names, so no copy stays under the old root.
+///
+/// Every write issued before the move names `old`, and one that lands after
+/// the removal brings the old file back. Superseding them first, under the
+/// gate's lock, waits for a write in progress and skips the rest.
+fn carry_session(stoat: &mut Stoat, ws_id: WorkspaceId, old: &Path) {
+    let ws = &stoat.workspaces[ws_id];
+    let Ok(new) = state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) else {
+        return;
+    };
+    if new == old {
+        return;
+    }
+    ws.save_gate.lock().expect("save gate poisoned").supersede();
+    remove_session_files(&*stoat.fs_host, old);
+    stoat.save_workspace(ws_id);
 }
 
 /// Report the active workspace's `git_root` as the one-shot bottom-row status
@@ -623,6 +664,82 @@ mod tests {
             [1; 2],
             "a root entered twice is walked once",
         );
+    }
+
+    /// A `:cd` carries the saved session to the new root's file and leaves
+    /// none under the old root. A save issued before the move, as a queued
+    /// autosave is, lands nothing after it, even when no save under the new
+    /// root has landed to outrank it.
+    ///
+    /// Persistence is on, so the paths resolve against the state directory,
+    /// but every write goes to the harness's fake filesystem.
+    #[test]
+    fn cd_carries_the_saved_session_to_the_new_root() {
+        let cd = |fail_new_write: bool| {
+            let mut harness = Stoat::test();
+            harness.stoat.persistence_disabled = false;
+            harness.fake_fs().insert_file("/proj/a.txt", "");
+            harness.fake_fs().insert_file("/other/b.txt", "");
+            harness.stoat.active_workspace_mut().git_root = PathBuf::from("/proj");
+            harness.seed_focused_buffer("edited\n");
+
+            let uid = harness.stoat.active_workspace().uid;
+            let [old, new] = ["/proj", "/other"].map(|root| {
+                state_path_for(Path::new(root), uid, &*harness.stoat.fs_host).expect("state path")
+            });
+            harness
+                .stoat
+                .save_workspace_now(harness.stoat.active_workspace());
+            let gate = Arc::clone(&harness.stoat.active_workspace().save_gate);
+            let queued = gate.lock().expect("save gate poisoned").issue();
+            let (state, meta) = {
+                let ws = harness.stoat.active_workspace();
+                (ws.to_state(), ws.meta())
+            };
+            if fail_new_write {
+                harness
+                    .fake_fs()
+                    .fail_writes_to(&new, std::io::ErrorKind::PermissionDenied);
+            }
+
+            set_cwd(&mut harness.stoat, "/other");
+            harness.run_until_parked();
+            let fs = &*harness.stoat.fs_host;
+            let late = workspace::write_state_gated(&gate, queued, &state, &meta, &old, fs)
+                .expect("the write runs");
+            (
+                [fs.exists(&old), fs.exists(&registry::meta_path_for(&old))],
+                fs.exists(&new),
+                late,
+            )
+        };
+
+        assert_eq!(
+            [cd(false), cd(true)],
+            [
+                ([false, false], true, false),
+                ([false, false], false, false)
+            ],
+        );
+    }
+
+    /// A fresh workspace leaves the session file under its uid in place on a
+    /// `:cd`, since a picker restore into it reads that file until it lands.
+    #[test]
+    fn cd_in_a_fresh_workspace_leaves_the_session_file() {
+        let mut harness = Stoat::test();
+        harness.stoat.persistence_disabled = false;
+        harness.fake_fs().insert_file("/other/b.txt", "");
+        harness.stoat.active_workspace_mut().git_root = PathBuf::from("/proj");
+        let uid = harness.stoat.active_workspace().uid;
+        let old =
+            state_path_for(Path::new("/proj"), uid, &*harness.stoat.fs_host).expect("state path");
+        harness.fake_fs().insert_file(&old, "()");
+
+        set_cwd(&mut harness.stoat, "/other");
+        harness.run_until_parked();
+
+        assert!(harness.stoat.fs_host.exists(&old));
     }
 
     /// How many watches the harness's watcher holds on each of `dirs`.
