@@ -3268,6 +3268,59 @@ fn emit_after_edit_reenters_pool_pages() {
     );
 }
 
+/// A change held while an editor pool rests goes out on the next move, and
+/// the scroll of that move goes out in the same batch. The pages the first
+/// composite reads fill ahead of that scroll, or the glide starts on the
+/// pre-edit text, and no page fills twice.
+#[test]
+fn a_released_edit_fills_the_composited_page_before_the_scroll() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let root = PathBuf::from("/released");
+    let path = root.join("a.txt");
+    h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    emit_raw(&mut h, &mut rx);
+
+    h.type_keys("i x escape");
+    emit_raw(&mut h, &mut rx);
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.scroll_offset = 1.0;
+        editor.scroll_glide = ScrollGlide::Wheel;
+    }
+
+    let bytes = emit_raw(&mut h, &mut rx);
+    let cmds = command::decode_stream(&bytes);
+    let scroll = cmds
+        .iter()
+        .position(|cmd| matches!(cmd, Command::Scroll(scroll) if scroll.pool == pool))
+        .expect("the move sends a scroll");
+    let filled_before_scroll: Vec<u64> = cmds[..scroll]
+        .iter()
+        .filter_map(|cmd| match cmd {
+            Command::Fill(fill) if fill.pool == pool => Some(fill.index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (filled_before_scroll, pool_fills(&bytes, pool)),
+        (vec![0, 1], vec![0, 1, 2, 3, 4]),
+        "the composited pages fill ahead of the scroll, and every page fills once"
+    );
+}
+
 #[test]
 fn emit_smooth_scroll_glide_uses_the_eased_offset() {
     use stoatty_protocol::command::Command;

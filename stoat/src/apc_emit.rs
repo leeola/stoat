@@ -33,6 +33,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    ops::RangeInclusive,
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
@@ -1031,8 +1032,38 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     crate::smooth_scroll::spotlight_display_span(&snapshot, spotlight),
                 )
             });
+        // A move releases a change the rest held, and its scroll goes out in
+        // this batch, ahead of the fills that render on the pool. The pages the
+        // first composite reads, under the last target and under the new one,
+        // render here, so their fills reach the terminal before the scroll. A
+        // pool's first emit holds nothing to release, and a conflict page has a
+        // renderer of its own, so both leave every page to the pool.
+        let composited = stoat
+            .smooth_scroll
+            .last_target(region.pool)
+            .filter(|_| editor.conflict_view.is_none())
+            .map(|from| {
+                (
+                    composited_pages(from, region.height),
+                    composited_pages(scroll_offset, region.height),
+                )
+            });
+        let snapshot = editor.display_map.snapshot();
+        let gutter = crate::smooth_scroll::PageGutter::new(
+            line_numbers != LineNumbers::Off,
+            editor
+                .gutter_severity_cache
+                .as_ref()
+                .map(|cache| cache.map.clone())
+                .unwrap_or_default(),
+            theme.clone(),
+            base_rich.clone().map(|r| r.dim(dim)),
+            current_line,
+        );
+        let diff_view = editor.diff_view;
+        let mut rendered = Vec::new();
         let Refill {
-            entered,
+            mut entered,
             redecorated,
         } = pool::emit_pages_into(
             &mut out,
@@ -1048,10 +1079,33 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // focus dim, and diagnostics, so they hold the window until the
             // glide starts.
             true,
-            // Editor pages fill asynchronously below, so the synchronous
-            // render emits nothing here.
-            |_| Vec::new(),
+            |index| {
+                let Some((under_from, under_target)) = &composited else {
+                    return Vec::new();
+                };
+                if !under_from.contains(&index) && !under_target.contains(&index) {
+                    return Vec::new();
+                }
+                rendered.push(index);
+                let top_row = crate::smooth_scroll::page_top_row(index, region.height);
+                let bottom = top_row.saturating_add(u32::from(region.height));
+                crate::smooth_scroll::render_page_from_snapshot(
+                    &snapshot,
+                    top_row,
+                    fallback_style,
+                    region.width,
+                    region.height,
+                    &gutter,
+                    diff_view,
+                    dim,
+                    diff_dials,
+                    snapshot.highlighted_endpoints(top_row..bottom),
+                    None,
+                    page_spotlight,
+                )
+            },
         );
+        entered.retain(|page| !rendered.contains(page));
 
         // Per-pane mode feeds each pane's own strip, keyed by its pool. Single
         // mode feeds one shared strip (u32::MAX) for the focused pane only.
@@ -1118,7 +1172,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         }
 
         if !entered.is_empty() || !redecorated.is_empty() {
-            let snapshot = editor.display_map.snapshot();
             if let Some(state) = editor.conflict_view.as_ref() {
                 // The conflict pane is a View::Editor, so without its own
                 // arm it would fill through the plain-editor page and paint
@@ -1135,12 +1188,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     height: region.height,
                 });
             } else {
-                let severity = editor
-                    .gutter_severity_cache
-                    .as_ref()
-                    .map(|cache| cache.map.clone())
-                    .unwrap_or_default();
-                let rich = base_rich.clone().map(|r| r.dim(dim));
                 async_jobs.push(PoolFill::Editor {
                     snapshot,
                     pages: entered,
@@ -1148,14 +1195,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     pool: region.pool,
                     width: region.width,
                     height: region.height,
-                    gutter: crate::smooth_scroll::PageGutter::new(
-                        line_numbers != LineNumbers::Off,
-                        severity,
-                        theme.clone(),
-                        rich,
-                        current_line,
-                    ),
-                    diff_view: editor.diff_view,
+                    gutter,
+                    diff_view,
                     dials: diff_dials,
                     dim,
                     spotlight: page_spotlight.cloned(),
@@ -2557,6 +2598,17 @@ fn spotlight_page_version(
     let mut hasher = DefaultHasher::new();
     (color, from, to).hash(&mut hasher);
     hasher.finish()
+}
+
+/// The pages that a composite at scroll offset `offset` reads, for a pool whose
+/// regions are `height` rows tall.
+///
+/// A composite reads one row more than the region holds, from the floored top
+/// row, so past a page edge it reads into the page after the one on top.
+fn composited_pages(offset: f32, height: u16) -> RangeInclusive<u64> {
+    let top = offset.max(0.0).floor() as u64;
+    let height = u64::from(height.max(1));
+    top / height..=(top + height) / height
 }
 
 /// The cells stamp that a list's selected row gives list page `index` of a

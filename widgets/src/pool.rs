@@ -179,6 +179,15 @@ impl SmoothScrollState {
             .is_some_and(|entry| entry.content_version == version)
     }
 
+    /// The scroll target that `pool`'s last emit sent, which is where the
+    /// terminal's next glide of the pool starts.
+    ///
+    /// `None` for a pool that has not emitted, so a caller reads it before
+    /// the emit that moves the target.
+    pub fn last_target(&self, pool: u32) -> Option<f32> {
+        self.pools.get(&pool)?.last_scroll_offset
+    }
+
     /// Hold back the fill of every pool whose rectangle moves, until the grid's
     /// geometry settles.
     ///
