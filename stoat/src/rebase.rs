@@ -1013,6 +1013,33 @@ mod tests {
         );
     }
 
+    /// The edit stop opens its file in front of the list it came from, so no
+    /// list has focus at the finish, and the list behind the file still shows
+    /// the rebased history.
+    #[test]
+    fn a_finished_rebase_reloads_the_list_behind_the_edit_stop() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+
+        h.type_keys("C");
+        h.settle();
+
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
+        let log: Vec<String> = repo
+            .log_commits(None, 10)
+            .into_iter()
+            .map(|commit| commit.sha)
+            .collect();
+        let lists: Vec<Vec<String>> = h
+            .stoat
+            .active_workspace()
+            .commit_lists
+            .values()
+            .map(|list| list.commits.iter().map(|c| c.sha.clone()).collect())
+            .collect();
+        assert_eq!(lists, vec![log], "the one list holds the rebased history");
+    }
+
     /// Attach HEAD to `main` at the tip of [`THREE_COMMITS`], as for a user on
     /// that branch. The fake lets a branch name a commit that the history
     /// seeds later.

@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::{commits::commits_refresh, reword::install_reword_pause},
+    action_handlers::{commits::reload_every_list, reword::install_reword_pause},
     app::{Stoat, UpdateEffect},
     auto_reload,
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
@@ -440,8 +440,8 @@ fn queue_rebase_finish(stoat: &mut Stoat, final_head: String, branch: Option<Str
 ///
 /// A failed checkout reports the rebased tip's sha, because no branch names
 /// that commit and the user needs it to recover the rebase. A finish that moved
-/// re-reads the clean buffers the checkout rewrote, then reloads the commits
-/// list.
+/// re-reads the clean buffers the checkout rewrote, then reloads every commits
+/// list of the workspace, focused or not.
 fn land_rebase_finish(
     stoat: &mut Stoat,
     final_head: String,
@@ -461,7 +461,7 @@ fn land_rebase_finish(
         None => format!("rebase complete, HEAD at {short}"),
     };
     emit_rebase_complete(stoat, &label);
-    commits_refresh(stoat);
+    reload_every_list(stoat);
 }
 
 fn emit_rebase_complete(stoat: &mut Stoat, label: &str) {

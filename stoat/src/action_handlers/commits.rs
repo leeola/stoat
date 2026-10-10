@@ -292,13 +292,35 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
     let Some(id) = stoat.active_workspace().focused_commits_id() else {
         return UpdateEffect::None;
     };
+    if !reload_list(stoat, id) {
+        return UpdateEffect::None;
+    }
+    UpdateEffect::Redraw
+}
+
+/// Reload every commits list of the active workspace.
+///
+/// A rebase rewrites the history each list shows, and no list needs focus at
+/// the finish. An edit stop opens its file in front of the list it came from.
+pub(super) fn reload_every_list(stoat: &mut Stoat) {
+    let ids: Vec<CommitListId> = stoat.active_workspace().commit_lists.keys().collect();
+    for id in ids {
+        reload_list(stoat, id);
+    }
+}
+
+/// Load list `id` again from the top of its repo's history, dropping the
+/// commits, the selection, and the previews it held.
+///
+/// Returns `false` when the active workspace holds no list `id`.
+fn reload_list(stoat: &mut Stoat, id: CommitListId) -> bool {
     let Some(repo) = stoat
         .active_workspace()
         .commit_lists
         .get(id)
         .map(|s| s.repo.clone())
     else {
-        return UpdateEffect::None;
+        return false;
     };
     let task = spawn_commit_log_load(
         &stoat.executor,
@@ -323,7 +345,7 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
     drain_commits_tasks(stoat, id);
     ensure_selected_preview(stoat, id);
     drain_commits_tasks(stoat, id);
-    UpdateEffect::Redraw
+    true
 }
 
 /// Start the next page load for list `id` when its selection comes near the
