@@ -1248,6 +1248,22 @@ fn manages_own_undo_group(kind: ActionKind) -> bool {
     )
 }
 
+/// Run `edit` as one undo step on the focused buffer, the way [`dispatch`]
+/// runs an action.
+///
+/// This is for an edit that a key completes outside [`dispatch`], such as the
+/// replace and surround chords. One undo takes back every edit that `edit`
+/// makes and restores the selections from before it.
+pub(crate) fn with_action_group(
+    stoat: &mut Stoat,
+    edit: impl FnOnce(&mut Stoat) -> UpdateEffect,
+) -> UpdateEffect {
+    let group = begin_action_group(stoat);
+    let effect = edit(stoat);
+    end_action_group(stoat, group);
+    effect
+}
+
 /// Open an undo group on the focused editor's buffer so every edit the
 /// dispatched action makes collapses into one undo step, capturing the
 /// pre-action selections to restore on undo. Returns the grouped buffer, or

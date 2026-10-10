@@ -1454,6 +1454,34 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
+    /// The surround chord inserts both delimiters as one step, so one undo
+    /// takes both back and restores the selection the chord surrounded.
+    #[test]
+    fn a_surround_add_undoes_in_one_step() {
+        fn text(h: &mut TestHarness) -> String {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            editor
+                .display_map
+                .snapshot()
+                .buffer_snapshot()
+                .rope()
+                .to_string()
+        }
+
+        let mut h = TestHarness::with_size(40, 10);
+        h.seed_focused_buffer("hello");
+        h.type_keys("%");
+        h.type_keys("m s (");
+        assert_eq!(text(&mut h), "(hello)");
+
+        h.type_keys("u");
+        assert_eq!(
+            (text(&mut h), h.selection_spans()),
+            ("hello".to_string(), vec![(0, 5, false)]),
+            "one undo takes both delimiters back and restores the selection"
+        );
+    }
+
     fn rope(s: &str) -> Rope {
         let mut r = Rope::new();
         r.push(s);

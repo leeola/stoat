@@ -9517,6 +9517,25 @@ fn select_sibling_walks_each_selection() {
     );
 }
 
+/// The replace chord edits every selection as one step, so one undo puts back
+/// each cursor's character and the cursors the chord started from.
+#[test]
+fn a_replace_over_two_cursors_undoes_in_one_step() {
+    let mut h = TestHarness::with_size(40, 10);
+    h.seed_focused_buffer("ab\ncd\n");
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    let before = h.selection_spans();
+    h.type_keys("r x");
+    assert_eq!(focused_buffer_text(&mut h), "xb\nxd\n");
+
+    dispatch(&mut h.stoat, &stoat_action::Undo);
+    assert_eq!(
+        (focused_buffer_text(&mut h), h.selection_spans()),
+        ("ab\ncd\n".to_string(), before),
+        "one undo takes back both replacements and restores both cursors"
+    );
+}
+
 /// The key that cancels a chord reaches nothing else. Normal mode binds Escape
 /// to dismissing the key hints, so the hints surviving is what says the press
 /// went no further than the chord it dropped.

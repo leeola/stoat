@@ -5451,14 +5451,18 @@ impl Stoat {
             let Some(text) = text else {
                 return UpdateEffect::Redraw;
             };
-            return action_handlers::movement::execute_replace(self, text);
+            return action_handlers::with_action_group(self, |stoat| {
+                action_handlers::movement::execute_replace(stoat, text)
+            });
         }
 
         if takes_pending && self.pending_surround_add {
             self.pending_surround_add = false;
             match key.code {
                 KeyCode::Char(ch) => {
-                    return action_handlers::surround::execute_surround_add(self, ch);
+                    return action_handlers::with_action_group(self, |stoat| {
+                        action_handlers::surround::execute_surround_add(stoat, ch)
+                    });
                 },
                 // Enter names a line ending, which is how a selection gets put
                 // on a line of its own. Always LF: a buffer holds LF whatever
@@ -5466,7 +5470,9 @@ impl Stoat {
                 // on save. Inserting one here leaves a stray carriage return in
                 // the text instead.
                 KeyCode::Enter => {
-                    return action_handlers::surround::execute_surround_add_pair(self, "\n", "\n");
+                    return action_handlers::with_action_group(self, |stoat| {
+                        action_handlers::surround::execute_surround_add_pair(stoat, "\n", "\n")
+                    });
                 },
                 // Cancelling costs the one press and nothing else, as it does
                 // for every chord below.
@@ -5499,7 +5505,9 @@ impl Stoat {
                         return UpdateEffect::Redraw;
                     },
                     action_handlers::surround::SurroundReplaceStage::AwaitTo(from) => {
-                        return action_handlers::surround::execute_surround_replace(self, from, ch);
+                        return action_handlers::with_action_group(self, |stoat| {
+                            action_handlers::surround::execute_surround_replace(stoat, from, ch)
+                        });
                     },
                     action_handlers::surround::SurroundReplaceStage::Idle => unreachable!(),
                 }
@@ -5511,7 +5519,9 @@ impl Stoat {
         if takes_pending && self.pending_surround_delete {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_surround_delete = false;
-                return action_handlers::surround::execute_surround_delete(self, ch);
+                return action_handlers::with_action_group(self, |stoat| {
+                    action_handlers::surround::execute_surround_delete(stoat, ch)
+                });
             }
             self.pending_surround_delete = false;
             return UpdateEffect::Redraw;
