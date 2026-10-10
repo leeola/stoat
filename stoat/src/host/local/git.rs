@@ -348,10 +348,24 @@ impl GitRepo for LocalGitRepo {
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;
-        match repo.apply(&diff, ApplyLocation::Index, None) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(apply_error(&repo, patch, &err)),
+
+        // The patch states no mode, and libgit2 writes the post-image entry at
+        // 100644 then. A mode header needs the blob ids of an `index` line,
+        // which the patch builder does not have, so the mode is read here and
+        // put back after the apply.
+        let rel = patch_target_path(patch);
+        let prior_mode = match rel {
+            Some(rel) => index_mode(&repo, rel).map_err(err_msg)?,
+            None => None,
+        };
+
+        if let Err(err) = repo.apply(&diff, ApplyLocation::Index, None) {
+            return Err(apply_error(&repo, patch, &err));
         }
+        if let (Some(rel), Some(mode)) = (rel, prior_mode) {
+            restore_index_mode(&repo, rel, mode).map_err(err_msg)?;
+        }
+        Ok(())
     }
 
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
@@ -430,7 +444,15 @@ impl GitRepo for LocalGitRepo {
             }
         }
         for (path, blob) in &written {
-            builder.upsert(path, *blob, git2::FileMode::Blob);
+            // An update replaces a file's contents only, so a script the base
+            // tree holds as executable stays executable.
+            let mode = match base.get_path(path) {
+                Ok(entry) if entry.filemode() == i32::from(git2::FileMode::BlobExecutable) => {
+                    git2::FileMode::BlobExecutable
+                },
+                _ => git2::FileMode::Blob,
+            };
+            builder.upsert(path, *blob, mode);
         }
 
         builder
@@ -1052,6 +1074,32 @@ fn apply_error(repo: &Repository, patch: &str, err: &git2::Error) -> GitApplyErr
     .build()
 }
 
+/// The mode of the stage-0 index entry at `rel`, or `None` when the index
+/// holds no such entry.
+fn index_mode(repo: &Repository, rel: &Path) -> Result<Option<u32>, git2::Error> {
+    let mut index = repo.index()?;
+    // A held handle keeps the index it loaded first, and another process
+    // sometimes rewrites the file after that load.
+    index.read(false)?;
+    Ok(index.get_path(rel, 0).map(|entry| entry.mode))
+}
+
+/// Put `mode` back on the index entry at `rel` after an apply that wrote it at
+/// 100644. An entry the apply removed stays removed.
+fn restore_index_mode(repo: &Repository, rel: &Path, mode: u32) -> Result<(), git2::Error> {
+    let mut index = repo.index()?;
+    index.read(false)?;
+    let Some(mut entry) = index.get_path(rel, 0) else {
+        return Ok(());
+    };
+    if entry.mode == mode {
+        return Ok(());
+    }
+    entry.mode = mode;
+    index.add(&entry)?;
+    index.write()
+}
+
 /// The file a unified-diff patch targets, read from its `+++ b/<path>` header
 /// and falling back to `--- a/<path>` when the new side is `/dev/null`.
 ///
@@ -1389,6 +1437,8 @@ mod tests {
     use git2::{Commit, Oid, Repository, RepositoryInitOptions, Signature};
     use std::{
         collections::BTreeMap,
+        fs::Permissions,
+        os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
         sync::Arc,
     };
@@ -1644,6 +1694,36 @@ mod tests {
             after.keys().collect::<Vec<_>>(),
             before.keys().collect::<Vec<_>>(),
             "and the tree still holds the same paths",
+        );
+    }
+
+    /// An update replaces a file's contents only, so the mode the base tree
+    /// gives each path carries through an amend.
+    #[test]
+    fn tree_with_updates_keeps_an_executable_mode() {
+        let (dir, repo, _) = seeded_repo();
+        let script = dir.path().join("run.sh");
+        std::fs::write(&script, b"echo old\n").unwrap();
+        std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+        let base = commit_files(&repo, &dir, &[("run.sh", b"echo old\n")]);
+        let git = discover(&dir);
+
+        let oid = git
+            .tree_with_updates(
+                &base,
+                &[
+                    (PathBuf::from("run.sh"), Some("echo new\n".to_string())),
+                    (PathBuf::from("a.txt"), Some("edited".to_string())),
+                ],
+            )
+            .expect("the update writes a tree");
+
+        let tree = repo.find_tree(Oid::from_str(&oid).unwrap()).unwrap();
+        let mode = |path: &str| tree.get_path(Path::new(path)).unwrap().filemode();
+        assert_eq!(
+            (mode("run.sh"), mode("a.txt")),
+            (0o100755, 0o100644),
+            "the script stays executable and the plain file stays plain",
         );
     }
 

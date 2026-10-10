@@ -52,6 +52,16 @@ impl TestRepo {
         self.write(name, content).stage(name)
     }
 
+    /// Mark the staged entry at `name` executable in the index.
+    fn mark_executable(&self, name: &str) -> &Self {
+        let mut index = self.repo.index().expect("index");
+        let mut entry = index.get_path(Path::new(name), 0).expect("entry");
+        entry.mode = u32::from(FileMode::BlobExecutable);
+        index.add(&entry).expect("re-add executable");
+        index.write().expect("write index");
+        self
+    }
+
     fn commit(&self, message: &str) -> &Self {
         let mut index = self.repo.index().expect("index");
         let tree_id = index.write_tree().expect("write tree");
@@ -646,6 +656,39 @@ fn apply_to_index_stages_modification() {
     assert_eq!(staged_blob(tr.path(), "a.rs").as_deref(), Some("new\n"));
 }
 
+/// libgit2 writes the post-image entry at 100644 when the patch states no
+/// mode, so staging a hunk of a script gives its mode back.
+#[test]
+fn apply_to_index_keeps_an_executable_mode() {
+    let tr = TestRepo::new();
+    tr.write_and_stage("run.sh", "echo old\n")
+        .mark_executable("run.sh")
+        .commit("c1");
+    tr.write("run.sh", "echo new\n");
+    let patch = "diff --git a/run.sh b/run.sh\n\
+                 --- a/run.sh\n\
+                 +++ b/run.sh\n\
+                 @@ -1,1 +1,1 @@\n\
+                 -echo old\n\
+                 +echo new\n";
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    repo.apply_to_index(patch).expect("apply ok");
+
+    let mode = {
+        let repo = Repository::open(tr.path()).expect("open repo");
+        let mut index = repo.index().expect("index");
+        index.read(true).expect("read index");
+        index.get_path(Path::new("run.sh"), 0).expect("entry").mode
+    };
+    assert_eq!(
+        (mode, staged_blob(tr.path(), "run.sh")),
+        (
+            u32::from(FileMode::BlobExecutable),
+            Some("echo new\n".to_string()),
+        ),
+    );
+}
+
 #[test]
 fn apply_to_index_stages_pure_addition() {
     let tr = TestRepo::new();
@@ -832,14 +875,7 @@ fn changed_contents_ignores_a_mode_only_change() {
     tr.write_and_stage("run.sh", "echo hi").commit("c1");
     let first = tr.head_sha();
 
-    {
-        let mut index = tr.repo.index().expect("index");
-        let mut entry = index.get_path(Path::new("run.sh"), 0).expect("entry");
-        entry.mode = u32::from(FileMode::BlobExecutable);
-        index.add(&entry).expect("re-add executable");
-        index.write().expect("write index");
-    }
-    tr.commit("c2");
+    tr.mark_executable("run.sh").commit("c2");
     let second = tr.head_sha();
 
     let repo = LocalGit::new().discover(tr.path()).unwrap();
