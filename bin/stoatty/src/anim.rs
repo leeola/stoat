@@ -597,8 +597,9 @@ pub(crate) struct PoolFrame {
     /// Each entry eases its own offset toward the terminal's app-declared target
     /// for that pool and holds the grids the composite reads, so several pools
     /// (split panes, a modal over an editor) glide independently and stack in
-    /// ascending-id z-order. An entry is created when a pool first appears and
-    /// dropped when the app retires it.
+    /// ascending-id z-order. An entry is created when a pool first appears,
+    /// starts over when the app declares the pool anew, and is dropped when the
+    /// app retires it.
     pub(crate) anims: BTreeMap<u32, PoolAnim>,
     /// The pool snapshot of the last projection, kept so that the composite
     /// build after the lock reads the same list the projection stepped.
@@ -728,11 +729,13 @@ pub(crate) fn project_frame(
             .entry(pool.id)
             .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
         let resident = pool.region.kind == PoolKind::Terminal;
-        // A pool declared again under its id as the other kind starts over. A
-        // glide and a terminal pool hold grids of different sizes, and neither
-        // describes the other.
-        if anim.last_version.is_some() != resident {
-            *anim = PoolAnim::new(pool.scroll_target.pages());
+        // A pool declared anew under its id starts over. A drop and a declare
+        // in one batch leave no frame without the id, so the serial tells the
+        // two pools apart. A pool declared again as the other kind starts over
+        // too, because a glide and a terminal pool hold grids of different
+        // sizes, and neither describes the other.
+        if anim.serial != pool.serial || anim.last_version.is_some() != resident {
+            anim.restart(pool);
         }
         if resident {
             if full_screen {
@@ -962,6 +965,13 @@ pub(crate) struct PoolAnim {
     /// [`Self::last_stamp`] instead. [`project_frame`] reads it to tell which
     /// kind of pool the state last served.
     pub(crate) last_version: Option<u64>,
+    /// The [`PoolView::serial`] of the pool declaration this state serves.
+    ///
+    /// A drop and a declare in one batch keep the pool's id, so the serial is
+    /// the only sign that this state belongs to the pool before the drop. Zero
+    /// in a fresh state, which is the serial of the first pool a terminal
+    /// declares.
+    pub(crate) serial: u64,
 }
 
 impl PoolAnim {
@@ -979,7 +989,15 @@ impl PoolAnim {
             last_buffered: false,
             held_frac: None,
             last_version: None,
+            serial: 0,
         }
+    }
+
+    /// Start over as the state of the `pool` declaration the terminal holds,
+    /// resting at its target.
+    pub(crate) fn restart(&mut self, pool: &PoolView) {
+        *self = PoolAnim::new(pool.scroll_target.pages());
+        self.serial = pool.serial;
     }
 }
 
@@ -1537,6 +1555,7 @@ mod tests {
             anchor: None,
             content_version: 0,
             grid: (8, 4),
+            serial: 0,
         };
         (view, terminal)
     }
@@ -1801,6 +1820,7 @@ mod tests {
             anchor: None,
             content_version: 0,
             grid: (40, 20),
+            serial: 0,
         };
         let (glided, still) = (view(1, 0), view(2, 20));
         let anims = BTreeMap::from([(1, PoolAnim::new(0.25)), (2, PoolAnim::new(0.5))]);

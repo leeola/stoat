@@ -4205,6 +4205,41 @@ fn pool_drop_clears_the_cursor_anchor() {
     );
 }
 
+/// A drop and a declare of one id in one batch leave no snapshot without the
+/// id, so only the serial tells a renderer that the pool after the drop is not
+/// the pool before it.
+#[test]
+fn a_pool_declared_after_its_drop_takes_a_new_serial() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let serial = |terminal: &Terminal| terminal.pools().first().map(|pool| pool.serial);
+    declare_pool(&mut terminal, 1, 4, 8);
+    let first = serial(&terminal).expect("pool 1 is declared");
+
+    declare_pool(&mut terminal, 1, 2, 8);
+    assert_eq!(
+        serial(&terminal),
+        Some(first),
+        "a re-declare of the held pool keeps its serial",
+    );
+
+    let mut batch = encode_pool_drop(&PoolDropCommand { pool: 1 });
+    batch.extend(encode_pool_region(&PoolRegionCommand {
+        pool: 1,
+        top: 0,
+        left: 0,
+        width: 8,
+        height: 4,
+        window: 0,
+        kind: PoolKind::Grid,
+    }));
+    terminal.advance(&batch);
+    let second = serial(&terminal).expect("pool 1 is declared again");
+    assert_ne!(
+        second, first,
+        "the pool declared after the drop takes a new serial"
+    );
+}
+
 #[test]
 fn a_cursor_release_takes_the_anchor_off_its_pool_alone() {
     let mut terminal = Terminal::new(4, 8, Theme::default());

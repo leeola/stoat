@@ -427,6 +427,9 @@ pub struct Terminal {
     /// `Gstoatty;pool_drop`. A [`BTreeMap`] so [`Self::pools`] yields them in
     /// ascending-id (z) order.
     pools: BTreeMap<u32, Pool>,
+    /// The serial the next newly built pool takes, so no two declarations
+    /// that build a pool in this terminal share one.
+    next_pool_serial: u64,
     /// Kitty graphics images this terminal holds, and the transmission still
     /// arriving.
     ///
@@ -800,6 +803,14 @@ pub struct PoolView {
     /// terminal-size cells its region fits, which [`PoolRegion::kind`] marks, so
     /// a renderer reads its pages at that size rather than the region's.
     pub grid: (usize, usize),
+    /// Which declaration of [`Self::id`] this pool is.
+    ///
+    /// A pool dropped and declared again under its id takes a new serial, even
+    /// when the drop and the declare arrive in one batch and no snapshot shows
+    /// the id missing. A renderer that keeps state per id compares serials to
+    /// tell the pool after the drop from the pool before it. A re-declare of a
+    /// held pool keeps its serial, because only its geometry moved.
+    pub serial: u64,
 }
 
 /// One smooth-scroll surface the document pool tracks.
@@ -837,11 +848,15 @@ struct Pool {
     /// `None` when the pool floats free, which is every pool that is not a
     /// popup riding a pane. Cleared when the pool is dropped.
     anchor: Option<(u32, f32)>,
+    /// Which declaration of its id this pool is, as [`PoolView::serial`]
+    /// reports it.
+    serial: u64,
 }
 
 impl Pool {
-    /// Create a pool for `region`, its page buffer built at `grid`.
-    fn new(region: PoolRegion, grid: (usize, usize)) -> Pool {
+    /// Create a pool for `region` as declaration `serial` of its id, its page
+    /// buffer built at `grid`.
+    fn new(region: PoolRegion, grid: (usize, usize), serial: u64) -> Pool {
         Pool {
             page_pool: PagePool::new(grid.0, grid.1, PAGE_POOL_CAPACITY),
             grid,
@@ -851,6 +866,7 @@ impl Pool {
             content_version: 0,
             cursor_anchor: None,
             anchor: None,
+            serial,
         }
     }
 }
@@ -1068,6 +1084,7 @@ impl Terminal {
             decoration_damage: Vec::new(),
             last_history: 0,
             pools: BTreeMap::new(),
+            next_pool_serial: 0,
             images: images::ImageStore::new(),
             fill: None,
             fill_scratch: None,
@@ -1655,7 +1672,10 @@ impl Terminal {
                             self.warn_pool_cap(region.pool);
                             return;
                         }
-                        self.pools.insert(region.pool, Pool::new(region, grid));
+                        let serial = self.next_pool_serial;
+                        self.next_pool_serial += 1;
+                        self.pools
+                            .insert(region.pool, Pool::new(region, grid, serial));
                         true
                     },
                 };
@@ -2217,6 +2237,7 @@ impl Terminal {
             anchor: pool.anchor,
             content_version: pool.content_version,
             grid: pool.grid,
+            serial: pool.serial,
         }
     }
 

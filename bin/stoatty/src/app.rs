@@ -3109,6 +3109,9 @@ fn redraw_aux(
                 .pool_anims
                 .entry(pool.id)
                 .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
+            if anim.serial != pool.serial {
+                anim.restart(pool);
+            }
             let reposition = terminal.take_reposition(pool.id);
             match advance_pool_glide(anim, pool, &terminal, reposition, dt) {
                 PoolStep::Settled => {},
@@ -4390,6 +4393,7 @@ mod tests {
             anchor: None,
             content_version: 0,
             grid: (2, 2),
+            serial: 0,
         }];
         (terminal, pools)
     }
@@ -4433,6 +4437,7 @@ mod tests {
             anchor: None,
             content_version: 7,
             grid: (12, 40),
+            serial: 0,
         };
         let covered = vec![ActivePool {
             id: 1,
@@ -4529,6 +4534,40 @@ mod tests {
             frame.anims.keys().copied().collect::<Vec<_>>(),
             [1],
             "pool 9 is gone, and the listed pool gains its state",
+        );
+    }
+
+    /// A pool dropped and declared again in one batch is a new pool, so it
+    /// rests at the target it was declared with instead of gliding there from
+    /// where the dropped pool stood.
+    #[test]
+    fn a_pool_declared_after_its_drop_starts_at_its_target() {
+        let mut terminal = pooled_terminal(&[(1, 0, 4)]);
+        let mut frame = PoolFrame::default();
+        project(&mut terminal, &mut frame);
+
+        let mut batch = encode_pool_drop(&PoolDropCommand { pool: 1 });
+        batch.extend(encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 4,
+            window: 0,
+            kind: PoolKind::Grid,
+        }));
+        batch.extend(encode_scroll(&ScrollCommand {
+            pool: 1,
+            page: 2,
+            fraction: 0,
+        }));
+        terminal.advance(&batch);
+        let projection = project(&mut terminal, &mut frame);
+
+        assert_eq!(
+            (frame.anims[&1].scroll, projection.glided),
+            (2.0, Vec::new()),
+            "the declared pool rests at its target, and nothing glides",
         );
     }
 
