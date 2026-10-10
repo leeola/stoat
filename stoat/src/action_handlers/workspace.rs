@@ -1,7 +1,9 @@
 use crate::{
+    action_handlers::pane::EditorDisposal,
     app::{Stoat, UpdateEffect},
     host::FsHost,
     input_view::{InputView, SubmitTarget},
+    pane::View,
     workspace::{
         registry::{self, RegistryEntry},
         state_path_for, Workspace, WorkspaceId, WorkspaceUid,
@@ -68,6 +70,7 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
         .expect("non-last workspace has at least one sibling");
 
     crate::lsp::session::release_documents(stoat);
+    release_workspace(stoat, active_id);
     stoat.workspaces.remove(active_id);
     switch_active_workspace(stoat, replacement);
     UpdateEffect::Redraw
@@ -124,9 +127,10 @@ pub(super) fn workspace_picker_complete(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// An inactive row loses the state file and meta sidecar it would restore
 /// from. An open background row loses those files and leaves the running
-/// instance too. The active workspace is refused with a status message,
-/// because the picker's own input lives in it and `close_workspace` refuses
-/// the last workspace for the same reason.
+/// instance too. Its shells and runs end, and its hook server stops. The
+/// active workspace is refused with a status message, because the picker's
+/// own input lives in it and `close_workspace` refuses the last workspace for
+/// the same reason.
 ///
 /// An open row's files resolve against the real state directory, so their
 /// deletion sits behind [`Stoat::persistence_disabled`], which the test
@@ -151,6 +155,7 @@ pub(super) fn workspace_picker_delete(stoat: &mut Stoat) -> UpdateEffect {
         (Some(id), _) => {
             stoat.pending_workspace_saves.remove(&id);
             remove_open_session(stoat, id);
+            release_workspace(stoat, id);
             stoat.workspaces.remove(id);
         },
         (None, Some(state_path)) => remove_session_files(&*stoat.fs_host, &state_path),
@@ -195,6 +200,35 @@ fn remove_session_files(fs: &dyn FsHost, state_path: &Path) {
             tracing::warn!(?target, ?err, "failed to delete workspace file");
         }
     }
+}
+
+/// End every shell, run, and agent session of the open workspace `id`, and
+/// stop its hook server.
+///
+/// A reader task holds its session, so a workspace removed without this
+/// leaves its shells running and its socket bound until exit. Each session
+/// ends the way a tab close ends it. The exit of a killed shell then lands
+/// for a workspace that no longer exists, and drops.
+fn release_workspace(stoat: &mut Stoat, id: WorkspaceId) {
+    let executor = stoat.executor.clone();
+    let ws = &mut stoat.workspaces[id];
+
+    let terms: Vec<_> = ws.terms.keys().collect();
+    for term_id in terms {
+        super::pane::dispose_view(
+            ws,
+            &executor,
+            View::Terminal(term_id),
+            EditorDisposal::Remove,
+        );
+    }
+    let runs: Vec<_> = ws.runs.keys().collect();
+    for run_id in runs {
+        super::pane::dispose_view(ws, &executor, View::Run(run_id), EditorDisposal::Remove);
+    }
+
+    let uid = ws.uid;
+    stoat.agent_servers.remove(&uid);
 }
 
 pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
@@ -317,6 +351,7 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         .filter(|&id| stoat.workspaces.get(id).is_some_and(Workspace::is_fresh));
     if let Some(id) = orphan {
         stoat.pending_workspace_saves.remove(&id);
+        release_workspace(stoat, id);
         stoat.workspaces.remove(id);
     }
     UpdateEffect::Redraw
@@ -519,6 +554,7 @@ mod tests {
     use crate::{
         badge::BadgeSource,
         dump::{self, DumpId},
+        host::{FakeTerminalHost, FakeTerminalSession},
         input_view::{InputView, SubmitTarget},
         test_harness::TestHarness,
         workspace::{
@@ -938,6 +974,83 @@ mod tests {
             &*stoat.fs_host,
         )
         .expect("the write runs")
+    }
+
+    /// Closing a workspace or deleting its open row ends the run and the shell
+    /// of that workspace, and stops its hook server.
+    #[test]
+    fn closing_or_deleting_an_open_workspace_ends_its_sessions() {
+        let released_after = |delete: bool| {
+            let mut harness = Stoat::test();
+            harness.allow_host_swap();
+            harness
+                .stoat
+                .set_agent_socket_dir("/stoat-test-never-served".into());
+            harness.stoat.set_serve_agent_sockets(true);
+            let first = harness.stoat.active_workspace;
+            harness.type_action("NewWorkspace()");
+
+            // The terminal covers the run and keeps it alive. A run opened
+            // over a terminal pane ends that shell, so the run goes first.
+            let run = install_fake_session(&mut harness);
+            harness.open_run();
+            let shell = install_fake_session(&mut harness);
+            super::super::dispatch(&mut harness.stoat, &stoat_action::Terminal);
+            let killed = || [run.was_killed(), shell.was_killed()];
+            assert_eq!(killed(), [false, false], "both live before the removal");
+
+            let stoat = &mut harness.stoat;
+            if delete {
+                stoat.active_workspace = first;
+                let input = picker_input(stoat);
+                let mut picker = WorkspacePicker::new(&stoat.workspaces, first, Vec::new(), input);
+                picker.select_next();
+                stoat.workspace_picker = Some(picker);
+                workspace_picker_delete(stoat);
+            } else {
+                close_workspace(stoat);
+            }
+            harness.run_until_parked();
+            (
+                harness.stoat.workspaces.len(),
+                killed(),
+                harness.stoat.agent_servers.len(),
+            )
+        };
+
+        assert_eq!(
+            [released_after(false), released_after(true)],
+            [(1, [true, true], 0); 2],
+        );
+    }
+
+    /// Every spawn of one fake host shares its session, so each spawn gets a
+    /// host of its own to tell its kill apart.
+    fn install_fake_session(harness: &mut TestHarness) -> Arc<FakeTerminalSession> {
+        let session = Arc::new(FakeTerminalSession::new());
+        harness.stoat.terminal_host = Arc::new(FakeTerminalHost::new(Arc::clone(&session)));
+        session
+    }
+
+    /// An untouched launch workspace that the picker drops stops its hook
+    /// server. A shell that exited leaves the workspace untouched but served.
+    #[test]
+    fn dropping_an_untouched_launch_workspace_stops_its_hook_server() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+        stoat.set_agent_socket_dir("/stoat-test-never-served".into());
+        stoat.set_serve_agent_sockets(true);
+        let uid = stoat.active_workspace().uid();
+        stoat.serve_term_session(uid).expect("the socket is served");
+
+        open_workspace_picker_over(stoat, vec![saved_session(WorkspaceUid(424242), "proj")]);
+        workspace_picker_select(stoat);
+
+        assert_eq!(
+            (stoat.workspaces.len(), stoat.agent_servers.len()),
+            (1, 0),
+            "the dropped launch workspace takes its hook server with it",
+        );
     }
 
     #[test]
