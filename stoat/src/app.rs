@@ -5062,6 +5062,12 @@ impl Stoat {
         );
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // The recording holds the press that closes a modal, so a replay
+            // closes it too. A hover arrives asynchronously, so a replay finds
+            // none to dismiss, and the press that dismissed one stays out.
+            if active_modal(self).is_some() {
+                action_handlers::macro_recording::capture(self, &key);
+            }
             if keymap_state::close_topmost_modal(self) {
                 return UpdateEffect::Redraw;
             }
@@ -5109,11 +5115,12 @@ impl Stoat {
         }
 
         if let Some(count) = self.pending_macro_replay.take() {
+            // A recording needs the key that answers the chord to replay it
+            // later, whether the key names a register or cancels the chord.
+            // Both arms return here, before the capture every other key goes
+            // through below.
+            action_handlers::macro_recording::capture(self, &key);
             if let KeyCode::Char(ch) = key.code {
-                // The register name is half of what a recording needs to replay
-                // this later, and returning here is what would skip the capture
-                // every other key goes through below.
-                action_handlers::macro_recording::capture(self, &key);
                 return action_handlers::macro_recording::execute_replay(self, ch, count);
             }
             return UpdateEffect::Redraw;

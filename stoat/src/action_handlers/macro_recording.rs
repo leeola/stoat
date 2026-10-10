@@ -120,7 +120,7 @@ pub(crate) fn capture(stoat: &mut Stoat, key: &KeyEvent) {
 mod tests {
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
-        test_harness::keys,
+        test_harness::{editor, keys},
         Stoat,
     };
     use crossterm::event::{Event, KeyCode};
@@ -257,6 +257,43 @@ mod tests {
             stored_macro(&mut h, '@'),
             Some("q a".to_string()),
             "the replay was recorded as the inner macro's body"
+        );
+    }
+
+    /// The Ctrl-C that closes a prompt is part of what the recording replays.
+    /// Without it, a replay types the keys after it into the prompt it opened.
+    #[test]
+    fn a_macro_records_the_ctrl_c_that_closes_a_prompt() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("ab\ncd\nef\n");
+        h.type_keys("Q / x ctrl-c j Q");
+        assert_eq!(stored_macro(&mut h, '@'), Some("/ x ctrl-c j".to_string()));
+
+        h.type_keys("q @");
+        assert_eq!(
+            (
+                h.stoat.search_input.is_none(),
+                editor::focused_head_row(&mut h.stoat)
+            ),
+            (true, 2),
+            "the replay closes the prompt it opened and moves down a row"
+        );
+    }
+
+    /// The key that cancels a replay chord is part of what the recording
+    /// replays. Without it, the replay names a register with the next key.
+    #[test]
+    fn a_macro_records_the_key_that_cancels_a_replay_chord() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world");
+        h.type_keys("Q q escape l Q");
+        assert_eq!(stored_macro(&mut h, '@'), Some("q escape l".to_string()));
+
+        h.type_keys("q @");
+        assert_eq!(
+            primary_offset(&mut h),
+            2,
+            "the replay cancels its chord and moves right"
         );
     }
 
