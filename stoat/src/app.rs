@@ -58,6 +58,7 @@ use futures::FutureExt;
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
+    ffi::OsStr,
     io,
     ops::Range,
     path::{Path, PathBuf},
@@ -4603,6 +4604,9 @@ impl Stoat {
     /// still active, the restored files open with their language servers, and
     /// terminals and commits lists respawn. A target the reader switched away
     /// from waits for [`Self::start_background_restore`] instead.
+    ///
+    /// A restore that does not install leaves the session file alone. See
+    /// [`Self::fork_unrestored`].
     fn install_pending_workspace_restore(&mut self) {
         let pending = self
             .pending_workspace_restore
@@ -4631,6 +4635,7 @@ impl Stoat {
                     ?err,
                     "failed to restore workspace state; starting fresh"
                 );
+                self.fork_unrestored(workspace, &path);
                 return;
             },
         };
@@ -4644,6 +4649,7 @@ impl Stoat {
                 ?path,
                 "workspace changed before session restore landed; dropping restore"
             );
+            self.fork_unrestored(workspace, &path);
             return;
         }
 
@@ -4665,6 +4671,26 @@ impl Stoat {
         if self.active_workspace().remote.is_some() {
             self.remote_pending = true;
             ssh::reconnect_when_ready(self);
+        }
+    }
+
+    /// Give `workspace` a new identity when it still carries the uid of the
+    /// session file at `path`, which a restore that did not install leaves.
+    ///
+    /// A picker activation gives the fresh workspace the session's uid before
+    /// the restore lands, so a quit mid-restore rewrites that same file. A
+    /// restore that does not install leaves live state the file never held, and
+    /// a save of it under that uid destroys the session with its unsaved
+    /// buffer text.
+    ///
+    /// The check compares the file stem with the uid, so it reads no disk. A
+    /// `--continue` target carries a uid of its own, so it keeps it.
+    fn fork_unrestored(&mut self, workspace: WorkspaceId, path: &Path) {
+        let Some(ws) = self.workspaces.get_mut(workspace) else {
+            return;
+        };
+        if path.file_stem() == Some(OsStr::new(&ws.uid.to_string())) {
+            ws.fork_identity(&self.executor);
         }
     }
 

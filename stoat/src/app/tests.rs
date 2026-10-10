@@ -3691,6 +3691,76 @@ fn async_session_restore_drops_when_the_target_was_edited() {
     );
 }
 
+/// Saves the launch workspace's session as `{uid}.ron` and returns a fresh
+/// active workspace that carries that uid, as a picker activation leaves it,
+/// with the uid and the session path.
+///
+/// The test clock stands still, so every new uid reads the same instant. The
+/// clock moves on here so that a fork names a uid of its own.
+fn a_target_under_the_saved_uid(
+    h: &mut crate::test_harness::TestHarness,
+) -> (WorkspaceId, WorkspaceUid, PathBuf) {
+    let uid = h.stoat.active_workspace().uid;
+    let state_path = PathBuf::from(format!("/state/hash/{uid}.ron"));
+    h.stoat
+        .active_workspace()
+        .save_state(&state_path, &*h.stoat.fs_host)
+        .expect("save state");
+
+    let target = h.create_workspace();
+    h.stoat.workspaces[target].uid = uid;
+    h.set_active_workspace(target);
+    h.advance_clock(std::time::Duration::from_secs(1));
+    (target, uid, state_path)
+}
+
+/// A restore dropped over an edited target gives the target a new uid, so its
+/// next save writes a file of its own and the saved session survives.
+#[test]
+fn a_dropped_session_restore_forks_the_target_identity() {
+    let mut h = Stoat::test();
+    let (target, uid, state_path) = a_target_under_the_saved_uid(&mut h);
+    let other = h.write_file("other.txt", "live\n");
+    h.open_file(&other);
+
+    h.stoat.spawn_workspace_restore(target, state_path);
+    h.settle();
+    h.stoat.drive_background();
+
+    assert_eq!(
+        (
+            h.stoat.workspaces[target].uid == uid,
+            crate::test_harness::editor::focused_buffer_path(&h.stoat)
+        ),
+        (false, other),
+        "the live workspace keeps its file under a uid of its own",
+    );
+}
+
+/// A session file that fails to read leaves a target under the file's uid with
+/// a new uid, so a save of what the target holds next leaves the file alone. A
+/// file under another uid, as a `--continue` launch restores, leaves the
+/// target's uid in place.
+#[test]
+fn an_unreadable_session_forks_only_a_target_under_its_uid() {
+    let keeps_uid = |under_target_uid: bool| {
+        let mut h = Stoat::test();
+        let (target, uid, state_path) = a_target_under_the_saved_uid(&mut h);
+        let path = match under_target_uid {
+            true => state_path,
+            false => PathBuf::from("/state/hash/0000000000000001.ron"),
+        };
+        h.fake_fs().insert_file(&path, b"not ron");
+
+        h.stoat.spawn_workspace_restore(target, path);
+        h.settle();
+        h.stoat.drive_background();
+        h.stoat.workspaces[target].uid == uid
+    };
+
+    assert_eq!([keeps_uid(true), keeps_uid(false)], [false, true]);
+}
+
 #[test]
 fn term_query_reply_writes_back_to_pty() {
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());

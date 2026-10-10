@@ -782,6 +782,17 @@ impl Workspace {
         display_name_of(&self.name, &self.git_root)
     }
 
+    /// Give this workspace a new uid and the default name that goes with it.
+    ///
+    /// The uid names the workspace's session file. A workspace that holds
+    /// state a session file never saw, under that file's uid, overwrites the
+    /// session at its next save, so it takes a new uid and saves to a file of
+    /// its own.
+    pub(crate) fn fork_identity(&mut self, executor: &Executor) {
+        self.uid = WorkspaceUid::now(executor);
+        self.name = name::default_workspace_name(self.uid);
+    }
+
     /// True when the user did nothing in this workspace.
     ///
     /// Such a workspace has one tab with one un-split pane on an empty scratch
