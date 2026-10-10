@@ -227,7 +227,15 @@ fn render_palette_arg_picker(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let entry = palette.command.expect("arg picker requires a command");
-    let title = format!(" {} ", entry.command_name);
+    let fallback_active = palette
+        .arg_picker
+        .as_ref()
+        .is_some_and(|picker| picker.fallback_active());
+    let title = if fallback_active {
+        format!(" {} (ignored) ", entry.command_name)
+    } else {
+        format!(" {} ", entry.command_name)
+    };
     let Some(layout) = render_palette_prelude(
         &palette.input,
         &title,
@@ -280,6 +288,11 @@ fn render_palette_arg_picker(
     let rows = list.height as usize;
     let core = picker.active_core_ref();
     let start_row = crate::render::picker::window_start(core.picklist.selected, rows);
+    let row_style = if fallback_active {
+        theme.get(crate::theme::scope::UI_TEXT_MUTED)
+    } else {
+        theme.get(crate::theme::scope::UI_TEXT)
+    };
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,
@@ -288,7 +301,7 @@ fn render_palette_arg_picker(
         list,
         start_row,
         theme,
-        theme.get(crate::theme::scope::UI_TEXT),
+        row_style,
         buf,
     );
 }

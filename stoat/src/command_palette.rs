@@ -1,12 +1,12 @@
 use crate::{
     app::Stoat,
-    file_finder::{Browse, BROWSE_PATH_CAP},
+    file_finder::{self, Browse},
     fuzzy,
     host::FsHost,
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
     paths,
-    picker::{self, PathPicker, PreviewPolicy, Scan},
+    picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
     workspace::Workspace,
 };
@@ -95,6 +95,13 @@ pub(crate) struct ArgPicker {
     /// the typed directory, leaving `core` untouched so backspacing out of the
     /// path restores the workspace list.
     pub(crate) browse: Option<Browse>,
+    /// The fallback of ignored files under the workspace root, walked by
+    /// [`FsHost::walk_all_files_streaming`] for a [`ValueSource::Files`]
+    /// argument.
+    ///
+    /// Installed once [`Self::core`] lists nothing for a tail that names no
+    /// explicit path, and kept until the picker is torn down.
+    pub(crate) ignored: Option<PathPicker>,
     /// Position within a run of Tab presses, or `None` when the last Tab did
     /// not complete or its result has since been edited. Driven entirely by
     /// [`Self::advance_tab_cycle`].
@@ -134,6 +141,7 @@ impl ArgPicker {
             source,
             core,
             browse: None,
+            ignored: None,
             cycle: None,
         }
     }
@@ -187,18 +195,64 @@ impl ArgPicker {
 
     /// The picker currently driving the list. Browse mode (a `/` or `~/`
     /// argument) swaps in its own directory-walk picker; every other argument
-    /// drives the workspace `core`.
+    /// drives the workspace `core`, or its fallback of ignored files while
+    /// [`Self::fallback_active`] holds.
     pub(crate) fn active_core(&mut self) -> &mut PathPicker {
-        match &mut self.browse {
-            Some(browse) => &mut browse.picker,
-            None => &mut self.core,
+        let fallback_active = self.fallback_active();
+        match (&mut self.browse, &mut self.ignored) {
+            (Some(browse), _) => &mut browse.picker,
+            (None, Some(ignored)) if fallback_active => ignored,
+            (None, _) => &mut self.core,
         }
     }
 
     pub(crate) fn active_core_ref(&self) -> &PathPicker {
-        match &self.browse {
-            Some(browse) => &browse.picker,
-            None => &self.core,
+        match (&self.browse, &self.ignored) {
+            (Some(browse), _) => &browse.picker,
+            (None, Some(ignored)) if self.fallback_active() => ignored,
+            (None, _) => &self.core,
+        }
+    }
+
+    /// Whether the fallback of ignored files stands in for the workspace list.
+    pub(crate) fn fallback_active(&self) -> bool {
+        self.browse.is_none() && self.ignored.is_some() && self.core.lists_nothing()
+    }
+
+    /// The root to walk for a fallback of ignored files, when `tail` needs one
+    /// and the picker has none.
+    ///
+    /// Only a [`ValueSource::Files`] argument falls back, and only once the
+    /// workspace list holds nothing for `tail`. A tail that starts with `/` or
+    /// `~` names an explicit path, which submit dispatches as typed, so a walk
+    /// serves nothing there.
+    pub(crate) fn wants_ignored_fallback(&self, tail: &str) -> Option<PathBuf> {
+        let tail = tail.trim_start();
+        let explicit_path = tail.starts_with('/') || tail.starts_with('~');
+        if self.source != ValueSource::Files
+            || self.ignored.is_some()
+            || explicit_path
+            || !self.core.lists_nothing()
+        {
+            return None;
+        }
+        Some(self.core.git_root.clone())
+    }
+
+    /// The picker a scan for `target` reports back to.
+    ///
+    /// # Panics
+    ///
+    /// Panics for [`ScanTarget::Fallback`] when no fallback is installed.
+    /// [`Self::begin_refilter`] hands out no such scan.
+    pub(crate) fn scan_target_mut(&mut self, target: ScanTarget) -> &mut PathPicker {
+        match (target, &mut self.browse) {
+            (ScanTarget::List, Some(browse)) => &mut browse.picker,
+            (ScanTarget::List, None) => &mut self.core,
+            (ScanTarget::Fallback, _) => self
+                .ignored
+                .as_mut()
+                .expect("a fallback scan has a fallback to land in"),
         }
     }
 
@@ -232,27 +286,28 @@ impl ArgPicker {
     }
 
     fn pump_walk(&mut self) -> bool {
-        match &mut self.browse {
-            Some(browse) => {
-                let pumped = browse.picker.pump_walk();
-                if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
-                    browse.picker.all_paths.truncate(BROWSE_PATH_CAP);
-                    browse.picker.stop_walk();
-                }
-                pumped
-            },
+        let pumped = match &mut self.browse {
+            Some(browse) => file_finder::pump_capped_walk(&mut browse.picker),
             None => self.core.pump_walk(),
+        };
+        if let Some(ignored) = &mut self.ignored {
+            file_finder::pump_capped_walk(ignored);
         }
+        pumped
     }
 
-    /// Prepare the ranking for the active list, for a caller that runs it.
+    /// Prepare the rankings for the active list and its fallback of ignored
+    /// files, for a caller that runs them.
     ///
     /// Both lists can hold a whole walk, so the matching goes to a worker like
     /// the finder's. Browse filters its own directory walk against the partial
     /// it holds rather than the typed tail, the directory part having already
     /// gone into the walk's root.
-    fn begin_refilter(&mut self, query: &str) -> Option<(u64, Scan)> {
-        match &mut self.browse {
+    ///
+    /// The fallback ranks the tail while the list holds a match too, so its
+    /// rows already answer the tail when the list runs dry.
+    fn begin_refilter(&mut self, query: &str) -> Vec<PendingScan> {
+        let begun = match &mut self.browse {
             Some(browse) => {
                 browse.picker.pump_scan();
                 let partial = browse.partial.clone();
@@ -262,11 +317,17 @@ impl ArgPicker {
                 self.core.pump_scan();
                 self.core.begin_scan(query)
             },
+        };
+        let mut pending: Vec<PendingScan> = ScanTarget::List.tag(begun).into_iter().collect();
+        if let Some(ignored) = &mut self.ignored {
+            ignored.pump_scan();
+            pending.extend(ScanTarget::Fallback.tag(ignored.begin_scan(query)));
         }
+        pending
     }
 
-    /// Bring the active list up to date here and now, for a caller about to act
-    /// on the selection rather than paint it.
+    /// Bring the active list and its fallback up to date here and now, for a
+    /// caller about to act on the selection rather than paint it.
     fn settle_scan(&mut self, query: &str) {
         match &mut self.browse {
             Some(browse) => {
@@ -274,6 +335,9 @@ impl ArgPicker {
                 browse.picker.settle_scan(&partial);
             },
             None => self.core.settle_scan(query),
+        }
+        if let Some(ignored) = &mut self.ignored {
+            ignored.settle_scan(query);
         }
     }
 
@@ -308,10 +372,14 @@ impl ArgPicker {
         }
     }
 
-    /// Tear down the preview editor slots owned by the core and any active
-    /// browse picker. Called on every palette-close and picker-teardown path.
+    /// Tear down the preview editor slots owned by the core, its fallback, and
+    /// any active browse picker. Called on every palette-close and
+    /// picker-teardown path.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.core.dispose(ws);
+        if let Some(ignored) = &self.ignored {
+            ignored.dispose(ws);
+        }
         if let Some(browse) = &self.browse {
             browse.picker.dispose(ws);
         }
@@ -614,8 +682,10 @@ impl CommandPalette {
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &LanguageRegistry,
-    ) -> Option<(u64, Scan)> {
-        let picker = self.arg_picker.as_mut()?;
+    ) -> Vec<PendingScan> {
+        let Some(picker) = self.arg_picker.as_mut() else {
+            return Vec::new();
+        };
         picker.pump_walk();
         let pending = picker.begin_refilter(tail);
         picker.sync_preview(ws, fs_host, language_registry);
@@ -967,8 +1037,11 @@ pub(crate) fn refilter(
 mod tests {
     use super::*;
     use crate::{
-        buffer_registry::AutoReloadMode, host::FakeFsOp, input_history::InputHistory,
-        picker::PREVIEW_DIR_LIMIT, test_harness::TestHarness,
+        buffer_registry::AutoReloadMode,
+        host::FakeFsOp,
+        input_history::InputHistory,
+        picker::PREVIEW_DIR_LIMIT,
+        test_harness::{editor, TestHarness},
     };
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
@@ -988,7 +1061,7 @@ mod tests {
     /// The arg picker's filtered rows as the text they display, sorted so an
     /// assertion pins the row set without pinning the fuzzy ranker's order.
     fn arg_rows(h: &TestHarness) -> Vec<String> {
-        let picklist = &arg_picker(h).core.picklist;
+        let picklist = &arg_picker(h).active_core_ref().picklist;
         let mut rows: Vec<String> = picklist
             .filtered
             .iter()
@@ -2068,10 +2141,13 @@ mod tests {
             .expect("arg picker")
             .core
             .invalidate();
-        assert!(
+        assert_eq!(
             palette
                 .sync_arg_picker("wsdir/al", ws, &*fs_host, &language_registry)
-                .is_some(),
+                .iter()
+                .map(|scan| scan.target)
+                .collect::<Vec<_>>(),
+            [ScanTarget::List],
             "the ranking is handed back for a worker to run",
         );
     }
@@ -3209,6 +3285,93 @@ mod tests {
             frame.content.contains("UNIQUE-PICKER-MARKER"),
             "selected candidate not opened:\n{}",
             frame.content
+        );
+    }
+
+    /// Drive frames until a fallback of ignored files stands in with rows.
+    ///
+    /// Active alone is a frame early, since the fallback's first scan lands a
+    /// frame after its walk.
+    fn settle_arg_fallback(h: &mut TestHarness) {
+        for _ in 0..8 {
+            let _ = h.snapshot();
+            h.settle();
+            if arg_picker(h).fallback_active() && !arg_rows(h).is_empty() {
+                return;
+            }
+        }
+        panic!("no fallback of ignored files stood in with rows after eight frames");
+    }
+
+    /// Drive the frames a tail with no listed match takes to settle, and
+    /// report whether the picker installed a fallback.
+    fn has_fallback_after(h: &mut TestHarness, text: &str) -> bool {
+        h.type_text(text);
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        arg_picker(h).ignored.is_some()
+    }
+
+    #[test]
+    fn an_open_tail_no_listed_file_matches_lists_ignored_files() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(
+            &mut h,
+            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+        );
+        let toml = root.join("target/debug/main.toml");
+
+        h.type_text(":o main.toml");
+        settle_arg_fallback(&mut h);
+        assert_eq!(arg_rows(&h), [toml.display().to_string()]);
+
+        h.type_keys("enter");
+        assert_eq!(editor::focused_buffer_path(&h.stoat), toml);
+    }
+
+    #[test]
+    fn closing_with_a_fallback_leaves_the_registry_at_its_pre_open_size() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+        );
+        let slots = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            (ws.buffers.len(), ws.editors.len())
+        };
+        let before = slots(&h);
+
+        h.type_text(":o main.toml");
+        settle_arg_fallback(&mut h);
+        h.type_keys("escape");
+
+        assert!(h.stoat.command_palette.is_none());
+        assert_eq!(
+            slots(&h),
+            before,
+            "the fallback's preview buffer and editor go with the palette",
+        );
+    }
+
+    #[test]
+    fn an_absolute_open_tail_takes_no_fallback() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("src/main.rs", "")]);
+        assert!(
+            !has_fallback_after(&mut h, ":o /nowhere/x"),
+            "an explicit path dispatches as typed",
+        );
+    }
+
+    #[test]
+    fn a_cd_tail_takes_no_fallback() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("src/main.rs", "")]);
+        assert!(
+            !has_fallback_after(&mut h, ":cd zzz"),
+            "only a file argument falls back",
         );
     }
 

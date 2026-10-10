@@ -3,7 +3,7 @@ use crate::{
     command_palette::{Availability, CommandPalette, PaletteOutcome},
     file_finder::Browse,
     host::FsHost,
-    picker::{PathPicker, Scan},
+    picker::{PathPicker, PendingScan},
     walkthrough,
 };
 use std::{
@@ -214,13 +214,36 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
             Some(palette) => {
                 palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry)
             },
-            None => None,
+            None => Vec::new(),
         }
     };
 
-    if let Some((generation, scan)) = pending {
-        spawn_arg_picker_scan(stoat, generation, scan);
+    // The fallback's first paths arrive on later frames, which its walk wakes,
+    // so no scan of it starts in this one.
+    let fallback_root = stoat
+        .command_palette
+        .as_ref()
+        .and_then(|palette| palette.arg_picker.as_ref())
+        .and_then(|picker| picker.wants_ignored_fallback(&tail));
+    if let Some(root) = fallback_root {
+        let walk = super::file_finder::spawn_all_files_walk(stoat, root.clone());
+        let executor = stoat.executor.clone();
+        let fallback = PathPicker::new(
+            &mut stoat.workspaces[active_idx],
+            executor,
+            root,
+            Some(walk),
+        );
+        if let Some(picker) = stoat
+            .command_palette
+            .as_mut()
+            .and_then(|palette| palette.arg_picker.as_mut())
+        {
+            picker.ignored = Some(fallback);
+        }
     }
+
+    spawn_arg_picker_scans(stoat, pending);
 }
 
 /// Bring the arg picker's rows up to date with what is typed, before an action
@@ -241,12 +264,16 @@ fn settle_arg_picker_scan(stoat: &mut Stoat) {
     palette.settle_arg_picker(&tail);
 }
 
-/// Run `scan` on a worker and report it back to the arg picker that asked.
+/// Run each of `pending` on a worker and report it back to the picker that
+/// asked.
 ///
 /// The candidate list is a whole walk, which is too much to rank inside the
 /// update path without input and paint waiting on it. The rows on display stay
 /// as they are until the result lands.
-fn spawn_arg_picker_scan(stoat: &mut Stoat, generation: u64, scan: Scan) {
+///
+/// A list and its fallback of ignored files rank on the same keystroke, so
+/// each scan names the picker whose sink takes its result.
+fn spawn_arg_picker_scans(stoat: &mut Stoat, pending: Vec<PendingScan>) {
     let redraw = stoat.redraw_notify.clone();
     let executor = stoat.executor.clone();
     let Some(picker) = stoat
@@ -256,9 +283,16 @@ fn spawn_arg_picker_scan(stoat: &mut Stoat, generation: u64, scan: Scan) {
     else {
         return;
     };
-    picker
-        .active_core()
-        .spawn_scan(&executor, redraw, generation, scan);
+    for PendingScan {
+        target,
+        generation,
+        scan,
+    } in pending
+    {
+        picker
+            .scan_target_mut(target)
+            .spawn_scan(&executor, redraw.clone(), generation, scan);
+    }
 }
 
 /// The immediate child directories of `root`, sorted non-hidden before hidden

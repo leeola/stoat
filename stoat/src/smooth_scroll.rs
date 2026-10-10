@@ -685,6 +685,11 @@ pub(crate) fn render_arg_page(
                 .as_ref()
                 .map(|browse| browse.typed_dir.as_str())
                 .unwrap_or_default();
+            let row_style = if picker.fallback_active() {
+                theme.get(crate::theme::scope::UI_TEXT_MUTED)
+            } else {
+                theme.get(crate::theme::scope::UI_TEXT)
+            };
             crate::render::picker::paint_path_rows(
                 &core.picklist,
                 &core.git_root,
@@ -693,7 +698,7 @@ pub(crate) fn render_arg_page(
                 area,
                 start_row,
                 theme,
-                theme.get(crate::theme::scope::UI_TEXT),
+                row_style,
                 buf,
             )
         },

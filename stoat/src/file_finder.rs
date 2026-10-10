@@ -604,6 +604,7 @@ impl FileFinder {
 
         let fallback_query = if let Some(browse) = &mut self.browse {
             pump_capped_walk(&mut browse.picker);
+            browse.picker.pump_scan();
             // A directory walk runs to the same cap as the repo walk, so
             // ranking it belongs on a worker for the same reason.
             pending.extend(ScanTarget::List.tag(browse.picker.begin_scan(&browse.partial)));
@@ -685,6 +686,7 @@ impl FileFinder {
             return;
         };
         pump_capped_walk(fallback);
+        fallback.pump_scan();
         out.extend(ScanTarget::Fallback.tag(fallback.begin_scan(query)));
     }
 
@@ -847,15 +849,18 @@ impl FileFinder {
     }
 }
 
-/// Drain `picker`'s walk and scan results, stopping the walk once it holds
-/// [`BROWSE_PATH_CAP`] paths.
-fn pump_capped_walk(picker: &mut PathPicker) {
-    picker.pump_walk();
-    picker.pump_scan();
+/// Drain `picker`'s walk, stopping it once it holds [`BROWSE_PATH_CAP`] paths.
+///
+/// Returns whether a batch arrived, as [`PathPicker::pump_walk`] does. A
+/// directory browse and a fallback of ignored files walk outside the workspace
+/// ignore rules, so they go through this rather than the plain pump.
+pub(crate) fn pump_capped_walk(picker: &mut PathPicker) -> bool {
+    let pumped = picker.pump_walk();
     if picker.all_paths.len() >= BROWSE_PATH_CAP {
         picker.all_paths.truncate(BROWSE_PATH_CAP);
         picker.stop_walk();
     }
+    pumped
 }
 
 /// Split a `/` or `~/` path query into its directory and fuzzy partial.

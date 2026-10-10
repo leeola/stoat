@@ -335,7 +335,7 @@ pub(super) fn spawn_workspace_walk(
 ///
 /// Feeds a fallback of ignored files, which lists what the workspace walk
 /// leaves out.
-fn spawn_all_files_walk(
+pub(super) fn spawn_all_files_walk(
     stoat: &Stoat,
     root: PathBuf,
 ) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
