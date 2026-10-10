@@ -903,13 +903,7 @@ pub(crate) fn paint_diff_rows(
                     {
                         Some(text) => (
                             text,
-                            mirror_window(
-                                snapshot,
-                                display_row,
-                                continuation,
-                                last_row,
-                                text.len(),
-                            ),
+                            mirror_window(snapshot, display_row, continuation, last_row, text),
                             snapshot.soft_wrap_indent(display_row) as usize,
                         ),
                         None => {
@@ -1766,25 +1760,35 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 ///
 /// `continuation` is whether the row continues the one above, and `last_row`
 /// whether no row continues it below.
+///
+/// Between an edit and the diff that follows it, the stored hunks still mark a
+/// changed row Unchanged, so the live row's wrap points index different bytes
+/// than the base line `text` holds. Each point snaps down to a char boundary
+/// of `text`, which leaves that row's mirror off by a few bytes until the next
+/// diff repaints it, rather than slicing inside a character.
 fn mirror_window(
     snapshot: &DisplaySnapshot,
     display_row: u32,
     continuation: bool,
     last_row: bool,
-    line_len: usize,
+    text: &str,
 ) -> std::ops::Range<usize> {
     let text_start = |row: u32| {
-        snapshot
+        let column = snapshot
             .display_to_buffer(DisplayPoint::new(row, snapshot.soft_wrap_indent(row)))
-            .map_or(0, |point| point.column as usize)
-            .min(line_len)
+            .map_or(0, |point| point.column as usize);
+        let mut byte = column.min(text.len());
+        while !text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        byte
     };
     let start = match continuation {
         true => text_start(display_row),
         false => 0,
     };
     let end = match last_row {
-        true => line_len,
+        true => text.len(),
         false => text_start(display_row + 1),
     };
     start..end.max(start)
@@ -4045,6 +4049,44 @@ mod tests {
                 [String::new(), String::new(), String::new(), "b".repeat(44)],
                 ["3".into(), "tail".into(), "3".into(), "tail".into()],
             ],
+        );
+    }
+
+    /// A map built before the edit still calls the line Unchanged, so the left
+    /// column mirrors the base line at the live row's wrap points. Byte 101 of
+    /// the live line falls inside the base line's fifty-first character.
+    #[test]
+    fn a_stale_map_mirrors_a_wrapped_multibyte_line_on_char_boundaries() {
+        let base = format!("{}\n", "\u{e9}".repeat(60));
+        let live = format!("x{base}");
+        let mut editor = diff_editor_with_map(
+            &live,
+            DiffMap::from_structural_changes(
+                structural_diff::diff(&base, &base),
+                Arc::new(base.clone()),
+                &base,
+            ),
+        );
+        editor.display_map.set_wrap_width(Some(51));
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            true,
+            None,
+            None,
+            false,
+            None,
+            DiffDials::shipped(),
+        );
+
+        assert_eq!(
+            [0, 1].map(|y| line_text(&buf, y, 8..59).trim().to_string()),
+            ["\u{e9}".repeat(50), "\u{e9}".repeat(10)],
         );
     }
 
