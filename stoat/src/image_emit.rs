@@ -30,6 +30,12 @@ use stoatty_protocol::kitty::{self, Action, ControlData, Format};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Placement {
     pub image: u32,
+    /// The placement id, which is the pane's index plus one.
+    ///
+    /// A put replaces the image's placement with the same id, so each pane
+    /// that shows one image needs an id of its own. Zero means unset on the
+    /// wire, which the offset keeps clear of.
+    pub placement: u32,
     /// The cell the image's top-left corner sits in, already centered inside
     /// the pane.
     pub row: u16,
@@ -57,8 +63,9 @@ pub(crate) struct ImageRuntime {
     /// What each file was transmitted as. A path present here has had its
     /// pixels sent and needs only placing.
     sent: HashMap<PathBuf, SentImage>,
-    /// Placements as the terminal last heard them, by image id.
-    placed: HashMap<u32, Placement>,
+    /// Placements as the terminal last heard them, by image id and placement
+    /// id.
+    placed: HashMap<(u32, u32), Placement>,
     /// Files being read and converted on the pool, by path, so one file opened
     /// in two panes is read once.
     pending: HashMap<PathBuf, PendingTransmit>,
@@ -113,8 +120,8 @@ impl ImageRuntime {
     fn forget_freed(&mut self, desired: &[Placement]) {
         let freed: Vec<u32> = self
             .placed
-            .keys()
-            .copied()
+            .values()
+            .map(|held| held.image)
             .filter(|id| !desired.iter().any(|placement| placement.image == *id))
             .collect();
         self.sent.retain(|_, sent| !freed.contains(&sent.id));
@@ -153,7 +160,7 @@ pub(crate) fn emit_images(stoat: &mut Stoat) {
 
     stoat.images.placed = desired
         .into_iter()
-        .map(|placement| (placement.image, placement))
+        .map(|placement| ((placement.image, placement.placement), placement))
         .collect();
 }
 
@@ -177,19 +184,25 @@ pub(crate) fn emit_drop_all_images(stoat: &Stoat) {
     let _ = apc_tx.send(batch);
 }
 
-/// The image panes on screen, as their file and the rectangle they fill.
+/// The image panes on screen, as their file, the rectangle they fill, and the
+/// placement id each pane's image takes.
 ///
 /// Read from the pane tree rather than collected while painting. A pane's
 /// content rectangle follows from its area alone, so nothing about the paint is
-/// needed to know where an image goes, and a collector threaded through the
-/// render would be paid for by every pane that has no image.
-fn wanted_images(stoat: &Stoat) -> Vec<(PathBuf, (u32, u32), Rect)> {
+/// needed to know where an image goes. A collector threaded through the render
+/// costs every pane that has no image.
+fn wanted_images(stoat: &Stoat) -> Vec<(PathBuf, (u32, u32), Rect, u32)> {
     stoat
         .active_workspace()
         .panes
         .split_panes()
         .filter_map(|(_, pane)| match &pane.view {
-            View::Image { path, px } => Some((path.clone(), *px, split_pane_status(pane.area).0)),
+            View::Image { path, px } => Some((
+                path.clone(),
+                *px,
+                split_pane_status(pane.area).0,
+                pane.index + 1,
+            )),
             _ => None,
         })
         .collect()
@@ -202,8 +215,12 @@ fn wanted_images(stoat: &Stoat) -> Vec<(PathBuf, (u32, u32), Rect)> {
 /// terminal can only scale down what it holds. A pane that shrank keeps the
 /// pixels it has, and a read already in flight is never restarted, so dragging
 /// a split costs one further read rather than one per frame.
-fn start_transmits(stoat: &mut Stoat, wanted: &[(PathBuf, (u32, u32), Rect)], cell_px: (u16, u16)) {
-    for (path, px, rect) in wanted {
+fn start_transmits(
+    stoat: &mut Stoat,
+    wanted: &[(PathBuf, (u32, u32), Rect, u32)],
+    cell_px: (u16, u16),
+) {
+    for (path, px, rect, _) in wanted {
         let target = fit_pixels(*px, (rect.width, rect.height), cell_px);
         if target == (0, 0)
             || stoat.images.pending.contains_key(path)
@@ -288,16 +305,17 @@ fn drain_transmits(stoat: &mut Stoat) -> Vec<u8> {
 /// Where each wanted image with pixels already sent should sit.
 fn placements(
     stoat: &Stoat,
-    wanted: &[(PathBuf, (u32, u32), Rect)],
+    wanted: &[(PathBuf, (u32, u32), Rect, u32)],
     cell_px: (u16, u16),
 ) -> Vec<Placement> {
     wanted
         .iter()
-        .filter_map(|(path, px, rect)| {
+        .filter_map(|(path, px, rect, placement)| {
             let image = stoat.images.sent.get(path)?.id;
             let (cols, rows, col_off, row_off) = fit_cells(*px, (rect.width, rect.height), cell_px);
             (cols > 0 && rows > 0).then_some(Placement {
                 image,
+                placement: *placement,
                 row: rect.y + row_off,
                 col: rect.x + col_off,
                 cols,
@@ -309,26 +327,39 @@ fn placements(
 
 /// The bytes that turn `previous` into `desired`.
 ///
-/// A placement that did not move sends nothing, an id no longer wanted is
-/// deleted along with its pixels, and a moved one is deleted and re-placed
-/// rather than moved, since the protocol offers no way to move a placement.
+/// A placement that did not move sends nothing, and a moved one is deleted and
+/// re-placed rather than moved, since the protocol offers no way to move a
+/// placement. A placement no longer wanted is deleted alone while another pane
+/// still shows its image. Once no pane shows the image, one delete takes the
+/// image and its pixels.
 ///
 /// Each placement is bracketed by a cursor save and restore. Placing draws at
-/// the cursor, so without that the editor's own cursor would end up wherever
+/// the cursor, so without the bracket the editor's own cursor ends up wherever
 /// the last image was.
-fn placement_batch(desired: &[Placement], previous: &HashMap<u32, Placement>) -> Vec<u8> {
+fn placement_batch(desired: &[Placement], previous: &HashMap<(u32, u32), Placement>) -> Vec<u8> {
     let mut batch = Vec::new();
 
-    for (id, held) in previous {
-        if !desired.iter().any(|placement| placement.image == *id) {
-            // Freed along with the placement: the pane is gone, and nothing
-            // else in this session refers to the image.
+    let mut freed = Vec::new();
+    for (key, held) in previous {
+        if desired
+            .iter()
+            .any(|placement| (placement.image, placement.placement) == *key)
+        {
+            continue;
+        }
+        if desired
+            .iter()
+            .any(|placement| placement.image == held.image)
+        {
+            delete_placement_into(&mut batch, held.image, held.placement);
+        } else if !freed.contains(&held.image) {
             delete_image_into(&mut batch, held.image);
+            freed.push(held.image);
         }
     }
 
     for placement in desired {
-        if previous.get(&placement.image) == Some(placement) {
+        if previous.get(&(placement.image, placement.placement)) == Some(placement) {
             continue;
         }
         place_into(&mut batch, placement);
@@ -364,27 +395,13 @@ fn place_into(out: &mut Vec<u8>, placement: &Placement) {
 
     // The old placement of this image goes first. The protocol has no way to
     // move one, so a move is a delete and a place.
-    kitty::encode_into(
-        out,
-        &ControlData {
-            action: Action::Delete,
-            id: placement.image,
-            placement: 1,
-            quiet: 2,
-            delete: kitty::DeleteTarget {
-                kind: kitty::DeleteKind::Id,
-                free_data: false,
-            },
-            ..ControlData::default()
-        },
-        b"",
-    );
+    delete_placement_into(out, placement.image, placement.placement);
     kitty::encode_into(
         out,
         &ControlData {
             action: Action::Put,
             id: placement.image,
-            placement: 1,
+            placement: placement.placement,
             cols: u32::from(placement.cols),
             rows: u32::from(placement.rows),
             cursor_policy: 1,
@@ -394,6 +411,26 @@ fn place_into(out: &mut Vec<u8>, placement: &Placement) {
         b"",
     );
     out.extend_from_slice(b"\x1b8");
+}
+
+/// Write a delete of placement `placement` of image `id`, which keeps the
+/// pixels and every other placement of the image.
+fn delete_placement_into(out: &mut Vec<u8>, id: u32, placement: u32) {
+    kitty::encode_into(
+        out,
+        &ControlData {
+            action: Action::Delete,
+            id,
+            placement,
+            quiet: 2,
+            delete: kitty::DeleteTarget {
+                kind: kitty::DeleteKind::Id,
+                free_data: false,
+            },
+            ..ControlData::default()
+        },
+        b"",
+    );
 }
 
 /// Write a delete of `id` and the pixels behind it.
@@ -680,6 +717,58 @@ mod tests {
         );
     }
 
+    /// A split clones an image pane, so both panes show the one transmitted
+    /// image, each through a placement of its own.
+    #[test]
+    fn a_split_image_pane_places_the_image_in_both_panes() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 2;
+        h.stoat.cell_pixels = Some(CELL);
+
+        let png = {
+            let buffer = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+            let mut out = Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            out.into_inner()
+        };
+        h.fake_fs().insert_file("/repo/a.png", png);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/a.png"),
+            },
+        );
+        h.settle();
+        h.type_action("SplitRight()");
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        emit_images(&mut h.stoat);
+        h.settle();
+        emit_images(&mut h.stoat);
+        let mut puts = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            for (action, id, placement, _) in actions(&batch) {
+                if action == Action::Put {
+                    puts.push((id, placement));
+                }
+            }
+        }
+        puts.sort_unstable();
+        assert_eq!(
+            puts,
+            [(1, 1), (1, 2)],
+            "each pane puts its own placement of image 1",
+        );
+    }
+
     /// An image the placement diff just deleted lost its pixels with it, so the
     /// record of having sent it goes too. Left behind, a pane reopened on the
     /// path would place an id the terminal freed.
@@ -692,7 +781,7 @@ mod tests {
         images
             .sent
             .insert(PathBuf::from("/held.png"), SentImage { id: 2, px: (8, 8) });
-        images.placed = HashMap::from([(1, placement(1, 0, 0)), (2, placement(2, 0, 0))]);
+        images.placed = keyed(&[placement(1, 0, 0), placement(2, 0, 0)]);
 
         images.forget_freed(&[placement(2, 0, 0)]);
 
@@ -729,6 +818,7 @@ mod tests {
     fn placement(image: u32, row: u16, col: u16) -> Placement {
         Placement {
             image,
+            placement: 1,
             row,
             col,
             cols: 4,
@@ -736,14 +826,24 @@ mod tests {
         }
     }
 
-    /// The graphics commands in a batch, in order, as (action, id).
-    fn actions(batch: &[u8]) -> Vec<(Action, u32, bool)> {
+    /// `placements` keyed the way [`ImageRuntime::placed`] holds them.
+    fn keyed(placements: &[Placement]) -> HashMap<(u32, u32), Placement> {
+        placements
+            .iter()
+            .map(|held| ((held.image, held.placement), *held))
+            .collect()
+    }
+
+    /// The graphics commands in a batch, in order, as (action, id, placement,
+    /// free data).
+    fn actions(batch: &[u8]) -> Vec<(Action, u32, u32, bool)> {
         decode_stream(batch)
             .into_iter()
             .filter_map(|command| match command {
                 Command::Kitty(frame) => Some((
                     frame.control.action,
                     frame.control.id,
+                    frame.control.placement,
                     frame.control.delete.free_data,
                 )),
                 _ => None,
@@ -756,7 +856,7 @@ mod tests {
     #[test]
     fn an_unmoved_placement_sends_nothing() {
         let held = placement(1, 3, 5);
-        let previous = HashMap::from([(1, held)]);
+        let previous = keyed(&[held]);
 
         assert!(placement_batch(&[held], &previous).is_empty());
     }
@@ -766,12 +866,12 @@ mod tests {
     /// about to be drawn again.
     #[test]
     fn a_moved_placement_is_deleted_and_placed_again() {
-        let previous = HashMap::from([(1, placement(1, 3, 5))]);
+        let previous = keyed(&[placement(1, 3, 5)]);
         let batch = placement_batch(&[placement(1, 4, 5)], &previous);
 
         assert_eq!(
             actions(&batch),
-            [(Action::Delete, 1, false), (Action::Put, 1, false)],
+            [(Action::Delete, 1, 1, false), (Action::Put, 1, 1, false)],
             "the old placement goes, the pixels stay, and the image is re-placed",
         );
     }
@@ -780,13 +880,52 @@ mod tests {
     /// nothing else in the session refers to its pixels.
     #[test]
     fn an_image_no_longer_wanted_is_deleted_with_its_pixels() {
-        let previous = HashMap::from([(1, placement(1, 0, 0)), (2, placement(2, 5, 0))]);
+        let previous = keyed(&[placement(1, 0, 0), placement(2, 5, 0)]);
         let batch = placement_batch(&[placement(1, 0, 0)], &previous);
 
         assert_eq!(
             actions(&batch),
-            [(Action::Delete, 2, true)],
+            [(Action::Delete, 2, 0, true)],
             "only the vanished image, and its data goes with it",
+        );
+    }
+
+    /// One image in two panes takes one placement per pane, because a put on a
+    /// placement id the image already holds replaces that placement. A pane
+    /// that closes takes its placement alone while the other pane shows the
+    /// image, and the last pane to close frees the pixels once.
+    #[test]
+    fn two_panes_on_one_image_each_keep_a_placement() {
+        let left = placement(1, 0, 0);
+        let right = Placement {
+            placement: 2,
+            ..placement(1, 0, 20)
+        };
+
+        assert_eq!(
+            actions(&placement_batch(&[left, right], &HashMap::new())),
+            [
+                (Action::Delete, 1, 1, false),
+                (Action::Put, 1, 1, false),
+                (Action::Delete, 1, 2, false),
+                (Action::Put, 1, 2, false),
+            ],
+            "each pane puts its own placement",
+        );
+        assert_eq!(
+            placement_batch(&[left, right], &keyed(&[left, right])),
+            Vec::<u8>::new(),
+            "the same pair again sends nothing",
+        );
+        assert_eq!(
+            actions(&placement_batch(&[right], &keyed(&[left, right]))),
+            [(Action::Delete, 1, 1, false)],
+            "the closed pane's placement goes, and the pixels stay for the other",
+        );
+        assert_eq!(
+            actions(&placement_batch(&[], &keyed(&[left, right]))),
+            [(Action::Delete, 1, 0, true)],
+            "closing both panes frees the image once",
         );
     }
 
@@ -808,7 +947,7 @@ mod tests {
     /// into whatever buffer has focus, so every frame has to suppress them.
     #[test]
     fn every_emitted_frame_suppresses_replies() {
-        let previous = HashMap::from([(9, placement(9, 0, 0))]);
+        let previous = keyed(&[placement(9, 0, 0)]);
         let batch = placement_batch(&[placement(1, 1, 1)], &previous);
         let quiet: Vec<u8> = decode_stream(&batch)
             .into_iter()
