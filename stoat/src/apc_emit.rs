@@ -1243,12 +1243,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             hasher.finish()
         };
         let home = stoat.home.as_deref();
-        pool::emit_into(
+        let selected = core.picklist.selected;
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(selected, page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_finder_page(
@@ -1379,12 +1384,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             hasher.finish()
         };
         let git_root = stoat.active_workspace().git_root.clone();
-        pool::emit_into(
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(finder.selected, page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_code_search_page(
@@ -1422,12 +1431,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             hasher.finish()
         };
         let git_root = stoat.active_workspace().git_root.clone();
-        pool::emit_into(
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(finder.selected, page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_symbol_finder_page(
@@ -1466,12 +1479,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             palette.generation.hash(&mut hasher);
             hasher.finish()
         };
-        pool::emit_into(
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(*selected, page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_palette_page(
@@ -1528,12 +1545,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             hasher.finish()
         };
         let home = stoat.home.as_deref();
-        pool::emit_into(
+        let selected = core.picklist.selected;
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(selected, page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_arg_page(
@@ -1562,17 +1584,33 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
         };
         let scroll_row = state.scroll_top as u32;
-        // Commits stream in lazily, so the length plus the load/end flags
-        // form the content version; new commits refill the pages.
-        let content_version = (state.commits.len() as u64) << 2
-            | ((state.pending_load.is_some() as u64) << 1)
-            | (state.reached_end as u64);
-        pool::emit_into(
+        // Commits stream in lazily, so the length and the load and end flags
+        // join the content version, and new commits refill the pages. The
+        // theme recolors every row, and another list in the pane replaces
+        // every row even at the same length.
+        let content_version = {
+            let mut hasher = DefaultHasher::new();
+            stoat.theme_epoch.hash(&mut hasher);
+            stoat.active_workspace.hash(&mut hasher);
+            stoat
+                .active_workspace()
+                .focused_commits_id()
+                .hash(&mut hasher);
+            state.commits.len().hash(&mut hasher);
+            state.pending_load.is_some().hash(&mut hasher);
+            state.reached_end.hash(&mut hasher);
+            hasher.finish()
+        };
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(state.selected, page, region.height),
             false,
             |page| {
                 crate::smooth_scroll::render_commits_page(
@@ -1599,23 +1637,27 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let lanes = picker.graph_lanes;
         let scroll_row =
             crate::render::picker::window_start(picker.selected, body.height as usize) as u32;
-        // A refilter rewrites every row, the column scope recolors them, and
-        // the selection moves the highlight, so all three refill the pages.
+        // A refilter rewrites every row and the column scope recolors them, so
+        // both refill the pages. The selection moves the highlight only on the
+        // page it leaves and the page it enters, so it stamps those pages.
         let content_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
             picker.filter_generation.hash(&mut hasher);
             picker.filter_column.map(|c| c as usize).hash(&mut hasher);
-            picker.selected.hash(&mut hasher);
             lanes.hash(&mut hasher);
             hasher.finish()
         };
-        pool::emit_into(
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(picker.selected, page, region.height),
             false,
             |page| {
                 crate::smooth_scroll::render_commit_picker_list_page(
@@ -1708,15 +1750,25 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         };
         let scroll_row = layout.viewport_top as u32;
         // The item list is replaced wholesale on a re-query, which bumps
-        // completion_generation, so that counter is the pool's content
-        // version. A re-query refills without hashing every label each emit.
-        let content_version = stoat.completion_generation;
-        pool::emit_into(
+        // completion_generation, so that counter and the theme are the pool's
+        // content version. A re-query refills without hashing every label each
+        // emit.
+        let content_version = {
+            let mut hasher = DefaultHasher::new();
+            stoat.theme_epoch.hash(&mut hasher);
+            stoat.completion_generation.hash(&mut hasher);
+            hasher.finish()
+        };
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
-            content_version,
+            PageVersions {
+                cells: content_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(popup.selected_idx, page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_completion_page(
@@ -1747,18 +1799,23 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             help.selected()
                 .saturating_sub(list.height.saturating_sub(1) as usize) as u32;
         // The filtered entry set changes on every search refilter, so its
-        // hash is the list pool's content version.
+        // generation and the theme are the list pool's content version.
         let list_version = {
             let mut hasher = DefaultHasher::new();
+            stoat.theme_epoch.hash(&mut hasher);
             help.generation.hash(&mut hasher);
             hasher.finish()
         };
-        pool::emit_into(
+        pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             list_region,
             list_scroll as f32,
-            list_version,
+            PageVersions {
+                cells: list_version,
+                decorations: 0,
+            },
+            |page| selection_page_stamp(help.selected(), page, list.height),
             false,
             |page| {
                 crate::smooth_scroll::render_help_list_page(
@@ -1783,10 +1840,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         };
         let detail_scroll = help.detail_scroll() as u32;
         // The detail body is the selected entry's, so a hash of its name is
-        // the content version: it bumps on a selection move and on a filter
-        // change that lands a different entry at the same index.
+        // the content version. It bumps on a selection move and on a filter
+        // change that lands a different entry at the same index. The theme
+        // joins it, because it recolors the body.
         let detail_version = {
             let mut hasher = DefaultHasher::new();
+            stoat.theme_epoch.hash(&mut hasher);
             help.selected_entry()
                 .map(|entry| entry.def.name())
                 .hash(&mut hasher);
@@ -2498,6 +2557,21 @@ fn spotlight_page_version(
     let mut hasher = DefaultHasher::new();
     (color, from, to).hash(&mut hasher);
     hasher.finish()
+}
+
+/// The cells stamp that a list's selected row gives list page `index` of a
+/// pool whose regions are `height` rows tall.
+///
+/// A page answers the same stamp while it holds the selection on the same row,
+/// and 0 while it holds no selection. A selection step therefore refills the
+/// page the selection leaves and the page it enters, and no other.
+fn selection_page_stamp(selected: usize, index: u64, height: u16) -> u64 {
+    let top_row = u64::from(crate::smooth_scroll::page_top_row(index, height));
+    let selected = selected as u64;
+    match (top_row..top_row + u64::from(height)).contains(&selected) {
+        true => selected + 1,
+        false => 0,
+    }
 }
 
 #[cfg(test)]

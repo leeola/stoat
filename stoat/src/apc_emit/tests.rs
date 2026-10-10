@@ -1680,6 +1680,19 @@ fn pool_commands(bytes: &[u8], pool: u32) -> Vec<command::Command> {
         .collect()
 }
 
+/// The pages filled for pool `pool` in `bytes`, in wire order.
+fn pool_fills(bytes: &[u8], pool: u32) -> Vec<u64> {
+    use stoatty_protocol::command::Command;
+
+    pool_commands(bytes, pool)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Fill(fill) => Some(fill.index),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The drops and declarations of pool `pool` in `bytes`, in wire order.
 fn pool_lifecycle(bytes: &[u8], pool: u32) -> Vec<&'static str> {
     use stoatty_protocol::command::Command;
@@ -2738,27 +2751,45 @@ fn help_list_and_detail_are_pooled_and_retired() {
     );
 }
 
+/// The fake `/work` repo, added on first use.
+fn work_repo(h: &mut crate::test_harness::TestHarness) -> Arc<dyn crate::host::GitRepo> {
+    let path = std::path::Path::new("/work");
+    h.stoat.git_host.discover(path).unwrap_or_else(|| {
+        h.fake_git.add_repo("/work");
+        h.stoat
+            .git_host
+            .discover(path)
+            .expect("the repo was just added")
+    })
+}
+
 /// Show a commits list over the `/work` repo in the focused pane.
 fn open_commits_list(h: &mut crate::test_harness::TestHarness) {
     use crate::commit_list::CommitListState;
 
-    let repo = h
-        .stoat
-        .git_host
-        .discover(std::path::Path::new("/work"))
-        .unwrap_or_else(|| {
-            h.fake_git.add_repo("/work");
-            h.stoat
-                .git_host
-                .discover(std::path::Path::new("/work"))
-                .expect("the repo was just added")
-        });
+    let repo = work_repo(h);
     let ws = h.stoat.active_workspace_mut();
     let focus = ws.panes.focus();
     let mut state = CommitListState::new(PathBuf::from("/work"), repo);
     state.covered = Some(ws.panes.pane(focus).view.clone());
     let list = ws.commit_lists.insert(state);
     ws.panes.pane_mut(focus).view = View::Commits(list);
+}
+
+/// `count` commits of one linear history, newest first.
+fn numbered_commits(count: usize) -> Vec<crate::host::CommitInfo> {
+    let sha = |i: usize| format!("{i:040x}");
+    (0..count)
+        .map(|i| crate::host::CommitInfo {
+            sha: sha(i),
+            short_sha: sha(i)[33..].to_string(),
+            summary: format!("commit {i}"),
+            author_name: "test".into(),
+            author_email: "t@t".into(),
+            time: 0,
+            parents: (i + 1 < count).then(|| sha(i + 1)).into_iter().collect(),
+        })
+        .collect()
 }
 
 #[test]
@@ -2805,6 +2836,147 @@ fn commits_list_is_pooled_and_retired() {
             pool: crate::smooth_scroll::non_pane_pool::COMMITS,
         })),
         "leaving commits mode retires its pool"
+    );
+}
+
+/// The list pages paint the selection highlight, so a step that scrolls the
+/// finder refills the page the selection leaves and the page it enters.
+#[test]
+fn a_one_row_scroll_of_the_finder_refills_its_pool() {
+    use stoat_action::OpenFileFinder;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let root = PathBuf::from("/stepfinder");
+    for i in 0..200 {
+        h.fake_fs()
+            .insert_file(root.join(format!("a{i}.rs")), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    emit_raw(&mut h, &mut rx);
+
+    let list_height = finder_layout(&h).list.height as usize;
+    h.stoat
+        .file_finder
+        .as_mut()
+        .expect("the finder is open")
+        .active_core()
+        .picklist
+        .selected = list_height;
+    assert_eq!(
+        pool_fills(
+            &emit_raw(&mut h, &mut rx),
+            crate::smooth_scroll::non_pane_pool::FINDER
+        ),
+        [0, 1],
+        "the step refills the page the selection leaves and the page it enters"
+    );
+}
+
+/// The help list holds nothing at rest, so a selection step refills the page
+/// that holds the highlight, and only that page.
+#[test]
+fn a_help_selection_step_refills_the_list_pool() {
+    use stoat_action::OpenHelp;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    action_handlers::dispatch(&mut h.stoat, &OpenHelp);
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    emit_raw(&mut h, &mut rx);
+
+    h.stoat
+        .help
+        .as_mut()
+        .expect("help is open")
+        .move_selection(1);
+    assert_eq!(
+        pool_fills(
+            &emit_raw(&mut h, &mut rx),
+            crate::smooth_scroll::non_pane_pool::HELP_LIST
+        ),
+        [0],
+        "a step inside the first page refills that page alone"
+    );
+}
+
+/// A selection step inside the first page of the commits list refills that
+/// page alone, not the whole buffered window.
+#[test]
+fn a_commits_selection_step_refills_one_page() {
+    fn list(h: &mut crate::test_harness::TestHarness) -> &mut crate::commit_list::CommitListState {
+        h.stoat
+            .active_workspace_mut()
+            .focused_commits_mut()
+            .expect("the list is open")
+    }
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    open_commits_list(&mut h);
+    list(&mut h).commits = numbered_commits(200);
+    list(&mut h).reached_end = true;
+    emit_raw(&mut h, &mut rx);
+
+    list(&mut h).selected = 1;
+    assert_eq!(
+        pool_fills(
+            &emit_raw(&mut h, &mut rx),
+            crate::smooth_scroll::non_pane_pool::COMMITS
+        ),
+        [0],
+        "a step inside the first page refills that page alone"
+    );
+}
+
+/// A selection step inside the first page of the commit picker refills that
+/// page alone, not the whole buffered window.
+#[test]
+fn a_commit_picker_step_refills_one_page() {
+    use crate::commit_picker::{CommitPicker, CommitPickerRole};
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let repo = work_repo(&mut h);
+    let executor = h.stoat.executor.clone();
+    let mut picker = CommitPicker::new(
+        h.stoat.active_workspace_mut(),
+        executor,
+        CommitPickerRole::Browse,
+        PathBuf::from("/work"),
+        repo,
+        String::new(),
+        0,
+    );
+    picker.set_commits(numbered_commits(200), Default::default(), "");
+    h.stoat.commit_picker = Some(picker);
+    h.settle();
+    emit_raw(&mut h, &mut rx);
+
+    h.stoat
+        .commit_picker
+        .as_mut()
+        .expect("the picker is open")
+        .selected = 1;
+    assert_eq!(
+        pool_fills(
+            &emit_raw(&mut h, &mut rx),
+            crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST
+        ),
+        [0],
+        "a step inside the first page refills that page alone"
     );
 }
 
