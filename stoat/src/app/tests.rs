@@ -3331,6 +3331,21 @@ fn async_session_restore_installs_into_a_fresh_workspace() {
     );
 }
 
+#[test]
+fn a_zero_day_retention_sweeps_nothing() {
+    let mut h = Stoat::test();
+    h.stoat.settings.session_retention_days = Some(0);
+    let before = h.fake_fs().ops();
+
+    h.stoat
+        .sweep_stale_state(None, &|_| panic!("a zero-day retention probes no socket"));
+    assert_eq!(
+        h.fake_fs().ops(),
+        before,
+        "a zero-day retention touches no file"
+    );
+}
+
 /// Saves the active workspace, with `restored.txt` open in it, as a session
 /// file, and returns the file's path and the session's.
 fn save_a_session(h: &mut crate::test_harness::TestHarness) -> (PathBuf, PathBuf) {

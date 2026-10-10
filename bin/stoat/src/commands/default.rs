@@ -4,6 +4,7 @@ use snafu::{whatever, ResultExt, Whatever};
 use std::{
     future::Future,
     io,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -555,9 +556,11 @@ fn run_tui(
         // so a large yank over SSH never blocks the event loop on the pipe and
         // never lands mid-frame.
         stoat.set_clipboard_host(Arc::new(LocalClipboard::new(Some(apc_tx))));
-        if continue_ || resume {
-            stoat.load_active_workspace_state();
-        }
+        let restoring = if continue_ || resume {
+            stoat.load_active_workspace_state()
+        } else {
+            None
+        };
 
         // Bind the active session's agent hook socket so an owned agent's hooks
         // and runtime queries reach this process. A workspace opened later
@@ -584,6 +587,12 @@ fn run_tui(
                 "session hook socket bind failed; agent hooks and runtime queries disabled this session",
             );
         }
+
+        // The probe opens a real socket, so it lives here rather than in the
+        // sweep, the way the attach command's connect does.
+        stoat.sweep_stale_state(restoring.as_deref(), &|path| {
+            UnixStream::connect(path).is_ok()
+        });
 
         match LocalFsWatcher::new() {
             Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),

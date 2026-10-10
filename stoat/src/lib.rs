@@ -76,6 +76,7 @@ mod selection;
 mod session_log;
 mod smooth_scroll;
 pub mod ssh;
+mod state_sweep;
 pub(crate) mod symbol_finder;
 pub(crate) mod syntax_parse;
 pub mod term_screen;

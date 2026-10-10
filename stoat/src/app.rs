@@ -4468,20 +4468,81 @@ impl Stoat {
     /// `stoat` launch leaves the default fresh workspace in place so each
     /// session starts clean. Tests intentionally skip this to stay isolated
     /// from the real state directory.
-    pub fn load_active_workspace_state(&mut self) {
+    ///
+    /// Returns the file the restore reads, or `None` when there is none. The
+    /// read runs off the main thread, so [`Self::sweep_stale_state`] keeps that
+    /// file out of its sweep.
+    pub fn load_active_workspace_state(&mut self) -> Option<PathBuf> {
         let git_root = self.active_workspace().git_root.clone();
         let files = match crate::workspace::list_workspace_files(&git_root, &*self.fs_host) {
             Ok(files) => files,
             Err(err) => {
                 tracing::warn!(?err, "could not resolve workspace state directory");
+                return None;
+            },
+        };
+        let path = files.into_iter().next()?;
+        let workspace = self.active_workspace;
+        self.spawn_workspace_restore(workspace, path.clone());
+        Some(path)
+    }
+
+    /// Remove the session files and hook sockets in the state directory that
+    /// have gone unused for longer than `session.retention_days`.
+    ///
+    /// A start of stoat runs this once, after the restore is scheduled. `keep`
+    /// names the file that restore reads, which stays whatever its age.
+    /// `socket_is_live` reports whether a server still answers on a socket, so
+    /// the socket of another running instance stays. A retention of 0 turns the
+    /// sweep off.
+    ///
+    /// Every failure is logged and skipped, so a start never aborts here.
+    pub fn sweep_stale_state(&self, keep: Option<&Path>, socket_is_live: &dyn Fn(&Path) -> bool) {
+        let days = self
+            .settings
+            .session_retention_days
+            .unwrap_or(crate::state_sweep::DEFAULT_RETENTION_DAYS);
+        if days == 0 {
+            return;
+        }
+        let retention = std::time::Duration::from_secs(u64::from(days) * 86_400);
+
+        let dirs = stoat_log::state_dir().and_then(|state_dir| {
+            Ok((
+                state_dir,
+                crate::run::agent_socket_dir()?,
+                stoat_log::workspace_state_dir()?,
+            ))
+        });
+        let (state_dir, socket_dir, workspaces_dir) = match dirs {
+            Ok(dirs) => dirs,
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::state_sweep",
+                    %err,
+                    "state directory unresolved; stale state stays",
+                );
                 return;
             },
         };
-        let Some(path) = files.into_iter().next() else {
-            return;
-        };
-        let workspace = self.active_workspace;
-        self.spawn_workspace_restore(workspace, path);
+
+        let report = crate::state_sweep::sweep(
+            &*self.fs_host,
+            &[state_dir, socket_dir],
+            &workspaces_dir,
+            std::time::SystemTime::now(),
+            retention,
+            keep,
+            socket_is_live,
+        );
+        if report.removed_files > 0 || report.removed_dirs > 0 {
+            tracing::info!(
+                target: "stoat::state_sweep",
+                removed_files = report.removed_files,
+                removed_dirs = report.removed_dirs,
+                "swept stale state",
+            );
+        }
     }
 
     /// Kick off an off-thread restore of `workspace` from `path`.
