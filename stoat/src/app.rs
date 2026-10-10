@@ -1447,6 +1447,19 @@ pub struct Stoat {
     /// position and `Up(Left)` clears it. Takes over the pointer so the press
     /// never reaches the text-area cursor or selection handling.
     pub(crate) minimap_drag: Option<EditorId>,
+    /// The workspace whose documents the language servers hold.
+    ///
+    /// Every workspace numbers its buffers from the same start, and the LSP
+    /// state below is keyed by bare [`BufferId`], so the servers mirror one
+    /// workspace at a time rather than a key per workspace and buffer. A server
+    /// holds one document per URI, and `CopyWorkspace` puts one path in two
+    /// workspaces. A switch closes the left workspace's documents and opens the
+    /// entered one's, through [`crate::lsp::session::mirror_workspace`].
+    ///
+    /// Explicit rather than read from [`Self::active_workspace`], because
+    /// [`Self::in_workspace`] swaps that field while a landing for a background
+    /// workspace runs.
+    pub(crate) lsp_workspace: WorkspaceId,
     /// Buffers for which `LspHost::did_open` has been dispatched.
     /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
     /// returns the existing entry on second open, but the LSP
@@ -2500,6 +2513,7 @@ impl Stoat {
             modal_separator_drag: None,
             commits_separator_drag: false,
             minimap_drag: None,
+            lsp_workspace: active_workspace,
             lsp_opened: std::collections::HashSet::new(),
             lsp_drain_hosts: Vec::new(),
             lsp_drain_buffers: Vec::new(),
@@ -4694,16 +4708,14 @@ impl Stoat {
         }
     }
 
-    /// Start the restored buffers, terminal panes, and commits panes of the
-    /// active workspace when its restore installed while another workspace was
-    /// active.
+    /// Start the restored terminal panes and commits panes of the active
+    /// workspace when its restore installed while another workspace was active.
     ///
-    /// A server spawn, a terminal shell, and a commits list read the active
-    /// workspace's root, and the first two its environment, so this waits for
-    /// the switch. Running from
-    /// [`Self::drive_background`] serves every path that makes the workspace
-    /// active. The environment load has started by then, so a subprocess
-    /// server still waits for the direnv diff, as at an in-place restore.
+    /// A terminal shell and a commits list read the active workspace's root,
+    /// and the shell its environment, so this waits for the switch. Running
+    /// from [`Self::drive_background`] serves every path that makes the
+    /// workspace active. The restored buffers need nothing here, because the
+    /// switch itself opens them on the language servers.
     ///
     /// The remote reconnect needs no deferral, because every workspace switch
     /// reconnects a remote workspace.
@@ -4711,7 +4723,6 @@ impl Stoat {
         if !std::mem::take(&mut self.active_workspace_mut().restored_in_background) {
             return;
         }
-        crate::lsp::drain::reopen_buffers(self, None);
         action_handlers::respawn_terminal_panes(self);
         action_handlers::respawn_commits_panes(self);
     }
@@ -7608,7 +7619,7 @@ impl Stoat {
                 else {
                     return UpdateEffect::None;
                 };
-                self.active_workspace = ws_id;
+                action_handlers::workspace::switch_active_workspace(self, ws_id);
 
                 let new_pane = {
                     let ws = self.active_workspace_mut();
@@ -7656,7 +7667,7 @@ impl Stoat {
                     let _ = done.send(false);
                     return UpdateEffect::None;
                 };
-                self.active_workspace = ws_id;
+                action_handlers::workspace::switch_active_workspace(self, ws_id);
 
                 let target = {
                     let ws = self.active_workspace_mut();

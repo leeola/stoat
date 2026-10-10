@@ -61,7 +61,7 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
         // Skip buffers unchanged since the last sync before grouping hosts and
         // building plans. build_dispatch_plan would return empty plans anyway,
         // and the version write-back below would rewrite the same value.
-        if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
+        if let Some(buffer) = stoat.workspaces[stoat.lsp_workspace].buffers.get(id) {
             let version = buffer.read().expect("buffer lock").version();
             if stoat.lsp_buffer_versions.get(&id) == Some(&version) {
                 continue;
@@ -131,7 +131,7 @@ fn dispatch_did_change(
 
     // The change is consumed for this buffer once seen, whether or not any
     // group took it, mirroring the sync-NONE path.
-    if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
+    if let Some(buffer) = stoat.workspaces[stoat.lsp_workspace].buffers.get(id) {
         let v = buffer.read().expect("buffer lock").version();
         stoat.lsp_buffer_versions.insert(id, v);
     }
@@ -234,7 +234,7 @@ type HostSyncGroups = Vec<(
 /// compare is a map read, where the payload those feed costs a whole-document
 /// string or a fresh patch walk.
 fn capture_dispatch_target(stoat: &Stoat, id: BufferId) -> Option<(Uri, TextBufferSnapshot)> {
-    let workspace = stoat.active_workspace();
+    let workspace = &stoat.workspaces[stoat.lsp_workspace];
     let buffer = workspace.buffers.get(id)?;
     let guard = buffer.read().expect("buffer lock");
 

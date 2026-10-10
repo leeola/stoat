@@ -555,8 +555,13 @@ fn write_buffer_to_disk(
 /// neither hears nothing, and `text` is materialized once per server that asked
 /// for it rather than once for the whole fan-out.
 ///
-/// A path that maps to no URI notifies nobody.
+/// A path that maps to no URI notifies nobody, and so does a save that lands
+/// for a workspace other than [`Stoat::lsp_workspace`], since no server holds
+/// its document.
 fn notify_did_save(stoat: &Stoat, buffer_id: BufferId, path: &Path, text: &Rope) {
+    if stoat.active_workspace != stoat.lsp_workspace {
+        return;
+    }
     let Some(uri) = super::lsp::path_to_uri(path) else {
         return;
     };
@@ -945,7 +950,8 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use stoat_action::{
-        ForceSaveBuffer, GotoLastAccessed, OpenFile, SaveBuffer, SplitRight, WriteQuit,
+        ForceSaveBuffer, GotoLastAccessed, NewWorkspace, OpenFile, SaveBuffer, SplitRight,
+        WriteQuit,
     };
     use stoatty_protocol::command;
 
@@ -2454,6 +2460,24 @@ mod tests {
             .into_iter()
             .map(|params| params.text)
             .collect()
+    }
+
+    /// A save that lands after the reader left its workspace sends no save
+    /// notification, since the servers no longer hold that document.
+    #[test]
+    fn a_save_landing_after_its_workspace_was_left_sends_no_did_save() {
+        let mut h = Stoat::test();
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            text_document_sync: save_sync(Some(TextDocumentSyncSaveOptions::Supported(true))),
+            ..ServerCapabilities::default()
+        });
+        open_edited(&mut h, Path::new("/did-save-left"), "a.txt", b"note\n");
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        dispatch(&mut h.stoat, &NewWorkspace);
+        h.settle();
+
+        assert_eq!(h.fake_lsp().observed_saves().len(), 0);
     }
 
     /// The saved text is a whole copy of the file per notification, so it goes

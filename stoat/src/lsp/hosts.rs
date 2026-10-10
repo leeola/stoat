@@ -7,6 +7,9 @@
 //! and advertises it; a fan-out request takes all of them. A buffer with no
 //! language, or none of whose servers are up, falls back to a noop host, so a
 //! caller never has to hold a `None`.
+//!
+//! A buffer id resolves in [`Stoat::lsp_workspace`], the one workspace whose
+//! documents the servers hold.
 
 use crate::{
     app::Stoat,
@@ -40,7 +43,7 @@ pub(crate) fn lsp_host(stoat: &Stoat) -> Arc<dyn LspHost> {
 /// injected sole client, or a noop. A buffer with no language falls back
 /// to the sole client, or a noop.
 pub(crate) fn lsp_for(stoat: &Stoat, buffer_id: BufferId) -> Arc<dyn LspHost> {
-    match session::lsp_language_name(&stoat.active_workspace().buffers, buffer_id) {
+    match session::lsp_language_name(&stoat.workspaces[stoat.lsp_workspace].buffers, buffer_id) {
         Some(name) => stoat.lsp_registry.route(&name),
         None => stoat.lsp_registry.sole_or_noop(),
     }
@@ -52,8 +55,9 @@ pub(crate) fn lsp_for(stoat: &Stoat, buffer_id: BufferId) -> Arc<dyn LspHost> {
 /// Every running server for the buffer's language needs the document, so
 /// this returns all of them (or the injected sole client when none are up).
 pub(crate) fn hosts_for_buffer(stoat: &Stoat, buffer_id: BufferId) -> Vec<Arc<dyn LspHost>> {
-    let name = session::lsp_language_name(&stoat.active_workspace().buffers, buffer_id)
-        .unwrap_or_default();
+    let name =
+        session::lsp_language_name(&stoat.workspaces[stoat.lsp_workspace].buffers, buffer_id)
+            .unwrap_or_default();
     stoat.lsp_registry.hosts_for_language(&name)
 }
 
@@ -85,8 +89,9 @@ pub(crate) fn feature_hosts(
     buffer_id: BufferId,
     feature: LanguageServerFeature,
 ) -> Vec<(String, Arc<dyn LspHost>)> {
-    let name = session::lsp_language_name(&stoat.active_workspace().buffers, buffer_id)
-        .unwrap_or_default();
+    let name =
+        session::lsp_language_name(&stoat.workspaces[stoat.lsp_workspace].buffers, buffer_id)
+            .unwrap_or_default();
     stoat.lsp_registry.hosts_with_feature(&name, feature)
 }
 

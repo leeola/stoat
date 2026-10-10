@@ -3598,7 +3598,7 @@ fn a_session_restored_in_the_background_opens_its_files_on_the_switch() {
         restored_opens(&h),
     );
 
-    h.set_active_workspace(target);
+    action_handlers::workspace::switch_active_workspace(&mut h.stoat, target);
     h.stoat.drive_background();
     h.settle();
 

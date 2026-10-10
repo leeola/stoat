@@ -67,6 +67,7 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
         .find(|k| *k != active_id)
         .expect("non-last workspace has at least one sibling");
 
+    crate::lsp::session::release_documents(stoat);
     stoat.workspaces.remove(active_id);
     switch_active_workspace(stoat, replacement);
     UpdateEffect::Redraw
@@ -76,7 +77,11 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
 /// at `next` and re-layouts the new active workspace to the current terminal size
 /// so the first render after the switch shows correctly-sized panes, and watches
 /// its root, so a workspace entered after launch hears the writes under it.
-fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
+///
+/// The language servers follow the switch. They close the documents of the
+/// workspace left and open the entered one's, through
+/// [`crate::lsp::session::mirror_workspace`].
+pub(crate) fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     stoat.active_workspace = next;
     let size = stoat.size();
     stoat.active_workspace_mut().layout(size);
@@ -86,6 +91,7 @@ fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
         stoat.remote_pending = true;
         crate::ssh::reconnect_when_ready(stoat);
     }
+    crate::lsp::session::mirror_workspace(stoat, next);
 }
 
 /// Page the workspace picker's selection by half its visible rows in `dir`.

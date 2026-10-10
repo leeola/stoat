@@ -709,6 +709,13 @@ pub(crate) fn close_buffer_by_id(stoat: &mut Stoat, buffer_id: BufferId) -> Upda
     stoat
         .active_workspace_mut()
         .release_bridge_waiters(buffer_id, outcome);
+    stoat.marks.retain(|(id, _), _| *id != buffer_id);
+
+    // The servers mirror one workspace. A buffer of any other was never opened
+    // on them, and its id names another workspace's document in their state.
+    if stoat.active_workspace != stoat.lsp_workspace {
+        return UpdateEffect::Redraw;
+    }
     stoat.lsp_opened.remove(&buffer_id);
     stoat.lsp_buffer_versions.remove(&buffer_id);
     stoat.lsp_pending_changes.remove(&buffer_id);
@@ -729,7 +736,6 @@ pub(crate) fn close_buffer_by_id(stoat: &mut Stoat, buffer_id: BufferId) -> Upda
     stoat.pull_diagnostic_result_ids.remove(&buffer_id);
     stoat.pending_pull_diagnostics.remove(&buffer_id);
     stoat.last_pull_diagnostic_key.remove(&buffer_id);
-    stoat.marks.retain(|(id, _), _| *id != buffer_id);
 
     if let Some(path) = path
         && let Some(uri) = crate::action_handlers::lsp::path_to_uri(&path)

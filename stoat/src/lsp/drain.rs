@@ -45,10 +45,10 @@ pub(crate) fn drain_lsp_notifications(stoat: &mut Stoat) {
         lsp_message,
         lsp_doc_versions,
         workspaces,
-        active_workspace,
+        lsp_workspace,
         ..
     } = stoat;
-    let buffers = &workspaces[*active_workspace].buffers;
+    let buffers = &workspaces[*lsp_workspace].buffers;
     for (server, host) in lsp_registry.named_hosts_iter() {
         drain_notifications_from(
             server,
@@ -70,7 +70,7 @@ pub(crate) fn drain_host_notifications(stoat: &mut Stoat, server: &str, host: &A
         lsp_message,
         lsp_doc_versions,
         workspaces,
-        active_workspace,
+        lsp_workspace,
         ..
     } = stoat;
     drain_notifications_from(
@@ -80,7 +80,7 @@ pub(crate) fn drain_host_notifications(stoat: &mut Stoat, server: &str, host: &A
         diagnostics,
         lsp_message,
         lsp_doc_versions,
-        &workspaces[*active_workspace].buffers,
+        &workspaces[*lsp_workspace].buffers,
     );
 }
 
@@ -266,8 +266,8 @@ fn install_ready_server(
     reopen_buffers(stoat, language.as_deref());
 }
 
-/// Re-send `did_open` for the active workspace's path-bound buffers, every one
-/// of them or only `language`'s.
+/// Re-send `did_open` for the path-bound buffers of [`Stoat::lsp_workspace`],
+/// every one of them or only `language`'s.
 ///
 /// Each buffer leaves [`Stoat::lsp_opened`] first. A host that never saw a
 /// buffer then receives it, and a buffer that calls for a server not yet
@@ -278,7 +278,7 @@ pub(crate) fn reopen_buffers(stoat: &mut Stoat, language: Option<&str>) {
     // reopens in one turn and a rope clone is a refcount bump where
     // materializing each buffer is not.
     let reopen: Vec<(BufferId, PathBuf, Rope)> = {
-        let buffers = &stoat.active_workspace().buffers;
+        let buffers = &stoat.workspaces[stoat.lsp_workspace].buffers;
         buffers
             .open_paths()
             .into_iter()
@@ -305,7 +305,7 @@ pub(crate) fn reopen_buffers(stoat: &mut Stoat, language: Option<&str>) {
         stoat.lsp_opened.remove(&id);
         stoat.lsp_doc_versions.remove(&id);
         stoat.lsp_buffer_versions.remove(&id);
-        let workspace = stoat.active_workspace;
+        let workspace = stoat.lsp_workspace;
         crate::lsp::session::notify_buffer_opened(stoat, workspace, id, &path, text);
     }
 }

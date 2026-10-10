@@ -20,7 +20,10 @@ use crate::{
     lsp::{hosts, servers::ServerSource},
     workspace::WorkspaceId,
 };
-use lsp_types::{DidOpenTextDocumentParams, ServerInfo, TextDocumentItem};
+use lsp_types::{
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, ServerInfo, TextDocumentIdentifier,
+    TextDocumentItem,
+};
 use std::{path::Path, sync::Arc};
 use stoat_text::Rope;
 
@@ -56,6 +59,9 @@ pub(crate) fn lsp_language_name(buffers: &BufferRegistry, buffer_id: BufferId) -
 /// Each host's payload string is built inside its own spawned task, so a
 /// language server coming up over many open buffers does not materialize them
 /// all on the run loop.
+///
+/// A buffer of a workspace other than [`Stoat::lsp_workspace`] reaches no
+/// server and spawns none. The switch into its workspace opens it.
 pub(crate) fn notify_buffer_opened(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
@@ -63,6 +69,9 @@ pub(crate) fn notify_buffer_opened(
     path: &Path,
     text: Rope,
 ) {
+    if workspace != stoat.lsp_workspace {
+        return;
+    }
     maybe_spawn_language_server(stoat, workspace, buffer_id);
     if !stoat.lsp_opened.insert(buffer_id) {
         return;
@@ -108,6 +117,81 @@ pub(crate) fn notify_buffer_opened(
             })
             .detach();
     }
+}
+
+/// Close every document the language servers hold for
+/// [`Stoat::lsp_workspace`], and drop the per-buffer state that tracks them.
+///
+/// Each buffer the servers opened gets a didClose to its language's hosts when
+/// the workspace still holds its path. The version, delivery, and
+/// pull-diagnostic state goes for every buffer either way, and the request keys
+/// reset. State kept for a buffer id that the next workspace reuses skips that
+/// buffer's didOpen and sends its edits against another file's text.
+///
+/// See also:
+/// - [`mirror_workspace`], which calls this when the servers move to another workspace.
+pub(crate) fn release_documents(stoat: &mut Stoat) {
+    let opened: Vec<BufferId> = stoat.lsp_opened.drain().collect();
+    if let Some(ws) = stoat.workspaces.get(stoat.lsp_workspace) {
+        for id in opened {
+            let Some(uri) = ws
+                .buffers
+                .path_for(id)
+                .and_then(action_handlers::lsp::path_to_uri)
+            else {
+                continue;
+            };
+            let language = lsp_language_name(&ws.buffers, id).unwrap_or_default();
+            let params = DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri },
+            };
+            for lsp in stoat.lsp_registry.hosts_for_language(&language) {
+                let params = params.clone();
+                stoat
+                    .executor
+                    .spawn(async move {
+                        if let Err(err) = lsp.did_close(params).await {
+                            tracing::warn!(target: "stoat::lsp", ?err, "did_close notification failed");
+                        }
+                    })
+                    .detach();
+            }
+        }
+    }
+
+    stoat.lsp_buffer_versions.clear();
+    stoat.lsp_pending_changes.clear();
+    stoat.lsp_doc_versions.clear();
+    stoat
+        .lsp_last_delivered_text
+        .lock()
+        .expect("lsp text mutex")
+        .clear();
+    stoat
+        .lsp_last_delivered_buffer_version
+        .lock()
+        .expect("lsp version mutex")
+        .clear();
+    stoat.pull_diagnostic_result_ids.clear();
+    stoat.pending_pull_diagnostics.clear();
+    stoat.last_pull_diagnostic_key.clear();
+    stoat.last_semantic_tokens_key = None;
+    stoat.last_folding_range_key = None;
+    stoat.last_inlay_hint_key = None;
+    stoat.last_document_highlight_key = None;
+}
+
+/// Point the language servers at workspace `next`, closing the documents of the
+/// workspace they held and opening `next`'s.
+///
+/// A no-op when the servers already mirror `next`.
+pub(crate) fn mirror_workspace(stoat: &mut Stoat, next: WorkspaceId) {
+    if stoat.lsp_workspace == next {
+        return;
+    }
+    release_documents(stoat);
+    stoat.lsp_workspace = next;
+    crate::lsp::drain::reopen_buffers(stoat, None);
 }
 
 /// Launch the servers `buffer_id` calls for the first time a buffer calls for
@@ -357,6 +441,7 @@ mod tests {
         test_fixture::{open_buffer, open_stcfg_with_server, seed},
         test_harness::TestHarness,
     };
+    use lsp_types::TextDocumentSyncKind;
     use std::time::Duration;
     use stoat_action::OpenFile;
 
@@ -765,5 +850,150 @@ mod tests {
         h.settle();
         let opens = h.fake_lsp().observed_opens();
         assert_eq!(opens.len(), 2);
+    }
+
+    /// Open `a.rs` in the launch workspace, then `b.rs` in a new workspace,
+    /// and return the launch workspace.
+    ///
+    /// Every workspace numbers its buffers from the same start, so `b.rs` takes
+    /// the buffer id `a.rs` holds in the launch workspace.
+    fn a_then_b_in_a_new_workspace(h: &mut TestHarness) -> WorkspaceId {
+        let root = seed(h, &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let launch = h.stoat.active_workspace;
+        open_buffer(h, root.join("a.rs"));
+        h.type_action("NewWorkspace()");
+        open_buffer(h, root.join("b.rs"));
+        launch
+    }
+
+    /// The file name an observed URI ends in.
+    fn file_name(uri: &str) -> String {
+        uri.rsplit('/').next().unwrap_or_default().to_string()
+    }
+
+    /// The switch closes the launch workspace's document, the new file opens as
+    /// a document of its own, and its edit reaches the server as a change to
+    /// that file alone.
+    #[test]
+    fn a_second_workspace_mirrors_its_own_documents() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::FULL);
+        a_then_b_in_a_new_workspace(&mut h);
+
+        h.edit_focused(0..0, "x");
+        crate::lsp::sync::notify_buffer_changes_pending(&mut h.stoat);
+        h.advance_clock(Duration::from_millis(60));
+
+        let fake = h.fake_lsp();
+        let opens: Vec<String> = fake
+            .observed_opens()
+            .iter()
+            .map(|open| file_name(open.text_document.uri.as_str()))
+            .collect();
+        let closes: Vec<String> = fake
+            .observed_closes()
+            .iter()
+            .map(|close| file_name(close.text_document.uri.as_str()))
+            .collect();
+        let changes: Vec<(String, String)> = fake
+            .observed_changes()
+            .iter()
+            .map(|change| {
+                let text = change.content_changes[0].text.clone();
+                (file_name(change.text_document.uri.as_str()), text)
+            })
+            .collect();
+        assert_eq!(
+            (opens, closes, changes),
+            (
+                vec!["a.rs".to_string(), "b.rs".to_string()],
+                vec!["a.rs".to_string()],
+                vec![("b.rs".to_string(), "xfn b() {}\n".to_string())]
+            ),
+        );
+    }
+
+    /// Leaving the second workspace closes its document and opens the launch
+    /// workspace's again, whether the reader switches back or closes it.
+    #[test]
+    fn leaving_the_second_workspace_reopens_the_launch_documents() {
+        let leave = |by_close: bool| {
+            let mut h = TestHarness::with_size(80, 24);
+            let launch = a_then_b_in_a_new_workspace(&mut h);
+
+            match by_close {
+                true => h.type_action("CloseWorkspace()"),
+                false => action_handlers::workspace::switch_active_workspace(&mut h.stoat, launch),
+            }
+            h.settle();
+
+            let fake = h.fake_lsp();
+            let closes: Vec<String> = fake
+                .observed_closes()
+                .iter()
+                .map(|close| file_name(close.text_document.uri.as_str()))
+                .collect();
+            let last_open = fake
+                .observed_opens()
+                .last()
+                .map(|open| file_name(open.text_document.uri.as_str()));
+            (closes, last_open)
+        };
+
+        let left = (
+            vec!["a.rs".to_string(), "b.rs".to_string()],
+            Some("a.rs".to_string()),
+        );
+        assert_eq!([leave(false), leave(true)], [left.clone(), left]);
+    }
+
+    /// A buffer that opens in a workspace the servers do not mirror, as a
+    /// landing for a background workspace does, reaches no server.
+    #[test]
+    fn a_buffer_of_an_unmirrored_workspace_reaches_no_server() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("b.rs", "fn b() {}\n")]);
+        let background = h.create_workspace();
+        h.set_active_workspace(background);
+
+        open_buffer(&mut h, root.join("b.rs"));
+
+        assert_eq!(h.fake_lsp().observed_opens().len(), 0);
+    }
+
+    /// Closing a buffer of a workspace the servers do not mirror leaves the
+    /// mirrored document under the same buffer id open.
+    #[test]
+    fn closing_an_unmirrored_buffer_keeps_the_mirrored_document_open() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        let a = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("a.rs"));
+        let background = h.create_workspace();
+        h.set_active_workspace(background);
+        open_buffer(&mut h, root.join("b.rs"));
+        let b = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("b.rs"))
+            .expect("b.rs opens");
+
+        crate::buffer_lifecycle::close_buffer_by_id(&mut h.stoat, b);
+        h.settle();
+
+        assert_eq!(
+            (
+                a,
+                h.fake_lsp().observed_closes().len(),
+                h.stoat.lsp_opened.contains(&b)
+            ),
+            (Some(b), 0, true),
+        );
     }
 }
