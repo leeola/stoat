@@ -309,11 +309,15 @@ impl SmoothScrollState {
 /// Pass a constant for content that is stable while scrolling.
 ///
 /// `hold_when_idle` defers a content change on a frame whose target did not
-/// move until the target shifts. It suits a surface whose content churns while
-/// it rests. A held frame keeps the page window the terminal holds when that
-/// window covers the pages a composite reads, which are the visible page and,
-/// on a rest between two rows, the page after it. Otherwise it asks for those
-/// pages alone.
+/// move and rests on a whole row, until the target shifts. It suits a surface
+/// whose content churns while it rests. The terminal composites nothing at a
+/// whole-row rest, so the live grid shows the change at once. A rest between
+/// two rows keeps compositing, so a change there refills the pages the
+/// composite reads, which are the visible page and the page after it.
+///
+/// A frame whose target did not move keeps the page window the terminal holds
+/// when that window covers the pages a composite reads. Otherwise it asks for
+/// those pages alone.
 ///
 /// A held pool whose rectangle moves renders no page at all while the caller
 /// reports the geometry unsettled through
@@ -391,17 +395,21 @@ pub fn emit_pages_into(
     let unsettled = state.geometry_unsettled;
     let entry = state.pools.entry(pool).or_default();
 
-    // A content change seen while the target is stationary waits for the next
-    // move. Holding keeps the stored version, which suppresses the refill wipe,
-    // and keeps the window the terminal holds, so the next glide enters only the
-    // pages its window gains.
+    // A content change seen while the target rests on a whole row waits for the
+    // next move. Holding keeps the stored version, which suppresses the refill
+    // wipe, and keeps the window the terminal holds, so the next glide enters
+    // only the pages its window gains.
     //
     // Computed before the region and version wipes below reset last_scroll_offset,
     // so it reflects real scroll motion. A fresh entry has last_scroll_offset None,
     // so its first display counts as scrolling and still prefills the whole window.
     let last_target = entry.last_scroll_offset;
     let scrolling = last_target != Some(scroll_offset);
-    let hold = hold_when_idle && !scrolling;
+    let idle = hold_when_idle && !scrolling;
+    // A rest on a whole row hands the region back to the live grid, which
+    // shows a change at once. A rest between two rows keeps compositing the
+    // pool's pages, so a change there refills the pages the composite reads.
+    let hold = idle && scroll_offset.fract() == 0.0;
 
     let region_changed = entry.region != Some(region);
     if region_changed {
@@ -434,7 +442,7 @@ pub fn emit_pages_into(
         true => page..page + 1,
         false => page..page + 2,
     };
-    let window = match (hold, &entry.requested) {
+    let window = match (idle, &entry.requested) {
         (true, Some(held)) if held.start <= needed.start && needed.end <= held.end => held.clone(),
         (true, _) => needed,
         (false, _) => window_range(page),
@@ -448,7 +456,7 @@ pub fn emit_pages_into(
     // any other reason has settled by the time the page draws: a picker's box
     // grows with its match count, and blanking that list would cost more than
     // the page it saves.
-    let entered = if hold && region_changed && unsettled {
+    let entered = if idle && region_changed && unsettled {
         Vec::new()
     } else {
         refill(
@@ -971,6 +979,32 @@ mod tests {
         assert_eq!(entered, vec![1, 2]);
     }
 
+    /// A rest between two rows keeps compositing, so a change there refills
+    /// the two pages the composite reads, and a rest with no change refills
+    /// nothing.
+    #[test]
+    fn a_change_at_a_fractional_rest_refills_the_composited_pages() {
+        let mut state = SmoothScrollState::default();
+        let mut emit = |version: u64| {
+            emit_into(
+                &mut Vec::new(),
+                &mut state,
+                region(1, 20),
+                40.5,
+                version,
+                true,
+                |_| Vec::new(),
+            )
+        };
+
+        // The first display, then a rest, at 40.5 rows.
+        emit(0);
+        emit(0);
+
+        // 40.5 rows over a 20-row region stands in page 2 and reads into page 3.
+        assert_eq!((emit(1), emit(1)), (vec![2, 3], Vec::new()));
+    }
+
     /// A page whose own cells version moves refills alone once the target
     /// moves, and the rest of the window keeps the pages the terminal holds.
     #[test]
@@ -1054,6 +1088,27 @@ mod tests {
             entered,
             vec![1],
             "a rectangle that held still fills its page"
+        );
+    }
+
+    /// A pool resting between two rows waits out a resize burst as a whole-row
+    /// rest does, since the burst throws away the pages its composite reads.
+    #[test]
+    fn a_fractional_rest_under_unsettled_geometry_defers_the_fill() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        emit_into(&mut out, &mut state, region(1, 20), 40.5, 0, true, |_| {
+            Vec::new()
+        });
+
+        state.set_geometry_unsettled(true);
+        let entered = emit_into(&mut out, &mut state, region(1, 22), 40.5, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(
+            entered,
+            Vec::<u64>::new(),
+            "a moved rectangle enters no page"
         );
     }
 
