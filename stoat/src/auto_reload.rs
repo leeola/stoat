@@ -32,6 +32,7 @@ use crate::{
     keymap_state,
     lsp::sync,
     pane::{FocusTarget, PaneId, View},
+    workspace::WorkspaceId,
 };
 use std::{
     mem,
@@ -56,6 +57,9 @@ const STOATTY_LOG_ID: &str = "STOATTY_LOG_ID";
 /// Held in [`Stoat::pending_auto_reloads`] so the task is not dropped, which
 /// cancels the read, before [`pump_auto_reload_install`] takes it.
 pub(crate) struct PendingAutoReload {
+    /// The workspace that started the read. Buffer ids repeat across
+    /// workspaces, so `id` names a buffer only together with it.
+    workspace: WorkspaceId,
     /// Which buffer the read answers for, so a poll landing while it is still
     /// out does not start a second read of the same file.
     id: BufferId,
@@ -65,6 +69,8 @@ pub(crate) struct PendingAutoReload {
 
 /// What a pool read found, as the run loop needs it.
 struct AutoReloadResult {
+    /// The workspace the install lands in, whichever one is on screen then.
+    workspace: WorkspaceId,
     id: BufferId,
     mode: AutoReloadMode,
     /// The file's mtime as the stat read it, recorded whatever the outcome, so
@@ -97,6 +103,16 @@ struct ReloadDiff {
     follow_offset: usize,
 }
 
+/// What installing one read did that the reader sees.
+enum Installed {
+    /// The read was stale, or the file matched the buffer.
+    Nothing,
+    /// The read failed, and the status line says why.
+    Status,
+    /// The buffer took the file's change.
+    Edited,
+}
+
 /// Arm the auto-reload poll if it is not already running.
 ///
 /// Spawns a timer loop sending a tick every [`crate::app::AUTO_RELOAD_POLL`],
@@ -126,8 +142,12 @@ pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
     stoat.auto_reload_poll = Some(task);
 }
 
-/// Stat every auto-reload-flagged buffer's file and read the ones that moved,
-/// disarming the poll when none remain.
+/// Stat the active workspace's auto-reload-flagged files and read the ones
+/// that moved, disarming the poll once no workspace flags a buffer.
+///
+/// Only the active workspace is polled. A workspace in the background reads
+/// its files again on return, because the stat compares mtimes. Its flags keep
+/// the poll armed meanwhile, and the poll reads nothing for it.
 ///
 /// The stat is all this does on the run loop. A file whose mtime advanced is
 /// read and compared on the blocking pool, and
@@ -140,12 +160,16 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
     if stoat.auto_reload_poll.is_none() {
         return false;
     }
-    let paths = stoat.active_workspace().buffers.auto_reload_paths();
-    if paths.is_empty() {
+    if !stoat
+        .workspaces
+        .values()
+        .any(|ws| ws.buffers.has_auto_reload())
+    {
         stoat.auto_reload_poll = None;
         return false;
     }
 
+    let paths = stoat.active_workspace().buffers.auto_reload_paths();
     let mut spawned = false;
     for (id, path, mode) in paths {
         spawned |= stat_and_read_buffer(stoat, id, &path, mode);
@@ -170,6 +194,7 @@ pub(crate) fn stat_and_read_buffer(
     path: &Path,
     mode: AutoReloadMode,
 ) -> bool {
+    let workspace = stoat.active_workspace;
     let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
         return false;
     };
@@ -199,7 +224,7 @@ pub(crate) fn stat_and_read_buffer(
     // One read per file at a time. A poll landing while the last one is
     // still out reads the same bytes a second time, and the install keeps
     // only the one the buffer has not moved past.
-    if stoat.pending_auto_reloads.iter().any(|p| p.id == id) {
+    if read_in_flight(stoat, id) {
         return false;
     }
 
@@ -212,6 +237,7 @@ pub(crate) fn stat_and_read_buffer(
         stoat.executor.spawn_blocking(move || {
             let outcome = read_and_compare(&*fs_host, &path, &rope);
             *result.lock().expect("pending reload mutex") = Some(AutoReloadResult {
+                workspace,
                 id,
                 mode,
                 mtime,
@@ -222,11 +248,24 @@ pub(crate) fn stat_and_read_buffer(
         })
     };
     stoat.pending_auto_reloads.push(PendingAutoReload {
+        workspace,
         id,
         _task: task,
         result,
     });
     true
+}
+
+/// Whether a read of the active workspace's buffer `id` is still out.
+///
+/// Buffer ids repeat across workspaces, so a read out for another workspace's
+/// buffer under the same id does not count.
+fn read_in_flight(stoat: &Stoat, id: BufferId) -> bool {
+    let workspace = stoat.active_workspace;
+    stoat
+        .pending_auto_reloads
+        .iter()
+        .any(|p| (p.workspace, p.id) == (workspace, id))
 }
 
 /// Read `path` and work out the edit that brings `old` up to it.
@@ -323,98 +362,15 @@ pub(crate) fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
     let mut changed = false;
 
     for result in ready {
-        let AutoReloadResult {
-            id,
-            mode,
-            mtime,
-            version,
-            outcome,
-        } = result;
-
-        let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
-            continue;
-        };
-        let (dirty, current) = {
-            let guard = buffer.read().expect("buffer poisoned");
-            (guard.dirty, guard.snapshot.version)
-        };
-        if dirty || current != version {
-            continue;
-        }
-
-        let diff = match outcome {
-            Ok(diff) => diff,
-            Err(message) => {
-                stoat
-                    .active_workspace_mut()
-                    .buffers
-                    .set_disk_mtime(id, mtime);
-                stoat.set_status(message);
-                status_set = true;
-                continue;
-            },
-        };
-
-        stoat
-            .active_workspace_mut()
-            .buffers
-            .set_line_ending(id, diff.ending);
-
-        let Some((old_span, text)) = diff.splice else {
-            stoat
-                .active_workspace_mut()
-                .buffers
-                .set_disk_mtime(id, mtime);
-            continue;
-        };
-
-        let tail_followers: Vec<EditorId> = if mode == AutoReloadMode::Tail {
-            stoat
-                .active_workspace_mut()
-                .editors
-                .iter_mut()
-                .filter_map(|(eid, editor)| {
-                    (editor.buffer_id == id && editor_cursor_row(editor) == diff.old_last_row)
-                        .then_some(eid)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        {
-            let mut guard = buffer.write().expect("buffer poisoned");
-            guard.edit(old_span, &text);
-            guard.mark_clean();
-        }
-        stoat
-            .active_workspace_mut()
-            .buffers
-            .set_disk_mtime(id, mtime);
-        changed = true;
-
-        let ws = stoat.active_workspace_mut();
-        for eid in tail_followers {
-            if let Some(editor) = ws.editors.get_mut(eid) {
-                collapse_to_buffer_end(editor, scrolloff);
-            }
-        }
-        if mode == AutoReloadMode::Follow {
-            if stoat.follow_changes {
-                show_followed_buffer(stoat, id, buffer);
-            }
-
-            let ws = stoat.active_workspace_mut();
-            let follow_editors: Vec<EditorId> = ws
-                .editors
-                .iter()
-                .filter_map(|(eid, editor)| (editor.buffer_id == id).then_some(eid))
-                .collect();
-            for eid in follow_editors {
-                if let Some(editor) = ws.editors.get_mut(eid) {
-                    collapse_to_offset(editor, diff.follow_offset, scrolloff);
-                }
-            }
+        let workspace = result.workspace;
+        let on_screen = workspace == stoat.active_workspace;
+        let installed = stoat.in_workspace(workspace, |stoat| {
+            install_reload(stoat, result, on_screen, scrolloff)
+        });
+        match installed {
+            Some(Installed::Edited) => changed = true,
+            Some(Installed::Status) => status_set = true,
+            Some(Installed::Nothing) | None => {},
         }
     }
 
@@ -422,6 +378,113 @@ pub(crate) fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
         sync::notify_buffer_changes_pending(stoat);
     }
     changed || status_set
+}
+
+/// Apply one finished read to the active workspace, which
+/// [`pump_auto_reload_install`] makes the workspace that started the read.
+///
+/// Only a workspace on screen brings a followed buffer to its pane. A
+/// workspace in the background still takes the edit and moves its cursors, so
+/// its file reads current on return.
+fn install_reload(
+    stoat: &mut Stoat,
+    result: AutoReloadResult,
+    on_screen: bool,
+    scrolloff: u32,
+) -> Installed {
+    let AutoReloadResult {
+        id,
+        mode,
+        mtime,
+        version,
+        outcome,
+        ..
+    } = result;
+
+    let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
+        return Installed::Nothing;
+    };
+    let (dirty, current) = {
+        let guard = buffer.read().expect("buffer poisoned");
+        (guard.dirty, guard.snapshot.version)
+    };
+    if dirty || current != version {
+        return Installed::Nothing;
+    }
+
+    let diff = match outcome {
+        Ok(diff) => diff,
+        Err(message) => {
+            stoat
+                .active_workspace_mut()
+                .buffers
+                .set_disk_mtime(id, mtime);
+            stoat.set_status(message);
+            return Installed::Status;
+        },
+    };
+
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_line_ending(id, diff.ending);
+
+    let Some((old_span, text)) = diff.splice else {
+        stoat
+            .active_workspace_mut()
+            .buffers
+            .set_disk_mtime(id, mtime);
+        return Installed::Nothing;
+    };
+
+    let tail_followers: Vec<EditorId> = if mode == AutoReloadMode::Tail {
+        stoat
+            .active_workspace_mut()
+            .editors
+            .iter_mut()
+            .filter_map(|(eid, editor)| {
+                (editor.buffer_id == id && editor_cursor_row(editor) == diff.old_last_row)
+                    .then_some(eid)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    {
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.edit(old_span, &text);
+        guard.mark_clean();
+    }
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_disk_mtime(id, mtime);
+
+    let ws = stoat.active_workspace_mut();
+    for eid in tail_followers {
+        if let Some(editor) = ws.editors.get_mut(eid) {
+            collapse_to_buffer_end(editor, scrolloff);
+        }
+    }
+    if mode == AutoReloadMode::Follow {
+        if stoat.follow_changes && on_screen {
+            show_followed_buffer(stoat, id, buffer);
+        }
+
+        let ws = stoat.active_workspace_mut();
+        let follow_editors: Vec<EditorId> = ws
+            .editors
+            .iter()
+            .filter_map(|(eid, editor)| (editor.buffer_id == id).then_some(eid))
+            .collect();
+        for eid in follow_editors {
+            if let Some(editor) = ws.editors.get_mut(eid) {
+                collapse_to_offset(editor, diff.follow_offset, scrolloff);
+            }
+        }
+    }
+    Installed::Edited
 }
 
 /// Bring buffer `id` to the pane a followed write lands in, with the diff view
@@ -984,7 +1047,7 @@ pub(crate) fn drain_live_reload(stoat: &mut Stoat) -> bool {
         let Some(id) = stoat.active_workspace().buffers.id_for_path(&path) else {
             continue;
         };
-        if stoat.pending_auto_reloads.iter().any(|p| p.id == id) {
+        if read_in_flight(stoat, id) {
             note_live_reload(stoat, path);
             continue;
         }
@@ -1314,6 +1377,92 @@ mod tests {
         assert!(
             !editor::focused_dirty(&h.stoat),
             "a reloaded buffer stays clean"
+        );
+    }
+
+    /// Buffer ids and fresh versions repeat across workspaces, so each read
+    /// lands in the workspace that started it, and a read still out for one
+    /// workspace does not hold back the other's.
+    #[test]
+    fn a_reload_lands_in_the_workspace_that_started_it() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-owner");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+        let launch = h.stoat.active_workspace;
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+        let (other_path, other_id) = open_auto_reload(&mut h, &root, "other.txt", b"other\n");
+        assert_eq!(other_id, id, "each workspace numbers its first file alike");
+
+        h.set_active_workspace(launch);
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        pump_auto_reload(&mut h.stoat);
+        h.set_active_workspace(other);
+        h.fake_fs().insert_file(&other_path, b"other\nmore\n");
+        pump_auto_reload(&mut h.stoat);
+        h.run_until_parked();
+        pump_auto_reload_install(&mut h.stoat);
+
+        let texts = [launch, other].map(|ws| {
+            h.set_active_workspace(ws);
+            buffer_text(&h, id)
+        });
+        assert_eq!(texts, ["line1\nline2\n", "other\nmore\n"]);
+    }
+
+    /// A poll made while another workspace is on screen keeps the follow
+    /// armed, so the followed file reloads on return.
+    #[test]
+    fn following_survives_a_workspace_round_trip() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-round-trip");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+        let launch = h.stoat.active_workspace;
+        let other = h.create_workspace();
+
+        h.set_active_workspace(other);
+        pump_poll(&mut h);
+        h.set_active_workspace(launch);
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        pump_poll(&mut h);
+
+        assert_eq!(
+            (h.stoat.auto_reload_poll.is_some(), buffer_text(&h, id)),
+            (true, "line1\nline2\n".to_owned()),
+            "the follow outlives a poll spent in another workspace",
+        );
+    }
+
+    /// A followed write that lands in a background workspace leaves its panes
+    /// as they were, since nobody looks at them.
+    #[test]
+    fn a_background_follow_leaves_the_panes_alone() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-background-follow");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .set_auto_reload(id, AutoReloadMode::Follow);
+        h.stoat.follow_changes = true;
+        let (_, shown) = open_auto_reload(&mut h, &root, "shown.txt", b"shown\n");
+        let launch = h.stoat.active_workspace;
+
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        pump_auto_reload(&mut h.stoat);
+        h.run_until_parked();
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+        pump_auto_reload_install(&mut h.stoat);
+        h.set_active_workspace(launch);
+
+        assert_eq!(
+            (
+                focused_editor_mut(&mut h.stoat).expect("editor").buffer_id,
+                buffer_text(&h, id),
+            ),
+            (shown, "line1\nline2\n".to_owned()),
+            "the read edits the followed buffer and leaves the pane on its file",
         );
     }
 

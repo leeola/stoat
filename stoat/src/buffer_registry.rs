@@ -420,6 +420,14 @@ impl BufferRegistry {
             .collect()
     }
 
+    /// Whether [`Self::auto_reload_paths`] lists any buffer, answered without
+    /// building the list.
+    pub(crate) fn has_auto_reload(&self) -> bool {
+        self.buffers
+            .values()
+            .any(|e| e.auto_reload != AutoReloadMode::Off && e.path.is_some())
+    }
+
     /// Returns paths of currently-open path-bound buffers in lexicographic
     /// order. Scratch buffers (with no path) are skipped. The deterministic
     /// ordering matches what the file finder shows for the All scope.
