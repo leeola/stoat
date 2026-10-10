@@ -30,6 +30,7 @@ pub enum FakeFsOp {
     CreateDirAll { path: PathBuf },
     Canonicalize { path: PathBuf },
     RemoveFile { path: PathBuf },
+    RemoveDir { path: PathBuf },
     Rename { from: PathBuf, to: PathBuf },
 }
 
@@ -627,6 +628,41 @@ impl FsHost for FakeFs {
         }
     }
 
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        let mut state = self.state.lock().expect("FakeFs lock poisoned");
+        state.ops.push(FakeFsOp::RemoveDir {
+            path: path.to_path_buf(),
+        });
+        match state.entries.get(path) {
+            Some(FakeEntry::Dir { .. }) => {},
+            Some(FakeEntry::File { .. } | FakeEntry::Symlink { .. }) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!("{}: not a directory", path.display()),
+                ));
+            },
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{}: not found", path.display()),
+                ));
+            },
+        }
+
+        let holds_entries = state
+            .entries
+            .keys()
+            .any(|key| key != path && key.starts_with(path));
+        if holds_entries {
+            return Err(io::Error::new(
+                io::ErrorKind::DirectoryNotEmpty,
+                format!("{}: directory not empty", path.display()),
+            ));
+        }
+        state.entries.remove(path);
+        Ok(())
+    }
+
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let mut state = self.state.lock().expect("FakeFs lock poisoned");
         state.ops.push(FakeFsOp::Rename {
@@ -871,6 +907,36 @@ mod tests {
         fs.remove_file(Path::new("/link")).unwrap();
         assert!(!fs.exists(Path::new("/link")));
         assert!(fs.exists(Path::new("/target")));
+    }
+
+    #[test]
+    fn remove_dir_removes_an_empty_directory() {
+        let fs = FakeFs::new();
+        fs.insert_dir("/root/empty");
+        fs.remove_dir(Path::new("/root/empty")).unwrap();
+        assert_eq!(
+            (
+                fs.exists(Path::new("/root/empty")),
+                fs.exists(Path::new("/root")),
+            ),
+            (false, true),
+            "the directory goes and its parent stays",
+        );
+    }
+
+    #[test]
+    fn remove_dir_refuses_a_directory_that_holds_a_file() {
+        let fs = FakeFs::new();
+        fs.insert_file("/root/full/a.txt", "a");
+        let err = fs.remove_dir(Path::new("/root/full")).unwrap_err();
+        assert_eq!(
+            (
+                err.kind(),
+                fs.exists(Path::new("/root/full")),
+                fs.exists(Path::new("/root/full/a.txt")),
+            ),
+            (io::ErrorKind::DirectoryNotEmpty, true, true),
+        );
     }
 
     #[test]
