@@ -689,6 +689,56 @@ fn apply_to_index_keeps_an_executable_mode() {
     );
 }
 
+/// The patch builder writes normalized lines, and the apply compares them byte
+/// for byte against a blob committed with CRLF.
+#[test]
+fn apply_to_index_stages_into_a_crlf_blob() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\r\ntwo\r\n");
+    let patch = "diff --git a/a.rs b/a.rs\n\
+                 --- a/a.rs\n\
+                 +++ b/a.rs\n\
+                 @@ -1,2 +1,2 @@\n \
+                 one\n\
+                 -two\n\
+                 +TWO\n";
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+
+    assert_eq!(
+        (
+            repo.apply_to_index(patch).is_ok(),
+            staged_blob(tr.path(), "a.rs")
+        ),
+        (true, Some("one\r\nTWO\r\n".to_string())),
+    );
+}
+
+/// The parser strips one byte from a line the no-newline marker follows, so
+/// that line keeps its bare `\n` while the rest of the hunk takes `\r\n`.
+#[test]
+fn apply_to_index_keeps_an_unterminated_crlf_last_line() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\r\ntwo");
+    let patch = "diff --git a/a.rs b/a.rs\n\
+                 --- a/a.rs\n\
+                 +++ b/a.rs\n\
+                 @@ -1,2 +1,2 @@\n \
+                 one\n\
+                 -two\n\
+                 \\ No newline at end of file\n\
+                 +TWO\n\
+                 \\ No newline at end of file\n";
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+
+    assert_eq!(
+        (
+            repo.apply_to_index(patch).is_ok(),
+            staged_blob(tr.path(), "a.rs")
+        ),
+        (true, Some("one\r\nTWO".to_string())),
+    );
+}
+
 #[test]
 fn apply_to_index_stages_pure_addition() {
     let tr = TestRepo::new();

@@ -347,7 +347,6 @@ impl GitRepo for LocalGitRepo {
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
-        let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;
 
         // The patch states no mode, and libgit2 writes the post-image entry at
         // 100644 then. A mode header needs the blob ids of an `index` line,
@@ -359,6 +358,24 @@ impl GitRepo for LocalGitRepo {
             None => None,
         };
 
+        // The patch builder works in normalized text, and the apply compares
+        // the pre-image byte for byte against the blob, so a blob committed
+        // with CRLF needs its endings in the hunk. A patch that already
+        // carries `\r\n`, as a conflict resolution's does, goes as written.
+        let crlf = !patch.contains("\r\n")
+            && rel
+                .and_then(|rel| index_blob_text(&repo, rel))
+                .is_some_and(|text| LineEnding::detect(&text) == LineEnding::Crlf);
+        let crlf_patch;
+        let patch = match crlf {
+            true => {
+                crlf_patch = with_crlf_hunk_lines(patch);
+                crlf_patch.as_str()
+            },
+            false => patch,
+        };
+
+        let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;
         if let Err(err) = repo.apply(&diff, ApplyLocation::Index, None) {
             return Err(apply_error(&repo, patch, &err));
         }
@@ -436,6 +453,14 @@ impl GitRepo for LocalGitRepo {
         for (path, content) in updates {
             match content {
                 Some(content) => {
+                    // An update arrives as normalized text, so a blob the base
+                    // tree holds with CRLF gets its endings back. A text that
+                    // already carries `\r\n` goes as written.
+                    let ending = match content.contains("\r\n") {
+                        true => LineEnding::Lf,
+                        false => tree_blob_ending(&repo, &base, path),
+                    };
+                    let content = ending.restore(content);
                     written.push((path, repo.blob(content.as_bytes()).map_err(err_msg)?))
                 },
                 None => {
@@ -1072,6 +1097,48 @@ fn apply_error(repo: &Repository, patch: &str, err: &git2::Error) -> GitApplyErr
         reason: format!("{reason} ({}: {detail})", rel.display()),
     }
     .build()
+}
+
+/// The line ending of the blob `tree` holds at `path`, or [`LineEnding::Lf`]
+/// when the path holds no UTF-8 blob.
+fn tree_blob_ending(repo: &Repository, tree: &git2::Tree<'_>, path: &Path) -> LineEnding {
+    tree.get_path(path)
+        .ok()
+        .and_then(|entry| repo.find_blob(entry.id()).ok())
+        .and_then(|blob| {
+            std::str::from_utf8(blob.content())
+                .ok()
+                .map(LineEnding::detect)
+        })
+        .unwrap_or(LineEnding::Lf)
+}
+
+/// `patch` with each hunk line ending in `\r\n`, for a blob that uses CRLF.
+///
+/// A line the no-newline marker follows keeps its `\n`, because the parser
+/// strips exactly one byte from that line. The headers, the `@@` lines, and
+/// the markers keep their own endings.
+fn with_crlf_hunk_lines(patch: &str) -> String {
+    let mut out = String::with_capacity(patch.len() + patch.len() / 8);
+    let mut in_hunk = false;
+    let mut lines = patch.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            out.push_str(line);
+            continue;
+        }
+
+        let before_marker = lines.peek().is_some_and(|next| next.starts_with('\\'));
+        match line.strip_suffix('\n') {
+            Some(text) if in_hunk && !line.starts_with('\\') && !before_marker => {
+                out.push_str(text);
+                out.push_str("\r\n");
+            },
+            _ => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// The mode of the stage-0 index entry at `rel`, or `None` when the index
@@ -1725,6 +1792,29 @@ mod tests {
             (0o100755, 0o100644),
             "the script stays executable and the plain file stays plain",
         );
+    }
+
+    /// An amend hands over normalized text, so a blob committed with CRLF gets
+    /// its endings back rather than turning every line to LF.
+    #[test]
+    fn tree_with_updates_keeps_a_crlf_blob_crlf() {
+        let (dir, repo, _) = seeded_repo();
+        let base = commit_files(&repo, &dir, &[("a.rs", b"one\r\ntwo\r\n")]);
+        let git = discover(&dir);
+
+        let oid = git
+            .tree_with_updates(
+                &base,
+                &[(PathBuf::from("a.rs"), Some("one\nTWO\n".to_string()))],
+            )
+            .expect("the update writes a tree");
+
+        let blob = {
+            let tree = repo.find_tree(Oid::from_str(&oid).unwrap()).unwrap();
+            let entry = tree.get_path(Path::new("a.rs")).unwrap();
+            repo.find_blob(entry.id()).unwrap().content().to_vec()
+        };
+        assert_eq!(blob, b"one\r\nTWO\r\n");
     }
 
     /// A conflict resolved by deleting a file, and a rebased pick over a commit
