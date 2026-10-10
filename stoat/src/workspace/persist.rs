@@ -813,11 +813,13 @@ mod tests {
     use crate::{
         host::FakeFs,
         jumplist::{JumpEntry, JumpList},
+        multi_buffer::MultiBuffer,
         pane::{Axis, DockSide, DockVisibility, Placement},
+        selection::SelectionsCollection,
     };
     use std::{collections::HashSet, sync::Arc, time::Duration};
     use stoat_scheduler::TestScheduler;
-    use stoat_text::{Selection, SelectionGoal};
+    use stoat_text::{Bias, Selection, SelectionGoal};
 
     fn executor() -> Executor {
         Arc::new(TestScheduler::new()).executor()
@@ -1655,6 +1657,70 @@ mod tests {
             .map(|s| restored_snap.resolve_anchor(&s.start))
             .collect();
         assert_eq!(offsets_after, offsets_before);
+    }
+
+    /// A session written before the selection set recorded its primary still
+    /// loads. The primary is recomputed as the highest-id selection rather than
+    /// taken as the first.
+    #[test]
+    fn a_session_without_a_recorded_primary_loads_and_recomputes_it() {
+        let fake = FakeFs::new();
+        let exec = executor();
+        let mut ws = new_laid_out_workspace(PathBuf::from("/test"), &exec);
+        let (id, buffer) = ws.buffers.open(Path::new("/test/code.txt"), "abcdefghij\n");
+        let editor_id = ws.editors.insert(EditorState::new(
+            id,
+            buffer.clone(),
+            exec.clone(),
+            crate::test_notify(),
+        ));
+        let snap = MultiBuffer::singleton(buffer).snapshot();
+        let mut selections = SelectionsCollection::new();
+        for offset in [3, 7] {
+            selections.insert_cursor(
+                snap.anchor_at(offset, Bias::Right),
+                SelectionGoal::None,
+                &snap,
+            );
+        }
+        ws.editors[editor_id].selections = selections;
+        let root = ws.panes.focus();
+        ws.panes.pane_mut(root).view = View::Editor(editor_id);
+
+        let state_path = PathBuf::from("/test/state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let legacy = {
+            let mut buf = Vec::new();
+            fake.read(&state_path, &mut buf).unwrap();
+            let body = String::from_utf8(buf).unwrap();
+            let kept: Vec<&str> = body
+                .lines()
+                .filter(|line| !line.contains("newest"))
+                .collect();
+            kept.join("\n")
+        };
+        fake.write(&state_path, legacy.as_bytes()).unwrap();
+
+        let mut fresh = Workspace::new(PathBuf::from("/test"), &exec, crate::test_notify());
+        fresh
+            .restore_state(&state_path, &fake, &exec)
+            .expect("a file without newest still loads");
+
+        let editor = match fresh.panes.pane(fresh.panes.focus()).view {
+            View::Editor(id) => &fresh.editors[id],
+            _ => panic!("the restored pane shows an editor"),
+        };
+        let restored =
+            MultiBuffer::singleton(fresh.buffers.get(editor.buffer_id).expect("buffer")).snapshot();
+        let anchors = editor.selections.all_anchors();
+        let primary = &anchors[editor.selections.primary_index()];
+        assert_eq!(
+            (restored.resolve_anchor(&primary.start), primary.id),
+            (
+                7,
+                anchors.iter().map(|sel| sel.id).max().expect("a selection")
+            ),
+        );
     }
 
     /// The snapshot runs on the UI thread, so it must not copy an open file's

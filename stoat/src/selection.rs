@@ -6,6 +6,7 @@ use stoat_text::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(from = "SelectionsCollectionWire")]
 pub(crate) struct SelectionsCollection {
     next_selection_id: usize,
     /// The selections, shared rather than owned.
@@ -1141,6 +1142,33 @@ impl SelectionsCollection {
             })
             .collect();
         self.install(landed);
+    }
+}
+
+/// A [`SelectionsCollection`] as a session file holds it, read without the
+/// recorded primary.
+///
+/// Files saved before the collection recorded its primary lack that field. The
+/// primary is a fact about the list, so the read recomputes it for every file
+/// rather than default it to the first selection, which is wrong whenever the
+/// newest cursor is not first. A file that carries the field reads the same
+/// way, since serde passes over a field the struct does not name.
+#[derive(Deserialize)]
+struct SelectionsCollectionWire {
+    next_selection_id: usize,
+    disjoint: Arc<[Selection<Anchor>]>,
+}
+
+impl From<SelectionsCollectionWire> for SelectionsCollection {
+    fn from(wire: SelectionsCollectionWire) -> Self {
+        let mut collection = Self::new();
+        // The primary lookup assumes a selection to point at, so an empty list
+        // keeps the single cursor a new collection starts with.
+        if !wire.disjoint.is_empty() {
+            collection.next_selection_id = wire.next_selection_id;
+            collection.install(wire.disjoint);
+        }
+        collection
     }
 }
 
@@ -2803,5 +2831,16 @@ mod tests {
             vec![(0, 18)],
             "the cursor covers the whole sequence the cell was drawn inside",
         );
+    }
+
+    /// A file with no selection reads as a new collection's single cursor,
+    /// since the primary lookup needs a selection to point at.
+    #[test]
+    fn an_empty_selection_list_reads_as_a_new_collection() {
+        let read: SelectionsCollection =
+            ron::from_str("(next_selection_id: 5, disjoint: [])").expect("the file parses");
+
+        let ids: Vec<usize> = read.all_anchors().iter().map(|sel| sel.id).collect();
+        assert_eq!((ids, read.newest_anchor().id), (vec![0], 0));
     }
 }

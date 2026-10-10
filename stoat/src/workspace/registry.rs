@@ -213,4 +213,40 @@ mod tests {
             "the legacy file's sidecar is backfilled"
         );
     }
+
+    /// A state file written before the selection set recorded its primary still
+    /// parses, so the listing shows it and backfills its sidecar.
+    #[test]
+    fn list_all_backfills_a_state_file_without_a_recorded_primary() {
+        let fake = FakeFs::new();
+        let exec = Arc::new(TestScheduler::new()).executor();
+        let path = PathBuf::from("/state/hash/3.ron");
+        Workspace::new(PathBuf::from("/proj"), &exec, crate::test_notify())
+            .save_state(&path, &fake)
+            .unwrap();
+        fake.remove_file(&meta_path_for(&path)).unwrap();
+
+        let mut buf = Vec::new();
+        fake.read(&path, &mut buf).unwrap();
+        let body = String::from_utf8(buf).unwrap();
+        assert!(
+            body.contains("newest"),
+            "the saved editor records its primary"
+        );
+        let kept: Vec<&str> = body
+            .lines()
+            .filter(|line| !line.contains("newest"))
+            .collect();
+        fake.write(&path, kept.join("\n").as_bytes()).unwrap();
+
+        let roots: Vec<PathBuf> = list_all_in(Path::new("/state"), &fake)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.meta.git_root)
+            .collect();
+        assert_eq!(
+            (roots, fake.exists(&meta_path_for(&path))),
+            (vec![PathBuf::from("/proj")], true),
+        );
+    }
 }
