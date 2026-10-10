@@ -1224,7 +1224,10 @@ fn ranges_meet(a: &Range<u32>, b: &Range<u32>) -> bool {
 /// recovers the index row. The removed count comes from [`hunk_base_lines`],
 /// the count the staging patches place their hunks by, so the two agree on
 /// where each hunk sits.
-fn map_buffer_row_to_index(index_text: &str, buffer_text: &str, cursor_row: u32) -> u32 {
+///
+/// An amend passes the commit's text as `index_text`, since the commit is the
+/// staged side there. See [`amend::amended_file`].
+pub(super) fn map_buffer_row_to_index(index_text: &str, buffer_text: &str, cursor_row: u32) -> u32 {
     let starts = line_starts(index_text);
     let mut shift: i64 = 0;
     for hunk in line_hunks(index_text, buffer_text) {

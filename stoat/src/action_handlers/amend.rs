@@ -5,7 +5,7 @@
 //! screen. The keys that cross that line are the same `s` and `S` that drive
 //! the git index elsewhere, so this is where they go instead.
 
-use super::review::{HunkStage, StageOutcome};
+use super::review::{self, HunkStage, StageOutcome};
 use crate::{
     app::Stoat, diff_map::line_starts, host::GitRepo, rebase::RebasePause,
     review_apply::base_line_range, review_walk::ReturnRef, workspace::diff::DiffBase,
@@ -148,7 +148,25 @@ pub(super) fn amended_file(
     };
 
     let amend_in = || amended_content(&head, buffer_text, &head, cursor_row, true, &unit);
-    let amend_out = || amended_content(&parent, &head, &head, cursor_row, false, &unit);
+    // Amending out diffs the parent against the commit, so it reads the
+    // commit's rows. An edit above the hunk moves the buffer rows off those.
+    let amend_out = || {
+        let head_row = |row| review::map_buffer_row_to_index(&head, buffer_text, row);
+        let head_unit = match &unit {
+            AmendUnit::Rows(rows) => {
+                AmendUnit::Rows(head_row(rows.start)..head_row(rows.end.saturating_sub(1)) + 1)
+            },
+            unit => unit.clone(),
+        };
+        amended_content(
+            &parent,
+            &head,
+            &head,
+            head_row(cursor_row),
+            false,
+            &head_unit,
+        )
+    };
     let (into, out_of, nothing) = unit.messages();
     let amended = match mode {
         HunkStage::Stage => amend_in().map(|text| (text, into)),
@@ -1148,6 +1166,64 @@ mod tests {
             committed(&h).as_deref(),
             Some("a\nb\nc\nd\n"),
             "both lines came out one press at a time",
+        );
+    }
+
+    /// An unstage reads the cursor in the commit's rows. A line typed above
+    /// both hunks puts each buffer row below it one past its commit row, so
+    /// the unchanged `d` holds no hunk, and the `E` row amends `E` out.
+    #[test]
+    fn an_unstage_below_a_typed_line_reads_the_commit_row() {
+        const TIP: &str = "a\nB\nc\nd\nE\nf\n";
+        let unstage_at = |row| {
+            let mut h = walking_the_tip_of("a\nb\nc\nd\ne\nf\n", TIP);
+            cursor_to(&mut h, 0);
+            h.type_keys("O n e w escape");
+            cursor_to(&mut h, row);
+
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+            h.settle();
+            (committed(&h), h.stoat.pending_message.clone())
+        };
+
+        assert_eq!(
+            (unstage_at(4), unstage_at(5)),
+            (
+                (
+                    Some(TIP.to_string()),
+                    Some("no hunk under the cursor".to_string())
+                ),
+                (
+                    Some("a\nB\nc\nd\ne\nf\n".to_string()),
+                    Some("amended hunk out of the commit".to_string())
+                ),
+            ),
+        );
+    }
+
+    /// Inside a hunk the tree pass narrowed, an unstage below a typed line
+    /// amends out the run under the cursor, read in the commit's rows.
+    #[test]
+    fn unstage_hunk_below_a_typed_line_amends_out_only_the_run_under_the_cursor() {
+        const TIP: &str =
+            "fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n        let c = 4;\n    }\n}\n";
+        let mut h = walking_the_tip_of(
+            "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n",
+            TIP,
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.seed_focused_buffer(&format!("// top\n{TIP}"));
+        h.settle_diff_jobs();
+        cursor_to(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        h.settle();
+
+        assert_eq!(
+            committed(&h).as_deref(),
+            Some(
+                "fn f() {\n        let a = 1;\n        let b = 2;\n        let c = 4;\n    }\n}\n"
+            ),
         );
     }
 }
