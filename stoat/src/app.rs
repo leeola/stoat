@@ -2,7 +2,7 @@ use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
     agent_status::AgentStatus,
-    apc_emit,
+    apc_emit::{self, PoolOwner},
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::OpenOrigin,
@@ -1041,6 +1041,13 @@ pub struct Stoat {
     /// on any anchored pool that glides. So the emit releases this pool once its
     /// pane is no longer the focused editor. `None` when no pool holds one.
     pub(crate) pool_cursor_holder: Option<u32>,
+    /// The surface each pane pool held on the last pass of
+    /// [`apc_emit::emit_smooth_scroll`], by pool id.
+    ///
+    /// A pool id is a pane index, and the root pane of every tab and every
+    /// workspace has index 0. The emit compares each pass against this record
+    /// and retires a pool whose surface changed under the same id.
+    pub(crate) pool_owners: std::collections::BTreeMap<u32, PoolOwner>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -2432,6 +2439,7 @@ impl Stoat {
             aux_windows: std::collections::BTreeMap::new(),
             aux_cursor: None,
             pool_cursor_holder: None,
+            pool_owners: std::collections::BTreeMap::new(),
             _index_build_task: None,
             redraw_notify,
             drain_notify,

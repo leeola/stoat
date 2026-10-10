@@ -1680,6 +1680,20 @@ fn pool_commands(bytes: &[u8], pool: u32) -> Vec<command::Command> {
         .collect()
 }
 
+/// The drops and declarations of pool `pool` in `bytes`, in wire order.
+fn pool_lifecycle(bytes: &[u8], pool: u32) -> Vec<&'static str> {
+    use stoatty_protocol::command::Command;
+
+    command::decode_stream(bytes)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::PoolDrop(drop) if drop.pool == pool => Some("drop"),
+            Command::PoolRegion(region) if region.pool == pool => Some("declare"),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A terminal pane pools as a terminal kind over its content area under a
 /// terminal at protocol 9, and pools nothing under an older one, which draws
 /// the pane on the live grid.
@@ -1809,6 +1823,76 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does() {
         (focused, unfocused),
         ((true, true), (false, true)),
         "the page and the live grid paint the pane alike, focused or not",
+    );
+}
+
+/// A pane keeps its index when it opens another file, and the root pane of a
+/// new tab takes index 0, so a pane pool's id outlives the editor it showed.
+/// The pool starts over for the next editor, or the terminal composites the
+/// pages of the last one over it.
+#[test]
+fn a_pane_pool_starts_over_for_another_editor() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/p");
+    for name in ["a.txt", "b.txt"] {
+        h.fake_fs()
+            .insert_file(root.join(name), b"alpha\nbravo\ncharlie\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root.clone();
+    let open = |h: &mut crate::test_harness::TestHarness, name: &str| {
+        let path = root.join(name);
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+    };
+    open(&mut h, "a.txt");
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    emit_raw(&mut h, &mut rx);
+
+    open(&mut h, "b.txt");
+    assert_eq!(
+        pool_lifecycle(&emit_raw(&mut h, &mut rx), pool),
+        ["drop", "declare"],
+        "another file in the pane retires the pool before the pass declares it again"
+    );
+    assert_eq!(
+        pool_lifecycle(&emit_raw(&mut h, &mut rx), pool),
+        Vec::<&str>::new(),
+        "and the next pass keeps it"
+    );
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    assert_eq!(
+        pool_lifecycle(&emit_raw(&mut h, &mut rx), 0),
+        ["drop", "declare"],
+        "the scratch editor in the root pane of a new tab takes pool 0 over"
+    );
+}
+
+/// A terminal pool's version leaves out which shell it draws, so a pane that
+/// passes to another shell at the same generation keeps the page of the first
+/// shell unless the pool starts over.
+#[test]
+fn a_pane_pool_starts_over_for_another_terminal() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 9;
+    let (_, pool) = terminal_in_focused_pane(&mut h, b"");
+    emit_raw(&mut h, &mut rx);
+
+    terminal_in_focused_pane(&mut h, b"");
+    assert_eq!(
+        pool_lifecycle(&emit_raw(&mut h, &mut rx), pool),
+        ["drop", "declare"],
+        "another shell in the pane retires the pool before the pass declares it again"
     );
 }
 

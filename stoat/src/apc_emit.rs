@@ -27,7 +27,7 @@ use crate::{
         walkthrough::{self, Spotlight},
     },
     term_session::{TermId, TermSession},
-    workspace::{diff, Workspace},
+    workspace::{diff, Workspace, WorkspaceId},
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::{
@@ -64,6 +64,18 @@ struct TerminalPoolPane {
     /// How far the page blends toward the background. Zero for the focused
     /// pane.
     dim: f32,
+}
+
+/// The surface whose pages a pane pool holds.
+///
+/// A pane pool takes its pane's index as its id, and the root pane of every
+/// tab and every workspace has index 0. One id therefore passes from surface
+/// to surface with no pass in between where it is absent, and only its owner
+/// tells the two surfaces apart.
+#[derive(PartialEq, Eq)]
+pub(crate) enum PoolOwner {
+    Editor(WorkspaceId, EditorId),
+    Terminal(WorkspaceId, TermId),
 }
 
 /// Flush the frame's APC decoration scene to the channel, when it changed.
@@ -766,6 +778,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     };
 
     let mut out = Vec::new();
+    drop_reowned_pools(stoat, &mut out, &panes, &terminal_panes);
+
     let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
     active.extend(terminal_panes.iter().map(|pane| pane.region.pool));
     // Each detached pane also keeps a one-row status pool alive.
@@ -1979,6 +1993,62 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             },
         }
     }
+}
+
+/// Retire every pane pool whose owner changed since the last pass, and record
+/// the owners of this pass.
+///
+/// The id of a pane pool is its pane's index, so the id stays when the
+/// surface changes. A new content version does not replace the drop. The
+/// terminal still composites the slots it holds and glides on from the old
+/// offset, so the pages of one file show over another until the refill lands.
+/// After the drop, this pass declares and fills the pool from scratch.
+///
+/// A pool changes owner when it gains, loses, or swaps one. A gain or a loss
+/// matters for a detached pane that changes between an editor and another
+/// view, because [`emit_window_content`] keeps the same id active for the
+/// content pool of the other view.
+///
+/// The cursor record of a focused detached pane names its pool. A drop clears
+/// that record, so the pass ships the cursor to the declared pool.
+fn drop_reowned_pools(
+    stoat: &mut Stoat,
+    out: &mut Vec<u8>,
+    panes: &[(u32, EditorId, PoolRegionCommand)],
+    terminal_panes: &[TerminalPoolPane],
+) {
+    let workspace = stoat.active_workspace;
+    let owners: std::collections::BTreeMap<u32, PoolOwner> = panes
+        .iter()
+        .map(|(pool, editor, _)| (*pool, PoolOwner::Editor(workspace, *editor)))
+        .chain(terminal_panes.iter().map(|pane| {
+            (
+                pane.region.pool,
+                PoolOwner::Terminal(workspace, pane.term_id),
+            )
+        }))
+        .collect();
+
+    let held = std::mem::take(&mut stoat.pool_owners);
+    let lost_or_swapped = held
+        .iter()
+        .filter(|(pool, owner)| owners.get(pool) != Some(owner))
+        .map(|(pool, _)| *pool);
+    let gained = owners
+        .keys()
+        .filter(|pool| !held.contains_key(pool))
+        .copied();
+    for pool in lost_or_swapped.chain(gained) {
+        stoat.smooth_scroll.drop_pool(out, pool);
+        if stoat
+            .aux_cursor
+            .is_some_and(|(cursor_pool, _, _)| cursor_pool == pool)
+        {
+            stoat.aux_cursor = None;
+        }
+    }
+
+    stoat.pool_owners = owners;
 }
 
 /// Every visible split pane showing an editor, as `(pool id, editor id,

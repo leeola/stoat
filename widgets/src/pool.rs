@@ -214,6 +214,23 @@ impl SmoothScrollState {
         }
     }
 
+    /// Retire pool `id` and forget the thumb placements it fed.
+    ///
+    /// A tracked pool emits its `Gstoatty;pool_drop` into `out`. An untracked
+    /// pool emits nothing, so a caller needs no check before the call.
+    ///
+    /// This is for an id that passes to other content between two frames,
+    /// which [`Self::drop_absent`] does not see because the id stays active.
+    /// The next emit under the id declares the pool from scratch, so no page
+    /// of the earlier content stays in the terminal's slots. A strip that the
+    /// earlier content fed gets its thumb again, even at an unchanged offset.
+    pub fn drop_pool(&mut self, out: &mut Vec<u8>, id: u32) {
+        if self.pools.remove(&id).is_some() {
+            encode_pool_drop_into(out, id);
+        }
+        self.minimap_views.retain(|_, view| view.pool != id);
+    }
+
     /// Retire every tracked pool and forget every thumb placement: emit a
     /// `Gstoatty;pool_drop` for each pool into `out`, then start over empty.
     ///
@@ -623,8 +640,8 @@ mod tests {
         Refill, SmoothScrollState, WINDOW_PAGES,
     };
     use stoatty_protocol::command::{
-        decode, Command, PoolDropCommand, PoolKind, PoolRegionCommand, RepositionCommand,
-        ScrollCommand,
+        decode, Command, MinimapViewCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
+        RepositionCommand, ScrollCommand,
     };
 
     fn region(pool: u32, height: u16) -> PoolRegionCommand {
@@ -1495,6 +1512,47 @@ mod tests {
             Vec::new()
         });
         assert!(commands(&out).contains(&Command::PoolRegion(region(2, 20))));
+    }
+
+    /// An id that passes to other content goes with the thumbs it fed, and
+    /// with nothing else, so the next emit declares the pool again and places
+    /// only those thumbs again.
+    #[test]
+    fn drop_pool_retires_the_pool_and_the_thumbs_it_fed() {
+        fn place_thumbs(state: &mut SmoothScrollState, out: &mut Vec<u8>) {
+            let inputs = MinimapWindowInputs::new(0.0, 7, 20);
+            state.emit_minimap_view(out, 5, 1, inputs, || (0.0, 20));
+            state.emit_minimap_view(out, 6, 2, inputs, || (0.0, 20));
+        }
+
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 7, false, |_| {
+            Vec::new()
+        });
+        place_thumbs(&mut state, &mut out);
+
+        out.clear();
+        state.drop_pool(&mut out, 1);
+        state.drop_pool(&mut out, 3);
+        assert_eq!(
+            commands(&out),
+            vec![Command::PoolDrop(PoolDropCommand { pool: 1 })],
+            "the tracked pool drops, and the untracked one sends nothing"
+        );
+        assert!(!state.already_emitted(1, 7), "pool 1 is forgotten");
+
+        out.clear();
+        place_thumbs(&mut state, &mut out);
+        assert_eq!(
+            commands(&out),
+            vec![Command::MinimapView(MinimapViewCommand {
+                strip_id: 5,
+                top_256: 0,
+                visible_lines: 20,
+            })],
+            "the thumb of pool 1 is placed again, and the thumb of pool 2 stays"
+        );
     }
 
     /// A program whose terminal was driven by another program in between comes
