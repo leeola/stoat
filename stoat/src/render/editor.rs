@@ -1963,6 +1963,11 @@ pub(crate) fn draw_fallback_line_numbers(
     let width = mark_w + width_digits + 2 + gap;
     let number_style = theme.get(s::UI_TEXT_MUTED);
 
+    // A pane as narrow as two columns is smaller than the gutter it reserves,
+    // and a cell past its right edge belongs to a neighbour or lies off the
+    // screen.
+    let right = inner.x + inner.width;
+
     // A scope resolves by walking progressively broadening keys, so a gutter
     // repeating a mark down fifty rows would pay that walk fifty times. Each
     // scope resolves on the first row that wants it and is remembered for the
@@ -1992,7 +1997,9 @@ pub(crate) fn draw_fallback_line_numbers(
         if y >= inner.y + inner.height {
             break;
         }
-        if let Some(sev) = row_severity.at(line - 1) {
+        if let Some(sev) = row_severity.at(line - 1)
+            && inner.x < right
+        {
             buf[(inner.x, y)]
                 .set_char(severity_mark(sev))
                 .set_style(style_for(severity_scope(sev)));
@@ -2002,7 +2009,10 @@ pub(crate) fn draw_fallback_line_numbers(
         write!(number, "{}", gutter_display_number(line, current_line))
             .expect("writing to a String is infallible");
         let start = inner.x + mark_w + width_digits.saturating_sub(number.len() as u16);
-        buf.set_stringn(start, y, &number, number.len(), number_style);
+        if start < right {
+            let max_width = usize::from(right - start).min(number.len());
+            buf.set_stringn(start, y, &number, max_width, number_style);
+        }
 
         if let Some(&(status, staged)) = diff_marks.get(&(line - 1)) {
             let (mark, scope) = match status {
@@ -2011,16 +2021,20 @@ pub(crate) fn draw_fallback_line_numbers(
                 DiffHunkStatus::Modified => ('▎', s::DIFF_MODIFIED),
                 DiffHunkStatus::Moved => ('▎', s::DIFF_MOVED),
             };
-            buf[(change_x, y)]
-                .set_char(mark)
-                .set_style(style_for(scope));
+            if change_x < right {
+                buf[(change_x, y)]
+                    .set_char(mark)
+                    .set_style(style_for(scope));
+            }
             let staged_scope = match staged {
                 true => s::DIFF_STAGED,
                 false => s::DIFF_UNSTAGED,
             };
-            buf[(staged_x, y)]
-                .set_char('▎')
-                .set_style(style_for(staged_scope));
+            if staged_x < right {
+                buf[(staged_x, y)]
+                    .set_char('▎')
+                    .set_style(style_for(staged_scope));
+            }
         }
         top += height;
     }
@@ -3410,6 +3424,36 @@ mod tests {
             buf[(3u16, 1u16)].symbol(),
             " ",
             "a row with no diff mark leaves the staged cell blank",
+        );
+    }
+
+    /// A pane 3 columns wide at the screen's right edge holds the mark and the
+    /// number, and its glyph cells fall past the edge.
+    #[test]
+    fn fallback_gutter_clips_to_a_pane_narrower_than_itself() {
+        use crate::diff_map::DiffHunkStatus;
+        let theme = crate::theme::Theme::empty();
+        let folded = [(1u32, 1u16), (2, 1)];
+        let mut diff_marks = std::collections::BTreeMap::new();
+        diff_marks.insert(0u32, (DiffHunkStatus::Modified, false));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
+
+        let width = super::draw_fallback_line_numbers(
+            &folded,
+            2,
+            &RowSeverity::for_rows([(0, DiagnosticSeverity::ERROR)]),
+            &diff_marks,
+            None,
+            Rect::new(7, 0, 3, 2),
+            &theme,
+            &mut buf,
+        );
+
+        let row = |y: u16| (0..10u16).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert_eq!(
+            (width, row(0), row(1)),
+            (6, "       E 1".to_string(), "         2".to_string()),
+            "the reserved width stays whole while every write stays inside the pane",
         );
     }
 
