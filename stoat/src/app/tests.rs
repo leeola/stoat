@@ -9,6 +9,7 @@ use crate::{
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
     display_map::{DisplayPoint, PaintVersion},
+    editor_state::EditorState,
     host::FsEventKind,
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
@@ -14255,6 +14256,127 @@ fn a_second_request_for_a_held_buffer_keeps_the_first_waiting() {
         [first.try_recv(), second.try_recv()],
         [Ok(BridgeOutcome::Closed); 2]
     );
+}
+
+/// An agent request that enters another workspace closes the palette of the
+/// workspace it leaves, drops the drags in progress, and saves that workspace.
+/// Editor keys repeat across workspaces, so a palette left open disposes the
+/// entered workspace's editor under its input's key on Escape.
+#[test]
+fn an_agent_switch_closes_the_palette_and_saves_the_workspace_left() {
+    let mut h = Stoat::test();
+    h.stoat.persistence_disabled = false;
+    h.seed_focused_buffer("edited\n");
+    let launch = h.stoat.active_workspace;
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+    let key = h
+        .stoat
+        .command_palette
+        .as_ref()
+        .expect("palette")
+        .input
+        .editor_id;
+
+    let second = h.create_workspace();
+    {
+        let (executor, redraw) = (h.stoat.executor.clone(), h.stoat.redraw_notify.clone());
+        let ws = &mut h.stoat.workspaces[second];
+        while !ws.editors.contains_key(key) && ws.editors.len() < 8 {
+            let (buffer_id, buffer) = ws.buffers.new_scratch();
+            let editor = EditorState::new(buffer_id, buffer, executor.clone(), redraw.clone());
+            ws.editors.insert(editor);
+        }
+        assert!(
+            ws.editors.contains_key(key),
+            "the second workspace holds the key"
+        );
+    }
+    h.stoat.editor_drag = Some((key, BufferId::new(1), true));
+    h.stoat.terminal_drag = Some((TermId::default(), true));
+
+    open_agent_editor_in(&mut h, second);
+    let drags = (h.stoat.editor_drag, h.stoat.terminal_drag);
+    h.type_keys("escape");
+
+    assert_eq!(
+        (
+            h.stoat.active_workspace,
+            h.stoat.command_palette.is_none(),
+            drags,
+            h.stoat.workspaces[second].editors.contains_key(key),
+            h.stoat.workspaces[launch].editors.contains_key(key),
+            h.stoat.pending_workspace_saves.contains_key(&launch),
+        ),
+        (second, true, (None, None), true, false, true),
+    );
+}
+
+/// A modal run in the workspace an agent request leaves ends with the switch.
+/// No key reaches the run after it, so a run left running stays modal forever.
+#[test]
+fn an_agent_switch_ends_the_modal_run_of_the_workspace_left() {
+    let mut h = Stoat::test();
+    let launch = h.stoat.active_workspace;
+    let session = Arc::new(crate::host::FakeTerminalSession::new());
+    let (run_id, input) = {
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut run = crate::run::RunState::new(PathBuf::from("/"), ws, executor);
+        run.shell_handle = Some(crate::run::ShellHandle::new(session.clone()));
+        let input = run.input.editor_id;
+        (ws.runs.insert(run), input)
+    };
+    h.stoat.modal_run = Some(run_id);
+    let second = h.create_workspace();
+
+    open_agent_editor_in(&mut h, second);
+
+    let ws = &h.stoat.workspaces[launch];
+    assert_eq!(
+        (
+            h.stoat.active_workspace,
+            h.stoat.modal_run,
+            session.was_killed(),
+            ws.runs.contains_key(run_id),
+            ws.editors.contains_key(input),
+        ),
+        (second, None, true, false, false),
+    );
+}
+
+/// A request into the active workspace leaves an open palette as it is, since
+/// the palette's input belongs to that same workspace.
+#[test]
+fn an_agent_request_into_the_active_workspace_keeps_its_palette() {
+    let mut h = Stoat::test();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+    let active = h.stoat.active_workspace;
+
+    open_agent_editor_in(&mut h, active);
+
+    assert!(h.stoat.command_palette.is_some(), "the palette stays open");
+}
+
+/// Send an agent's request to open a seeded file into workspace `ws`.
+///
+/// The request finds its workspace by uid, and workspaces made while the test
+/// clock stands still share one, so `ws` takes a uid of its own first.
+fn open_agent_editor_in(h: &mut crate::test_harness::TestHarness, ws: WorkspaceId) {
+    let root = PathBuf::from("/bridge");
+    let path = root.join("msg.txt");
+    h.fake_fs().insert_file(&path, b"draft\n");
+    let uid = WorkspaceUid(0xbeef);
+    h.stoat.workspaces[ws].git_root = root;
+    h.stoat.workspaces[ws].uid = uid;
+
+    let (done, _) = tokio::sync::mpsc::unbounded_channel();
+    let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+        uid,
+        client: 0,
+        path,
+        done,
+    });
+    assert_eq!(effect, UpdateEffect::Redraw, "the request opens its file");
 }
 
 #[test]

@@ -7595,11 +7595,13 @@ impl Stoat {
     /// Switches the active workspace to the owning session so the editor lands
     /// beside the agent pane, splits a new pane for the file, and parks the
     /// request's sender on the opened buffer through [`Workspace::hold_buffer`].
-    /// A buffer that is already held gains a second waiter. A file that reads on
-    /// the blocking pool parks the sender on that read, which hands it to the
-    /// buffer the read installs as. Returns [`UpdateEffect::None`] when no live
-    /// workspace owns the session or the file does not open. The dropped sender
-    /// then unblocks the agent so its `$EDITOR` invocation does not hang.
+    /// A switch closes the modals of the workspace it leaves and saves that
+    /// workspace first. A buffer that is already held gains a second waiter. A
+    /// file that reads on the blocking pool parks the sender on that read, which
+    /// hands it to the buffer the read installs as. Returns
+    /// [`UpdateEffect::None`] when no live workspace owns the session or the
+    /// file does not open. The dropped sender then unblocks the agent so its
+    /// `$EDITOR` invocation does not hang.
     ///
     /// An [`AgentControl::ClientGone`] drops the waiters of a command that
     /// went away, and leaves the active workspace as it is.
@@ -7619,7 +7621,7 @@ impl Stoat {
                 else {
                     return UpdateEffect::None;
                 };
-                action_handlers::workspace::switch_active_workspace(self, ws_id);
+                self.enter_agent_workspace(ws_id);
 
                 let new_pane = {
                     let ws = self.active_workspace_mut();
@@ -7667,7 +7669,7 @@ impl Stoat {
                     let _ = done.send(false);
                     return UpdateEffect::None;
                 };
-                action_handlers::workspace::switch_active_workspace(self, ws_id);
+                self.enter_agent_workspace(ws_id);
 
                 let target = {
                     let ws = self.active_workspace_mut();
@@ -7769,6 +7771,43 @@ impl Stoat {
                 UpdateEffect::None
             },
         }
+    }
+
+    /// Close the active workspace's modals, save it, and switch to `ws_id`, for
+    /// an agent request that opens files there.
+    ///
+    /// A modal input owns an editor and a buffer under keys of the workspace it
+    /// opened in, and those keys repeat across workspaces. Left open over
+    /// another workspace, the modal types into the editor there under the same
+    /// key, and its close disposes that editor. A modal run ends outright,
+    /// because the close loop interrupts a run and leaves it open. Hover state
+    /// and a drag in progress belong to the workspace left, so they go too.
+    ///
+    /// A request for the active workspace changes nothing.
+    fn enter_agent_workspace(&mut self, ws_id: WorkspaceId) {
+        if ws_id == self.active_workspace {
+            return;
+        }
+
+        if let Some(run_id) = self.modal_run.take() {
+            let ws = self.active_workspace_mut();
+            if let Some(mut state) = ws.runs.remove(run_id) {
+                if let Some(handle) = &mut state.shell_handle {
+                    handle.kill();
+                }
+                state.dispose(ws);
+            }
+        }
+        while active_modal(self).is_some() {
+            keymap_state::close_topmost_modal(self);
+        }
+        self.pending_hover = None;
+        self.pending_hover_request = None;
+        self.editor_drag = None;
+        self.terminal_drag = None;
+
+        self.save_workspace(self.active_workspace);
+        action_handlers::workspace::switch_active_workspace(self, ws_id);
     }
 
     /// The split pane showing the terminal session named by `token`, with that
