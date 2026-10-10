@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent},
-    picker::{PathPicker, Scan},
+    picker::{PathPicker, PendingScan},
 };
 use std::{
     collections::HashSet,
@@ -27,34 +27,60 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
     }
     sync_file_finder_browse(stoat);
     let active_idx = stoat.active_workspace;
-    let ws = &mut stoat.workspaces[active_idx];
-    let fs_host = &*stoat.fs_host;
-    let language_registry = &stoat.language_registry;
-    let finder = stoat.file_finder.as_mut().expect("file_finder present");
-    let pending = finder.refilter_from_input(ws);
-    finder.sync_preview(ws, fs_host, language_registry);
+    let (pending, fallback_root) = {
+        let ws = &mut stoat.workspaces[active_idx];
+        let fs_host = &*stoat.fs_host;
+        let language_registry = &stoat.language_registry;
+        let finder = stoat.file_finder.as_mut().expect("file_finder present");
+        let pending = finder.refilter_from_input(ws);
+        finder.sync_preview(ws, fs_host, language_registry);
+        (pending, finder.wants_ignored_fallback())
+    };
 
-    if let Some((generation, scan)) = pending {
-        spawn_finder_scan(stoat, generation, scan);
+    // The fallback's first paths arrive on later frames, which its walk wakes,
+    // so no scan of it starts in this one.
+    if let Some(root) = fallback_root {
+        let walk = spawn_all_files_walk(stoat, root.clone());
+        let executor = stoat.executor.clone();
+        let picker = PathPicker::new(
+            &mut stoat.workspaces[active_idx],
+            executor,
+            root,
+            Some(walk),
+        );
+        stoat
+            .file_finder
+            .as_mut()
+            .expect("file_finder present")
+            .install_fallback(picker);
     }
+
+    spawn_finder_scans(stoat, pending);
 }
 
-/// Run `scan` on a worker and report it back to the finder that asked for it.
+/// Run each of `pending` on a worker and report it back to the picker that
+/// asked for it.
 ///
 /// The scanned scopes cover the whole repo walk, which is too much to do inside
 /// the update path without input and paint waiting on it. The picker keeps
 /// painting the previous query's rows until the result lands.
 ///
-/// Browse mode filters its own directory walk in a picker of its own, and the
-/// two are never both live, so which one asked is the same question the
-/// refilter answered.
-fn spawn_finder_scan(stoat: &mut Stoat, generation: u64, scan: Scan) {
+/// A list and its fallback of ignored files refilter on the same keystroke, so
+/// each scan names the picker whose sink takes its result.
+fn spawn_finder_scans(stoat: &mut Stoat, pending: Vec<PendingScan>) {
     let redraw = stoat.redraw_notify.clone();
     let executor = stoat.executor.clone();
     let finder = stoat.file_finder.as_mut().expect("file_finder present");
-    finder
-        .active_core()
-        .spawn_scan(&executor, redraw, generation, scan);
+    for PendingScan {
+        target,
+        generation,
+        scan,
+    } in pending
+    {
+        finder
+            .scan_target_mut(target)
+            .spawn_scan(&executor, redraw.clone(), generation, scan);
+    }
 }
 
 /// Bring the finder's rows up to date with what is typed, before an action
@@ -120,6 +146,11 @@ fn sync_file_finder_browse(stoat: &mut Stoat) {
         let finder = stoat.file_finder.as_mut().expect("file_finder present");
         match &mut finder.browse {
             Some(browse) => {
+                // A fallback walked the old root, and the new one starts with
+                // none.
+                if let Some(ignored) = browse.ignored.take() {
+                    ignored.dispose(ws);
+                }
                 browse.root = root.clone();
                 browse.picker.git_root = root.clone();
                 browse.picker.reset_walk(walk_rx, walk_task);
@@ -132,6 +163,7 @@ fn sync_file_finder_browse(stoat: &mut Stoat) {
                     root: root.clone(),
                     partial: String::new(),
                     picker,
+                    ignored: None,
                 });
             },
         }
@@ -288,6 +320,30 @@ pub(super) fn spawn_workspace_walk(
     let redraw_notify = stoat.redraw_notify.clone();
     let task = stoat.executor.spawn_blocking(move || {
         fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+            if walk_tx.send(batch).is_err() {
+                return ControlFlow::Break(());
+            }
+            redraw_notify.notify_one();
+            ControlFlow::Continue(())
+        });
+    });
+    (walk_rx, task)
+}
+
+/// Spawn a walk of every file under `root`, the ignored ones included, in the
+/// shape [`spawn_workspace_walk`] returns.
+///
+/// Feeds a fallback of ignored files, which lists what the workspace walk
+/// leaves out.
+fn spawn_all_files_walk(
+    stoat: &Stoat,
+    root: PathBuf,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (walk_tx, walk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let fs_host = stoat.fs_host.clone();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        fs_host.walk_all_files_streaming(&root, &mut |batch| {
             if walk_tx.send(batch).is_err() {
                 return ControlFlow::Break(());
             }
@@ -565,9 +621,7 @@ pub(super) fn file_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
         pending
     };
 
-    if let Some((generation, scan)) = pending {
-        spawn_finder_scan(stoat, generation, scan);
-    }
+    spawn_finder_scans(stoat, pending);
     UpdateEffect::Redraw
 }
 

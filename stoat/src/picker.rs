@@ -340,6 +340,36 @@ pub(crate) struct ScanOutcome {
     scored: usize,
 }
 
+/// Which of an owner's two pickers a [`PendingScan`] reports back to.
+///
+/// A file-opening picker shows its list, or a fallback of ignored files while
+/// that list holds no match. Both refilter on the same keystroke, so each scan
+/// names the picker whose sink takes its result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanTarget {
+    List,
+    Fallback,
+}
+
+impl ScanTarget {
+    /// Tag a scan from [`PathPicker::begin_scan`] as one this picker takes back.
+    pub(crate) fn tag(self, begun: Option<(u64, Scan)>) -> Option<PendingScan> {
+        begun.map(|(generation, scan)| PendingScan {
+            target: self,
+            generation,
+            scan,
+        })
+    }
+}
+
+/// A scan [`PathPicker::begin_scan`] handed back, for the owner to run on a
+/// worker against the picker that `target` names.
+pub(crate) struct PendingScan {
+    pub(crate) target: ScanTarget,
+    pub(crate) generation: u64,
+    pub(crate) scan: Scan,
+}
+
 impl Scan {
     /// Match and rank, which is the expensive half and touches nothing but this.
     ///
@@ -1159,6 +1189,21 @@ impl PathPicker {
 
     pub(crate) fn page(&mut self, dir: i32) {
         self.picklist.page(dir);
+    }
+
+    /// Whether the list holds no match for the current query, with no path
+    /// left to arrive.
+    ///
+    /// True only when the rows answer the current query, the walk has
+    /// delivered every path, and no row matched. A caller-fed picker counts as
+    /// delivered, and so does a walk cut short by [`Self::stop_walk`]. While a
+    /// scan is out or a walk still streams, the answer is false, because the
+    /// rows do not yet answer for every path.
+    pub(crate) fn lists_nothing(&self) -> bool {
+        self.walk_rx.is_none()
+            && !self.scan_pending
+            && self.filter_valid
+            && self.picklist.filtered.is_empty()
     }
 
     /// Drain every walk batch since the last call into [`Self::all_paths`],
@@ -3239,6 +3284,40 @@ mod tests {
             rows,
             ["three.rs", "four.rs"],
             "a re-rooted walk is a different list, so the held rows do not apply"
+        );
+    }
+
+    #[test]
+    fn lists_nothing_waits_for_the_walk_and_the_scan() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor.clone(), p("/repo"), None);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        picker.reset_walk(rx, executor.spawn(async {}));
+
+        tx.send(vec![p("/repo/one.rs")]).expect("walk open");
+        picker.pump_walk();
+        picker.refilter("zzz");
+        let streaming = picker.lists_nothing();
+
+        drop(tx);
+        picker.pump_walk();
+        let walked = picker.lists_nothing();
+
+        picker.begin_scan("zzzz").expect("a fuzzy query scans");
+        let scanning = picker.lists_nothing();
+
+        picker.refilter("one");
+        let matched = picker.lists_nothing();
+
+        picker.invalidate();
+        let stale = picker.lists_nothing();
+
+        assert_eq!(
+            [streaming, walked, scanning, matched, stale],
+            [false, true, false, false, false],
+            "only a finished walk whose rows answer the query with no match lists nothing",
         );
     }
 

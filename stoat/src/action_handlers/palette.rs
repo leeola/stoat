@@ -356,6 +356,7 @@ fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
                         root: root.clone(),
                         partial: String::new(),
                         picker: child_picker,
+                        ignored: None,
                     });
                 },
             }

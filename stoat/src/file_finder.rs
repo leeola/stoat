@@ -2,7 +2,10 @@ use crate::{
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::{BaseId, DisplayCache, PathPicker, PreviewPolicy, PreviewSource, Scan},
+    picker::{
+        BaseId, DisplayCache, PathPicker, PendingScan, PreviewPolicy, PreviewSource, Scan,
+        ScanTarget,
+    },
     term_session::TermId,
     workspace::Workspace,
 };
@@ -16,9 +19,13 @@ use std::{
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// Upper bound on the paths a directory-browse walk collects. A bare `/` walk
-/// could traverse the whole filesystem, so draining stops here and the walk is
-/// dropped, keeping the list and its refilter bounded.
+/// Upper bound on the paths a directory-browse walk or a fallback of ignored
+/// files collects.
+///
+/// A bare `/` walk otherwise traverses the whole filesystem, and an ignored
+/// build tree such as `target/` holds a very large number of files. Draining
+/// stops here and the walk is dropped, which keeps the list and its refilter
+/// bounded.
 pub(crate) const BROWSE_PATH_CAP: usize = 100_000;
 
 /// Columns [`FileFinder::content_size`] always asks for, matching the recommended
@@ -144,6 +151,24 @@ pub(crate) struct Browse {
     pub(crate) root: PathBuf,
     pub(crate) partial: String,
     pub(crate) picker: PathPicker,
+    /// The fallback of ignored files under [`Self::root`], walked by
+    /// [`FsHost::walk_all_files_streaming`].
+    ///
+    /// The finder installs it once [`Self::picker`] lists nothing, and keeps it
+    /// until the browse re-roots or ends. The palette's directory browse lists
+    /// directories and never takes one.
+    pub(crate) ignored: Option<PathPicker>,
+}
+
+impl Browse {
+    /// Return the preview slots of the browse picker and its fallback to the
+    /// workspace.
+    fn dispose(&self, ws: &mut Workspace) {
+        self.picker.dispose(ws);
+        if let Some(ignored) = &self.ignored {
+            ignored.dispose(ws);
+        }
+    }
 }
 
 /// The workspace file list a walk collected, held for whatever asks next.
@@ -237,6 +262,13 @@ pub struct FileFinder {
     /// [`PathPicker::invalidate`]s it to force a re-run under an unchanged
     /// query.
     pub(crate) core: PathPicker,
+    /// The fallback of ignored files under the workspace root, walked by
+    /// [`FsHost::walk_all_files_streaming`] for [`FinderScope::All`].
+    ///
+    /// Installed once [`Self::core`] lists nothing in that scope, and kept until
+    /// the finder closes. A flip to another scope leaves it in place, so a
+    /// return to All reuses it.
+    pub(crate) ignored: Option<PathPicker>,
     /// Active directory-browse mode, or `None` for the normal workspace list.
     pub(crate) browse: Option<Browse>,
     /// Config-defined named scopes, compiled at open time in alphabetical
@@ -346,6 +378,7 @@ impl FileFinder {
             walk_epoch,
             base_generation: crate::picker::next_generation(),
             core,
+            ignored: None,
             browse: None,
             named_scopes: compile_named_scopes(finder_scopes),
             named_cache: None,
@@ -363,18 +396,89 @@ impl FileFinder {
 
     /// The picker currently driving the list. Browse mode (a `/` or `~/`
     /// query) swaps in its own directory-walk picker; every other query drives
-    /// the workspace `core`.
+    /// the workspace `core`. Either gives way to its fallback of ignored files
+    /// while [`Self::fallback_active`] holds.
     pub(crate) fn active_core(&mut self) -> &mut PathPicker {
-        match &mut self.browse {
-            Some(browse) => &mut browse.picker,
-            None => &mut self.core,
+        let fallback_active = self.fallback_active();
+        match self.list_and_fallback_mut() {
+            (_, Some(fallback)) if fallback_active => fallback,
+            (list, _) => list,
         }
     }
 
     pub(crate) fn active_core_ref(&self) -> &PathPicker {
+        match self.list_and_fallback() {
+            (_, Some(fallback)) if self.fallback_active() => fallback,
+            (list, _) => list,
+        }
+    }
+
+    /// Whether the fallback of ignored files stands in for the list.
+    ///
+    /// Only browse and [`FinderScope::All`] fall back. A Modified or buffer list
+    /// that holds nothing keeps its empty rows, and a fallback built under All
+    /// stays through a flip away, so a return to All reuses it.
+    pub(crate) fn fallback_active(&self) -> bool {
+        if self.browse.is_none() && self.scope != FinderScope::All {
+            return false;
+        }
+        let (list, fallback) = self.list_and_fallback();
+        fallback.is_some() && list.lists_nothing()
+    }
+
+    /// The root to walk for a fallback of ignored files, when the list on
+    /// display needs one and has none.
+    ///
+    /// `None` outside browse and [`FinderScope::All`], once a fallback exists,
+    /// and until [`PathPicker::lists_nothing`] holds for the list.
+    pub(crate) fn wants_ignored_fallback(&self) -> Option<PathBuf> {
+        let (list, fallback) = self.list_and_fallback();
+        if fallback.is_some() || !list.lists_nothing() {
+            return None;
+        }
         match &self.browse {
-            Some(browse) => &browse.picker,
-            None => &self.core,
+            Some(browse) => Some(browse.root.clone()),
+            None if self.scope == FinderScope::All => Some(self.core.git_root.clone()),
+            None => None,
+        }
+    }
+
+    /// Set `picker` as the fallback of the list on display.
+    pub(crate) fn install_fallback(&mut self, picker: PathPicker) {
+        match &mut self.browse {
+            Some(browse) => browse.ignored = Some(picker),
+            None => self.ignored = Some(picker),
+        }
+    }
+
+    /// The picker a scan for `target` reports back to.
+    ///
+    /// # Panics
+    ///
+    /// Panics for [`ScanTarget::Fallback`] when the list on display has no
+    /// fallback. [`Self::refilter_from_input`] hands out no such scan.
+    pub(crate) fn scan_target_mut(&mut self, target: ScanTarget) -> &mut PathPicker {
+        match (target, self.list_and_fallback_mut()) {
+            (ScanTarget::List, (list, _)) => list,
+            (ScanTarget::Fallback, (_, fallback)) => {
+                fallback.expect("a fallback scan has a fallback to land in")
+            },
+        }
+    }
+
+    /// The list on display, browse or workspace, and the fallback that stands
+    /// in for it.
+    fn list_and_fallback(&self) -> (&PathPicker, Option<&PathPicker>) {
+        match &self.browse {
+            Some(browse) => (&browse.picker, browse.ignored.as_ref()),
+            None => (&self.core, self.ignored.as_ref()),
+        }
+    }
+
+    fn list_and_fallback_mut(&mut self) -> (&mut PathPicker, Option<&mut PathPicker>) {
+        match &mut self.browse {
+            Some(browse) => (&mut browse.picker, browse.ignored.as_mut()),
+            None => (&mut self.core, self.ignored.as_mut()),
         }
     }
 
@@ -488,34 +592,44 @@ impl FileFinder {
     /// filter. Called from the renderer so typing picks up without a dedicated
     /// sync hook. Drains any pending walk result first so freshly arrived
     /// paths participate in the same render tick.
-    pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) -> Option<(u64, Scan)> {
+    ///
+    /// The fallback of ignored files refilters with the list it stands in for,
+    /// so its rows answer the query the moment the list runs dry. Each scan
+    /// handed back names the picker it reports to.
+    pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) -> Vec<PendingScan> {
         // Ahead of the browse branch so a git-status answer landing while a
         // directory query is typed is taken rather than left in the channel.
         self.pump_modified();
-        if let Some(browse) = &mut self.browse {
-            browse.picker.pump_walk();
-            browse.picker.pump_scan();
-            if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
-                browse.picker.all_paths.truncate(BROWSE_PATH_CAP);
-                browse.picker.stop_walk();
-            }
+        let mut pending = Vec::new();
+
+        let fallback_query = if let Some(browse) = &mut self.browse {
+            pump_capped_walk(&mut browse.picker);
             // A directory walk runs to the same cap as the repo walk, so
             // ranking it belongs on a worker for the same reason.
-            let pending = browse.picker.begin_scan(&browse.partial);
-            self.remeasure_content();
-            return pending;
+            pending.extend(ScanTarget::List.tag(browse.picker.begin_scan(&browse.partial)));
+            Some(browse.partial.clone())
+        } else {
+            self.core.pump_walk();
+            self.core.pump_scan();
+            let text = self.input.text(ws);
+            pending.extend(ScanTarget::List.tag(self.refilter_scope(&text)));
+            (self.scope == FinderScope::All).then_some(text)
+        };
+
+        if let Some(query) = fallback_query {
+            self.refilter_fallback(&query, &mut pending);
         }
-        self.core.pump_walk();
-        self.core.pump_scan();
-        let text = self.input.text(ws);
+        self.remeasure_content();
+        pending
+    }
+
+    /// Refilter [`Self::core`] against the scope's base, handing back the scan
+    /// of a scope that ranks on a worker.
+    fn refilter_scope(&mut self, text: &str) -> Option<(u64, Scan)> {
         match self.scope.clone() {
             // The uncapped scopes are the whole repo walk, so their scan goes to
             // a worker and the caller spawns what this hands back.
-            FinderScope::All | FinderScope::AllWorkspaces => {
-                let pending = self.core.begin_scan(&text);
-                self.remeasure_content();
-                return pending;
-            },
+            FinderScope::All | FinderScope::AllWorkspaces => self.core.begin_scan(text),
             // The tag is what keeps two lists sharing the finder's generation
             // from reading as each other. A scope flip invalidates, which alone
             // would do it, but this does not depend on that.
@@ -525,12 +639,13 @@ impl FileFinder {
                     self.base_generation,
                     self.modified_paths.len(),
                 );
-                self.core
-                    .refilter_with_base(&text, &self.modified_paths, id);
+                self.core.refilter_with_base(text, &self.modified_paths, id);
+                None
             },
             FinderScope::Buffers => {
                 let id = base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len());
-                self.core.refilter_with_base(&text, &self.buffer_paths, id);
+                self.core.refilter_with_base(text, &self.buffer_paths, id);
+                None
             },
             FinderScope::ModifiedBuffers => {
                 let id = base_id(
@@ -539,7 +654,8 @@ impl FileFinder {
                     self.dirty_buffer_paths.len(),
                 );
                 self.core
-                    .refilter_with_base(&text, &self.dirty_buffer_paths, id);
+                    .refilter_with_base(text, &self.dirty_buffer_paths, id);
+                None
             },
             // A glob over the whole walk can keep most of it, so this scans
             // elsewhere like the uncapped scopes. A base small enough not to
@@ -548,19 +664,28 @@ impl FileFinder {
                 self.sync_named_cache(&name);
                 // `named_cache` and `core` are disjoint fields, so the matcher
                 // reads the cached base in place rather than cloning it.
-                let pending = match &self.named_cache {
+                match &self.named_cache {
                     Some(cache) => {
                         let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
-                        self.core.begin_scan_with_base(&text, &cache.filtered, id)
+                        self.core.begin_scan_with_base(text, &cache.filtered, id)
                     },
                     None => None,
-                };
-                self.remeasure_content();
-                return pending;
+                }
             },
         }
-        self.remeasure_content();
-        None
+    }
+
+    /// Bring the fallback of the list on display up to date with `query`, and
+    /// hand back its scan.
+    ///
+    /// Runs while the fallback stands aside too, so its rows already answer the
+    /// query when the list runs dry again.
+    fn refilter_fallback(&mut self, query: &str, out: &mut Vec<PendingScan>) {
+        let (_, Some(fallback)) = self.list_and_fallback_mut() else {
+            return;
+        };
+        pump_capped_walk(fallback);
+        out.extend(ScanTarget::Fallback.tag(fallback.begin_scan(query)));
     }
 
     /// Bring the rows up to date with `query` on this thread.
@@ -570,6 +695,9 @@ impl FileFinder {
     ///
     /// A named scope catches up against the cache it filters rather than the
     /// walk, which holds a different set and would answer a different question.
+    ///
+    /// A fallback of ignored files settles with its list, so an action reads the
+    /// row on display whichever of the two shows.
     pub(crate) fn settle_scan(&mut self, query: &str) {
         // Browse filters the directory walk against its own partial rather than
         // the typed query, the leading directory having already been consumed
@@ -577,10 +705,19 @@ impl FileFinder {
         if let Some(browse) = &mut self.browse {
             let partial = browse.partial.clone();
             browse.picker.settle_scan(&partial);
+            if let Some(ignored) = &mut browse.ignored {
+                ignored.settle_scan(&partial);
+            }
             return;
         }
         match self.scope.clone() {
-            FinderScope::All | FinderScope::AllWorkspaces => self.core.settle_scan(query),
+            FinderScope::All => {
+                self.core.settle_scan(query);
+                if let Some(ignored) = &mut self.ignored {
+                    ignored.settle_scan(query);
+                }
+            },
+            FinderScope::AllWorkspaces => self.core.settle_scan(query),
             FinderScope::Named(name) => {
                 self.sync_named_cache(&name);
                 if let Some(cache) = &self.named_cache {
@@ -692,17 +829,32 @@ impl FileFinder {
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         self.core.dispose(ws);
+        if let Some(ignored) = &self.ignored {
+            ignored.dispose(ws);
+        }
         if let Some(browse) = &self.browse {
-            browse.picker.dispose(ws);
+            browse.dispose(ws);
         }
     }
 
-    /// Leave directory-browse mode, disposing the browse picker's preview so
-    /// the registry returns to its pre-browse size. No-op when not browsing.
+    /// Leave directory-browse mode, disposing the previews of the browse picker
+    /// and its fallback so the registry returns to its pre-browse size. No-op
+    /// when not browsing.
     pub(crate) fn leave_browse(&mut self, ws: &mut Workspace) {
         if let Some(browse) = self.browse.take() {
-            browse.picker.dispose(ws);
+            browse.dispose(ws);
         }
+    }
+}
+
+/// Drain `picker`'s walk and scan results, stopping the walk once it holds
+/// [`BROWSE_PATH_CAP`] paths.
+fn pump_capped_walk(picker: &mut PathPicker) {
+    picker.pump_walk();
+    picker.pump_scan();
+    if picker.all_paths.len() >= BROWSE_PATH_CAP {
+        picker.all_paths.truncate(BROWSE_PATH_CAP);
+        picker.stop_walk();
     }
 }
 
@@ -1679,10 +1831,22 @@ mod tests {
         assert!(finder.browse.is_some(), "a path query browses");
 
         // Invalidated so the partial is asked afresh, the sync driven by the
-        // typing above having already answered it.
-        finder.active_core().invalidate();
-        assert!(
-            finder.refilter_from_input(ws).is_some(),
+        // typing above having already answered it. The browse list is named
+        // rather than taken from `active_core`, because `/` lists nothing in the
+        // fake filesystem and so a fallback of ignored files stands in for it.
+        finder
+            .browse
+            .as_mut()
+            .expect("a path query browses")
+            .picker
+            .invalidate();
+        assert_eq!(
+            finder
+                .refilter_from_input(ws)
+                .iter()
+                .map(|scan| scan.target)
+                .collect::<Vec<_>>(),
+            [ScanTarget::List],
             "the ranking is handed back for a worker to run",
         );
     }
@@ -1713,8 +1877,13 @@ mod tests {
         // Invalidated so the query is asked afresh, since the sync driven by
         // the typing above has already answered this one.
         finder.core.invalidate();
-        assert!(
-            finder.refilter_from_input(ws).is_some(),
+        assert_eq!(
+            finder
+                .refilter_from_input(ws)
+                .iter()
+                .map(|scan| scan.target)
+                .collect::<Vec<_>>(),
+            [ScanTarget::List],
             "the ranking is handed back for a worker to run",
         );
     }
@@ -2108,14 +2277,15 @@ mod tests {
     /// resolver the renderer uses.
     fn finder_rows(h: &TestHarness) -> Vec<String> {
         let finder = h.stoat.file_finder.as_ref().expect("finder open");
-        let list = &finder.core.picklist;
+        let core = finder.active_core_ref();
+        let list = &core.picklist;
         let mut rows: Vec<String> = list
             .filtered
             .iter()
             .map(|&i| {
                 crate::picker::row_display(
                     &list.base[i],
-                    &finder.core.git_root,
+                    &core.git_root,
                     list.display_roots.as_deref(),
                     None,
                 )
@@ -2123,6 +2293,122 @@ mod tests {
             .collect();
         rows.sort();
         rows
+    }
+
+    /// Drive frames until a fallback of ignored files stands in with rows.
+    ///
+    /// The list settles in one frame, the fallback installs in the next, and
+    /// its first scan lands a frame after its walk, so active alone is too
+    /// early to read rows from.
+    fn settle_fallback(h: &mut TestHarness) {
+        for _ in 0..8 {
+            let _ = h.snapshot();
+            h.settle();
+            let finder = h.stoat.file_finder.as_ref().expect("finder open");
+            if finder.fallback_active() && !finder_rows(h).is_empty() {
+                return;
+            }
+        }
+        panic!("no fallback of ignored files stood in with rows after eight frames");
+    }
+
+    #[test]
+    fn a_query_no_listed_file_matches_lists_ignored_files() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+        );
+
+        h.type_keys("space p");
+        h.type_text("main.toml");
+        settle_fallback(&mut h);
+        assert_eq!(finder_rows(&h), ["target/debug/main.toml"]);
+
+        h.type_keys("backspace backspace backspace backspace backspace");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(
+            (finder_rows(&h), finder.fallback_active()),
+            (vec!["src/main.rs".to_string()], false),
+            "a listed match takes the list back",
+        );
+    }
+
+    #[test]
+    fn a_browse_of_a_directory_whose_files_are_all_ignored_lists_them() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[("build/.gitignore", "*\n"), ("build/out.bin", "")],
+        );
+
+        h.type_keys("space p");
+        h.type_text(&format!("{}/build/", root.display()));
+        settle_fallback(&mut h);
+
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(
+            (
+                finder_rows(&h),
+                finder
+                    .browse
+                    .as_ref()
+                    .map(|browse| browse.ignored.is_some()),
+            ),
+            (
+                vec![".gitignore".to_string(), "out.bin".to_string()],
+                Some(true),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_scope_other_than_all_takes_no_fallback() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/main.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_text("zzz");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(
+            (finder.scope(), finder.ignored.is_none()),
+            (&FinderScope::Modified, true),
+            "a Modified list that matches nothing keeps its empty rows",
+        );
+    }
+
+    #[test]
+    fn closing_with_a_fallback_leaves_the_registry_at_its_pre_open_size() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+        );
+        let slots = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            (ws.buffers.len(), ws.editors.len())
+        };
+        let before = slots(&h);
+
+        h.type_keys("space p");
+        h.type_text("main.toml");
+        settle_fallback(&mut h);
+        h.type_keys("escape");
+
+        assert!(h.stoat.file_finder.is_none());
+        assert_eq!(
+            slots(&h),
+            before,
+            "the fallback's preview buffer and editor go with the finder",
+        );
     }
 
     #[test]
@@ -2581,13 +2867,6 @@ mod tests {
         h.fake_env().set("HOME", home.to_str().unwrap());
 
         h.type_keys("space p");
-        let previews_before = h
-            .stoat
-            .active_workspace()
-            .buffers
-            .preview_buffer_ids()
-            .len();
-
         h.type_text("~/");
         let _ = h.snapshot();
         let browse_preview = h
@@ -2622,14 +2901,21 @@ mod tests {
                 .is_none(),
             "browse preview disposed on leave"
         );
+
+        // The query `~` on the way out matches nothing in the workspace list,
+        // which installs a fallback of ignored files with a preview of its own.
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        let mut live: Vec<_> = [Some(&finder.core), finder.ignored.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|picker| picker.preview.buffer)
+            .collect();
+        live.sort();
+        let mut previews = h.stoat.active_workspace().buffers.preview_buffer_ids();
+        previews.sort();
         assert_eq!(
-            h.stoat
-                .active_workspace()
-                .buffers
-                .preview_buffer_ids()
-                .len(),
-            previews_before,
-            "registry returns to its pre-browse preview count"
+            previews, live,
+            "every preview left belongs to a picker still live"
         );
     }
 

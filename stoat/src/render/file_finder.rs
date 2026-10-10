@@ -90,18 +90,24 @@ pub(crate) fn render_file_finder(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let title: String = if finder.browse.is_some() {
-        " file finder (browse) ".to_string()
+    let label = if finder.browse.is_some() {
+        "browse"
     } else {
         match finder.scope() {
-            FinderScope::All => " file finder (all) ".to_string(),
-            FinderScope::Modified => " file finder (modified) ".to_string(),
-            FinderScope::Buffers => " file finder (buffers) ".to_string(),
-            FinderScope::ModifiedBuffers => " file finder (modified buffers) ".to_string(),
-            FinderScope::Named(name) => format!(" file finder ({name}) "),
-            FinderScope::AllWorkspaces => " file finder (all workspaces) ".to_string(),
+            FinderScope::All => "all",
+            FinderScope::Modified => "modified",
+            FinderScope::Buffers => "buffers",
+            FinderScope::ModifiedBuffers => "modified buffers",
+            FinderScope::Named(name) => name.as_str(),
+            FinderScope::AllWorkspaces => "all workspaces",
         }
     };
+    let suffix = if finder.fallback_active() {
+        ", ignored"
+    } else {
+        ""
+    };
+    let title = format!(" file finder ({label}{suffix}) ");
     crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
@@ -159,6 +165,9 @@ fn render_list(
 ///
 /// A thin adapter over [`crate::render::picker::paint_path_rows`], kept because
 /// the smooth-scroll pool paints pages through a `&FileFinder`.
+///
+/// The rows paint muted while a fallback of ignored files stands in for the
+/// list, so they read apart from the files the list holds.
 pub(crate) fn paint_finder_rows(
     finder: &FileFinder,
     home: Option<&Path>,
@@ -173,6 +182,11 @@ pub(crate) fn paint_finder_rows(
         .as_ref()
         .map(|browse| browse.typed_dir.as_str())
         .unwrap_or_default();
+    let row_style = if finder.fallback_active() {
+        theme.get(crate::theme::scope::UI_TEXT_MUTED)
+    } else {
+        theme.get(crate::theme::scope::UI_TEXT)
+    };
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,
@@ -181,7 +195,7 @@ pub(crate) fn paint_finder_rows(
         area,
         start_row,
         theme,
-        theme.get(crate::theme::scope::UI_TEXT),
+        row_style,
         buf,
     );
 }
