@@ -277,18 +277,37 @@ pub(crate) fn rows_to_unified_diff(
         "@@ -{base_start},{base_count} +{buffer_start},{buffer_count} @@\n"
     ));
 
+    // The parser takes the post-image's no-newline marker only once every
+    // pre-image line is read. A `+` line that ends the post-image while a later
+    // row still removes a line waits here, and every row after it removes only,
+    // so moving it to the end keeps the hunk valid.
+    let mut deferred = String::new();
     for (i, row) in rows.iter().enumerate() {
         let is_last_left = Some(i) == last_left_idx;
         let is_last_right = Some(i) == last_right_idx;
+        let later_left = last_left_idx.is_some_and(|last| last > i);
 
         match row {
+            // A context line reads as unterminated on both sides when the marker
+            // follows it. Only the pre-image's end decides that. A line that a
+            // staging narrowed back to its base carries a base line on its right
+            // side too, so the buffer's own ending says nothing about it.
             ReviewRow::Context { left, right } => {
-                emit_prefixed(&mut out, ' ', &right.text);
-                let left_at_eof = base_no_nl && is_last_left && touches_base_eof(left, base_total);
-                let right_at_eof =
-                    buffer_no_nl && is_last_right && touches_buffer_eof(right, buffer_total);
-                if left_at_eof || right_at_eof {
-                    out.push_str(NO_NEWLINE_MARKER);
+                let base_eof = base_no_nl && is_last_left && touches_base_eof(left, base_total);
+                match (base_eof, is_last_right) {
+                    // The pre-image ends here, but a later line follows in the
+                    // post-image, so this line gains a newline and stops being
+                    // context.
+                    (true, false) => {
+                        emit_prefixed(&mut out, '-', &left.text);
+                        out.push_str(NO_NEWLINE_MARKER);
+                        emit_prefixed(&mut out, '+', &right.text);
+                    },
+                    (true, true) => {
+                        emit_prefixed(&mut out, ' ', &right.text);
+                        out.push_str(NO_NEWLINE_MARKER);
+                    },
+                    (false, _) => emit_prefixed(&mut out, ' ', &right.text),
                 }
             },
             ReviewRow::Changed {
@@ -304,10 +323,8 @@ pub(crate) fn rows_to_unified_diff(
                 left: None,
                 right: Some(r),
             } => {
-                emit_prefixed(&mut out, '+', &r.text);
-                if buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total) {
-                    out.push_str(NO_NEWLINE_MARKER);
-                }
+                let r_eof = buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total);
+                emit_added(&mut out, &mut deferred, &r.text, r_eof, later_left);
             },
             ReviewRow::Changed {
                 left: Some(l),
@@ -317,10 +334,8 @@ pub(crate) fn rows_to_unified_diff(
                 if base_no_nl && is_last_left && touches_base_eof(l, base_total) {
                     out.push_str(NO_NEWLINE_MARKER);
                 }
-                emit_prefixed(&mut out, '+', &r.text);
-                if buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total) {
-                    out.push_str(NO_NEWLINE_MARKER);
-                }
+                let r_eof = buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total);
+                emit_added(&mut out, &mut deferred, &r.text, r_eof, later_left);
             },
             ReviewRow::Changed {
                 left: None,
@@ -328,8 +343,23 @@ pub(crate) fn rows_to_unified_diff(
             } => {},
         }
     }
+    out.push_str(&deferred);
 
     out
+}
+
+/// Emit `+text`, with the no-newline marker when `at_eof`, into `out`, or into
+/// `deferred` when it ends the post-image while `later_left` rows still remove
+/// lines.
+fn emit_added(out: &mut String, deferred: &mut String, text: &str, at_eof: bool, later_left: bool) {
+    let target = match at_eof && later_left {
+        true => deferred,
+        false => out,
+    };
+    emit_prefixed(target, '+', text);
+    if at_eof {
+        target.push_str(NO_NEWLINE_MARKER);
+    }
 }
 
 fn emit_prefixed(out: &mut String, prefix: char, text: &str) {
@@ -569,5 +599,39 @@ mod tests {
     #[test]
     fn an_added_blank_line_stages_on_its_own() {
         assert_eq!(stage_hunk("a\nb\n", "a\n\nb\n", 0), "a\n\nb\n");
+    }
+
+    /// The index text after the 1-based buffer `lines` of hunk 0 stage over a
+    /// HEAD and index at `base`.
+    fn stage_lines(base: &str, buffer: &str, lines: Range<u32>) -> String {
+        let (_dir, repo, host_repo) = index_repo(base, buffer);
+        let rows =
+            hunk_rows(base, buffer, &hunks(base, buffer), 0, HUNK_CONTEXT).expect("hunk 0 exists");
+        let rows = line_restricted_rows(&rows, lines, true).expect("a change sits on the lines");
+        let patch = rows_to_unified_diff(Path::new("a.rs"), base, buffer, &rows);
+        host_repo
+            .apply_to_index(&patch)
+            .expect("the line patch applies to real libgit2");
+        staged_text(&repo)
+    }
+
+    /// The index's last line has no newline, and the staged line goes after it,
+    /// so that line gains one in the index.
+    #[test]
+    fn a_line_staged_after_an_unterminated_last_line_keeps_both_lines() {
+        assert_eq!(stage_lines("a\nb", "a\nb\nc", 3..4), "a\nb\nc");
+    }
+
+    /// An unselected row keeps its index line as the index ends it, though the
+    /// buffer ends without a newline.
+    #[test]
+    fn a_line_staged_from_an_unterminated_buffer_keeps_the_index_ending() {
+        assert_eq!(stage_lines("x\ny\n", "X\nY", 1..2), "X\ny\n");
+    }
+
+    /// The buffer's unterminated last line replaces a line above a removed one.
+    #[test]
+    fn a_hunk_that_ends_unterminated_above_a_removal_stages() {
+        assert_eq!(stage_hunk("a\nb\nc\n", "a\nB", 0), "a\nB");
     }
 }
