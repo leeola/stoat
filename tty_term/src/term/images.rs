@@ -36,6 +36,14 @@ const MAX_TRANSMIT_BYTES: usize = 128 * 1024 * 1024;
 /// cap above does not bound this one.
 const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
+/// Longest side, in pixels, of an image the store accepts.
+///
+/// The renderer draws each image as one GPU texture, and wgpu's default limits
+/// cap a 2D texture's side at 8192. A strip far under the byte cap above still
+/// passes that side. Refusing it here answers the program that sent it, where a
+/// texture the device rejects stops the renderer.
+const MAX_DIMENSION: u32 = 8192;
+
 /// Largest total RGBA the store holds across every image.
 const MAX_STORE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -915,6 +923,10 @@ fn declared_size(control: &ControlData) -> Result<(u32, u32), ResponseResult> {
 }
 
 fn check_size(width: u32, height: u32) -> Result<(), ResponseResult> {
+    if width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err(error("EFBIG", "image too large"));
+    }
+
     let bytes = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(RGBA));
@@ -966,7 +978,9 @@ fn respond_as(control: &ControlData, id: u32, result: ResponseResult) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageStore, Screen, MAX_DECODED_BYTES, MAX_IMAGES, MAX_PLACEMENTS, RGBA};
+    use super::{
+        ImageStore, Screen, MAX_DECODED_BYTES, MAX_DIMENSION, MAX_IMAGES, MAX_PLACEMENTS, RGBA,
+    };
     use base64::Engine;
     use stoatty_protocol::kitty::{
         Action, Compression, ControlData, Format, GraphicsFrame, Medium, Response, ResponseResult,
@@ -1263,6 +1277,45 @@ mod tests {
             code(&reply(&mut store, frame(control, Vec::new()))),
             Some("EFBIG"),
             "the size is refused before any buffer is grown to hold it",
+        );
+    }
+
+    /// A strip one pixel tall sits far under the byte cap, but its long side
+    /// passes what a GPU texture holds.
+    #[test]
+    fn an_image_past_the_texture_side_is_refused() {
+        let mut store = ImageStore::new();
+        let strip = |id: u32, width: u32| {
+            let control = ControlData {
+                format: Format::Rgba,
+                width,
+                height: 1,
+                ..transmit(id)
+            };
+            frame(control, base64(&vec![0; width as usize * RGBA]))
+        };
+
+        let past = reply(&mut store, strip(11, MAX_DIMENSION + 1));
+        let at = reply(&mut store, strip(12, MAX_DIMENSION));
+
+        assert_eq!(
+            (
+                past,
+                stored(&store, 11).is_some(),
+                at,
+                stored(&store, 12).is_some(),
+            ),
+            (
+                Some(Response {
+                    id: 11,
+                    number: 0,
+                    placement: 0,
+                    result: super::error("EFBIG", "image too large"),
+                }),
+                false,
+                ok(12),
+                true,
+            ),
         );
     }
 

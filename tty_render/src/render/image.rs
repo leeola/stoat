@@ -114,6 +114,13 @@ pub struct ImagePass {
     over: Vec<ImageDraw>,
     scratch: Vec<ImageInstance>,
     metrics: CellMetrics,
+    /// The device's longest texture side.
+    ///
+    /// A placement past it draws nothing. Creating its texture is a validation
+    /// error, which wgpu's default handler turns into a panic of the render
+    /// thread. The terminal refuses such an image on arrival, and this guards a
+    /// device whose limit sits lower than the one that check assumes.
+    max_dimension: u32,
 }
 
 impl ImagePass {
@@ -286,6 +293,7 @@ impl ImagePass {
             over: Vec::new(),
             scratch: Vec::new(),
             metrics,
+            max_dimension: device.limits().max_texture_dimension_2d,
         }
     }
 
@@ -329,7 +337,11 @@ impl ImagePass {
                 image: placed.image,
                 generation: placed.generation,
             };
-            if placed.width == 0 || placed.height == 0 {
+            if placed.width == 0
+                || placed.height == 0
+                || placed.width > self.max_dimension
+                || placed.height > self.max_dimension
+            {
                 continue;
             }
             self.ensure_texture(device, queue, key, placed);
@@ -624,15 +636,16 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 mod tests {
     use super::{crop_uv, ImagePass, TextureKey};
     use crate::{render::CellMetrics, test_support::require_headless_device};
+    use futures::executor;
     use std::sync::Arc;
-    use stoatty_term::grid::{ImageCrop, PlacedImage};
+    use stoatty_term::grid::{Grid, ImageCrop, PlacedImage};
     use wgpu::{
         naga::{
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode,
-        Origin3d, PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, ErrorFilter, Extent3d,
+        MapMode, Origin3d, PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout,
         TexelCopyTextureInfo, Texture, TextureAspect, TextureFormat, COPY_BYTES_PER_ROW_ALIGNMENT,
     };
 
@@ -653,6 +666,35 @@ mod tests {
             offset_y: 0,
             z: 0,
         }
+    }
+
+    /// A side past the device's limit leaves the image undrawn, where creating
+    /// its texture is a validation error.
+    #[test]
+    fn an_image_past_the_texture_limit_draws_nothing() {
+        let (device, queue) = require_headless_device();
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 6.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let mut pass = ImagePass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        let mut grid = Grid::new(4, 10);
+        let side = device.limits().max_texture_dimension_2d + 1;
+        grid.set_images(vec![placed(side, 1, ImageCrop::default())]);
+
+        let scope = device.push_error_scope(ErrorFilter::Validation);
+        pass.prepare(&device, &queue, &grid, [60.0, 48.0]);
+        let error_future = scope.pop();
+        device.poll(PollType::wait_indefinitely()).expect("poll");
+        let error = executor::block_on(error_future);
+
+        assert_eq!(
+            (error.map(|err| err.to_string()), pass.textures.len()),
+            (None, 0),
+            "the oversized image raises no error and creates no texture",
+        );
     }
 
     /// A zero crop dimension is how a client says "the rest of the image", which
