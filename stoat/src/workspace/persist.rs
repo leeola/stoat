@@ -491,6 +491,15 @@ impl Workspace {
             rehydrate_tree(tree, &editor_id_map);
         }
 
+        // A save keeps only the buffers a pane holds or the user dirtied, so a
+        // jump into any other buffer names one this restore did not bring back.
+        for tree in std::iter::once(&mut panes).chain(parked.iter_mut().flatten()) {
+            for (_, pane) in tree.all_panes_mut() {
+                pane.jumplist
+                    .retain_buffers(|buffer_id| self.buffers.get(buffer_id).is_some());
+            }
+        }
+
         let mut docks = state.docks;
         remap_editor_views_in_docks(&mut docks, &editor_id_map);
         sweep_stale_views_in_docks(&mut docks);
@@ -1327,6 +1336,54 @@ mod tests {
             ),
             (vec![1, 5, 9], 1, 3),
             "the entries, the cursor, and the push count survive",
+        );
+    }
+
+    /// A save keeps only the buffers a pane holds or the user dirtied, so the
+    /// restore drops every jump into another buffer, in a parked tab as in the
+    /// active one, and the cursor stays at the tip of what is left.
+    #[test]
+    fn a_restored_jumplist_keeps_only_jumps_into_restored_buffers() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/jumps");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (unheld, _) = ws.buffers.open(&ws_dir.join("a.rs"), "0123456789");
+        let held = open_held(&mut ws, &ws_dir.join("b.rs"), "0123456789", &exec);
+        let push_jumps = |ws: &mut Workspace| {
+            let pane = ws.panes.focus();
+            for (id, offset) in [(unheld, 1), (held, 2), (unheld, 3)] {
+                let entry = jump_at(&ws.buffers, id, offset);
+                ws.panes.pane_mut(pane).jumplist.push(entry, &ws.buffers);
+            }
+            pane
+        };
+        let parked_pane = push_jumps(&mut ws);
+        ws.new_tab(&exec);
+        let active_pane = push_jumps(&mut ws);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        let kept = |jumplist: &JumpList| {
+            let buffers: Vec<BufferId> = jumplist
+                .entries()
+                .iter()
+                .map(|jump| jump.buffer_id)
+                .collect();
+            (buffers, jump_offsets(&fresh, jumplist), jumplist.cursor())
+        };
+        let parked = fresh.tabs[0].parked.as_ref().expect("tab 0 parks");
+        assert_eq!(
+            [
+                kept(&parked.pane(parked_pane).jumplist),
+                kept(&fresh.panes.pane(active_pane).jumplist)
+            ],
+            [(vec![held], vec![2], 1), (vec![held], vec![2], 1)],
+            "the parked tab and the active one each keep only the jump into b",
         );
     }
 

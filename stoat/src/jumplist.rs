@@ -165,6 +165,16 @@ impl JumpList {
     pub(crate) fn remove_buffer(&mut self, buffer_id: BufferId) {
         self.list.retain(|entry| entry.buffer_id != buffer_id);
     }
+
+    /// Keep only the entries into a buffer `live` accepts, with the cursor over
+    /// the same surviving position.
+    ///
+    /// A restore brings back only the buffers its session kept, so a jump into
+    /// any other names a buffer that no longer exists, and a walk onto it does
+    /// nothing.
+    pub(crate) fn retain_buffers(&mut self, live: impl Fn(BufferId) -> bool) {
+        self.list.retain(|entry| live(entry.buffer_id));
+    }
 }
 
 /// Whether two entries select the same buffer positions, comparing resolved

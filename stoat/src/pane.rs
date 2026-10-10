@@ -759,6 +759,12 @@ impl PaneTree {
         self.panes.iter()
     }
 
+    /// [`Self::all_panes`] with each pane open to change, for a caller such as
+    /// the restore that filters each jumplist.
+    pub(crate) fn all_panes_mut(&mut self) -> impl Iterator<Item = (PaneId, &mut Pane)> {
+        self.panes.iter_mut()
+    }
+
     /// Every detached pane paired with the aux window it renders into, ordered by
     /// [`Pane::index`] so window assignment is stable across calls.
     pub fn windowed_panes(&self) -> Vec<(PaneId, u32)> {
