@@ -77,6 +77,7 @@ use std::{
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
+use unicode_width::UnicodeWidthStr;
 
 /// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
 /// titles.
@@ -518,15 +519,29 @@ pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::T
 /// regardless of what that slot held before. Cursor moves are absolute, so the
 /// stream is positioned for the page's top-left independent of the live grid
 /// cursor.
+///
+/// The cells a wide glyph covers are skipped, as the live diff skips them. The
+/// terminal advances its cursor across them when it prints the glyph, so a
+/// blank printed for one lands a column too far right and shifts the rest of
+/// the row. The gap makes the backend move the cursor before the next cell.
 pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
     use ratatui::backend::{Backend, CrosstermBackend};
 
     let mut bytes = Vec::new();
     {
         let mut backend = CrosstermBackend::new(&mut bytes);
-        let cells = buf.content.iter().enumerate().map(|(i, cell)| {
+        let mut hidden = 0;
+        let cells = buf.content.iter().enumerate().filter_map(|(i, cell)| {
             let (x, y) = buf.pos_of(i);
-            (x, y, cell)
+            if x == buf.area.x {
+                hidden = 0;
+            }
+            if hidden > 0 {
+                hidden -= 1;
+                return None;
+            }
+            hidden = cell.symbol().width().saturating_sub(1);
+            Some((x, y, cell))
         });
         // CrosstermBackend over a Vec<u8> writer is infallible; the Results are
         // surfaced only because the Backend trait is generic over fallible writers.
@@ -2070,5 +2085,26 @@ mod lsp_filter_tests {
             with_diag.contains(picker_row),
             "the picker row shows once a diagnostic is seeded"
         );
+    }
+}
+
+#[cfg(test)]
+mod serialize_tests {
+    use super::serialize_buffer;
+    use crate::term_screen::TermScreen;
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+
+    /// The cell a wide glyph covers prints nothing, so the cells after the
+    /// glyph keep the columns the buffer gave them.
+    #[test]
+    fn cells_after_a_wide_glyph_keep_their_columns() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 2));
+        buf.set_string(0, 0, "a", Style::default());
+        buf.set_string(0, 1, "\u{4e2d}bcde", Style::default());
+
+        let mut screen = TermScreen::new(2, 6);
+        screen.feed(&serialize_buffer(&buf));
+
+        assert_eq!(screen.text(), "a\n\u{4e2d}bcde");
     }
 }
