@@ -667,11 +667,7 @@ pub(crate) fn frame(
 
     let screen = crate::keymap_state::view_predicate(ws);
 
-    let overlay_pane = if matches!(screen, Some("rebase" | "reword" | "rebase_conflict")) {
-        Some(ws.panes.focus())
-    } else {
-        None
-    };
+    let overlay_pane = overlay_pane(ws);
 
     let workspace_name = workspace::display_name_of(&ws.name, &ws.git_root);
 
@@ -1463,6 +1459,17 @@ pub(crate) fn frame(
 
     if mode == "space_pane_display" {
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
+    }
+}
+
+/// The pane that a rebase, reword, or conflict screen paints over.
+///
+/// The screen covers the focused pane alone, so every other pane keeps
+/// painting beside it. `None` while no such screen is up.
+pub(crate) fn overlay_pane(ws: &Workspace) -> Option<PaneId> {
+    match crate::keymap_state::view_predicate(ws) {
+        Some("rebase" | "reword" | "rebase_conflict") => Some(ws.panes.focus()),
+        _ => None,
     }
 }
 

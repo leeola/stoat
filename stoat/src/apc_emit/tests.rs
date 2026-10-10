@@ -233,7 +233,7 @@ fn emit_smooth_scroll_retires_pools_in_overlay_mode() {
         "first emit declares the editor pool, got {first:?}"
     );
 
-    // Entering a full-screen overlay screen retires the editor pool.
+    // Entering a rebase screen retires the editor pool.
     h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
         PathBuf::from("/pool"),
         "onto".into(),
@@ -1794,7 +1794,7 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does() {
     let pages_and_live = |h: &mut crate::test_harness::TestHarness| {
         let live = h.stoat.render();
         let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
-        let pane = terminal_pool_panes(&h.stoat, inactive_dim)
+        let pane = terminal_pool_panes(&h.stoat, inactive_dim, None)
             .into_iter()
             .find(|pane| pane.term_id == term_id)
             .expect("the terminal pane pools");
@@ -1893,6 +1893,63 @@ fn a_pane_pool_starts_over_for_another_terminal() {
         pool_lifecycle(&emit_raw(&mut h, &mut rx), pool),
         ["drop", "declare"],
         "another shell in the pane retires the pool before the pass declares it again"
+    );
+}
+
+/// The commits list is a pane view, so a terminal beside it keeps painting,
+/// and the live grid leaves a pooled terminal blank. The terminal keeps its
+/// pool while the list is up.
+#[test]
+fn a_terminal_beside_the_commits_list_keeps_its_pool() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 9;
+    h.type_action("SplitRight()");
+    h.settle();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    let (_, pool) = terminal_in_focused_pane(&mut h, b"");
+    emit_raw(&mut h, &mut rx);
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+    open_commits_list(&mut h);
+    assert_eq!(
+        pool_lifecycle(&emit_raw(&mut h, &mut rx), pool),
+        Vec::<&str>::new(),
+        "the terminal pool is neither dropped nor declared again"
+    );
+}
+
+/// A rebase screen paints over the focused pane alone. The terminal under it
+/// gives up its pool, or the page composites over the screen, and the
+/// terminal beside it keeps its pool.
+#[test]
+fn a_rebase_screen_retires_only_the_terminal_pool_it_covers() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 9;
+    h.type_action("SplitRight()");
+    h.settle();
+    let (_, covered) = terminal_in_focused_pane(&mut h, b"");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    let (_, beside) = terminal_in_focused_pane(&mut h, b"");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+    emit_raw(&mut h, &mut rx);
+
+    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+        PathBuf::from("/work"),
+        "onto".into(),
+        vec![],
+    ));
+    let bytes = emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (
+            pool_lifecycle(&bytes, covered),
+            pool_lifecycle(&bytes, beside)
+        ),
+        (vec!["drop"], vec![]),
+        "the covered terminal retires its pool, and the terminal beside it keeps one"
     );
 }
 
@@ -2681,17 +2738,10 @@ fn help_list_and_detail_are_pooled_and_retired() {
     );
 }
 
-#[test]
-fn commits_list_is_pooled_and_retired() {
+/// Show a commits list over the `/work` repo in the focused pane.
+fn open_commits_list(h: &mut crate::test_harness::TestHarness) {
     use crate::commit_list::CommitListState;
-    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
-    let mut h = Stoat::test();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    h.stoat.set_apc_tx(tx);
-
-    let size = h.stoat.size();
-    h.stoat.active_workspace_mut().layout(size);
     let repo = h
         .stoat
         .git_host
@@ -2703,14 +2753,25 @@ fn commits_list_is_pooled_and_retired() {
                 .discover(std::path::Path::new("/work"))
                 .expect("the repo was just added")
         });
-    {
-        let ws = h.stoat.active_workspace_mut();
-        let focus = ws.panes.focus();
-        let mut state = CommitListState::new(PathBuf::from("/work"), repo);
-        state.covered = Some(ws.panes.pane(focus).view.clone());
-        let list = ws.commit_lists.insert(state);
-        ws.panes.pane_mut(focus).view = View::Commits(list);
-    }
+    let ws = h.stoat.active_workspace_mut();
+    let focus = ws.panes.focus();
+    let mut state = CommitListState::new(PathBuf::from("/work"), repo);
+    state.covered = Some(ws.panes.pane(focus).view.clone());
+    let list = ws.commit_lists.insert(state);
+    ws.panes.pane_mut(focus).view = View::Commits(list);
+}
+
+#[test]
+fn commits_list_is_pooled_and_retired() {
+    use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    open_commits_list(&mut h);
 
     emit_smooth_scroll(&mut h.stoat);
     let focused = {

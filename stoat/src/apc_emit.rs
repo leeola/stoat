@@ -19,7 +19,7 @@ use crate::{
     editor_state::{EditorId, ScrollGlide},
     input_view::InputView,
     minimap::emit::minimap_view_window,
-    pane::{FocusTarget, Placement, View},
+    pane::{FocusTarget, PaneId, Placement, View},
     render::{
         hover::HoverFrame,
         review::DiffDials,
@@ -527,9 +527,10 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
 /// view) gets its own pool, keyed by the pane's stable index, so split panes
 /// glide independently and at once. A pane
 /// that is no longer pooled -- closed, switched to another view, turned into a
-/// review, or hidden behind a full-screen overlay (commits, rebase, reword,
-/// conflict) -- is retired with `pool_drop`, so returning to it re-declares the
-/// region and refills the page window.
+/// review, or an editor while the commits list or a rebase, reword, or conflict
+/// screen is up -- is retired with `pool_drop`, so returning to it re-declares
+/// the region and refills the page window. A terminal pane keeps its pool
+/// beside those screens.
 ///
 /// A pool that took the cursor anchor is released with `pool_cursor_release` in
 /// the first pass after its pane stops being the focused editor.
@@ -553,9 +554,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .is_some_and(|(at, _)| stoat.executor.now() < *at);
     stoat.smooth_scroll.set_geometry_unsettled(unsettled);
 
-    // A full-screen overlay screen hides every editor, so nothing is pooled
-    // this frame and any live pools are retired. The diff screen renders in
-    // the real editor pool, so it is not an overlay.
+    // The commits list and the rebase, reword, and conflict screens retire
+    // every editor and modal pool, and the editors beside them paint on the
+    // live grid. None of these screens covers the whole window. The commits
+    // list is a pane view, and the rebase screens paint over the focused pane
+    // alone, so a terminal beside one keeps its pool. The diff screen renders
+    // in the real editor pool, so it is not an overlay.
     let overlay = matches!(
         crate::keymap_state::view_predicate(stoat.active_workspace()),
         Some("commits" | "rebase" | "reword" | "rebase_conflict")
@@ -770,11 +774,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .clamp(0.0, 1.0) as f32;
 
     // A terminal or agent pane draws at the terminal font size as a terminal
-    // pool, which a terminal before that protocol does not know. An overlay
-    // screen hides it with the editors.
-    let terminal_panes = match overlay || stoat.stoatty_protocol < TERMINAL_POOL_PROTOCOL {
+    // pool, which a terminal before that protocol does not know. The live grid
+    // leaves a pooled terminal blank, so the pool stays beside an overlay
+    // screen. Only the pane that a rebase screen paints over gives it up.
+    let terminal_panes = match stoat.stoatty_protocol < TERMINAL_POOL_PROTOCOL {
         true => Vec::new(),
-        false => terminal_pool_panes(stoat, inactive_dim),
+        false => {
+            let covered = crate::render::overlay_pane(stoat.active_workspace());
+            terminal_pool_panes(stoat, inactive_dim, covered)
+        },
     };
 
     let mut out = Vec::new();
@@ -2113,13 +2121,20 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
 /// that changes view keeps its id and the terminal declares it again as the
 /// other kind. The region is the pane's content area, which the pool covers
 /// whatever count of terminal cells it holds.
-fn terminal_pool_panes(stoat: &Stoat, inactive_dim: f32) -> Vec<TerminalPoolPane> {
+///
+/// `covered` names the pane a rebase screen paints over. Its terminal pools
+/// nothing, since a pool there composites its page over the screen.
+fn terminal_pool_panes(
+    stoat: &Stoat,
+    inactive_dim: f32,
+    covered: Option<PaneId>,
+) -> Vec<TerminalPoolPane> {
     let ws = stoat.active_workspace();
     let focused = matches!(ws.focus, FocusTarget::SplitPane).then(|| ws.panes.focus());
     ws.panes
         .split_panes()
         .filter_map(|(id, pane)| {
-            if pane.placement != Placement::Split {
+            if pane.placement != Placement::Split || covered == Some(id) {
                 return None;
             }
             let (View::Terminal(term_id) | View::Agent(term_id)) = pane.view else {
