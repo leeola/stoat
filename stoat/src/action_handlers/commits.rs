@@ -1169,7 +1169,10 @@ mod tests {
         };
 
         h.stoat
-            .handle_pty_notification(PtyNotification::TermExited { term_id });
+            .handle_pty_notification(PtyNotification::TermExited {
+                workspace: h.stoat.active_workspace,
+                term_id,
+            });
 
         assert_eq!(
             h.stoat.current_view(),

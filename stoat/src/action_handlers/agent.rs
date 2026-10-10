@@ -41,6 +41,7 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
         .agent_socket_dir
         .as_deref()
         .map(|dir| agent_socket_path_in(dir, uid));
+    let workspace = stoat.active_workspace;
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
     let diff = ws.env.diff.clone();
@@ -67,7 +68,7 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     let focused = ws.panes.focus();
     buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Agent(agent_id));
 
-    spawn_term_reader(&executor, session, agent_id, pty_tx);
+    spawn_term_reader(&executor, session, workspace, agent_id, pty_tx);
     UpdateEffect::Redraw
 }
 

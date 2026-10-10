@@ -205,6 +205,7 @@ pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let executor = stoat.executor.clone();
     let pty_tx = stoat.pty_tx.clone();
     let socket_dir = stoat.agent_socket_dir.clone();
+    let workspace = stoat.active_workspace;
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
     let diff = ws.env.diff.clone();
@@ -236,7 +237,7 @@ pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
         session.clone(),
         token,
     ));
-    spawn_term_reader(&executor, session, term_id, pty_tx);
+    spawn_term_reader(&executor, session, workspace, term_id, pty_tx);
     View::Terminal(term_id)
 }
 

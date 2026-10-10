@@ -684,6 +684,7 @@ impl TestHarness {
 
     pub fn inject_run_output(&mut self, run_id: crate::run::RunId, data: &[u8]) {
         let notif = crate::run::PtyNotification::Output {
+            workspace: self.stoat.active_workspace,
             run_id,
             data: data.to_vec(),
         };
@@ -694,6 +695,7 @@ impl TestHarness {
     pub fn inject_run_done(&mut self, run_id: crate::run::RunId, exit_code: i32) {
         let mark = format!("\x1b]133;D;{exit_code}\x07");
         let notif = crate::run::PtyNotification::Output {
+            workspace: self.stoat.active_workspace,
             run_id,
             data: mark.into_bytes(),
         };

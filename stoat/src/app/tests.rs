@@ -3086,6 +3086,7 @@ fn agent_output_feeds_emulator() {
     stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
 
     let effect = stoat.handle_pty_notification(PtyNotification::TermOutput {
+        workspace: stoat.active_workspace,
         agent_id,
         data: b"hello".to_vec(),
     });
@@ -3116,6 +3117,7 @@ fn a_retitle_on_a_hidden_terminal_marks_the_frame_dirty() {
     ));
     let output = |stoat: &mut Stoat, data: &[u8]| {
         stoat.handle_pty_notification(PtyNotification::TermOutput {
+            workspace: stoat.active_workspace,
             agent_id,
             data: data.to_vec(),
         });
@@ -3154,8 +3156,10 @@ fn flood_pty(stoat: &mut Stoat) {
     let pane = stoat.active_workspace().panes.focus();
     stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
 
+    let workspace = stoat.active_workspace;
     let pty_tx = stoat.pty_tx.clone();
     let chunk = move || PtyNotification::TermOutput {
+        workspace,
         agent_id,
         data: vec![b'x'; 64 * 1024],
     };
@@ -3239,6 +3243,7 @@ fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
         h.stoat
             .pty_tx
             .try_send(PtyNotification::Output {
+                workspace: h.stoat.active_workspace,
                 run_id: RunId::default(),
                 data: vec![b'x'; chunk],
             })
@@ -3278,6 +3283,7 @@ fn term_pane_osc52_forwards_to_clipboard() {
     // OSC 52 set-clipboard with the base64 of "hi", BEL-terminated.
     h.stoat
         .handle_pty_notification(PtyNotification::TermOutput {
+            workspace: h.stoat.active_workspace,
             agent_id,
             data: b"\x1b]52;c;aGk=\x07".to_vec(),
         });
@@ -3777,6 +3783,7 @@ fn term_query_reply_writes_back_to_pty() {
     // A DSR cursor-position query in the PTY output must be answered back
     // to the PTY. A fresh screen reports the cursor at row 1, column 1.
     stoat.handle_pty_notification(PtyNotification::TermOutput {
+        workspace: stoat.active_workspace,
         agent_id,
         data: b"\x1b[6n".to_vec(),
     });
@@ -3898,7 +3905,10 @@ fn terminal_pane_closes_when_shell_exits() {
 
     let effect = h
         .stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     assert_eq!(effect, UpdateEffect::Redraw);
     let ws = h.stoat.active_workspace();
@@ -3926,7 +3936,10 @@ fn last_terminal_pane_restores_scratch_when_no_prev_view() {
     h.stoat.transition_mode("insert".to_string());
 
     h.stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     let ws = h.stoat.active_workspace();
     assert!(!ws.terms.contains_key(term_id), "session dropped on exit");
@@ -3972,7 +3985,10 @@ fn last_terminal_pane_restores_previous_view_on_exit() {
     h.stoat.transition_mode("insert".to_string());
 
     h.stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     let ws = h.stoat.active_workspace();
     let View::Editor(restored) = ws.panes.pane(pane).view else {
@@ -4005,7 +4021,10 @@ fn last_terminal_pane_falls_back_to_scratch_when_prev_view_dangles() {
     h.stoat.transition_mode("insert".to_string());
 
     h.stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     let ws = h.stoat.active_workspace();
     let View::Editor(restored) = ws.panes.pane(only_pane).view else {
@@ -4035,7 +4054,10 @@ fn terminal_exit_keeps_insert_mode_when_pane_not_focused() {
     h.stoat.transition_mode("insert".to_string());
 
     h.stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     assert_eq!(
         h.stoat.focused_mode(),
@@ -4053,7 +4075,10 @@ fn agent_pane_survives_shell_exit() {
     ws.panes.pane_mut(only_pane).view = View::Agent(term_id);
 
     h.stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     let ws = h.stoat.active_workspace();
     assert!(
@@ -4125,7 +4150,10 @@ fn a_dock_held_agent_survives_shell_exit() {
     });
 
     h.stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     assert!(
         h.stoat.active_workspace().terms.contains_key(term_id),
@@ -4148,7 +4176,10 @@ fn a_terminal_hidden_behind_a_buffer_retires_on_exit() {
 
     let effect = h
         .stoat
-        .handle_pty_notification(PtyNotification::TermExited { term_id });
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
 
     assert_eq!(
         effect,
@@ -4163,6 +4194,108 @@ fn a_terminal_hidden_behind_a_buffer_retires_on_exit() {
     assert!(
         ws.panes.pane(pane).prev_view.is_none(),
         "a dead shell is nothing to return to",
+    );
+}
+
+/// Terminal ids repeat across workspaces, so a shell in a background workspace
+/// feeds and retires its own session and repaints nothing.
+#[test]
+fn a_background_shell_lands_in_its_own_workspace() {
+    let mut h = Stoat::test();
+    let launch = h.stoat.active_workspace;
+    let second = h.create_workspace();
+    let ids = [launch, second].map(|id| {
+        let ws = &mut h.stoat.workspaces[id];
+        let term_id = insert_term_session(ws);
+        let pane = ws.panes.focus();
+        ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+        term_id
+    });
+    assert_eq!(ids[0], ids[1], "each workspace keys its first shell alike");
+    let term_id = ids[0];
+    h.set_active_workspace(second);
+
+    let effect = h
+        .stoat
+        .handle_pty_notification(PtyNotification::TermOutput {
+            workspace: launch,
+            agent_id: term_id,
+            data: b"from-a".to_vec(),
+        });
+    let texts = [launch, second].map(|id| h.stoat.workspaces[id].terms[term_id].term.text());
+    assert_eq!(
+        (effect, h.stoat.pty_dirty, texts),
+        (
+            UpdateEffect::None,
+            false,
+            ["from-a".to_owned(), String::new()]
+        ),
+        "the output feeds the launch shell and repaints nothing",
+    );
+
+    let effect = h
+        .stoat
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: launch,
+            term_id,
+        });
+    let second_ws = &h.stoat.workspaces[second];
+    let second_view = &second_ws.panes.pane(second_ws.panes.focus()).view;
+    assert_eq!(
+        (
+            effect,
+            h.stoat.workspaces[launch].terms.contains_key(term_id),
+            second_ws.terms.contains_key(term_id),
+            matches!(second_view, View::Terminal(id) if *id == term_id),
+            h.stoat.active_workspace,
+        ),
+        (UpdateEffect::None, false, true, true, second),
+        "the exit retires the launch shell and leaves the second workspace as it was",
+    );
+}
+
+/// Run ids repeat across workspaces too, so a run in a background workspace
+/// finishes its own block and repaints nothing.
+#[test]
+fn a_background_run_lands_in_its_own_workspace() {
+    let mut h = Stoat::test();
+    let launch = h.stoat.active_workspace;
+    let second = h.create_workspace();
+    let ids = [launch, second].map(|id| {
+        h.set_active_workspace(id);
+        let run_id = h.open_run();
+        h.submit_run("true");
+        run_id
+    });
+    assert_eq!(ids[0], ids[1], "each workspace keys its first run alike");
+    let run_id = ids[0];
+
+    let effects = [
+        h.stoat.handle_pty_notification(PtyNotification::Output {
+            workspace: launch,
+            run_id,
+            data: b"\x1b]133;D;3\x07".to_vec(),
+        }),
+        h.stoat
+            .handle_pty_notification(PtyNotification::CommandDone {
+                workspace: launch,
+                run_id,
+                exit_status: Some(0),
+            }),
+    ];
+    let blocks = [launch, second].map(|id| {
+        let run = &h.stoat.workspaces[id].runs[run_id];
+        let block = run.active_block().expect("the submit opened a block");
+        (block.finished, block.exit_status)
+    });
+    assert_eq!(
+        (effects, h.stoat.pty_dirty, blocks),
+        (
+            [UpdateEffect::None; 2],
+            false,
+            [(true, Some(3)), (false, None)]
+        ),
+        "the launch run finishes with its own exit code, and nothing repaints",
     );
 }
 
@@ -4185,6 +4318,7 @@ fn hidden_term_output_advances_state_without_a_repaint() {
     let effect = h
         .stoat
         .handle_pty_notification(PtyNotification::TermOutput {
+            workspace: h.stoat.active_workspace,
             agent_id: term_id,
             data: b"abc".to_vec(),
         });
@@ -4222,6 +4356,7 @@ fn visible_term_output_paces_a_repaint_to_the_tick() {
         let effect = h
             .stoat
             .handle_pty_notification(PtyNotification::TermOutput {
+                workspace: h.stoat.active_workspace,
                 agent_id: term_id,
                 data: b"x".to_vec(),
             });

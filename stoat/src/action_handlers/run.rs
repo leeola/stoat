@@ -2,13 +2,14 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     pane::View,
-    run::{OutputBlock, RunState},
+    run::{OutputBlock, RunSink, RunState},
 };
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let pty_tx = stoat.pty_tx.clone();
     let host = stoat.terminal_host.clone();
+    let workspace = stoat.active_workspace;
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
     let diff = ws.env.diff.clone();
@@ -18,8 +19,12 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let state = RunState::new(cwd.clone(), ws, executor.clone());
     let run_id = ws.runs.insert(state);
 
-    if let Ok(handle) =
-        crate::run::spawn_shell(&*host, &executor, &cwd, width, pty_tx, run_id, &diff)
+    let sink = RunSink {
+        tx: pty_tx,
+        workspace,
+        run_id,
+    };
+    if let Ok(handle) = crate::run::spawn_shell(&*host, &executor, &cwd, width, sink, &diff)
         && let Some(run_state) = ws.runs.get_mut(run_id)
     {
         run_state.shell_handle = Some(handle);
@@ -82,10 +87,15 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         .push(OutputBlock::new(text.clone(), run_state.cwd.clone(), width));
     run_state.trim_blocks();
 
+    let sink = RunSink {
+        tx: pty_tx,
+        workspace: active_idx,
+        run_id: id,
+    };
     if let Some(handle) = &mut run_state.shell_handle {
         handle.send_command(&text);
     } else if let Ok(handle) =
-        crate::run::spawn_shell(&*host, &executor, &run_state.cwd, width, pty_tx, id, &diff)
+        crate::run::spawn_shell(&*host, &executor, &run_state.cwd, width, sink, &diff)
     {
         run_state.shell_handle = Some(handle);
         if let Some(h) = &mut run_state.shell_handle {
@@ -181,7 +191,12 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
         .push(OutputBlock::new(command.to_owned(), cwd.clone(), width));
     let id = ws.runs.insert(state);
 
-    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, pty_tx, id, &diff) {
+    let sink = RunSink {
+        tx: pty_tx,
+        workspace: active_idx,
+        run_id: id,
+    };
+    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, sink, &diff) {
         Ok(handle) => {
             let ws = stoat.active_workspace_mut();
             if let Some(run_state) = ws.runs.get_mut(id) {

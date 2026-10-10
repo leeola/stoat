@@ -2,7 +2,7 @@ use super::RunId;
 use crate::{
     host::terminal::{merge_env_diff, open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
     term_session::TermId,
-    workspace::WorkspaceUid,
+    workspace::{WorkspaceId, WorkspaceUid},
 };
 use std::{
     io::Error,
@@ -12,20 +12,30 @@ use std::{
 use stoat_scheduler::Executor;
 use tokio::sync::mpsc;
 
+/// What a PTY reader tells the run loop.
+///
+/// A [`RunId`] or [`TermId`] is a key local to the workspace that owns the
+/// session, so the first sessions of two workspaces share a key. Each session
+/// notification therefore carries the [`WorkspaceId`] of its owner. The run
+/// loop applies it to that workspace, on screen or not.
 pub enum PtyNotification {
     Output {
+        workspace: WorkspaceId,
         run_id: RunId,
         data: Vec<u8>,
     },
     CommandDone {
+        workspace: WorkspaceId,
         run_id: RunId,
         exit_status: Option<i32>,
     },
     TermOutput {
+        workspace: WorkspaceId,
         agent_id: TermId,
         data: Vec<u8>,
     },
     TermExited {
+        workspace: WorkspaceId,
         term_id: TermId,
     },
     /// One chunk of a remote `:ssh` session's output, on its way to stdout as
@@ -82,13 +92,22 @@ impl ShellHandle {
     }
 }
 
+/// Where a run's PTY reader sends the output it reads.
+///
+/// A [`RunId`] names a run only within its own workspace, so the reader tags
+/// each notification with the owning [`WorkspaceId`] as well as the run.
+pub struct RunSink {
+    pub tx: mpsc::Sender<PtyNotification>,
+    pub workspace: WorkspaceId,
+    pub run_id: RunId,
+}
+
 pub fn spawn_shell(
     host: &dyn TerminalHost,
     executor: &Executor,
     cwd: &Path,
     width: u16,
-    pty_tx: mpsc::Sender<PtyNotification>,
-    run_id: RunId,
+    sink: RunSink,
     diff: &[(String, Option<String>)],
 ) -> std::io::Result<ShellHandle> {
     use futures::FutureExt;
@@ -126,9 +145,7 @@ pub fn spawn_shell(
         },
     };
     let session: Arc<dyn TerminalSession> = Arc::from(session);
-    executor
-        .spawn(reader_task(session.clone(), run_id, pty_tx))
-        .detach();
+    executor.spawn(reader_task(session.clone(), sink)).detach();
 
     // bash --noediting echoes injected lines back into the grid. Turn the
     // tty's echo off so only real command output is rendered.
@@ -142,8 +159,7 @@ pub fn spawn_oneshot(
     command: &str,
     cwd: &Path,
     width: u16,
-    pty_tx: mpsc::Sender<PtyNotification>,
-    run_id: RunId,
+    sink: RunSink,
     diff: &[(String, Option<String>)],
 ) -> std::io::Result<ShellHandle> {
     let mut args = SpawnArgs {
@@ -158,9 +174,7 @@ pub fn spawn_oneshot(
     merge_env_diff(&mut args, diff);
     args.env.push(("TERM".into(), "dumb".into()));
     let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
-    executor
-        .spawn(reader_task(session.clone(), run_id, pty_tx))
-        .detach();
+    executor.spawn(reader_task(session.clone(), sink)).detach();
 
     Ok(ShellHandle::new(session))
 }
@@ -276,16 +290,18 @@ fn terminal_spawn_args(
 pub fn spawn_term_reader(
     executor: &Executor,
     session: Arc<dyn TerminalSession>,
+    workspace: WorkspaceId,
     agent_id: TermId,
     pty_tx: mpsc::Sender<PtyNotification>,
 ) {
     executor
-        .spawn(term_reader_task(session, agent_id, pty_tx))
+        .spawn(term_reader_task(session, workspace, agent_id, pty_tx))
         .detach();
 }
 
 async fn term_reader_task(
     session: Arc<dyn TerminalSession>,
+    workspace: WorkspaceId,
     agent_id: TermId,
     tx: mpsc::Sender<PtyNotification>,
 ) {
@@ -296,6 +312,7 @@ async fn term_reader_task(
         };
         if tx
             .send(PtyNotification::TermOutput {
+                workspace,
                 agent_id,
                 data: chunk,
             })
@@ -311,7 +328,10 @@ async fn term_reader_task(
     // terminal pane. The handler decides what to do by pane kind, and a closed
     // channel drops this send silently.
     let _ = tx
-        .send(PtyNotification::TermExited { term_id: agent_id })
+        .send(PtyNotification::TermExited {
+            workspace,
+            term_id: agent_id,
+        })
         .await;
 }
 
@@ -455,11 +475,12 @@ fn editor_command_for(exe: Option<&Path>) -> String {
     }
 }
 
-async fn reader_task(
-    session: Arc<dyn TerminalSession>,
-    run_id: RunId,
-    tx: mpsc::Sender<PtyNotification>,
-) {
+async fn reader_task(session: Arc<dyn TerminalSession>, sink: RunSink) {
+    let RunSink {
+        tx,
+        workspace,
+        run_id,
+    } = sink;
     loop {
         let chunk = match session.read_chunk().await {
             Ok(Some(chunk)) => chunk,
@@ -467,6 +488,7 @@ async fn reader_task(
         };
         if tx
             .send(PtyNotification::Output {
+                workspace,
                 run_id,
                 data: chunk,
             })
@@ -482,6 +504,7 @@ async fn reader_task(
     // without an OSC 133 done mark, which the oneshot modal path relies on.
     let _ = tx
         .send(PtyNotification::CommandDone {
+            workspace,
             run_id,
             exit_status: None,
         })

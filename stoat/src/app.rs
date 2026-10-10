@@ -7829,12 +7829,41 @@ impl Stoat {
     }
 
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
+        match notif {
+            PtyNotification::SshOutput { data } => ssh::forward_output(self, data),
+            PtyNotification::SshExited { exit_status } => ssh::finish(self, exit_status),
+            PtyNotification::Output { workspace, .. }
+            | PtyNotification::CommandDone { workspace, .. }
+            | PtyNotification::TermOutput { workspace, .. }
+            | PtyNotification::TermExited { workspace, .. } => {
+                let on_screen = workspace == self.active_workspace;
+                self.in_workspace(workspace, |stoat| {
+                    stoat.handle_session_notification(notif, on_screen)
+                })
+                .unwrap_or(UpdateEffect::None)
+            },
+        }
+    }
+
+    /// Apply a run or terminal notification to the active workspace.
+    ///
+    /// [`Self::handle_pty_notification`] calls this inside [`Self::in_workspace`],
+    /// so the active workspace is the one that owns the session.
+    ///
+    /// Only an owner on screen marks the frame dirty, asks for a redraw, or
+    /// leaves insert mode after its terminal pane closes. An owner in the
+    /// background keeps its state current, and a switch to it repaints.
+    fn handle_session_notification(
+        &mut self,
+        notif: PtyNotification,
+        on_screen: bool,
+    ) -> UpdateEffect {
         let clipboard_host = self.clipboard_host.clone();
         let env_host = self.env_host.clone();
         let modal_run = self.modal_run;
         let ws = self.active_workspace_mut();
         match notif {
-            PtyNotification::Output { run_id, data } => {
+            PtyNotification::Output { run_id, data, .. } => {
                 // The block still feeds while hidden, but a hidden run drives no
                 // repaint. Revealing it repaints on the toggle's own dispatch.
                 let visible = Self::run_visible(ws, run_id, modal_run);
@@ -7880,7 +7909,7 @@ impl Stoat {
                     run_state.cwd = cwd;
                 }
                 run_state.trim_blocks();
-                if visible {
+                if visible && on_screen {
                     self.pty_dirty = true;
                 }
                 UpdateEffect::None
@@ -7888,6 +7917,7 @@ impl Stoat {
             PtyNotification::CommandDone {
                 run_id,
                 exit_status,
+                ..
             } => {
                 let Some(run_state) = ws.runs.get_mut(run_id) else {
                     return UpdateEffect::None;
@@ -7899,9 +7929,13 @@ impl Stoat {
                     block.finished = true;
                     block.exit_status = exit_status;
                 }
-                UpdateEffect::Redraw
+                if on_screen {
+                    UpdateEffect::Redraw
+                } else {
+                    UpdateEffect::None
+                }
             },
-            PtyNotification::TermOutput { agent_id, data } => {
+            PtyNotification::TermOutput { agent_id, data, .. } => {
                 // Computed before the feed so the later self.write_to_term does
                 // not collide with a borrow of ws. A hidden term still feeds but
                 // drives no repaint until a surface reveals it.
@@ -7923,14 +7957,12 @@ impl Stoat {
                         &text,
                     );
                 }
-                if visible || retitled {
+                if on_screen && (visible || retitled) {
                     self.pty_dirty = true;
                 }
                 UpdateEffect::None
             },
-            PtyNotification::SshOutput { data } => ssh::forward_output(self, data),
-            PtyNotification::SshExited { exit_status } => ssh::finish(self, exit_status),
-            PtyNotification::TermExited { term_id } => {
+            PtyNotification::TermExited { term_id, .. } => {
                 let pane_ids = ws
                     .panes
                     .split_pane_ids()
@@ -8000,10 +8032,17 @@ impl Stoat {
                     }
                 }
 
+                if !on_screen {
+                    return UpdateEffect::None;
+                }
                 if exited_held_focus && self.focused_mode() == "insert" {
                     self.transition_mode("normal".to_string());
                 }
                 UpdateEffect::Redraw
+            },
+            // The ssh session belongs to no workspace, so the caller handles it.
+            PtyNotification::SshOutput { .. } | PtyNotification::SshExited { .. } => {
+                UpdateEffect::None
             },
         }
     }
