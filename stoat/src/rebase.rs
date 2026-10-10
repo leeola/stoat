@@ -144,6 +144,12 @@ pub(crate) struct ActiveRebase {
     /// Message of `last_pick_sha`, used when building squash messages.
     pub last_message: Option<String>,
     pub pause: Option<RebasePause>,
+    /// The branch HEAD was attached to when the plan started.
+    ///
+    /// The finish points it at the rebased tip and attaches HEAD to it, as an
+    /// interactive rebase in git leaves the repository. `None` for a plan
+    /// started on a detached HEAD, which ends detached at the tip.
+    pub branch: Option<String>,
 }
 
 pub(crate) enum RebasePause {
@@ -204,7 +210,7 @@ pub(crate) enum ConflictResolution {
 }
 
 impl ActiveRebase {
-    pub(crate) fn new(state: RebaseState) -> Self {
+    pub(crate) fn new(state: RebaseState, branch: Option<String>) -> Self {
         Self {
             workdir: state.workdir,
             onto: state.onto.clone(),
@@ -213,6 +219,7 @@ impl ActiveRebase {
             last_pick_sha: None,
             last_message: None,
             pause: None,
+            branch,
         }
     }
 }
@@ -938,6 +945,116 @@ mod tests {
         let log = repo.log_commits(None, 10);
         // Two rebased commits (from c2 and c3) plus root c1.
         assert_eq!(log.len(), 3, "full chain rebased: {log:#?}");
+    }
+
+    /// A finished rebase leaves git as an interactive rebase does. The files
+    /// match the tip, the starting branch names the tip, and HEAD is on that
+    /// branch.
+    #[test]
+    fn a_finished_rebase_moves_its_branch_and_checks_it_out() {
+        let mut h = Stoat::test();
+        on_main(&h);
+        pause_on_edit(&mut h);
+        // The fake checkout writes no file, so the tip's text goes on disk here.
+        h.fake_fs().insert_file("/repo/a.rs", b"tip\n");
+
+        h.type_keys("C");
+        h.settle();
+
+        assert_finished_on_main(&h);
+        let buffers = &h.stoat.active_workspace().buffers;
+        let id = buffers.id_for_path(Path::new("/repo/a.rs")).expect("a.rs");
+        assert_eq!(
+            buffers
+                .get(id)
+                .expect("buffer")
+                .read()
+                .expect("poisoned")
+                .snapshot
+                .visible_text
+                .to_string(),
+            "tip\n",
+            "the open file reads what the checkout wrote",
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_drops_a_commit_moves_its_branch() {
+        let mut h = Stoat::test();
+        on_main(&h);
+        drop_middle(&mut h);
+
+        assert_finished_on_main(&h);
+    }
+
+    /// A plan started on a detached HEAD ends detached at the tip and moves no
+    /// branch.
+    #[test]
+    fn a_rebase_started_detached_ends_detached_at_the_tip() {
+        let mut h = Stoat::test();
+        drop_middle(&mut h);
+
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
+        let tip = repo.resolve_rev("HEAD").expect("HEAD");
+        let checkouts = checkouts(&h);
+        assert_eq!(
+            (
+                checkouts.last(),
+                checkouts.iter().any(|c| c.starts_with("ref:")),
+                repo.head_branch(),
+                pause_badge(&h),
+            ),
+            (
+                Some(&format!("detached:{tip}")),
+                false,
+                None,
+                Some(format!("rebase complete, HEAD at {}", &tip[..7])),
+            ),
+        );
+    }
+
+    /// Attach HEAD to `main` at the tip of [`THREE_COMMITS`], as for a user on
+    /// that branch. The fake lets a branch name a commit that the history
+    /// seeds later.
+    fn on_main(h: &TestHarness) {
+        h.fake_git
+            .add_repo("/repo")
+            .branch("main", "c3")
+            .set_head_branch("main");
+    }
+
+    /// Rebase [`THREE_COMMITS`] onto its root with the middle commit dropped.
+    fn drop_middle(h: &mut TestHarness) {
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("d");
+        h.type_keys("Enter");
+        h.settle();
+    }
+
+    /// Assert the finish checked the rebased tip out, pointed `main` at it, and
+    /// attached HEAD to `main`, with HEAD read as the rebased tip.
+    fn assert_finished_on_main(h: &TestHarness) {
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
+        let tip = repo.resolve_rev("HEAD").expect("HEAD");
+        let checkouts = checkouts(h);
+        assert_eq!(
+            (
+                &checkouts[checkouts.len().saturating_sub(2)..],
+                repo.resolve_rev("main"),
+                repo.head_branch(),
+                pause_badge(h),
+            ),
+            (
+                &[format!("detached:{tip}"), "ref:main".to_string()][..],
+                Some(tip.clone()),
+                Some("main".to_string()),
+                Some(format!("rebase complete, main at {}", &tip[..7])),
+            ),
+        );
     }
 
     #[test]

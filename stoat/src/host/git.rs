@@ -548,18 +548,13 @@ pub trait GitRepo: Send + Sync {
         author_email: &str,
     ) -> Result<String, GitApplyError>;
 
-    /// Point HEAD at `sha` (detached update; does not move any branch
-    /// refs). Used by the rebase stepper after the plan completes.
-    fn update_head(&self, sha: &str) -> Result<(), GitApplyError>;
-
     /// Check out `sha`, updating the working tree and index to its content and
     /// leaving HEAD detached there.
     ///
-    /// Unlike [`Self::update_head`], which moves the ref and leaves the files
-    /// alone, this makes the working tree actually match the commit, so tools
-    /// reading from disk see the same revision the editor does. Refuses with an
-    /// error when a tracked file has local modifications that the checkout
-    /// would have to overwrite, leaving HEAD and the working tree untouched.
+    /// The working tree matches the commit afterwards, so tools that read from
+    /// disk see the same revision the editor does. Refuses with an error when a
+    /// tracked file has local modifications that the checkout has to overwrite,
+    /// and leaves HEAD and the working tree untouched.
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError>;
 
     /// Check out local branch `name`, updating the working tree and index to

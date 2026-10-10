@@ -33,6 +33,10 @@ pub(crate) struct ActiveRebaseSnap {
     pub last_pick_sha: Option<String>,
     pub last_message: Option<String>,
     pub pause: Option<RebasePauseSnap>,
+    /// Absent from a snapshot written before the field existed, which then
+    /// finishes detached at the tip.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// Serializable variants of [`RebasePause`]. Omits `Reword` because
@@ -106,6 +110,7 @@ impl ActiveRebaseSnap {
                 last_pick_sha: active.last_pick_sha.clone(),
                 last_message: active.last_message.clone(),
                 pause,
+                branch: active.branch.clone(),
             },
             dropped,
         }
@@ -120,6 +125,7 @@ impl ActiveRebaseSnap {
             last_pick_sha: self.last_pick_sha,
             last_message: self.last_message,
             pause: self.pause.map(|p| p.into_pause()),
+            branch: self.branch,
         }
     }
 }

@@ -1425,18 +1425,6 @@ impl GitRepo for FakeGitRepo {
         Ok(new_sha)
     }
 
-    fn update_head(&self, sha: &str) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
-        if !state.commits.contains_key(sha) {
-            return BackendSnafu {
-                reason: format!("unknown sha: {sha}"),
-            }
-            .fail();
-        }
-        state.head = Some(sha.to_string());
-        Ok(())
-    }
-
     /// Records the checkout and moves head, without modelling libgit2's refusal
     /// to overwrite a dirty working tree.
     ///

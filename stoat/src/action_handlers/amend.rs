@@ -679,6 +679,7 @@ mod tests {
                 pause: Some(RebasePause::Edit {
                     cherry_picked_commit: "c2".to_string(),
                 }),
+                branch: None,
             });
         }
         cursor_to(&mut h, 2);

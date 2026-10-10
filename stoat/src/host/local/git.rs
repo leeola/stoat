@@ -792,14 +792,6 @@ impl GitRepo for LocalGitRepo {
         Ok(new_id.to_string())
     }
 
-    fn update_head(&self, sha: &str) -> Result<(), GitApplyError> {
-        let repo = self.repo.lock().expect("git repo lock");
-        let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
-        repo.reference("HEAD", oid, true, "stoat rebase")
-            .map_err(err_msg)?;
-        Ok(())
-    }
-
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let oid = git2::Oid::from_str(sha).map_err(err_msg)?;

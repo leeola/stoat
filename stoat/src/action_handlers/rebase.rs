@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::{commits::commits_refresh, reword::install_reword_pause},
     app::{Stoat, UpdateEffect},
+    auto_reload,
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::{CherryPickOutcome, ConflictedFile, GitApplyError, GitRepo, RebaseTodoOp},
     merge_view::MergeRow,
@@ -223,9 +224,9 @@ fn install_edit_pause(stoat: &mut Stoat, workdir: &Path, sha: &str) {
 /// entry, so a call while a step is out does nothing. The keys that end a
 /// Reword, an Edit, or a conflict pause call this to resume the plan.
 ///
-/// When the plan drains, the rebase ends at once. The move of HEAD onto the
-/// rebased tip waits its turn in the git queue, and the complete badge shows
-/// when that move lands.
+/// When the plan drains, the rebase ends at once. The checkout of the rebased
+/// tip and the move of the branch the plan started on wait their turn in the
+/// git queue, and the complete badge shows when they land.
 pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.git_jobs.holds(GitJobKey::RebaseStep) {
         return UpdateEffect::Redraw;
@@ -241,8 +242,9 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
 
         let Some(entry) = active.remaining.pop_front() else {
             let final_head = active.current_head.clone();
+            let branch = active.branch.take();
             stoat.active_workspace_mut().rebase_active = None;
-            queue_rebase_finish(stoat, final_head);
+            queue_rebase_finish(stoat, final_head, branch);
             return UpdateEffect::Redraw;
         };
         if entry.op == RebaseTodoOp::Drop {
@@ -399,25 +401,67 @@ fn land_rebase_step(stoat: &mut Stoat, entry: RebaseEntry, workdir: PathBuf, out
     }
 }
 
-/// Queue the move of HEAD onto `final_head`, the tip the drained plan built.
+/// Queue the checkout of `final_head`, the tip the drained plan built, and the
+/// move of `branch` onto it.
+///
+/// The tip is checked out detached first, against the tree HEAD has, so the
+/// files and the index match it. Then `branch` names the tip and HEAD attaches
+/// to it, as an interactive rebase in git leaves the repository. A plan that
+/// started detached ends detached at the tip. A failed step stops the rest,
+/// because a ref moved onto a tree the files do not match is the mismatch the
+/// checkout exists to prevent.
 ///
 /// The job has no key. A keyed job that waits in the queue gives its place to
 /// a later plan's keyed step, and HEAD then never moves.
-fn queue_rebase_finish(stoat: &mut Stoat, final_head: String) {
+fn queue_rebase_finish(stoat: &mut Stoat, final_head: String, branch: Option<String>) {
     let job = GitJob::new("rebase finish", None, move |stoat: &mut Stoat| {
         let repo = stoat.git_host.discover(&stoat.active_workspace().git_root);
         Some(Box::new(move || {
-            if let Some(repo) = repo {
-                let _ = repo.update_head(&final_head);
-            }
-            Box::new(move |stoat: &mut Stoat| {
-                let short = &final_head[..final_head.len().min(7)];
-                emit_rebase_complete(stoat, &format!("rebase complete, HEAD at {short}"));
-                commits_refresh(stoat);
-            }) as GitLanding
+            let moved = match repo {
+                None => Err("git repo not found".to_string()),
+                Some(repo) => repo
+                    .checkout_detached(&final_head)
+                    .and_then(|()| match branch.as_deref() {
+                        Some(name) => repo
+                            .set_branch_target(name, &final_head)
+                            .and_then(|()| repo.checkout_ref(name)),
+                        None => Ok(()),
+                    })
+                    .map_err(|err| err.to_string()),
+            };
+            Box::new(move |stoat: &mut Stoat| land_rebase_finish(stoat, final_head, branch, moved))
+                as GitLanding
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
+}
+
+/// Report where the finish left the repository.
+///
+/// A failed checkout reports the rebased tip's sha, because no branch names
+/// that commit and the user needs it to recover the rebase. A finish that moved
+/// re-reads the clean buffers the checkout rewrote, then reloads the commits
+/// list.
+fn land_rebase_finish(
+    stoat: &mut Stoat,
+    final_head: String,
+    branch: Option<String>,
+    moved: Result<(), String>,
+) {
+    if let Err(err) = moved {
+        let detail = format!("{err}; the rebased tip is {final_head}");
+        emit_rebase_error(stoat, "rebase checkout failed", Some(detail));
+        return;
+    }
+
+    auto_reload::reload_clean_buffers(stoat);
+    let short = &final_head[..final_head.len().min(7)];
+    let label = match branch {
+        Some(name) => format!("rebase complete, {name} at {short}"),
+        None => format!("rebase complete, HEAD at {short}"),
+    };
+    emit_rebase_complete(stoat, &label);
+    commits_refresh(stoat);
 }
 
 fn emit_rebase_complete(stoat: &mut Stoat, label: &str) {
@@ -435,9 +479,10 @@ fn emit_rebase_complete(stoat: &mut Stoat, label: &str) {
 
 /// Run the rebase plan on screen.
 ///
-/// The press takes the plan and queues a check for tracked changes. The plan
-/// starts when that check lands clean. While another rebase runs, the press
-/// reports that and leaves the plan on screen.
+/// The press takes the plan and queues a check for tracked changes, which also
+/// reads the branch HEAD is on. The plan starts when that check lands clean.
+/// While another rebase runs, the press reports that and leaves the plan on
+/// screen.
 pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().rebase_active.is_some() {
         emit_rebase_error(stoat, "rebase already in progress", None);
@@ -457,7 +502,9 @@ pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
         };
         Some(Box::new(move || {
             let dirty = repo.has_tracked_changes();
-            Box::new(move |stoat: &mut Stoat| land_rebase_check(stoat, plan, dirty)) as GitLanding
+            let branch = repo.head_branch();
+            Box::new(move |stoat: &mut Stoat| land_rebase_check(stoat, plan, dirty, branch))
+                as GitLanding
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
@@ -466,9 +513,10 @@ pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Start `plan` when its dirty check lands clean.
 ///
-/// A check that waited behind another plan's check finds that plan installed,
-/// with its first step queued, and refuses.
-fn land_rebase_check(stoat: &mut Stoat, plan: RebaseState, dirty: bool) {
+/// `branch` is the branch HEAD was on at the check, which the finish moves
+/// onto the rebased tip. A check that waited behind another plan's check finds
+/// that plan installed, with its first step queued, and refuses.
+fn land_rebase_check(stoat: &mut Stoat, plan: RebaseState, dirty: bool, branch: Option<String>) {
     if dirty {
         emit_rebase_error(stoat, "working tree dirty: commit or stash first", None);
         return;
@@ -478,7 +526,7 @@ fn land_rebase_check(stoat: &mut Stoat, plan: RebaseState, dirty: bool) {
         return;
     }
 
-    stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(plan));
+    stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(plan, branch));
     drive_rebase(stoat);
 }
 

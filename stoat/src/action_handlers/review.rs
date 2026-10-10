@@ -3041,6 +3041,7 @@ mod tests {
             pause: Some(crate::rebase::RebasePause::Edit {
                 cherry_picked_commit: "c1".to_string(),
             }),
+            branch: None,
         }
     }
 
