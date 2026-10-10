@@ -1013,6 +1013,73 @@ mod tests {
         );
     }
 
+    /// A squash with no pick before it is refused at its start. The refusal
+    /// ends the rebase, so the next plan runs rather than report a rebase in
+    /// progress.
+    #[test]
+    fn a_refused_step_ends_the_rebase() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("s");
+        h.type_keys("Enter");
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_none(),
+                pause_badge(&h),
+            ),
+            (
+                true,
+                Some("squash/fixup without preceding pick".to_string())
+            ),
+        );
+
+        h.type_keys("i");
+        h.type_keys("d");
+        h.type_keys("Enter");
+        h.settle();
+
+        let repo = h.fake_git.discover(Path::new("/repo")).unwrap();
+        assert_eq!(
+            repo.log_commits(None, 10).len(),
+            2,
+            "the next plan ran, dropping c2 and rebasing c3",
+        );
+    }
+
+    /// A pick that fails ends the rebase, as a refused start does.
+    #[test]
+    fn a_failed_pick_ends_the_rebase() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        let plan = h
+            .stoat
+            .active_workspace_mut()
+            .rebase
+            .as_mut()
+            .expect("plan");
+        plan.todo[0].commit.sha = "missing".to_string();
+
+        h.type_keys("Enter");
+        h.settle();
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_none(),
+                pause_badge(&h),
+            ),
+            (true, Some("cherry-pick failed".to_string())),
+        );
+    }
+
     /// The edit stop opens its file in front of the list it came from, so no
     /// list has focus at the finish, and the list behind the file still shows
     /// the rebased history.

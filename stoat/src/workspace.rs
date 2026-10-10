@@ -325,7 +325,8 @@ pub struct Workspace {
     pub(crate) rebase: Option<RebaseState>,
     /// In-flight rebase execution state. Present while the stepper is
     /// paused on reword/edit/conflict and during final execution;
-    /// dropped when the plan completes or aborts.
+    /// dropped when the plan completes, aborts, or fails a step, and when a
+    /// restore finds it with no pause.
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     /// Buffers whose last parse captured only what was on screen.

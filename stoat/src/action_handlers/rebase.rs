@@ -260,7 +260,9 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The start reads the base and the squash message at the job's turn, after
 /// every earlier job landed, so the entry stacks onto what those jobs built. A
-/// start after an abort finds no rebase and refuses.
+/// start after an abort finds no rebase and refuses. A start that finds no base
+/// or no repo for its entry ends the rebase, because nothing drives it after
+/// the refusal and no ref has moved.
 fn queue_rebase_step(stoat: &mut Stoat, entry: RebaseEntry) {
     let job = GitJob::new(
         "rebase step",
@@ -275,10 +277,12 @@ fn queue_rebase_step(stoat: &mut Stoat, entry: RebaseEntry) {
             };
 
             let Some(base) = base else {
+                stoat.active_workspace_mut().rebase_active = None;
                 emit_rebase_error(stoat, "squash/fixup without preceding pick", None);
                 return None;
             };
             let Some(repo) = stoat.git_host.discover(&workdir) else {
+                stoat.active_workspace_mut().rebase_active = None;
                 emit_rebase_error(stoat, "git repo not found", None);
                 return None;
             };
@@ -364,7 +368,8 @@ fn run_rebase_step(
 
 /// Apply the landed git work of `entry`, then pause or drive the next entry.
 ///
-/// A landing after an abort applies nothing, since its plan is gone.
+/// A landing after an abort applies nothing, since its plan is gone. A failed
+/// pick ends the rebase, as a refused start does.
 fn land_rebase_step(stoat: &mut Stoat, entry: RebaseEntry, workdir: PathBuf, outcome: StepOutcome) {
     let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
         return;
@@ -397,7 +402,10 @@ fn land_rebase_step(stoat: &mut Stoat, entry: RebaseEntry, workdir: PathBuf, out
                 merge_rows,
             });
         },
-        StepOutcome::Failed { label, reason } => emit_rebase_error(stoat, label, Some(reason)),
+        StepOutcome::Failed { label, reason } => {
+            stoat.active_workspace_mut().rebase_active = None;
+            emit_rebase_error(stoat, label, Some(reason));
+        },
     }
 }
 

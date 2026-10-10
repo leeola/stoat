@@ -17,6 +17,7 @@
 //! by design.
 
 use crate::{
+    badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, TextBuffer},
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
     commit_list::{CommitListId, CommitListSnap},
@@ -518,7 +519,25 @@ impl Workspace {
         self.uid = state.uid;
         self.git_root = state.git_root;
         self.rebase = state.rebase;
-        self.rebase_active = state.rebase_active.map(ActiveRebaseSnap::into_active);
+        self.rebase_active = match state.rebase_active {
+            // A rebase saved with no pause was out in the stepper, and the
+            // snapshot does not record which entry was in flight. Driving it
+            // on skips that entry, so the restore ends it.
+            Some(snap) if snap.pause.is_none() => {
+                self.badges.insert(Badge {
+                    source: BadgeSource::Review,
+                    anchor: BadgeAnchor::BottomRight,
+                    state: BadgeState::Error,
+                    label: "rebase interrupted".to_string(),
+                    detail: Some(
+                        "the session closed while the rebase ran; HEAD is where it stopped"
+                            .to_string(),
+                    ),
+                });
+                None
+            },
+            snap => snap.map(ActiveRebaseSnap::into_active),
+        };
         self.name = if state.name.is_empty() {
             super::name::default_workspace_name(state.uid)
         } else {
@@ -899,9 +918,14 @@ mod tests {
         jumplist::{JumpEntry, JumpList},
         multi_buffer::MultiBuffer,
         pane::{Axis, DockSide, DockVisibility, Placement},
+        rebase::{ActiveRebase, RebasePause},
         selection::SelectionsCollection,
     };
-    use std::{collections::HashSet, sync::Arc, time::Duration};
+    use std::{
+        collections::{HashSet, VecDeque},
+        sync::Arc,
+        time::Duration,
+    };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, Selection, SelectionGoal};
 
@@ -1487,6 +1511,47 @@ mod tests {
         assert_eq!(fresh.active_tab, 0);
         assert!(fresh.tabs[0].parked.is_none());
         assert_eq!(fresh.last_tab, None);
+    }
+
+    /// A rebase saved with no pause was out in the stepper, so the restore
+    /// drops it with a badge. A rebase stopped at a pause comes back.
+    #[test]
+    fn a_restored_rebase_with_no_pause_is_dropped() {
+        let restored = |pause: Option<RebasePause>| {
+            let exec = executor();
+            let mut ws = new_laid_out_workspace(PathBuf::from("/rebasing"), &exec);
+            ws.rebase_active = Some(ActiveRebase {
+                workdir: PathBuf::from("/rebasing"),
+                onto: "c1".to_string(),
+                remaining: VecDeque::new(),
+                current_head: "c2".to_string(),
+                last_pick_sha: Some("c2".to_string()),
+                last_message: None,
+                pause,
+                branch: None,
+            });
+            let state = ws.to_state();
+
+            let mut fresh = new_laid_out_workspace(PathBuf::from("/rebasing"), &exec);
+            fresh.apply_state(state, &exec);
+            let badge = fresh
+                .badges
+                .find_by_source(BadgeSource::Review)
+                .and_then(|id| fresh.badges.get(id))
+                .map(|badge| badge.label.clone());
+            (fresh.rebase_active.is_some(), badge)
+        };
+
+        let edit = RebasePause::Edit {
+            cherry_picked_commit: "c2".to_string(),
+        };
+        assert_eq!(
+            [restored(None), restored(Some(edit))],
+            [
+                (false, Some("rebase interrupted".to_string())),
+                (true, None)
+            ],
+        );
     }
 
     #[test]
