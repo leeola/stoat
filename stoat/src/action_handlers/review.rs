@@ -932,15 +932,20 @@ fn index_hunk(
     mode: HunkStage,
 ) -> StageOutcome {
     let nothing = || StageOutcome::Unchanged("no hunk under the cursor".to_string());
-    let Some(head_text) = repo.head_content(path) else {
+    let Some((head_text, index_text)) = staging_texts(repo, path) else {
         return nothing();
     };
-    let index_text = repo
-        .index_content(path)
-        .unwrap_or_else(|| head_text.clone());
 
     let stage = || stage_hunk_patch(rel, &index_text, buffer_text, cursor_row);
-    let unstage = || unstage_hunk_patch(rel, &index_text, &head_text, buffer_text, cursor_row);
+    let unstage = || {
+        unstage_hunk_patch(
+            rel,
+            &index_text,
+            head_text.as_deref(),
+            buffer_text,
+            cursor_row,
+        )
+    };
     let patch_and_message = match mode {
         HunkStage::Stage => stage().map(|patch| (patch, "staged hunk")),
         HunkStage::Unstage => unstage().map(|patch| (patch, "unstaged hunk")),
@@ -958,6 +963,27 @@ fn index_hunk(
     }
 }
 
+/// HEAD's and the index's text for `path`, as `(head, index)`, for a press that
+/// stages or unstages.
+///
+/// A moved file has no HEAD blob at its own path, so its HEAD text comes from
+/// the path it moved from. A file HEAD does not hold reads [`None`] there, and
+/// an unstage that empties its index text removes it from the index.
+///
+/// A file with no index entry reads its index text as HEAD's. A patch for a
+/// file that `git rm --cached` took out of the index then fails to apply,
+/// rather than putting part of the file back.
+///
+/// [`None`] when neither HEAD nor the index holds the file, which is what an
+/// untracked file answers.
+fn staging_texts(repo: &dyn GitRepo, path: &Path) -> Option<(Option<String>, String)> {
+    let head = repo
+        .head_content(path)
+        .or_else(|| repo.head_content(&repo.rename_source(path)?));
+    let index = repo.index_content(path).or_else(|| head.clone())?;
+    Some((head, index))
+}
+
 /// Build the patch that stages the hunk under the cursor by diffing the git
 /// index against the live buffer.
 ///
@@ -968,6 +994,7 @@ fn stage_hunk_patch(
     buffer_text: &str,
     cursor_row: u32,
 ) -> Option<String> {
+    let (buffer_text, removes_file) = stage_post_image(buffer_text);
     let hunks = line_hunks(index_text, buffer_text);
 
     // Resolved by the gutter's own rule, so the staged unit is the one drawn
@@ -980,7 +1007,20 @@ fn stage_hunk_patch(
             false => rows.contains(&cursor_row),
         }
     })?;
-    hunk_to_patch(rel, index_text, buffer_text, &hunks, k)
+    hunk_to_patch(rel, index_text, buffer_text, &hunks, k, removes_file)
+}
+
+/// The text a stage diffs the index against, and whether it stands for a file
+/// removed from the working tree.
+///
+/// A removed file opens as a lone newline, which a diff reads as one blank
+/// line. It stages as empty text instead, so the patch removes the file rather
+/// than writing a blob that holds one blank line.
+fn stage_post_image(buffer_text: &str) -> (&str, bool) {
+    match diff::buffer_removed(buffer_text) {
+        true => ("", true),
+        false => (buffer_text, false),
+    }
 }
 
 /// Build the patch that unstages the hunk under the cursor by reverting its
@@ -990,13 +1030,18 @@ fn stage_hunk_patch(
 /// Diffing the index against HEAD then expresses each staged change as index
 /// rows, and the patch reverts the one at the mapped row. `None` when that row
 /// carries no staged change.
+///
+/// A `head_text` of [`None`] marks a file HEAD does not hold, which an unstage
+/// of all its index lines removes from the index.
 fn unstage_hunk_patch(
     rel: &Path,
     index_text: &str,
-    head_text: &str,
+    head_text: Option<&str>,
     buffer_text: &str,
     cursor_row: u32,
 ) -> Option<String> {
+    let removes_file = head_text.is_none();
+    let head_text = head_text.unwrap_or("");
     let index_row = map_buffer_row_to_index(index_text, buffer_text, cursor_row);
     let hunks = line_hunks(index_text, head_text);
 
@@ -1009,7 +1054,7 @@ fn unstage_hunk_patch(
             false => rows.contains(&index_row),
         }
     })?;
-    hunk_to_patch(rel, index_text, head_text, &hunks, k)
+    hunk_to_patch(rel, index_text, head_text, &hunks, k, removes_file)
 }
 
 /// What a line press reports, as `(staged, unstaged, nothing to move)`.
@@ -1041,12 +1086,9 @@ fn index_rows(
     (staged, unstaged, nothing): (&'static str, &'static str, &'static str),
 ) -> StageOutcome {
     let unchanged = || StageOutcome::Unchanged(nothing.to_string());
-    let Some(head_text) = repo.head_content(path) else {
+    let Some((head_text, index_text)) = staging_texts(repo, path) else {
         return unchanged();
     };
-    let index_text = repo
-        .index_content(path)
-        .unwrap_or_else(|| head_text.clone());
     let rel = rel.to_string_lossy();
 
     let stage = || {
@@ -1062,7 +1104,7 @@ fn index_rows(
         Some(unstage_rows_patch(
             &rel,
             &index_text,
-            &head_text,
+            head_text.as_deref(),
             buffer_text,
             rows.clone(),
         ))
@@ -1107,6 +1149,7 @@ fn stage_rows_patch(
     buffer_text: &str,
     rows: Range<u32>,
 ) -> Vec<String> {
+    let (buffer_text, removes_file) = stage_post_image(buffer_text);
     let hunks = line_hunks(index_text, buffer_text);
     (0..hunks.len())
         .filter(|&k| ranges_meet(&hunks[k].buffer_line_range, &rows))
@@ -1119,6 +1162,7 @@ fn stage_rows_patch(
                 index_text,
                 buffer_text,
                 &kept,
+                removes_file,
             ))
         })
         .collect()
@@ -1132,13 +1176,18 @@ fn stage_rows_patch(
 /// Diffing the index against HEAD then expresses each staged change as
 /// index-side rows, and each forward patch reverts the mapped rows of one hunk
 /// to HEAD, last hunk first. Empty when the mapped rows carry no staged change.
+///
+/// A `head_text` of [`None`] marks a file HEAD does not hold, as
+/// [`unstage_hunk_patch`] reads it.
 fn unstage_rows_patch(
     rel: &str,
     index_text: &str,
-    head_text: &str,
+    head_text: Option<&str>,
     buffer_text: &str,
     rows: Range<u32>,
 ) -> Vec<String> {
+    let removes_file = head_text.is_none();
+    let head_text = head_text.unwrap_or("");
     let index_rows = map_buffer_row_to_index(index_text, buffer_text, rows.start)
         ..map_buffer_row_to_index(index_text, buffer_text, rows.end.saturating_sub(1)) + 1;
     // The emitted patch runs index to HEAD, so the index is this diff's base
@@ -1157,6 +1206,7 @@ fn unstage_rows_patch(
                 index_text,
                 head_text,
                 &kept,
+                removes_file,
             ))
         })
         .collect()
@@ -2307,7 +2357,7 @@ mod tests {
         assert_eq!(
             (
                 stage_rows_patch("a.rs", HEAD, EDITED, 1..7),
-                unstage_rows_patch("a.rs", EDITED, HEAD, EDITED, 1..7),
+                unstage_rows_patch("a.rs", EDITED, Some(HEAD), EDITED, 1..7),
             ),
             (
                 vec![
@@ -2664,6 +2714,103 @@ mod tests {
         let patch = &patches[0];
         assert!(patch.contains("-X\n"), "removes the staged line: {patch}");
         assert!(patch.contains("+c\n"), "restores the HEAD line: {patch}");
+    }
+
+    /// Open `rel` under `/work`, press `action` with the cursor on `row`, and
+    /// return every patch the press applied.
+    fn press_in(h: &mut TestHarness, rel: &str, row: u32, action: &dyn Action) -> Vec<String> {
+        let workdir = PathBuf::from("/work");
+        h.open_file(&workdir.join(rel));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, row);
+
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+        h.fake_git().applied_patches(&workdir)
+    }
+
+    /// `git add` leaves a new file in the index with no HEAD blob. Its hunks
+    /// stage against the index text alone.
+    #[test]
+    fn a_file_only_the_index_holds_stages_its_hunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario_with_staged("/work", &[], &[("new.rs", "a\nb\n")]);
+        h.fake_git().add_repo("/work").index_file("new.rs", "a\n");
+
+        assert_eq!(
+            press_in(&mut h, "new.rs", 1, &stoat_action::StageHunk),
+            ["diff --git a/new.rs b/new.rs\n--- a/new.rs\n+++ b/new.rs\n@@ -1,1 +1,2 @@\n a\n+b\n"],
+        );
+    }
+
+    /// HEAD holds the file empty, so an unstage that empties the index text
+    /// writes an empty blob rather than removing the entry.
+    #[test]
+    fn unstaging_all_of_a_file_committed_empty_keeps_its_entry() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_index_scenario("/work", &[("a.rs", "", "x\n", "x\n")]);
+
+        assert_eq!(
+            press_in(&mut h, "a.rs", 0, &stoat_action::UnstageHunk),
+            ["diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,0 @@\n-x\n"],
+        );
+    }
+
+    /// A removed file opens as a lone newline. The press stages the removal
+    /// rather than a blob that holds one blank line.
+    #[test]
+    fn a_file_removed_from_disk_stages_its_deletion() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.fake_git()
+            .add_repo("/work")
+            .head_file("gone.rs", "a\nb\n");
+
+        assert_eq!(
+            press_in(&mut h, "gone.rs", 0, &stoat_action::StageHunk),
+            ["diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1,2 +1,0 @@\n-a\n-b\n"],
+        );
+    }
+
+    /// An unstage takes a file HEAD does not hold out of the index only when no
+    /// line of it stays staged, from the hunk key and the line key alike.
+    #[test]
+    fn unstaging_an_added_file_removes_it_only_when_no_line_stays() {
+        let unstage = |index: &str, row: u32, action: &dyn Action| {
+            let mut h = TestHarness::with_size(80, 14);
+            h.stage_review_scenario_with_staged("/work", &[], &[("new.rs", index)]);
+            h.fake_git().add_repo("/work").index_file("new.rs", index);
+            press_in(&mut h, "new.rs", row, action)
+        };
+        let removal = "diff --git a/new.rs b/new.rs\ndeleted file mode 100644\n--- a/new.rs\n+++ /dev/null\n@@ -1,1 +1,0 @@\n-a\n";
+
+        assert_eq!(
+            (
+                unstage("a\n", 0, &stoat_action::UnstageHunk),
+                unstage("a\n", 0, &stoat_action::UnstageLine),
+                unstage("a\nb\n", 1, &stoat_action::UnstageLine),
+            ),
+            (
+                vec![removal.to_string()],
+                vec![removal.to_string()],
+                vec!["diff --git a/new.rs b/new.rs\n--- a/new.rs\n+++ b/new.rs\n@@ -1,2 +1,1 @@\n a\n-b\n".to_string()],
+            ),
+        );
+    }
+
+    /// A moved file has no HEAD blob at its own path. An unstage reverts its
+    /// index lines to the text HEAD holds at the path it moved from.
+    #[test]
+    fn unstaging_in_a_moved_file_reverts_to_the_text_it_moved_from() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_rename_scenario("/work", "old.rs", "new.rs", "a\nb\n", "a\nB\n");
+        h.fake_git()
+            .add_repo("/work")
+            .index_file("new.rs", "a\nB\n");
+
+        assert_eq!(
+            press_in(&mut h, "new.rs", 1, &stoat_action::UnstageHunk),
+            ["diff --git a/new.rs b/new.rs\n--- a/new.rs\n+++ b/new.rs\n@@ -1,2 +1,2 @@\n a\n-B\n+b\n"],
+        );
     }
 
     #[test]

@@ -1378,7 +1378,7 @@ fn moved_base(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<Strin
 /// lone newline, so the buffer holds `"\n"` rather than nothing. A test for an
 /// empty string alone therefore misses every real removal and catches only a
 /// file that exists holding zero bytes.
-fn buffer_removed(buffer_text: &str) -> bool {
+pub(crate) fn buffer_removed(buffer_text: &str) -> bool {
     buffer_text.is_empty() || buffer_text == "\n"
 }
 

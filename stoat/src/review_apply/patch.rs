@@ -159,25 +159,34 @@ fn hunk_lines<'a>(lines: &[&'a str], start: u32, len: u32) -> Vec<&'a str> {
 /// The patch turns the hunk's `base_text` lines into its `buffer_text` lines,
 /// and it applies where the hunk sits in `base_text`. An index write passes the
 /// index as the base, so the patch lands whatever the index holds above it.
+///
+/// See also:
+/// - [`rows_to_unified_diff`] for what `removes_file` does to the patch.
 pub(crate) fn hunk_to_patch(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
     hunks: &[DiffHunk],
     k: usize,
+    removes_file: bool,
 ) -> Option<String> {
     let rows = hunk_rows(base_text, buffer_text, hunks, k, HUNK_CONTEXT)?;
-    Some(rows_to_unified_diff(rel, base_text, buffer_text, &rows))
+    Some(rows_to_unified_diff(
+        rel,
+        base_text,
+        buffer_text,
+        &rows,
+        removes_file,
+    ))
 }
 
-/// The text's lines without their terminators, and without the empty tail a
-/// trailing newline would otherwise produce.
+/// The text's lines without their terminators, and with no empty line after a
+/// trailing newline.
+///
+/// An empty text has no lines, so a hunk into an empty file names no context
+/// line that the file does not hold.
 fn split_lines(text: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    lines
+    text.split_terminator('\n').collect()
 }
 /// Restrict a chunk's rows to the changes at the 1-based `side_lines`, for
 /// staging or unstaging a line or a run of lines.
@@ -229,13 +238,22 @@ pub(crate) fn line_restricted_rows(
 /// The hunk's `+` start repeats its `-` start. libgit2's index apply places a
 /// hunk at exactly its `+` start, with no search. A one-hunk patch has no
 /// earlier hunk to shift the lines above it, so the `-` start is where the
-/// pre-image sits. A hunk with no `-` lines, the new-file form
-/// `@@ -0,0 +1,N @@`, keeps its own `+` start.
+/// pre-image sits. A hunk into an empty base, `@@ -0,0 +1,N @@`, keeps its own
+/// `+` start.
+///
+/// `removes_file` marks a post-image with no file. The patch then removes the
+/// index entry when its rows take every base line and add none. Empty text does
+/// not tell a removed file from a file that holds zero bytes, so the caller
+/// decides.
+///
+/// The patch never creates a file. A patch for a path the index does not hold
+/// fails to apply, rather than giving the index a partial copy of the file.
 pub(crate) fn rows_to_unified_diff(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
     rows: &[ReviewRow],
+    removes_file: bool,
 ) -> String {
     let rel_display = rel.display();
 
@@ -253,25 +271,17 @@ pub(crate) fn rows_to_unified_diff(
     let last_left_idx = last_row_with_left(rows);
     let last_right_idx = last_row_with_right(rows);
 
-    let base_is_new_file = base_text.is_empty();
-    let buffer_is_deleted_file = buffer_text.is_empty();
+    let deletes_file = removes_file && buffer_count == 0 && base_count == base_total;
 
     let mut out = String::new();
     out.push_str(&format!("diff --git a/{rel_display} b/{rel_display}\n"));
-    if base_is_new_file {
-        out.push_str("new file mode 100644\n");
-    } else if buffer_is_deleted_file {
+    if deletes_file {
         out.push_str("deleted file mode 100644\n");
     }
-    if base_is_new_file {
-        out.push_str("--- /dev/null\n");
-    } else {
-        out.push_str(&format!("--- a/{rel_display}\n"));
-    }
-    if buffer_is_deleted_file {
-        out.push_str("+++ /dev/null\n");
-    } else {
-        out.push_str(&format!("+++ b/{rel_display}\n"));
+    out.push_str(&format!("--- a/{rel_display}\n"));
+    match deletes_file {
+        true => out.push_str("+++ /dev/null\n"),
+        false => out.push_str(&format!("+++ b/{rel_display}\n")),
     }
     out.push_str(&format!(
         "@@ -{base_start},{base_count} +{buffer_start},{buffer_count} @@\n"
@@ -514,7 +524,8 @@ mod tests {
             2,
             "the file has two hunks to keep apart"
         );
-        let stage = hunk_to_patch(rel, BASE, BUFFER, &buffer_hunks, 0).expect("hunk 0 exists");
+        let stage =
+            hunk_to_patch(rel, BASE, BUFFER, &buffer_hunks, 0, false).expect("hunk 0 exists");
         host_repo
             .apply_to_index(&stage)
             .expect("the hunk patch must apply to real libgit2");
@@ -524,8 +535,8 @@ mod tests {
             "the index carries the first change and not the second"
         );
 
-        let unstage =
-            hunk_to_patch(rel, &staged, BASE, &hunks(&staged, BASE), 0).expect("hunk 0 is staged");
+        let unstage = hunk_to_patch(rel, &staged, BASE, &hunks(&staged, BASE), 0, false)
+            .expect("hunk 0 is staged");
         host_repo
             .apply_to_index(&unstage)
             .expect("the unstage patch must apply too");
@@ -546,8 +557,15 @@ mod tests {
         const BUFFER: &str = "a\nZ1\nZ2\nc\nd\ne\nf\nY\nh\n";
         let (_dir, repo, host_repo) = index_repo(BASE, BUFFER);
 
-        let patch = hunk_to_patch(Path::new("a.rs"), BASE, BUFFER, &hunks(BASE, BUFFER), 1)
-            .expect("hunk 1 exists");
+        let patch = hunk_to_patch(
+            Path::new("a.rs"),
+            BASE,
+            BUFFER,
+            &hunks(BASE, BUFFER),
+            1,
+            false,
+        )
+        .expect("hunk 1 exists");
         host_repo
             .apply_to_index(&patch)
             .expect("the second hunk applies with the first unstaged");
@@ -565,8 +583,15 @@ mod tests {
     /// The index text after hunk `k` stages over a HEAD and index at `base`.
     fn stage_hunk(base: &str, buffer: &str, k: usize) -> String {
         let (_dir, repo, host_repo) = index_repo(base, buffer);
-        let patch = hunk_to_patch(Path::new("a.rs"), base, buffer, &hunks(base, buffer), k)
-            .expect("the hunk exists");
+        let patch = hunk_to_patch(
+            Path::new("a.rs"),
+            base,
+            buffer,
+            &hunks(base, buffer),
+            k,
+            false,
+        )
+        .expect("the hunk exists");
         host_repo
             .apply_to_index(&patch)
             .expect("the hunk patch applies to real libgit2");
@@ -608,7 +633,7 @@ mod tests {
         let rows =
             hunk_rows(base, buffer, &hunks(base, buffer), 0, HUNK_CONTEXT).expect("hunk 0 exists");
         let rows = line_restricted_rows(&rows, lines, true).expect("a change sits on the lines");
-        let patch = rows_to_unified_diff(Path::new("a.rs"), base, buffer, &rows);
+        let patch = rows_to_unified_diff(Path::new("a.rs"), base, buffer, &rows, false);
         host_repo
             .apply_to_index(&patch)
             .expect("the line patch applies to real libgit2");
@@ -633,5 +658,27 @@ mod tests {
     #[test]
     fn a_hunk_that_ends_unterminated_above_a_removal_stages() {
         assert_eq!(stage_hunk("a\nb\nc\n", "a\nB", 0), "a\nB");
+    }
+
+    /// A file committed empty takes a line and gives it back. Neither patch
+    /// removes the file, so the index ends with an empty blob.
+    #[test]
+    fn a_line_stages_into_and_out_of_an_empty_file() {
+        let (_dir, repo, host_repo) = index_repo("", "x\n");
+        let rel = Path::new("a.rs");
+
+        let stage =
+            hunk_to_patch(rel, "", "x\n", &hunks("", "x\n"), 0, false).expect("hunk 0 exists");
+        host_repo
+            .apply_to_index(&stage)
+            .expect("the stage applies to real libgit2");
+        let staged = staged_text(&repo);
+
+        let unstage = hunk_to_patch(rel, &staged, "", &hunks(&staged, ""), 0, false)
+            .expect("hunk 0 is staged");
+        host_repo
+            .apply_to_index(&unstage)
+            .expect("the unstage applies too");
+        assert_eq!((staged.as_str(), staged_text(&repo).as_str()), ("x\n", ""));
     }
 }
