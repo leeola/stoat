@@ -51,19 +51,18 @@ pub(crate) fn meta_path_for(state_path: &Path) -> PathBuf {
     state_path.with_extension("meta")
 }
 
-/// Write `meta` as the sidecar for `state_path`, atomically via a tmp+rename.
+/// Write `meta` as the sidecar for `state_path`, atomically.
+///
+/// Each write takes a temporary file of its own, so two writes of one sidecar
+/// never rename the other's bytes into place.
 pub(crate) fn write_meta(
     meta: &WorkspaceMeta,
     state_path: &Path,
     fs: &dyn FsHost,
 ) -> io::Result<()> {
-    let path = meta_path_for(state_path);
     let body = ron::ser::to_string_pretty(meta, ron::ser::PrettyConfig::default())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let tmp = path.with_extension("meta.tmp");
-    fs.write(&tmp, body.as_bytes())?;
-    fs.rename(&tmp, &path)?;
-    Ok(())
+    fs.write_atomic(&meta_path_for(state_path), body.as_bytes())
 }
 
 /// List every persisted workspace across all git roots, newest state file first.

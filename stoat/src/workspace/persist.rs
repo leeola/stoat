@@ -35,6 +35,7 @@ use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
@@ -387,10 +388,14 @@ impl Workspace {
 
     /// Serialize the current workspace state to RON and write it atomically
     /// to `path`. Parent directory is created if missing.
+    ///
+    /// The write goes through [`Self::save_gate`] as the newest save, so it
+    /// writes nothing once the workspace is retired.
     pub(crate) fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
+        let seq = self.save_gate.lock().expect("save gate poisoned").issue();
         let mut state = self.to_state();
         state.resolve_reanchors();
-        write_state(&state, &self.meta(), path, fs)
+        write_state_gated(&self.save_gate, seq, &state, &self.meta(), path, fs).map(|_| ())
     }
 
     /// The registry entry describing this workspace, as it stands.
@@ -574,9 +579,10 @@ impl Workspace {
 /// Nothing here reads the live workspace, so what lands on disk is the
 /// workspace as it stood when `state` was taken, however long ago that was.
 ///
-/// The state file is written through a temp file and a rename, so a reader
-/// never sees a partial one.
-pub(crate) fn write_state(
+/// The state file is replaced atomically through a temporary file of its own,
+/// so a reader never sees a partial one, and two writes never rename each
+/// other's bytes into place.
+fn write_state(
     state: &WorkspaceStateV1,
     meta: &super::registry::WorkspaceMeta,
     path: &Path,
@@ -588,11 +594,67 @@ pub(crate) fn write_state(
 
     let body = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let tmp = path.with_extension("ron.tmp");
-    fs.write(&tmp, body.as_bytes())?;
-    fs.rename(&tmp, path)?;
+    fs.write_atomic(path, body.as_bytes())?;
 
     super::registry::write_meta(meta, path, fs)
+}
+
+/// The order of one workspace's session writes, and whether any of them still
+/// lands.
+///
+/// Every save takes its snapshot on the run loop and writes on the blocking
+/// pool, which runs the writes in no fixed order. A write the pool already
+/// holds when a close or a delete removes the session files also writes them
+/// again. Each save takes a sequence number with its snapshot, and each write
+/// holds the gate while it writes, so a write older than the last one written,
+/// or one for a retired workspace, lands nothing.
+///
+/// See also:
+/// - [`write_state_gated`] for the write that reads the gate.
+#[derive(Default)]
+pub(crate) struct SaveGate {
+    issued: u64,
+    written: u64,
+    retired: bool,
+}
+
+impl SaveGate {
+    /// Take the sequence number of a snapshot about to be taken.
+    pub(crate) fn issue(&mut self) -> u64 {
+        self.issued += 1;
+        self.issued
+    }
+
+    /// Stop every write of this workspace that has not landed, before its
+    /// session files are removed.
+    ///
+    /// The caller holds the gate's lock, so a write in progress finishes first
+    /// and none starts after.
+    pub(crate) fn retire(&mut self) {
+        self.retired = true;
+    }
+}
+
+/// [`write_state`] for the save numbered `seq`, unless a newer save of the
+/// workspace already landed or the workspace is retired.
+///
+/// Holds `gate` for the whole write, so two writes of one workspace never
+/// overlap. Returns whether the write ran.
+pub(crate) fn write_state_gated(
+    gate: &Mutex<SaveGate>,
+    seq: u64,
+    state: &WorkspaceStateV1,
+    meta: &super::registry::WorkspaceMeta,
+    path: &Path,
+    fs: &dyn FsHost,
+) -> io::Result<bool> {
+    let mut gate = gate.lock().expect("save gate poisoned");
+    if gate.retired || seq < gate.written {
+        return Ok(false);
+    }
+    write_state(state, meta, path, fs)?;
+    gate.written = seq;
+    Ok(true)
 }
 
 /// The selection endpoints of one editor or one jump, resolved against the
@@ -935,6 +997,50 @@ mod tests {
         assert!(
             !meta_body.contains("renamed"),
             "the registry entry is the snapshot's too, got {meta_body}",
+        );
+    }
+
+    /// Writes land in the order their saves were issued, and none lands once
+    /// the workspace is retired. An older snapshot that reaches the gate after
+    /// a newer one leaves the newer file in place, and a retired workspace
+    /// writes no file back after its files are removed.
+    #[test]
+    fn a_gated_write_skips_an_older_or_retired_save() {
+        let fake = FakeFs::new();
+        let exec = executor();
+        let mut ws = new_laid_out_workspace(PathBuf::from("/gated"), &exec);
+        let path = PathBuf::from("/gated/state.ron");
+        let meta_path = super::super::registry::meta_path_for(&path);
+        let gate = Mutex::new(SaveGate::default());
+        let write = |ws: &Workspace, seq| {
+            write_state_gated(&gate, seq, &ws.to_state(), &ws.meta(), &path, &fake).unwrap()
+        };
+
+        ws.name = "new".to_string();
+        let newer = write(&ws, 2);
+        ws.name = "old".to_string();
+        let older = write(&ws, 1);
+        let on_disk = {
+            let mut buf = Vec::new();
+            fake.read(&path, &mut buf).unwrap();
+            let state: WorkspaceStateV1 = ron::from_str(&String::from_utf8(buf).unwrap()).unwrap();
+            state.name
+        };
+
+        fake.remove_file(&path).unwrap();
+        fake.remove_file(&meta_path).unwrap();
+        gate.lock().unwrap().retire();
+        let retired = write(&ws, 3);
+
+        assert_eq!(
+            (
+                newer,
+                older,
+                on_disk,
+                retired,
+                [fake.exists(&path), fake.exists(&meta_path)]
+            ),
+            (true, false, "new".to_string(), false, [false, false]),
         );
     }
 

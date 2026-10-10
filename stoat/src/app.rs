@@ -4724,9 +4724,12 @@ impl Stoat {
     /// blocking pool. What lands on disk is the workspace as it stood at this
     /// call, whatever it does afterwards.
     ///
-    /// A second save of the same workspace replaces the first's task. Snapshots
-    /// are ordered by this thread and every write is atomic, so the most a
-    /// late-landing earlier write costs is a stale file the next save replaces.
+    /// A second save of the same workspace replaces the first's task in
+    /// [`Self::pending_workspace_saves`], but the pool still runs the first.
+    /// Each save takes a sequence number from the workspace's
+    /// [`crate::workspace::SaveGate`] with its snapshot, so a write that lands
+    /// after a newer one writes nothing, and none lands once a close or a
+    /// delete retires the gate.
     ///
     /// No-op when [`Self::persistence_disabled`] is set (used by the test
     /// harness to keep the real `$XDG_STATE_HOME` pristine) or when the
@@ -4741,6 +4744,8 @@ impl Stoat {
             return;
         };
         let (state, meta) = (ws.to_state(), ws.meta());
+        let gate = Arc::clone(&ws.save_gate);
+        let seq = gate.lock().expect("save gate poisoned").issue();
 
         let fs = self.fs_host.clone();
         let task = self.executor.spawn_blocking(move || {
@@ -4749,7 +4754,9 @@ impl Stoat {
             // shows, which is why that half happens here.
             let mut state = state;
             state.resolve_reanchors();
-            if let Err(err) = crate::workspace::write_state(&state, &meta, &path, fs.as_ref()) {
+            let written =
+                crate::workspace::write_state_gated(&gate, seq, &state, &meta, &path, fs.as_ref());
+            if let Err(err) = written {
                 tracing::warn!(?path, ?err, "failed to save workspace state");
             }
         });

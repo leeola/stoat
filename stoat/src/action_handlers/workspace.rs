@@ -59,13 +59,7 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let active_id = stoat.active_workspace;
-    if !stoat.persistence_disabled {
-        let ws = &stoat.workspaces[active_id];
-        stoat.save_workspace_now(ws);
-        if let Ok(path) = state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
-            remove_session_files(&*stoat.fs_host, &path);
-        }
-    }
+    remove_open_session(stoat, active_id);
 
     let replacement: WorkspaceId = stoat
         .workspaces
@@ -149,17 +143,8 @@ pub(super) fn workspace_picker_delete(stoat: &mut Stoat) -> UpdateEffect {
 
     match (id, state_path) {
         (Some(id), _) => {
-            // Dropping the held task is what keeps a deferred write from
-            // landing after the files are gone and resurrecting the session.
             stoat.pending_workspace_saves.remove(&id);
-
-            if !stoat.persistence_disabled {
-                let ws = &stoat.workspaces[id];
-                if let Ok(path) = state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
-                    remove_session_files(&*stoat.fs_host, &path);
-                }
-            }
-
+            remove_open_session(stoat, id);
             stoat.workspaces.remove(id);
         },
         (None, Some(state_path)) => remove_session_files(&*stoat.fs_host, &state_path),
@@ -171,6 +156,26 @@ pub(super) fn workspace_picker_delete(stoat: &mut Stoat) -> UpdateEffect {
     }
     stoat.set_status(format!("deleted session {basename}"));
     UpdateEffect::Redraw
+}
+
+/// Remove the session files of the open workspace `id`, after stopping every
+/// write still queued for it.
+///
+/// The blocking pool runs a save it already holds whatever happens to its
+/// task, and that write puts the files back unless the gate stops it. Retiring
+/// the gate first waits for a write in progress and stops every later one.
+///
+/// The files resolve against the real state directory, so their removal sits
+/// behind [`Stoat::persistence_disabled`].
+fn remove_open_session(stoat: &Stoat, id: WorkspaceId) {
+    let ws = &stoat.workspaces[id];
+    ws.save_gate.lock().expect("save gate poisoned").retire();
+    if stoat.persistence_disabled {
+        return;
+    }
+    if let Ok(path) = state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
+        remove_session_files(&*stoat.fs_host, &path);
+    }
 }
 
 /// Remove a workspace's state file and its meta sidecar, skipping either if it
@@ -469,10 +474,17 @@ mod tests {
         dump::{self, DumpId},
         input_view::{InputView, SubmitTarget},
         test_harness::TestHarness,
-        workspace::registry::{RegistryEntry, WorkspaceMeta},
+        workspace::{
+            self,
+            registry::{RegistryEntry, WorkspaceMeta},
+            SaveGate,
+        },
         workspace_picker::WorkspacePicker,
     };
-    use std::time::UNIX_EPOCH;
+    use std::{
+        sync::{Arc, Mutex},
+        time::UNIX_EPOCH,
+    };
     use time::macros::datetime;
 
     fn picker_input(stoat: &mut Stoat) -> InputView {
@@ -747,6 +759,62 @@ mod tests {
             Some("deleted session beta"),
             "the status names the deleted session"
         );
+    }
+
+    /// Closing a workspace or deleting its open row stops every session write
+    /// still queued for it, so none brings the removed files back. The
+    /// workspace left open keeps writing.
+    #[test]
+    fn closing_or_deleting_an_open_workspace_retires_its_saves() {
+        let writes_after = |delete: bool| {
+            let mut harness = Stoat::test();
+            let stoat = &mut harness.stoat;
+            let first = stoat.active_workspace;
+            let second = {
+                let ws = Workspace::new(
+                    PathBuf::from("/tmp/beta"),
+                    &stoat.executor,
+                    stoat.redraw_notify.clone(),
+                );
+                let id = stoat.workspaces.insert(ws);
+                stoat.workspaces[id].id = id;
+                id
+            };
+            let gates = [first, second].map(|id| Arc::clone(&stoat.workspaces[id].save_gate));
+
+            if delete {
+                let input = picker_input(stoat);
+                let mut picker = WorkspacePicker::new(&stoat.workspaces, first, Vec::new(), input);
+                picker.select_next();
+                stoat.workspace_picker = Some(picker);
+                workspace_picker_delete(stoat);
+            } else {
+                stoat.active_workspace = second;
+                close_workspace(stoat);
+            }
+            gates.map(|gate| gate_lands_a_write(&gate, stoat))
+        };
+
+        assert_eq!(
+            [writes_after(false), writes_after(true)],
+            [[true, false], [true, false]],
+        );
+    }
+
+    /// Whether a save issued to `gate` writes, measured with a write of the
+    /// active workspace to a scratch path.
+    fn gate_lands_a_write(gate: &Mutex<SaveGate>, stoat: &Stoat) -> bool {
+        let seq = gate.lock().expect("save gate poisoned").issue();
+        let ws = stoat.active_workspace();
+        workspace::write_state_gated(
+            gate,
+            seq,
+            &ws.to_state(),
+            &ws.meta(),
+            Path::new("/probe/state.ron"),
+            &*stoat.fs_host,
+        )
+        .expect("the write runs")
     }
 
     #[test]

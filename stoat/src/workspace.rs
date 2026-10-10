@@ -36,7 +36,9 @@ use crate::{
 };
 use codegraph::{CodeGraph, FileId};
 pub use persist::find_resume_anchor;
-pub(crate) use persist::{anchor_state_dir, list_workspace_files, state_path_for, write_state};
+pub(crate) use persist::{
+    anchor_state_dir, list_workspace_files, state_path_for, write_state_gated, SaveGate,
+};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
@@ -48,7 +50,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     task::{Context, Poll},
     time::{Duration, Instant, UNIX_EPOCH},
@@ -182,6 +184,10 @@ pub struct Workspace {
     /// environment, so they start only once this workspace is active. See
     /// [`crate::app::Stoat::start_background_restore`].
     pub(crate) restored_in_background: bool,
+    /// The order of this workspace's session writes, shared with each write
+    /// the blocking pool holds, so a close or a delete stops the writes still
+    /// queued before it removes the session files.
+    pub(crate) save_gate: Arc<Mutex<SaveGate>>,
     /// Persisted name of the finder scope this workspace last closed in, so
     /// `space p` reopens where the user left off. Holds `"all"`, `"modified"`,
     /// or a named-scope key, and is `None` until a finder closes here. Buffers
@@ -443,6 +449,7 @@ impl Workspace {
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
             restored_in_background: false,
+            save_gate: Arc::default(),
             last_finder_scope: None,
             remote: None,
             palette_history: InputHistory::default(),
