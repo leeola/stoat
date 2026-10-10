@@ -445,6 +445,7 @@ fn run_tui(
         ui_inactive_dim: None,
         ui_pin_hides_hints: None,
         highlight_retention: None,
+        session_retention_days: None,
         terminal_shell: None,
         terminal_args: None,
         ssh_program: None,

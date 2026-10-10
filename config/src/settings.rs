@@ -171,6 +171,10 @@ pub struct Settings {
     /// 64. `0` drops a buffer's state as soon as it is hidden. Set via
     /// `editor.highlight_retention = N;` in stcfg.
     pub highlight_retention: Option<u32>,
+    /// Days a session file or hook socket in the state directory survives
+    /// unused before a start removes it. `None` falls back to 14, and 0 turns
+    /// the sweep off. Set via `session.retention_days = N;` in stcfg.
+    pub session_retention_days: Option<u32>,
     /// Program a terminal pane spawns as its subshell. `None` lets the spawn
     /// site fall back to `$SHELL`, then `/bin/sh`. Set via
     /// `terminal.shell = "/bin/zsh";` in stcfg.
@@ -316,6 +320,7 @@ impl Settings {
             ui_inactive_dim: other.ui_inactive_dim.or(self.ui_inactive_dim),
             ui_pin_hides_hints: other.ui_pin_hides_hints.or(self.ui_pin_hides_hints),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
+            session_retention_days: other.session_retention_days.or(self.session_retention_days),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
             ssh_program: other.ssh_program.or(self.ssh_program),
@@ -406,6 +411,11 @@ impl Settings {
             ["editor", "highlight_retention"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.highlight_retention = Some(n as u32);
+                }
+            },
+            ["session", "retention_days"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.session_retention_days = Some(n as u32);
                 }
             },
             ["editor", "line_numbers"] => {
@@ -638,6 +648,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -836,6 +847,20 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_session_retention_days() {
+        let days = |src: &str| Settings::from_config(&parse_ok(src)).session_retention_days;
+        assert_eq!(
+            [
+                days("on init { session.retention_days = 14; }"),
+                days("on init { session.retention_days = 0; }"),
+                days("on init { }"),
+            ],
+            [Some(14), Some(0), None],
+            "absent falls back at the consumer",
+        );
+    }
+
+    #[test]
     fn from_config_extracts_lsp_server() {
         let config = parse_ok(r#"on init { lsp.server.rust = ["ra", "--flag"]; }"#);
         assert_eq!(
@@ -973,6 +998,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -1018,6 +1044,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -1072,6 +1099,7 @@ mod tests {
             ui_inactive_dim: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
+            session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
@@ -1109,6 +1137,7 @@ mod tests {
             ui_inactive_dim: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
+            session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
@@ -1148,6 +1177,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -1190,6 +1220,7 @@ mod tests {
             ui_inactive_dim: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
+            session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
@@ -1230,6 +1261,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -1283,6 +1315,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -1328,6 +1361,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
+                session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,
@@ -1370,6 +1404,7 @@ mod tests {
             ui_inactive_dim: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
+            session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,
@@ -1407,6 +1442,7 @@ mod tests {
             ui_inactive_dim: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
+            session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
             ssh_program: None,

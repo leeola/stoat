@@ -223,6 +223,11 @@ on init {
     # least-recently-shown are evicted. 0 drops state as soon as a buffer hides.
     editor.highlight_retention = 64;
 
+    # A start of stoat removes a session file or a hook socket in the state
+    # directory once it has gone unused for this many days. A session touched
+    # inside the period is kept. 0 turns the sweep off.
+    session.retention_days = 14;
+
     # Read a search pattern's own case as the request: one typed without any
     # uppercase character matches any case, and one uppercase character makes
     # the whole pattern case-sensitive. On by default. Set false to search

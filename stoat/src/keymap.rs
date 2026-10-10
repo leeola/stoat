@@ -3486,6 +3486,7 @@ mod tests {
                 ui_inactive_dim: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: Some(64),
+                session_retention_days: Some(14),
                 terminal_shell: None,
                 terminal_args: None,
                 ssh_program: None,

@@ -134,6 +134,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "64",
         },
         SettingDef {
+            path: &[Lit("session"), Lit("retention_days")],
+            shape: ValueShape::Number,
+            doc: "Days a session file or hook socket survives unused before a \
+                  start removes it. 0 turns the sweep off.",
+            default: "14",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("line_numbers")],
             shape: ValueShape::Enum(&["off", "absolute", "relative"]),
             doc: "How the editor gutter numbers lines (`false` means off, `true` \
