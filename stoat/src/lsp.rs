@@ -90,7 +90,7 @@ pub(crate) fn lsp_pending_label(stoat: &Stoat) -> Option<&'static str> {
         ),
         (
             "format",
-            stoat.pending_format_request.is_pending() || stoat.pending_format_on_save.is_some(),
+            stoat.pending_format_request.is_pending() || !stoat.pending_format_on_save.is_empty(),
         ),
     ]
     .into_iter()

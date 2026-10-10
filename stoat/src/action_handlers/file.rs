@@ -54,9 +54,12 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 /// the app running with the failure in [`Stoat::pending_message`].
 ///
 /// A write that lands later, through format on save or the background write,
-/// defers the quit with it. [`Stoat::quit_after_save`] records the pane, and
-/// the pump that lands the write quits that pane.
+/// defers the quit with it. [`Stoat::quit_after_save`] records the pane and the
+/// buffer, and the pump that lands that buffer's write quits the pane. A save
+/// of the same buffer already on its way stands in for this one, so the quit
+/// waits for it.
 pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
+    let buffer_id = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
     match save_flow(stoat, false) {
         SaveFlow::Wrote => {
             let focused = stoat.active_workspace().panes.focus();
@@ -68,7 +71,8 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
         },
         SaveFlow::Armed | SaveFlow::AlreadyPending => {
             let pane = stoat.active_workspace().panes.focus();
-            stoat.quit_after_save = Some((stoat.active_workspace, pane));
+            stoat.quit_after_save =
+                buffer_id.map(|buffer_id| (stoat.active_workspace, pane, buffer_id));
             UpdateEffect::Redraw
         },
         SaveFlow::RefusedDiskChanged | SaveFlow::Failed => UpdateEffect::Redraw,
@@ -79,16 +83,29 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
-/// Quit the pane a deferred `:wq` waits on, once its write has landed.
+/// Quit the pane a deferred `:wq` waits on, once the write of `buffer_id` in
+/// `workspace` has landed.
+///
+/// A quit that waits on another buffer stays in place for that buffer's write.
 ///
 /// The quit drops when the write failed, so the buffer stays for the user. It
 /// also drops when the pane is gone or its workspace is not the active one. A
 /// pane id names a pane only within its own workspace, so after a switch it
 /// names no pane on screen.
-fn finish_deferred_quit(stoat: &mut Stoat, wrote: bool) {
-    let Some((workspace, pane)) = stoat.quit_after_save.take() else {
+fn finish_deferred_quit(
+    stoat: &mut Stoat,
+    wrote: bool,
+    workspace: WorkspaceId,
+    buffer_id: BufferId,
+) {
+    let Some((quit_workspace, pane, quit_buffer)) = stoat.quit_after_save else {
         return;
     };
+    if (quit_workspace, quit_buffer) != (workspace, buffer_id) {
+        return;
+    }
+    stoat.quit_after_save = None;
+
     if !wrote
         || stoat.active_workspace != workspace
         || !stoat.active_workspace().panes.contains(pane)
@@ -116,8 +133,9 @@ enum SaveFlow {
     /// A format-on-save request or a background write was armed. The write
     /// lands later, through [`pump_format_on_save`] or [`pump_pending_save`].
     Armed,
-    /// A format-on-save write was already in flight, so this save was dropped.
-    /// The in-flight write still lands the latest text.
+    /// A save of the same buffer was already on its way, through format on
+    /// save or the background write, so this save was dropped. The one in
+    /// flight still lands the text it took.
     AlreadyPending,
     /// The buffer's bytes were written to disk and the dirty flag cleared.
     Wrote,
@@ -154,19 +172,27 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         return SaveFlow::RefusedDiskChanged;
     }
 
-    // A save already on its way to disk drops later ones, the same rule a save
-    // already formatting follows. The in-flight one still lands the text it
-    // took, and a buffer that moved since keeps its dirty flag.
-    if stoat.pending_save.is_some() {
+    // A save of this buffer already formatting or on its way to disk drops
+    // later ones, so a burst does not queue duplicate writes. The in-flight one
+    // still lands the text it took, and a buffer that moved since keeps its
+    // dirty flag. A save of any other buffer goes ahead.
+    let key = (stoat.active_workspace, buffer_id);
+    let in_flight = stoat
+        .pending_format_on_save
+        .iter()
+        .map(|pending| (pending.workspace, pending.buffer_id))
+        .chain(
+            stoat
+                .pending_saves
+                .iter()
+                .map(|pending| (pending.workspace, pending.buffer_id)),
+        )
+        .any(|pending| pending == key);
+    if in_flight {
         return SaveFlow::AlreadyPending;
     }
 
     if let Some(host) = format_on_save_host(stoat, buffer_id) {
-        // A save already formatting drops later ones so a burst does not queue
-        // duplicate writes. The in-flight one still lands the latest text.
-        if stoat.pending_format_on_save.is_some() {
-            return SaveFlow::AlreadyPending;
-        }
         arm_format_on_save(stoat, host, buffer_id, path, force);
         return SaveFlow::Armed;
     }
@@ -183,7 +209,7 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
 /// Carries the buffer and path to write, plus the edits to apply first. The
 /// edits are `None` when the server errored or the save-time budget elapsed, in
 /// which case the buffer is written unchanged.
-pub(crate) struct FormatOnSaveOutcome {
+struct FormatOnSaveOutcome {
     /// The workspace the save started in, where the outcome lands. A buffer id
     /// names a buffer only within its own workspace.
     workspace: WorkspaceId,
@@ -201,6 +227,17 @@ pub(crate) struct FormatOnSaveOutcome {
     /// to know because the disk-change guard runs there rather than at the
     /// command.
     force: bool,
+}
+
+/// A buffer's format-on-save request on its way back from the server.
+///
+/// The outcome names its buffer too, but only once it resolves. A save of the
+/// same buffer reads the names here to know that this request already stands
+/// for it.
+pub(crate) struct PendingFormatOnSave {
+    workspace: WorkspaceId,
+    buffer_id: BufferId,
+    task: stoat_scheduler::Task<FormatOnSaveOutcome>,
 }
 
 /// Save-time budget for `format_on_save`. A formatting response slower than this
@@ -282,7 +319,11 @@ fn arm_format_on_save(
             force,
         }
     });
-    stoat.pending_format_on_save = Some(task);
+    stoat.pending_format_on_save.push(PendingFormatOnSave {
+        workspace,
+        buffer_id,
+        task,
+    });
 }
 
 /// The buffer's edit counter, or `None` when the buffer is gone.
@@ -292,9 +333,10 @@ fn buffer_version(stoat: &Stoat, buffer_id: BufferId) -> Option<u64> {
     Some(version)
 }
 
-/// Poll the in-flight format-on-save request. On completion, apply any formatting
-/// edits as a single-document [`WorkspaceEdit`] and then write the buffer.
-/// Returns true when state changed so the caller can request a redraw.
+/// Poll every in-flight format-on-save request. Each one that completes applies
+/// its formatting edits as a single-document [`WorkspaceEdit`] and then writes
+/// its buffer. Returns true when state changed, which tells the caller to
+/// redraw.
 ///
 /// Edits computed against a buffer that has since changed are discarded and the
 /// buffer is written as it stands. Their offsets name text that moved, and the
@@ -307,28 +349,31 @@ fn buffer_version(stoat: &Stoat, buffer_id: BufferId) -> Option<u64> {
 /// The outcome lands in the workspace the save started in, whichever workspace
 /// is on screen. An outcome whose workspace closed writes nothing.
 pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_format_on_save.take() else {
-        return false;
-    };
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(outcome) => {
-            let workspace = outcome.workspace;
-            let landed = stoat.in_workspace(workspace, |stoat| land_format_on_save(stoat, outcome));
-            // An armed write leaves a deferred `:wq` for the pump that lands it.
-            match landed {
-                Some(WriteOutcome::Armed) => {},
-                Some(WriteOutcome::Wrote) => finish_deferred_quit(stoat, true),
-                Some(WriteOutcome::Failed) | None => finish_deferred_quit(stoat, false),
-            }
-            true
-        },
-        Poll::Pending => {
-            stoat.pending_format_on_save = Some(task);
-            false
-        },
+    let mut landed_any = false;
+    for mut pending in std::mem::take(&mut stoat.pending_format_on_save) {
+        let outcome = match Pin::new(&mut pending.task).poll(&mut cx) {
+            Poll::Ready(outcome) => outcome,
+            Poll::Pending => {
+                stoat.pending_format_on_save.push(pending);
+                continue;
+            },
+        };
+        landed_any = true;
+
+        let (workspace, buffer_id) = (outcome.workspace, outcome.buffer_id);
+        let landed = stoat.in_workspace(workspace, |stoat| land_format_on_save(stoat, outcome));
+        // An armed write leaves a deferred `:wq` for the pump that lands it.
+        match landed {
+            Some(WriteOutcome::Armed) => {},
+            Some(WriteOutcome::Wrote) => finish_deferred_quit(stoat, true, workspace, buffer_id),
+            Some(WriteOutcome::Failed) | None => {
+                finish_deferred_quit(stoat, false, workspace, buffer_id)
+            },
+        }
     }
+    landed_any
 }
 
 /// Apply a finished format request's edits to the buffer in the active
@@ -596,7 +641,7 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
         })
     };
 
-    stoat.pending_save = Some(PendingSave {
+    stoat.pending_saves.push(PendingSave {
         rx,
         _task: task,
         workspace: stoat.active_workspace,
@@ -606,7 +651,7 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
     });
 }
 
-/// Land a write that has come back from its thread.
+/// Land every write that has come back from its thread.
 ///
 /// The buffer is marked clean only when it still holds the version that was
 /// written. One that moved inside the write window is genuinely dirty against
@@ -618,39 +663,45 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
 /// Returns `true` when an outcome landed this call, which is what tells the run
 /// loop to redraw.
 pub(crate) fn pump_pending_save(stoat: &mut Stoat) -> bool {
-    let Some(pending) = stoat.pending_save.take() else {
-        return false;
-    };
-    let result = match pending.rx.try_recv() {
-        Ok(result) => result,
-        Err(mpsc::TryRecvError::Empty) => {
-            stoat.pending_save = Some(pending);
-            return false;
-        },
-        Err(mpsc::TryRecvError::Disconnected) => {
-            // The worker died without answering, which leaves the file in
-            // whatever state it reached. Reported as a failure so the buffer
-            // stays dirty rather than being marked clean over unknown bytes.
-            Err(std::io::Error::other("the save worker stopped"))
-        },
-    };
+    let mut landed_any = false;
+    for pending in std::mem::take(&mut stoat.pending_saves) {
+        let result = match pending.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => {
+                stoat.pending_saves.push(pending);
+                continue;
+            },
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // The worker died without answering, which leaves the file in
+                // whatever state it reached. Reported as a failure so the
+                // buffer stays dirty rather than being marked clean over
+                // unknown bytes.
+                Err(std::io::Error::other("the save worker stopped"))
+            },
+        };
+        landed_any = true;
 
-    let wrote = match result {
-        Ok(()) => {
-            stoat.in_workspace(pending.workspace, |stoat| {
-                finish_pending_save(stoat, &pending)
-            });
-            true
-        },
-        Err(err) => {
-            tracing::warn!(target: "stoat::file", ?err, path = ?pending.path, "buffer save failed");
-            stoat.set_status(format!("save failed: {err}"));
-            false
-        },
-    };
-
-    finish_deferred_quit(stoat, wrote);
-    true
+        let wrote = match result {
+            Ok(()) => {
+                stoat.in_workspace(pending.workspace, |stoat| {
+                    finish_pending_save(stoat, &pending)
+                });
+                true
+            },
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::file",
+                    ?err,
+                    path = ?pending.path,
+                    "buffer save failed"
+                );
+                stoat.set_status(format!("save failed: {err}"));
+                false
+            },
+        };
+        finish_deferred_quit(stoat, wrote, pending.workspace, pending.buffer_id);
+    }
+    landed_any
 }
 
 /// Everything a landed write does beyond the bytes themselves.
@@ -855,7 +906,9 @@ mod tests {
         TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
     };
     use std::path::{Path, PathBuf};
-    use stoat_action::{ForceSaveBuffer, OpenFile, SaveBuffer, SplitRight, WriteQuit};
+    use stoat_action::{
+        ForceSaveBuffer, GotoLastAccessed, OpenFile, SaveBuffer, SplitRight, WriteQuit,
+    };
     use stoatty_protocol::command;
 
     /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
@@ -1483,7 +1536,7 @@ mod tests {
         h.settle();
 
         assert_eq!(on_disk(&h, &path), b"fn  main (){}\n");
-        assert!(h.stoat.pending_format_on_save.is_none());
+        assert!(h.stoat.pending_format_on_save.is_empty());
     }
 
     #[test]
@@ -1978,11 +2031,13 @@ mod tests {
     fn a_deferred_write_quit_drops_after_a_workspace_switch() {
         let mut h = Stoat::test();
         let pane = h.stoat.active_workspace().panes.focus();
-        h.stoat.quit_after_save = Some((h.stoat.active_workspace, pane));
+        let workspace = h.stoat.active_workspace;
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        h.stoat.quit_after_save = Some((workspace, pane, buffer_id));
         let other = h.create_workspace();
         h.set_active_workspace(other);
 
-        super::finish_deferred_quit(&mut h.stoat, true);
+        super::finish_deferred_quit(&mut h.stoat, true, workspace, buffer_id);
 
         assert_eq!(
             (
@@ -1991,6 +2046,87 @@ mod tests {
             ),
             (false, 1),
             "the quit names a pane of the workspace it left",
+        );
+    }
+
+    /// A save of one buffer leaves a save of another alone. A `:wq` pressed
+    /// while another buffer's write is on its way writes its own buffer, and
+    /// quits only once that write lands, so a failed write of its own keeps the
+    /// app though the other write landed first.
+    #[test]
+    fn write_quit_behind_another_buffers_write_waits_for_its_own() {
+        let press = |fail_own_write: bool| {
+            let mut h = Stoat::test();
+            let root = PathBuf::from("/wq-two");
+            let a = open_edited(&mut h, &root, "a.txt", b"one\n");
+            let b = open_edited(&mut h, &root, "b.txt", b"two\n");
+            if fail_own_write {
+                h.fake_fs()
+                    .fail_writes_to(&a, std::io::ErrorKind::PermissionDenied);
+            }
+
+            dispatch(&mut h.stoat, &SaveBuffer);
+            dispatch(&mut h.stoat, &GotoLastAccessed);
+            dispatch(&mut h.stoat, &WriteQuit);
+            h.settle();
+            (
+                [on_disk(&h, &a), on_disk(&h, &b)],
+                [dirty_at(&h, &a), dirty_at(&h, &b)],
+                h.stoat.quit_requested,
+            )
+        };
+
+        assert_eq!(
+            [press(false), press(true)],
+            [
+                (
+                    [b"edited one\n".to_vec(), b"edited two\n".to_vec()],
+                    [false, false],
+                    true
+                ),
+                (
+                    [b"one\n".to_vec(), b"edited two\n".to_vec()],
+                    [true, false],
+                    false
+                ),
+            ],
+        );
+    }
+
+    /// Whether the buffer open at `path` holds edits its file lacks.
+    fn dirty_at(h: &TestHarness, path: &Path) -> bool {
+        let buffers = &h.stoat.active_workspace().buffers;
+        let id = buffers.id_for_path(path).expect("buffer open");
+        buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .dirty
+    }
+
+    /// A save of one buffer while another formats goes ahead, so both files
+    /// take their formatted text.
+    #[test]
+    fn a_save_while_another_buffer_formats_still_formats_and_writes() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-two");
+        let a = open_rs(&mut h, &root, "a.rs", b"fn  a (){}\n");
+        let b = open_rs(&mut h, &root, "b.rs", b"fn  b (){}\n");
+        for (path, formatted) in [(&a, "fn a() {}\n"), (&b, "fn b() {}\n")] {
+            h.fake_lsp()
+                .set_formatting(path.to_str().unwrap(), vec![whole_file_edit(formatted)]);
+        }
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(
+            [on_disk(&h, &a), on_disk(&h, &b)],
+            [b"fn a() {}\n".to_vec(), b"fn b() {}\n".to_vec()],
         );
     }
 
@@ -2096,10 +2232,11 @@ mod tests {
         );
 
         let pane = h.stoat.active_workspace().panes.focus();
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
         assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
         assert_eq!(
             h.stoat.quit_after_save,
-            Some((h.stoat.active_workspace, pane)),
+            Some((h.stoat.active_workspace, pane, buffer_id)),
             "the quit defers behind the formatted write"
         );
         assert!(!h.stoat.quit_requested);

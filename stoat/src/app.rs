@@ -1906,26 +1906,31 @@ pub struct Stoat {
     /// the returned text edits are applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
     pub(crate) pending_format_request: StampedPending<Option<action_handlers::lsp::FormatResponse>>,
-    /// In-flight format-on-save task. Set when a save with `format_on_save`
-    /// enabled arms a formatting request bounded by a save-time budget;
-    /// [`action_handlers::file::pump_format_on_save`] applies any edits and
-    /// writes the buffer. While `Some`, further saves of that buffer are
-    /// ignored so a burst does not queue duplicate writes.
-    pub(crate) pending_format_on_save:
-        Option<stoat_scheduler::Task<action_handlers::file::FormatOnSaveOutcome>>,
-    /// In-flight write of a buffer to disk. The bytes stream from a clone of
-    /// the rope on a blocking thread, so a slow disk costs the run loop
-    /// nothing; [`action_handlers::file::pump_pending_save`] lands the outcome.
-    /// While `Some`, further saves are dropped so a burst does not queue
-    /// duplicate writes.
-    pub(crate) pending_save: Option<action_handlers::file::PendingSave>,
-    /// The pane a `:wq` ([`action_handlers::file::write_quit`]) was pressed in,
-    /// with its workspace, while the write it started is on its way.
+    /// In-flight format-on-save requests, one per buffer that a save formats.
     ///
-    /// The pump that lands the write takes it and closes that pane, and sets
-    /// [`Self::quit_requested`] only when the pane is the last. A failed write
-    /// or a pane that is gone drops the quit and leaves the buffer for the user.
-    pub(crate) quit_after_save: Option<(WorkspaceId, PaneId)>,
+    /// A save with `format_on_save` enabled arms a formatting request bounded
+    /// by a save-time budget, and [`action_handlers::file::pump_format_on_save`]
+    /// applies any edits and writes the buffer. While an entry names a buffer,
+    /// further saves of that buffer are dropped so a burst does not queue
+    /// duplicate writes. A save of any other buffer goes ahead.
+    pub(crate) pending_format_on_save: Vec<action_handlers::file::PendingFormatOnSave>,
+    /// In-flight writes of buffers to disk, one per buffer.
+    ///
+    /// The bytes stream from a clone of the rope on a blocking thread, so a
+    /// slow disk costs the run loop nothing, and
+    /// [`action_handlers::file::pump_pending_save`] lands each outcome. While an
+    /// entry names a buffer, further saves of that buffer are dropped so a
+    /// burst does not queue duplicate writes.
+    pub(crate) pending_saves: Vec<action_handlers::file::PendingSave>,
+    /// The pane a `:wq` ([`action_handlers::file::write_quit`]) was pressed in,
+    /// with its workspace and the buffer it saves, while that buffer's write is
+    /// on its way.
+    ///
+    /// The pump that lands that buffer's write takes it and closes the pane,
+    /// and sets [`Self::quit_requested`] only when the pane is the last. The
+    /// write of any other buffer leaves it alone. A failed write or a pane that
+    /// is gone drops the quit and leaves the buffer for the user.
+    pub(crate) quit_after_save: Option<(WorkspaceId, PaneId, BufferId)>,
     /// Set once a `:wq`-driven write has landed and the pane it closes is the
     /// last. The run loop takes it right after [`Self::drive_background`] and
     /// quits, so a quit deferred behind a write happens on the frame it
@@ -2583,8 +2588,8 @@ impl Stoat {
             pending_symbol_picker: None,
             pending_workspace_symbol_request: None,
             pending_format_request: StampedPending::default(),
-            pending_format_on_save: None,
-            pending_save: None,
+            pending_format_on_save: Vec::new(),
+            pending_saves: Vec::new(),
             quit_after_save: None,
             quit_requested: false,
             pending_completion: None,
