@@ -1928,8 +1928,10 @@ pub struct Stoat {
     ///
     /// The pump that lands that buffer's write takes it and closes the pane,
     /// and sets [`Self::quit_requested`] only when the pane is the last. The
-    /// write of any other buffer leaves it alone. A failed write or a pane that
-    /// is gone drops the quit and leaves the buffer for the user.
+    /// write of any other buffer leaves it alone. A buffer still dirty when its
+    /// write lands saves again first, so the quit waits for its latest text. A
+    /// failed write or a pane that is gone drops the quit and leaves the buffer
+    /// for the user.
     pub(crate) quit_after_save: Option<(WorkspaceId, PaneId, BufferId)>,
     /// Set once a `:wq`-driven write has landed and the pane it closes is the
     /// last. The run loop takes it right after [`Self::drive_background`] and

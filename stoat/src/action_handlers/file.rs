@@ -58,6 +58,10 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 /// buffer, and the pump that lands that buffer's write quits the pane. A save
 /// of the same buffer already on its way stands in for this one, so the quit
 /// waits for it.
+///
+/// A write that lands with older text than the buffer holds, because the
+/// buffer moved after that write started, saves the buffer again first. The
+/// quit lands only once the buffer's latest text is on disk.
 pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
     let buffer_id = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
     match save_flow(stoat, false) {
@@ -88,10 +92,15 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// A quit that waits on another buffer stays in place for that buffer's write.
 ///
-/// The quit drops when the write failed, so the buffer stays for the user. It
-/// also drops when the pane is gone or its workspace is not the active one. A
-/// pane id names a pane only within its own workspace, so after a switch it
-/// names no pane on screen.
+/// A write holds the text it took when it started. A buffer edited since, or
+/// one whose `:wq` stood behind an earlier save, is still dirty when that write
+/// lands, so it saves again and the quit waits for that write.
+///
+/// The quit drops when the write failed, so the buffer stays for the user, and
+/// the same holds for a refused or failed follow-up save. It also drops when
+/// the pane is gone or its workspace is not the active one. A pane id names a
+/// pane only within its own workspace, so after a switch it names no pane on
+/// screen.
 fn finish_deferred_quit(
     stoat: &mut Stoat,
     wrote: bool,
@@ -111,6 +120,22 @@ fn finish_deferred_quit(
         || !stoat.active_workspace().panes.contains(pane)
     {
         return;
+    }
+
+    let dirty = stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)
+        .is_some_and(|buffer| buffer.read().expect("buffer poisoned").dirty);
+    if dirty {
+        match save_buffer_flow(stoat, buffer_id, false) {
+            SaveFlow::Armed | SaveFlow::AlreadyPending => {
+                stoat.quit_after_save = Some((workspace, pane, buffer_id));
+                return;
+            },
+            SaveFlow::Wrote => {},
+            SaveFlow::NoTarget | SaveFlow::RefusedDiskChanged | SaveFlow::Failed => return,
+        }
     }
 
     if !super::pane::quit_pane(stoat, pane) {
@@ -162,20 +187,28 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         return SaveFlow::NoTarget;
     };
     let buffer_id = editor.buffer_id;
+    save_buffer_flow(stoat, buffer_id, force)
+}
+
+/// Save `buffer_id` in the active workspace the way the save commands save the
+/// focused buffer, format on save included.
+///
+/// A deferred `:wq` calls this for a buffer that is no longer focused, when its
+/// write lands with older text than the buffer holds.
+fn save_buffer_flow(stoat: &mut Stoat, buffer_id: BufferId, force: bool) -> SaveFlow {
     let path = match stoat.active_workspace().buffers.path_for(buffer_id) {
         Some(p) => p.to_path_buf(),
         None => return SaveFlow::NoTarget,
     };
 
-    if !force && disk_changed_since_open(stoat, buffer_id, &path) {
-        stoat.set_status("file changed on disk; use :w! to overwrite");
-        return SaveFlow::RefusedDiskChanged;
-    }
-
     // A save of this buffer already formatting or on its way to disk drops
     // later ones, so a burst does not queue duplicate writes. The in-flight one
     // still lands the text it took, and a buffer that moved since keeps its
     // dirty flag. A save of any other buffer goes ahead.
+    //
+    // This runs before the disk guard. A write that reached the disk but has
+    // not landed moved the file's mtime past the buffer's baseline, which the
+    // guard reads as a change from outside.
     let key = (stoat.active_workspace, buffer_id);
     let in_flight = stoat
         .pending_format_on_save
@@ -190,6 +223,11 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         .any(|pending| pending == key);
     if in_flight {
         return SaveFlow::AlreadyPending;
+    }
+
+    if !force && disk_changed_since_open(stoat, buffer_id, &path) {
+        stoat.set_status("file changed on disk; use :w! to overwrite");
+        return SaveFlow::RefusedDiskChanged;
     }
 
     if let Some(host) = format_on_save_host(stoat, buffer_id) {
@@ -920,6 +958,12 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root.to_path_buf();
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
+        edit_focused(h, "edited ");
+        path
+    }
+
+    /// Insert `text` at the start of the focused buffer.
+    fn edit_focused(h: &mut TestHarness, text: &str) {
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .buffer_id;
@@ -929,8 +973,7 @@ mod tests {
             .buffers
             .get(buffer_id)
             .expect("buffer");
-        buffer.write().expect("poisoned").edit(0..0, "edited ");
-        path
+        buffer.write().expect("poisoned").edit(0..0, text);
     }
 
     fn buffer_text(h: &TestHarness, id: BufferId) -> String {
@@ -2089,6 +2132,39 @@ mod tests {
                     [true, false],
                     false
                 ),
+            ],
+        );
+    }
+
+    /// A `:wq` behind a write of the same buffer quits only once the buffer's
+    /// latest text is on disk. An edit inside the write window saves again
+    /// before the quit, and a failed second write keeps the app and the edit.
+    #[test]
+    fn write_quit_behind_an_earlier_save_writes_the_latest_text() {
+        let press = |fail_second_write: bool| {
+            let mut h = Stoat::test();
+            let path = open_edited(&mut h, Path::new("/wq-again"), "a.txt", b"one\n");
+            dispatch(&mut h.stoat, &SaveBuffer);
+            edit_focused(&mut h, "more ");
+            if fail_second_write {
+                h.fake_fs()
+                    .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
+            }
+
+            dispatch(&mut h.stoat, &WriteQuit);
+            h.settle();
+            (
+                on_disk(&h, &path),
+                dirty_at(&h, &path),
+                h.stoat.quit_requested,
+            )
+        };
+
+        assert_eq!(
+            [press(false), press(true)],
+            [
+                (b"more edited one\n".to_vec(), false, true),
+                (b"edited one\n".to_vec(), true, false),
             ],
         );
     }
