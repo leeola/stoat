@@ -311,6 +311,14 @@ pub struct Renderer {
     /// live grid is stale for the whole glide. Every occluder list drops it
     /// rather than punch a hole where it no longer is.
     riding: Vec<u32>,
+    /// The frame's rides, each scissor clamped to the render target.
+    ///
+    /// A pool region sized from a grid that lags a live resize, or placed past
+    /// the grid's right edge, gives its ride a scissor larger than the target,
+    /// and wgpu aborts the process on such a scissor. Every riding draw reads
+    /// its scissor from here. A ride clamped to nothing holds a zero-area
+    /// scissor, which the draws skip.
+    clamped_rides: Vec<HostRide>,
     /// GPU frame timer, created lazily on the first render when the device was
     /// built with `TIMESTAMP_QUERY`. `None` until then or when unsupported.
     #[cfg(feature = "perf")]
@@ -388,6 +396,7 @@ impl Renderer {
                 occluders: Vec::new(),
                 pool_occluders: Vec::new(),
                 riding: Vec::new(),
+                clamped_rides: Vec::new(),
                 #[cfg(feature = "perf")]
                 gpu_timer: None,
                 #[cfg(feature = "perf")]
@@ -616,6 +625,12 @@ impl Renderer {
         // background pass reads it to keep the cells under a panel.
         self.riding.clear();
         self.riding.extend(anchored.iter().map(|ride| ride.host));
+        self.clamped_rides.clear();
+        self.clamped_rides
+            .extend(anchored.iter().map(|ride| HostRide {
+                scissor: clamp_scissor(ride.scissor, self.width, self.height).unwrap_or([0; 4]),
+                ..*ride
+            }));
         crate::render::build_occluders_into(
             grid.panels(),
             grid.sketches(),
@@ -659,11 +674,11 @@ impl Renderer {
             resolution,
             frame,
             &self.occluders,
-            anchored,
+            &self.clamped_rides,
             covered,
         );
         self.panel
-            .prepare(device, queue, grid, anchored, resolution);
+            .prepare(device, queue, grid, &self.clamped_rides, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon.prepare(
             device,
@@ -682,7 +697,7 @@ impl Renderer {
             queue,
             grid,
             frame.sketch_reveals,
-            anchored,
+            &self.clamped_rides,
             &self.occluders,
             resolution,
         );

@@ -1,40 +1,46 @@
-//! Headless GPU check that an oversized pool or cursor scissor is clamped to
-//! the render target instead of tripping a validation error.
+//! Headless GPU check that an oversized pool, cursor, or riding scissor is
+//! clamped to the render target instead of tripping a validation error.
 //!
-//! During a live resize the app can hand `composite_pool` and `draw_cursor_over`
-//! a scissor sized to a stale grid larger than the freshly shrunk drawable. wgpu
-//! aborts the process when a scissor exceeds the render target, so the renderer
-//! clamps every caller-supplied scissor. This drives both entry points with a
-//! scissor twice the offscreen target's size inside a validation error scope and
-//! asserts no error is raised.
+//! During a live resize the app sometimes hands `composite_pool` and
+//! `draw_cursor_over` a scissor sized to a stale grid larger than the freshly
+//! shrunk drawable, and a panel riding a pool takes its scissor from that pool's
+//! region. wgpu aborts
+//! the process when a scissor exceeds the render target, so the renderer clamps
+//! every caller-supplied scissor. These drive each entry point with a scissor
+//! twice the offscreen target's size inside a validation error scope and assert
+//! no error is raised.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use futures::executor;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
-    render::cell_size,
+    render::{cell_size, HostRide},
     test_support::require_headless_device,
 };
 use stoatty_term::{
-    grid::{Grid, Rgb},
+    grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
     term::Damage,
 };
 use wgpu::{
-    ErrorFilter, Extent3d, PollType, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureViewDescriptor,
+    Device, ErrorFilter, Extent3d, PollType, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
-#[test]
-fn oversized_scissors_are_clamped_not_validated() {
-    let (device, queue) = require_headless_device();
+/// An offscreen target three rows tall and a renderer sized to it.
+struct Setup {
+    /// Held so the target outlives every draw into `view`.
+    _target: Texture,
+    view: TextureView,
+    renderer: Renderer,
+    width: u32,
+    height: u32,
+}
 
+fn setup(device: &Device) -> Setup {
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let [_, cell_h] = cell_size(font_size, 1.0);
     let (width, height) = (128u32, cell_h.round() as u32 * 3);
-
-    let black = Rgb::new(0, 0, 0);
-    let white = Rgb::new(255, 255, 255);
 
     let target = device.create_texture(&TextureDescriptor {
         label: Some("scissor clamp target"),
@@ -52,8 +58,8 @@ fn oversized_scissors_are_clamped_not_validated() {
     });
     let view = target.create_view(&TextureViewDescriptor::default());
 
-    let mut renderer = Renderer::new(
-        &device,
+    let renderer = Renderer::new(
+        device,
         format,
         [width, height],
         build_font_system(),
@@ -63,9 +69,48 @@ fn oversized_scissors_are_clamped_not_validated() {
             family: &["JetBrains Mono".to_owned()],
             ligatures: true,
         },
-        black,
-        white,
+        Rgb::new(0, 0, 0),
+        Rgb::new(255, 255, 255),
     );
+
+    Setup {
+        _target: target,
+        view,
+        renderer,
+        width,
+        height,
+    }
+}
+
+/// A frame with no cursor, no scroll, and the whole grid damaged.
+fn still_frame(no_decoration: &Damage) -> Frame<'_> {
+    Frame {
+        cursor: None,
+        cursor_corners: None,
+        scroll: Scroll {
+            grid: 0.0,
+            document: 0.0,
+            scrollback: 0.0,
+            region: 0.0,
+            popovers: &[],
+        },
+        damage: &Damage::Full,
+        decoration_damage: no_decoration,
+        scrolled_rows: 0,
+        sketch_reveals: &[],
+    }
+}
+
+#[test]
+fn oversized_scissors_are_clamped_not_validated() {
+    let (device, queue) = require_headless_device();
+    let Setup {
+        view,
+        mut renderer,
+        width,
+        height,
+        ..
+    } = setup(&device);
 
     let (rows, cols) = renderer.grid_size();
     let base = Grid::new(rows, cols);
@@ -80,27 +125,7 @@ fn oversized_scissors_are_clamped_not_validated() {
 
     let scope = device.push_error_scope(ErrorFilter::Validation);
 
-    renderer.render_into(
-        &device,
-        &queue,
-        &view,
-        &base,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &no_decoration,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
-    );
+    renderer.render_into(&device, &queue, &view, &base, still_frame(&no_decoration));
     renderer.composite_pool(
         &device,
         &queue,
@@ -134,5 +159,64 @@ fn oversized_scissors_are_clamped_not_validated() {
     assert!(
         error.is_none(),
         "a scissor larger than the target must be clamped, not validated: {error:?}"
+    );
+}
+
+/// A panel anchored to a gliding pool draws inside the scissor its ride carries,
+/// which a pool region past the window makes larger than the target.
+#[test]
+fn an_oversized_riding_scissor_is_clamped_not_validated() {
+    let (device, queue) = require_headless_device();
+    let Setup {
+        view,
+        mut renderer,
+        width,
+        height,
+        ..
+    } = setup(&device);
+
+    let (rows, cols) = renderer.grid_size();
+    let mut grid = Grid::new(rows, cols);
+    grid.set_panels(vec![Panel {
+        top: 0,
+        left: 0,
+        width: 2,
+        height: 1,
+        style: BorderStyle::Rounded,
+        border: Rgb::new(200, 100, 50),
+        corner_radius: 6,
+        fill: None,
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        anchor: Some((7, 0.0)),
+        seq: 0,
+    }]);
+    let no_decoration = Damage::Partial(Vec::new());
+    let ride = HostRide {
+        host: 7,
+        top_rows: 0.0,
+        scissor: [0, 0, width * 2, height * 2],
+    };
+
+    let scope = device.push_error_scope(ErrorFilter::Validation);
+
+    renderer.render_pools_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        still_frame(&no_decoration),
+        &[],
+        &[ride],
+    );
+
+    let error_future = scope.pop();
+    device.poll(PollType::wait_indefinitely()).expect("poll");
+    let error = executor::block_on(error_future);
+
+    assert!(
+        error.is_none(),
+        "a riding scissor larger than the target must be clamped, not validated: {error:?}"
     );
 }
