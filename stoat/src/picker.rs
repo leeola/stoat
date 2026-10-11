@@ -2098,8 +2098,10 @@ impl<E> TargetPicker<E> {
 
     /// Rank the rows for `query`, keeping the selection inside the result.
     ///
+    /// A new query puts the selection on the top row, which is its best match.
     /// A repeat of the query the current ranking came from returns without
-    /// work, so a per-frame drive costs nothing while the prompt sits still.
+    /// work, so a per-frame drive costs nothing while the prompt sits still,
+    /// and a selection the reader moved stays where it is.
     ///
     /// A list longer than [`INLINE_RANK_MAX`] ranks a query on the pool. The
     /// rows on display stay as they are until [`Self::pump_rank`] takes the
@@ -2110,6 +2112,7 @@ impl<E> TargetPicker<E> {
             return;
         }
         self.last_filter_query = Some(query.to_owned());
+        self.selected = 0;
 
         if self.haystacks.len() > INLINE_RANK_MAX
             && let Some(pattern) = fuzzy::parse_query(query)
@@ -2153,10 +2156,16 @@ impl<E> TargetPicker<E> {
     ///
     /// A long list pays one inline rank at the select rather than one per
     /// keystroke.
+    ///
+    /// A query other than the last one ranked puts the selection on the top
+    /// row, as [`Self::refilter`] does.
     pub(crate) fn settle_rank(&mut self, query: &str) {
         self.pump_rank();
         if !self.rank_pending && self.last_filter_query.as_deref() == Some(query) {
             return;
+        }
+        if self.last_filter_query.as_deref() != Some(query) {
+            self.selected = 0;
         }
         self.last_filter_query = Some(query.to_owned());
         self.rank_inline(query);
@@ -3911,6 +3920,24 @@ mod tests {
                 (1, Some("beta")),
                 "a narrowed list drags the cursor onto a row that still exists"
             );
+        }
+
+        /// A new query puts the cursor on its best match, whether a frame
+        /// refilters it or a select settles it first. The same query again
+        /// keeps a cursor the reader moved.
+        #[test]
+        fn a_new_query_puts_the_cursor_on_the_top_row() {
+            for rank in [TargetPicker::refilter, TargetPicker::settle_rank] {
+                let mut picker = picker(&["alpha", "alpine", "alps"]);
+                picker.move_selection(2);
+                rank(&mut picker, "alp");
+                let after_new = picker.selected();
+
+                picker.move_selection(1);
+                rank(&mut picker, "alp");
+
+                assert_eq!((after_new, picker.selected()), (0, 1));
+            }
         }
 
         #[test]

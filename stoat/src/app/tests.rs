@@ -13403,6 +13403,22 @@ fn typing_narrows_the_jumps() {
     );
 }
 
+/// The picker opens on the walk cursor's row, which is the last jump here. A
+/// query that every jump matches moves the selection to the best match.
+#[test]
+fn a_query_selects_the_best_match() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    open_jumplist_picker(&mut h, 12);
+
+    h.type_text("lands");
+    h.stoat.drive_background();
+
+    assert_eq!(
+        h.stoat.jumplist_picker.as_ref().expect("open").selected(),
+        0
+    );
+}
+
 /// Keys typed in one burst reach Enter with no frame between them, so the jump
 /// ranks the query itself.
 #[test]
