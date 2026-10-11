@@ -12,7 +12,7 @@ use crate::{
     review::ReviewSide,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 use stoat_text::cursor_offset;
 
 /// At or above this inner width the ours and theirs columns keep a line-number
@@ -141,7 +141,7 @@ pub(crate) fn render_conflict_view(
         editor,
         &snapshot,
         inner,
-        cols.center_text_x,
+        cols.center_text_x..cols.sep2_x,
         theme,
         buf,
         stoatty,
@@ -154,11 +154,15 @@ pub(crate) fn render_conflict_view(
 /// One cell for the newest cursor, and no selection wash as a plain pane paints,
 /// because the reader picks chunks in the center column rather than selecting
 /// text there.
+///
+/// `text` is the center's text columns. The center has no horizontal scroll, so
+/// a cursor past its last column is hidden, as a row out of view is, rather
+/// than clamped onto a cell it is not on.
 fn render_conflict_cursor(
     editor: &mut EditorState,
     snapshot: &DisplaySnapshot,
     inner: Rect,
-    text_x: u16,
+    text: Range<u16>,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     stoatty: bool,
@@ -180,10 +184,11 @@ fn render_conflict_cursor(
         return;
     }
     let y = inner.y + (display.row - editor.scroll_row) as u16;
-    let x = text_x + display.column as u16;
-    if x >= inner.x + inner.width || y >= inner.y + inner.height {
+    let x = u32::from(text.start) + display.column;
+    if x >= u32::from(text.end) || y >= inner.y + inner.height {
         return;
     }
+    let x = x as u16;
 
     if stoatty {
         editor.cursor_screen_cell = Some((x, y));
@@ -441,7 +446,11 @@ fn paint_side(
 mod tests {
     use super::ConflictColumns;
     use crate::test_harness::TestHarness;
-    use ratatui::layout::Rect;
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Modifier, Style},
+    };
     use std::{path::PathBuf, sync::Arc};
 
     /// Open the conflict view on one three-stage file in a `width`-wide harness.
@@ -455,6 +464,43 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Conflict);
         h.settle();
         h
+    }
+
+    /// The center has no horizontal scroll, so a cursor past its column is
+    /// hidden rather than drawn over the rule or the theirs column.
+    #[test]
+    fn a_cursor_past_the_center_column_paints_nothing() {
+        let shared = "x".repeat(40);
+        let mut h = conflict_harness(
+            90,
+            &format!("{shared}\nbase\n"),
+            &format!("{shared}\nOURS\n"),
+            &format!("{shared}\nTHEIRS\n"),
+        );
+        h.type_keys("k");
+        h.type_keys("g l");
+        let head = h.head_offsets();
+
+        let theme = crate::theme::Theme::empty();
+        let inner = Rect::new(0, 0, 90, 20);
+        let cols = ConflictColumns::compute(inner);
+        let center_width = usize::from(cols.sep2_x - cols.center_text_x);
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        let mut buf = Buffer::empty(inner);
+        editor.cursor_screen_cell = None;
+        super::render_conflict_view(editor, inner, Style::default(), &theme, &mut buf, true);
+        let delegated = editor.cursor_screen_cell;
+        super::render_conflict_view(editor, inner, Style::default(), &theme, &mut buf, false);
+        let painted_past = (cols.sep2_x..inner.right())
+            .flat_map(|x| (inner.top()..inner.bottom()).map(move |y| (x, y)))
+            .any(|cell| buf[cell].style().add_modifier.contains(Modifier::REVERSED));
+
+        assert_eq!(
+            (head[0] >= center_width, delegated, painted_past),
+            (true, None, false),
+            "the cursor sits past the center column, and neither path draws it there"
+        );
     }
 
     /// Split each rendered row on the two column rules into its trimmed ours,
