@@ -1763,12 +1763,16 @@ impl ApplicationHandler<PtyEvent> for App {
                 let cell_height =
                     render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
 
-                // A child on the upstream channel takes travel rather than
-                // notches, so a trackpad's fraction reaches it whole instead of
-                // being rounded away by the wheel protocol. The pixel
-                // accumulator is left untouched, since the fallback below still
-                // needs its remainder.
-                if state.window_event_tx.is_some() && mouse_reporting(state) {
+                // A program that holds the zoom claim and reads the socket
+                // takes travel rather than notches, so a trackpad's fraction
+                // reaches it whole instead of being rounded away by the wheel
+                // protocol. The pixel accumulator is left untouched, since the
+                // fallback below still needs its remainder.
+                if wheel_upstream(
+                    state.zoom_capture,
+                    state.window_client_connected.load(Ordering::Relaxed),
+                    mouse_reporting(state),
+                ) {
                     let (col, row) = state.pointer_cell;
                     send_window_event(
                         state,
@@ -1984,6 +1988,23 @@ fn zoom_route(capture: bool, inband: bool, client_connected: bool) -> ZoomRoute 
         (true, false, true) => ZoomRoute::Socket,
         _ => ZoomRoute::FontStep,
     }
+}
+
+/// Whether a wheel notch goes upstream over the window socket as travel, in
+/// place of down the PTY.
+///
+/// Every child gets a bound socket, but only a program that holds the zoom
+/// claim reads wheel travel from it. Any other child hears a notch only as SGR
+/// reports. Travel sent to the socket for such a child queues without
+/// bound, because nothing reads it.
+///
+/// The claim gates this whatever delivery it named, because stoat claims the
+/// combo in band and still reads the socket. A claim still needs a connected
+/// reader, for the reason that [`zoom_route`] gives. `reporting` is whether the
+/// child asked for SGR mouse reports. Without them, a notch scrolls the local
+/// view.
+fn wheel_upstream(claimed: bool, client_connected: bool, reporting: bool) -> bool {
+    claimed && client_connected && reporting
 }
 
 /// Step both font sizes by `delta` and re-fit everything measured in cells.
@@ -3901,9 +3922,9 @@ mod tests {
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
         net_font_step, notification_should_show, pool_composite, pool_grid_reports,
         selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo,
-        update_cell_pixels, zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize,
-        PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute,
-        MAX_AUX_WINDOWS,
+        update_cell_pixels, wheel_upstream, zoom_route, ActivePool, ForceFull, FrameOutcome, Input,
+        PendingResize, PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent,
+        WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -5153,6 +5174,28 @@ mod tests {
                 ZoomRoute::FontStep,
             ],
             "with nobody reading, only the inband claim still has a channel",
+        );
+    }
+
+    #[test]
+    fn a_wheel_notch_goes_upstream_only_to_a_connected_claimant() {
+        let inputs = [
+            (true, true, true),
+            (true, true, false),
+            (true, false, true),
+            (true, false, false),
+            (false, true, true),
+            (false, true, false),
+            (false, false, true),
+            (false, false, false),
+        ];
+
+        assert_eq!(
+            inputs.map(|(claimed, connected, reporting)| {
+                wheel_upstream(claimed, connected, reporting)
+            }),
+            [true, false, false, false, false, false, false, false],
+            "only a claim with a reader and mouse reports on takes travel",
         );
     }
 
