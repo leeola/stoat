@@ -44,7 +44,7 @@ use std::{
     time::Duration,
 };
 use stoat_scheduler::Task;
-use stoat_text::{Anchor, Bias, Point, Rope, SelectionGoal};
+use stoat_text::{Anchor, Bias, LineEnding, Point, Rope, SelectionGoal};
 
 /// Which diagnostic [`goto_diagnostic`] goes to.
 ///
@@ -245,6 +245,7 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let fs = stoat.fs_host.clone();
+    let open = open_ropes(stoat);
     let executor = stoat.executor.clone();
     let LspRequestSite {
         buffer_id,
@@ -295,7 +296,9 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
             }
         }
         executor
-            .spawn_blocking(move || resolve_goto_targets(answers, &source_path, &source_rope, &*fs))
+            .spawn_blocking(move || {
+                resolve_goto_targets(answers, &source_path, &source_rope, &open, &*fs)
+            })
             .await
     });
     stoat.pending_lsp_jump = Some(("references", task));
@@ -342,6 +345,28 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
     })
 }
 
+/// The rope of every open path-bound buffer, keyed by its path.
+///
+/// A goto target in an open file resolves against this text, because it is
+/// what the server was sent. The file on disk does not hold the unsaved edits,
+/// and it keeps its own line endings.
+fn open_ropes(stoat: &Stoat) -> HashMap<PathBuf, Rope> {
+    let buffers = &stoat.active_workspace().buffers;
+    buffers
+        .open_paths()
+        .into_iter()
+        .filter_map(|path| {
+            let rope = buffers
+                .get(buffers.id_for_path(&path)?)?
+                .read()
+                .ok()?
+                .rope()
+                .clone();
+            Some((path, rope))
+        })
+        .collect()
+}
+
 /// Issue an LSP jump-style request (definition / type definition /
 /// implementation / declaration) for the symbol under the focused
 /// editor's primary cursor. The async response is stored on
@@ -371,6 +396,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     };
 
     let fs = stoat.fs_host.clone();
+    let open = open_ropes(stoat);
     let executor = stoat.executor.clone();
     let LspRequestSite {
         buffer_id,
@@ -425,7 +451,9 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
             }
         }
         executor
-            .spawn_blocking(move || resolve_goto_targets(answers, &source_path, &source_rope, &*fs))
+            .spawn_blocking(move || {
+                resolve_goto_targets(answers, &source_path, &source_rope, &open, &*fs)
+            })
             .await
     });
     stoat.pending_lsp_jump = Some((kind.status_label(), task));
@@ -447,15 +475,20 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
 ///
 /// Each entry carries the byte offset under its server's [`OffsetEncoding`],
 /// the 1-based line and column, the trimmed text of the target line, and the
-/// bytes of the block a link names. Targets in the source file reuse
-/// `source_rope`. The resolve reads each other file through `fs` and builds
-/// its rope once for all the candidates in it, so a file with no open buffer
-/// resolves too. The reads and the rope builds block, so both callers run
-/// this on the pool.
+/// bytes of the block a link names.
+///
+/// A server measures a position in an open file against the text it was
+/// sent. Targets in the source file reuse `source_rope`, and targets in
+/// another open file use its rope from `open`. The resolve reads each other
+/// file through `fs` and builds its rope once for all the candidates in it, so
+/// a file with no open buffer resolves too. That rope takes LF line endings, as
+/// a buffer does, so the offset is the one the opened buffer holds. The reads
+/// and the rope builds block, so both callers run this on the pool.
 fn resolve_goto_targets(
     answers: Vec<(OffsetEncoding, GotoDefinitionResponse)>,
     source_path: &Path,
     source_rope: &Rope,
+    open: &HashMap<PathBuf, Rope>,
     fs: &dyn FsHost,
 ) -> Vec<LocationEntry> {
     let candidates = answers.into_iter().flat_map(|(encoding, response)| {
@@ -479,9 +512,11 @@ fn resolve_goto_targets(
         let file_rope;
         let rope = if path == source_path {
             source_rope
+        } else if let Some(rope) = open.get(&path) {
+            rope
         } else {
             match super::read_string_via_host(fs, &path) {
-                Ok(text) => file_rope = Rope::from(text.as_str()),
+                Ok(text) => file_rope = Rope::from(LineEnding::normalize(&text).as_ref()),
                 Err(err) => {
                     tracing::warn!(
                         target: "stoat::lsp",

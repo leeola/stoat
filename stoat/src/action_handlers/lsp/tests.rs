@@ -968,6 +968,72 @@ fn goto_definition_opens_target_file() {
     assert_eq!(cursor_offset(&mut h), 15);
 }
 
+/// The buffer holds LF text, so a target in a CRLF file lands where the
+/// server's line and column point in that text, not one byte further per line.
+#[test]
+fn goto_definition_into_a_crlf_file_lands_on_the_target() {
+    let mut h = TestHarness::with_size(80, 24);
+    enable_goto_definition(&h);
+    let root = seed(
+        &mut h,
+        &[
+            ("main.rs", "abc\n"),
+            ("lib.rs", "fn one() {}\r\nfn two() {}\r\n"),
+        ],
+    );
+
+    assert_eq!(
+        goto_lib_definition(&mut h, &root, 1, 3),
+        (root.join("lib.rs"), 15)
+    );
+}
+
+/// The server measured against the open buffer, unsaved edits included, so
+/// the target resolves against that text rather than the file on disk.
+#[test]
+fn goto_definition_into_an_edited_buffer_lands_on_the_target() {
+    let mut h = TestHarness::with_size(80, 24);
+    enable_goto_definition(&h);
+    let root = seed(
+        &mut h,
+        &[
+            ("main.rs", "abc\n"),
+            ("lib.rs", "fn one() {}\nfn two() {}\n"),
+        ],
+    );
+    open_buffer(&mut h, root.join("lib.rs"));
+    h.edit_focused(0..0, "// x\n");
+
+    assert_eq!(
+        goto_lib_definition(&mut h, &root, 2, 3),
+        (root.join("lib.rs"), 20)
+    );
+}
+
+/// Go from the start of `main.rs` to the definition the fake server places at
+/// `line` and `column` of `lib.rs`, and answer the focused path and the cursor
+/// offset where the jump lands.
+fn goto_lib_definition(
+    h: &mut TestHarness,
+    root: &Path,
+    line: u32,
+    column: u32,
+) -> (PathBuf, usize) {
+    let main_path = root.join("main.rs");
+    open_buffer(h, main_path.clone());
+    h.fake_lsp().set_definition(
+        main_path.to_str().unwrap(),
+        0,
+        0,
+        root.join("lib.rs").to_str().unwrap(),
+        line,
+        column,
+    );
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+    h.settle();
+    (focused_buffer_path(h), cursor_offset(h))
+}
+
 #[test]
 fn goto_definition_no_result_is_noop() {
     let mut h = TestHarness::with_size(80, 24);
