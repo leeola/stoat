@@ -1488,6 +1488,23 @@ fn vertical_move_and_extend_agree_at_an_accented_line_end() {
     );
 }
 
+/// A switch into a primary mode ends the command a count prefixed, so the
+/// count does not reach the next motion. A switch through a chord mode keeps
+/// the count until the Escape that leaves the chord.
+#[test]
+fn a_switch_into_a_primary_mode_drops_a_pending_count() {
+    for keys in ["v 3 escape j", "3 g escape j", "3 v j"] {
+        let mut h = TestHarness::with_size(40, 12);
+        h.seed_focused_buffer("a\nb\nc\nd\ne\n");
+        h.type_keys(keys);
+        assert_eq!(
+            (focused_head_row(&mut h.stoat), h.stoat.pending_count),
+            (1, None),
+            "`{keys}` moves one row"
+        );
+    }
+}
+
 #[test]
 fn count_vertical_motion_clamps_at_buffer_edge() {
     let mut h = TestHarness::with_size(40, 12);

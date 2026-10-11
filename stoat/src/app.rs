@@ -39,6 +39,7 @@ use crate::{
         pane_cache::PaneCacheEntry,
         sanitize,
         undercurl::{self, UndercurlBatch},
+        PRIMARY_MODES,
     },
     run::{CommandMark, PtyNotification, RunId},
     selection::merge_overlapping_spans,
@@ -5677,12 +5678,14 @@ impl Stoat {
             && !actions
                 .iter()
                 .all(|ra| ra.name == "SetMode" || ra.name == "SetVar");
+        let mut entered_primary = false;
         for ra in actions.iter() {
             if ra.name == "SetMode" {
                 if holds_mode {
                     continue;
                 }
                 if let Some(mode_name) = ra.args.first().and_then(keymap_state::arg_as_str) {
+                    entered_primary |= PRIMARY_MODES.contains(&mode_name.as_str());
                     self.transition_mode(mode_name);
                     effect = UpdateEffect::Redraw;
                 }
@@ -5725,6 +5728,12 @@ impl Stoat {
         if dismisses_pinned {
             self.pending_hover = None;
             self.pending_hover_request = None;
+        }
+        // A switch into a primary mode ends the command a count prefixed, as
+        // an action does. A chord mode keeps the count, because the key after
+        // it still completes the command.
+        if entered_primary {
+            self.pending_count = None;
         }
         if dispatched_action {
             self.pending_count = None;
