@@ -225,23 +225,18 @@ pub(crate) fn install_pending_lsp_host(stoat: &mut Stoat) {
 }
 
 /// Register a ready `host` under its `server` name, install it into the
-/// routing list its `scope` names, then re-fire `did_open` for the buffers it
-/// now serves.
+/// routing list its `scope` names, then deliver the documents it now serves.
 ///
-/// Those buffers already sent `did_open` to the noop while the server was
-/// starting, so they are dropped from [`lsp_opened`] and reopened to
-/// deliver the documents to the real server.
-///
-/// A language server reopens only its own language's buffers, leaving other
+/// A language server takes only its own language's buffers, leaving other
 /// languages' servers untouched. A global server serves every open buffer, so
-/// every one of them is reopened.
+/// it takes every one of them.
 fn install_ready_server(
     stoat: &mut Stoat,
     server: String,
     scope: SpawnScope,
     host: Arc<dyn LspHost>,
 ) {
-    stoat.lsp_registry.insert(server, host);
+    stoat.lsp_registry.insert(server.clone(), Arc::clone(&host));
     let language = match &scope {
         SpawnScope::Language(language) => {
             let selectors = crate::lsp::servers::resolve_servers(&stoat.settings, language)
@@ -263,7 +258,51 @@ fn install_ready_server(
         },
     };
 
-    reopen_buffers(stoat, language.as_deref());
+    open_on_new_server(stoat, &server, &host, language.as_deref());
+}
+
+/// Deliver the documents a server that just came up now serves, the buffers of
+/// `language` or every buffer for a global server.
+///
+/// A buffer that another running server already holds opens on `host` alone,
+/// at the text and version the others hold. Reopening it on every host sends
+/// the others a second didOpen with no didClose between, which restarts their
+/// document version. Every other buffer reopens as [`reopen_buffers`] does.
+///
+/// The change scan runs last. A change already waiting in its debounce goes
+/// only to the hosts it was armed for, so the scan replaces it with one over
+/// every host, measured from the text the new server took.
+fn open_on_new_server(
+    stoat: &mut Stoat,
+    server: &str,
+    host: &Arc<dyn LspHost>,
+    language: Option<&str>,
+) {
+    let mut reopen = Vec::new();
+    for (id, path, text) in covered_buffers(stoat, language) {
+        if stoat.lsp_opened.contains(&id)
+            && held_by_another_server(stoat, server, id)
+            && crate::lsp::session::open_on_host(stoat, Arc::clone(host), id, &path)
+        {
+            stoat.lsp_buffer_versions.remove(&id);
+        } else {
+            reopen.push((id, path, text));
+        }
+    }
+    reopen_each(stoat, reopen);
+    crate::lsp::sync::notify_buffer_changes_pending(stoat);
+}
+
+/// Whether a running server other than `server` routes the language of `id`.
+fn held_by_another_server(stoat: &Stoat, server: &str, id: BufferId) -> bool {
+    let language =
+        crate::lsp::session::lsp_language_name(&stoat.workspaces[stoat.lsp_workspace].buffers, id)
+            .unwrap_or_default();
+    stoat
+        .lsp_registry
+        .names_for_language(&language)
+        .iter()
+        .any(|name| name != server)
 }
 
 /// Re-send `did_open` for the path-bound buffers of [`Stoat::lsp_workspace`],
@@ -274,34 +313,41 @@ fn install_ready_server(
 /// started starts it. A server that just came up and a restored session both
 /// need this, because no `did_open` for their buffers reached that server.
 pub(crate) fn reopen_buffers(stoat: &mut Stoat, language: Option<&str>) {
-    // Ropes rather than strings, because this runs over every buffer it
-    // reopens in one turn and a rope clone is a refcount bump where
-    // materializing each buffer is not.
-    let reopen: Vec<(BufferId, PathBuf, Rope)> = {
-        let buffers = &stoat.workspaces[stoat.lsp_workspace].buffers;
-        buffers
-            .open_paths()
-            .into_iter()
-            .filter_map(|path| {
-                let id = buffers.id_for_path(&path)?;
-                if let Some(language) = language
-                    && crate::lsp::session::lsp_language_name(buffers, id).as_deref()
-                        != Some(language)
-                {
-                    return None;
-                }
-                let text = buffers
-                    .get(id)?
-                    .read()
-                    .expect("buffer poisoned")
-                    .rope()
-                    .clone();
-                Some((id, path, text))
-            })
-            .collect()
-    };
+    let buffers = covered_buffers(stoat, language);
+    reopen_each(stoat, buffers);
+}
 
-    for (id, path, text) in reopen {
+/// The path-bound buffers of [`Stoat::lsp_workspace`] in `language`, or every
+/// one of them when `language` is `None`, each with its path and rope.
+fn covered_buffers(stoat: &Stoat, language: Option<&str>) -> Vec<(BufferId, PathBuf, Rope)> {
+    // Ropes rather than strings, because this runs over every buffer it
+    // covers in one turn and a rope clone is a refcount bump where
+    // materializing each buffer is not.
+    let buffers = &stoat.workspaces[stoat.lsp_workspace].buffers;
+    buffers
+        .open_paths()
+        .into_iter()
+        .filter_map(|path| {
+            let id = buffers.id_for_path(&path)?;
+            if let Some(language) = language
+                && crate::lsp::session::lsp_language_name(buffers, id).as_deref() != Some(language)
+            {
+                return None;
+            }
+            let text = buffers
+                .get(id)?
+                .read()
+                .expect("buffer poisoned")
+                .rope()
+                .clone();
+            Some((id, path, text))
+        })
+        .collect()
+}
+
+/// Send `did_open` for each of `buffers` to every host, from version 0.
+fn reopen_each(stoat: &mut Stoat, buffers: Vec<(BufferId, PathBuf, Rope)>) {
+    for (id, path, text) in buffers {
         stoat.lsp_opened.remove(&id);
         stoat.lsp_doc_versions.remove(&id);
         stoat.lsp_buffer_versions.remove(&id);
@@ -420,9 +466,15 @@ mod tests {
     use crate::{
         app::PendingSpawn,
         host::{FakeLsp, LspNotification},
+        test_harness::TestHarness,
     };
     use lsp_types::MessageType;
     use stoat_config::Settings;
+
+    /// The text of `a.rs` as [`edited_with_only_a_up`] opens it.
+    const OPENED: &str = "fn a() {}\n";
+    /// The text of `a.rs` after the edit [`edited_with_only_a_up`] makes.
+    const EDITED: &str = "// x\nfn a() {}\n";
 
     #[test]
     fn show_message_is_attributed_to_its_server() {
@@ -515,6 +567,120 @@ mod tests {
             stoat.pending_message, None,
             "a successful install shows no message"
         );
+    }
+
+    /// A server that comes up beside one already holding a buffer opens that
+    /// buffer on itself alone, at the text and version the first one holds. A
+    /// second didOpen to the first server, with no didClose between, restarts
+    /// its document version.
+    #[test]
+    fn a_second_server_opens_a_held_buffer_on_itself_alone() {
+        use std::time::Duration;
+        let mut h = Stoat::test();
+        let (a, b) = edited_with_only_a_up(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        install_b(&mut h, &b);
+
+        assert_eq!(
+            (opens(&a), opens(&b)),
+            (vec![(OPENED.to_string(), 0)], vec![(EDITED.to_string(), 1)]),
+        );
+    }
+
+    /// An edit still in its debounce at the install was armed for `a` alone.
+    /// The install replaces it with one change for both servers, measured from
+    /// the text `b` opened with.
+    #[test]
+    fn a_second_server_gets_the_change_pending_at_its_install() {
+        use std::time::Duration;
+        let mut h = Stoat::test();
+        let (a, b) = edited_with_only_a_up(&mut h);
+
+        install_b(&mut h, &b);
+        h.advance_clock(Duration::from_millis(60));
+
+        assert_eq!(
+            (opens(&b), changes(&a), changes(&b)),
+            (
+                vec![(OPENED.to_string(), 1)],
+                vec![(2, EDITED.to_string())],
+                vec![(2, EDITED.to_string())],
+            ),
+        );
+    }
+
+    /// Two full-sync rust servers `a` and `b`, with only `a` up and `a.rs` open
+    /// and edited. The edit's change waits in its debounce.
+    fn edited_with_only_a_up(h: &mut TestHarness) -> (Arc<FakeLsp>, Arc<FakeLsp>) {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind};
+        use stoat_action::OpenFile;
+
+        let full_sync = || {
+            let fake = Arc::new(FakeLsp::new());
+            fake.set_capabilities(ServerCapabilities {
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::FULL,
+                )),
+                ..Default::default()
+            });
+            fake
+        };
+        let (a, b) = (full_sync(), full_sync());
+        h.stoat
+            .settings
+            .lsp_server_lists
+            .insert("rust".into(), vec!["a".into(), "b".into()]);
+        h.stoat.lsp_registry.insert("a".into(), a.clone());
+        h.stoat
+            .lsp_registry
+            .set_selectors("rust".into(), vec![ServerSelector::all("a".into())]);
+
+        let path = PathBuf::from("/ws/a.rs");
+        h.fake_fs().insert_file(&path, OPENED.as_bytes());
+        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.edit_focused(0..0, "// x\n");
+        crate::lsp::sync::notify_buffer_changes_pending(&mut h.stoat);
+        (a, b)
+    }
+
+    /// Install `b` as a ready rust server, and let what it sends go out.
+    fn install_b(h: &mut TestHarness, b: &Arc<FakeLsp>) {
+        h.stoat
+            .pending_lsp_host
+            .lock()
+            .expect("pending lsp host mutex")
+            .push(PendingSpawn {
+                server: "b".to_string(),
+                scope: SpawnScope::Language("rust".to_string()),
+                result: Ok(b.clone()),
+            });
+        install_pending_lsp_host(&mut h.stoat);
+        h.settle();
+    }
+
+    /// The text and version of every didOpen `fake` saw.
+    fn opens(fake: &FakeLsp) -> Vec<(String, i32)> {
+        fake.observed_opens()
+            .into_iter()
+            .map(|open| (open.text_document.text, open.text_document.version))
+            .collect()
+    }
+
+    /// The version and full text of every didChange `fake` saw.
+    fn changes(fake: &FakeLsp) -> Vec<(i32, String)> {
+        fake.observed_changes()
+            .into_iter()
+            .flat_map(|change| {
+                let version = change.text_document.version;
+                change
+                    .content_changes
+                    .into_iter()
+                    .map(move |event| (version, event.text))
+            })
+            .collect()
     }
 
     #[test]

@@ -22,7 +22,7 @@ use crate::{
 };
 use lsp_types::{
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, ServerInfo, TextDocumentIdentifier,
-    TextDocumentItem,
+    TextDocumentItem, Uri,
 };
 use std::{path::Path, sync::Arc};
 use stoat_text::Rope;
@@ -99,24 +99,78 @@ pub(crate) fn notify_buffer_opened(
         .expect("lsp version mutex")
         .insert(buffer_id, buffer_version);
     for lsp in hosts::hosts_for_buffer(stoat, buffer_id) {
-        let (uri, language_id, text) = (uri.clone(), language_id.clone(), text.clone());
-        stoat
-            .executor
-            .spawn(async move {
-                let params = DidOpenTextDocumentParams {
-                    text_document: TextDocumentItem {
-                        uri,
-                        language_id,
-                        version: 0,
-                        text: text.to_string(),
-                    },
-                };
-                if let Err(err) = lsp.did_open(params).await {
-                    tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
-                }
-            })
-            .detach();
+        send_did_open(
+            stoat,
+            lsp,
+            uri.clone(),
+            language_id.clone(),
+            0,
+            text.clone(),
+        );
     }
+}
+
+/// Open `buffer_id` on `host` alone, at the text and version the buffer's other
+/// servers already hold.
+///
+/// For a server that comes up beside one that already holds the buffer. Answers
+/// `false` when nothing was delivered for the buffer, so there is no text and
+/// version to match. The caller then opens the buffer on every host instead.
+pub(crate) fn open_on_host(
+    stoat: &Stoat,
+    host: Arc<dyn LspHost>,
+    buffer_id: BufferId,
+    path: &Path,
+) -> bool {
+    let Some(uri) = action_handlers::lsp::path_to_uri(path) else {
+        return false;
+    };
+    let Some(&version) = stoat.lsp_doc_versions.get(&buffer_id) else {
+        return false;
+    };
+    let Some(text) = stoat
+        .lsp_last_delivered_text
+        .lock()
+        .expect("lsp text mutex")
+        .get(&buffer_id)
+        .cloned()
+    else {
+        return false;
+    };
+    let language_id = lsp_language_name(&stoat.workspaces[stoat.lsp_workspace].buffers, buffer_id)
+        .unwrap_or_else(|| "plaintext".to_string());
+    send_did_open(stoat, host, uri, language_id, version, text);
+    true
+}
+
+/// Send `host` a didOpen of `text` at `version`, detached on the executor.
+///
+/// The payload string is built inside the task, so a server coming up over many
+/// open buffers does not materialize them all on the run loop.
+fn send_did_open(
+    stoat: &Stoat,
+    host: Arc<dyn LspHost>,
+    uri: Uri,
+    language_id: String,
+    version: i32,
+    text: Rope,
+) {
+    stoat
+        .executor
+        .spawn(async move {
+            let params = DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri,
+                    language_id,
+                    version,
+                    text: text.to_string(),
+                },
+            };
+            if let Err(err) = host.did_open(params).await {
+                tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
+            }
+        })
+        .detach();
 }
 
 /// Close every document the language servers hold for
