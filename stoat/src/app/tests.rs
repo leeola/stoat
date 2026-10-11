@@ -4469,6 +4469,34 @@ fn an_idle_frame_tick_repaints_nothing() {
     );
 }
 
+#[test]
+fn a_glide_tick_repaints_only_outside_stoatty() {
+    assert_eq!(
+        (wheel_glide_tick(false), wheel_glide_tick(true)),
+        ((UpdateEffect::Redraw, true), (UpdateEffect::None, true)),
+        "a plain terminal repaints mid-glide, and stoatty takes the glide on its pool"
+    );
+}
+
+/// Arm a wheel glide in a 200-line file with the given `stoatty` flag and run
+/// one frame tick. Returns the tick's effect and whether the glide still eases.
+fn wheel_glide_tick(stoatty: bool) -> (UpdateEffect, bool) {
+    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+    let path = h.write_file("long.rs", &body);
+    h.open_file(&path);
+    h.stoat.stoatty = stoatty;
+
+    let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+    editor.viewport_rows = Some(10);
+    for _ in 0..4 {
+        action_handlers::view::wheel_scroll(editor, true);
+    }
+    assert!(h.stoat.is_animating(), "the wheel armed a glide");
+
+    (h.stoat.frame_tick(0.016), h.stoat.is_animating())
+}
+
 fn stoat_with_focused_term(
     make_view: fn(TermId) -> View,
 ) -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {

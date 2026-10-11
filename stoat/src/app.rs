@@ -4005,8 +4005,12 @@ impl Stoat {
         let animating = self.is_animating();
         let building = self.minimap_build_pending;
         let effect = if self.tick_scroll_anim(dt) {
-            apc_emit::emit_smooth_scroll(self);
-            UpdateEffect::None
+            if self.stoatty {
+                apc_emit::emit_smooth_scroll(self);
+                UpdateEffect::None
+            } else {
+                UpdateEffect::Redraw
+            }
         } else if animating {
             // The glide just landed. Viewport-keyed LSP work is held back while
             // one is in flight, and a frame tick never reaches the trigger
