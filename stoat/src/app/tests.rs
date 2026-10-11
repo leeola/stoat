@@ -6655,6 +6655,15 @@ fn encode_paste_to_pty_normalizes_newlines_when_unbracketed() {
 }
 
 #[test]
+fn encode_paste_to_pty_strips_a_nested_end_guard() {
+    assert_eq!(
+        encode_paste_to_pty("a\x1b[20\x1b[201~1~b", true),
+        b"\x1b[200~ab\x1b[201~".to_vec(),
+        "the guard that the first strip joins together goes too"
+    );
+}
+
+#[test]
 fn enter_after_open_brace_auto_indents() {
     let mut h = Stoat::test();
     open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");

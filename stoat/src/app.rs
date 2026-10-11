@@ -8687,13 +8687,21 @@ fn is_printable_key(key: &KeyEvent) -> bool {
 ///
 /// `bracketed` is the child's own DECSET 2004 state, read from
 /// [`TermScreen::bracketed_paste`]. Under it the payload is wrapped in the
-/// guard markers, with any embedded end guard stripped so pasted bytes cannot
-/// close the bracket early and have the rest run as typed input. Without it
-/// newlines become carriage returns, which is what the Enter key sends, so a
-/// pasted multi-line command submits each line the way typing it would.
+/// guard markers, with every embedded end guard stripped so pasted bytes never
+/// close the bracket early and have the rest run as typed input. The strip
+/// repeats until no end guard remains, because the bytes on the two sides of a
+/// removed guard sometimes join into another.
+///
+/// Without bracketed paste, newlines become carriage returns, which is what
+/// the Enter key sends, so a pasted multi-line command submits each line as
+/// typing it does.
 fn encode_paste_to_pty(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
-        let guarded = text.replace("\x1b[201~", "");
+        // Each pass makes the text shorter, so the loop ends.
+        let mut guarded = text.replace("\x1b[201~", "");
+        while guarded.contains("\x1b[201~") {
+            guarded = guarded.replace("\x1b[201~", "");
+        }
         format!("\x1b[200~{guarded}\x1b[201~").into_bytes()
     } else {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
