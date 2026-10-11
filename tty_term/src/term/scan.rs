@@ -69,12 +69,18 @@ pub(super) enum EscEvent<'a> {
         interior: Range<usize>,
         end: usize,
     },
-    /// An OSC past its cap, as the bytes to leave out of what a parser sees.
+    /// An OSC past its cap, or the part of an open image escape in this call,
+    /// as the bytes to leave out of what a parser sees.
     ///
-    /// Carries no payload. The scanner never buffered these bytes, and the event
-    /// exists only so a caller cuts them from the stream it passes on. The vte
-    /// parser's OSC buffer is an unbounded `Vec` that keeps its capacity for the
-    /// session, so an escape nobody acts on would cost the session its size.
+    /// Carries no payload, and exists only so a caller cuts these bytes from
+    /// the stream it passes on. The vte parser's OSC buffer is an unbounded
+    /// `Vec` that keeps its capacity for the session, so an escape nobody acts
+    /// on costs the session its size.
+    ///
+    /// An image escape that spans several calls reports its part of each call
+    /// here, until the call that ends it. The scanner keeps those bytes, and
+    /// [`EscEvent::OscImage`] reports the whole payload at the terminator, with
+    /// an interior that covers only the part of that last call.
     ///
     /// `end` is one past whichever byte ended the escape, and the interior's own
     /// end when none has yet. An escape spanning several calls is reported once
@@ -468,6 +474,18 @@ impl EscScanner {
                     reset: announce,
                 });
             }
+        }
+
+        // An open image reports at its terminator, in a later call. The parser
+        // must not see the part this call holds either, so it is cut now.
+        if matches!(self.state, EscState::OscImage | EscState::OscImageEscape)
+            && osc.end > osc.start
+        {
+            emit(EscEvent::OscOverrun {
+                interior: osc.clone(),
+                end: osc.end,
+                reset: false,
+            });
         }
     }
 
@@ -1569,6 +1587,34 @@ mod tests {
                 "split at {split} loses the payload",
             );
         }
+    }
+
+    /// The parser buffers whatever part of an image it sees, so each read's
+    /// part is cut from it, not only the part of the read that ends it.
+    #[test]
+    fn an_image_split_across_reads_is_cut_from_every_read() {
+        let cuts = |reads: [&[u8]; 2]| {
+            let mut scanner = EscScanner::default();
+            let mut interiors = Vec::new();
+            for read in reads {
+                scanner.scan(read, &mut |event| match event {
+                    EscEvent::OscOverrun { interior, .. } | EscEvent::OscImage { interior, .. } => {
+                        interiors.push(interior);
+                    },
+                    _ => {},
+                });
+            }
+            interiors
+        };
+
+        assert_eq!(
+            [
+                cuts([b"\x1b]1337;File=inline=1:QU", b"JD\x1b\\"]),
+                cuts([b"\x1b]1337;File=inline=1:QU\x1b", b"\\"]),
+            ],
+            [vec![7..23, 0..2], vec![7..23, 0..0]],
+            "each read cuts its own part, a read that ends on the ESC too",
+        );
     }
 
     /// Every other 1337 escape belongs to a feature this terminal does not
