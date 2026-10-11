@@ -291,8 +291,9 @@ pub struct PaneTree {
     widened: Option<PaneId>,
     /// Each split pane's area before a widen overlays the layout.
     ///
-    /// A widen zeroes the panes it covers, but the dividers, their hit test,
-    /// and a divider drag keep the natural geometry, so they read it here.
+    /// A widen zeroes the panes it covers, but the dividers, their hit test, a
+    /// divider drag, and a pane resize keep the natural geometry, so they read
+    /// it here.
     #[serde(skip)]
     natural: HashMap<PaneId, Rect>,
 }
@@ -823,13 +824,6 @@ impl PaneTree {
         }
     }
 
-    fn node_area(&self, node: NodeId) -> Rect {
-        match &self.nodes[node].content {
-            NodeContent::Leaf(pid) => self.panes[*pid].area,
-            NodeContent::Split(split) => split.area,
-        }
-    }
-
     /// The area `node` holds before a widen overlays the layout.
     fn natural_area(&self, node: NodeId) -> Rect {
         match &self.nodes[node].content {
@@ -981,6 +975,9 @@ impl PaneTree {
     /// A no-op for a pane with no split above it, which covers both a lone pane
     /// and a windowed one. The resulting weights persist across restart.
     ///
+    /// Under a widen, the resize reads the natural layout, so it moves the
+    /// split the same way it does without the widen.
+    ///
     /// See also:
     /// - [`Self::set_divider`] for the pointer-driven resize of one boundary.
     pub(crate) fn resize_focused_pane(&mut self, delta: i32) {
@@ -1009,7 +1006,7 @@ impl PaneTree {
         let mut extents: Vec<u16> = children
             .iter()
             .map(|&child| {
-                let area = self.node_area(child);
+                let area = self.natural_area(child);
                 match axis {
                     Axis::Vertical => area.width,
                     Axis::Horizontal => area.height,
@@ -2289,6 +2286,27 @@ mod tests {
             tree.pane(tr).area.height,
             10,
             "the top-right pane ends where the drag let go"
+        );
+    }
+
+    #[test]
+    fn a_resize_under_a_widen_moves_the_natural_split() {
+        let resized = |widen: bool| {
+            let mut tree = PaneTree::new(area());
+            let left = tree.focus();
+            let right = tree.split(Axis::Vertical);
+            if widen {
+                assert!(tree.widen(right));
+            }
+            tree.resize_focused_pane(1);
+            tree.unwiden();
+            (tree.pane(left).area, tree.pane(right).area)
+        };
+
+        assert_eq!(
+            resized(true),
+            resized(false),
+            "the widen leaves the resize of the layout under it unchanged"
         );
     }
 }
