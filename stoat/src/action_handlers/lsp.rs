@@ -1509,6 +1509,10 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
                 "rename workspace edit failed to apply",
             );
         }
+        // The pump runs outside the input loop that arms the change debounce.
+        // Without this call, the servers hear of the edited buffers only at the
+        // next key.
+        crate::lsp::sync::notify_buffer_changes_pending(stoat);
     }
     true
 }

@@ -2123,6 +2123,49 @@ fn rename_submit_applies_workspace_edit() {
     assert_eq!(buffer_text(&h, &path), "fn bar() {}\n");
 }
 
+/// The rename lands in a background pump, outside the input loop that arms
+/// the change debounce. No key follows here, so the renamed text reaches the
+/// server only when the pump sends it.
+#[test]
+fn a_rename_sends_its_edit_with_no_key_after_it() {
+    use lsp_types::{
+        OneOf, Position as LspPosition, PrepareRenameResponse, Range as LspRange,
+        ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    };
+    let mut h = TestHarness::with_size(80, 24);
+    h.fake_lsp().set_capabilities(ServerCapabilities {
+        rename_provider: Some(OneOf::Left(true)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        ..Default::default()
+    });
+    let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    h.fake_lsp().set_prepare_rename(
+        path.to_str().unwrap(),
+        0,
+        0,
+        PrepareRenameResponse::Range(LspRange::new(
+            LspPosition::new(0, 3),
+            LspPosition::new(0, 6),
+        )),
+    );
+    h.fake_lsp().set_rename(
+        path.to_str().unwrap(),
+        0,
+        0,
+        rename_workspace_edit(path.to_str().unwrap(), 0, 3, 3, "bar"),
+    );
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+    h.settle();
+    crate::action_handlers::lsp::rename_input_submit(&mut h.stoat);
+    h.settle();
+
+    h.advance_clock(Duration::from_millis(60));
+
+    assert_eq!(sent_changes(&h), ["fn bar() {}\n"]);
+}
+
 /// Move the focused buffer on without going through a keypress, which would
 /// also pump the reply and close the window the guard exists for.
 fn edit_focused_buffer_directly(h: &mut TestHarness, text: &str) {

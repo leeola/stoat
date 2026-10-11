@@ -29,7 +29,9 @@
 //! edit fires. A `Rename` op also updates the registry's path mapping so
 //! the buffer remains addressable by its new path.
 
-use crate::{app::Stoat, buffer::BufferId, lsp::util::lsp_range_to_byte_range};
+use crate::{
+    action_handlers::OpenContent, app::Stoat, buffer::BufferId, lsp::util::lsp_range_to_byte_range,
+};
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, ResourceOp, TextEdit, Uri, WorkspaceEdit,
 };
@@ -38,6 +40,7 @@ use std::{
     cmp::Reverse,
     path::{Path, PathBuf},
 };
+use stoat_text::LineEnding;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -328,20 +331,58 @@ fn document_version_current(stoat: &Stoat, id: BufferId, version: Option<i32>) -
     version == current
 }
 
+/// The buffer for `path`, opened from disk when no buffer holds it yet.
+///
+/// A file opened here gets the same setup as an ordinary open. The buffer holds
+/// LF text and records the file's line ending, mtime, and language, and its
+/// servers get a didOpen. Without the didOpen, the server keeps the disk text
+/// and never hears of the edit about to land in the buffer.
+///
+/// A file that is not UTF-8 text fails rather than decode lossily. A lossy
+/// decode puts replacement characters in the buffer, and a later save writes
+/// them over the file's bytes.
 fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEditError> {
     if let Some(id) = stoat.active_workspace().buffers.id_for_path(path) {
         return Ok(id);
     }
-    let mut bytes = Vec::new();
-    stoat
-        .fs_host
-        .read(path, &mut bytes)
+    let content =
+        crate::action_handlers::read_open_content(&*stoat.fs_host, path).with_context(|_| {
+            PathReadFailedSnafu {
+                path: path.to_path_buf(),
+            }
+        })?;
+    let OpenContent::Text(text) = content else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not a text file",
+        ))
         .with_context(|_| PathReadFailedSnafu {
             path: path.to_path_buf(),
-        })?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let workspace = stoat.active_workspace_mut();
-    let (id, _buffer) = workspace.buffers.open(path, &text);
+        });
+    };
+    let disk_mtime = stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .map(|meta| meta.modified);
+    let language = stoat.language_registry.for_path(path);
+
+    let workspace = stoat.active_workspace;
+    let (id, rope) = {
+        let buffers = &mut stoat.workspaces[workspace].buffers;
+        let (id, buffer) = buffers.open(path, &LineEnding::normalize(&text));
+        buffers.set_line_ending(id, LineEnding::detect(&text));
+        if let Some(mtime) = disk_mtime {
+            buffers.set_disk_mtime(id, mtime);
+        }
+        if let Some(language) = language {
+            buffers.set_language(id, language);
+        }
+        let rope = buffer.read().expect("buffer lock").rope().clone();
+        (id, rope)
+    };
+    crate::lsp::session::notify_buffer_opened(stoat, workspace, id, path, rope);
     Ok(id)
 }
 
@@ -869,6 +910,53 @@ mod tests {
             .id_for_path(&path)
             .is_some());
         assert_eq!(buffer_text(&h, &path), "hello!\n");
+    }
+
+    /// An edit into a closed CRLF file opens it the way an ordinary open does.
+    /// The buffer holds LF text and remembers CRLF for the save, and the server
+    /// hears a didOpen of the text the edit then lands in.
+    #[test]
+    fn an_edit_opens_a_closed_file_like_an_ordinary_open() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/closed.rs");
+        h.fake_fs().insert_file(&path, b"hello\r\nworld\r\n");
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(file_uri(&path), vec![text_edit(0, 5, 5, "!")]);
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
+        h.settle();
+
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .expect("buffer open");
+        let opens: Vec<(Uri, String)> = h
+            .fake_lsp()
+            .observed_opens()
+            .into_iter()
+            .map(|open| (open.text_document.uri, open.text_document.text))
+            .collect();
+        assert_eq!(
+            (
+                opens,
+                h.stoat.lsp_opened.contains(&id),
+                buffer_text(&h, &path),
+                h.stoat.active_workspace().buffers.line_ending(id),
+            ),
+            (
+                vec![(file_uri(&path), "hello\nworld\n".to_string())],
+                true,
+                "hello!\nworld\n".to_string(),
+                LineEnding::Crlf,
+            ),
+        );
     }
 
     #[test]
