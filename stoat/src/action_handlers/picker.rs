@@ -184,9 +184,11 @@ pub(super) fn jumplist_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// walk cursor at the chosen entry so a later backward/forward resumes from it.
 /// An empty picker just closes.
 pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(picker) = stoat.jumplist_picker.take() else {
+    let Some(mut picker) = stoat.jumplist_picker.take() else {
         return UpdateEffect::None;
     };
+    let query = picker.picker.input.text(stoat.active_workspace());
+    picker.picker.settle_rank(&query);
     let idx = picker.selected_index();
     picker.dispose(stoat.active_workspace_mut());
     let Some(idx) = idx else {

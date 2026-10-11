@@ -10421,6 +10421,55 @@ fn cursor_keys_move_inside_the_palette_input() {
     );
 }
 
+/// Keys typed in one burst reach Enter with no frame between them, so the
+/// submit refilters the command list itself.
+#[test]
+fn enter_in_a_burst_runs_the_command_the_query_selects() {
+    let mut h = Stoat::test();
+    open_scratch_file(&mut h, "abc\n");
+    let shown = h.stoat.minimap_enabled();
+    h.type_keys(":");
+
+    burst(&mut h, "minima", KeyCode::Enter);
+
+    assert_eq!(h.stoat.minimap_override, Some(!shown));
+}
+
+/// Tab in a burst completes the command the query selects, not the top row of
+/// the list before the query.
+#[test]
+fn tab_in_a_burst_completes_the_command_the_query_selects() {
+    let mut h = Stoat::test();
+    open_scratch_file(&mut h, "abc\n");
+    h.type_keys(":");
+
+    burst(&mut h, "minima", KeyCode::Tab);
+
+    assert_eq!(
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette")
+            .focused_input()
+            .expect("input")
+            .text(h.stoat.active_workspace()),
+        "minimap"
+    );
+}
+
+/// Send `text` and then `last` with no frame between the keys, the way a macro
+/// replay or a burst of input delivers them.
+fn burst(h: &mut crate::test_harness::TestHarness, text: &str, last: KeyCode) {
+    for ch in text.chars() {
+        h.stoat.update(Event::Key(KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        )));
+    }
+    h.stoat
+        .update(Event::Key(KeyEvent::new(last, KeyModifiers::NONE)));
+}
+
 /// Measured against the actions themselves rather than against a row this
 /// pin works out for itself, since the scroll arithmetic and the scrolloff
 /// band are the motion's business and not this binding's. Both legs page
@@ -13351,6 +13400,24 @@ fn typing_narrows_the_jumps() {
         (all, narrowed),
         (jumps, 1),
         "the query keeps only the jump it names"
+    );
+}
+
+/// Keys typed in one burst reach Enter with no frame between them, so the jump
+/// ranks the query itself.
+#[test]
+fn enter_in_a_burst_jumps_to_the_entry_the_query_selects() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    open_jumplist_picker(&mut h, 12);
+
+    burst(&mut h, "jump-7", KeyCode::Enter);
+
+    assert_eq!(
+        (
+            h.stoat.jumplist_picker.is_none(),
+            focused_cursor_row(&mut h.stoat)
+        ),
+        (true, 6),
     );
 }
 

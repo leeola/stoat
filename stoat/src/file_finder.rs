@@ -631,31 +631,8 @@ impl FileFinder {
             // The uncapped scopes are the whole repo walk, so their scan goes to
             // a worker and the caller spawns what this hands back.
             FinderScope::All | FinderScope::AllWorkspaces => self.core.begin_scan(text),
-            // The tag is what keeps two lists sharing the finder's generation
-            // from reading as each other. A scope flip invalidates, which alone
-            // would do it, but this does not depend on that.
-            FinderScope::Modified => {
-                let id = base_id(
-                    MODIFIED_BASE,
-                    self.base_generation,
-                    self.modified_paths.len(),
-                );
-                self.core.refilter_with_base(text, &self.modified_paths, id);
-                None
-            },
-            FinderScope::Buffers => {
-                let id = base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len());
-                self.core.refilter_with_base(text, &self.buffer_paths, id);
-                None
-            },
-            FinderScope::ModifiedBuffers => {
-                let id = base_id(
-                    DIRTY_BUFFERS_BASE,
-                    self.base_generation,
-                    self.dirty_buffer_paths.len(),
-                );
-                self.core
-                    .refilter_with_base(text, &self.dirty_buffer_paths, id);
+            FinderScope::Modified | FinderScope::Buffers | FinderScope::ModifiedBuffers => {
+                self.refilter_listed(text);
                 None
             },
             // A glob over the whole walk can keep most of it, so this scans
@@ -676,6 +653,38 @@ impl FileFinder {
         }
     }
 
+    /// Refilter [`Self::core`] on this thread against the modified files, the
+    /// open buffers, or the modified buffers, whichever list the scope shows.
+    fn refilter_listed(&mut self, query: &str) {
+        // The tag stops two lists that share the finder's generation from
+        // reading as each other. A scope flip invalidates too, but the tag does
+        // not depend on that.
+        let (base, id) = match &self.scope {
+            FinderScope::Modified => (
+                &self.modified_paths,
+                base_id(
+                    MODIFIED_BASE,
+                    self.base_generation,
+                    self.modified_paths.len(),
+                ),
+            ),
+            FinderScope::Buffers => (
+                &self.buffer_paths,
+                base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len()),
+            ),
+            FinderScope::ModifiedBuffers => (
+                &self.dirty_buffer_paths,
+                base_id(
+                    DIRTY_BUFFERS_BASE,
+                    self.base_generation,
+                    self.dirty_buffer_paths.len(),
+                ),
+            ),
+            FinderScope::All | FinderScope::AllWorkspaces | FinderScope::Named(_) => return,
+        };
+        self.core.refilter_with_base(query, base, id);
+    }
+
     /// Bring the fallback of the list on display up to date with `query`, and
     /// hand back its scan.
     ///
@@ -692,8 +701,10 @@ impl FileFinder {
 
     /// Bring the rows up to date with `query` on this thread.
     ///
-    /// Only the scopes that scan elsewhere can be behind. The rest filter
-    /// within their refilter call and are current already.
+    /// Each scope falls behind the query in its own way. A scope that scans
+    /// elsewhere answers the query that started its scan. A list held in
+    /// memory refilters only when a frame runs, and keys typed in one burst
+    /// reach an action with no frame between them.
     ///
     /// A named scope catches up against the cache it filters rather than the
     /// walk, which holds a different set and would answer a different question.
@@ -727,7 +738,10 @@ impl FileFinder {
                     self.core.settle_scan_with_base(query, &cache.filtered, id);
                 }
             },
-            FinderScope::Modified | FinderScope::Buffers | FinderScope::ModifiedBuffers => {},
+            FinderScope::Modified | FinderScope::Buffers | FinderScope::ModifiedBuffers => {
+                self.pump_modified();
+                self.refilter_listed(query);
+            },
         }
     }
 
@@ -963,6 +977,8 @@ pub(crate) fn query_modified(git_host: &dyn GitHost, git_root: &Path) -> Vec<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_harness::keys;
+    use crossterm::event::{Event, KeyCode};
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -1385,6 +1401,32 @@ mod tests {
                 focused_terminal(&h)
             ),
             (true, 0, term_id),
+        );
+    }
+
+    /// Keys typed in one burst reach Enter with no frame between them, so the
+    /// submit brings the buffer list up to date with the query itself.
+    #[test]
+    fn enter_in_a_burst_opens_the_buffer_the_query_selects() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("c.rs", "")]);
+        for name in ["c.rs", "a.rs"] {
+            let path = root.join(name);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
+        }
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('c'))));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
+        assert_eq!(
+            (
+                h.stoat.file_finder.is_none(),
+                h.stoat.active_workspace().buffers.path_for(buffer_id),
+            ),
+            (true, Some(root.join("c.rs").as_path())),
         );
     }
 

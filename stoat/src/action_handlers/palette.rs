@@ -246,6 +246,21 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     spawn_arg_picker_scans(stoat, pending);
 }
 
+/// Bring the command list up to date with what is typed, before an action
+/// reads the selection rather than paints it.
+///
+/// The list refilters once a frame. A macro replay or a burst of keys reaches
+/// the action with no frame between the keys, so the selection still names a
+/// row for an older query.
+fn settle_command_list(stoat: &mut Stoat) {
+    let active_idx = stoat.active_workspace;
+    let ws = &stoat.workspaces[active_idx];
+    let Some(palette) = stoat.command_palette.as_mut() else {
+        return;
+    };
+    palette.refilter_from_input(ws);
+}
+
 /// Bring the arg picker's rows up to date with what is typed, before an action
 /// reads the selection rather than paints it.
 ///
@@ -414,6 +429,7 @@ fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
 /// fall through to other prompt consumers.
 pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     stoat.command_palette.as_ref()?;
+    settle_command_list(stoat);
     settle_arg_picker_scan(stoat);
     let outcome = {
         let active_idx = stoat.active_workspace;
@@ -544,6 +560,7 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
 /// render still reads the completed entry rather than its first child.
 pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
+    settle_command_list(stoat);
 
     // The argument arm below reads the selected row, and its cycle walks the
     // filtered ones, so the list has to answer what is typed rather than

@@ -256,10 +256,12 @@ impl Help {
         self.detail_scroll
     }
 
-    /// Refilter the help entries against the current input text. Called from
-    /// `handle_insert_key` after the global prompt-mode short-circuit mutates
-    /// the help input's buffer, so the list stays in sync without a dedicated
-    /// post-edit hook.
+    /// Refilter the help entries against the current input text.
+    ///
+    /// `handle_insert_key` calls this after each key that edits the help input,
+    /// so the list stays in sync without a dedicated post-edit hook. A paste
+    /// edits the input with no such call, so submit and complete call this too
+    /// before they read the selection.
     pub(crate) fn sync_filter(&mut self, ws: &Workspace) {
         self.refilter(ws);
     }
@@ -521,10 +523,11 @@ pub fn format_arg(arg: &ResolvedArg) -> Option<String> {
 mod tests {
     use super::*;
     use crate::{
+        app::UpdateEffect,
         keymap::CompiledKey,
         test_harness::{keys, TestHarness},
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn active_binding(label: &str, action_name: &str) -> (String, Vec<ResolvedAction>) {
         (
@@ -616,7 +619,6 @@ mod tests {
     /// Dispatch a key through the test harness's top-level key handler so
     /// typing flows through `dispatch_help_key` with workspace access.
     fn send_key(h: &mut TestHarness, key: KeyEvent) {
-        use crossterm::event::Event;
         h.stoat.update(Event::Key(key));
     }
 
@@ -881,6 +883,30 @@ mod tests {
         assert!(
             h.stoat.help.is_some(),
             "unbound param action should stay open"
+        );
+    }
+
+    /// A paste edits the input with no key in between, so Tab brings the list
+    /// up to date with the pasted query before it completes.
+    #[test]
+    fn tab_after_a_paste_completes_the_pasted_match() {
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        h.stoat.update(Event::Paste("MoveUp".to_owned()));
+        send_key(&mut h, keys::key(KeyCode::Tab));
+        assert_eq!(input_text(&mut h), "MoveUp");
+    }
+
+    /// Quit is the one sample entry that asks the app to exit, so the effect
+    /// tells which entry Enter dispatched.
+    #[test]
+    fn enter_after_a_paste_dispatches_the_pasted_match() {
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        h.stoat.update(Event::Paste("Quit".to_owned()));
+        assert_eq!(
+            h.stoat.update(Event::Key(keys::key(KeyCode::Enter))),
+            UpdateEffect::Quit
         );
     }
 

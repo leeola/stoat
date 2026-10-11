@@ -29,6 +29,7 @@ pub(super) fn help_complete(stoat: &mut Stoat) -> UpdateEffect {
     let Some(help) = stoat.help.as_mut() else {
         return UpdateEffect::None;
     };
+    help.sync_filter(&workspaces[active_idx]);
     if help.complete_selected(&mut workspaces[active_idx]) {
         UpdateEffect::Redraw
     } else {
@@ -83,9 +84,11 @@ fn apply_to_help(stoat: &mut Stoat, f: impl FnOnce(&mut Help)) -> UpdateEffect {
 pub(super) fn help_submit(stoat: &mut Stoat) -> UpdateEffect {
     use crate::help::HelpOutcome;
 
-    let Some(help) = stoat.help.as_ref() else {
+    let active_idx = stoat.active_workspace;
+    let Some(help) = stoat.help.as_mut() else {
         return UpdateEffect::None;
     };
+    help.sync_filter(&stoat.workspaces[active_idx]);
     let outcome = help.dispatch_selected_pub();
     match outcome {
         HelpOutcome::None => UpdateEffect::Redraw,
