@@ -304,6 +304,40 @@ mod tests {
         }
     }
 
+    /// The window spans display rows, so a line above it that soft-wraps
+    /// changes which buffer lines it shows. The labels land on the words the
+    /// window shows, not on the buffer lines whose numbers match its rows.
+    #[test]
+    fn g_w_labels_the_window_below_a_wrapped_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let text = format!("{}\nab cd\nef gh\nij kl\nmn op\n", "-".repeat(30));
+        let path = h.write_file("wrap.txt", &text);
+        h.open_file(&path);
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.viewport_rows = Some(2);
+            editor.display_map.set_wrap_width(Some(10));
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+            editor.scroll_row = 3;
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoWord);
+        let mut ranges: Vec<(usize, usize)> = h
+            .stoat
+            .pending_goto_word
+            .as_ref()
+            .expect("labels armed")
+            .values()
+            .copied()
+            .collect();
+        ranges.sort_unstable();
+        assert_eq!(
+            ranges,
+            [(31, 33), (34, 36), (37, 39), (40, 42)],
+            "the words of the two lines the window shows"
+        );
+    }
+
     #[test]
     fn g_w_arms_pending_labels_and_typing_jumps_cursor() {
         use std::path::PathBuf;

@@ -5834,8 +5834,23 @@ fn arm_word_labels(stoat: &mut Stoat, extend_from: Option<(usize, usize)>) -> Up
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    let first_row = scroll_row;
-    let last_row = scroll_row.saturating_add(viewport.saturating_sub(1));
+    // The window spans display rows and the word walk counts buffer rows,
+    // which part ways once a line above the window soft-wraps. The top row
+    // resolves forward and the bottom row backward, so a block or fold row at
+    // either edge lands on text inside the window.
+    let max_display_row = display_snapshot.max_point().row;
+    let buffer_row = |row: u32, bias: Bias| {
+        let point = DisplayPoint::new(row.min(max_display_row), 0);
+        display_snapshot
+            .display_to_buffer(display_snapshot.clip_point(point, bias))
+            .map(|point| point.row)
+    };
+    let first_row = buffer_row(scroll_row, Bias::Right).unwrap_or(0);
+    let last_row = buffer_row(
+        scroll_row.saturating_add(viewport.saturating_sub(1)),
+        Bias::Left,
+    )
+    .unwrap_or_else(|| rope.max_point().row);
 
     let max_targets = crate::goto_word::ALPHABET.len() * crate::goto_word::ALPHABET.len();
     let targets = crate::goto_word::find_word_starts(rope, first_row, last_row, max_targets);
