@@ -7693,6 +7693,31 @@ fn add_newline_above_inserts_before_the_first_line() {
     );
 }
 
+/// A line selection keeps the text it was on when a blank line goes in at
+/// either of its edges, so a delete that follows takes no blank line with it.
+#[test]
+fn a_line_selection_keeps_off_the_blank_lines_around_it() {
+    let mut h = TestHarness::with_size(40, 8);
+    let path = h.write_file("s.txt", "aa\nbb\ncc\n");
+    h.open_file(&path);
+    h.type_keys("j x");
+    assert_eq!(h.selection_spans(), vec![(3, 6, false)]);
+
+    dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
+    assert_eq!(
+        (focused_buffer_text(&mut h), h.selection_spans()),
+        ("aa\nbb\n\ncc\n".to_string(), vec![(3, 6, false)]),
+        "the blank line below stays out of the selection",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::AddNewlineAbove);
+    assert_eq!(
+        (focused_buffer_text(&mut h), h.selection_spans()),
+        ("aa\n\nbb\n\ncc\n".to_string(), vec![(4, 7, false)]),
+        "the blank line above stays out of it too",
+    );
+}
+
 /// A count asks for that many lines at once rather than one press apiece.
 #[test]
 fn count_prefix_add_newline_below_inserts_that_many() {

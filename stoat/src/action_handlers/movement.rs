@@ -5656,6 +5656,9 @@ pub(super) fn add_newline_above(stoat: &mut Stoat) -> UpdateEffect {
 /// so its span steps back a grapheme first. Two selections on one line ask for
 /// the same insert point, and their two requests become one insert of both
 /// runs, which lands the text each of them asked for.
+///
+/// Each selection keeps the text it was on, so a blank line at either of its
+/// edges stays outside it.
 fn add_newline(stoat: &mut Stoat, above: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -5667,13 +5670,21 @@ fn add_newline(stoat: &mut Stoat, above: bool) -> UpdateEffect {
     let rope = buffer_snapshot.rope();
     let max_row = rope.max_point().row;
 
-    let mut offsets: Vec<usize> = editor
+    let spans: Vec<(usize, usize, usize)> = editor
         .selections
         .all_anchors()
         .iter()
         .map(|sel| {
-            let start = buffer_snapshot.resolve_anchor(&sel.start);
-            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            (
+                sel.id,
+                buffer_snapshot.resolve_anchor(&sel.start),
+                buffer_snapshot.resolve_anchor(&sel.end),
+            )
+        })
+        .collect();
+    let mut offsets: Vec<usize> = spans
+        .iter()
+        .map(|&(_, start, end)| {
             let last = match end > start {
                 true => rope.prev_grapheme_boundary(end).max(start),
                 false => end,
@@ -5702,15 +5713,53 @@ fn add_newline(stoat: &mut Stoat, above: bool) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
-    let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
-        return UpdateEffect::None;
+    {
+        let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+            return UpdateEffect::None;
+        };
+        let mut guard = buffer.write().expect("buffer poisoned");
+        let edits: Vec<(Range<usize>, &str)> = batch
+            .iter()
+            .map(|(at, text)| (*at..*at, text.as_str()))
+            .collect();
+        guard.edit_batch(&edits);
+    }
+
+    // An insert at a selection's start lands before it, and an insert at its
+    // end lands after it, so the selection keeps exactly the text it was on. A
+    // selection with no width moves past an insert at its own offset.
+    let inserted_before = |bound: usize, at_bound: bool| -> usize {
+        batch
+            .iter()
+            .filter(|(at, _)| *at < bound || (at_bound && *at == bound))
+            .map(|(_, text)| text.len())
+            .sum()
     };
-    let mut guard = buffer.write().expect("buffer poisoned");
-    let edits: Vec<(Range<usize>, &str)> = batch
-        .iter()
-        .map(|(at, text)| (*at..*at, text.as_str()))
-        .collect();
-    guard.edit_batch(&edits);
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::Redraw;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let mut recorded = spans.iter();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let Some(&(_, start, end)) = recorded.next().filter(|span| span.0 == sel.id) else {
+            return sel.clone();
+        };
+        let (start, end) = match start < end {
+            true => (
+                start + inserted_before(start, true),
+                end + inserted_before(end, false),
+            ),
+            false => {
+                let at = start + inserted_before(start, true);
+                (at, at)
+            },
+        };
+        let mut landed = sel.clone();
+        landed.start = buffer_snapshot.anchor_at(start, Bias::Left);
+        landed.end = buffer_snapshot.anchor_at(end, Bias::Right);
+        landed
+    });
     UpdateEffect::Redraw
 }
 
