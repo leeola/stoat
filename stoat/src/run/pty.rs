@@ -90,6 +90,16 @@ impl ShellHandle {
         use futures::FutureExt;
         let _ = self.session.kill().now_or_never();
     }
+
+    /// Whether the shell process has exited.
+    ///
+    /// An exited shell reads no more input, so a command sent to it is lost.
+    /// The check never blocks. A session that gives no answer at once counts
+    /// as still running.
+    pub(crate) fn exited(&self) -> bool {
+        use futures::FutureExt;
+        matches!(self.session.try_wait().now_or_never(), Some(Ok(Some(_))))
+    }
 }
 
 /// Where a run's PTY reader sends the output it reads.

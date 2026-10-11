@@ -92,6 +92,7 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         workspace: active_idx,
         run_id: id,
     };
+    run_state.shell_handle.take_if(|handle| handle.exited());
     if let Some(handle) = &mut run_state.shell_handle {
         handle.send_command(&text);
     } else if let Ok(handle) =
@@ -241,6 +242,33 @@ mod tests {
             ),
             (true, false),
             "the run takes the pane, and the editor it replaced goes"
+        );
+    }
+
+    #[test]
+    fn a_command_after_the_shell_exits_starts_a_fresh_shell() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        h.fake_terminal().finish(0);
+
+        let input = h.stoat.active_workspace().runs[run_id].input.clone();
+        input.replace_text(h.stoat.active_workspace_mut(), "ls");
+        super::super::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
+
+        assert_eq!(
+            (
+                h.fake_terminal_host().spawns().len(),
+                h.fake_terminal().sent_strings()
+            ),
+            (
+                2,
+                vec![
+                    "stty -echo\n".to_owned(),
+                    "stty -echo\n".to_owned(),
+                    "ls\n".to_owned()
+                ]
+            ),
+            "the exited shell gives way to a fresh one, which gets the command"
         );
     }
 }
