@@ -35,13 +35,13 @@ pub(crate) struct AcceptedImports {
 /// when the popup is not showing, the focused pane is not an editor,
 /// or the popup's items list is empty.
 ///
-/// Snippet items (`is_snippet: true`) parse the insert text via
-/// [`crate::completion::snippet::parse`] and install multi-cursor
-/// selections at the first tabstop group; remaining groups stash on
+/// Every cursor gets a copy of the accepted text. Snippet items
+/// (`is_snippet: true`) parse the insert text via
+/// [`crate::completion::snippet::parse`], and install selections at the
+/// first tabstop group of every copy. The remaining groups stash on
 /// [`Stoat::active_snippet`] for [`crate::completion::snippet::advance`]
 /// to consume on later Tab presses. Plain items insert the text
-/// verbatim at every cursor, and each cursor lands at the end of its own
-/// insertion.
+/// verbatim, and each cursor lands at the end of its own insertion.
 pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     // A narrow off the loop has not landed yet on the keystroke that armed it,
     // and the rows it installs next are the ones the reader sees when Tab
@@ -92,34 +92,28 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         .map(|r| r.text.as_str())
         .unwrap_or(&item.insert_text);
 
-    // A snippet installs its own cursors at its tabstops, so it replaces only
-    // the range the request measured.
-    let landings = {
-        let mut guard = buffer.write().expect("poisoned");
-        match &snippet_rendered {
-            Some(_) => {
-                guard.edit(edit_range.clone(), inserted_text);
-                HashMap::new()
-            },
-            None => insert_at_every_cursor(
-                &mut guard,
-                editor.selections.all_anchors(),
-                editor.selections.newest_anchor().id,
-                edit_range.clone(),
-                inserted_text,
-            ),
-        }
-    };
+    let copies = insert_at_every_cursor(
+        &mut buffer.write().expect("poisoned"),
+        editor.selections.all_anchors(),
+        editor.selections.newest_anchor().id,
+        edit_range,
+        inserted_text,
+    );
 
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
 
     let active_snippet = if let Some(rendered) = &snippet_rendered {
-        let (selections, active) =
-            crate::completion::snippet::install(rendered, edit_range.start, new_buf);
+        let mut starts: Vec<usize> = copies.iter().map(|(start, _)| *start).collect();
+        starts.sort_unstable();
+        let (selections, active) = crate::completion::snippet::install(rendered, &starts, new_buf);
         editor.selections.replace_with(selections, new_buf);
         active
     } else {
+        let landings: HashMap<usize, usize> = copies
+            .iter()
+            .flat_map(|(start, ids)| ids.iter().map(move |&id| (id, start + inserted_text.len())))
+            .collect();
         editor.selections.transform(new_buf, |s| {
             crate::selection::forward_block_cursor(
                 s.id,
@@ -142,18 +136,18 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Replace each cursor's copy of the accepted text with `text` in one batch
-/// edit, and answer where each selection id lands.
+/// edit, and answer where each copy starts after the edit, with the ids of the
+/// selections that land in it.
 ///
 /// `edit_range` is the range of the `newest` selection, which the request
-/// measured from. Each cursor lands at the end of the insertion its range
-/// took.
+/// measured from.
 fn insert_at_every_cursor(
     buffer: &mut TextBuffer,
     selections: &[Selection<Anchor>],
     newest: usize,
     edit_range: Range<usize>,
     text: &str,
-) -> HashMap<usize, usize> {
+) -> Vec<(usize, Vec<usize>)> {
     let cursors: Vec<(usize, usize)> = selections
         .iter()
         .map(|sel| {
@@ -180,12 +174,9 @@ fn insert_at_every_cursor(
     buffer.edit_batch(&edits);
 
     groups
-        .iter()
+        .into_iter()
         .zip(&starts)
-        .flat_map(|((_, ids), start)| {
-            let landing = buffer.resolve_anchor(start) + text.len();
-            ids.iter().map(move |&id| (id, landing))
-        })
+        .map(|((_, ids), start)| (buffer.resolve_anchor(start), ids))
         .collect()
 }
 
@@ -959,6 +950,56 @@ mod tests {
             (buffer_text(&h, &path), cursor_offsets(&mut h)),
             ("foobar\nfoobar\n".to_string(), vec![6, 13]),
         );
+    }
+
+    /// A snippet expands at every cursor, each copy with its own tabstops, and
+    /// Tab puts a cursor at the exit of every copy.
+    #[test]
+    fn accept_expands_a_snippet_at_every_cursor() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "fo\nfo\n");
+        h.type_keys("i");
+        set_cursors(&mut h, &[2, 5]);
+        let items = vec![CompletionItem {
+            label: "foo".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 3..5),
+            insert_text: "foo($1)$0".into(),
+            is_snippet: true,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 3..5);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+        let expanded = (buffer_text(&h, &path), selection_spans(&mut h));
+        h.type_keys("tab");
+
+        assert_eq!(
+            (expanded, selection_spans(&mut h)),
+            (
+                ("foo()\nfoo()\n".to_string(), vec![(4, 4), (10, 10)]),
+                vec![(5, 5), (11, 11)],
+            ),
+        );
+    }
+
+    /// The start and end of every selection, in document order.
+    fn selection_spans(h: &mut TestHarness) -> Vec<(usize, usize)> {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let mut spans: Vec<(usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| (buf.resolve_anchor(&sel.start), buf.resolve_anchor(&sel.end)))
+            .collect();
+        spans.sort_unstable();
+        spans
     }
 
     /// Put a collapsed cursor at each of `offsets`, the last one newest.

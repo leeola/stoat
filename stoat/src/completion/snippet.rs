@@ -267,21 +267,26 @@ impl Snippet {
     }
 }
 
-/// In-flight snippet expansion: the editor is sitting on the
-/// rendered text, and Tab cycles through the remaining tabstop
-/// groups before landing the cursor at [`Self::exit`]. Anchors
-/// survive intermediate edits so that typing inside one tabstop
-/// keeps subsequent tabstops correctly positioned.
+/// A snippet expansion in progress, with the editor on the rendered text.
+///
+/// Tab cycles through the remaining tabstop groups, and then puts the cursors
+/// at [`Self::exit`]. Anchors survive the edits in between, so typing inside
+/// one tabstop keeps the later tabstops in place.
+///
+/// A snippet accepted with several cursors expands once at each. Every group
+/// then holds its ranges for every copy, so each tabstop puts a cursor in each
+/// copy.
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveSnippet {
     pub(crate) groups: std::collections::VecDeque<Vec<Range<Anchor>>>,
-    pub(crate) exit: Anchor,
+    /// Where each copy of the snippet ends the expansion, one anchor per copy.
+    pub(crate) exit: Vec<Anchor>,
 }
 
 /// Advance the active snippet to the next tabstop group, or exit
 /// when no groups remain. Sets the focused editor's selections to
-/// either the next group's anchors or a single collapsed selection
-/// at [`ActiveSnippet::exit`].
+/// either the next group's anchors or a collapsed selection at each
+/// of [`ActiveSnippet::exit`].
 ///
 /// Returns `true` when state changed (always true when called with
 /// an active snippet); `false` when there is nothing to advance.
@@ -307,112 +312,88 @@ pub(crate) fn advance(stoat: &mut Stoat) -> bool {
 
     match next_group {
         Some(group) if !group.is_empty() => {
-            let selections: Vec<Selection<Anchor>> = group
-                .into_iter()
-                .enumerate()
-                .map(|(i, range)| Selection {
-                    id: i,
-                    start: range.start,
-                    end: range.end,
-                    reversed: false,
-                    goal: SelectionGoal::None,
-                })
-                .collect();
-            editor.selections.replace_with(selections, buf_snapshot);
+            editor
+                .selections
+                .replace_with(selections_over(group), buf_snapshot);
             stoat.active_snippet = Some(active);
         },
         _ => {
-            let exit = active.exit;
-            editor.selections.replace_with(
-                vec![Selection {
-                    id: 0,
-                    start: exit,
-                    end: exit,
-                    reversed: false,
-                    goal: SelectionGoal::None,
-                }],
-                buf_snapshot,
-            );
+            let exits = active.exit.into_iter().map(|at| at..at);
+            editor
+                .selections
+                .replace_with(selections_over(exits), buf_snapshot);
         },
     }
     true
 }
 
-/// Build an [`ActiveSnippet`] from rendered tabstop groups. Each
-/// rendered range is offset by `inserted_at` (the buffer byte
-/// offset where the snippet text was inserted) and resolved to
-/// anchors via `buf_snapshot`. The first group is taken as the
-/// initial selection set; any remaining groups (plus the exit) are
-/// stashed for [`advance`].
-///
-/// Returns the initial selections to install (caller writes them
-/// onto the editor) plus the active-snippet state to stash. When
-/// the snippet has only the exit group, returns a single collapsed
-/// selection at the exit and `None` for the active state.
-pub(crate) fn install(
-    rendered: &Rendered,
-    inserted_at: usize,
-    buf_snapshot: &crate::multi_buffer::MultiBufferSnapshot,
-) -> (Vec<Selection<Anchor>>, Option<ActiveSnippet>) {
-    let mut anchored: Vec<Vec<Range<Anchor>>> = rendered
-        .groups
-        .iter()
-        .map(|g| {
-            g.ranges
-                .iter()
-                .map(|r| {
-                    let start = buf_snapshot.anchor_at(inserted_at + r.start, Bias::Right);
-                    let end = buf_snapshot.anchor_at(inserted_at + r.end, Bias::Right);
-                    start..end
-                })
-                .collect()
-        })
-        .collect();
-
-    let exit_anchor = anchored
-        .last()
-        .and_then(|g| g.first())
-        .map(|r| r.start)
-        .unwrap_or_else(|| buf_snapshot.anchor_at(inserted_at, Bias::Right));
-
-    let real_groups_count = anchored.len().saturating_sub(1);
-    let exit_group = anchored.pop();
-    let _ = exit_group;
-
-    if real_groups_count == 0 {
-        let sel = Selection {
-            id: 0,
-            start: exit_anchor,
-            end: exit_anchor,
-            reversed: false,
-            goal: SelectionGoal::None,
-        };
-        return (vec![sel], None);
-    }
-
-    let first = anchored.remove(0);
-    let initial: Vec<Selection<Anchor>> = first
+/// One selection over each of `ranges`, numbered in order.
+fn selections_over(ranges: impl IntoIterator<Item = Range<Anchor>>) -> Vec<Selection<Anchor>> {
+    ranges
         .into_iter()
         .enumerate()
-        .map(|(i, range)| Selection {
-            id: i,
+        .map(|(id, range)| Selection {
+            id,
             start: range.start,
             end: range.end,
             reversed: false,
             goal: SelectionGoal::None,
         })
+        .collect()
+}
+
+/// Build an [`ActiveSnippet`] from rendered tabstop groups, expanded once at
+/// each of `starts`, the buffer offsets where the copies of the snippet text
+/// start.
+///
+/// Each rendered range is offset by every start and resolved to anchors via
+/// `buf_snapshot`, so each group holds its ranges for every copy. The first
+/// group is taken as the initial selection set. Any remaining groups, plus the
+/// exits, are stashed for [`advance`].
+///
+/// Returns the initial selections to install (caller writes them onto the
+/// editor) plus the active-snippet state to stash. When the snippet has only
+/// the exit group, returns a collapsed selection at each exit and `None` for
+/// the active state.
+pub(crate) fn install(
+    rendered: &Rendered,
+    starts: &[usize],
+    buf_snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+) -> (Vec<Selection<Anchor>>, Option<ActiveSnippet>) {
+    let mut anchored: Vec<Vec<Range<Anchor>>> = rendered
+        .groups
+        .iter()
+        .map(|group| {
+            starts
+                .iter()
+                .flat_map(|&at| {
+                    group.ranges.iter().map(move |range| {
+                        let start = buf_snapshot.anchor_at(at + range.start, Bias::Right);
+                        let end = buf_snapshot.anchor_at(at + range.end, Bias::Right);
+                        start..end
+                    })
+                })
+                .collect()
+        })
         .collect();
 
-    let active = if anchored.is_empty() {
-        ActiveSnippet {
-            groups: std::collections::VecDeque::new(),
-            exit: exit_anchor,
-        }
-    } else {
-        ActiveSnippet {
-            groups: anchored.into(),
-            exit: exit_anchor,
-        }
+    // The render ends with the exit group, which holds one range per copy.
+    let exit: Vec<Anchor> = anchored
+        .pop()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|range| range.start)
+        .collect();
+
+    if anchored.is_empty() {
+        let exits = exit.into_iter().map(|at| at..at);
+        return (selections_over(exits), None);
+    }
+
+    let initial = selections_over(anchored.remove(0));
+    let active = ActiveSnippet {
+        groups: anchored.into(),
+        exit,
     };
 
     (initial, Some(active))
