@@ -2004,6 +2004,11 @@ fn copy_status(text: &str) -> String {
     format!("copied {lines} line{plural} to clipboard")
 }
 
+/// The buffer offset under the cell `col`, `row` of the editor pane at `area`,
+/// or `None` for a cell outside the painted text.
+///
+/// The pane's status row paints no text, so a press on it maps to nothing
+/// rather than to the line below the last visible one.
 pub(crate) fn editor_screen_to_offset(
     stoat: &mut Stoat,
     editor_id: EditorId,
@@ -2011,7 +2016,8 @@ pub(crate) fn editor_screen_to_offset(
     col: u16,
     row: u16,
 ) -> Option<usize> {
-    if col >= area.width || row >= area.height {
+    let content = crate::render::layout::split_pane_status(area).0;
+    if col >= content.width || row >= content.height {
         return None;
     }
     let ws = stoat.active_workspace_mut();
@@ -2713,6 +2719,44 @@ mod tests {
             editor_screen_to_offset(&mut h.stoat, editor_id, area, 110, 1),
             row_start,
             "a theirs-column click lands on the aligned center row start"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_status_row_leaves_the_cursor_in_place() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.seed_focused_buffer(&"line\n".repeat(60));
+        h.snapshot();
+        let status_y = {
+            let ws = h.stoat.active_workspace();
+            crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area)
+                .1
+                .y
+        };
+        let heads = h.head_offsets();
+
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            h.stoat
+                .update(mouse_event(MouseEventKind::Down(button), 3, status_y));
+        }
+        assert_eq!(
+            (h.head_offsets(), h.stoat.editor_drag),
+            (heads, None),
+            "no press on the status row reaches the line below the text"
+        );
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 2));
+        let pressed = h.head_offsets();
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            3,
+            status_y,
+        ));
+        assert_eq!(
+            h.head_offsets(),
+            pressed,
+            "a drag onto the status row extends nothing"
         );
     }
 
