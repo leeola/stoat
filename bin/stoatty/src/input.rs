@@ -306,12 +306,18 @@ fn csi_u_ctrl(s: &str, alt: bool) -> Option<Vec<u8>> {
 /// Encode clipboard `text` for the PTY on paste.
 ///
 /// In bracketed-paste mode the payload is wrapped in the DECSET 2004 guard
-/// markers, with any embedded end-guard stripped so pasted bytes cannot close
-/// the bracket early and inject input. Otherwise newlines are normalized to
-/// carriage returns, matching what the Enter key sends.
+/// markers, with any embedded end-guard stripped so pasted bytes never close
+/// the bracket early and inject input. The strip repeats until no end guard
+/// remains, because the bytes on the two sides of a removed guard sometimes
+/// join into another. Otherwise newlines are normalized to carriage returns,
+/// matching what the Enter key sends.
 pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
-        let guarded = text.replace("\x1b[201~", "");
+        // Each pass makes the text shorter, so the loop ends.
+        let mut guarded = text.to_owned();
+        while guarded.contains("\x1b[201~") {
+            guarded = guarded.replace("\x1b[201~", "");
+        }
         format!("\x1b[200~{guarded}\x1b[201~").into_bytes()
     } else {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
@@ -733,6 +739,15 @@ mod tests {
             paste_bytes("a\x1b[201~b", true),
             b"\x1b[200~ab\x1b[201~".to_vec(),
             "an embedded end-guard cannot break out of the bracket"
+        );
+    }
+
+    #[test]
+    fn paste_bytes_strips_a_nested_end_guard() {
+        assert_eq!(
+            paste_bytes("a\x1b[20\x1b[201~1~b", true),
+            b"\x1b[200~ab\x1b[201~".to_vec(),
+            "the guard that the first strip joins together goes too"
         );
     }
 
