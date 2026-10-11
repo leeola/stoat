@@ -30,8 +30,8 @@ const FONT_SIZE_CEIL: u32 = 256;
 /// shape. A modified key always takes a CSI form, because only CSI carries a
 /// parameter.
 enum XtermKey {
-    /// The arrows, Home, and End send `ESC [ X`, or `ESC [ 1 ; m X` when
-    /// modified.
+    /// The arrows, Home, and End send `ESC [ X`, or `ESC O X` in application
+    /// cursor mode, or `ESC [ 1 ; m X` when modified.
     Csi(u8),
 
     /// F1 to F4 send `ESC O X`, or `ESC [ 1 ; m X` when modified.
@@ -76,10 +76,14 @@ impl XtermKey {
 
     /// The bytes the key sends under the xterm modifier parameter `param`.
     ///
-    /// A `param` of 1 names no modifier and keeps the plain form.
-    fn bytes(self, param: u8) -> Vec<u8> {
+    /// A `param` of 1 names no modifier and keeps the plain form. With
+    /// `app_cursor` set, the plain form of a cursor key is SS3, as application
+    /// cursor mode (DECCKM) asks.
+    fn bytes(self, param: u8, app_cursor: bool) -> Vec<u8> {
         match self {
-            Self::Csi(final_byte) if param == 1 => vec![0x1b, b'[', final_byte],
+            Self::Csi(final_byte) if param == 1 => {
+                vec![0x1b, if app_cursor { b'O' } else { b'[' }, final_byte]
+            },
             Self::Ss3(final_byte) if param == 1 => vec![0x1b, b'O', final_byte],
             Self::Csi(final_byte) | Self::Ss3(final_byte) => {
                 format!("\x1b[1;{param}{}", char::from(final_byte)).into_bytes()
@@ -215,15 +219,20 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
 /// layout that needs Option.
 ///
 /// The named editing, navigation, and function keys send their xterm
-/// normal-mode sequences, which is what the child terminal parser decodes back
-/// into the matching key. A held Shift, Alt, or Ctrl goes in the xterm modifier
+/// sequences, which is what the child terminal parser decodes back into the
+/// matching key. A held Shift, Alt, or Ctrl goes in the xterm modifier
 /// parameter `1 + shift + 2 * alt + 4 * ctrl`. Ctrl-Left is then
 /// `ESC [ 1 ; 5 D`, and Alt-Delete is `ESC [ 3 ; 3 ~`. A modified F1 to F4
 /// takes that CSI form in place of its SS3 form, because SS3 carries no
-/// parameter. Super has no bit. The cursor keys have no application-mode form
-/// here.
-pub(crate) fn encode_key(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
-    encode_key_with(key, mods, cfg!(target_os = "macos"))
+/// parameter. Super has no bit.
+///
+/// `app_cursor` is whether the child turned on application cursor mode
+/// (DECCKM). In that mode an unmodified arrow, Home, or End sends `ESC O X` in
+/// place of `ESC [ X`. A program turns the mode on when it reads keys by their
+/// terminfo strings, and the `xterm-256color` entry lists these SS3 forms. A
+/// modified cursor key keeps its CSI form.
+pub(crate) fn encode_key(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
+    encode_key_with(key, mods, cfg!(target_os = "macos"), app_cursor)
 }
 
 /// [`encode_key`] with the macOS Option rule as a parameter, so a test run on
@@ -231,7 +240,12 @@ pub(crate) fn encode_key(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
 ///
 /// `option_composes` is whether Option turns a character key without Ctrl into
 /// the composed character, as it does on macOS.
-fn encode_key_with(key: &Key, mods: ModifiersState, option_composes: bool) -> Option<Vec<u8>> {
+fn encode_key_with(
+    key: &Key,
+    mods: ModifiersState,
+    option_composes: bool,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     let shift = mods.shift_key();
     let alt = mods.alt_key();
@@ -245,7 +259,7 @@ fn encode_key_with(key: &Key, mods: ModifiersState, option_composes: bool) -> Op
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
         Key::Named(named) => {
             let param = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
-            XtermKey::of(*named).map(|xterm_key| xterm_key.bytes(param))
+            XtermKey::of(*named).map(|xterm_key| xterm_key.bytes(param, app_cursor))
         },
         // winit composes Option into the logical key only while Ctrl is up.
         // So a character key with Ctrl keeps its Alt on macOS too.
@@ -770,8 +784,9 @@ mod tests {
 
     #[test]
     fn encode_key_maps_keys_to_terminal_bytes() {
-        let named = |key| encode_key(&Key::Named(key), ModifiersState::empty());
-        let printable = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::empty());
+        let named = |key| encode_key(&Key::Named(key), ModifiersState::empty(), false);
+        let printable =
+            |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::empty(), false);
 
         assert_eq!(
             printable("a"),
@@ -823,8 +838,8 @@ mod tests {
 
     #[test]
     fn encode_key_maps_ctrl_to_control_bytes() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL);
-        let space = |mods| encode_key(&Key::Named(NamedKey::Space), mods);
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL, false);
+        let space = |mods| encode_key(&Key::Named(NamedKey::Space), mods, false);
 
         assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
         assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
@@ -852,7 +867,7 @@ mod tests {
     /// is what makes such a combo bindable.
     #[test]
     fn encode_key_maps_ctrl_punctuation_to_csi_u() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL);
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL, false);
 
         assert_eq!(
             ctrl("?"),
@@ -874,12 +889,12 @@ mod tests {
     #[test]
     fn encode_key_shift_tab_sends_csi_z() {
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
+            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, false),
             Some(b"\x1b[Z".to_vec()),
             "Shift-Tab sends CSI Z so stoat decodes BackTab"
         );
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::empty()),
+            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::empty(), false),
             Some(vec![b'\t']),
             "plain Tab still sends a tab"
         );
@@ -908,7 +923,7 @@ mod tests {
         for option_composes in [false, true] {
             for (key, mods, bytes) in &under_both_rules {
                 assert_eq!(
-                    encode_key_with(key, *mods, option_composes),
+                    encode_key_with(key, *mods, option_composes, false),
                     Some(bytes.to_vec()),
                     "{key:?} with {mods:?}, option composes: {option_composes}"
                 );
@@ -916,12 +931,12 @@ mod tests {
         }
 
         assert_eq!(
-            encode_key_with(&character("d"), alt, false),
+            encode_key_with(&character("d"), alt, false, false),
             Some(b"\x1bd".to_vec()),
             "Alt-d where Option does not compose"
         );
         assert_eq!(
-            encode_key_with(&character("\u{2202}"), alt, true),
+            encode_key_with(&character("\u{2202}"), alt, true, false),
             Some("\u{2202}".as_bytes().to_vec()),
             "the character Option composed takes no prefix"
         );
@@ -946,11 +961,38 @@ mod tests {
         ];
         for (key, mods, bytes) in cases {
             assert_eq!(
-                encode_key(&Key::Named(key), mods),
+                encode_key(&Key::Named(key), mods, false),
                 Some(bytes.to_vec()),
                 "{key:?} with {mods:?}"
             );
         }
+    }
+
+    #[test]
+    fn encode_key_sends_ss3_cursor_keys_in_application_mode() {
+        let plain = ModifiersState::empty();
+
+        let cases: [(NamedKey, ModifiersState, &[u8]); 6] = [
+            (NamedKey::ArrowUp, plain, b"\x1bOA"),
+            (NamedKey::Home, plain, b"\x1bOH"),
+            (NamedKey::End, plain, b"\x1bOF"),
+            (NamedKey::ArrowLeft, ModifiersState::CONTROL, b"\x1b[1;5D"),
+            (NamedKey::PageUp, plain, b"\x1b[5~"),
+            (NamedKey::F1, plain, b"\x1bOP"),
+        ];
+        for (key, mods, bytes) in cases {
+            assert_eq!(
+                encode_key(&Key::Named(key), mods, true),
+                Some(bytes.to_vec()),
+                "{key:?} with {mods:?}"
+            );
+        }
+
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::ArrowUp), plain, false),
+            Some(b"\x1b[A".to_vec()),
+            "Up outside application cursor mode",
+        );
     }
 
     #[test]

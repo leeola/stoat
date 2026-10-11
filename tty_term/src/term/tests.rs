@@ -926,6 +926,18 @@ fn tracks_focus_reporting_mode() {
 }
 
 #[test]
+fn tracks_app_cursor_mode() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    assert!(!terminal.app_cursor(), "off by default");
+
+    terminal.advance(b"\x1b[?1h");
+    assert!(terminal.app_cursor(), "DECSET 1 enables it");
+
+    terminal.advance(b"\x1b[?1l");
+    assert!(!terminal.app_cursor(), "DECRST 1 disables it");
+}
+
+#[test]
 fn surfaces_osc9_notification() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
 

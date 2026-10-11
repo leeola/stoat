@@ -1748,7 +1748,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                if let Some(bytes) = encode_key(&event.logical_key, state.modifiers) {
+                // A guard taken in the `if let` scrutinee stays alive through
+                // the body, where `Input::key` locks again and deadlocks.
+                let app_cursor = state.terminal.lock().app_cursor();
+                if let Some(bytes) = encode_key(&event.logical_key, state.modifiers, app_cursor) {
                     Input {
                         terminal: &state.terminal,
                         pty: &mut state.pty,

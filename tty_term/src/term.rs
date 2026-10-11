@@ -3085,6 +3085,12 @@ impl Terminal {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    /// Whether application cursor mode (DECCKM, DECSET 1) is on, which makes an
+    /// unmodified cursor key send its SS3 form in place of its CSI form.
+    pub fn app_cursor(&self) -> bool {
+        self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
     /// Whether focus reporting (DECSET 1004) is on, so the app should send a
     /// focus-in or focus-out report as the window gains or loses focus.
     pub fn report_focus_in_out(&self) -> bool {
