@@ -8306,6 +8306,93 @@ fn status_message_expires_after_its_ttl() {
 }
 
 #[test]
+fn the_status_message_shows_only_on_the_focused_pane_bar() {
+    let mut h = Stoat::test();
+    h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+    let right = h.stoat.active_workspace().panes.focus();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    let left = h.stoat.active_workspace().panes.focus();
+    h.open_commits("/repo");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+    h.stoat.set_status("saved");
+    h.snapshot();
+
+    assert_eq!(
+        (
+            status_row_text(&h, left).contains("saved"),
+            status_row_text(&h, right).contains("saved")
+        ),
+        (false, true),
+        "the commits bar beside the focused pane leaves the message to it"
+    );
+}
+
+#[test]
+fn a_long_status_message_stays_inside_an_overlay_bar() {
+    let (mut h, left, right) = commits_in_the_right_half();
+    h.stoat.set_status("@".repeat(60));
+    h.snapshot();
+
+    assert_eq!(
+        (
+            status_row_text(&h, left).contains('@'),
+            status_row_text(&h, right).contains('@')
+        ),
+        (false, true),
+        "the focused commits bar cuts the message to the room it has"
+    );
+}
+
+#[test]
+fn a_count_with_no_room_stays_off_an_overlay_bar() {
+    let (mut h, _, right) = commits_in_the_right_half();
+    h.stoat.active_workspace_mut().name = "w".repeat(60);
+    h.stoat.pending_count = Some(3);
+    h.snapshot();
+
+    let bar = status_row_text(&h, right);
+    assert_eq!(
+        (bar.contains("www"), bar.contains(" 3 ")),
+        (true, false),
+        "the workspace name fills the bar, and the count does not paint over it"
+    );
+}
+
+/// A harness with the commits list focused and unwidened in the right half of
+/// a split, and the left pane and the commits pane as its other two values.
+///
+/// The bars paint through the cell fallback, the path that started an uncut
+/// segment left of its bar.
+fn commits_in_the_right_half() -> (crate::test_harness::TestHarness, PaneId, PaneId) {
+    let mut h = Stoat::test();
+    h.stoat.stoatty = false;
+    h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
+    let left = h.stoat.active_workspace().panes.focus();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+    let right = h.stoat.active_workspace().panes.focus();
+    h.open_commits("/repo");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
+    assert_eq!(
+        h.stoat.active_workspace().panes.widened(),
+        None,
+        "the commits list sits in its own half"
+    );
+    (h, left, right)
+}
+
+/// The text of `pane`'s status row in the last rendered frame.
+fn status_row_text(h: &crate::test_harness::TestHarness, pane: PaneId) -> String {
+    let area =
+        crate::render::layout::split_pane_status(h.stoat.active_workspace().panes.pane(pane).area)
+            .1;
+    let buf = h.rendered_buffer();
+    (area.x..area.x + area.width)
+        .map(|x| buf[(x, area.y)].symbol())
+        .collect()
+}
+
+#[test]
 fn diagnostics_notification_updates_store() {
     use crate::host::LspNotification;
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Uri};

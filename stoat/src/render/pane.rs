@@ -518,6 +518,9 @@ fn dim_memoized(
 /// status message on the right. Matches the visual style of
 /// [`render_pane_status`] for a focused pane.
 ///
+/// As on the pane bar, the count and the message show only while the pane has
+/// focus, and the message is cut to the room the left segments leave.
+///
 /// `screen` picks the label. A commits pane names itself, because an
 /// unfocused list is not the screen the frame reports.
 pub(crate) fn render_overlay_status(
@@ -544,38 +547,46 @@ pub(crate) fn render_overlay_status(
     }
 
     let segments = status_segments_area(area, frame.badge_cover);
-    let left = overlay_status_segments(is_focused, segments, screen, frame);
+    let (left, left_end) = overlay_status_segments(is_focused, segments, screen, frame);
     let mut right: Vec<StatusSeg> = Vec::new();
+    let mut right_anchor = segments.x + segments.width;
     // The first right segment takes the bar's right edge, which is where the
     // pane bar paints the count.
     if is_focused && let Some(count) = frame.pending_count {
-        right.push((
-            format!(" {count} "),
-            base_style.add_modifier(Modifier::BOLD),
-        ));
+        let text = format!(" {count} ");
+        let start = right_anchor.saturating_sub(text.chars().count() as u16);
+        if start >= left_end {
+            right.push((text, base_style.add_modifier(Modifier::BOLD)));
+            right_anchor = start;
+        }
     }
-    if let Some(message) = frame.status_message {
-        right.push((
-            message.to_string(),
-            status_message_style(base_style, frame.theme),
-        ));
+    if is_focused && let Some(message) = frame.status_message {
+        let available = right_anchor.saturating_sub(left_end) as usize;
+        if available > 0 {
+            right.push((
+                message.chars().take(available).collect(),
+                status_message_style(base_style, frame.theme),
+            ));
+        }
     }
     render_status_segments(
         area, segments, base_style, frame, &left, &right, buf, scene, None,
     );
 }
 
-/// Build the overlay status bar's left segments in paint order.
+/// Build the overlay status bar's left segments in paint order, with the column
+/// where they end.
 ///
 /// Mode and workspace show only when focused, then a screen label that shows
 /// unconditionally, left-padded when it leads. The screen segment differs from
-/// the pane status's focus-gated one.
+/// the pane status's focus-gated one. The end column stops at the right edge of
+/// `area`, and the right segments fit between it and that edge.
 fn overlay_status_segments(
     is_focused: bool,
     area: Rect,
     screen: Option<&str>,
     frame: FrameCtx<'_>,
-) -> Vec<StatusSeg> {
+) -> (Vec<StatusSeg>, u16) {
     let theme = frame.theme;
     let base_style = if is_focused {
         theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
@@ -614,8 +625,7 @@ fn overlay_status_segments(
             base_style.fg(screen_color),
         );
     }
-    let _ = cursor;
-    left
+    (left, cursor)
 }
 
 pub(crate) fn render_pane_dividers(
