@@ -417,6 +417,11 @@ pub struct Terminal {
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
+    /// The most lines the scrollback history keeps.
+    ///
+    /// A history at this size grows no more, so [`Self::project`] measures a
+    /// scroll by its slide from then on.
+    scrollback_limit: usize,
     /// Rows the last [`Self::project`] slid its grid by, which
     /// [`Self::slid_rows`] reports.
     last_slide: isize,
@@ -1031,11 +1036,9 @@ impl Terminal {
     /// against `theme`.
     pub fn new(rows: usize, cols: usize, theme: Theme) -> Terminal {
         let responses = ResponseSink::default();
-        let term = Term::new(
-            Config::default(),
-            &GridSize { rows, cols },
-            responses.clone(),
-        );
+        let config = Config::default();
+        let scrollback_limit = config.scrolling_history;
+        let term = Term::new(config, &GridSize { rows, cols }, responses.clone());
         let palette = default_palette(&theme);
 
         Terminal {
@@ -1093,6 +1096,7 @@ impl Terminal {
             last_selection: None,
             decoration_damage: Vec::new(),
             last_history: 0,
+            scrollback_limit,
             last_slide: 0,
             last_alt_screen: false,
             pools: BTreeMap::new(),
@@ -3362,7 +3366,16 @@ impl Terminal {
         // guess costs the projection a row comparison, where it would cost a
         // placement its existence. A region scroll inside the margins grows no
         // history either, so placements do not follow that.
-        self.images.scroll(scrolled as i32, rows);
+        //
+        // A full history grows no more, so from then on the slide is the only
+        // measure of a scroll. A placement that stays put there is wrong on
+        // every scroll, which is worse than a guess that is wrong now and then.
+        let followed = if grew == 0 && history >= self.scrollback_limit {
+            self.last_slide as i32
+        } else {
+            scrolled as i32
+        };
+        self.images.scroll(followed, rows);
         if resized {
             self.images.clamp_to(rows, cols);
         }

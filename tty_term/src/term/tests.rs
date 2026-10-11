@@ -5982,6 +5982,49 @@ fn leaving_the_alternate_screen_scrolls_nothing() {
     );
 }
 
+/// A full history grows no more, so a scroll there moves a placement by the
+/// slide the projection found, the way it moves the text beside it.
+///
+/// Eight rows, because the probe confirms up to four rows below the top, and
+/// the line typed at the bottom must lie outside that window.
+#[test]
+fn a_placement_follows_a_scroll_once_the_history_is_full() {
+    use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+    let mut terminal = Terminal::new(8, 20, Theme::default());
+    let mut grid = Grid::new(8, 20);
+    terminal.set_cell_pixels(8, 16);
+    let lines: String = (1..=10_010).map(|n| format!("{n}\r\n")).collect();
+    terminal.advance(lines.as_bytes());
+    // Projected before the placement, or the placement rides the history
+    // that output grew.
+    terminal.project(&mut grid);
+
+    let mut out = Vec::new();
+    kitty::encode_into(
+        &mut out,
+        &ControlData {
+            action: Action::TransmitAndDisplay,
+            format: Format::Rgba,
+            width: 8,
+            height: 16,
+            id: 84,
+            cursor_policy: 1,
+            ..ControlData::default()
+        },
+        &base64_of(&[7u8; 8 * 16 * 4]),
+    );
+    terminal.advance(b"\x1b[2;1H");
+    terminal.advance(&out);
+    terminal.project(&mut grid);
+    let rows = |grid: &Grid| grid.images().iter().map(|i| i.row).collect::<Vec<_>>();
+    assert_eq!(rows(&grid), [1], "placed on the second row");
+
+    terminal.advance(b"\x1b[8;1Ha\r\n");
+    terminal.project(&mut grid);
+    assert_eq!(rows(&grid), [0], "and moved up one row with the text");
+}
+
 /// A full reset returns the terminal to its start state, so the images a
 /// client transmitted go with it. An erase does not: it clears the screen,
 /// and the client places the same images again onto what it draws next.
