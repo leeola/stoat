@@ -8,7 +8,7 @@ use crate::{
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 use stoat_text::BufferId;
 
 new_key_type! {
@@ -289,6 +289,12 @@ pub struct PaneTree {
     /// covers. Transient view scratch: a restored session opens unwidened.
     #[serde(skip)]
     widened: Option<PaneId>,
+    /// Each split pane's area before a widen overlays the layout.
+    ///
+    /// A widen zeroes the panes it covers, but the dividers, their hit test,
+    /// and a divider drag keep the natural geometry, so they read it here.
+    #[serde(skip)]
+    natural: HashMap<PaneId, Rect>,
 }
 
 impl PaneTree {
@@ -324,6 +330,7 @@ impl PaneTree {
             stack: Vec::new(),
             last_split_focus: pane_id,
             widened: None,
+            natural: HashMap::new(),
         }
     }
 
@@ -796,56 +803,14 @@ impl PaneTree {
     /// reserves these gaps; this walk emits the line segment that should be
     /// painted in each one. `touches_focus` is set when either of the
     /// subtrees flanking the gap contains the currently focused leaf.
+    ///
+    /// Under a widen, a divider between covered panes is hidden with them, and
+    /// a divider that crosses the widened rows shows only outside them.
     pub fn dividers(&self) -> Vec<Divider> {
-        let focus = self.focus;
-        let widened_band = self.widened.map(|id| {
-            let a = self.panes[id].area;
-            (a.y, a.y + a.height)
-        });
-        let mut out = Vec::new();
-        let mut stack = vec![self.root];
-        while let Some(nid) = stack.pop() {
-            if let NodeContent::Split(split) = &self.nodes[nid].content {
-                stack.extend(split.children.iter().copied());
-                // A split lying entirely within the widened band separates only
-                // covered panes, so its dividers are hidden with them. The band
-                // edge falls on a split that straddles it, whose divider stays.
-                if let Some((start, end)) = widened_band
-                    && split.area.y >= start
-                    && split.area.y + split.area.height <= end
-                {
-                    continue;
-                }
-                let children: Vec<(NodeId, Rect)> = split
-                    .children
-                    .iter()
-                    .map(|&c| (c, self.node_area(c)))
-                    .collect();
-                for pair in children.windows(2) {
-                    let (left_id, left_rect) = pair[0];
-                    let (right_id, _right_rect) = pair[1];
-                    let touches_focus = self.subtree_contains(left_id, focus)
-                        || self.subtree_contains(right_id, focus);
-                    match split.axis {
-                        Axis::Vertical => out.push(Divider {
-                            orientation: DividerOrientation::Vertical,
-                            x: left_rect.x + left_rect.width,
-                            y: split.area.y,
-                            len: split.area.height,
-                            touches_focus,
-                        }),
-                        Axis::Horizontal => out.push(Divider {
-                            orientation: DividerOrientation::Horizontal,
-                            x: split.area.x,
-                            y: left_rect.y + left_rect.height,
-                            len: split.area.width,
-                            touches_focus,
-                        }),
-                    }
-                }
-            }
-        }
-        out
+        self.divider_segments()
+            .into_iter()
+            .map(|(_, _, divider)| divider)
+            .collect()
     }
 
     fn subtree_contains(&self, node: NodeId, target: PaneId) -> bool {
@@ -865,6 +830,18 @@ impl PaneTree {
         }
     }
 
+    /// The area `node` holds before a widen overlays the layout.
+    fn natural_area(&self, node: NodeId) -> Rect {
+        match &self.nodes[node].content {
+            NodeContent::Leaf(pid) => self
+                .natural
+                .get(pid)
+                .copied()
+                .unwrap_or(self.panes[*pid].area),
+            NodeContent::Split(split) => split.area,
+        }
+    }
+
     /// The split node and gap index whose divider segment covers cell
     /// `(col, row)`, or `None` when the point is not on a divider.
     ///
@@ -872,6 +849,32 @@ impl PaneTree {
     /// with [`Self::set_divider`]. Mirrors the segment geometry [`Self::dividers`]
     /// paints.
     pub(crate) fn divider_at(&self, col: u16, row: u16) -> Option<(NodeId, usize)> {
+        self.divider_segments()
+            .into_iter()
+            .find(|(_, _, divider)| match divider.orientation {
+                DividerOrientation::Vertical => {
+                    col == divider.x && (divider.y..divider.y + divider.len).contains(&row)
+                },
+                DividerOrientation::Horizontal => {
+                    row == divider.y && (divider.x..divider.x + divider.len).contains(&col)
+                },
+            })
+            .map(|(node, gap, _)| (node, gap))
+    }
+
+    /// Every divider segment, with the split node and gap index it belongs to.
+    ///
+    /// The segments follow the natural layout, so the panes a widen zeroes do
+    /// not move them. The widened pane's rows hide them. A vertical segment
+    /// keeps its parts above and below those rows, and a horizontal segment
+    /// inside them goes.
+    fn divider_segments(&self) -> Vec<(NodeId, usize, Divider)> {
+        // An unwidened tree has an empty band, which cuts nothing.
+        let (start, end) = self.widened.map_or((0, 0), |id| {
+            let a = self.panes[id].area;
+            (a.y, a.y + a.height)
+        });
+        let mut out = Vec::new();
         let mut stack = vec![self.root];
         while let Some(nid) = stack.pop() {
             let NodeContent::Split(split) = &self.nodes[nid].content else {
@@ -879,23 +882,42 @@ impl PaneTree {
             };
             stack.extend(split.children.iter().copied());
             for (gap, pair) in split.children.windows(2).enumerate() {
-                let left = self.node_area(pair[0]);
-                let hit = match split.axis {
+                let left = self.natural_area(pair[0]);
+                let touches_focus = self.subtree_contains(pair[0], self.focus)
+                    || self.subtree_contains(pair[1], self.focus);
+                match split.axis {
                     Axis::Vertical => {
-                        col == left.x + left.width
-                            && (split.area.y..split.area.y + split.area.height).contains(&row)
+                        let (top, bottom) = (split.area.y, split.area.y + split.area.height);
+                        for (y, below) in [(top, bottom.min(start)), (top.max(end), bottom)] {
+                            if y < below {
+                                let divider = Divider {
+                                    orientation: DividerOrientation::Vertical,
+                                    x: left.x + left.width,
+                                    y,
+                                    len: below - y,
+                                    touches_focus,
+                                };
+                                out.push((nid, gap, divider));
+                            }
+                        }
                     },
                     Axis::Horizontal => {
-                        row == left.y + left.height
-                            && (split.area.x..split.area.x + split.area.width).contains(&col)
+                        let y = left.y + left.height;
+                        if !(start..end).contains(&y) {
+                            let divider = Divider {
+                                orientation: DividerOrientation::Horizontal,
+                                x: split.area.x,
+                                y,
+                                len: split.area.width,
+                                touches_focus,
+                            };
+                            out.push((nid, gap, divider));
+                        }
                     },
-                };
-                if hit {
-                    return Some((nid, gap));
                 }
             }
         }
-        None
+        out
     }
 
     /// Move the divider at `gap` in split `node` to screen position `(col, row)`,
@@ -917,7 +939,7 @@ impl PaneTree {
         let extents: Vec<u16> = children
             .iter()
             .map(|&c| {
-                let r = self.node_area(c);
+                let r = self.natural_area(c);
                 match axis {
                     Axis::Vertical => r.width,
                     Axis::Horizontal => r.height,
@@ -925,8 +947,8 @@ impl PaneTree {
             })
             .collect();
         let (origin, target) = match axis {
-            Axis::Vertical => (self.node_area(children[gap]).x, col),
-            Axis::Horizontal => (self.node_area(children[gap]).y, row),
+            Axis::Vertical => (self.natural_area(children[gap]).x, col),
+            Axis::Horizontal => (self.natural_area(children[gap]).y, row),
         };
 
         let combined = extents[gap] + extents[gap + 1];
@@ -1087,6 +1109,7 @@ impl PaneTree {
     fn recalculate(&mut self) {
         self.stack.clear();
         self.stack.push((self.root, self.area));
+        self.natural.clear();
 
         while let Some((node_id, area)) = self.stack.pop() {
             let node = &mut self.nodes[node_id];
@@ -1094,6 +1117,7 @@ impl PaneTree {
             match &mut node.content {
                 NodeContent::Leaf(pane_id) => {
                     self.panes[*pane_id].area = area;
+                    self.natural.insert(*pane_id, area);
                 },
                 NodeContent::Split(split) => {
                     split.area = area;
@@ -2189,5 +2213,82 @@ mod tests {
         assert_eq!(dividers.len(), 1, "the in-band vertical divider is hidden");
         assert_eq!(dividers[0].orientation, DividerOrientation::Horizontal);
         assert_eq!(dividers[0].y, band_edge, "the band-edge divider survives");
+    }
+
+    #[test]
+    fn a_widen_over_a_whole_split_leaves_no_divider() {
+        let mut tree = PaneTree::new(area());
+        let right = tree.split(Axis::Vertical);
+        assert!(tree.widen(right));
+
+        assert_eq!(
+            (tree.dividers(), tree.divider_at(0, 5)),
+            (Vec::new(), None),
+            "the covered pane's divider neither paints nor takes a press at column 0"
+        );
+    }
+
+    #[test]
+    fn a_widen_cuts_the_dividers_it_covers() {
+        let (mut tree, tl, _bl, tr, _br) = grid_2x2();
+        let natural = tree.dividers();
+        let (tl_area, tr_area) = (tree.pane(tl).area, tree.pane(tr).area);
+        let vertical_x = natural
+            .iter()
+            .find(|divider| divider.orientation == DividerOrientation::Vertical)
+            .expect("the grid has a vertical divider")
+            .x;
+        assert!(tree.widen(tl));
+
+        let expected: Vec<Divider> = natural
+            .iter()
+            .map(|&divider| match divider.orientation {
+                DividerOrientation::Vertical => Divider {
+                    y: tl_area.y + tl_area.height,
+                    len: divider.len - tl_area.height,
+                    ..divider
+                },
+                DividerOrientation::Horizontal => divider,
+            })
+            .collect();
+        assert_eq!(
+            (
+                tree.dividers(),
+                tree.divider_at(vertical_x, 0),
+                tree.divider_at(tr_area.x + 1, 0)
+            ),
+            (expected, None, None),
+            "the vertical divider starts below the widened rows, and none takes a press there"
+        );
+    }
+
+    #[test]
+    fn a_widen_hides_the_dividers_between_covered_panes() {
+        let (mut tree, left, _) = one_left_three_right();
+        assert!(tree.widen(left));
+        assert_eq!(
+            tree.dividers(),
+            Vec::new(),
+            "the covered right column takes its dividers with it"
+        );
+    }
+
+    #[test]
+    fn a_divider_drag_under_a_widen_moves_the_natural_split() {
+        let (mut tree, tl, _bl, tr, _br) = grid_2x2();
+        let tr_area = tree.pane(tr).area;
+        assert!(tree.widen(tl));
+
+        let (node, gap) = tree
+            .divider_at(tr_area.x + 1, tr_area.y + tr_area.height)
+            .expect("the right column's divider shows below the widened rows");
+        tree.set_divider(node, gap, tr_area.x + 1, 10);
+        tree.unwiden();
+
+        assert_eq!(
+            tree.pane(tr).area.height,
+            10,
+            "the top-right pane ends where the drag let go"
+        );
     }
 }

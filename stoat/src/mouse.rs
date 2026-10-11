@@ -2142,7 +2142,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_action::{MoveDown, NewTab, OpenFile, SplitDown, SplitRight};
+    use stoat_action::{MoveDown, NewTab, OpenFile, SplitDown, SplitRight, TogglePaneWiden};
     /// A buffer with `count` single-line diagnostics on consecutive rows,
     /// painted once so the pane areas and the render's span cache exist.
     fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
@@ -2757,6 +2757,22 @@ mod tests {
             h.head_offsets(),
             pressed,
             "a drag onto the status row extends nothing"
+        );
+    }
+
+    #[test]
+    fn a_press_where_a_covered_divider_was_arms_no_drag() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("line\n");
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        action_handlers::dispatch(&mut h.stoat, &TogglePaneWiden);
+        h.snapshot();
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 2));
+        assert_eq!(
+            h.stoat.divider_drag, None,
+            "column 0 belongs to the widened pane, not to the covered pane's divider"
         );
     }
 
