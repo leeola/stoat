@@ -252,12 +252,10 @@ pub(super) fn arrive_at_commit(stoat: &mut Stoat, landed: &str) {
     // the first landing finds the pane not yet latched.
     super::review::latch_diff_view(stoat);
 
-    // A key press follows the cursor after its handler runs, and a landing
-    // arrives from the git queue with no key behind it.
-    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-    if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
-        action_handlers::view::follow_jump(editor, scrolloff);
-    }
+    // The latch lays the diff out anew, so the landing frames its range again
+    // against the rows the reader sees.
+    let range = current_anchor(run_of(stoat)).range;
+    frame_range(stoat, range, false);
 }
 
 /// Close a tour over commits whose walk ended or never started.
@@ -672,6 +670,7 @@ fn jump_to_range(
 ) -> Option<Landing> {
     action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
+    let buffer_before = action_handlers::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
     // A stop in another file focuses another editor, which carries its own
     // mode. The mode belongs to the reader rather than to whichever buffer a
     // jump puts under them, so a tour read in walkthrough mode keeps it.
@@ -681,12 +680,40 @@ fn jump_to_range(
 
     let offset = focused_offset_of(stoat, range.start)?;
     let effect = action_handlers::movement::jump_to_offset(stoat, offset);
+    // Landing in another file shows an editor with no earlier view to glide
+    // from, so it snaps.
+    let same_buffer =
+        action_handlers::focused_editor_mut(stoat).map(|editor| editor.buffer_id) == buffer_before;
+    frame_range(stoat, range, same_buffer);
 
     Some(Landing {
         offset,
         drifted: drifted(stoat, range, captured),
         effect,
     })
+}
+
+/// Frame `range`'s lines in the focused editor, as a jump to a declaration
+/// frames its block, so a stop or annotation lands whole on screen when it
+/// fits.
+///
+/// The stored end column is one-based and inclusive, so the block runs to the
+/// start of the line after the last and frames that last line whole.
+fn frame_range(stoat: &mut Stoat, range: walkthrough::Range, glide: bool) {
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+    let block = {
+        let snapshot = editor.display_map.snapshot();
+        let rope = snapshot.buffer_snapshot().rope();
+        let line_start = |row: u32| match row > rope.max_point().row {
+            true => rope.len(),
+            false => rope.point_to_offset(stoat_text::Point::new(row, 0)),
+        };
+        line_start(range.start.line.saturating_sub(1))..line_start(range.end.line)
+    };
+    action_handlers::view::frame_jump_on_block(editor, block, scrolloff, glide);
 }
 
 /// What to call the current stop, being its own title or the tour's.

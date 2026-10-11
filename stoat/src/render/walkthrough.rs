@@ -290,7 +290,7 @@ pub(crate) fn spotlight_of(stoat: &mut Stoat) -> Option<(EditorId, Spotlight)> {
         let snapshot = editor.display_map.snapshot();
         range_offsets(snapshot.buffer_snapshot().rope(), &range)
     };
-    screen::span(editor, offsets.clone())?;
+    screen::visible_span(editor, offsets.clone())?;
 
     Some((
         editor_id,
@@ -1000,7 +1000,8 @@ fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
 
 /// Turn a stored range into the cells it covers on screen.
 ///
-/// `None` when either end is off screen, which the layout turns into no mark.
+/// A range that crosses the view's edge is cut at that edge. `None` when no row
+/// of it is on screen, which the layout turns into no mark.
 fn measure_range(stoat: &mut Stoat, editor_id: EditorId, range: &Range) -> Option<CellRange> {
     let ws = stoat.active_workspace_mut();
     let editor = ws.editors.get_mut(editor_id)?;
@@ -1009,7 +1010,7 @@ fn measure_range(stoat: &mut Stoat, editor_id: EditorId, range: &Range) -> Optio
         range_offsets(snapshot.buffer_snapshot().rope(), range)
     };
 
-    let span = screen::span(editor, offsets)?;
+    let span = screen::visible_span(editor, offsets)?;
     Some(CellRange {
         rows: span.rows.collect(),
         start_x: span.start_x,
@@ -1469,6 +1470,57 @@ mod tests {
 
         open(&mut h.stoat, "tour");
         h
+    }
+
+    /// A landing frames the stop's lines, so a focus that fits the pane lands
+    /// whole and draws its ring. A focus taller than the pane rings the part
+    /// that shows.
+    #[test]
+    fn a_landed_stop_shows_its_whole_focus() {
+        let code: String = (1..=100)
+            .map(|line| format!("fn f{line}() {{}}\n"))
+            .collect();
+        let lines = |first: u32, last: u32| Location {
+            path: PathBuf::from("a.rs"),
+            range: Range {
+                start: Point {
+                    line: first,
+                    col: 1,
+                },
+                end: Point { line: last, col: 1 },
+            },
+            snippet: String::new(),
+        };
+        let mut h = harness_with_stops(&[], &code, &[lines(60, 66), lines(10, 90)]);
+        open(&mut h.stoat, "tour");
+        h.stoat.render();
+        let rings = |h: &mut TestHarness| {
+            let emitted = sketches(h);
+            let focus = part_id(h, part::FOCUS_MARK);
+            emitted.iter().any(|sketch| sketch.id == focus)
+        };
+
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 2);
+        let short_rings = rings(&mut h);
+        let (scroll_row, viewport) = {
+            let editor =
+                crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            (editor.scroll_row, editor.viewport_rows.expect("rendered"))
+        };
+
+        crate::action_handlers::walkthrough::next(&mut h.stoat, 1);
+        let tall_rings = rings(&mut h);
+
+        assert_eq!(
+            (
+                short_rings,
+                scroll_row <= 59,
+                65 < scroll_row + viewport,
+                tall_rings
+            ),
+            (true, true, true, true),
+            "the short focus lands whole and ringed, and the tall one rings what shows"
+        );
     }
 
     /// Annotations cycle through the marker scopes, so two adjacent ones draw
