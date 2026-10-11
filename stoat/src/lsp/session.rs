@@ -256,6 +256,11 @@ pub(crate) fn maybe_spawn_language_server(
     // under the wrong PATH, so defer those until install_pending re-fires them.
     // An in-process server has no process and no environment, so it starts now
     // regardless.
+    //
+    // A file given on the command line opens before the first frame starts the
+    // load, and an unstarted load defers nothing. Starting the load here makes
+    // the spawn wait for it.
+    crate::project_env::ensure_loaded(stoat);
     let env_loading =
         stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading;
     let mut deferred = false;
@@ -623,6 +628,48 @@ mod tests {
             .id_for_path(&root.join("a.rs"));
         assert!(buffer_id.is_some());
         assert_eq!(h.stoat.lsp_spawn_deferred, buffer_id);
+    }
+
+    /// A file given on the command line opens before any frame has started the
+    /// env load. The open starts it, so the subprocess server waits for the
+    /// environment instead of spawning without it.
+    ///
+    /// No settle follows the open. A settle lets the load land, and the landing
+    /// re-fires the deferred spawn.
+    #[test]
+    fn lsp_spawn_starts_the_env_load_and_waits_for_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
+        h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+        h.stoat.set_lsp_auto_spawn(true);
+        h.stoat.set_env_auto_load(true);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("a.rs"))
+            .expect("the opened buffer");
+        assert_eq!(
+            (
+                h.stoat.lsp_registry.spawn_attempted("rust-analyzer"),
+                h.stoat.lsp_spawn_deferred,
+                h.stoat.active_workspace().env.state,
+            ),
+            (
+                false,
+                Some(buffer_id),
+                crate::project_env::EnvLoadState::Loading,
+            ),
+        );
     }
 
     #[test]
