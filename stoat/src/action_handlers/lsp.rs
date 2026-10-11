@@ -916,6 +916,10 @@ pub(crate) struct CodeActionPicker {
     /// The routed server that produced these actions, so resolve and execute
     /// route back to it rather than the sole host.
     pub(crate) server: String,
+    /// The buffer version the server measured these actions against. A
+    /// `Direct` entry carries its edit already, so it applies only while the
+    /// buffer still holds this version.
+    pub(crate) requested_at: Option<DocumentStamp>,
 }
 
 /// Issue a `textDocument/codeAction` request for the focused editor's
@@ -989,7 +993,12 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
+    let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
+    let requested_at = DocumentStamp::take(stoat, buffer_id, encoding);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         match host.code_action(params).await {
             Ok(Some(actions)) => Some(actions),
             Ok(None) => None,
@@ -1005,6 +1014,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         anchor_offset,
         selected_idx: 0,
         server,
+        requested_at,
     });
     // The picker is reset to an empty list above so a stale popup
     // from a prior request does not persist while the new one is
@@ -1139,10 +1149,14 @@ fn apply_code_action_edit(stoat: &mut Stoat, edit: WorkspaceEdit, encoding: Offs
 /// a `codeAction/resolve` task whose result is applied by
 /// [`pump_lsp_code_action_resolve`]. Clears the picker either way.
 /// No-op when no picker is open or `index` is out of range.
+///
+/// The pick drops a `Direct` entry when the buffer moved since the request,
+/// and the status bar says so.
 pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
     let Some(picker) = stoat.pending_code_action_picker.take() else {
         return false;
     };
+    let requested_at = picker.requested_at;
     let Some(entry) = picker.entries.into_iter().nth(index) else {
         return false;
     };
@@ -1154,6 +1168,11 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
             server,
             ..
         } => {
+            if let Some(stamp) = requested_at
+                && skipped_as_stale(stoat, &stamp, "code action")
+            {
+                return true;
+            }
             let encoding = resolve_code_action_host(stoat, &server, buffer_id).offset_encoding();
             apply_code_action_edit(stoat, *edit, encoding);
             if let Some(command) = command {
@@ -1327,7 +1346,11 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         position,
     };
 
+    let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         let response = match host.prepare_rename(params).await {
             Ok(Some(resp)) => resp,
             Ok(None) => return None,
@@ -1533,7 +1556,11 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
+    let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         let requests = hosts.iter().map(|(_, host)| {
             let encoding = host.offset_encoding();
             let params = params.clone();
@@ -2099,7 +2126,11 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
+    let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         match host.range_formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
                 uri: source_uri,
@@ -2161,7 +2192,11 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
+    let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         match host.formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
                 uri: source_uri,

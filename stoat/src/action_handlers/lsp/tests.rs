@@ -1789,6 +1789,41 @@ fn code_action_pick_one_applies_edit() {
     assert_eq!(buffer_text(&h, &path), "// hi\nabc\n");
 }
 
+/// The server measured a direct action's edit against the text it was sent.
+/// Once the buffer moves, the edit names the wrong places, so the pick drops it
+/// and says why.
+#[test]
+fn a_direct_code_action_is_skipped_when_the_buffer_moved() {
+    let mut h = TestHarness::with_size(80, 24);
+    enable_code_action(&h);
+    let root = seed(&mut h, &[("main.rs", "abc\n")]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    h.fake_lsp().set_code_actions(
+        path.to_str().unwrap(),
+        vec![direct_action(
+            "Insert prefix",
+            path.to_str().unwrap(),
+            0,
+            0,
+            "// hi\n",
+        )],
+    );
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+    h.settle();
+
+    edit_focused_buffer_directly(&mut h, "x");
+    crate::action_handlers::lsp::pick_code_action(&mut h.stoat, 0);
+
+    assert_eq!(
+        (buffer_text(&h, &path), h.stoat.pending_message.as_deref()),
+        (
+            "xabc\n".to_string(),
+            Some("lsp: code action skipped, buffer changed")
+        ),
+    );
+}
+
 #[test]
 fn code_action_resolve_path_applies_resolved_edit() {
     let mut h = TestHarness::with_size(80, 24);
@@ -3227,6 +3262,108 @@ fn range_formatting_asks_for_the_indentation_too() {
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].options.tab_size, 2);
     assert!(observed[0].options.insert_spaces);
+}
+
+/// A format reply is edits measured against the text the server holds, so the
+/// change of an edit still in its debounce goes out before the request.
+#[test]
+fn a_format_sends_the_pending_change_first() {
+    use lsp_types::{OneOf, ServerCapabilities};
+    type Requests = fn(&TestHarness) -> usize;
+    let formats: [(&dyn stoat_action::Action, Requests); 2] = [
+        (&stoat_action::Format, |h| {
+            h.fake_lsp().observed_formatting().len()
+        }),
+        (&stoat_action::FormatSelections, |h| {
+            h.fake_lsp().observed_range_formatting().len()
+        }),
+    ];
+    for (action, requests) in formats {
+        let mut h = TestHarness::with_size(80, 24);
+        edit_pending_on_a_full_sync_server(
+            &mut h,
+            ServerCapabilities {
+                document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
+                ..Default::default()
+            },
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+        h.settle();
+
+        assert_eq!(
+            (sent_changes(&h), requests(&h)),
+            (vec!["// typed\nfn  main (){}\n".to_string()], 1),
+            "{action:?}",
+        );
+    }
+}
+
+/// Code action, rename, and the symbol picker measure positions in the same
+/// text, so each sends the pending change first too.
+#[test]
+fn a_document_request_sends_the_pending_change_first() {
+    use lsp_types::{CodeActionProviderCapability, OneOf, ServerCapabilities};
+    let actions: [&dyn stoat_action::Action; 3] = [
+        &stoat_action::CodeAction,
+        &stoat_action::RenameSymbol,
+        &stoat_action::OpenSymbolPicker,
+    ];
+    for action in actions {
+        let mut h = TestHarness::with_size(80, 24);
+        edit_pending_on_a_full_sync_server(
+            &mut h,
+            ServerCapabilities {
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                ..Default::default()
+            },
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+        h.settle();
+
+        assert_eq!(
+            sent_changes(&h),
+            ["// typed\nfn  main (){}\n"],
+            "{action:?}"
+        );
+    }
+}
+
+/// Open `a.rs` on a server that takes the whole text on change, and leave the
+/// change of an edit waiting in its debounce.
+///
+/// The clock never moves after this, so only a flush delivers the change.
+fn edit_pending_on_a_full_sync_server(
+    h: &mut TestHarness,
+    capabilities: lsp_types::ServerCapabilities,
+) {
+    use lsp_types::{ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind};
+    h.fake_lsp().set_capabilities(ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        ..capabilities
+    });
+    let root = seed(h, &[("a.rs", "fn  main (){}\n")]);
+    open_buffer(h, root.join("a.rs"));
+    h.edit_focused(0..0, "// typed\n");
+    crate::lsp::sync::notify_buffer_changes_pending(&mut h.stoat);
+}
+
+/// The text of every change notification the server received.
+fn sent_changes(h: &TestHarness) -> Vec<String> {
+    h.fake_lsp()
+        .observed_changes()
+        .iter()
+        .flat_map(|change| {
+            change
+                .content_changes
+                .iter()
+                .map(|event| event.text.clone())
+        })
+        .collect()
 }
 
 #[test]
