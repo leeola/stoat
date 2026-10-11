@@ -201,8 +201,10 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
 /// for a key with no terminal encoding, such as a bare modifier, so the caller
 /// writes nothing.
 ///
-/// With Ctrl held, an ASCII letter becomes its C0 control byte (Ctrl-C is
-/// `0x03`). Printable keys pass through as their own UTF-8 bytes.
+/// With Ctrl held, an ASCII letter or one of `@ [ \ ] ^ _` becomes its C0
+/// control byte, so Ctrl-C is `0x03` and `Ctrl-[` is `ESC`. Ctrl-Space sends
+/// NUL, the same byte as `Ctrl-@`. Printable keys pass through as their own
+/// UTF-8 bytes.
 ///
 /// With Alt held, Enter, Backspace, Tab, Space, and a character key send their
 /// bytes behind an `ESC`, which the child terminal parser decodes as Alt on
@@ -239,7 +241,7 @@ fn encode_key_with(key: &Key, mods: ModifiersState, option_composes: bool) -> Op
         Key::Named(NamedKey::Backspace) => Some(alt_prefixed(alt, &[0x7f])),
         Key::Named(NamedKey::Tab) if shift => Some(b"\x1b[Z".to_vec()),
         Key::Named(NamedKey::Tab) => Some(alt_prefixed(alt, b"\t")),
-        Key::Named(NamedKey::Space) => Some(alt_prefixed(alt, b" ")),
+        Key::Named(NamedKey::Space) => Some(alt_prefixed(alt, if ctrl { &[0x00] } else { b" " })),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
         Key::Named(named) => {
             let param = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
@@ -266,12 +268,17 @@ fn alt_prefixed(alt: bool, bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The C0 control byte for Ctrl held with a single ASCII letter (Ctrl-C is
-/// `0x03`), or `None` when `s` is not one such letter.
+/// The C0 control byte for Ctrl held with a single character, or `None` when
+/// `s` is not one character that has such a byte.
+///
+/// The ASCII letters have one, and so do `@ [ \ ] ^ _`, which are next to the
+/// uppercase letters in ASCII. The byte is the low five bits of the uppercase
+/// character, so Ctrl-C is `0x03`, `Ctrl-@` is NUL, and `Ctrl-[` is `ESC`.
 fn ctrl_byte(s: &str) -> Option<u8> {
     let mut chars = s.chars();
     let c = chars.next()?;
-    if chars.next().is_some() || !c.is_ascii_alphabetic() {
+    let has_byte = c.is_ascii_alphabetic() || matches!(c, '@' | '[' | '\\' | ']' | '^' | '_');
+    if chars.next().is_some() || !has_byte {
         return None;
     }
 
@@ -281,10 +288,15 @@ fn ctrl_byte(s: &str) -> Option<u8> {
 /// The CSI-u bytes for Ctrl held with a single character that has no C0 byte,
 /// or `None` when `s` is not one such character.
 ///
-/// Only the letters carry a control byte, so every other ctrl combo has no
-/// terminal encoding of its own and reaches the child as nothing without this.
-/// `ESC [ cp ; 5 u` names the character by codepoint instead, which is what
-/// lets a chord such as `Ctrl-?` be bound at all.
+/// A ctrl combo that [`ctrl_byte`] gives no byte has no terminal encoding of
+/// its own, so it reaches the child as nothing without this. `ESC [ cp ; 5 u`
+/// names the character by codepoint instead, which is what lets a chord such
+/// as `Ctrl-?` be bound at all.
+///
+/// The digits and `/` take this form too, though X11 gives most of them a
+/// control byte. Those bytes already belong to other keys. In X11, Ctrl-2
+/// sends NUL like Ctrl-Space, and `Ctrl-/` sends `0x1f`, which a parser
+/// decodes as Ctrl-7.
 ///
 /// The modifier field is 5, which is ctrl alone in the `1 + bitmask` encoding
 /// CSI-u uses, or 7 when `alt` is held too. Alt goes in the field because an
@@ -295,7 +307,7 @@ fn ctrl_byte(s: &str) -> Option<u8> {
 fn csi_u_ctrl(s: &str, alt: bool) -> Option<Vec<u8>> {
     let mut chars = s.chars();
     let c = chars.next()?;
-    if chars.next().is_some() || c.is_ascii_alphabetic() {
+    if chars.next().is_some() || ctrl_byte(s).is_some() {
         return None;
     }
 
@@ -810,12 +822,29 @@ mod tests {
     }
 
     #[test]
-    fn encode_key_maps_ctrl_letters_to_control_bytes() {
+    fn encode_key_maps_ctrl_to_control_bytes() {
         let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL);
+        let space = |mods| encode_key(&Key::Named(NamedKey::Space), mods);
 
         assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
         assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
         assert_eq!(ctrl("C"), Some(vec![0x03]), "folds case");
+        assert_eq!(
+            ["@", "[", "\\", "]", "^", "_"].map(ctrl),
+            [0x00, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f].map(|byte| Some(vec![byte])),
+            "punctuation takes the low five bits",
+        );
+
+        assert_eq!(
+            space(ModifiersState::CONTROL),
+            Some(vec![0x00]),
+            "Ctrl-Space"
+        );
+        assert_eq!(
+            space(ModifiersState::CONTROL | ModifiersState::ALT),
+            Some(vec![0x1b, 0x00]),
+            "Alt prefixes the NUL",
+        );
     }
 
     /// A ctrl combo with no control byte has nothing else to write, so without
