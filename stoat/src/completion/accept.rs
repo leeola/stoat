@@ -1,9 +1,9 @@
 //! Acceptance handler for the completion popup.
 //!
 //! Replaces the highlighted item's `replace_range` with its
-//! `insert_text` in the focused buffer, places the primary cursor at
-//! the inserted end, and clears popup state. Bound to `Tab` in
-//! insert mode via the arbitration arm in
+//! `insert_text` at every cursor in the focused buffer, puts each cursor
+//! at the end of its own insertion, and clears popup state. Bound to
+//! `Tab` in insert mode via the arbitration arm in
 //! [`crate::app::Stoat::handle_insert_key`].
 //!
 //! An item's `replace_range` is anchored against the text its source
@@ -15,12 +15,13 @@
 
 use crate::{
     app::{Stoat, UpdateEffect},
-    buffer::BufferId,
+    buffer::{BufferId, TextBuffer},
     completion::CompletionItem,
     lsp::stamp::DocumentStamp,
     pane::{FocusTarget, View},
 };
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, ops::Range, path::Path, time::Duration};
+use stoat_text::{Anchor, Bias, Rope, Selection, SelectionGoal};
 
 /// The `additionalTextEdits` a `completionItem/resolve` returned for an
 /// accepted completion, plus the buffer they apply to. Carried from the
@@ -38,8 +39,9 @@ pub(crate) struct AcceptedImports {
 /// [`crate::completion::snippet::parse`] and install multi-cursor
 /// selections at the first tabstop group; remaining groups stash on
 /// [`Stoat::active_snippet`] for [`crate::completion::snippet::advance`]
-/// to consume on subsequent Tab presses. Plain items insert the text
-/// verbatim and collapse the cursor at the inserted end.
+/// to consume on later Tab presses. Plain items insert the text
+/// verbatim at every cursor, and each cursor lands at the end of its own
+/// insertion.
 pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     // A narrow off the loop has not landed yet on the keystroke that armed it,
     // and the rows it installs next are the ones the reader sees when Tab
@@ -90,10 +92,24 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         .map(|r| r.text.as_str())
         .unwrap_or(&item.insert_text);
 
-    {
+    // A snippet installs its own cursors at its tabstops, so it replaces only
+    // the range the request measured.
+    let landings = {
         let mut guard = buffer.write().expect("poisoned");
-        guard.edit(edit_range.clone(), inserted_text);
-    }
+        match &snippet_rendered {
+            Some(_) => {
+                guard.edit(edit_range.clone(), inserted_text);
+                HashMap::new()
+            },
+            None => insert_at_every_cursor(
+                &mut guard,
+                editor.selections.all_anchors(),
+                editor.selections.newest_anchor().id,
+                edit_range.clone(),
+                inserted_text,
+            ),
+        }
+    };
 
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
@@ -104,12 +120,11 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         editor.selections.replace_with(selections, new_buf);
         active
     } else {
-        let new_offset = edit_range.start + inserted_text.len();
         editor.selections.transform(new_buf, |s| {
             crate::selection::forward_block_cursor(
                 s.id,
-                new_offset,
-                stoat_text::SelectionGoal::None,
+                landings[&s.id],
+                SelectionGoal::None,
                 new_buf.rope(),
                 new_buf,
             )
@@ -124,6 +139,104 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     apply_or_resolve_additional_edits(stoat, buffer_id, &item);
 
     UpdateEffect::Redraw
+}
+
+/// Replace each cursor's copy of the accepted text with `text` in one batch
+/// edit, and answer where each selection id lands.
+///
+/// `edit_range` is the range of the `newest` selection, which the request
+/// measured from. Each cursor lands at the end of the insertion its range
+/// took.
+fn insert_at_every_cursor(
+    buffer: &mut TextBuffer,
+    selections: &[Selection<Anchor>],
+    newest: usize,
+    edit_range: Range<usize>,
+    text: &str,
+) -> HashMap<usize, usize> {
+    let cursors: Vec<(usize, usize)> = selections
+        .iter()
+        .map(|sel| {
+            let tail = buffer.resolve_anchor(&sel.tail());
+            let head = buffer.resolve_anchor(&sel.head());
+            (sel.id, stoat_text::cursor_offset(buffer.rope(), tail, head))
+        })
+        .collect();
+    let newest_at = cursors
+        .iter()
+        .find(|(id, _)| *id == newest)
+        .map_or(edit_range.end, |&(_, at)| at);
+    let groups = replace_ranges(buffer.rope(), &cursors, newest_at, edit_range);
+
+    // Left bias keeps each start ahead of the text inserted there.
+    let starts: Vec<Anchor> = groups
+        .iter()
+        .map(|(range, _)| buffer.anchor_at(range.start, Bias::Left))
+        .collect();
+    let edits: Vec<(Range<usize>, &str)> = groups
+        .iter()
+        .map(|(range, _)| (range.clone(), text))
+        .collect();
+    buffer.edit_batch(&edits);
+
+    groups
+        .iter()
+        .zip(&starts)
+        .flat_map(|((_, ids), start)| {
+            let landing = buffer.resolve_anchor(start) + text.len();
+            ids.iter().map(move |&id| (id, landing))
+        })
+        .collect()
+}
+
+/// The range each cursor replaces when a completion is accepted at every
+/// cursor, as groups of a range and the selection ids that land with it.
+///
+/// `cursors` holds each selection id with its insertion offset, and the cursor
+/// at `newest` replaces `edit_range`. Every other cursor replaces that range
+/// moved to itself when its text there is the same. A completion that reaches
+/// past the typed prefix then lands the same way at each cursor. A cursor whose
+/// text differs replaces its own word prefix.
+///
+/// The groups come sorted by start descending, with no overlap and no shared
+/// start, which is what a batch edit takes. A cursor whose range collides with
+/// a range already taken joins that group, so it lands with that cursor.
+fn replace_ranges(
+    rope: &Rope,
+    cursors: &[(usize, usize)],
+    newest: usize,
+    edit_range: Range<usize>,
+) -> Vec<(Range<usize>, Vec<usize>)> {
+    let mut ranges: Vec<(Range<usize>, usize)> = cursors
+        .iter()
+        .map(|&(id, at)| {
+            let moved = (edit_range.start + at)
+                .checked_sub(newest)
+                .map(|start| start..start + edit_range.len())
+                .filter(|range| {
+                    range.end <= rope.len()
+                        && rope
+                            .bytes_in_range(range.clone())
+                            .eq(rope.bytes_in_range(edit_range.clone()))
+                });
+            let range = moved.unwrap_or_else(|| {
+                crate::completion::request::compute_context(rope, at).prefix_range
+            });
+            (range, id)
+        })
+        .collect();
+    ranges.sort_by(|(a, _), (b, _)| b.start.cmp(&a.start).then(b.end.cmp(&a.end)));
+
+    let mut groups: Vec<(Range<usize>, Vec<usize>)> = Vec::with_capacity(ranges.len());
+    for (range, id) in ranges {
+        match groups.last_mut() {
+            Some((taken, ids)) if range.end > taken.start || range.start == taken.start => {
+                ids.push(id);
+            },
+            _ => groups.push((range, vec![id])),
+        }
+    }
+    groups
 }
 
 /// Apply the accepted item's `additionalTextEdits` -- typically the
@@ -790,5 +903,100 @@ mod tests {
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(buffer_text(&h, &path), "foobar\nfoobar");
+    }
+
+    /// The other cursor typed the same prefix, so it takes the newest cursor's
+    /// range moved to itself, and each cursor ends after its own insertion.
+    #[test]
+    fn accept_completes_the_prefix_at_every_cursor() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "foobar\n\n\n");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 7);
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(crate::completion::request::COMPLETION_DEBOUNCE);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(
+            (buffer_text(&h, &path), cursor_offsets(&mut h)),
+            ("foobar\nfoobar\nfoobar\n".to_string(), vec![13, 20]),
+        );
+    }
+
+    /// A cursor whose text differs from the newest cursor's replaces its own
+    /// word prefix, not the newest cursor's range moved to it.
+    #[test]
+    fn accept_completes_a_cursor_with_other_text_at_its_own_prefix() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "ab fo\nfoo\n");
+        set_cursors(&mut h, &[5, 9]);
+        let items = vec![lsp_row(&h, "foobar", 6..9)];
+        install_popup(&mut h, items, 6..9);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(
+            (buffer_text(&h, &path), cursor_offsets(&mut h)),
+            ("ab foobar\nfoobar\n".to_string(), vec![9, 16]),
+        );
+    }
+
+    /// A server's text edit sometimes reaches past the typed prefix. That range
+    /// replaces the same span around every cursor whose text there matches.
+    #[test]
+    fn accept_replaces_a_widened_range_at_every_cursor() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "foo_x\nfoo_x\n");
+        set_cursors(&mut h, &[3, 9]);
+        let items = vec![lsp_row(&h, "foobar", 6..11)];
+        install_popup(&mut h, items, 6..9);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(
+            (buffer_text(&h, &path), cursor_offsets(&mut h)),
+            ("foobar\nfoobar\n".to_string(), vec![6, 13]),
+        );
+    }
+
+    /// Put a collapsed cursor at each of `offsets`, the last one newest.
+    fn set_cursors(h: &mut TestHarness, offsets: &[usize]) {
+        let (&first, rest) = offsets.split_first().expect("at least one cursor");
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let cursor = |id, at| Selection {
+            id,
+            start: buf.anchor_at(at, Bias::Right),
+            end: buf.anchor_at(at, Bias::Right),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        editor
+            .selections
+            .transform(buf, |sel| cursor(sel.id, first));
+        let others = rest.iter().map(|&at| cursor(0, at)).collect();
+        editor.selections.extend_with_fresh_ids(others, buf);
+    }
+
+    /// The insertion offset of every cursor, in document order.
+    fn cursor_offsets(h: &mut TestHarness) -> Vec<usize> {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let mut offsets: Vec<usize> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let tail = buf.resolve_anchor(&sel.tail());
+                let head = buf.resolve_anchor(&sel.head());
+                stoat_text::cursor_offset(buf.rope(), tail, head)
+            })
+            .collect();
+        offsets.sort_unstable();
+        offsets
     }
 }
