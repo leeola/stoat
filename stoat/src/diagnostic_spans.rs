@@ -138,6 +138,18 @@ impl DiagnosticSpanCache {
         resolve_span_range(&self.spans[bounds], snapshot)
     }
 
+    /// Every span, resolved to offsets.
+    ///
+    /// It serves a reader that paints rows outside the viewport. It keeps the
+    /// zero-width spans at the two ends of the file, which the bounds of
+    /// [`Self::resolve_overlapping`] drop.
+    pub(crate) fn resolve_all(
+        &self,
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Vec<ResolvedDiag> {
+        resolve_span_range(&self.spans, snapshot)
+    }
+
     /// The worst-severity diagnostic whose rows straddle `line`.
     ///
     /// The answer for one line is kept, so a frame whose cursor has not changed

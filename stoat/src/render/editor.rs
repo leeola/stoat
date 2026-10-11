@@ -36,7 +36,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
+use stoat_text::{cursor_offset, Anchor, Bias, Rope};
 use stoat_widgets::{
     bar::Bar,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
@@ -236,13 +236,8 @@ pub(crate) fn render_editor_with_overlay(
             let version = set.version_for(path);
             let buffer_snapshot = snapshot.buffer_snapshot();
             let buffer_version = buffer_snapshot.version();
-            let rows = editor.scroll_row..end_row;
             let stale = match &editor.gutter_severity_cache {
-                Some(cache) => {
-                    cache.version != version
-                        || cache.buffer_version != buffer_version
-                        || cache.rows != rows
-                },
+                Some(cache) => cache.version != version || cache.buffer_version != buffer_version,
                 None => true,
             };
             if stale {
@@ -252,17 +247,11 @@ pub(crate) fn render_editor_with_overlay(
                 let map = editor
                     .diagnostic_span_cache
                     .as_ref()
-                    .map(|cache| {
-                        let visible = row_byte_range(buffer_snapshot, &rows);
-                        row_severity_from_spans(
-                            &cache.resolve_overlapping(&visible, buffer_snapshot),
-                        )
-                    })
+                    .map(|cache| row_severity_from_spans(&cache.resolve_all(buffer_snapshot)))
                     .unwrap_or_default();
                 editor.gutter_severity_cache = Some(GutterSeverityCache {
                     version,
                     buffer_version,
-                    rows,
                     map: Arc::new(map),
                 });
             }
@@ -1008,19 +997,16 @@ pub(crate) fn paint_chunk_rows(
 
 /// Cached gutter severity map for one diagnostic set against one buffer.
 ///
-/// `map` is the worst severity per buffer row, over the visible rows only.
-/// Rebuilt when the version, the buffer, or the window moves, so the gutter is
-/// not rebuilt every frame.
+/// `map` is the worst severity per buffer row, over the whole buffer, because
+/// the page gutter and the minimap read rows outside the viewport. The paint
+/// rebuilds it when the version or the buffer moves, not every frame.
 ///
 /// The buffer version belongs in the key because the rows come from spans
 /// shifted through the edits since each diagnostic was published, so typing
-/// moves them without the server saying anything. The row window belongs there
-/// because the map describes only the rows it was built for, and a scroll asks
-/// about rows it never covered.
+/// moves them without the server saying anything.
 pub(crate) struct GutterSeverityCache {
     pub(crate) version: u64,
     buffer_version: u64,
-    rows: Range<u32>,
     pub(crate) map: Arc<RowSeverity>,
 }
 
@@ -1112,24 +1098,6 @@ impl RowSeverity {
             .flat_map(|(run, _)| run.start.max(rows.start)..run.end.min(rows.end))
             .collect()
     }
-}
-
-/// The bytes `rows` covers, for a query that names rows but searches offsets.
-///
-/// The end runs to the start of the row past the window, so a diagnostic
-/// reaching the window's last row is kept whatever column it ends on.
-fn row_byte_range(
-    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
-    rows: &Range<u32>,
-) -> Range<usize> {
-    let rope = snapshot.rope();
-    let start = rope.point_to_offset(Point::new(rows.start, 0));
-    let end = if rows.end >= snapshot.line_count() {
-        rope.len()
-    } else {
-        rope.point_to_offset(Point::new(rows.end, 0))
-    };
-    start..end.max(start)
 }
 
 /// Build the row severities from resolved diagnostic spans, the worst severity
@@ -2836,6 +2804,52 @@ mod tests {
             severity_rows(&mut h),
             vec![2],
             "and the mark rides the inserted line down with its text",
+        );
+    }
+
+    /// The severity map covers the whole buffer, so a window that starts below
+    /// a wrapped line still marks a diagnostic in view.
+    #[test]
+    fn the_severity_map_covers_the_whole_buffer() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/severity-wrap");
+        let path = root.join("a.txt");
+        let text = format!("{}\n{}", "a".repeat(400), "x\n".repeat(30));
+        h.fake_fs().insert_file(&path, text.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.seed_diagnostics(&path, vec![diag(2, DiagnosticSeverity::ERROR)]);
+        let _ = h.stoat.render();
+
+        let severity_rows_from = |h: &mut crate::test_harness::TestHarness, scroll_row: u32| {
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .scroll_row = scroll_row;
+            let _ = h.stoat.render();
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .gutter_severity_cache
+                .as_ref()
+                .expect("built by the paint")
+                .map
+                .rows_in(0..u32::MAX)
+        };
+        let below_the_wrap = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .display_map
+            .snapshot()
+            .buffer_to_display(Point::new(1, 0))
+            .row;
+
+        assert_eq!(
+            (
+                below_the_wrap > 1,
+                severity_rows_from(&mut h, below_the_wrap),
+                severity_rows_from(&mut h, 0)
+            ),
+            (true, vec![2], vec![2]),
+            "the wrap moves buffer row 1 down, and the map names row 2 at either scroll",
         );
     }
 
