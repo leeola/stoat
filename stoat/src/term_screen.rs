@@ -39,10 +39,18 @@ use std::{
 ///
 /// `fg`/`bg` are `None` when the cell uses the terminal's default color, so the
 /// renderer supplies the pane's own default rather than a baked-in one. Mirrors
-/// the Run pane's cell shape so a term pane renders through the same path.
+/// the Run pane's cell shape, plus [`Self::marks`], so a term pane renders
+/// through the same path.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StyledCell {
     pub ch: char,
+    /// The combining marks drawn over [`Self::ch`], in the order they followed
+    /// it. Empty for nearly every cell.
+    ///
+    /// Joiners and variation selectors stay out. Painted into the cell's
+    /// symbol, they change its measured width, so the column after it draws
+    /// nothing.
+    pub marks: SmallVec<[char; 2]>,
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     pub modifiers: Modifier,
@@ -52,6 +60,7 @@ impl Default for StyledCell {
     fn default() -> Self {
         StyledCell {
             ch: ' ',
+            marks: SmallVec::new(),
             fg: None,
             bg: None,
             modifiers: Modifier::empty(),
@@ -561,6 +570,18 @@ impl Dimensions for GridSize {
 fn convert_cell(cell: &TermCell) -> StyledCell {
     StyledCell {
         ch: painted_char(cell.c),
+        marks: cell
+            .zerowidth()
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|ch| {
+                !matches!(
+                    ch,
+                    '\u{200c}' | '\u{200d}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}'
+                )
+            })
+            .collect(),
         fg: map_color(cell.fg),
         bg: map_color(cell.bg),
         modifiers: map_modifiers(cell.flags),
@@ -690,6 +711,27 @@ mod tests {
         term.feed(b"ab\r\ncd");
         assert_eq!(text_row(&term, 0), "ab");
         assert_eq!(text_row(&term, 1), "cd");
+    }
+
+    /// A combining mark rides the cell of the character before it. A variation
+    /// selector is no mark, since it only picks how that character presents.
+    #[test]
+    fn a_combining_mark_rides_its_base_cell() {
+        let mut term = TermScreen::new(4, 10);
+        term.feed("e\u{301}x\u{2764}\u{fe0f}".as_bytes());
+        let row = term.row(0);
+
+        assert_eq!(
+            (
+                row[0].ch,
+                row[0].marks.as_slice(),
+                row[1].ch,
+                row[2].ch,
+                row[2].marks.as_slice()
+            ),
+            ('e', ['\u{301}'].as_slice(), 'x', '\u{2764}', [].as_slice()),
+            "the accent stays with its letter, and the selector is left out",
+        );
     }
 
     /// A tab leaves its control character in the cell where it started, and a

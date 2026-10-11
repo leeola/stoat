@@ -41,6 +41,7 @@ pub(crate) fn render_term_pane(
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION);
 
     let mut cells = Vec::new();
+    let mut symbol = String::new();
     for row_idx in 0..rows {
         let y = area.y + row_idx as u16;
         term.row_into(row_idx, &mut cells);
@@ -57,7 +58,16 @@ pub(crate) fn render_term_pane(
             if selection.is_some_and(|sel| sel.contains(row_idx, col)) {
                 style = style.patch(selection_style);
             }
-            buf[(x, y)].set_char(cell.ch).set_style(style);
+            let target = &mut buf[(x, y)];
+            if cell.marks.is_empty() {
+                target.set_char(cell.ch);
+            } else {
+                symbol.clear();
+                symbol.push(cell.ch);
+                symbol.extend(&cell.marks);
+                target.set_symbol(&symbol);
+            }
+            target.set_style(style);
         }
     }
 
@@ -75,14 +85,36 @@ pub(crate) fn render_term_pane(
 
 #[cfg(test)]
 mod tests {
+    use super::render_term_pane;
     use crate::{
         host::{FakeTerminalSession, TerminalSession},
         pane::{Axis, View},
         term_screen::TermScreen,
         term_session::TermSession,
+        theme::Theme,
         Stoat,
     };
+    use ratatui::{buffer::Buffer, layout::Rect};
     use std::sync::Arc;
+
+    /// A cell with a combining mark paints its character and the mark as one
+    /// symbol, so the accent shows on screen as it does in a copy.
+    #[test]
+    fn a_combining_mark_paints_with_its_base() {
+        let session: Arc<dyn TerminalSession> = Arc::new(FakeTerminalSession::new());
+        let mut agent = TermSession::new(TermScreen::new(2, 4), session, TermSession::next_token());
+        agent.term.feed("e\u{301}x".as_bytes());
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+
+        render_term_pane(&agent, &Theme::empty(), area, false, &mut buf);
+
+        assert_eq!(
+            (buf[(0, 0)].symbol(), buf[(1, 0)].symbol()),
+            ("e\u{301}", "x"),
+            "the accent shares its letter's cell, and the next cell keeps its own",
+        );
+    }
 
     #[test]
     fn snapshot_term_pane_composited_into_split() {
