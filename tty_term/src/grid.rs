@@ -13,7 +13,7 @@ use std::{
     ops::{BitOr, BitOrAssign, Range},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex, PoisonError,
     },
 };
 use stoatty_protocol::command::{BarCommand, PolylineCommand, SketchCommand, TextRunCommand};
@@ -44,6 +44,15 @@ static NEXT_GRID_ID: AtomicU64 = AtomicU64::new(0);
 /// id across a redeclaration of that pool, which starts the pool's own counts
 /// again, so a stamp it saw before must never come back.
 static NEXT_PAGE_STAMP: AtomicU64 = AtomicU64::new(0);
+
+/// The combining-mark sequences that [`MarkId`]s name, one table for the whole
+/// process. Entry `i` holds the sequence of `MarkId(i + 1)`.
+///
+/// One table rather than one per grid, because cells move between grids. The
+/// projection copies them into the live grid, a fill into a page, and a pool
+/// into its composite, and a per-grid table leaves a copied id naming another
+/// grid's sequence.
+static MARKS: Mutex<Vec<Arc<[char]>>> = Mutex::new(Vec::new());
 
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
@@ -1430,6 +1439,11 @@ struct Page {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Cell {
     pub ch: char,
+    /// The combining marks drawn over [`Self::ch`], held in a process-wide
+    /// table rather than inline.
+    ///
+    /// [`MarkId::NONE`] for a cell with none, which is nearly every cell.
+    pub marks: MarkId,
     pub fg: Rgb,
     pub bg: Rgb,
     pub flags: Flags,
@@ -1474,6 +1488,7 @@ impl Default for Cell {
     fn default() -> Cell {
         Cell {
             ch: ' ',
+            marks: MarkId::NONE,
             fg: Rgb::new(0xcc, 0xcc, 0xcc),
             bg: Rgb::new(0x00, 0x00, 0x00),
             flags: Flags::empty(),
@@ -1504,6 +1519,68 @@ pub struct BorderId(u16);
 impl BorderId {
     /// The id of a cell with no borders, which every cell starts at.
     pub const NONE: BorderId = BorderId(0);
+}
+
+/// The combining marks a cell draws over its character, as an id into a
+/// process-wide table.
+///
+/// A mark is rare against the thousands of cells a screen holds, so a cell
+/// keeps a one-byte id rather than the marks themselves. The same sequence
+/// interns to the same id, so two cells compare equal when their marks do.
+///
+/// The table holds at most 255 sequences and never frees one. Past that,
+/// [`Self::intern`] answers [`Self::NONE`], so a cell drops its marks rather
+/// than the table growing with a stream of distinct ones.
+///
+/// See also:
+/// - [`Cell::marks`] for where a cell holds one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct MarkId(u8);
+
+impl MarkId {
+    /// The id of a cell with no marks, which every cell starts at.
+    pub const NONE: MarkId = MarkId(0);
+
+    /// The id of `marks`, interned on first sight.
+    ///
+    /// [`Self::NONE`] for an empty slice, and for a new sequence once the table
+    /// is full. Takes a process-wide lock.
+    pub fn intern(marks: &[char]) -> MarkId {
+        let mut table = MARKS.lock().unwrap_or_else(PoisonError::into_inner);
+        intern_into(&mut table, marks)
+    }
+
+    /// The marks this id names, in the order they followed the character.
+    ///
+    /// Empty for [`Self::NONE`]. Takes a process-wide lock.
+    pub fn chars(self) -> Arc<[char]> {
+        let Some(slot) = usize::from(self.0).checked_sub(1) else {
+            return Arc::default();
+        };
+        let table = MARKS.lock().unwrap_or_else(PoisonError::into_inner);
+        table.get(slot).cloned().unwrap_or_default()
+    }
+}
+
+/// The id `marks` holds in `table`, appending the sequence when it is new.
+///
+/// The table logic of [`MarkId::intern`], apart from the process-wide table,
+/// so a test fills a table of its own to the cap without exhausting the one
+/// every other test shares.
+fn intern_into(table: &mut Vec<Arc<[char]>>, marks: &[char]) -> MarkId {
+    if marks.is_empty() {
+        return MarkId::NONE;
+    }
+
+    let slot = match table.iter().position(|held| **held == *marks) {
+        Some(slot) => slot,
+        None if table.len() < usize::from(u8::MAX) => {
+            table.push(Arc::from(marks));
+            table.len() - 1
+        },
+        None => return MarkId::NONE,
+    };
+    MarkId((slot + 1) as u8)
 }
 
 /// Which of a cell's four edges a border is being stamped on.
@@ -2125,9 +2202,9 @@ impl BitOrAssign for Flags {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid, HashMap, Icon,
-        IconKind, LineSummary, Minimap, MinimapRun, MinimapStrip, Overlay, PagePool, Polyline, Rgb,
-        Rgba, Scale, ScrollRegion, TextRun,
+        intern_into, Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid,
+        HashMap, Icon, IconKind, LineSummary, MarkId, Minimap, MinimapRun, MinimapStrip, Overlay,
+        PagePool, Polyline, Rgb, Rgba, Scale, ScrollRegion, TextRun,
     };
 
     /// The rows the slide vacates have to come back blank rather than holding
@@ -2443,6 +2520,35 @@ mod tests {
             size_of::<Cell>(),
             20,
             "grew past its budget; hold rare attributes out of line",
+        );
+    }
+
+    #[test]
+    fn interning_reuses_a_sequence_and_answers_none_once_full() {
+        let mut table = Vec::new();
+        let acute = intern_into(&mut table, &['\u{301}']);
+        let pairs =
+            ('\u{310}'..='\u{31f}').flat_map(|a| ('\u{320}'..='\u{32f}').map(move |b| [a, b]));
+        let ids: Vec<MarkId> = pairs.map(|pair| intern_into(&mut table, &pair)).collect();
+
+        assert_eq!(
+            (
+                acute,
+                intern_into(&mut table, &['\u{301}']),
+                intern_into(&mut table, &[]),
+                ids[253],
+                ids[254],
+                table.len(),
+            ),
+            (
+                MarkId(1),
+                MarkId(1),
+                MarkId::NONE,
+                MarkId(255),
+                MarkId::NONE,
+                255
+            ),
+            "a held sequence keeps its id, and a new one past 255 gets none",
         );
     }
 

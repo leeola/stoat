@@ -17,7 +17,8 @@ use stoatty_protocol::command::{
 };
 use stoatty_term::{
     grid::{
-        whole_row, Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, Sketch, TextRun, UnderlineStyle,
+        whole_row, Cell, Grid, MarkId, Overlay, Rgb, Scale, ScrollRegion, Sketch, TextRun,
+        UnderlineStyle,
     },
     term::Damage,
 };
@@ -923,6 +924,42 @@ fn a_word_shapes_its_ligature_the_same_beside_other_words() {
             .expect("the lone arrow was cached"),
         "the arrow shapes to the same glyphs with or without words beside it"
     );
+}
+
+/// A combining mark shapes with the character it rides, so the font composes
+/// the accented glyph where it has one, and `e` with U+0301 draws as `é` does.
+/// The cell before it stays out of that run, or the mark is lost.
+#[test]
+fn a_combining_mark_draws_with_its_base() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let mut drawn = |accented: char, marks: MarkId| {
+        let mut grid = Grid::new(1, 2);
+        grid.get_mut(0, 0).ch = 'a';
+        let cell = grid.get_mut(0, 1);
+        (cell.ch, cell.marks) = (accented, marks);
+
+        let covers = |_: char| true;
+        let shaping = RowShaping {
+            primary: font::shape_family(Some("JetBrains Mono")),
+            covers: &covers,
+            reshapes: &|_| true,
+            cursor_cell: None,
+        };
+        let mut pending = Vec::new();
+        pass.rasterize_row(&device, &queue, &grid, 0, &shaping, &mut pending);
+        pending
+            .into_iter()
+            .map(|glyph| (glyph.col, glyph.source))
+            .collect::<Vec<_>>()
+    };
+
+    let marked = drawn('e', MarkId::intern(&['\u{301}']));
+    assert_eq!(
+        marked,
+        drawn('\u{e9}', MarkId::NONE),
+        "the precomposed accent"
+    );
+    assert_ne!(marked, drawn('e', MarkId::NONE), "not the bare letter");
 }
 
 /// The work a screen of prose costs, counted rather than timed: every

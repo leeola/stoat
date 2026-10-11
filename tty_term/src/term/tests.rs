@@ -7,9 +7,9 @@ use super::{
 };
 use crate::{
     grid::{
-        Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
-        MinimapView, Overlay, Panel, PanelShadow, Polyline, Rgb, Scale, ScrollRegion, Sketch,
-        TextRun, UnderlineStyle,
+        Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, MarkId,
+        Minimap, MinimapView, Overlay, Panel, PanelShadow, Polyline, Rgb, Scale, ScrollRegion,
+        Sketch, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -1111,6 +1111,29 @@ fn project_reports_rows_scrolled() {
     // A projection with no new output reports no scroll.
     let (_, scrolled, _) = terminal.project(&mut grid);
     assert_eq!(scrolled, 0, "no further scroll");
+}
+
+/// A combining mark rides the cell of the character before it, so an accent
+/// written in its decomposed form draws over its letter. A variation selector
+/// is no mark, since it only picks how the character before it presents.
+#[test]
+fn a_combining_mark_rides_its_base_cell() {
+    let mut terminal = Terminal::new(2, 8, Theme::default());
+    let mut grid = Grid::new(2, 8);
+    terminal.advance("e\u{301}\u{2764}\u{fe0f}".as_bytes());
+    terminal.project(&mut grid);
+
+    let (accented, heart) = (grid.get(0, 0), grid.get(0, 1));
+    assert_eq!(
+        (
+            accented.ch,
+            &accented.marks.chars()[..],
+            heart.ch,
+            heart.marks
+        ),
+        ('e', &['\u{301}'][..], '\u{2764}', MarkId::NONE),
+        "the accent stays with its letter, and the selector is left out",
+    );
 }
 
 /// A line of output damages the whole terminal, but the screen only moved

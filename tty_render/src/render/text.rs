@@ -25,7 +25,7 @@ use cosmic_text::{
 use rustc_hash::FxHashMap;
 use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
-    grid::{Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
+    grid::{Cell, Flags, Grid, MarkId, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -3672,7 +3672,8 @@ impl TextPass {
     ///
     /// The per-row body of [`Self::rasterize_visible`]: same-style primary-covered
     /// runs shape together so ligatures form, while scaled glyphs, characters the
-    /// primary font lacks, and the cursor cell shape on their own. `shaping`
+    /// primary font lacks, and the cursor cell shape on their own. A cell with
+    /// combining marks shapes alone too, as one run with its marks. `shaping`
     /// carries the primary family, its coverage test, and the cursor cell,
     /// resolved once by the caller.
     fn rasterize_row(
@@ -3695,6 +3696,47 @@ impl TextPass {
                 col += 1;
                 continue;
             };
+
+            // One run lets the font compose a precomposed glyph where it has
+            // one. Every glyph the run gives lands on this cell's column.
+            if scale == 1 && cell.marks != MarkId::NONE {
+                run_text.clear();
+                run_text.push(cell.ch);
+                run_text.extend(cell.marks.chars().iter());
+
+                let font_system = &mut self.font_system;
+                let metrics = self.face.metrics;
+                let primary = shaping.primary;
+                let shaped =
+                    font::shape_run_cached(&mut self.face.run_shape_cache, &run_text, |scratch| {
+                        font::shape_run(scratch, font_system, &run_text, metrics, primary)
+                    });
+
+                let (fg, _) = cell.draw_colors();
+                for &(_, key) in shaped {
+                    if let Some(info) = self.atlas.get_or_insert(
+                        device,
+                        queue,
+                        &mut self.font_system,
+                        &mut self.swash_cache,
+                        key,
+                    ) {
+                        pending.push(PendingGlyph {
+                            row,
+                            col,
+                            source: GlyphSource::Font(key),
+                            fg,
+                            scale: 1.0,
+                            cell_fill: false,
+                            wide: cell.flags.contains(Flags::WIDE),
+                            info,
+                            resolved_epoch: self.atlas.content_epoch(),
+                        });
+                    }
+                }
+                col += 1;
+                continue;
+            }
 
             // With ligatures off, every cell is shaped on its own. A scaled glyph
             // or a character the primary font lacks (icon, CJK) always is, through
@@ -3724,6 +3766,7 @@ impl TextPass {
             while end < grid.cols() {
                 let next = *grid.get(row, end);
                 let groups = cell_glyph_scale(&next) == Some(1)
+                    && next.marks == MarkId::NONE
                     && next.fg == cell.fg
                     && next.bg == cell.bg
                     && next.flags == cell.flags

@@ -7,7 +7,7 @@
 
 use super::{Cursor, CursorShape, ResponseSink, PALETTE_LEN};
 use crate::{
-    grid::{whole_row, BorderId, Cell, Flags, Grid, Rgb, RowDamage, Scale, UnderlineStyle},
+    grid::{whole_row, BorderId, Cell, Flags, Grid, MarkId, Rgb, RowDamage, Scale, UnderlineStyle},
     theme::Theme,
 };
 use alacritty_terminal::{
@@ -236,6 +236,7 @@ pub(super) fn project_cell(
 
     Cell {
         ch: cell.c,
+        marks: marks_of(cell),
         fg,
         bg: resolve(cell.bg, overrides, theme, palette),
         flags: map_flags(cell.flags),
@@ -246,6 +247,28 @@ pub(super) fn project_cell(
         border_id: BorderId::NONE,
         scale: Scale::Single,
     }
+}
+
+/// The combining marks `cell` draws over its character.
+///
+/// Joiners and variation selectors stay out. They change how an emoji
+/// sequence presents rather than draw a mark, and a cell draws the base glyph
+/// of such a sequence.
+fn marks_of(cell: &TermCell) -> MarkId {
+    let Some(zerowidth) = cell.zerowidth() else {
+        return MarkId::NONE;
+    };
+    let marks: Vec<char> = zerowidth
+        .iter()
+        .copied()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '\u{200c}' | '\u{200d}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}'
+            )
+        })
+        .collect();
+    MarkId::intern(&marks)
 }
 
 /// Resolve a terminal [`Color`] to concrete channels.
