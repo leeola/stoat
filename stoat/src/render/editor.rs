@@ -882,14 +882,17 @@ pub(crate) fn paint_goto_word_labels(
 
 /// The wrap width `mode` gives a text area `text_width` columns wide.
 ///
-/// [`WrapMode::Bounded`] caps the width at `wrap_column`. [`WrapMode::None`]
-/// still answers a width, [`MAX_UNWRAPPED_COLUMNS`], which keeps a huge line's
-/// rows bounded.
+/// [`WrapMode::EditorWidth`] leaves the last column of the area free. A row
+/// that the wrap fills puts its newline cell one column past its text, and the
+/// end-of-line caret shows on that cell. [`WrapMode::Bounded`] does the same,
+/// and caps the width at `wrap_column`. [`WrapMode::None`] still answers a
+/// width, [`MAX_UNWRAPPED_COLUMNS`], which keeps a huge line's rows bounded.
 fn wrap_width_for(mode: WrapMode, text_width: u32, wrap_column: u32) -> Option<u32> {
+    let width = text_width.saturating_sub(1).max(1);
     match mode {
         WrapMode::None => Some(MAX_UNWRAPPED_COLUMNS),
-        WrapMode::EditorWidth => Some(text_width.max(1)),
-        WrapMode::Bounded => Some(text_width.max(1).min(wrap_column)),
+        WrapMode::EditorWidth => Some(width),
+        WrapMode::Bounded => Some(width.min(wrap_column)),
     }
 }
 
@@ -3986,9 +3989,16 @@ mod tests {
         let area = Rect::new(0, 0, 40, 10);
         let (width, display_rows, buffer_rows) =
             wrap_after_render(&mut h.stoat, area, WrapMode::EditorWidth, 80);
-        assert_eq!(width, Some(40), "editor_width wraps at the pane text width");
+        assert_eq!(
+            width,
+            Some(39),
+            "editor_width wraps one column short of the pane text width"
+        );
         assert_eq!(buffer_rows, 1, "the buffer is one long line");
-        assert_eq!(display_rows, 5, "200 columns wrap into five 40-column rows");
+        assert_eq!(
+            display_rows, 6,
+            "200 columns wrap into six rows of up to 39"
+        );
     }
 
     #[test]
@@ -4019,7 +4029,7 @@ mod tests {
             wrap_after_render(&mut h.stoat, area, WrapMode::EditorWidth, 80);
         assert_eq!(
             on_width,
-            Some(40),
+            Some(39),
             "clearing the override follows the frame again"
         );
         assert!(
@@ -4943,6 +4953,64 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED),
             "the block paints on the buffer-end cell",
+        );
+    }
+
+    /// A cursor on the newline of a line as wide as the text area still draws
+    /// a block.
+    ///
+    /// The wrap keeps the last column free, so the line breaks one character
+    /// early and its newline cell lands inside the area, not one column past
+    /// its right edge.
+    #[test]
+    fn a_cursor_after_a_full_width_line_draws_a_block() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/full-width");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"abcdefghijkl\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        for _ in 0..12 {
+            dispatch(&mut h.stoat, &MoveRight);
+        }
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 12, 4);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            0.0,
+            DiffDials::shipped(),
+            WrapMode::EditorWidth,
+            80,
+        );
+
+        assert!(
+            buf[(1, 1)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "the block paints on the newline cell after the wrapped l",
         );
     }
 
