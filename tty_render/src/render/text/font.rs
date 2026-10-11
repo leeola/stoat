@@ -18,6 +18,7 @@ use ttf_parser::{
     opentype_layout::{ClassDefinition, Coverage},
     Face as TtfFace,
 };
+use unicode_width::UnicodeWidthChar;
 
 /// Family name of the bundled text face, registered by [`load_bundled_fonts`].
 ///
@@ -31,6 +32,20 @@ pub(super) const BUNDLED_FAMILY: &str = "JetBrains Mono";
 /// programming fonts omit, so it serves as the symbol fallback ahead of any
 /// system font (see [`glyph_family`]).
 pub(super) const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// Color emoji families, in the order [`glyph_family`] tries them for a wide
+/// character.
+///
+/// cosmic-text's own fallback list puts a monochrome face such as DejaVu Sans
+/// ahead of these, so an emoji left to it draws as an outline. Most desktops
+/// install one of them. Linux desktops ship Noto, macOS ships Apple's, Windows
+/// ships Segoe, and Firefox brings Twemoji Mozilla.
+pub(super) const EMOJI_FAMILIES: [&str; 4] = [
+    "Noto Color Emoji",
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Twemoji Mozilla",
+];
 
 /// Words a [`CoveredSet`] holds, one bit per Unicode codepoint.
 const UNICODE_WORDS: usize = 0x11_0000 / 64;
@@ -754,9 +769,16 @@ pub(super) fn run_text_and_columns_into(
     }
 }
 
-/// The cosmic-text family to shape `ch` with: `primary` when it carries the
-/// glyph, otherwise the bundled symbols font so Private-Use-Area icons resolve
-/// to it ahead of cosmic-text's system fallback.
+/// The cosmic-text family to shape `ch` with, and whether any face covers it.
+///
+/// `primary` shapes what it carries. The bundled symbols font comes next, so
+/// Private-Use-Area icons resolve to it ahead of cosmic-text's system fallback.
+///
+/// A wide character then takes the first of [`EMOJI_FAMILIES`] that covers it.
+/// An emoji with default emoji presentation is East Asian Wide, so the width
+/// finds it without an emoji table, and that fallback lists a monochrome face
+/// ahead of the color ones. A wide character no emoji face covers, such as a
+/// CJK ideograph, goes on to the fallback walk under the symbols family.
 pub(super) fn glyph_family<'a>(
     font_system: &mut FontSystem,
     ch: char,
@@ -770,6 +792,15 @@ pub(super) fn glyph_family<'a>(
     let symbols = Family::Name(SYMBOLS_FAMILY);
     if family_covers(font_system, symbols, ch) {
         return (symbols, true);
+    }
+
+    if UnicodeWidthChar::width(ch) == Some(2) {
+        for name in EMOJI_FAMILIES {
+            let emoji = Family::Name(name);
+            if family_covers(font_system, emoji, ch) {
+                return (emoji, true);
+            }
+        }
     }
 
     // Both bundled charmaps missed, which is the only case worth the set. A
@@ -1107,8 +1138,8 @@ mod tests {
         build_font_system, bundled_database, bundled_font_system_with_locale, font_covers,
         glyph_family, resolve_primary_family, resolve_primary_font, run_text_and_columns_into,
         shape_char, shape_family, shape_run, shape_run_cached, shape_words, substitution_rules,
-        CoveredSet, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, RUN_SHAPE_CACHE_CAP,
-        SYMBOLS_FAMILY,
+        CoveredSet, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, EMOJI_FAMILIES,
+        RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -1215,6 +1246,31 @@ mod tests {
             glyph_family(&mut font_system, '\u{e0b6}', primary, &mut None),
             (Family::Name(SYMBOLS_FAMILY), true),
             "a Private-Use-Area powerline glyph the primary lacks routes to the symbols font"
+        );
+    }
+
+    /// The fallback walk lists a monochrome face ahead of the color emoji
+    /// faces, so a wide emoji asks for a color face by name. A wide character
+    /// no emoji face covers still takes the walk. A system with no emoji face
+    /// installed has nothing to check.
+    #[test]
+    fn a_wide_emoji_shapes_with_a_color_emoji_face() {
+        let mut font_system = build_font_system();
+        let Some(found) = EMOJI_FAMILIES
+            .into_iter()
+            .find(|&name| face_of(&font_system, Family::Name(name)).is_some())
+        else {
+            return;
+        };
+        let primary = Family::Name(BUNDLED_FAMILY);
+
+        assert_eq!(
+            (
+                glyph_family(&mut font_system, '\u{1F600}', primary, &mut None),
+                glyph_family(&mut font_system, '\u{4E2D}', primary, &mut None).0,
+            ),
+            ((Family::Name(found), true), Family::Name(SYMBOLS_FAMILY)),
+            "the emoji takes the color face, and the ideograph keeps the walk",
         );
     }
 

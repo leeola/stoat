@@ -962,6 +962,46 @@ fn a_combining_mark_draws_with_its_base() {
     assert_ne!(marked, drawn('e', MarkId::NONE), "not the bare letter");
 }
 
+/// A wide emoji draws from a color face, so its glyph lands in the color atlas
+/// rather than as a monochrome mask. A system with no emoji face installed has
+/// nothing to check.
+#[test]
+fn a_wide_emoji_draws_in_color() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let installed = pass.font_system.db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(family, _)| font::EMOJI_FAMILIES.contains(&family.as_str()))
+    });
+    if !installed {
+        return;
+    }
+
+    let mut grid = Grid::new(1, 2);
+    grid.get_mut(0, 0).ch = '\u{1F600}';
+    // What the bundled primary covers, so the emoji takes the per-cell path
+    // that picks its family, as it does for a real primary.
+    let covers = |ch: char| ch.is_ascii();
+    let shaping = RowShaping {
+        primary: font::shape_family(Some("JetBrains Mono")),
+        covers: &covers,
+        reshapes: &|_| true,
+        cursor_cell: None,
+    };
+    let mut pending = Vec::new();
+    pass.rasterize_row(&device, &queue, &grid, 0, &shaping, &mut pending);
+
+    assert_eq!(
+        pending
+            .iter()
+            .filter(|glyph| glyph.col == 0)
+            .map(|glyph| glyph.info.kind)
+            .collect::<Vec<_>>(),
+        [AtlasKind::Color],
+        "the emoji's one glyph is a color bitmap",
+    );
+}
+
 /// The work a screen of prose costs, counted rather than timed: every
 /// distinct run is shaped exactly once, so the characters the cache holds
 /// are the characters that were shaped.
