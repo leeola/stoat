@@ -628,6 +628,13 @@ pub(crate) struct FrameProjection {
     pub(crate) cursor: Cursor,
     /// Rows that live output pushed off the top since the last projection.
     pub(crate) scroll_delta: usize,
+    /// Rows the projection slid the grid by, which the renderer's row caches
+    /// rotate by.
+    ///
+    /// Differs from [`Self::scroll_delta`] for a scroll that grows no history,
+    /// such as one on the alternate screen, which the projection finds by
+    /// probe. See [`Terminal::slid_rows`].
+    pub(crate) slid_rows: isize,
     pub(crate) damage: Damage,
     pub(crate) decoration_damage: Damage,
     pub(crate) display_offset: usize,
@@ -682,16 +689,17 @@ pub(crate) fn project_frame(
     // Zero scroll is what the projection reports at a non-zero
     // offset anyway, the viewport being pinned to its content,
     // so standing in for it costs nothing.
-    let (cursor, scroll_delta, damage) = if display_offset > 0 {
+    let (cursor, scroll_delta, slid_rows, damage) = if display_offset > 0 {
         let changed = terminal.take_damage_flag();
         let damage = if changed {
             Damage::Full
         } else {
             Damage::Partial(Vec::new())
         };
-        (terminal.cursor(), 0, damage)
+        (terminal.cursor(), 0, 0, damage)
     } else {
-        terminal.project(grid)
+        let (cursor, scroll_delta, damage) = terminal.project(grid);
+        (cursor, scroll_delta, terminal.slid_rows(), damage)
     };
     let decoration_damage = terminal.take_decoration_damage();
     let damage = forced_damage(force_full, damage);
@@ -857,6 +865,7 @@ pub(crate) fn project_frame(
     FrameProjection {
         cursor,
         scroll_delta,
+        slid_rows,
         damage,
         decoration_damage,
         display_offset,
@@ -2745,6 +2754,29 @@ mod tests {
             revealed(&out),
             [0.5, 1.0, 0.0],
             "drawing, drawn, and still waiting"
+        );
+    }
+
+    /// The row caches rotate by the slide, so a frame has to carry the slide
+    /// the probe found even when the scroll grew no history.
+    #[test]
+    fn an_alt_screen_scroll_frame_carries_the_probed_slide() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+        let mut frame = PoolFrame::default();
+        let mut project = |terminal: &mut Terminal| {
+            project_frame(terminal, &mut grid, &mut frame, false, EASE_BASELINE_FRAME)
+        };
+
+        terminal.advance(b"\x1b[?1049haaa\r\nbbb\r\nccc\r\nddd");
+        project(&mut terminal);
+        terminal.advance(b"\r\neee");
+        let projection = project(&mut terminal);
+
+        assert_eq!(
+            (projection.scroll_delta, projection.slid_rows),
+            (0, 1),
+            "no history grew, and the grid slid one row"
         );
     }
 }

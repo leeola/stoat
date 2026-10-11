@@ -2649,6 +2649,7 @@ fn redraw(state: &mut State) {
     let FrameProjection {
         cursor,
         scroll_delta,
+        slid_rows,
         damage,
         decoration_damage,
         display_offset,
@@ -2852,7 +2853,7 @@ fn redraw(state: &mut State) {
                     // really changed, so the row caches have to
                     // rotate to match or the clean ones redraw from
                     // their pre-slide instances.
-                    scrolled_rows: scroll_delta as isize,
+                    scrolled_rows: slid_rows,
                     sketch_reveals: &state.sketch_reveals,
                 },
             );
@@ -2958,7 +2959,7 @@ fn redraw(state: &mut State) {
                 },
                 damage: &damage,
                 decoration_damage: &decoration_damage,
-                scrolled_rows: scroll_delta as isize,
+                scrolled_rows: slid_rows,
                 sketch_reveals: &state.sketch_reveals,
             },
             &composites,

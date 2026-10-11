@@ -417,6 +417,9 @@ pub struct Terminal {
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
+    /// Rows the last [`Self::project`] slid its grid by, which
+    /// [`Self::slid_rows`] reports.
+    last_slide: isize,
     /// Smooth-scroll pools keyed by id: each a declared region plus the recycled
     /// pages buffered around its scroll target and that target itself.
     ///
@@ -1083,6 +1086,7 @@ impl Terminal {
             last_selection: None,
             decoration_damage: Vec::new(),
             last_history: 0,
+            last_slide: 0,
             pools: BTreeMap::new(),
             next_pool_serial: 0,
             images: images::ImageStore::new(),
@@ -3097,6 +3101,22 @@ impl Terminal {
         self.term.mode().contains(TermMode::FOCUS_IN_OUT)
     }
 
+    /// The rows the last [`Self::project`] slid its grid by, positive up the
+    /// screen.
+    ///
+    /// The projection slides the grid to where the content moved before it
+    /// compares rows, so its damage names only the rows that differ after the
+    /// slide. A cache kept by row has to rotate by this much, or its clean rows
+    /// draw what they held before the slide.
+    ///
+    /// This differs from the scroll count that `project` returns, which counts
+    /// only the history the screen grew. An alternate-screen scroll, a scroll
+    /// inside a region, and any scroll once the history is full grow no history,
+    /// and the projection finds those slides by probe.
+    pub fn slid_rows(&self) -> isize {
+        self.last_slide
+    }
+
     /// Copy the parsed screen onto `grid` and return the cursor, the number of
     /// rows the content scrolled since the previous call, and which rows changed.
     ///
@@ -3116,6 +3136,10 @@ impl Terminal {
     /// not account for the stoatty APC overlays (borders, scales, popovers, icons,
     /// bars, line layout, text runs) re-stamped every projection, so a consumer
     /// caching by row must treat those as able to change any row.
+    ///
+    /// See also:
+    /// - [`Self::slid_rows`] for the rows this call slid `grid` by, which a cache kept by row
+    ///   rotates by in place of the scroll delta.
     pub fn project(&mut self, grid: &mut Grid) -> (Cursor, usize, Damage) {
         let rows = self.term.screen_lines();
         let cols = self.term.columns();
@@ -3126,6 +3150,7 @@ impl Terminal {
         }
 
         self.output_since_project = false;
+        self.last_slide = 0;
         // Nothing has damaged the terminal since the last projection, so there is
         // nothing to read out of it. Reading anyway would report the cursor's row
         // as dirty, which it always does, and buy a reprojection and a re-upload
@@ -3227,6 +3252,7 @@ impl Terminal {
             };
 
             grid.scroll_by(shift as isize);
+            self.last_slide = shift as isize;
             dirty = Damage::Partial(row_bounds(&mut self.row_flags_spare, rows));
         }
 

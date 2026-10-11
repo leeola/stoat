@@ -1131,6 +1131,28 @@ fn a_scroll_reports_only_the_rows_that_changed() {
     assert_eq!(row_text(3), "eee     ", "the new row holds the new output");
 }
 
+#[test]
+fn a_scroll_that_grows_history_reports_its_slide() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let mut grid = Grid::new(4, 8);
+    terminal.project(&mut grid);
+
+    terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne");
+    let (_, scrolled, _) = terminal.project(&mut grid);
+    assert_eq!(
+        (scrolled, terminal.slid_rows()),
+        (1, 1),
+        "the slide follows the one row of history the output grew"
+    );
+
+    let (_, scrolled, _) = terminal.project(&mut grid);
+    assert_eq!(
+        (scrolled, terminal.slid_rows()),
+        (0, 0),
+        "a projection with no new output slides nothing"
+    );
+}
+
 /// The alternate screen has no scrollback to grow, so a scroll there
 /// reports no movement at all and the shift has to be found by probe.
 ///
@@ -1151,6 +1173,7 @@ fn an_alt_screen_scroll_reports_only_the_rows_that_changed() {
     let (_, scrolled, damage) = terminal.project(&mut grid);
 
     assert_eq!(scrolled, 0, "the alternate screen grows no history");
+    assert_eq!(terminal.slid_rows(), 1, "the slide the probe found");
     let Damage::Partial(rows) = damage else {
         panic!("an alt-screen scroll must not report the whole screen damaged");
     };
