@@ -144,17 +144,9 @@ pub(crate) fn prompt_display(stoat: &mut Stoat) -> Option<SearchPrompt> {
         )
     };
 
-    let offset = stoat
-        .active_workspace_mut()
-        .editors
-        .get_mut(editor_id)
-        .map(|editor| {
-            let display_snapshot = editor.display_map.snapshot();
-            let buf_snapshot = display_snapshot.buffer_snapshot();
-            let head = editor.selections.newest_anchor().head();
-            buf_snapshot.resolve_anchor(&head)
-        })
-        .unwrap_or(text.len());
+    // The caret marks where the next key lands. A mid-text insert cursor is a
+    // one-wide range, and its head is one cluster past that point.
+    let offset = stoat.newest_cursor_offset(editor_id).unwrap_or(text.len());
 
     let cursor = (0..=offset.min(text.len()))
         .rev()
@@ -931,6 +923,28 @@ mod tests {
                 "`{chord}` leaves the menu behind once the prompt closes",
             );
         }
+    }
+
+    /// A mid-text insert cursor is a one-wide range, and its head is a cluster
+    /// past the point where the next key lands. The caret marks that point.
+    #[test]
+    fn prompt_caret_marks_the_insertion_point() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("left");
+
+        let prompt = super::prompt_display(&mut h.stoat).expect("prompt opened");
+        assert_eq!((prompt.text.as_str(), prompt.cursor), ("abc", 2));
+
+        h.type_text("X");
+        let prompt = super::prompt_display(&mut h.stoat).expect("prompt opened");
+        assert_eq!(
+            (prompt.text.as_str(), prompt.cursor),
+            ("abXc", 3),
+            "the key lands at the caret, and the caret stays on c",
+        );
     }
 
     #[test]
