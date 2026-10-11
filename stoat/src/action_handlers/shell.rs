@@ -3,7 +3,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
 };
 use std::ops::Range;
-use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::{Anchor, Bias, LineEnding, Selection, SelectionGoal};
 
 /// Which shell-integration operation the input modal will perform on
 /// submit.
@@ -100,6 +100,9 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
 /// with a newline the selection lacked added that newline itself, so it comes
 /// off along with a carriage return before it. Insert and append pipe nothing
 /// but still measure against their selection.
+///
+/// The answer has LF line endings, the form the buffer holds, so a piece that
+/// an op sizes by it matches the text that lands.
 fn run_shell(
     host: &dyn crate::host::ShellHost,
     cmd: &str,
@@ -125,7 +128,7 @@ fn run_shell(
             text.pop();
         }
     }
-    Ok(text)
+    Ok(LineEnding::normalize(&text).into_owned())
 }
 
 /// Text the first selection covers, or empty where no editor is focused.
@@ -543,6 +546,34 @@ mod tests {
             .selections
             .all_anchors()
             .len()
+    }
+
+    /// The buffer holds LF, so output with CRLF endings lands a byte shorter
+    /// per line than the command printed it. Each selection still covers its
+    /// own output.
+    #[test]
+    fn crlf_output_keeps_each_selection_over_its_own_piece() {
+        let mut h = Stoat::test();
+        install_fake(&h).set_response(
+            "crlf",
+            ShellOutput {
+                stdout: b"X\r\nY".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("ab cd");
+        select_range(&mut h, 0, 2);
+        add_range(&mut h, 3, 5);
+
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("crlf");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(
+            (buffer_text(&mut h), h.selection_spans()),
+            ("X\nY X\nY".to_string(), vec![(0, 3, false), (4, 7, false)]),
+            "each piece is three bytes once its CRLF is LF",
+        );
     }
 
     #[test]
