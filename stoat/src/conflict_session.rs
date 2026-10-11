@@ -858,6 +858,39 @@ mod tests {
     }
 
     #[test]
+    fn a_step_onto_a_parked_file_drops_a_switch_still_aligning() {
+        let mut h = Stoat::test();
+        seed_three_files(&mut h);
+        dispatch_conflict(&mut h);
+        pick(&mut h, &ConflictNextFile);
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictPrevFile);
+        h.settle();
+
+        assert_eq!(
+            (current_file(&h), h.stoat.pending_conflict_file.is_none()),
+            (0, true),
+            "the parked first file stays, and the third file's alignment never lands"
+        );
+    }
+
+    #[test]
+    fn a_close_drops_a_switch_still_aligning() {
+        let mut h = Stoat::test();
+        seed_two_files(&mut h);
+        dispatch_conflict(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
+        crate::action_handlers::dispatch(&mut h.stoat, &CloseConflict);
+        dispatch_conflict(&mut h);
+
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("conflict"),
+            "the open after the close goes through"
+        );
+    }
+
+    #[test]
     fn stepping_between_files_parks_and_restores_picks() {
         let mut h = Stoat::test();
         seed_two_files(&mut h);

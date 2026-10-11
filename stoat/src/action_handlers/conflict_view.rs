@@ -400,7 +400,11 @@ fn stage_line_ending(stages: &ConflictedFile) -> LineEnding {
 
 /// Close the conflict view, restoring the original editor into the focused pane
 /// and disposing the scratch center editor and buffer when unreferenced.
+///
+/// A file switch whose alignment has not landed goes with the view, so it
+/// never lands after the close and never blocks the next open.
 pub(super) fn close_conflict(stoat: &mut Stoat) {
+    drop_pending_switch(stoat);
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.conflict.take() else {
         return;
@@ -585,7 +589,8 @@ pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool, count: usize)
 /// so the view keeps showing the outgoing file until [`pump_conflict_file`]
 /// lands the document. A second switch replaces the first before it lands,
 /// which drops the older alignment rather than showing a file the reader
-/// already stepped past.
+/// already stepped past. A parked target drops a pending switch for the same
+/// reason.
 fn switch_to_file(stoat: &mut Stoat, target: usize) {
     let (file_count, repo, target_path) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
@@ -607,7 +612,10 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
         .as_mut()
         .and_then(|session| session.parked.remove(&target));
     match parked {
-        Some(state) => show_file(stoat, target, state),
+        Some(state) => {
+            drop_pending_switch(stoat);
+            show_file(stoat, target, state);
+        },
         None => {
             let source = ConflictSource::Session {
                 repo,
@@ -617,6 +625,20 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
             };
             spawn_conflict_doc(stoat, source, ConflictIntent::Switch { target });
         },
+    }
+}
+
+/// Drop a file switch whose alignment has not landed.
+///
+/// A pending open stays, because only its landing installs the session the
+/// reader asked for.
+fn drop_pending_switch(stoat: &mut Stoat) {
+    if stoat
+        .pending_conflict_file
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.intent, ConflictIntent::Switch { .. }))
+    {
+        stoat.pending_conflict_file = None;
     }
 }
 
