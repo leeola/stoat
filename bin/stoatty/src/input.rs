@@ -444,20 +444,31 @@ pub(crate) fn sgr_wheel_bytes(lines: i32, col: usize, row: usize, mods: u8) -> V
 
 /// Encode a mouse button press or release at cell (`col`, `row`) as an SGR
 /// (1006) report: `button` (0 left, 1 middle, 2 right) with 1-based
-/// coordinates, terminated by `M` on press and `m` on release. SGR reports the
-/// real button on release, unlike legacy mouse encodings.
-pub(crate) fn sgr_button_bytes(button: u8, pressed: bool, col: usize, row: usize) -> Vec<u8> {
+/// coordinates, ending in `M` on press and `m` on release. SGR reports the real
+/// button on release, unlike legacy mouse encodings.
+///
+/// `mods` are the held-modifier bits from [`sgr_modifier_bits`], summed into
+/// the button code, so a Ctrl-click arrives distinguishable from a plain one.
+pub(crate) fn sgr_button_bytes(
+    button: u8,
+    pressed: bool,
+    col: usize,
+    row: usize,
+    mods: u8,
+) -> Vec<u8> {
     let terminator = if pressed { 'M' } else { 'm' };
-    format!("\x1b[<{button};{};{}{terminator}", col + 1, row + 1).into_bytes()
+    let code = button + mods;
+    format!("\x1b[<{code};{};{}{terminator}", col + 1, row + 1).into_bytes()
 }
 
 /// Encode pointer motion at cell (`col`, `row`) as an SGR (1006) motion report.
 ///
 /// The code is the held button (0 left, 1 middle, 2 right) plus the 32 motion
 /// flag, or code 3 (no button) plus 32 for buttonless any-motion (1003)
-/// tracking, with 1-based coordinates and a trailing `M`.
-pub(crate) fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
-    let code = button.unwrap_or(3) + 32;
+/// tracking, with 1-based coordinates and a trailing `M`. `mods` are the
+/// held-modifier bits from [`sgr_modifier_bits`], summed into the code too.
+pub(crate) fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize, mods: u8) -> Vec<u8> {
+    let code = button.unwrap_or(3) + 32 + mods;
     format!("\x1b[<{code};{};{}M", col + 1, row + 1).into_bytes()
 }
 
@@ -729,12 +740,12 @@ mod tests {
     fn sgr_button_bytes_reports_press_and_release_at_the_cell() {
         // Left button (0) at 1-based cell (3,7)->(4,8): M on press, m on release.
         assert_eq!(
-            sgr_button_bytes(0, true, 3, 7),
+            sgr_button_bytes(0, true, 3, 7, 0),
             b"\x1b[<0;4;8M".to_vec(),
             "press reports the button with a trailing M"
         );
         assert_eq!(
-            sgr_button_bytes(0, false, 3, 7),
+            sgr_button_bytes(0, false, 3, 7, 0),
             b"\x1b[<0;4;8m".to_vec(),
             "release reports the same button with a trailing m"
         );
@@ -743,14 +754,28 @@ mod tests {
     #[test]
     fn sgr_motion_bytes_encodes_button_and_motion_flag() {
         assert_eq!(
-            sgr_motion_bytes(Some(0), 3, 7),
+            sgr_motion_bytes(Some(0), 3, 7, 0),
             b"\x1b[<32;4;8M".to_vec(),
             "held left button (0) drags as code 0+32=32 at 1-based (4,8)"
         );
         assert_eq!(
-            sgr_motion_bytes(None, 0, 0),
+            sgr_motion_bytes(None, 0, 0, 0),
             b"\x1b[<35;1;1M".to_vec(),
             "buttonless any-motion is the no-button code 3+32=35 at the origin"
+        );
+    }
+
+    #[test]
+    fn sgr_button_and_motion_bytes_add_the_modifier_bits() {
+        let ctrl = sgr_modifier_bits(ModifiersState::CONTROL);
+        let alt = sgr_modifier_bits(ModifiersState::ALT);
+        assert_eq!(
+            (
+                sgr_button_bytes(0, true, 3, 7, ctrl),
+                sgr_motion_bytes(Some(0), 3, 7, alt)
+            ),
+            (b"\x1b[<16;4;8M".to_vec(), b"\x1b[<40;4;8M".to_vec()),
+            "ctrl lifts a left press from 0 to 16, and alt a left drag from 32 to 40"
         );
     }
 

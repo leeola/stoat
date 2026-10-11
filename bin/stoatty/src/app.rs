@@ -1842,7 +1842,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     terminal: &state.terminal,
                     pty: &mut state.pty,
                 }
-                .motion(state.pointer_cell, state.pressed_button);
+                .motion(
+                    state.pointer_cell,
+                    state.pressed_button,
+                    sgr_modifier_bits(state.modifiers),
+                );
             },
             WindowEvent::MouseInput {
                 state: element_state,
@@ -1911,7 +1915,10 @@ impl ApplicationHandler<PtyEvent> for App {
 
                 if sgr {
                     let (col, row) = state.pointer_cell;
-                    let _ = state.pty.write(&sgr_button_bytes(code, pressed, col, row));
+                    let mods = sgr_modifier_bits(state.modifiers);
+                    let _ = state
+                        .pty
+                        .write(&sgr_button_bytes(code, pressed, col, row, mods));
                 }
             },
             _ => {},
@@ -2133,8 +2140,9 @@ impl<W: PtyWrite> Input<'_, W> {
     ///
     /// A held `button` makes the move a drag, which an app subscribes to
     /// separately from bare motion, so one wanting only drags hears nothing
-    /// while the pointer is loose and the other way about.
-    fn motion(&mut self, at: (usize, usize), button: Option<u8>) -> bool {
+    /// while the pointer is loose and the other way about. `mods` are the
+    /// held-modifier bits from [`sgr_modifier_bits`] that the report carries.
+    fn motion(&mut self, at: (usize, usize), button: Option<u8>, mods: u8) -> bool {
         // Snapshot the routing modes under one lock, matching the wheel path,
         // so the decision reads a consistent terminal state.
         let (sgr, drag, motion) = {
@@ -2151,7 +2159,7 @@ impl<W: PtyWrite> Input<'_, W> {
             return false;
         }
 
-        let _ = self.pty.write(&sgr_motion_bytes(button, at.0, at.1));
+        let _ = self.pty.write(&sgr_motion_bytes(button, at.0, at.1, mods));
         true
     }
 
@@ -5489,7 +5497,7 @@ mod tests {
                 terminal: &terminal,
                 pty: &mut pty,
             }
-            .motion((1, 2), button);
+            .motion((1, 2), button, 0);
             assert_eq!(
                 sent,
                 !pty.written.is_empty(),
@@ -5524,11 +5532,11 @@ mod tests {
             terminal: &terminal,
             pty: &mut pty,
         }
-        .motion((4, 9), Some(0));
+        .motion((4, 9), Some(0), 0);
 
         assert_eq!(
             pty.written,
-            sgr_motion_bytes(Some(0), 4, 9),
+            sgr_motion_bytes(Some(0), 4, 9, 0),
             "the report names where the pointer is and what is held"
         );
     }
