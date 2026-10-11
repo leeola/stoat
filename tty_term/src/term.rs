@@ -420,6 +420,13 @@ pub struct Terminal {
     /// Rows the last [`Self::project`] slid its grid by, which
     /// [`Self::slid_rows`] reports.
     last_slide: isize,
+    /// Whether the alternate screen showed at the previous [`Self::project`].
+    ///
+    /// The alternate screen keeps no history, so a switch moves the history
+    /// count by the whole primary history while no content scrolls. A
+    /// projection that sees the screen change rebases [`Self::last_history`]
+    /// on it, so the switch reports no growth.
+    last_alt_screen: bool,
     /// Smooth-scroll pools keyed by id: each a declared region plus the recycled
     /// pages buffered around its scroll target and that target itself.
     ///
@@ -1087,6 +1094,7 @@ impl Terminal {
             decoration_damage: Vec::new(),
             last_history: 0,
             last_slide: 0,
+            last_alt_screen: false,
             pools: BTreeMap::new(),
             next_pool_serial: 0,
             images: images::ImageStore::new(),
@@ -3130,7 +3138,9 @@ impl Terminal {
     /// vertical scrolling. It is reported as zero while the user has scrolled
     /// back (a non-zero display offset), since the viewport is then pinned to its
     /// content as history grows and must not glide, and it saturates to zero once
-    /// the scrollback history fills.
+    /// the scrollback history fills. A switch between the primary and the
+    /// alternate screen reports zero too, because the alternate screen keeps no
+    /// history and the switch scrolls no content.
     ///
     /// The returned [`Damage`] reports the VT cell rows this call rewrote. It does
     /// not account for the stoatty APC overlays (borders, scales, popovers, icons,
@@ -3173,6 +3183,11 @@ impl Terminal {
         // Read before the projection below, which wants to know how far the
         // content moved so it can slide the grid to match.
         let history = self.term.history_size();
+        let alt_screen = self.is_alt_screen();
+        if alt_screen != self.last_alt_screen {
+            self.last_alt_screen = alt_screen;
+            self.last_history = history;
+        }
         let grew = history.saturating_sub(self.last_history);
         self.last_history = history;
         // A non-zero display offset means the user has scrolled back: the

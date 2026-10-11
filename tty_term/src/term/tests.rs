@@ -5901,6 +5901,47 @@ fn the_alternate_screen_keeps_its_own_placements() {
     );
 }
 
+/// The alternate screen keeps no history, so leaving it must not read as the
+/// primary history growing back. That growth drops every placement on the
+/// primary screen and eases the whole screen in.
+#[test]
+fn leaving_the_alternate_screen_scrolls_nothing() {
+    use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let mut grid = Grid::new(4, 8);
+    terminal.set_cell_pixels(8, 16);
+    terminal.advance(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+    terminal.project(&mut grid);
+
+    let mut out = Vec::new();
+    kitty::encode_into(
+        &mut out,
+        &ControlData {
+            action: Action::TransmitAndDisplay,
+            format: Format::Rgba,
+            width: 8,
+            height: 16,
+            id: 83,
+            cursor_policy: 1,
+            ..ControlData::default()
+        },
+        &base64_of(&[7u8; 8 * 16 * 4]),
+    );
+    terminal.advance(&out);
+
+    terminal.advance(b"\x1b[?1049h");
+    terminal.project(&mut grid);
+    terminal.advance(b"\x1b[?1049l");
+    let (_, scrolled, _) = terminal.project(&mut grid);
+
+    assert_eq!(
+        (scrolled, grid.images().first().map(|image| image.row)),
+        (0, Some(3)),
+        "the switch back scrolls nothing, and the image keeps its row"
+    );
+}
+
 /// A full reset returns the terminal to its start state, so the images a
 /// client transmitted go with it. An erase does not: it clears the screen,
 /// and the client places the same images again onto what it draws next.
