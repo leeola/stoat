@@ -461,8 +461,11 @@ pub(crate) fn read_register_fragments(
 /// A buffer with no path is `[scratch]`, which is what the row shows too. What
 /// pastes is therefore what the reader sees named, rather than an absolute path
 /// they never looked at.
-fn focused_document_name(stoat: &Stoat) -> String {
-    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+///
+/// While a prompt is open, the buffer behind the prompt answers. The prompt's
+/// own input is a scratch buffer that the reader did not open.
+fn focused_document_name(stoat: &mut Stoat) -> String {
+    let Some(buffer_id) = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id) else {
         return "[scratch]".to_string();
     };
     let ws = stoat.active_workspace();
@@ -2034,6 +2037,20 @@ mod tests {
             super::read_register_fragments(&mut h.stoat, crate::register::Register::DocumentPath),
             Some(vec!["[scratch]".to_string()]),
         );
+    }
+
+    /// A prompt's input is a pathless buffer of its own. The register names the
+    /// buffer behind the prompt, which is the one the reader has open.
+    #[test]
+    fn ctrl_r_percent_in_a_prompt_inserts_the_buffer_behind_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "x\n");
+        h.type_keys("/");
+        h.type_keys("Ctrl-r");
+        h.type_text("%");
+
+        let state = h.stoat.search_input.as_ref().expect("prompt opened");
+        assert_eq!(state.input.text(h.stoat.active_workspace()), "buf.txt");
     }
 
     /// The command register holds the palette lines already run, newest first,
