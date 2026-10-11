@@ -12,6 +12,7 @@ use crate::{
     jumplist::JumpEntry,
     merge_view::{ChunkState, ConflictChunk, MergeDoc, MergeRow, RowPick, Side},
     pane::View,
+    workspace::WorkspaceId,
 };
 use ratatui::text::Line;
 use std::{
@@ -74,6 +75,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
     };
     let intent = ConflictIntent::Open {
         git_root,
+        workspace: stoat.active_workspace,
         saved_editor,
         origin,
     };
@@ -82,9 +84,14 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
 
 /// Install a landed first alignment as the workspace's conflict session and
 /// swap its center editor into the focused pane.
+///
+/// The open is abandoned, with a status, when the focus left the pane that
+/// asked for it while the alignment ran. The close restores the editor the
+/// press recorded, so the swap must take that same pane.
 fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
     let ConflictIntent::Open {
         git_root,
+        workspace,
         saved_editor,
         origin,
     } = intent
@@ -95,6 +102,14 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
     let Some(FoundConflicts { repo, files }) = found else {
         return;
     };
+    let still_focused = stoat.active_workspace == workspace && {
+        let panes = &stoat.active_workspace().panes;
+        matches!(panes.pane(panes.focus()).view, View::Editor(editor) if editor == saved_editor)
+    };
+    if !still_focused {
+        stoat.set_status("conflict view not opened: focus moved");
+        return;
+    }
     let current = doc.index;
 
     let (file, first_chunk_offset) = install_conflict_file(stoat, doc, &git_root);
@@ -145,6 +160,7 @@ enum ConflictIntent {
     /// to hold it yet.
     Open {
         git_root: PathBuf,
+        workspace: WorkspaceId,
         saved_editor: EditorId,
         origin: Option<JumpEntry>,
     },

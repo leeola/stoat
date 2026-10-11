@@ -240,12 +240,12 @@ fn chunk_states(
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
+    use crate::{app::Stoat, merge_view::MergeDoc, pane::View, test_harness::TestHarness};
     use stoat_action::{
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
         ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
-        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
-        GotoNextChange, GotoPrevChange,
+        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk, FocusLeft,
+        GotoNextChange, GotoPrevChange, NewWorkspace, SplitRight,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -398,6 +398,67 @@ mod tests {
 
         assert_eq!(h.stoat.current_view(), Some("conflict"));
         assert_eq!(center_text(&h), expected);
+    }
+
+    /// The press names the pane the view opens in. A focus move before the
+    /// alignment lands leaves the view unopened, so the pane the reader moved
+    /// to keeps what it shows.
+    #[test]
+    fn an_open_that_lands_after_the_focus_moved_opens_nothing() {
+        let mut h = Stoat::test();
+        seed_conflict(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        let pressed = h.stoat.active_workspace().panes.focus();
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        crate::action_handlers::dispatch(&mut h.stoat, &FocusLeft);
+        let (moved_to, left_editor) = {
+            let panes = &h.stoat.active_workspace().panes;
+            let View::Editor(editor) = panes.pane(panes.focus()).view else {
+                panic!("the left pane shows an editor");
+            };
+            (panes.focus(), editor)
+        };
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                moved_to != pressed,
+                ws.conflict.is_none(),
+                matches!(ws.panes.pane(moved_to).view, View::Editor(editor) if editor == left_editor),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                true,
+                true,
+                true,
+                Some("conflict view not opened: focus moved")
+            ),
+            "the open gives way, and the left pane keeps its editor"
+        );
+    }
+
+    /// A workspace switch before the alignment lands leaves the view unopened.
+    /// Editor ids count within one workspace, so the other workspace's focused
+    /// editor carries the same id as the one the press recorded.
+    #[test]
+    fn an_open_that_lands_in_another_workspace_opens_nothing() {
+        let mut h = Stoat::test();
+        seed_conflict(&mut h);
+        let pressed = h.stoat.active_workspace;
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        crate::action_handlers::dispatch(&mut h.stoat, &NewWorkspace);
+        h.settle();
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace != pressed,
+                h.stoat.workspaces.values().all(|ws| ws.conflict.is_none()),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (true, true, Some("conflict view not opened: focus moved")),
+            "the open gives way in both workspaces"
+        );
     }
 
     #[test]
