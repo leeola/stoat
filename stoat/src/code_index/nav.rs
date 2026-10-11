@@ -468,7 +468,11 @@ pub(crate) fn jump_to_symbol(stoat: &mut Stoat, key: SymbolKey) -> UpdateEffect 
 
     action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, target, &path, OpenOrigin::Visited);
+    if crate::buffer_lifecycle::open_file_in_pane_now(stoat, target, &path, OpenOrigin::Visited)
+        .is_none()
+    {
+        return UpdateEffect::None;
+    }
     action_handlers::movement::jump_to_offset(stoat, def_start)
 }
 
@@ -604,6 +608,29 @@ mod tests {
             Some(key),
             "the jump lands the cursor inside the symbol, which resolves back to it",
         );
+    }
+
+    /// An open reads a file over 1 MiB in the background. The jump reads it
+    /// first, so the cursor lands in the symbol rather than in the buffer that
+    /// had focus.
+    #[test]
+    fn jump_to_symbol_in_a_large_file_lands_in_the_symbol() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        let big = format!("fn foo() {{}}\n{}", "\n".repeat(1 << 20));
+        fs.insert_file("/repo/src/a.rs", big.as_str());
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        let key = SymbolKey([1u8; 16]);
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(foo_shard(file));
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+
+        jump_to_symbol(&mut stoat, key);
+        assert_eq!(symbol_at_cursor(&mut stoat), Some(key));
     }
 
     #[test]

@@ -2045,7 +2045,11 @@ pub(crate) fn open_workspace_symbol_target(
     encoding: OffsetEncoding,
 ) {
     let focused = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, path, OpenOrigin::Visited);
+    if crate::buffer_lifecycle::open_file_in_pane_now(stoat, focused, path, OpenOrigin::Visited)
+        .is_none()
+    {
+        return;
+    }
 
     let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
         return;
@@ -2328,7 +2332,11 @@ pub(crate) fn apply_jump(
         crate::action_handlers::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
 
     let focused = stoat.active_workspace().panes.focus();
-    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, path, OpenOrigin::Visited);
+    if crate::buffer_lifecycle::open_file_in_pane_now(stoat, focused, path, OpenOrigin::Visited)
+        .is_none()
+    {
+        return;
+    }
     super::movement::jump_to_offset(stoat, offset);
 
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);

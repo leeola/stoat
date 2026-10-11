@@ -66,17 +66,48 @@ pub(crate) struct PendingFileOpen {
 
 /// Open `path` in pane `target`, recording `origin` as how the buffer was
 /// reached, which decides whether the buffer picker lists it.
+///
+/// A file over `OPEN_SYNC_MAX_BYTES` reads in the background and installs
+/// later, so this answers `None` for it at once. A caller that moves the cursor
+/// into the file right after takes [`open_file_in_pane_now`] instead.
 pub(crate) fn open_file_in_pane(
     stoat: &mut Stoat,
     target: PaneId,
     path: &Path,
     origin: OpenOrigin,
 ) -> Option<BufferId> {
+    open_file_in_pane_with(stoat, target, path, origin, true)
+}
+
+/// [`open_file_in_pane`] that reads a file of any size before it returns.
+///
+/// For a jump that moves the cursor in the opened file right after. With the
+/// deferring form, a large file is not open yet when the jump lands, and the
+/// cursor moves in the buffer that still has focus. The read here blocks for
+/// the size of the file.
+pub(crate) fn open_file_in_pane_now(
+    stoat: &mut Stoat,
+    target: PaneId,
+    path: &Path,
+    origin: OpenOrigin,
+) -> Option<BufferId> {
+    open_file_in_pane_with(stoat, target, path, origin, false)
+}
+
+/// The body of [`open_file_in_pane`] and [`open_file_in_pane_now`], which
+/// differ only in `defer_large`.
+fn open_file_in_pane_with(
+    stoat: &mut Stoat,
+    target: PaneId,
+    path: &Path,
+    origin: OpenOrigin,
+    defer_large: bool,
+) -> Option<BufferId> {
     let absolute = absolute_path(stoat, path);
 
     let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
     let disk_mtime = meta.map(|m| m.modified);
-    if meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES {
+    if defer_large && meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES {
         spawn_pending_open(stoat, target, absolute, disk_mtime, origin);
         return None;
     }

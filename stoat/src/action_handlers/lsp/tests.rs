@@ -983,7 +983,7 @@ fn goto_definition_into_a_crlf_file_lands_on_the_target() {
     );
 
     assert_eq!(
-        goto_lib_definition(&mut h, &root, 1, 3),
+        goto_definition_in(&mut h, &root, "lib.rs", 1, 3),
         (root.join("lib.rs"), 15)
     );
 }
@@ -1005,17 +1005,58 @@ fn goto_definition_into_an_edited_buffer_lands_on_the_target() {
     h.edit_focused(0..0, "// x\n");
 
     assert_eq!(
-        goto_lib_definition(&mut h, &root, 2, 3),
+        goto_definition_in(&mut h, &root, "lib.rs", 2, 3),
         (root.join("lib.rs"), 20)
     );
 }
 
+/// An open reads a file over 1 MiB in the background. The jump reads the file
+/// before it moves the cursor, so the cursor does not move in the buffer that
+/// still has focus while the read runs.
+#[test]
+fn goto_definition_into_a_large_file_lands_on_the_target() {
+    let mut h = TestHarness::with_size(80, 24);
+    enable_goto_definition(&h);
+    let big = format!("fn one() {{}}\n{}", "\n".repeat(1 << 20));
+    let root = seed(&mut h, &[("main.rs", "abc\n"), ("big.rs", big.as_str())]);
+
+    assert_eq!(
+        goto_definition_in(&mut h, &root, "big.rs", 0, 3),
+        (root.join("big.rs"), 3)
+    );
+}
+
+/// A picked workspace symbol lands in a file over 1 MiB the way a goto does.
+#[test]
+fn a_workspace_symbol_in_a_large_file_lands_on_the_target() {
+    use crate::host::OffsetEncoding;
+    use lsp_types::Position;
+    let mut h = TestHarness::with_size(80, 24);
+    let big = format!("fn one() {{}}\n{}", "\n".repeat(1 << 20));
+    let root = seed(&mut h, &[("main.rs", "abc\n"), ("big.rs", big.as_str())]);
+    open_buffer(&mut h, root.join("main.rs"));
+
+    crate::action_handlers::lsp::open_workspace_symbol_target(
+        &mut h.stoat,
+        &root.join("big.rs"),
+        Position::new(0, 3),
+        OffsetEncoding::Utf16,
+    );
+    h.settle();
+
+    assert_eq!(
+        (focused_buffer_path(&h), cursor_offset(&mut h)),
+        (root.join("big.rs"), 3)
+    );
+}
+
 /// Go from the start of `main.rs` to the definition the fake server places at
-/// `line` and `column` of `lib.rs`, and answer the focused path and the cursor
+/// `line` and `column` of `target`, and answer the focused path and the cursor
 /// offset where the jump lands.
-fn goto_lib_definition(
+fn goto_definition_in(
     h: &mut TestHarness,
     root: &Path,
+    target: &str,
     line: u32,
     column: u32,
 ) -> (PathBuf, usize) {
@@ -1025,7 +1066,7 @@ fn goto_lib_definition(
         main_path.to_str().unwrap(),
         0,
         0,
-        root.join("lib.rs").to_str().unwrap(),
+        root.join(target).to_str().unwrap(),
         line,
         column,
     );
