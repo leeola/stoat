@@ -284,6 +284,53 @@ pub(crate) fn restore_pane_after_term_exit(stoat: &mut Stoat, pane_id: PaneId) {
     show_view_or_scratch(stoat, pane_id, prev);
 }
 
+/// Close pane `pane` of the parked tab `tab` after its terminal exited, or
+/// point it at its pre-terminal view when it is that tab's last pane.
+///
+/// A parked pane keeps its view while the shell dies, so without this it
+/// paints blank and swallows every key once its tab comes back. The rest
+/// follows [`close_pane_by_id`] and [`restore_pane_after_term_exit`]. A last
+/// pane shows its live `prev_view` or a fresh scratch editor, and a closed
+/// pane takes with it a shell or commits list that it covered.
+pub(crate) fn retire_parked_pane(
+    ws: &mut Workspace,
+    executor: &Executor,
+    tab: usize,
+    pane: PaneId,
+) {
+    // The tree leaves its slot, because the scratch fallback borrows the
+    // workspace mutably.
+    let Some(mut tree) = ws.tabs.get_mut(tab).and_then(|slot| slot.parked.take()) else {
+        return;
+    };
+    let covered = tree.pane_mut(pane).prev_view.take();
+    let closed = tree.close(pane);
+    if !closed {
+        let view = covered
+            .clone()
+            .filter(|view| view_is_live(ws, Some(view)))
+            .unwrap_or_else(|| scratch_editor_view(ws, executor.clone()));
+        tree.pane_mut(pane).view = view;
+    }
+    ws.tabs[tab].parked = Some(tree);
+
+    if !closed {
+        return;
+    }
+    match covered {
+        Some(View::Terminal(term_id)) if !ws.term_shown(term_id) => dispose_view(
+            ws,
+            executor,
+            View::Terminal(term_id),
+            EditorDisposal::Remove,
+        ),
+        Some(View::Commits(list)) => {
+            dispose_view(ws, executor, View::Commits(list), EditorDisposal::Remove)
+        },
+        _ => {},
+    }
+}
+
 /// Point pane `pane_id` at `view`, or at a fresh scratch editor when `view` is
 /// `None` or no longer resolves against live workspace state.
 pub(crate) fn show_view_or_scratch(stoat: &mut Stoat, pane_id: PaneId, view: Option<View>) {

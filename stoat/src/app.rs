@@ -7943,6 +7943,7 @@ impl Stoat {
     ) -> UpdateEffect {
         let clipboard_host = self.clipboard_host.clone();
         let env_host = self.env_host.clone();
+        let executor = self.executor.clone();
         let modal_run = self.modal_run;
         let ws = self.active_workspace_mut();
         match notif {
@@ -8061,34 +8062,58 @@ impl Stoat {
                         matches!(dock.view, View::Terminal(t) if t == term_id).then_some(id)
                     })
                     .collect::<Vec<_>>();
+                // A pane in a parked tab names the session too, and it paints
+                // blank and swallows every key once its tab comes back unless it
+                // retires with the rest.
+                let mut parked = Vec::new();
+                for (tab, slot) in ws.tabs.iter().enumerate() {
+                    let Some(tree) = &slot.parked else {
+                        continue;
+                    };
+                    for id in tree.split_pane_ids() {
+                        if matches!(tree.pane(id).view, View::Terminal(t) if t == term_id) {
+                            parked.push((tab, id));
+                        }
+                    }
+                }
 
                 // With nothing showing the session as a terminal, what happens
-                // next turns on whether an agent view holds it. An agent shares
-                // the reader and keeps its last frame after the shell dies, so
-                // its session has to outlive the exit. A session no view holds
-                // at all is a terminal hidden behind a buffer, which retires
-                // like any other. Its records go with it, since the Terminal
-                // action has nothing to return to once the shell is gone.
-                if pane_ids.is_empty() && dock_ids.is_empty() {
-                    let agent_displayed =
-                        ws.panes.split_pane_ids().into_iter().any(
-                            |id| matches!(ws.panes.pane(id).view, View::Agent(t) if t == term_id),
-                        ) || ws
-                            .docks
-                            .iter()
-                            .any(|(_, dock)| matches!(dock.view, View::Agent(t) if t == term_id));
+                // next turns on whether an agent view holds it, in any tab. An
+                // agent shares the reader and keeps its last frame after the
+                // shell dies, so its session has to outlive the exit, and its
+                // badge shows the exit. A session no view holds at all is a
+                // terminal hidden behind a buffer, which retires like any other.
+                // Its records go with it, since the Terminal action has nothing
+                // to return to once the shell is gone.
+                if pane_ids.is_empty() && dock_ids.is_empty() && parked.is_empty() {
+                    let agent_displayed = ws.pane_trees().any(|tree| {
+                        tree.split_panes()
+                            .any(|(_, pane)| matches!(pane.view, View::Agent(t) if t == term_id))
+                    }) || ws
+                        .docks
+                        .iter()
+                        .any(|(_, dock)| matches!(dock.view, View::Agent(t) if t == term_id));
                     if agent_displayed {
-                        return UpdateEffect::None;
+                        if let Some(agent) = &mut ws.agent {
+                            agent.mark_exited();
+                        }
+                        return if on_screen {
+                            UpdateEffect::Redraw
+                        } else {
+                            UpdateEffect::None
+                        };
                     }
 
                     ws.terms.remove(term_id);
-                    for id in ws.panes.split_pane_ids() {
-                        let names_exited = matches!(
-                            ws.panes.pane(id).prev_view,
-                            Some(View::Terminal(t) | View::Agent(t)) if t == term_id,
-                        );
-                        if names_exited {
-                            ws.panes.pane_mut(id).prev_view = None;
+                    for tree in ws.pane_trees_mut() {
+                        for id in tree.split_pane_ids() {
+                            let names_exited = matches!(
+                                tree.pane(id).prev_view,
+                                Some(View::Terminal(t) | View::Agent(t)) if t == term_id,
+                            );
+                            if names_exited {
+                                tree.pane_mut(id).prev_view = None;
+                            }
                         }
                     }
                     // Nothing on screen showed it, so nothing on screen changed.
@@ -8107,6 +8132,9 @@ impl Stoat {
                     if let Some(dock) = ws.docks.get_mut(dock_id) {
                         dock.view = View::Label("terminal exited".into());
                     }
+                }
+                for (tab, pane) in parked {
+                    action_handlers::retire_parked_pane(ws, &executor, tab, pane);
                 }
 
                 for pane_id in pane_ids {

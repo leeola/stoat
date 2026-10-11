@@ -4092,6 +4092,87 @@ fn agent_pane_survives_shell_exit() {
     );
 }
 
+/// Park the tab whose focused pane shows `view` of a fresh session, then
+/// report that session's shell gone. Answers the session and the pane.
+fn exit_behind_a_new_tab(
+    h: &mut crate::test_harness::TestHarness,
+    view: fn(TermId) -> View,
+) -> (TermId, PaneId) {
+    let ws = h.stoat.active_workspace_mut();
+    let pane = ws.panes.focus();
+    let term_id = insert_term_session(ws);
+    ws.panes.pane_mut(pane).view = view(term_id);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+
+    h.stoat
+        .handle_pty_notification(PtyNotification::TermExited {
+            workspace: h.stoat.active_workspace,
+            term_id,
+        });
+    (term_id, pane)
+}
+
+/// The parked tab keeps its tree, so a shell that exits there retires its pane
+/// there, and a last pane shows an editor rather than the dead session.
+#[test]
+fn a_parked_terminal_pane_retires_when_its_shell_exits() {
+    let mut h = Stoat::test();
+    let (term_id, pane) = exit_behind_a_new_tab(&mut h, View::Terminal);
+
+    let ws = h.stoat.active_workspace();
+    let parked = ws.tabs[0].parked.as_ref().expect("the first tab is parked");
+    assert!(!ws.terms.contains_key(term_id), "session dropped on exit");
+    assert!(
+        matches!(parked.pane(pane).view, View::Editor(id) if ws.editors.contains_key(id)),
+        "the parked pane shows a live editor",
+    );
+}
+
+/// A pane that closes takes with it the shell it covered, as a close in the
+/// active tab does.
+#[test]
+fn a_parked_terminal_pane_beside_another_closes_when_its_shell_exits() {
+    let mut h = Stoat::test();
+    let ws = h.stoat.active_workspace_mut();
+    let editor_pane = ws.panes.focus();
+    let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+    let covered = insert_term_session(ws);
+    ws.panes.pane_mut(term_pane).prev_view = Some(View::Terminal(covered));
+    exit_behind_a_new_tab(&mut h, View::Terminal);
+
+    let ws = h.stoat.active_workspace();
+    assert_eq!(
+        (
+            ws.tabs[0].parked.as_ref().map(PaneTree::split_pane_ids),
+            ws.terms.contains_key(covered),
+        ),
+        (Some(vec![editor_pane]), false),
+        "the terminal pane closed in the parked tab, and the shell it covered went too",
+    );
+}
+
+/// An agent keeps its session and its last frame after the shell dies, in a
+/// parked tab as in the active one, and its badge shows that it exited.
+#[test]
+fn a_parked_agent_keeps_its_session_and_shows_the_exit() {
+    let mut h = Stoat::test();
+    h.stoat.active_workspace_mut().agent = Some(AgentStatus::new());
+    let (term_id, _) = exit_behind_a_new_tab(&mut h, View::Agent);
+
+    let ws = h.stoat.active_workspace();
+    assert_eq!(
+        (
+            ws.terms.contains_key(term_id),
+            ws.agent
+                .as_ref()
+                .and_then(AgentStatus::badge)
+                .map(|badge| badge.label),
+        ),
+        (true, Some("claude: exited".to_string())),
+        "the session stays for its last frame, and the badge shows the exit",
+    );
+}
+
 // The server task needs a live reactor, so these never settle the
 // scheduler. They count what was enqueued rather than run any of it, and
 // the directory is a path nothing binds either way.
