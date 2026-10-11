@@ -79,6 +79,7 @@ pub mod ssh;
 mod state_sweep;
 pub(crate) mod symbol_finder;
 pub(crate) mod syntax_parse;
+mod term_keys;
 pub mod term_screen;
 pub mod term_session;
 pub mod theme;

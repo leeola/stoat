@@ -46,6 +46,7 @@ use crate::{
     session_log::SessionLog,
     ssh,
     symbol_finder::SymbolFinder,
+    term_keys,
     term_session::{TermId, TermLocation},
     theme_pool::{ThemePool, VscodeSource},
     ui::RenderFrame,
@@ -5812,17 +5813,26 @@ impl Stoat {
             .lookup_scoped(&StoatKeymapState::from_stoat(self), key, "pane", pane)
     }
 
-    /// Encode `key` and send it to the PTY of `agent_id`.
+    /// Encode `key` the way xterm does and send it to the PTY of `agent_id`.
     ///
     /// Every key that reaches here is sent, Escape included. A key with no
     /// encoding is swallowed. A key that a pane-scoped binding takes never
     /// reaches here. See [`Self::passthrough_binding`].
     ///
+    /// The cursor keys follow the child's own application cursor mode, read
+    /// from its screen, the way a paste follows its bracketed-paste mode.
+    ///
     /// The view returns to the live screen first, so the key lands in sight.
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         mouse::clear_term_selection(self, agent_id);
         let effect = self.show_term_live_screen(agent_id);
-        if let Some(bytes) = encode_key_to_pty(&key) {
+        let app_cursor = self
+            .active_workspace()
+            .terms
+            .get(agent_id)
+            .is_some_and(|session| session.term.app_cursor());
+
+        if let Some(bytes) = term_keys::encode(&key, app_cursor) {
             self.write_to_term(agent_id, &bytes);
         }
         effect
@@ -8645,36 +8655,6 @@ fn is_printable_key(key: &KeyEvent) -> bool {
         && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
 }
 
-/// The byte sequence a VT terminal sends for `key`, or `None` when the key has
-/// no encoding here.
-///
-/// This encodes the printable characters (UTF-8), `Ctrl`+letter control bytes,
-/// and named keys (Enter, Tab, Backspace, Esc, the four arrows) an interactive
-/// agent pane needs. Backspace maps to `DEL` (`0x7f`), the xterm default.
-/// Modifiers other than `Ctrl` are ignored, so e.g. `Alt`+key encodes as the
-/// bare key.
-fn encode_key_to_pty(key: &KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                control_byte(c).map(|b| vec![b])
-            } else {
-                let mut buf = [0u8; 4];
-                Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
-            }
-        },
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        _ => None,
-    }
-}
-
 /// The byte sequence a VT terminal sends for a paste of `text`.
 ///
 /// `bracketed` is the child's own DECSET 2004 state, read from
@@ -8690,13 +8670,6 @@ fn encode_paste_to_pty(text: &str, bracketed: bool) -> Vec<u8> {
     } else {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
-}
-
-/// The ASCII control byte for `Ctrl`+`c`, mapping `Ctrl-A`..`Ctrl-Z` to
-/// `0x01`..`0x1a`. `None` when `c` is not an ASCII letter.
-fn control_byte(c: char) -> Option<u8> {
-    c.is_ascii_alphabetic()
-        .then(|| (c.to_ascii_lowercase() as u8) - b'a' + 1)
 }
 
 /// Crossterm modifiers from a window-IPC modifier bitmask.

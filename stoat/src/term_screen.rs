@@ -329,6 +329,15 @@ impl TermScreen {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    /// Whether the program running in this screen turned on application
+    /// cursor mode (DECCKM, DECSET 1).
+    ///
+    /// In that mode an unmodified arrow, Home, or End sends its SS3 form,
+    /// which is the key string a program reads once it turns the mode on.
+    pub fn app_cursor(&self) -> bool {
+        self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
     /// Whether a wheel over this screen belongs to the child as arrow keys.
     ///
     /// A full-screen program on the alternate screen keeps no history to walk.

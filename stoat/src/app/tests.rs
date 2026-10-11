@@ -4793,24 +4793,6 @@ fn editor_pane_modes_are_independent_across_focus() {
 }
 
 #[test]
-fn encode_key_to_pty_covers_agent_keys() {
-    let enc = |k: KeyEvent| encode_key_to_pty(&k);
-    assert_eq!(enc(bare(KeyCode::Char('a'))), Some(b"a".to_vec()));
-    assert_eq!(enc(bare(KeyCode::Char('Z'))), Some(b"Z".to_vec()));
-    assert_eq!(enc(ctrl('c')), Some(vec![0x03]));
-    assert_eq!(enc(ctrl('a')), Some(vec![0x01]));
-    assert_eq!(enc(bare(KeyCode::Enter)), Some(vec![b'\r']));
-    assert_eq!(enc(bare(KeyCode::Tab)), Some(vec![b'\t']));
-    assert_eq!(enc(bare(KeyCode::Backspace)), Some(vec![0x7f]));
-    assert_eq!(enc(bare(KeyCode::Esc)), Some(vec![0x1b]));
-    assert_eq!(enc(bare(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
-    assert_eq!(enc(bare(KeyCode::Down)), Some(b"\x1b[B".to_vec()));
-    assert_eq!(enc(bare(KeyCode::Right)), Some(b"\x1b[C".to_vec()));
-    assert_eq!(enc(bare(KeyCode::Left)), Some(b"\x1b[D".to_vec()));
-    assert_eq!(enc(bare(KeyCode::F(1))), None);
-}
-
-#[test]
 fn focused_term_pane_routes_keys_to_pty() {
     let (mut stoat, _id, fake) = stoat_with_focused_agent();
 
@@ -4853,6 +4835,29 @@ fn focused_terminal_pane_routes_keys_to_pty() {
         vec![b"l".to_vec(), b"s".to_vec(), vec![b'\r']],
     );
     assert_eq!(stoat.focused_mode(), "normal");
+}
+
+/// Plain PageDown belongs to the child, and the cursor keys follow the
+/// child's own application cursor mode.
+#[test]
+fn a_terminal_pane_sends_keys_as_its_child_asked() {
+    let (mut stoat, term_id, fake) = stoat_with_focused_term(View::Terminal);
+
+    stoat.handle_key(bare(KeyCode::PageDown));
+    stoat
+        .active_workspace_mut()
+        .terms
+        .get_mut(term_id)
+        .expect("the pane's session")
+        .term
+        .feed(b"\x1b[?1h");
+    stoat.handle_key(bare(KeyCode::Up));
+
+    assert_eq!(
+        fake.sent_bytes(),
+        vec![b"\x1b[6~".to_vec(), b"\x1bOA".to_vec()],
+        "PageDown, then Up in its application-mode form",
+    );
 }
 
 #[test]
