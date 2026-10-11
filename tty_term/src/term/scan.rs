@@ -116,10 +116,12 @@ pub(super) enum EscEvent<'a> {
 /// state machine recognizes all of them for the cost of the one walk.
 ///
 /// A lone `ESC`, a cancel, or a substitute inside an OSC ends it, which is what
-/// the vte parser does with the same bytes. The two have to agree on where such
-/// a payload stops. The driver cuts an oversized one out of what that parser
-/// reads, and a cut reaching past the end swallows text the parser goes on to
-/// print.
+/// the vte parser does with the same bytes. A lone `ESC` there, or right after
+/// a CSI introducer, also starts the next escape for that parser, so the scan
+/// starts it too and a sequence behind it still meets the caps. The two have
+/// to agree on where such a payload stops. The driver cuts an oversized one
+/// out of what that parser reads, and a cut reaching past the end swallows
+/// text the parser goes on to print.
 ///
 /// Inside an APC payload a lone `ESC` abandons the frame instead, and the bytes
 /// after it are the abandoned payload's.
@@ -307,6 +309,7 @@ impl EscScanner {
                 EscState::CsiEntry => {
                     self.state = match byte {
                         b'>' => EscState::CsiGt,
+                        ESC => EscState::Escape,
                         _ => EscState::Ground,
                     }
                 },
@@ -370,9 +373,12 @@ impl EscScanner {
                 EscState::OscBufferEscape => match byte {
                     STRING_TERMINATOR => self.finish_osc(emit),
                     ESC => self.state = EscState::OscBufferEscape,
+                    // The parser reads this byte as the start of an escape, so
+                    // the scan reads it again from there.
                     _ => {
                         self.payload.clear();
-                        self.state = EscState::Ground;
+                        self.state = EscState::Escape;
+                        continue;
                     },
                 },
                 EscState::OscImage => match byte {
@@ -390,7 +396,8 @@ impl EscScanner {
                     _ => {
                         self.payload.clear();
                         self.overflow = false;
-                        self.state = EscState::Ground;
+                        self.state = EscState::Escape;
+                        continue;
                     },
                 },
                 EscState::OscSkip => match byte {
@@ -1144,6 +1151,24 @@ mod tests {
             scan_collect(&mut scanner, b"\x1b]52;c;\x1b_Gstoatty;x\x1b\\\x07"),
             vec![(b"Gstoatty;x".to_vec(), 21)],
             "the frame after the escape that closed the OSC is a frame",
+        );
+    }
+
+    /// A lone `ESC` in a buffered OSC, or right after a CSI introducer, starts
+    /// the next escape, as it does for the vte parser. The OSC behind it is
+    /// then seen, so its caps hold.
+    #[test]
+    fn a_lone_escape_starts_the_sequence_after_it() {
+        let streams: [&[u8]; 3] = [
+            b"\x1b]9;a\x1b]9;b\x07",
+            b"\x1b]1337;File=:QUJD\x1b]9;b\x07",
+            b"\x1b[\x1b]9;b\x07",
+        ];
+
+        assert_eq!(
+            streams.map(|bytes| scan_osc(&mut EscScanner::default(), bytes)),
+            [(); 3].map(|()| vec![(9, b"b".to_vec())]),
+            "the notification after a notification, an image, and a CSI introducer",
         );
     }
 

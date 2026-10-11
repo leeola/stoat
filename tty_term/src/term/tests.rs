@@ -707,6 +707,23 @@ fn an_oversize_title_reaches_the_parser_empty() {
     );
 }
 
+/// An `ESC` right after a CSI introducer starts a new escape for the parser,
+/// so the title behind it is an OSC there and has to meet the same cap.
+#[test]
+fn an_oversize_title_after_a_csi_introducer_reaches_the_parser_empty() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+
+    let mut seq = b"\x1b[\x1b]0;".to_vec();
+    seq.resize(seq.len() + 1024 * 1024, b'a');
+    seq.push(0x07);
+    terminal.advance(&seq);
+
+    assert_eq!(
+        terminal.take_events(),
+        vec![TermEvent::Title(String::new())]
+    );
+}
+
 /// The parser ends an OSC on a cancel as well, then prints what follows. A
 /// cut past the cancel takes that text with it.
 #[test]
