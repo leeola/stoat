@@ -141,7 +141,7 @@ pub(crate) fn render_hints_grouped(
         area_width: area.width,
         area_height: area.height,
         title_len: mode.len(),
-        footer_len: footer.map(|f| f.text.len()),
+        footer_len: footer.map(|f| f.text.chars().count()),
     };
     if cache.layout.as_ref().map(|layout| &layout.key) != Some(&key) {
         cache.layout = lay_out(&cache.rows, key);
@@ -251,12 +251,18 @@ pub(crate) fn render_hints_grouped(
             );
         }
         if text_row < inner.y + inner.height {
+            // The rich text run ignores `end_x`, so the text itself is cut to
+            // the box.
+            let text = clip(
+                &footer.text,
+                (box_width as usize).saturating_sub(BORDER_PAD + CONTENT_PAD),
+            );
             crate::render::chrome::text(
                 buf,
                 inner.x + 1,
                 text_row,
                 end_x,
-                &footer.text,
+                &text,
                 footer.style,
                 run_bg,
                 TEXT_SCALE_POPUP,
@@ -330,7 +336,12 @@ fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
         + INTER_COL_GAP * columns.len().saturating_sub(1);
 
     let title_width = key.title_len + 4;
-    let footer_width = key.footer_len.unwrap_or(0);
+    // The footer never widens the box past the area. The paint cuts the text
+    // that does not fit, so a long footer never hides the keys above it.
+    let footer_width = key
+        .footer_len
+        .unwrap_or(0)
+        .min((key.area_width as usize).saturating_sub(BORDER_PAD + CONTENT_PAD));
     let content_width = columns_width.max(title_width).max(footer_width);
 
     Some(HintsLayout {
@@ -591,6 +602,47 @@ mod tests {
         assert!(
             wide > narrow,
             "the longer footer must widen the box, got {narrow} then {wide}",
+        );
+    }
+
+    #[test]
+    fn a_footer_wider_than_the_area_is_cut_to_the_box() {
+        let bindings = vec![("k", "act".to_string())];
+        let mut cache = HintsCache::new(0, group_by_action(&plain(&bindings)));
+        let footer = HintsFooter {
+            text: "x".repeat(100),
+            style: Default::default(),
+        };
+
+        let buf = render_into(&mut cache, Some(&footer), ToggleStates::default(), 40, 10);
+
+        let rows: Vec<String> = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+        let shows = |needle: &str| rows.iter().any(|row| row.contains(needle));
+        assert_eq!(
+            (
+                shows(" k   act"),
+                shows(&format!(" {}\u{2026}", "x".repeat(35)))
+            ),
+            (true, true),
+            "the box shows its key, and the footer ends in an ellipsis 35 columns in"
+        );
+    }
+
+    #[test]
+    fn a_footer_is_measured_in_chars() {
+        let bindings = vec![("k", "act".to_string())];
+        let mut cache = HintsCache::new(0, group_by_action(&plain(&bindings)));
+        let footer = HintsFooter {
+            text: "\u{b7}".repeat(20),
+            style: Default::default(),
+        };
+
+        render_into(&mut cache, Some(&footer), ToggleStates::default(), 60, 20);
+
+        assert_eq!(
+            cache.layout.as_ref().expect("laid out").box_width,
+            24,
+            "twenty two-byte dots take twenty columns, plus the frame and padding"
         );
     }
 
