@@ -18,6 +18,7 @@
 
 use crate::{
     app::Stoat,
+    buffer_lifecycle,
     editor_state::EditorId,
     pane::View,
     render::{layout, screen, TEXT_SCALE_POPUP},
@@ -262,9 +263,10 @@ pub(crate) struct Spotlight {
 /// the frame just drawn, or `None` when it paints none.
 ///
 /// It paints none while the reader is on the focus, for an annotation in
-/// another file, and for one whose code is off screen. A pooled page carries
-/// the same answer, because a page lit where the settled grid is not flashes
-/// a dim that the grid never shows once the glide ends.
+/// another file, for one whose code is off screen, and while the focused pane
+/// shows a file other than the stop's. A pooled page carries the same answer,
+/// because a page lit where the settled grid is not flashes a dim that the
+/// grid never shows once the glide ends.
 pub(crate) fn spotlight_of(stoat: &mut Stoat) -> Option<(EditorId, Spotlight)> {
     let (range, key) = {
         let run = stoat.active_workspace().walkthrough.as_ref()?;
@@ -276,11 +278,14 @@ pub(crate) fn spotlight_of(stoat: &mut Stoat) -> Option<(EditorId, Spotlight)> {
     };
     let colors = Colors::of(stoat);
 
-    let ws = stoat.active_workspace_mut();
+    let ws = stoat.active_workspace();
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
         return None;
     };
-    let editor = ws.editors.get_mut(editor_id)?;
+    if !shows_stop_file(stoat, editor_id) {
+        return None;
+    }
+    let editor = stoat.active_workspace_mut().editors.get_mut(editor_id)?;
     let offsets = {
         let snapshot = editor.display_map.snapshot();
         range_offsets(snapshot.buffer_snapshot().rope(), &range)
@@ -298,6 +303,23 @@ pub(crate) fn spotlight_of(stoat: &mut Stoat) -> Option<(EditorId, Spotlight)> {
             },
         },
     ))
+}
+
+/// Whether `editor_id` shows the current stop's file.
+///
+/// A stop's ranges name lines of its own file, so a slide over another file
+/// marks code the stop never described. The stop's path resolves the way the
+/// jump opens it.
+fn shows_stop_file(stoat: &Stoat, editor_id: EditorId) -> bool {
+    let ws = stoat.active_workspace();
+    let Some(run) = ws.walkthrough.as_ref() else {
+        return false;
+    };
+    let stop_path = buffer_lifecycle::absolute_path(stoat, &run.current_stop().focus.path);
+    ws.editors
+        .get(editor_id)
+        .and_then(|editor| ws.buffers.path_for(editor.buffer_id))
+        .is_some_and(|path| path == stop_path)
 }
 
 /// Re-declare the retiring slide with the exit phase, and report whether one is
@@ -909,8 +931,8 @@ fn focused_content_area(stoat: &Stoat) -> Option<Rect> {
 
 /// Measure the screen into the layout's input.
 ///
-/// `None` when no tour plays, the focused pane is not an editor, or the render
-/// has not painted that editor yet.
+/// `None` when no tour plays, the focused pane is not an editor, that editor
+/// shows a file other than the stop's, or the render has not painted it yet.
 fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
     let (focus_range, annotations, card, current, card_hidden) = {
         let run = stoat.active_workspace().walkthrough.as_ref()?;
@@ -945,6 +967,9 @@ fn measure(stoat: &mut Stoat) -> Option<SlideInput> {
     let View::Editor(editor_id) = pane.view else {
         return None;
     };
+    if !shows_stop_file(stoat, editor_id) {
+        return None;
+    }
     let pane_rect = ws.editors.get(editor_id)?.text_rect?;
 
     let focus = measure_range(stoat, editor_id, &focus_range);
@@ -1038,6 +1063,7 @@ mod tests {
     };
     use ratatui::style::Color;
     use std::{path::PathBuf, time::Duration};
+    use stoat_action::OpenFile;
     use stoat_config::LineNumbers;
     use stoatty_protocol::command::{
         self, Command, FillCommand, PoolRegionCommand, SketchCommand, SketchEnd, SketchPhase,
@@ -1331,6 +1357,74 @@ mod tests {
     /// even once reached.
     #[test]
     fn a_cross_file_annotation_draws_nothing_here() {
+        let mut h = cross_file_tour();
+        // On past it to the annotation in this file, so it is reached while
+        // this file is on screen.
+        reach(&mut h, 2);
+        let mark = {
+            let run = h
+                .stoat
+                .active_workspace()
+                .walkthrough
+                .as_ref()
+                .expect("playing");
+            run.annotation_ids(0).1
+        };
+
+        let emitted = sketches(&mut h);
+        assert!(
+            !emitted.iter().any(|sketch| sketch.id == mark),
+            "no mark for it in this file, got {:?}",
+            emitted.iter().map(|sketch| sketch.id).collect::<Vec<_>>(),
+        );
+        assert!(
+            emitted
+                .iter()
+                .any(|sketch| sketch.id == part_id(&h, part::FOCUS_MARK)),
+            "and the focus still draws",
+        );
+    }
+
+    /// A stop's marks name lines of its own file, so the slide draws nothing
+    /// while the focused pane shows another file, whether a step to an
+    /// annotation there or an open put it on screen.
+    #[test]
+    fn a_slide_draws_nothing_over_another_file() {
+        let mut h = cross_file_tour();
+        let (focus_mark, focus_link) =
+            (part_id(&h, part::FOCUS_MARK), part_id(&h, part::FOCUS_LINK));
+        let drawn = |h: &mut TestHarness| -> Vec<u32> {
+            sketches(h).into_iter().map(|sketch| sketch.id).collect()
+        };
+
+        reach(&mut h, 1);
+        let after_the_step = drawn(&mut h);
+
+        reach(&mut h, 1);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/elsewhere.rs"),
+            },
+        );
+        let after_the_open = drawn(&mut h);
+
+        assert_eq!(
+            (
+                after_the_step
+                    .iter()
+                    .any(|&id| id == focus_mark || id == focus_link),
+                after_the_open.contains(&focus_mark),
+                super::spotlight_of(&mut h.stoat).is_some(),
+            ),
+            (false, false, false),
+            "neither the step nor the open draws the stop's marks or spotlight there"
+        );
+    }
+
+    /// A one-stop tour in `a.rs` whose first annotation names a range of
+    /// `elsewhere.rs` and whose second names one of `a.rs`, opened on its stop.
+    fn cross_file_tour() -> TestHarness {
         let mut h = Stoat::test();
         h.stoat.stoatty_protocol = 3;
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
@@ -1374,31 +1468,7 @@ mod tests {
         );
 
         open(&mut h.stoat, "tour");
-        // On past it to the annotation in this file, so it is reached while
-        // this file is on screen.
-        reach(&mut h, 2);
-        let mark = {
-            let run = h
-                .stoat
-                .active_workspace()
-                .walkthrough
-                .as_ref()
-                .expect("playing");
-            run.annotation_ids(0).1
-        };
-
-        let emitted = sketches(&mut h);
-        assert!(
-            !emitted.iter().any(|sketch| sketch.id == mark),
-            "no mark for it in this file, got {:?}",
-            emitted.iter().map(|sketch| sketch.id).collect::<Vec<_>>(),
-        );
-        assert!(
-            emitted
-                .iter()
-                .any(|sketch| sketch.id == part_id(&h, part::FOCUS_MARK)),
-            "and the focus still draws",
-        );
+        h
     }
 
     /// Annotations cycle through the marker scopes, so two adjacent ones draw

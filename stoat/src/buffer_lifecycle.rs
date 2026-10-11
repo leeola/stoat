@@ -129,7 +129,7 @@ fn open_file_in_pane_with(
 
 /// `path` as an absolute path, where a relative one starts at the active
 /// workspace's root.
-fn absolute_path(stoat: &Stoat, path: &Path) -> PathBuf {
+pub(crate) fn absolute_path(stoat: &Stoat, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
