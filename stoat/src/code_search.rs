@@ -396,11 +396,12 @@ mod tests {
     use ast_grep_core::Pattern;
     use regex::Regex;
     use std::{
+        cell::Cell,
         ops::ControlFlow,
         path::{Path, PathBuf},
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Mutex,
+            Arc, Condvar, Mutex,
         },
     };
 
@@ -903,20 +904,47 @@ mod tests {
     /// of the list looks nothing like one where the other threads carry on and
     /// finish all of it.
     ///
-    /// The threads still reading are stopped by their next claim, which they
-    /// reach in the time between the breaking callback returning and its
-    /// caller parking the cursor. Getting through the whole list in that window
-    /// would take them thousands of times longer than they have.
+    /// The other threads stop at their first claim after the breaking thread
+    /// parks the cursor. A scheduler pause between the break and the park lets
+    /// them claim the whole list first, so every other batch holds its thread
+    /// until the breaking thread exits, which comes after the park. A
+    /// thread-local value on the breaking thread opens the gate when its drop
+    /// runs at that exit.
     #[test]
     fn scan_paths_parallel_stops_on_break() {
+        struct OpenOnExit(Arc<(Mutex<bool>, Condvar)>);
+
+        impl Drop for OpenOnExit {
+            fn drop(&mut self) {
+                let (open, opened) = &*self.0;
+                *open.lock().expect("gate poisoned") = true;
+                opened.notify_all();
+            }
+        }
+
+        thread_local! {
+            static GATE: Cell<Option<OpenOnExit>> = const { Cell::new(None) };
+        }
+
         let paths: Vec<PathBuf> = (0..40_000)
             .map(|i| PathBuf::from(format!("/repo/f{i}.rs")))
             .collect();
         let batches = AtomicUsize::new(0);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
 
-        scan_paths_parallel(&paths, &|_| match batches.fetch_add(1, Ordering::Relaxed) {
-            0 => ControlFlow::Break(()),
-            _ => ControlFlow::Continue(()),
+        scan_paths_parallel(&paths, &|_| {
+            if batches.fetch_add(1, Ordering::Relaxed) == 0 {
+                GATE.set(Some(OpenOnExit(gate.clone())));
+                return ControlFlow::Break(());
+            }
+            let (open, opened) = &*gate;
+            let closed = open.lock().expect("gate poisoned");
+            drop(
+                opened
+                    .wait_while(closed, |open| !*open)
+                    .expect("gate poisoned"),
+            );
+            ControlFlow::Continue(())
         });
 
         let batches = batches.into_inner();
