@@ -3,6 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
 use smallvec::SmallVec;
 use std::{ops::Range, path::PathBuf};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone)]
 pub struct StyledCell {
@@ -244,11 +245,12 @@ impl VtermGrid {
         let mut lines: Vec<String> = Vec::with_capacity(row_end - row_start);
         for row in &self.cells[row_start..row_end] {
             let slice_end = col_end.min(row.len());
-            let raw: String = if col_start >= slice_end {
-                String::new()
-            } else {
-                row[col_start..slice_end].iter().map(|c| c.ch).collect()
-            };
+            // The cell after a wide character is its covered half, a blank
+            // rather than a character of its own.
+            let raw: String = (col_start..slice_end)
+                .filter(|&col| col == 0 || UnicodeWidthChar::width(row[col - 1].ch) != Some(2))
+                .map(|col| row[col].ch)
+                .collect();
             lines.push(raw.trim_end().to_string());
         }
         lines.join("\n")
@@ -311,22 +313,38 @@ impl VtermGrid {
         self.trimmed_rows += excess;
     }
 
+    /// Write `ch` at the cursor and move the cursor past it.
+    ///
+    /// A wide character takes two cells, the second a blank that ratatui
+    /// covers with the glyph, and a zero-width character keeps one. A
+    /// character that does not fit in what is left of the row wraps to the
+    /// next one. The wrap waits for that character rather than following the
+    /// one that fills the row, so a line that fills its row and then ends with
+    /// CRLF stays one row, as in a terminal.
     fn put_char(&mut self, ch: char) {
-        let w = self.width as usize;
-        self.ensure_row(self.cursor_row);
-        if self.cursor_col < w {
-            let row = &mut self.cells[self.cursor_row];
-            if row.len() <= self.cursor_col {
-                row.resize(self.cursor_col + 1, StyledCell::default());
-            }
-            row[self.cursor_col] = StyledCell {
-                ch,
-                fg: self.pen_fg,
-                bg: self.pen_bg,
-                modifiers: self.pen_modifiers,
-            };
-            self.cursor_col += 1;
+        let w = usize::from(self.width).max(1);
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).clamp(1, 2).min(w);
+        if self.cursor_col + cw > w {
+            self.leave_row();
+            self.cursor_row += 1;
+            self.cursor_col = 0;
         }
+        self.ensure_row(self.cursor_row);
+
+        let row = &mut self.cells[self.cursor_row];
+        if row.len() < self.cursor_col + cw {
+            row.resize(self.cursor_col + cw, StyledCell::default());
+        }
+        row[self.cursor_col] = StyledCell {
+            ch,
+            fg: self.pen_fg,
+            bg: self.pen_bg,
+            modifiers: self.pen_modifiers,
+        };
+        if cw == 2 {
+            row[self.cursor_col + 1] = StyledCell::default();
+        }
+        self.cursor_col += cw;
     }
 
     fn reset_pen(&mut self) {

@@ -309,6 +309,24 @@ mod tests {
         assert_eq!(row_text(&grid, 0), "ab");
     }
 
+    /// A character that does not fit wraps to the next row, but only once it
+    /// comes, so a line that fills its row and ends with CRLF stays one row.
+    #[test]
+    fn a_long_line_wraps_at_the_width() {
+        let mut grid = VtermGrid::new(5);
+        grid.feed(b"abcdefg\r\nhijkl\r\nm");
+        assert_eq!(grid.text_in(0..5, 0..4), "abcde\nfg\nhijkl\nm");
+    }
+
+    /// A wide character takes two cells, and one that does not fit in what is
+    /// left of the row wraps whole.
+    #[test]
+    fn a_wide_character_takes_two_cells() {
+        let mut grid = VtermGrid::new(5);
+        grid.feed("\u{4e2d}\u{6587}\u{4e2d}".as_bytes());
+        assert_eq!(grid.text_in(0..5, 0..2), "\u{4e2d}\u{6587}\n\u{4e2d}");
+    }
+
     #[test]
     fn a_finished_row_holds_only_its_cells() {
         let mut grid = VtermGrid::new(200);
