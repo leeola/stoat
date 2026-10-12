@@ -524,6 +524,16 @@ struct AuxWindow {
     id: u32,
     window: Arc<Window>,
     gpu: Option<GpuContext>,
+    /// The font size this window's GPU draws at, fixed when the window opens.
+    ///
+    /// A zoom or a config reload moves the primary's font size, and a display
+    /// move changes the primary's scale, but this window's GPU keeps the metrics
+    /// it was built with. Its pointer cells and pool scissors use these, so they
+    /// match what it draws.
+    font_size: u32,
+    /// The display scale this window's GPU draws at, fixed when the window
+    /// opens. See [`Self::font_size`].
+    scale_factor: f32,
     /// Size this window's surface has yet to be fitted to. See
     /// [`PendingResize`].
     pending_resize: PendingResize,
@@ -1400,8 +1410,6 @@ impl ApplicationHandler<PtyEvent> for App {
             match &event {
                 WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => {},
                 WindowEvent::RedrawRequested => {
-                    let font_size = state.font_size;
-                    let scale = state.scale_factor as f32;
                     let mut report = None;
                     if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
                         if !aux.visibility.admit() {
@@ -1417,6 +1425,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             .map(|prev| now.duration_since(prev).min(MAX_EASE_DT))
                             .unwrap_or(EASE_BASELINE_FRAME);
                         aux.last_redraw = Some(now);
+                        let (font_size, scale) = (aux.font_size, aux.scale_factor);
                         if redraw_aux(aux, &state.terminal, font_size, scale, dt) {
                             aux.window.request_redraw();
                         }
@@ -1483,7 +1492,6 @@ impl ApplicationHandler<PtyEvent> for App {
                 },
                 WindowEvent::CursorMoved { position, .. } => {
                     let position = *position;
-                    let cell_size = render::cell_size(state.font_size, state.scale_factor as f32);
                     let mods = modifier_bits(state.modifiers);
                     let event = state
                         .aux
@@ -1491,6 +1499,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         .find(|aux| aux.window.id() == id)
                         .and_then(|aux| {
                             let (rows, cols) = aux.gpu.as_ref()?.grid_size();
+                            let cell_size = render::cell_size(aux.font_size, aux.scale_factor);
                             let (col, row) = cell_at(position.x, position.y, cell_size, rows, cols);
                             let cell = (col as u16, row as u16);
                             let event =
@@ -1542,8 +1551,6 @@ impl ApplicationHandler<PtyEvent> for App {
                 },
                 WindowEvent::MouseWheel { delta, .. } => {
                     let delta = *delta;
-                    let cell_height =
-                        render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
                     let mods = modifier_bits(state.modifiers);
                     // An aux window always has the upstream channel, so its
                     // travel goes as one fractional event rather than a burst of
@@ -1552,8 +1559,12 @@ impl ApplicationHandler<PtyEvent> for App {
                         .aux
                         .iter()
                         .find(|aux| aux.window.id() == id)
-                        .map(|aux| (aux.id, aux.pointer_cell));
-                    if let Some((window, (col, row))) = at {
+                        .map(|aux| {
+                            let cell_height =
+                                render::cell_size(aux.font_size, aux.scale_factor)[1] as f64;
+                            (aux.id, aux.pointer_cell, cell_height)
+                        });
+                    if let Some((window, (col, row), cell_height)) = at {
                         send_window_event(
                             state,
                             WindowIpcEvent::Wheel {
@@ -2518,10 +2529,14 @@ fn open_aux_window(
         },
     };
 
+    let font_size = state.font_size;
+    let scale_factor = state.scale_factor as f32;
     state.aux.push(AuxWindow {
         id: window_id,
         window: window.clone(),
         gpu: None,
+        font_size,
+        scale_factor,
         pending_resize: PendingResize::default(),
         grid: Grid::new(0, 0),
         scratch: Grid::new(0, 0),
@@ -2542,8 +2557,6 @@ fn open_aux_window(
     });
 
     let size = window.inner_size();
-    let font_size = state.font_size;
-    let scale_factor = state.scale_factor as f32;
     let proxy = config.proxy.clone();
     let theme = config.theme;
     let font_family = config.font_family.to_vec();
