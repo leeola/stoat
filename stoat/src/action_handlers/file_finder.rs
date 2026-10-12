@@ -1,6 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent},
+    file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent, BROWSE_PATH_CAP},
     picker::{PathPicker, PendingScan},
 };
 use std::{
@@ -335,6 +335,10 @@ pub(super) fn spawn_workspace_walk(
 ///
 /// Feeds a fallback of ignored files, which lists what the workspace walk
 /// leaves out.
+///
+/// The walk stops itself once it has sent [`BROWSE_PATH_CAP`] paths, whether
+/// or not its owner drains them. Without the cap, an owner that stops draining
+/// early leaves the walk to fill the channel with every path under the root.
 pub(super) fn spawn_all_files_walk(
     stoat: &Stoat,
     root: PathBuf,
@@ -343,15 +347,32 @@ pub(super) fn spawn_all_files_walk(
     let fs_host = stoat.fs_host.clone();
     let redraw_notify = stoat.redraw_notify.clone();
     let task = stoat.executor.spawn_blocking(move || {
-        fs_host.walk_all_files_streaming(&root, &mut |batch| {
+        let mut sent = 0;
+        fs_host.walk_all_files_streaming(&root, &mut |mut batch| {
+            let flow = cap_batch(&mut batch, &mut sent, BROWSE_PATH_CAP);
             if walk_tx.send(batch).is_err() {
                 return ControlFlow::Break(());
             }
             redraw_notify.notify_one();
-            ControlFlow::Continue(())
+            flow
         });
     });
     (walk_rx, task)
+}
+
+/// Cut `batch` so the walk sends at most `cap` paths in all, and count what
+/// stays into `sent`.
+///
+/// Answers [`ControlFlow::Break`] once the walk has sent `cap` paths, so it
+/// stops after the batch that reaches the cap.
+fn cap_batch(batch: &mut Vec<PathBuf>, sent: &mut usize, cap: usize) -> ControlFlow<()> {
+    batch.truncate(cap.saturating_sub(*sent));
+    *sent += batch.len();
+    if *sent >= cap {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
 }
 
 /// Hand `paths` to a picker as one batch, in the shape [`spawn_workspace_walk`]
@@ -732,6 +753,7 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
 
 #[cfg(test)]
 mod tests {
+    use super::cap_batch;
     use crate::{
         action_handlers::workspace,
         app::Stoat,
@@ -740,7 +762,30 @@ mod tests {
             WorkspaceUid,
         },
     };
-    use std::{path::PathBuf, time::UNIX_EPOCH};
+    use std::{ops::ControlFlow, path::PathBuf, time::UNIX_EPOCH};
+
+    #[test]
+    fn cap_batch_stops_at_the_cap() {
+        let mut sent = 0;
+        let (lens, flows): (Vec<usize>, Vec<ControlFlow<()>>) = (0..3)
+            .map(|_| {
+                let mut batch = vec![PathBuf::new(); 256];
+                let flow = cap_batch(&mut batch, &mut sent, 600);
+                (batch.len(), flow)
+            })
+            .unzip();
+        assert_eq!(
+            (lens, flows),
+            (
+                vec![256, 256, 88],
+                vec![
+                    ControlFlow::Continue(()),
+                    ControlFlow::Continue(()),
+                    ControlFlow::Break(()),
+                ],
+            ),
+        );
+    }
 
     /// A bare launch at `/home` enters a saved session through the picker, and
     /// the cross-workspace walk then covers the session's root alone.
