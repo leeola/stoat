@@ -73,7 +73,7 @@ use stoatty_term::{
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalSize},
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState},
@@ -2500,11 +2500,15 @@ fn open_aux_window(
         },
     }
 
-    let [cell_w, cell_h] = render::cell_size(state.font_size, state.scale_factor as f32);
     let attributes = with_app_name(
         Window::default_attributes()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(cols as f32 * cell_w, rows as f32 * cell_h)),
+            .with_inner_size(aux_window_size(
+                cols,
+                rows,
+                state.font_size,
+                state.scale_factor,
+            )),
     );
     let window = match event_loop.create_window(attributes) {
         Ok(window) => Arc::new(window),
@@ -2598,6 +2602,23 @@ fn open_aux_window(
         tracing::warn!(window = window_id, %error, "failed to spawn aux gpu thread");
         state.aux.retain(|aux| aux.id != window_id);
     }
+}
+
+/// The logical inner size that holds a `cols` by `rows` grid at `font_size` on
+/// a display at `scale`.
+///
+/// The size is logical because Wayland sizes a new window in logical units
+/// before it knows the scale. Wayland then rounds the size to whole logical
+/// pixels. A size rounded down comes back a physical pixel short at some
+/// fractional scales and drops a column or a row, so the size rounds up.
+fn aux_window_size(cols: u16, rows: u16, font_size: u32, scale: f64) -> LogicalSize<f64> {
+    let [cell_w, cell_h] = render::cell_size(font_size, scale as f32);
+    let extent = PhysicalSize::new(
+        f64::from(cols) * f64::from(cell_w),
+        f64::from(rows) * f64::from(cell_h),
+    );
+    let logical: LogicalSize<f64> = extent.to_logical(scale);
+    LogicalSize::new(logical.width.ceil(), logical.height.ceil())
 }
 
 /// Assemble and present one primary-window frame.
@@ -3610,12 +3631,14 @@ fn apply_primary_resize(state: &mut State) {
 /// Fit one aux window's surface to the size its last batch settled on,
 /// returning the cell dimensions to report to the child.
 ///
-/// `None` when no size waits or the window's GPU has not arrived yet. The
-/// caller sends the report, since the socket lives on the whole [`State`] while
-/// this borrows one window out of it.
+/// `None` when no size waits or the window's GPU has not arrived yet. A size
+/// that arrives before the GPU waits for it, so the first redraw after the GPU
+/// install fits the window and reports its grid. The caller sends the report,
+/// since the socket lives on the whole [`State`] while this borrows one window
+/// out of it.
 fn fit_aux(aux: &mut AuxWindow) -> Option<(u16, u16)> {
-    let (width, height) = aux.pending_resize.take()?;
     let gpu = aux.gpu.as_mut()?;
+    let (width, height) = aux.pending_resize.take()?;
     gpu.resize(width, height);
     let (rows, cols) = gpu.grid_size();
     Some((cols as u16, rows as u16))
@@ -3941,9 +3964,9 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
-        classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
-        net_font_step, notification_should_show, pool_composite, pool_grid_reports,
+        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, aux_window_size,
+        bell_should_ring, classify_window_open, compose_aux_grid, earliest, forced_damage,
+        grid_pixels, net_font_step, notification_should_show, pool_composite, pool_grid_reports,
         selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo,
         update_cell_pixels, wheel_upstream, zoom_route, ActivePool, ForceFull, FrameOutcome, Input,
         PendingResize, PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent,
@@ -5045,6 +5068,38 @@ mod tests {
         assert!(
             !visibility.set_occluded(false),
             "no redraw was asked for while it was away",
+        );
+    }
+
+    /// X11 converts the logical size straight to physical pixels, and Wayland
+    /// first rounds it to whole logical pixels, so each grid goes through both
+    /// at a range of whole and fractional scales.
+    #[test]
+    fn aux_window_size_holds_the_requested_grid() {
+        let misses: Vec<(f64, u16, u16)> = [1.0, 1.25, 1.5, 1.75, 2.0]
+            .into_iter()
+            .flat_map(|scale| {
+                (1..=100).flat_map(move |cols| (1..=50).map(move |rows| (scale, cols, rows)))
+            })
+            .filter(|&(scale, cols, rows)| {
+                let size = aux_window_size(cols, rows, 14, scale);
+                let x11 = size.to_physical::<u32>(scale);
+                let wayland = size.cast::<u32>().to_physical::<u32>(scale);
+                [x11, wayland].into_iter().any(|physical| {
+                    stoatty_render::render::grid_size(
+                        physical.width,
+                        physical.height,
+                        14,
+                        scale as f32,
+                    ) != (usize::from(rows), usize::from(cols))
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            misses,
+            [],
+            "(scale, cols, rows) whose window misses its grid"
         );
     }
 
