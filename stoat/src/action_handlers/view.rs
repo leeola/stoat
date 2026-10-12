@@ -451,7 +451,8 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
 /// direction it came from in the document.
 ///
 /// A single-row follow stays a snap, so plain motion at the viewport margin
-/// keeps its immediate feel.
+/// keeps its immediate feel. The snap is the editor's own view state. A
+/// stoatty pool eases every target move by itself.
 pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     let prev = editor.scroll_row;
     let scrolled = ensure_cursor_in_view(editor, scrolloff);

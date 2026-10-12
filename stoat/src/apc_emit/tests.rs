@@ -3253,18 +3253,19 @@ fn emit_after_edit_reenters_pool_pages() {
     h.edit_focused(0..0, "x");
     let _ = drain_fills(&mut rx);
 
-    // The edit bumps the snapshot version, so the next moving emit wipes the
-    // buffered window and re-enters its pages rather than compositing stale
-    // pre-edit text.
+    // The edit bumps the snapshot version, so the next moving emit re-enters
+    // the pages its composite reads, page 0 and the straddle page 1, rather
+    // than compositing stale pre-edit text.
     {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         editor.scroll_offset = 0.9;
         editor.scroll_glide = ScrollGlide::Page;
     }
     emit_smooth_scroll(&mut h.stoat);
-    assert!(
-        !drain_fills(&mut rx).is_empty(),
-        "a scroll after an edit re-enters the pool's pages with fresh text"
+    assert_eq!(
+        drain_fills(&mut rx),
+        vec![0, 1],
+        "a scroll after an edit re-enters the composited pages with fresh text"
     );
 }
 
@@ -3316,8 +3317,9 @@ fn a_released_edit_fills_the_composited_page_before_the_scroll() {
         .collect();
     assert_eq!(
         (filled_before_scroll, pool_fills(&bytes, pool)),
-        (vec![0, 1], vec![0, 1, 2, 3, 4]),
-        "the composited pages fill ahead of the scroll, and every page fills once"
+        (vec![0, 1], vec![0, 1]),
+        "the composited pages fill ahead of the scroll, once each, and no other \
+         page refills"
     );
 }
 
@@ -3909,11 +3911,91 @@ fn a_page_glide_redecorates_no_page_above_its_start() {
 }
 
 #[test]
-fn an_older_terminal_still_gets_whole_refills() {
+fn an_older_terminal_refills_the_composited_pages_whole() {
     assert_eq!(
         relative_line_scroll_fills(4),
-        (vec![0, 1, 2, 3, 4], Vec::new()),
-        "a terminal without decorations-only fills repaints the window"
+        (vec![0, 1], Vec::new()),
+        "a terminal without decorations-only fills repaints the pages the move \
+         composites"
+    );
+}
+
+/// Enter at the bottom scrolloff margin moves the view one row with no
+/// glide. The edit it carries refills only the pages that move composites,
+/// ahead of its scroll and with no reposition.
+#[test]
+fn a_margin_follow_refills_the_pages_its_move_composites() {
+    use stoatty_protocol::command::{Command, FillCommand, PoolRegionCommand, NON_PANE_POOL_BASE};
+
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/margin");
+    let path = root.join("a.txt");
+    let body: String = (0..400).map(|i| format!("line {i}\n")).collect();
+    h.fake_fs().insert_file(&path, body.as_bytes());
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+
+    let line = |n: usize| body.find(&format!("line {n}\n")).expect("the line exists");
+    h.stoat.collapse_focused_cursor_to(line(100));
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("focused editor")
+        .scroll_row = 100;
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+    let height = drain_apc(&mut rx)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::PoolRegion(PoolRegionCommand { pool, height, .. })
+                if pool < NON_PANE_POOL_BASE =>
+            {
+                Some(u64::from(height))
+            },
+            _ => None,
+        })
+        .expect("the editor declares its pool");
+
+    // The default scrolloff keeps three rows below the cursor.
+    h.stoat
+        .collapse_focused_cursor_to(line(100 + height as usize - 4));
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+    let _ = drain_apc(&mut rx);
+
+    h.type_keys("i enter escape");
+    let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+    assert_eq!(
+        (editor.scroll_row, editor.scroll_glide),
+        (101, ScrollGlide::None),
+        "the margin follow snaps the view one row",
+    );
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+
+    let sent = drain_apc(&mut rx);
+    let fills: Vec<u64> = sent
+        .iter()
+        .filter_map(|command| match command {
+            Command::Fill(FillCommand { index, .. }) => Some(*index),
+            _ => None,
+        })
+        .collect();
+    let repositioned = sent
+        .iter()
+        .any(|command| matches!(command, Command::Reposition(_)));
+    assert_eq!(
+        (fills, repositioned),
+        (
+            (100 / height..=(101 + height) / height).collect::<Vec<_>>(),
+            false,
+        ),
+        "the move composites the pages from row 100 through the straddle row",
     );
 }
 

@@ -1021,12 +1021,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             theme_epoch,
             page_spotlight,
         );
+        let snapshot = editor.display_map.snapshot();
         // The spotlight recolors only the rows it lights, so where it falls is
         // each page's own version. A diff-view page draws no spotlight.
         let lit = page_spotlight
             .filter(|_| !editor.diff_view)
             .map(|spotlight| {
-                let snapshot = editor.display_map.snapshot();
                 (
                     spotlight.color,
                     crate::smooth_scroll::spotlight_display_span(&snapshot, spotlight),
@@ -1048,7 +1048,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     composited_pages(scroll_offset, region.height),
                 )
             });
-        let snapshot = editor.display_map.snapshot();
         let gutter = crate::smooth_scroll::PageGutter::new(
             line_numbers != LineNumbers::Off,
             editor
@@ -1070,6 +1069,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_offset,
+            u64::from(snapshot.line_count()),
             PageVersions {
                 cells: content_version,
                 decorations: decoration_version,
@@ -1122,7 +1122,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // display rows, so the window converts before it ships. The
             // conversion is deferred into the closure because an idle frame
             // has nothing to convert that the last one did not.
-            let snapshot = editor.display_map.snapshot();
             let rows = region.height as u32;
             let inputs = MinimapWindowInputs::new(
                 scroll_offset,
@@ -1290,6 +1289,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1430,6 +1430,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1477,6 +1478,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1525,6 +1527,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1592,6 +1595,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1647,6 +1651,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1694,6 +1699,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1805,6 +1811,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             region,
             scroll_row as f32,
+            u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
@@ -1852,6 +1859,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &mut stoat.smooth_scroll,
             list_region,
             list_scroll as f32,
+            u64::MAX,
             PageVersions {
                 cells: list_version,
                 decorations: 0,

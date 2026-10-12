@@ -111,9 +111,11 @@ struct PoolEmitState {
     /// `scroll_offset` the most recent [`ScrollCommand`] was computed from.
     /// Skips re-emitting an unchanged scroll target.
     last_scroll_offset: Option<f32>,
-    /// Content version last seen for this pool. When the caller passes a
-    /// different value the buffered pages are stale (the surface re-filtered or
-    /// regenerated), so the window is refilled rather than composited as-is.
+    /// Content version last seen for this pool.
+    ///
+    /// A different value from the caller means the surface changed under the
+    /// buffered pages. Each page then refills once a composite reads it, and a
+    /// page no composite reads keeps its fill until one does.
     content_version: u64,
     /// What the slot of each requested page holds.
     pages: Vec<PageStamp>,
@@ -131,17 +133,21 @@ struct PageStamp {
     /// The `page_cells` answer of [`emit_pages_into`] that the page's whole
     /// fill carried.
     cells: u64,
+    /// The [`PageVersions::cells`] that the page's whole fill carried.
+    surface: u64,
     /// The [`PageVersions::decorations`] that the page's latest fill carried.
     decorations: u64,
 }
 
 /// The two versions a pool's buffered pages answer to.
 ///
-/// `cells` covers everything a page paints into its cells, and a change refills
-/// every buffered page. `decorations` covers only the text runs, bars, and
-/// polylines laid over those cells. A change of it alone re-sends just those,
-/// to the buffered pages a scroll composites or heads toward, which costs far
-/// less than painting them again.
+/// `cells` covers everything a page paints into its cells. A change refills
+/// each buffered page once a composite reads it, so a press that moves the
+/// view one row repaints the pages it shows and not the whole window.
+/// `decorations` covers only the text runs, bars, and polylines laid over
+/// those cells. A change of it alone re-sends just those, to the buffered
+/// pages a scroll composites or heads toward, which costs far less than
+/// painting them again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PageVersions {
     pub cells: u64,
@@ -152,8 +158,9 @@ pub struct PageVersions {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Refill {
     /// Pages owed a whole fill, ascending. These are the pages newly entering
-    /// the buffered window and the buffered pages whose own cells version
-    /// moved.
+    /// the buffered window, the buffered pages whose own cells version moved,
+    /// and the buffered pages a composite reads after a change of
+    /// [`PageVersions::cells`].
     pub entered: Vec<u64>,
     /// Buffered pages owed a decorations-only fill, ascending. A page is listed
     /// when its decorations changed and the move composites or heads toward
@@ -329,10 +336,12 @@ impl SmoothScrollState {
 /// closure `render_page` returns the self-contained VT bytes painting page
 /// `index`, which covers content rows `index * region.height ..`.
 ///
-/// `content_version` changes whenever the surface's content changes (a
-/// re-filtered list, a regenerated diff); a value differing from the last emit
-/// forces the buffered window to refill so a stale page is never composited.
-/// Pass a constant for content that is stable while scrolling.
+/// `content_version` changes whenever the surface's content changes, such as a
+/// re-filtered list or a regenerated diff. After a change, a buffered page
+/// refills once a composite reads it, which is a page a move eases through or a
+/// page a rest shows. So a stale page is never composited, and a page that no
+/// composite reads keeps its old fill until one does. Pass a constant for
+/// content that is stable while scrolling.
 ///
 /// `hold_when_idle` defers a content change on a frame whose target did not
 /// move and rests on a whole row, until the target shifts. It suits a surface
@@ -352,15 +361,16 @@ impl SmoothScrollState {
 ///
 /// Emits, in order: a `pool_region` frame when the rectangle changed; a
 /// `fill`/page-VT/`fill_end` triple for each page newly entering the buffered
-/// window; a `reposition` frame when the new window is disjoint from the old, so
-/// a far jump re-anchors near the destination instead of easing across the gap;
-/// then a `scroll` frame carrying the precise target. A frame that needs none of
-/// these appends nothing.
+/// window and each stale page a composite reads; a `reposition` frame when the
+/// new window is disjoint from the old, so a far jump re-anchors near the
+/// destination instead of easing across the gap; then a `scroll` frame carrying
+/// the precise target. A frame that needs none of these appends nothing.
 ///
-/// Returns the page indices that newly entered the buffered window this call, in
-/// ascending order. A caller filling synchronously ignores them (the fill bytes
-/// are already in `out`); a caller filling asynchronously passes an
-/// empty-returning `render_page` and fills these pages off-thread instead.
+/// Returns the page indices filled this call, in ascending order: the pages
+/// newly entering the buffered window and the stale pages a composite reads. A
+/// caller filling synchronously ignores them (the fill bytes are already in
+/// `out`); a caller filling asynchronously passes an empty-returning
+/// `render_page` and fills these pages off-thread instead.
 pub fn emit_into(
     out: &mut Vec<u8>,
     state: &mut SmoothScrollState,
@@ -379,6 +389,7 @@ pub fn emit_into(
         state,
         region,
         scroll_offset,
+        u64::MAX,
         versions,
         |_| 0,
         hold_when_idle,
@@ -390,15 +401,21 @@ pub fn emit_into(
 /// [`emit_into`] for a pool whose pages version their decorations apart from
 /// their cells.
 ///
-/// A change of `versions.cells` refills the window as a content version change
-/// does there. A change of `versions.decorations` alone lists buffered pages
-/// in [`Refill::redecorated`], for the caller to send as decorations-only
-/// fills. It lists only the pages the move composites or heads toward, from
-/// the pages under the last target onward in the direction the target moves.
-/// A page behind the move keeps its old decorations until a later move heads
-/// back toward it. A page entering the window this call is never listed there
-/// too, because its whole fill carries the decorations. The hold rule defers a
-/// decoration change the way it defers a cell change.
+/// A change of `versions.cells` refills the pages a composite reads, as a
+/// content version change does there. A change of `versions.decorations` alone
+/// lists buffered pages in [`Refill::redecorated`], for the caller to send as
+/// decorations-only fills. It lists only the pages the move composites or
+/// heads toward, from the pages under the last target onward in the direction
+/// the target moves. A page behind the move keeps its old decorations until a
+/// later move heads back toward it. A page entering the window this call is
+/// never listed there too, because its whole fill carries the decorations.
+/// Neither is a page that a cells change left stale, since the whole fill it
+/// is owed carries them. The hold rule defers a decoration change the way it
+/// defers a cell change.
+///
+/// `content_rows` is how many rows the surface holds, so the window stops at
+/// the last page a composite reads and the surface's end costs no blank page.
+/// Pass `u64::MAX` for a surface with no known end.
 ///
 /// `page_cells` answers a cells version for each page on top of
 /// `versions.cells`, for content that changes on some pages and not others.
@@ -412,6 +429,7 @@ pub fn emit_pages_into(
     state: &mut SmoothScrollState,
     region: PoolRegionCommand,
     scroll_offset: f32,
+    content_rows: u64,
     versions: PageVersions,
     page_cells: impl Fn(u64) -> u64,
     hold_when_idle: bool,
@@ -422,12 +440,12 @@ pub fn emit_pages_into(
     let entry = state.pools.entry(pool).or_default();
 
     // A content change seen while the target rests on a whole row waits for the
-    // next move. Holding keeps the stored version, which suppresses the refill
-    // wipe, and keeps the window the terminal holds, so the next glide enters
-    // only the pages its window gains.
+    // next move. Holding keeps the stored version and the window the terminal
+    // holds, so the next glide enters the pages its window gains and refills
+    // the pages it composites.
     //
-    // Computed before the region and version wipes below reset last_scroll_offset,
-    // so it reflects real scroll motion. A fresh entry has last_scroll_offset None,
+    // Computed before the region wipe below resets last_scroll_offset, so it
+    // reflects real scroll motion. A fresh entry has last_scroll_offset None,
     // so its first display counts as scrolling and still prefills the whole window.
     let last_target = entry.last_scroll_offset;
     let scrolling = last_target != Some(scroll_offset);
@@ -447,17 +465,10 @@ pub fn emit_pages_into(
         entry.last_scroll_offset = None;
     }
 
-    let effective_version = if hold {
-        entry.content_version
-    } else {
-        versions.cells
-    };
-    if entry.content_version != effective_version {
-        // The surface changed under the pool. The buffered pages are stale.
-        entry.requested = None;
-        entry.pages.clear();
-        entry.last_scroll_offset = None;
-        entry.content_version = effective_version;
+    // A changed surface keeps the buffered pages, and each page's stamp
+    // decides below whether a composite reads it stale.
+    if !hold {
+        entry.content_version = versions.cells;
     }
 
     let region_height = region.height.max(1) as u64;
@@ -468,10 +479,15 @@ pub fn emit_pages_into(
         true => page..page + 1,
         false => page..page + 2,
     };
+    let last_page = (content_rows / region_height).max(page + 1);
+    let composited = match last_target {
+        Some(from) if scrolling => pages_composited(from, scroll_offset, region_height),
+        _ => needed.clone(),
+    };
     let window = match (idle, &entry.requested) {
         (true, Some(held)) if held.start <= needed.start && needed.end <= held.end => held.clone(),
         (true, _) => needed,
-        (false, _) => window_range(page),
+        (false, _) => window_range(page, last_page),
     };
 
     let prev = entry.requested.clone();
@@ -490,10 +506,11 @@ pub fn emit_pages_into(
             entry,
             pool,
             window.clone(),
-            !hold,
+            (!hold).then_some(&composited),
             &|page| PageStamp {
                 page,
                 cells: page_cells(page),
+                surface: versions.cells,
                 decorations: versions.decorations,
             },
             &mut render_page,
@@ -502,13 +519,16 @@ pub fn emit_pages_into(
 
     // A page that did not enter keeps its cells and needs only the new
     // decorations. An entered page's fill carried them, so its stamp is
-    // current. A cell change emptied the requested range above, so every page
-    // entered and none is listed here.
+    // current. A page that a surface change left stale takes no runs, since
+    // the whole fill a later move owes it carries them.
     let mut redecorated = Vec::new();
     if !hold {
         let ahead = pages_ahead(window, last_target, scroll_offset, region_height);
         for held in &mut entry.pages {
-            if ahead.contains(&held.page) && held.decorations != versions.decorations {
+            if ahead.contains(&held.page)
+                && held.decorations != versions.decorations
+                && held.surface == versions.cells
+            {
                 held.decorations = versions.decorations;
                 redecorated.push(held.page);
             }
@@ -542,9 +562,14 @@ pub fn emit_pages_into(
 ///
 /// Pages already covered by the previous window are not re-pushed, so a sub-page
 /// scroll that does not change the window enters no pages and a one-page step enters
-/// only the single page at the edge. With `compare`, a covered page whose
-/// `stamp` cells differ from the ones its fill carried enters again. An entered
-/// page records its `stamp`.
+/// only the single page at the edge.
+///
+/// `compare` holds the pages a composite reads this call. With it, a covered
+/// page whose `stamp` cells differ from the ones its fill carried enters again.
+/// A covered page whose `stamp` surface differs enters again only when
+/// `compare` holds it, so a page no composite reads keeps its older fill. With
+/// `None`, every covered page stays as it is. An entered page records its
+/// `stamp`.
 ///
 /// `render_page(index)` returning empty bytes requests the page without emitting a
 /// fill frame. A caller filling asynchronously uses that to mean "no synchronous
@@ -555,7 +580,7 @@ fn refill(
     entry: &mut PoolEmitState,
     pool: u32,
     window: Range<u64>,
-    compare: bool,
+    compare: Option<&Range<u64>>,
     stamp: &impl Fn(u64) -> PageStamp,
     render_page: &mut impl FnMut(u64) -> Vec<u8>,
 ) -> Vec<u64> {
@@ -563,12 +588,17 @@ fn refill(
     let mut entered = Vec::new();
     for index in window.clone() {
         let buffered = already.contains(&index);
-        if buffered && !compare {
+        if buffered && compare.is_none() {
             continue;
         }
         let fresh = stamp(index);
-        let unchanged = |held: &PageStamp| held.page == index && held.cells == fresh.cells;
-        if buffered && entry.pages.iter().any(unchanged) {
+        let composited = compare.is_some_and(|pages| pages.contains(&index));
+        let current = |held: &PageStamp| {
+            held.page == index
+                && held.cells == fresh.cells
+                && (held.surface == fresh.surface || !composited)
+        };
+        if buffered && entry.pages.iter().any(current) {
             continue;
         }
 
@@ -614,13 +644,29 @@ fn pages_ahead(window: Range<u64>, from: Option<f32>, to: f32, region_height: u6
     }
 }
 
-/// The half-open page window centered on `page`, clamped at the content start.
+/// The pages a move of the scroll target from `from` to `to` composites.
+///
+/// The terminal eases through every row between the two targets, and a
+/// composite at each reads `region_height + 1` rows from its floored top row.
+/// So the range runs from the page under the lower target's top row to the
+/// page under the row past the higher target's last row, the straddle row.
+fn pages_composited(from: f32, to: f32, region_height: u64) -> Range<u64> {
+    let low = from.min(to).floor() as u64;
+    let high = from.max(to).floor() as u64;
+    low / region_height..(high + region_height) / region_height + 1
+}
+
+/// The half-open page window centered on `page`, clamped at the content start
+/// and at `last_page`, the last page a composite reads.
 ///
 /// Centering leaves pages buffered on both sides of the visible page so an ease
-/// lagging behind a jump stays covered in either direction.
-fn window_range(page: u64) -> Range<u64> {
+/// lagging behind a jump stays covered in either direction. A window clamped at
+/// the end shifts back, so it still holds as many pages as the content has.
+fn window_range(page: u64, last_page: u64) -> Range<u64> {
     let start = page.saturating_sub(WINDOW_PAGES / 2);
-    start..start + WINDOW_PAGES
+    let end = (start + WINDOW_PAGES).min(last_page.saturating_add(1));
+    let start = end.saturating_sub(WINDOW_PAGES).min(start);
+    start..end
 }
 
 /// Map a fractional top visible content row to pool `pool`'s scroll target, a
@@ -800,10 +846,18 @@ mod tests {
     }
 
     #[test]
-    fn window_centers_and_clamps_at_start() {
-        assert_eq!(window_range(0), 0..WINDOW_PAGES);
-        assert_eq!(window_range(1), 0..WINDOW_PAGES);
-        assert_eq!(window_range(10), 8..8 + WINDOW_PAGES);
+    fn window_centers_and_clamps_at_both_ends() {
+        assert_eq!(
+            [
+                window_range(0, u64::MAX),
+                window_range(1, u64::MAX),
+                window_range(10, u64::MAX),
+                window_range(4, 5),
+                window_range(5, 5),
+                window_range(0, 1),
+            ],
+            [0..5, 0..5, 8..13, 1..6, 1..6, 0..2],
+        );
     }
 
     #[test]
@@ -869,12 +923,111 @@ mod tests {
         });
         assert!(held.is_empty(), "resting hold entered {held:?}");
 
-        // A sub-page move applies the deferred bump, wiping the stale window and
-        // refilling it even though the visible page did not change.
+        // A sub-page move applies the deferred bump and refills the pages its
+        // composite reads, the visible page and the straddle page after it.
         let moved = emit_into(&mut out, &mut state, region(1, 20), 41.0, 1, true, |_| {
             Vec::new()
         });
-        assert_eq!(moved, (0..WINDOW_PAGES).collect::<Vec<_>>());
+        assert_eq!(moved, vec![2, 3]);
+    }
+
+    /// Emit pool 1 over 20-row pages at `offset` and `version`, holding at
+    /// rest and filling asynchronously, and return the pages it fills.
+    fn emit_held(state: &mut SmoothScrollState, offset: f32, version: u64) -> Vec<u64> {
+        emit_into(
+            &mut Vec::new(),
+            state,
+            region(1, 20),
+            offset,
+            version,
+            true,
+            |_| Vec::new(),
+        )
+    }
+
+    /// A change that a move releases refills only the pages that move
+    /// composites, and the next move finds them current.
+    #[test]
+    fn a_change_while_scrolling_refills_only_the_pages_the_move_composites() {
+        let mut state = SmoothScrollState::default();
+        emit_held(&mut state, 40.0, 0);
+        emit_held(&mut state, 40.0, 0);
+        assert_eq!(
+            (
+                emit_held(&mut state, 41.0, 1),
+                emit_held(&mut state, 42.0, 1),
+            ),
+            (vec![2, 3], Vec::new()),
+            "a move inside page 2 composites pages 2 and 3",
+        );
+    }
+
+    /// Page 4 stays stale behind a move inside page 2, and refills once the
+    /// glide to page 5 composites it, beside the pages the window gains.
+    #[test]
+    fn a_page_left_stale_refills_when_a_move_composites_it() {
+        let mut state = SmoothScrollState::default();
+        for (offset, version) in [(40.0, 0), (40.0, 0), (41.0, 1), (42.0, 1)] {
+            emit_held(&mut state, offset, version);
+        }
+        assert_eq!(emit_held(&mut state, 100.0, 1), vec![4, 5, 6, 7]);
+    }
+
+    /// A far jump that carries a new version still re-anchors the terminal
+    /// near its destination, so the glide does not ease across the gap.
+    #[test]
+    fn a_far_jump_that_releases_a_held_change_repositions() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, true, |_| {
+                Vec::new()
+            });
+        }
+
+        out.clear();
+        emit_into(&mut out, &mut state, region(1, 20), 170.0, 1, true, |_| {
+            Vec::new()
+        });
+        let nav: Vec<Command> = commands(&out)
+            .into_iter()
+            .filter(|c| matches!(c, Command::Reposition(_) | Command::Scroll(_)))
+            .collect();
+        assert_eq!(
+            nav,
+            vec![
+                Command::Reposition(RepositionCommand { pool: 1, page: 8 }),
+                Command::Scroll(ScrollCommand {
+                    pool: 1,
+                    page: 8,
+                    fraction: 32768,
+                }),
+            ],
+        );
+    }
+
+    /// The window stops at the page past the content's last row, the last
+    /// page a composite reads, so a surface's end costs no blank page.
+    #[test]
+    fn the_window_stops_at_the_last_page_a_composite_reads() {
+        let entered = |content_rows: u64, offset: f32| {
+            emit_pages_into(
+                &mut Vec::new(),
+                &mut SmoothScrollState::default(),
+                region(1, 20),
+                offset,
+                content_rows,
+                PageVersions::default(),
+                |_| 0,
+                false,
+                |_| Vec::new(),
+            )
+            .entered
+        };
+        assert_eq!(
+            (entered(100, 80.0), entered(10, 0.0)),
+            (vec![1, 2, 3, 4, 5], vec![0, 1]),
+        );
     }
 
     /// Emit pool 1 at `offset` with decoration version `decorations`, holding at
@@ -889,6 +1042,7 @@ mod tests {
             state,
             region(1, 20),
             offset,
+            u64::MAX,
             versions,
             |_| 0,
             true,
@@ -1043,6 +1197,7 @@ mod tests {
                 state,
                 region(1, 20),
                 offset,
+                u64::MAX,
                 PageVersions::default(),
                 |page| if page == 3 { lit } else { 0 },
                 true,
@@ -1207,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn without_hold_a_resting_content_change_still_refills() {
+    fn without_hold_a_resting_content_change_refills_the_visible_page() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
 
@@ -1215,12 +1370,13 @@ mod tests {
             Vec::new()
         });
 
-        // A pool passing hold_when_idle false refills the full window on a
-        // content change even while the target is stationary.
+        // A pool passing hold_when_idle false refills the page it shows on a
+        // content change even while the target is stationary. The pages around
+        // it wait for a composite to read them.
         let entered = emit_into(&mut out, &mut state, region(1, 20), 40.0, 1, false, |_| {
             Vec::new()
         });
-        assert_eq!(entered, (0..WINDOW_PAGES).collect::<Vec<_>>());
+        assert_eq!(entered, vec![2]);
     }
 
     #[test]
@@ -1318,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn content_version_bump_forces_refill() {
+    fn a_content_bump_at_rest_refills_the_visible_page() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
         emit_into(&mut out, &mut state, region(1, 20), 0.0, 1, false, |_| {
@@ -1337,18 +1493,13 @@ mod tests {
             refilled.push(page);
             Vec::new()
         });
+        let rescrolled = commands(&out)
+            .iter()
+            .any(|c| matches!(c, Command::Scroll(_)));
         assert_eq!(
-            refilled,
-            (0..WINDOW_PAGES).collect::<Vec<_>>(),
-            "a content bump refills the whole window at the same scroll position"
-        );
-        assert!(
-            commands(&out).contains(&Command::Scroll(ScrollCommand {
-                pool: 1,
-                page: 0,
-                fraction: 0
-            })),
-            "a content bump re-emits the scroll target"
+            (refilled, rescrolled),
+            (vec![0], false),
+            "a content bump at rest refills the page it shows and keeps the target"
         );
     }
 
@@ -1365,6 +1516,7 @@ mod tests {
             &mut state,
             region(1, 20),
             0.0,
+            u64::MAX,
             first,
             |_| 0,
             true,
@@ -1381,6 +1533,7 @@ mod tests {
             &mut state,
             region(1, 20),
             1.0,
+            u64::MAX,
             moved,
             |_| 0,
             true,
@@ -1404,6 +1557,7 @@ mod tests {
             &mut state,
             region(1, 20),
             2.0,
+            u64::MAX,
             moved,
             |_| 0,
             true,
@@ -1424,6 +1578,7 @@ mod tests {
             &mut state,
             region(1, 20),
             0.0,
+            u64::MAX,
             first,
             |_| 0,
             true,
@@ -1439,6 +1594,7 @@ mod tests {
             &mut state,
             region(1, 20),
             1.0,
+            u64::MAX,
             both,
             |_| 0,
             true,
@@ -1448,10 +1604,45 @@ mod tests {
         assert_eq!(
             refill,
             Refill {
-                entered: (0..WINDOW_PAGES).collect(),
+                entered: vec![0, 1],
                 redecorated: Vec::new(),
             },
-            "a whole fill carries the new decorations with the new cells"
+            "the composited pages refill with the new decorations, and the stale \
+             pages take no runs"
+        );
+    }
+
+    /// A page that a cells change left stale takes no decorations-only fill,
+    /// since the whole fill a later composite owes it carries the new runs.
+    #[test]
+    fn a_stale_page_takes_no_decorations_only_fill() {
+        let mut state = SmoothScrollState::default();
+        let mut emit = |offset: f32, cells: u64, decorations: u64| {
+            emit_pages_into(
+                &mut Vec::new(),
+                &mut state,
+                region(1, 20),
+                offset,
+                u64::MAX,
+                PageVersions { cells, decorations },
+                |_| 0,
+                true,
+                |_| Vec::new(),
+            )
+        };
+        emit(0.0, 1, 1);
+        assert_eq!(
+            (emit(1.0, 2, 2), emit(2.0, 2, 3)),
+            (
+                Refill {
+                    entered: vec![0, 1],
+                    redecorated: Vec::new(),
+                },
+                Refill {
+                    entered: Vec::new(),
+                    redecorated: vec![0, 1],
+                },
+            ),
         );
     }
 
