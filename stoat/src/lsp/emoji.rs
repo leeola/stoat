@@ -45,15 +45,16 @@ use lsp_types::{
     SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
     SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Uri, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    TextDocumentContentChangeEvent, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::Value as JsonValue;
 use std::{
     collections::HashMap,
     io,
+    ops::Range as ByteRange,
     sync::{Arc, LazyLock, Mutex},
 };
 use stoat_text::Rope;
@@ -133,15 +134,7 @@ impl LspHost for EmojiLsp {
         let Some(rope) = docs.get_mut(&params.text_document.uri) else {
             return Ok(());
         };
-        for change in params.content_changes {
-            match change.range {
-                Some(range) => {
-                    let bytes = util::lsp_range_to_byte_range(rope, range, OffsetEncoding::Utf8);
-                    rope.replace(bytes, &change.text);
-                },
-                None => *rope = Rope::from(change.text.as_str()),
-            }
-        }
+        apply_changes(rope, params.content_changes);
         Ok(())
     }
 
@@ -465,6 +458,65 @@ impl LspHost for EmojiLsp {
     }
 }
 
+/// Apply `changes` to `rope` in order, each against the text the one before it
+/// left.
+///
+/// stoat sends a multi-range edit back to front, disjoint, and in the
+/// coordinates of the text before the first change. Each range then converts
+/// against `rope` as it stands, and one ascending pass splices them all, so N
+/// changes cost one rebuild rather than N. Any other list, which the protocol
+/// also allows, takes the changes one at a time.
+fn apply_changes(rope: &mut Rope, changes: Vec<TextDocumentContentChangeEvent>) {
+    if let Some(ranges) = back_to_front_ranges(rope, &changes) {
+        let mut spliced = Rope::new();
+        let mut cursor = rope.cursor(0);
+        // The reversed list is in ascending order. Two inserts at one offset
+        // then land as the sequential loop leaves them, the later-listed text
+        // first.
+        for (range, change) in ranges.iter().zip(&changes).rev() {
+            spliced.append(cursor.slice(range.start));
+            cursor.seek_forward(range.end);
+            spliced.push(&change.text);
+        }
+        spliced.append(cursor.suffix());
+        *rope = spliced;
+        return;
+    }
+
+    for change in changes {
+        match change.range {
+            Some(range) => {
+                let bytes = util::lsp_range_to_byte_range(rope, range, OffsetEncoding::Utf8);
+                rope.replace(bytes, &change.text);
+            },
+            None => *rope = Rope::from(change.text.as_str()),
+        }
+    }
+}
+
+/// The byte range of each change against `rope`, when every change has one and
+/// each ends at or before the start of the change listed before it.
+fn back_to_front_ranges(
+    rope: &Rope,
+    changes: &[TextDocumentContentChangeEvent],
+) -> Option<Vec<ByteRange<usize>>> {
+    let ranges = changes
+        .iter()
+        .map(|change| {
+            let range = change.range?;
+            Some(util::lsp_range_to_byte_range(
+                rope,
+                range,
+                OffsetEncoding::Utf8,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    ranges
+        .windows(2)
+        .all(|pair| pair[1].end <= pair[0].start)
+        .then_some(ranges)
+}
+
 /// The shortcode being typed at `position`, as the column the opening `:` sits
 /// at, the character before that colon, and the letters typed since.
 ///
@@ -542,9 +594,7 @@ fn item(glyph: &str, shortcode: &str, replacing: lsp_types::Range) -> Completion
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsp_types::{
-        TextDocumentContentChangeEvent, TextDocumentItem, VersionedTextDocumentIdentifier,
-    };
+    use lsp_types::{TextDocumentItem, VersionedTextDocumentIdentifier};
     use std::str::FromStr;
     use stoat_scheduler::TestScheduler;
 
@@ -655,22 +705,26 @@ mod tests {
         assert!(offered("let x: T", 0, 6).is_empty());
     }
 
+    /// A content change over `(line, column, end line, end column)`, or over
+    /// the whole document with no range.
+    fn change(range: Option<(u32, u32, u32, u32)>, text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: range.map(|(line, column, end_line, end_column)| {
+                lsp_types::Range::new(
+                    Position::new(line, column),
+                    Position::new(end_line, end_column),
+                )
+            }),
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
     /// The second range names text that only the first change creates. The `é`
     /// is two bytes but one UTF-16 unit. A change applied out of order, or
     /// measured in the wrong unit, leaves other text.
     #[test]
     fn a_ranged_change_edits_the_kept_rope() {
-        let change =
-            |range: Option<(u32, u32, u32, u32)>, text: &str| TextDocumentContentChangeEvent {
-                range: range.map(|(line, column, end_line, end_column)| {
-                    lsp_types::Range::new(
-                        Position::new(line, column),
-                        Position::new(end_line, end_column),
-                    )
-                }),
-                range_length: None,
-                text: text.to_string(),
-            };
         TestScheduler::new().block_on(async {
             let server = EmojiLsp::new();
             let uri = Uri::from_str("file:///notes.md").expect("valid uri");
@@ -710,5 +764,54 @@ mod tests {
                 .expect("did_change");
             assert_eq!(kept(), ":sm\n", "a change with no range replaces it all");
         });
+    }
+
+    /// One splice pass over a back-to-front list leaves the text that applying
+    /// each change in turn leaves. The list mixes a replacement, inserts, two
+    /// inserts at one offset, and deletions within a line and across one.
+    #[test]
+    fn a_back_to_front_change_list_applies_as_the_sequential_loop_does() {
+        let text: String = (0..10).map(|row| format!("line {row}\n")).collect();
+        let changes = vec![
+            change(Some((9, 0, 9, 4)), "LINE"),
+            change(Some((7, 2, 7, 2)), "x"),
+            change(Some((7, 2, 7, 2)), "y"),
+            change(Some((5, 0, 6, 0)), ""),
+            change(Some((2, 1, 2, 3)), ""),
+            change(Some((0, 0, 0, 0)), "top\n"),
+        ];
+
+        let mut spliced = Rope::from(text.as_str());
+        assert_eq!(
+            back_to_front_ranges(&spliced, &changes),
+            Some(vec![63..67, 51..51, 51..51, 35..42, 15..17, 0..0]),
+            "the list reads as back to front, in bytes of the text before it",
+        );
+        apply_changes(&mut spliced, changes.clone());
+
+        let mut sequential = Rope::from(text.as_str());
+        for change in changes {
+            let range = change.range.expect("every change has a range");
+            let bytes = util::lsp_range_to_byte_range(&sequential, range, OffsetEncoding::Utf8);
+            sequential.replace(bytes, &change.text);
+        }
+        assert_eq!(spliced.to_string(), sequential.to_string());
+    }
+
+    /// An ascending list names each range in the text the changes before it
+    /// left. The first change adds a line, so the later ranges name other text
+    /// in the coordinates of the text before the list.
+    #[test]
+    fn an_ascending_change_list_takes_the_sequential_loop() {
+        let mut rope = Rope::from("abc\ndef\nghi\n");
+        apply_changes(
+            &mut rope,
+            vec![
+                change(Some((0, 1, 0, 1)), "X\n"),
+                change(Some((2, 0, 2, 3)), "D"),
+                change(Some((3, 2, 3, 3)), "I"),
+            ],
+        );
+        assert_eq!(rope.to_string(), "aX\nbc\nD\nghI\n");
     }
 }
