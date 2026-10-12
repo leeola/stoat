@@ -563,6 +563,7 @@ impl Renderer {
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.occludable,
+                pool.skip_clear,
                 pool.id,
                 slot,
             );
@@ -911,6 +912,9 @@ impl Renderer {
     /// applied to both passes so the composed pool glides pixel-by-pixel; pass a
     /// negative value to shift the rows up.
     ///
+    /// Every cell paints, the cells of the clear color included, since `view`
+    /// already holds a drawn frame under the scissor.
+    ///
     /// Draws only the background and text passes: no cursor, decorations,
     /// regions, overlays, icons, or bars, since the pool carries plain composed
     /// page rows.
@@ -960,6 +964,7 @@ impl Renderer {
             content_changed,
             scrolled_rows,
             occludable,
+            false,
             pool,
             slot,
         );
@@ -1002,6 +1007,9 @@ impl Renderer {
     /// `metrics` is the cell box `pool_grid` lays out in, from
     /// [`Self::pool_metrics`]. `origin_cells` stays a cell of the live grid, and
     /// is restated in the pool's own cells for the passes.
+    ///
+    /// `skip_clear` leaves the pool's cells of the frame's clear color undrawn,
+    /// as [`PoolComposite::skip_clear`] describes.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_pool(
         &mut self,
@@ -1016,6 +1024,7 @@ impl Renderer {
         content_changed: bool,
         scrolled_rows: Option<isize>,
         occludable: bool,
+        skip_clear: bool,
         pool: u32,
         slot: usize,
     ) {
@@ -1044,6 +1053,7 @@ impl Renderer {
             origin_cells,
             content_changed,
             scrolled_rows,
+            skip_clear.then_some(self.clear_rgb),
             pool,
             slot,
         );
@@ -1343,6 +1353,15 @@ pub struct PoolComposite<'a> {
     /// box (a hints box over a still-easing palette list) can still bleed for
     /// the frames of the glide.
     pub occludable: bool,
+    /// Whether the composite leaves the pool's cells of the frame's clear color
+    /// to the clear, as the live grid's own cells do.
+    ///
+    /// True only for a pool whose region holds nothing beneath it but the
+    /// clear. The live grid under a terminal pool holds only blanks of the
+    /// clear color, so a blank terminal cell needs no quad of its own. A glide
+    /// pool covers live content, and the live cells along its edge and beside
+    /// panels still draw, so it paints every cell.
+    pub skip_clear: bool,
 }
 
 /// Clamp `scissor` (`[x, y, width, height]` in physical pixels) to a
@@ -2258,6 +2277,7 @@ impl GpuContext {
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.occludable,
+                pool.skip_clear,
                 pool.id,
                 slot,
             );
@@ -2539,6 +2559,7 @@ mod tests {
                 content_changed: true,
                 scrolled_rows: None,
                 occludable: true,
+                skip_clear: false,
             },
             PoolComposite {
                 id: 4,
@@ -2550,6 +2571,7 @@ mod tests {
                 content_changed: true,
                 scrolled_rows: None,
                 occludable: true,
+                skip_clear: false,
             },
         ];
 
@@ -2568,6 +2590,7 @@ mod tests {
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.occludable,
+                pool.skip_clear,
                 pool.id,
                 slot,
             );
@@ -2715,6 +2738,7 @@ mod tests {
             true,
             None,
             true,
+            false,
             3,
             0,
         );
@@ -2844,6 +2868,33 @@ mod tests {
         );
     }
 
+    /// A pool that skips the clear leaves its cells of the clear color to what
+    /// lies beneath them. The live cells along a pool's edge still draw, which
+    /// is why only a pool over nothing but the clear skips.
+    #[test]
+    fn a_pool_that_skips_the_clear_leaves_its_clear_cells_to_the_live_grid() {
+        let (device, queue) = require_headless_device();
+        let clear = Rgb::new(0, 0, 90);
+        let (target, mut renderer) = readback_renderer(&device, clear);
+        let (rows, cols) = renderer.grid_size();
+        let live = filled_grid(rows, cols, Rgb::new(0, 160, 0));
+        let pool = filled_grid(rows, cols, clear);
+
+        let mut corner = |skip_clear| {
+            let pools = [PoolComposite {
+                skip_clear,
+                ..whole_pool(&pool)
+            }];
+            let shot = draw_pooled(&device, &queue, &mut renderer, &target, &live, &pools);
+            pixel(&shot, CELL[0] / 2, CELL[1] / 2)
+        };
+        assert_eq!(
+            [corner(false), corner(true)],
+            [[0, 0, 90], [0, 160, 0]],
+            "the corner cell paints the clear, or leaves the live cell beneath it",
+        );
+    }
+
     /// The cell a 30-pixel font lays out at scale 1, in pixels.
     const CELL: [u32; 2] = [18, 36];
 
@@ -2918,6 +2969,7 @@ mod tests {
             content_changed: true,
             scrolled_rows: None,
             occludable: true,
+            skip_clear: false,
         }
     }
 

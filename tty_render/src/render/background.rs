@@ -122,8 +122,11 @@ struct Globals {
     ///
     /// Such a cell repaints what the clear already painted, and on a screen of
     /// blank cells that is most of the frame's fill. Zero culls no cell, since
-    /// every instance carries alpha 255. A pool composite writes zero, because
-    /// it covers the live grid and must paint its default cells.
+    /// every instance carries alpha 255.
+    ///
+    /// A glide composite writes zero, because live cells still draw under it
+    /// and its default cells must cover them. A terminal composite skips the
+    /// clear color, because only the clear lies under it.
     skip_color: u32,
     /// Non-zero when the cursor fragment draws the block's outline only.
     cursor_hollow: u32,
@@ -518,6 +521,9 @@ impl BackgroundPass {
     /// written, as the live pass does for a scroll. `None`, or a grid of another
     /// shape, rebuilds every cell.
     ///
+    /// `skip` is the color whose cells draw no quad, which only a pool with
+    /// nothing but the clear beneath it names. `None` paints every cell.
+    ///
     /// The page cells are occluded against `occluders` with the seq test bypassed,
     /// so a pooled cell gliding beneath a modal is hidden by it. `occluders`
     /// carries the frame's whole list and how much of it covers this pool, and
@@ -543,6 +549,7 @@ impl BackgroundPass {
         origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
+        skip: Option<Rgb>,
         pool: u32,
         slot: usize,
     ) {
@@ -588,7 +595,7 @@ impl BackgroundPass {
             rows: rows as u32,
             origin_cells,
             cursor_color: [0.0; 4],
-            skip_color: 0,
+            skip_color: skip.map_or(0, packed_color),
             cursor_hollow: 0,
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
@@ -1389,9 +1396,31 @@ mod tests {
 
         prepare_live(&device, &queue, &mut pass, &grid, &[], &[]);
         assert_eq!(
-            composite_cells(&device, &queue, &mut pass, &grid, None, true),
+            composite_cells(&device, &queue, &mut pass, &grid, None, true, None),
             vec![rgb(SKIP); CELLS * CELLS],
             "every composite cell paints its own color",
+        );
+    }
+
+    /// A composite that skips a color leaves its cells of that color to the
+    /// clear, as the live frame does, and paints every other cell.
+    #[test]
+    fn a_composite_that_skips_a_color_leaves_its_cells_to_the_clear() {
+        let (device, queue) = require_headless_device();
+        let mut grid = filled_grid(SKIP);
+        grid.get_mut(1, 2).bg = OTHER;
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+
+        let expected: Vec<[u8; 3]> = (0..CELLS * CELLS)
+            .map(|cell| match cell {
+                6 => rgb(OTHER),
+                _ => rgb(CLEARED),
+            })
+            .collect();
+        assert_eq!(
+            composite_cells(&device, &queue, &mut pass, &grid, None, true, Some(SKIP)),
+            expected,
+            "each cell of the skipped color shows the clear, and the other cell paints",
         );
     }
 
@@ -1422,7 +1451,7 @@ mod tests {
             .iter()
             .map(|(grid, scrolled, changed)| {
                 (
-                    composite_cells(&device, &queue, &mut pass, grid, *scrolled, *changed),
+                    composite_cells(&device, &queue, &mut pass, grid, *scrolled, *changed, None),
                     grid_cells(grid),
                 )
             })
@@ -1437,7 +1466,15 @@ mod tests {
     fn a_scrolled_composite_writes_only_the_rows_it_exposed() {
         let (device, queue) = require_headless_device();
         let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
-        composite_cells(&device, &queue, &mut pass, &document_rows(0, 4), None, true);
+        composite_cells(
+            &device,
+            &queue,
+            &mut pass,
+            &document_rows(0, 4),
+            None,
+            true,
+            None,
+        );
 
         // One row down keeps display rows 0 to 2 and exposes row 3.
         let mut repainted = document_rows(1, 4);
@@ -1445,7 +1482,7 @@ mod tests {
             repainted.get_mut(0, col).bg = OTHER;
         }
         assert_eq!(
-            composite_cells(&device, &queue, &mut pass, &repainted, Some(1), true),
+            composite_cells(&device, &queue, &mut pass, &repainted, Some(1), true, None),
             grid_cells(&document_rows(1, 4)),
             "the kept row draws what the first composite wrote",
         );
@@ -1494,8 +1531,8 @@ mod tests {
     }
 
     /// The cell colors `pass` draws for `grid` composited as pool 1, whose
-    /// content moved `scrolled` rows since its last composite and whose rows
-    /// `changed` or held.
+    /// content moved `scrolled` rows since its last composite, whose rows
+    /// `changed` or held, and whose cells of the color `skip` draw nothing.
     fn composite_cells(
         device: &Device,
         queue: &Queue,
@@ -1503,6 +1540,7 @@ mod tests {
         grid: &Grid,
         scrolled: Option<isize>,
         changed: bool,
+        skip: Option<Rgb>,
     ) -> Vec<[u8; 3]> {
         pass.prepare_composite(
             device,
@@ -1515,6 +1553,7 @@ mod tests {
             [0.0; 2],
             changed,
             scrolled,
+            skip,
             1,
             0,
         );

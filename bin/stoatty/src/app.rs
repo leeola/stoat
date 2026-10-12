@@ -3079,7 +3079,9 @@ fn redraw(state: &mut State) {
 /// so the surface slides out of the pane edge rather than over the neighbour.
 ///
 /// A terminal pool's page holds cells of the terminal font, so it draws at
-/// `terminal_font_size` over the pane its region covers.
+/// `terminal_font_size` over the pane its region covers. The live grid under
+/// it holds only blanks of the clear color, so it leaves its own cells of
+/// that color to the clear.
 fn pool_composite<'a>(
     pool: &ActivePool,
     grid: &'a Grid,
@@ -3133,6 +3135,7 @@ fn pool_composite<'a>(
         content_changed: pool.content_changed,
         scrolled_rows: pool.scrolled_rows,
         occludable: pool.id < NON_PANE_POOL_BASE,
+        skip_clear: region.kind == PoolKind::Terminal,
     }
 }
 
@@ -3271,6 +3274,7 @@ fn redraw_aux(
             content_changed: pool.content_changed,
             scrolled_rows: pool.scrolled_rows,
             occludable: pool.id < NON_PANE_POOL_BASE,
+            skip_clear: false,
         })
         .collect::<Vec<_>>();
 
@@ -4822,8 +4826,9 @@ mod tests {
         );
     }
 
-    /// A terminal pool composites at the terminal font size over its own region,
-    /// and a grid pool at the live grid's size.
+    /// A terminal pool composites at the terminal font size over its own region
+    /// and leaves its cells of the clear color to the clear. A grid pool
+    /// composites at the live grid's size and paints every cell.
     #[test]
     fn a_terminal_pool_composites_at_the_terminal_font_size() {
         let grid = Grid::new(1, 1);
@@ -4848,16 +4853,17 @@ mod tests {
                 composite.font_size,
                 composite.origin_cells,
                 composite.scissor,
+                composite.skip_clear,
             )
         };
 
         assert_eq!(
             (drawn(PoolKind::Terminal), drawn(PoolKind::Grid)),
             (
-                (Some(10), [2.0, 1.0], [24, 24, 48, 48]),
-                (None, [2.0, 1.0], [24, 24, 48, 48])
+                (Some(10), [2.0, 1.0], [24, 24, 48, 48], true),
+                (None, [2.0, 1.0], [24, 24, 48, 48], false)
             ),
-            "only the terminal pool takes the terminal size, and both cover their region",
+            "only the terminal pool takes its size and skips the clear, and both cover the region",
         );
     }
 
