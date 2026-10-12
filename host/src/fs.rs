@@ -22,6 +22,14 @@ use tempfile::NamedTempFile;
 /// without colliding with the build artifact.
 pub(crate) const DEFAULT_STOATIGNORE: &str = include_str!("../../stoatignore");
 
+/// The per-directory ignore files a workspace walk reads, lowest precedence
+/// first.
+///
+/// The production walker reads all three, with `.stoatignore` as its custom
+/// file. An edit of any of them moves what the walk yields. Code that mirrors
+/// the walk reads this list, so the two stay in step.
+pub const IGNORE_FILE_NAMES: [&str; 3] = [".gitignore", ".ignore", ".stoatignore"];
+
 #[derive(Clone, Copy, Debug)]
 pub struct FsMetadata {
     pub len: u64,
@@ -242,10 +250,10 @@ pub const WALK_BATCH_SIZE: usize = 256;
 
 /// Recursive walker driven by [`FsHost::list_dir`] / [`FsHost::read`].
 /// Used by every fake that has no notion of an underlying real filesystem
-/// (notably [`crate::FakeFs`]). Honours per-directory `.gitignore` /
-/// `.stoatignore` plus the baked-in [`DEFAULT_STOATIGNORE`] hard filter.
-/// Does not consult global / `$HOME` ignore files; that is the
-/// production walker's job.
+/// (notably [`crate::FakeFs`]). Honors the per-directory
+/// [`IGNORE_FILE_NAMES`] plus the baked-in [`DEFAULT_STOATIGNORE`] hard filter.
+/// Does not consult global or `$HOME` ignore files. The production walker
+/// reads those.
 pub fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
     let defaults = build_default_ignore(root);
     let mut stack: Vec<Gitignore> = Vec::new();
@@ -301,6 +309,38 @@ pub fn manual_walk_all_streaming(
     if flow.is_continue() && !buffer.is_empty() {
         let _ = on_batch(buffer);
     }
+}
+
+/// Whether the workspace walk from `root` skips `path`, a path below it.
+///
+/// The walk prunes an excluded directory whole, so a path below one is
+/// excluded too. The answer reads the [`IGNORE_FILE_NAMES`] of `root` and of
+/// each directory between it and `path`, beside the baked-in
+/// [`DEFAULT_STOATIGNORE`]. It reads no global or `.git/info/exclude` rule.
+///
+/// Each call reads up to three files through `fs` for each directory on the
+/// way down, so a caller on a hot path caches the answer. A path outside
+/// `root` answers `false`.
+pub fn walk_excludes(fs: &dyn FsHost, root: &Path, path: &Path, is_dir: bool) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let defaults = build_default_ignore(root);
+    let mut stack: Vec<Gitignore> = Vec::new();
+    let mut dir = root.to_path_buf();
+
+    // This replays the descent of `walk_dir`. A directory's ignore files
+    // apply to the entries it holds, and an excluded entry ends the descent.
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        push_dir_ignores(fs, &dir, &mut stack);
+        dir.push(component);
+        let entry_is_dir = is_dir || components.peek().is_some();
+        if path_is_ignored(&defaults, &stack, &dir, entry_is_dir) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The walk every workspace traversal is built from.
@@ -479,9 +519,8 @@ fn walk_all_dir_streaming(
 }
 
 fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
-    const NAMES: &[&str] = &[".gitignore", ".stoatignore"];
     let mut pushed = 0;
-    for name in NAMES {
+    for name in IGNORE_FILE_NAMES {
         if let Some(matcher) = read_ignore_file(fs, dir, name) {
             stack.push(matcher);
             pushed += 1;

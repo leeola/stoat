@@ -1312,6 +1312,103 @@ mod tests {
         );
     }
 
+    /// The production walker reads `.ignore` beside `.gitignore`, so the
+    /// in-memory walk reads it too, or the two list different files.
+    #[test]
+    fn an_ignore_entry_hides_a_file_from_the_walk() {
+        let fs = FakeFs::new();
+        fs.insert_files([
+            ("/repo/.ignore", "scratch.rs\n"),
+            ("/repo/scratch.rs", ""),
+            ("/repo/src/a.rs", ""),
+        ]);
+
+        assert_eq!(
+            fs.walk_workspace_files(Path::new("/repo")),
+            [
+                PathBuf::from("/repo/.ignore"),
+                PathBuf::from("/repo/src/a.rs")
+            ],
+        );
+    }
+
+    /// The watch drain asks `walk_excludes` about one path where the walk
+    /// lists a whole tree, so the two agree on every file and directory,
+    /// nested rules and a negation included.
+    #[test]
+    fn walk_excludes_agrees_with_the_walk() {
+        let fs = FakeFs::new();
+        let root = Path::new("/repo");
+        fs.insert_files([
+            ("/repo/.gitignore", "*.log\n"),
+            ("/repo/.ignore", "scratch/\n"),
+            ("/repo/sub/.gitignore", "!keep.log\n"),
+            ("/repo/sub/.stoatignore", "gen/\n"),
+        ]);
+        let files = [
+            "/repo/keep.rs",
+            "/repo/node_modules/pkg/i.js",
+            "/repo/scratch/a.rs",
+            "/repo/sub/gen/b.rs",
+            "/repo/sub/keep.log",
+            "/repo/sub/src/d.rs",
+            "/repo/sub/target/debug/c.rs",
+            "/repo/x.log",
+        ];
+        for file in files {
+            fs.insert_file(file, "");
+        }
+        let dirs = [
+            "/repo/node_modules",
+            "/repo/node_modules/pkg",
+            "/repo/scratch",
+            "/repo/sub",
+            "/repo/sub/gen",
+            "/repo/sub/src",
+            "/repo/sub/target",
+            "/repo/sub/target/debug",
+        ];
+
+        let exclusions = |paths: &[&'static str], walked: Vec<PathBuf>, is_dir: bool| {
+            let by_walk: Vec<&str> = paths
+                .iter()
+                .copied()
+                .filter(|path| !walked.contains(&PathBuf::from(path)))
+                .collect();
+            let by_predicate: Vec<&str> = paths
+                .iter()
+                .copied()
+                .filter(|path| crate::fs::walk_excludes(&fs, root, Path::new(path), is_dir))
+                .collect();
+            (by_walk, by_predicate)
+        };
+        let excluded_files = vec![
+            "/repo/node_modules/pkg/i.js",
+            "/repo/scratch/a.rs",
+            "/repo/sub/gen/b.rs",
+            "/repo/sub/target/debug/c.rs",
+            "/repo/x.log",
+        ];
+        let excluded_dirs = vec![
+            "/repo/node_modules",
+            "/repo/node_modules/pkg",
+            "/repo/scratch",
+            "/repo/sub/gen",
+            "/repo/sub/target",
+            "/repo/sub/target/debug",
+        ];
+        assert_eq!(
+            (
+                exclusions(&files, fs.walk_workspace_files(root), false),
+                exclusions(&dirs, fs.walk_workspace_dirs(root), true),
+            ),
+            (
+                (excluded_files.clone(), excluded_files),
+                (excluded_dirs.clone(), excluded_dirs),
+            ),
+        );
+    }
+
     #[test]
     fn walk_workspace_files_streaming_emits_multiple_batches() {
         let fs = FakeFs::new();

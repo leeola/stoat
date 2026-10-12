@@ -19,10 +19,11 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use stoat_host::fs;
 
 /// Quiet window after the last filesystem-watch event before the work that
 /// event triggers runs.
@@ -191,18 +192,20 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let mut finder_changes = Vec::new();
     for (path, kind) in events {
         let in_git_dir = path.starts_with(&git_dir);
-        let is_gitignore = path.file_name() == Some(OsStr::new(".gitignore"));
+        let is_ignore_file = path
+            .file_name()
+            .is_some_and(|name| fs::IGNORE_FILE_NAMES.iter().any(|ignore| name == *ignore));
 
-        // Invalidate before reading any verdict, so a .gitignore edit drained
-        // alongside later paths in the same batch cannot leave them resolving
-        // against the rules it just replaced.
-        if in_git_dir || is_gitignore {
+        // Invalidate before reading any verdict, so an ignore file edit drained
+        // alongside later paths in the same batch does not leave them resolving
+        // against the rules it replaced.
+        if in_git_dir || is_ignore_file {
             stoat.ignored_dir_cache.clear();
         }
 
         // The rules deciding which files a walk yields just moved, so the
         // cached list was built under different ones.
-        if is_gitignore {
+        if is_ignore_file {
             stoat.finder_path_epoch += 1;
         }
 
@@ -480,9 +483,9 @@ fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit 
     }
 }
 
-/// Whether `path` sits in a gitignored directory, answering from
-/// [`Stoat::ignored_dir_cache`] when the directory has been asked about
-/// before.
+/// Whether `path` sits in a directory that the workspace walk or git excludes,
+/// answering from [`Stoat::ignored_dir_cache`] when the directory has been
+/// asked about before.
 ///
 /// Asks about the parent rather than `path` itself, which is what makes the
 /// answer reusable, since one query then covers every file a build writes
@@ -506,8 +509,13 @@ fn parent_dir_ignored(
     dir_ignored(stoat, parent, repo_root, repo)
 }
 
-/// Whether `dir` is gitignored, answering from [`Stoat::ignored_dir_cache`]
-/// when it has been asked about before.
+/// Whether the workspace walk or git excludes `dir`, answering from
+/// [`Stoat::ignored_dir_cache`] when it has been asked about before.
+///
+/// The walk decides the watch set, the finder's list, and the index, so a
+/// directory it skips earns none of those when it arrives. Its rules include
+/// `.stoatignore`, `.ignore`, and the baked-in `node_modules/` and `target/`,
+/// which git does not read. Git adds its global and `.git/info/exclude` rules.
 ///
 /// `repo` memoizes the repository discovery across one drain batch.
 fn dir_ignored(
@@ -520,9 +528,11 @@ fn dir_ignored(
         return *ignored;
     }
 
-    let git_host = stoat.git_host.clone();
-    let repo = repo.get_or_insert_with(|| git_host.discover(repo_root));
-    let ignored = repo.as_ref().is_some_and(|r| r.is_path_ignored(dir));
+    let ignored = fs::walk_excludes(&*stoat.fs_host, repo_root, dir, true) || {
+        let git_host = stoat.git_host.clone();
+        let repo = repo.get_or_insert_with(|| git_host.discover(repo_root));
+        repo.as_ref().is_some_and(|r| r.is_path_ignored(dir))
+    };
 
     // A bound rather than an eviction policy, because the working set here is
     // the directories one build touches. Dropping all of it costs at most one
@@ -822,7 +832,7 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_finder::FinderPathCache;
+    use crate::{file_finder::FinderPathCache, host::FakeFsOp};
     use futures::FutureExt;
     use std::time::Duration;
     // TEST IMPORTS
@@ -1199,6 +1209,98 @@ mod tests {
             ),
             (false, 0),
         );
+    }
+
+    /// Seed `file` under `dir`, report `dir` arriving, and drain until quiet.
+    /// Answers whether `dir` is watched, how long the backlog is, whether
+    /// nothing waits to reach the index, and the listings of `dir`.
+    fn arrival_footprint(
+        h: &mut crate::test_harness::TestHarness,
+        dir: &str,
+        file: &str,
+    ) -> (bool, usize, bool, Vec<FakeFsOp>) {
+        h.fake_fs().insert_file(file, "{}");
+        h.fake_fs_watcher()
+            .inject(Path::new(dir), FsEventKind::Created);
+        drain_until_quiet(h);
+
+        let listings = h
+            .fake_fs()
+            .ops()
+            .into_iter()
+            .filter(|op| matches!(op, FakeFsOp::ListDir { path } if path == Path::new(dir)))
+            .collect();
+        (
+            h.fake_fs_watcher().is_watching(Path::new(dir)),
+            h.stoat.fs_watch_backlog.len(),
+            h.stoat.index_pending_external_edits.is_empty(),
+            listings,
+        )
+    }
+
+    /// The walk excludes `node_modules/` whatever the repo's `.gitignore`
+    /// says, so an install whose `.gitignore` lacks it earns no watch, no
+    /// listing, and no reindex.
+    #[test]
+    fn an_unignored_node_modules_that_arrives_is_left_alone() {
+        let mut h = ignored_dir_harness();
+        assert_eq!(
+            arrival_footprint(
+                &mut h,
+                "/repo/node_modules",
+                "/repo/node_modules/pkg/package.json"
+            ),
+            (false, 0, true, Vec::new()),
+        );
+    }
+
+    #[test]
+    fn a_stoatignored_directory_that_arrives_is_left_alone() {
+        let mut h = ignored_dir_harness();
+        h.fake_fs().insert_file("/repo/.stoatignore", "vendor/\n");
+        assert_eq!(
+            arrival_footprint(&mut h, "/repo/vendor", "/repo/vendor/lib/a.rs"),
+            (false, 0, true, Vec::new()),
+        );
+    }
+
+    /// Cache a clean verdict for `/repo/generated`, then write `generated/`
+    /// to the root ignore file `name` and drain its edit beside a write under
+    /// that directory. Answers whether the write stayed out of the index, and
+    /// how far the finder epoch moved.
+    fn edit_ignore_file(name: &str) -> (bool, u64) {
+        let mut h = ignored_dir_harness();
+        let built = PathBuf::from("/repo/generated/one.rs");
+        h.fake_fs_watcher().inject(&built, FsEventKind::Modified);
+        drain_fs_watch_events(&mut h.stoat);
+        assert_eq!(
+            h.stoat.index_pending_external_edits.len(),
+            1,
+            "the directory is clean, so its verdict caches as not ignored"
+        );
+        h.stoat.index_pending_external_edits.clear();
+        let epoch = h.stoat.finder_path_epoch;
+
+        let rules = Path::new("/repo").join(name);
+        h.fake_fs().insert_file(&rules, "generated/\n");
+        h.fake_fs_watcher().inject(&rules, FsEventKind::Modified);
+        h.fake_fs_watcher().inject(&built, FsEventKind::Modified);
+        drain_fs_watch_events(&mut h.stoat);
+
+        (
+            h.stoat.index_pending_external_edits.is_empty(),
+            h.stoat.finder_path_epoch - epoch,
+        )
+    }
+
+    #[test]
+    fn a_stoatignore_edit_retires_the_cached_verdicts() {
+        assert_eq!(edit_ignore_file(".stoatignore"), (true, 1));
+    }
+
+    #[test]
+    fn an_ignore_edit_retires_the_cached_verdicts() {
+        assert_eq!(edit_ignore_file(".ignore"), (true, 1));
     }
 
     /// The entries a drain queues raise no watch event, so the drain asks for
