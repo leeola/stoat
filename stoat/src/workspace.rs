@@ -1668,6 +1668,9 @@ impl Workspace {
     /// A term with a grid in [`Self::term_pool_grids`] takes that grid instead,
     /// since stoatty draws it at another font size than the content area's
     /// cells. A closed term's grid is dropped here.
+    ///
+    /// A term that several panes show takes the size of the first of them in
+    /// [`PaneTree::split_panes`] order.
     fn fit_terms_to_panes(&mut self) {
         // The walk reads the pane tree while the fit writes to the terms, so
         // both fields are borrowed apart rather than the ids being collected to
@@ -1679,11 +1682,14 @@ impl Workspace {
             ..
         } = self;
         term_pool_grids.retain(|id, _| terms.contains_key(*id));
+        // One PTY has one size, so a second fit for another pane changes it
+        // back on every layout, and the child repaints for each change.
+        let mut fitted: Vec<TermId> = Vec::new();
         for (_, pane) in panes.split_panes() {
             let (View::Agent(id) | View::Terminal(id)) = pane.view else {
                 continue;
             };
-            if pane.area.width == 0 || pane.area.height == 0 {
+            if pane.area.width == 0 || pane.area.height == 0 || fitted.contains(&id) {
                 continue;
             }
             let (content, _) = split_pane_status(pane.area);
@@ -1694,6 +1700,7 @@ impl Workspace {
             if let Some(agent) = terms.get_mut(id) {
                 agent.fit(rows, cols);
             }
+            fitted.push(id);
         }
     }
 }
@@ -1724,6 +1731,7 @@ mod tests {
         term_session::{TermId, TermSession},
         test_harness::TestHarness,
     };
+    use ratatui::layout::Rect;
     use std::{
         path::{Path, PathBuf},
         sync::{
@@ -1782,6 +1790,32 @@ mod tests {
             Arc::new(FakeTerminalSession::new()),
             TermSession::next_token(),
         ))
+    }
+
+    /// A terminal that both halves of a split show keeps the size the first
+    /// layout gave it, rather than a resize for each half on every layout.
+    #[test]
+    fn a_terminal_two_panes_show_is_fit_once_per_layout() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        let id = insert_session(ws);
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).view = View::Terminal(id);
+        ws.panes.split(Axis::Vertical);
+        let size = |ws: &Workspace| {
+            let term = &ws.terms[id].term;
+            (term.rows(), term.cols(), term.generation())
+        };
+
+        ws.layout(Rect::new(0, 0, 80, 24));
+        let first = size(ws);
+        ws.layout(Rect::new(0, 0, 80, 24));
+
+        assert_eq!(
+            size(ws),
+            first,
+            "(rows, cols, generation) after a second layout"
+        );
     }
 
     /// The status line names the first command that waits on a buffer, and the
