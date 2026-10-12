@@ -1102,10 +1102,12 @@ mod tests {
     };
     use crate::{
         app::Stoat,
+        auto_reload,
         badge::BadgeSource,
         commit_list::Preview,
         commit_picker::CommitPickerRole,
         git_jobs::{self, GitJobKey},
+        host::FakeFsOp,
         test_harness::TestHarness,
         workspace::diff::{self, DiffBase},
     };
@@ -2032,6 +2034,34 @@ mod tests {
                 (CHECKED_OUT_A.to_string(), false)
             ),
             "the step lands on a.rs with the checked-out text, clean",
+        );
+    }
+
+    /// A checkout rewrites only the files that differ between its two commits,
+    /// so a landing reads those and stats the rest.
+    #[test]
+    fn a_checkout_landing_reads_only_files_whose_mtime_moved() {
+        let mut h = harness();
+        h.open_file(Path::new("/repo/b.rs"));
+        h.open_file(Path::new("/repo/a.rs"));
+        h.fake_fs().insert_file("/repo/a.rs", CHECKED_OUT_A);
+        let before = h.fake_fs().ops().len();
+
+        auto_reload::reload_clean_buffers(&mut h.stoat);
+        let reads: Vec<FakeFsOp> = h.fake_fs().ops()[before..]
+            .iter()
+            .filter(|op| matches!(op, FakeFsOp::Read { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            (reads, open_text(&h)),
+            (
+                vec![FakeFsOp::Read {
+                    path: PathBuf::from("/repo/a.rs")
+                }],
+                (CHECKED_OUT_A.to_string(), false)
+            ),
+            "only the rewritten file reads, and a.rs holds its new text, clean",
         );
     }
 

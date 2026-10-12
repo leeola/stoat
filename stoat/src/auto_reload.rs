@@ -540,7 +540,11 @@ pub(crate) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    match reload_from_disk(stoat, id, &path) {
+    let outcome = match file_mtime(stoat, &path) {
+        Some(mtime) => reload_from_disk(stoat, id, &path, mtime),
+        None => ReloadOutcome::Missing,
+    };
+    match outcome {
         ReloadOutcome::Missing => stoat.set_status("file no longer exists on disk"),
         ReloadOutcome::Unchanged => stoat.set_status("already up to date"),
         ReloadOutcome::Reloaded => {
@@ -571,7 +575,7 @@ pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         reloaded,
         skipped,
         missing,
-    } = reload_each(stoat, paths, force);
+    } = reload_each(stoat, paths, force, false);
 
     let mut parts: Vec<String> = Vec::new();
     if reloaded > 0 {
@@ -592,7 +596,8 @@ pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Re-read every open file-backed buffer that holds no unsaved edits.
+/// Re-read each open buffer that holds no unsaved edits and whose file mtime
+/// moved since its last read.
 ///
 /// A checkout rewrites the working tree under the open buffers. [`open_file`]
 /// on a path that is already open returns that path's buffer and discards what
@@ -601,11 +606,15 @@ pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
 /// text. The review walk and the rebase edit pause call this when a checkout
 /// lands.
 ///
+/// A checkout rewrites only the files that differ between its two commits, so
+/// every other buffer costs one stat and no read. A rewrite that keeps the
+/// mtime of the file it replaced goes unseen.
+///
 /// Sets no status, because the re-read is part of the checkout the reader asked
 /// for rather than a command of its own.
 pub(crate) fn reload_clean_buffers(stoat: &mut Stoat) {
     let paths = stoat.active_workspace().buffers.open_paths();
-    reload_each(stoat, paths, false);
+    reload_each(stoat, paths, false, true);
 }
 
 /// What one [`reload_each`] pass did to the buffers it was given.
@@ -621,8 +630,15 @@ struct ReloadTally {
 /// Reload the buffer open on each of `paths` through [`reload_from_disk`].
 ///
 /// A buffer with unsaved edits stays as it is unless `force` discards them.
-/// Notifies the language server once when anything reloaded.
-fn reload_each(stoat: &mut Stoat, paths: Vec<PathBuf>, force: bool) -> ReloadTally {
+/// With `only_moved`, a buffer whose file mtime matches the one its last read
+/// recorded is skipped and not counted. Notifies the language server once when
+/// anything reloaded.
+fn reload_each(
+    stoat: &mut Stoat,
+    paths: Vec<PathBuf>,
+    force: bool,
+    only_moved: bool,
+) -> ReloadTally {
     let mut tally = ReloadTally::default();
 
     for path in paths {
@@ -639,7 +655,16 @@ fn reload_each(stoat: &mut Stoat, paths: Vec<PathBuf>, force: bool) -> ReloadTal
             tally.skipped += 1;
             continue;
         }
-        match reload_from_disk(stoat, id, &path) {
+
+        let Some(mtime) = file_mtime(stoat, &path) else {
+            tally.missing += 1;
+            continue;
+        };
+        if only_moved && stoat.active_workspace().buffers.disk_mtime(id) == Some(mtime) {
+            continue;
+        }
+
+        match reload_from_disk(stoat, id, &path, mtime) {
             ReloadOutcome::Reloaded => tally.reloaded += 1,
             ReloadOutcome::Missing => tally.missing += 1,
             ReloadOutcome::Unchanged => {},
@@ -666,21 +691,18 @@ enum ReloadOutcome {
 /// Replace buffer `id`'s content with `path`'s current bytes, mirroring
 /// [`pump_auto_reload`]'s replace arm without the cursor-follow logic.
 ///
-/// A file that cannot be stat-ed or read yields [`ReloadOutcome::Missing`] and
-/// leaves the buffer untouched. A file already byte-identical to the buffer is
-/// left un-edited to avoid version churn, but the buffer is still marked clean
-/// and its mtime baseline refreshed. Otherwise the whole buffer is replaced in
-/// one undoable edit and marked clean.
-fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutcome {
-    let Some(mtime) = stoat
-        .fs_host
-        .metadata(path)
-        .ok()
-        .flatten()
-        .map(|m| m.modified)
-    else {
-        return ReloadOutcome::Missing;
-    };
+/// `mtime` is the file's mtime from the caller's stat, and it becomes the
+/// buffer's baseline. A file that does not read yields
+/// [`ReloadOutcome::Missing`] and leaves the buffer untouched. A file already
+/// byte-identical to the buffer is left un-edited to avoid version churn, but
+/// the buffer is still marked clean and its mtime baseline refreshed. Otherwise
+/// the whole buffer is replaced in one undoable edit and marked clean.
+fn reload_from_disk(
+    stoat: &mut Stoat,
+    id: BufferId,
+    path: &Path,
+    mtime: SystemTime,
+) -> ReloadOutcome {
     let Ok(new) = read_string_via_host(&*stoat.fs_host, path) else {
         return ReloadOutcome::Missing;
     };
@@ -723,6 +745,16 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
     } else {
         ReloadOutcome::Reloaded
     }
+}
+
+/// The mtime of `path` on disk, or `None` when its metadata does not read.
+fn file_mtime(stoat: &Stoat, path: &Path) -> Option<SystemTime> {
+    stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .map(|meta| meta.modified)
 }
 
 /// Open a log file and follow it as new lines are written.
@@ -2541,6 +2573,27 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("reloaded 1; 1 missing on disk"),
+        );
+    }
+
+    /// The forced form reads every buffer back, so it discards an unsaved edit
+    /// even when nothing rewrote the file under it.
+    #[test]
+    fn reload_all_forced_discards_an_edit_over_an_unmoved_file() {
+        let mut h = Stoat::test();
+        open_edited(&mut h, Path::new("/reload-all-unmoved"), "a.txt", b"aaa\n");
+        let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
+
+        reload_all(&mut h.stoat, true);
+
+        assert_eq!(
+            (
+                buffer_text(&h, id),
+                buffer_dirty(&h, id),
+                h.stoat.pending_message.as_deref()
+            ),
+            ("aaa\n".to_string(), false, Some("reloaded 1")),
+            "the buffer holds the file's text again, clean",
         );
     }
 
