@@ -2,7 +2,10 @@
 //! for inputs that fail to parse or exceed the structural-diff graph cap.
 //!
 //! Interns each input's lines into token streams and runs imara-diff's
-//! histogram algorithm over them, then maps each change region to Lhs/Rhs
+//! histogram algorithm over them. Git's slider heuristics, with the
+//! indentation rule, then place each region whose lines fit at more than one
+//! place, so an inserted function marks its own lines rather than the closing
+//! braces above it. Each change region then maps to Lhs/Rhs
 //! [`DiffChange`]s. A region that touches both sides is tagged
 //! [`super::ChangeKind::Replaced`] (one side replaces the other); a
 //! one-sided region is [`super::ChangeKind::Novel`].
@@ -12,10 +15,7 @@
 //! cheap even on the large or unparseable files this fallback exists for.
 
 use super::{ChangeKind, DiffChange, DiffResult, Side};
-use imara_diff::{
-    intern::{InternedInput, TokenSource},
-    sources, Algorithm, Sink,
-};
+use imara_diff::{sources, Algorithm, Diff, InternedInput, TokenSource};
 use std::{iter::Map, ops::Range, slice::Iter};
 
 /// Compute a line-level diff between `lhs` and `rhs`. The returned
@@ -25,20 +25,20 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
     let lhs_lines = lines_with_offsets(lhs);
     let rhs_lines = lines_with_offsets(rhs);
 
-    let input = InternedInput::new(
-        sources::lines_with_terminator(lhs),
-        sources::lines_with_terminator(rhs),
-    );
-    let mut changes = imara_diff::diff(
-        Algorithm::Histogram,
-        &input,
-        ChangeSink {
-            lhs_lines: &lhs_lines,
-            rhs_lines: &rhs_lines,
-            changes: Vec::new(),
-            next_pair_id: 0,
-        },
-    );
+    let input = InternedInput::new(sources::lines(lhs), sources::lines(rhs));
+    let mut diff = Diff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
+
+    let mut sink = ChangeSink {
+        lhs_lines: &lhs_lines,
+        rhs_lines: &rhs_lines,
+        changes: Vec::new(),
+        next_pair_id: 0,
+    };
+    for hunk in diff.hunks() {
+        sink.push_change(hunk.before, hunk.after);
+    }
+    let mut changes = sink.changes;
     super::refine::refine_replaced_pairs(&mut changes, lhs, rhs);
 
     DiffResult {
@@ -63,17 +63,19 @@ pub fn align_lines(lhs: &[&str], rhs: &[&str]) -> Vec<(Option<usize>, Option<usi
     let lhs_keys: Vec<String> = lhs.iter().map(|line| collapse_whitespace(line)).collect();
     let rhs_keys: Vec<String> = rhs.iter().map(|line| collapse_whitespace(line)).collect();
     let input = InternedInput::new(KeyLines(&lhs_keys), KeyLines(&rhs_keys));
+    let mut diff = Diff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
 
-    imara_diff::diff(
-        Algorithm::Histogram,
-        &input,
-        PairSink {
-            pairs: Vec::with_capacity(lhs.len().max(rhs.len())),
-            lhs_at: 0,
-            rhs_at: 0,
-            lhs_len: lhs.len(),
-        },
-    )
+    let mut sink = PairSink {
+        pairs: Vec::with_capacity(lhs.len().max(rhs.len())),
+        lhs_at: 0,
+        rhs_at: 0,
+    };
+    for hunk in diff.hunks() {
+        sink.push_change(hunk.before, hunk.after);
+    }
+    sink.match_until(lhs.len());
+    sink.pairs
 }
 
 /// The `(start, end)` byte offsets of one line in the source string.
@@ -105,10 +107,9 @@ fn lines_with_offsets(text: &str) -> Vec<LineRecord> {
 
 /// Accumulates imara-diff's change regions into [`DiffChange`]s.
 ///
-/// Each `process_change` hunk maps to the same output the previous
-/// subsequence walk produced. A region touching both sides becomes a
-/// [`ChangeKind::Replaced`] pair sharing a fresh `pair_id`, and a
-/// one-sided region becomes a [`ChangeKind::Novel`] run.
+/// A region touching both sides becomes a [`ChangeKind::Replaced`] pair
+/// sharing a fresh `pair_id`, and a one-sided region becomes a
+/// [`ChangeKind::Novel`] run.
 struct ChangeSink<'a> {
     lhs_lines: &'a [LineRecord],
     rhs_lines: &'a [LineRecord],
@@ -116,10 +117,8 @@ struct ChangeSink<'a> {
     next_pair_id: u32,
 }
 
-impl Sink for ChangeSink<'_> {
-    type Out = Vec<DiffChange>;
-
-    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
+impl ChangeSink<'_> {
+    fn push_change(&mut self, before: Range<u32>, after: Range<u32>) {
         let lhs_start = before.start as usize;
         let lhs_count = (before.end - before.start) as usize;
         let rhs_start = after.start as usize;
@@ -172,10 +171,6 @@ impl Sink for ChangeSink<'_> {
             });
         }
     }
-
-    fn finish(self) -> Vec<DiffChange> {
-        self.changes
-    }
 }
 
 fn range_for_lines(lines: &[LineRecord], start: usize, count: usize) -> Range<usize> {
@@ -222,7 +217,6 @@ struct PairSink {
     pairs: Vec<(Option<usize>, Option<usize>)>,
     lhs_at: usize,
     rhs_at: usize,
-    lhs_len: usize,
 }
 
 impl PairSink {
@@ -237,12 +231,8 @@ impl PairSink {
             self.rhs_at += 1;
         }
     }
-}
 
-impl Sink for PairSink {
-    type Out = Vec<(Option<usize>, Option<usize>)>;
-
-    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
+    fn push_change(&mut self, before: Range<u32>, after: Range<u32>) {
         self.match_until(before.start as usize);
 
         let lhs = before.start as usize..before.end as usize;
@@ -256,12 +246,6 @@ impl Sink for PairSink {
         self.lhs_at = lhs.end;
         self.rhs_at = rhs.end;
     }
-
-    fn finish(mut self) -> Self::Out {
-        let lhs_len = self.lhs_len;
-        self.match_until(lhs_len);
-        self.pairs
-    }
 }
 
 #[cfg(test)]
@@ -270,6 +254,79 @@ mod tests {
 
     fn changes(lhs: &str, rhs: &str) -> Vec<DiffChange> {
         diff_lines(lhs, rhs).changes
+    }
+
+    /// Each change as its side, its kind, and the text it covers.
+    fn runs<'a>(lhs: &'a str, rhs: &'a str) -> Vec<(Side, ChangeKind, &'a str)> {
+        changes(lhs, rhs)
+            .into_iter()
+            .map(|change| {
+                let text = match change.side {
+                    Side::Lhs => &lhs[change.byte_range],
+                    Side::Rhs => &rhs[change.byte_range],
+                };
+                (change.side, change.kind, text)
+            })
+            .collect()
+    }
+
+    /// An inserted function has a blank line at each end, so its run fits at
+    /// two places. Git's indent heuristic puts the run on the function's own
+    /// lines, ending before the blank line below, and the other place starts
+    /// at the blank line above.
+    #[test]
+    fn an_inserted_function_marks_its_own_lines() {
+        let lhs = "int a(void) {\n    return 0;\n}\n\nint b(void) {\n    return 1;\n}\n";
+        let rhs = "int a(void) {\n    return 0;\n}\n\nint c(void) {\n    return 2;\n}\n\n\
+                   int b(void) {\n    return 1;\n}\n";
+        assert_eq!(
+            runs(lhs, rhs),
+            [(
+                Side::Rhs,
+                ChangeKind::Novel,
+                "int c(void) {\n    return 2;\n}\n"
+            )],
+        );
+    }
+
+    /// A module appended after a block ends on a closing brace, as the block
+    /// does, so its run fits at two places. It starts at the blank line above
+    /// the module, not at the brace that closes the block.
+    #[test]
+    fn an_appended_module_starts_at_its_blank_line() {
+        let lhs = "fn a() {\n    if x {\n    }\n}\n";
+        let rhs = "fn a() {\n    if x {\n    }\n}\n\n#[cfg(test)]\nmod test {\n    fn t() {}\n}\n";
+        assert_eq!(
+            runs(lhs, rhs),
+            [(
+                Side::Rhs,
+                ChangeKind::Novel,
+                "\n#[cfg(test)]\nmod test {\n    fn t() {}\n}"
+            )],
+        );
+    }
+
+    /// An edit higher in the file stops the common prefix short, so the
+    /// histogram places the appended module itself, and it pairs the block's
+    /// closing brace with the module's. The run then starts on that brace
+    /// until the indent heuristic moves it down to the blank line.
+    #[test]
+    fn an_appended_module_behind_an_edit_starts_at_its_blank_line() {
+        let lhs = "fn a() {\n    one();\n}\nfn b() {\n    if x {\n    }\n}\n";
+        let rhs = "fn a() {\n    uno();\n}\nfn b() {\n    if x {\n    }\n}\n\n\
+                   #[cfg(test)]\nmod test {\n    fn t() {}\n}\n";
+        assert_eq!(
+            runs(lhs, rhs),
+            [
+                (Side::Lhs, ChangeKind::Replaced, "    one();"),
+                (Side::Rhs, ChangeKind::Replaced, "    uno();"),
+                (
+                    Side::Rhs,
+                    ChangeKind::Novel,
+                    "\n#[cfg(test)]\nmod test {\n    fn t() {}\n}"
+                ),
+            ],
+        );
     }
 
     /// The line pass runs where nothing parsed, so the whole file is text with
@@ -427,6 +484,41 @@ mod tests {
                 (Some(2), Some(3)),
             ],
         );
+    }
+
+    /// The alignment places an inserted run with the same slider heuristics as
+    /// the line pass. The block above keeps its closing brace, and the
+    /// appended module pairs with nothing.
+    #[test]
+    fn align_lines_keeps_an_appended_module_off_the_brace_above() {
+        let lhs = [
+            "fn a() {",
+            "    one();",
+            "}",
+            "fn b() {",
+            "    if x {",
+            "    }",
+            "}",
+        ];
+        let rhs = [
+            "fn a() {",
+            "    uno();",
+            "}",
+            "fn b() {",
+            "    if x {",
+            "    }",
+            "}",
+            "",
+            "#[cfg(test)]",
+            "mod test {",
+            "    fn t() {}",
+            "}",
+        ];
+        let expected: Vec<(Option<usize>, Option<usize>)> = (0..7)
+            .map(|row| (Some(row), Some(row)))
+            .chain((7..12).map(|row| (None, Some(row))))
+            .collect();
+        assert_eq!(align_lines(&lhs, &rhs), expected);
     }
 
     #[test]

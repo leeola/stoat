@@ -32,11 +32,7 @@ use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
 };
-use imara_diff::{
-    intern::{InternedInput, Interner},
-    Algorithm, Sink,
-};
-use std::ops::Range;
+use imara_diff::{Algorithm, Diff, InternedInput, Interner};
 
 /// What the preprocessing pass concluded about a node. The diff search
 /// only walks `Pending` nodes; `Unchanged` and `Moved` are terminal tags
@@ -315,7 +311,9 @@ fn list_children(arena: &SyntaxArena<'_>, id: SyntaxId) -> Vec<SyntaxId> {
 /// Interns each side's `ContentId` sequence and runs imara-diff's histogram
 /// algorithm in `O(n+m)` memory. The matched anchors are the equal regions
 /// between the change hunks, which advance in lockstep on both sides, so
-/// [`LcsPairSink`] reconstructs the in-order pairs from them.
+/// [`LcsPairSink`] reconstructs the in-order pairs from them. No slider
+/// heuristic runs, since a content id carries no indentation to place a
+/// region by.
 ///
 /// Histogram may under-match the true longest common subsequence on
 /// degenerate repeats. The per-section Dijkstra search recovers those, so
@@ -334,17 +332,19 @@ fn lcs_pairs(
     input.update_before(lhs.iter().map(|&id| lhs_arena.get(id).content_id()));
     input.update_after(rhs.iter().map(|&id| rhs_arena.get(id).content_id()));
 
-    imara_diff::diff(
-        Algorithm::Histogram,
-        &input,
-        LcsPairSink {
-            lhs_cursor: 0,
-            rhs_cursor: 0,
-            lhs_len: lhs.len() as u32,
-            rhs_len: rhs.len() as u32,
-            pairs: Vec::new(),
-        },
-    )
+    let diff = Diff::compute(Algorithm::Histogram, &input);
+    let mut sink = LcsPairSink {
+        lhs_cursor: 0,
+        rhs_cursor: 0,
+        pairs: Vec::new(),
+    };
+    for hunk in diff.hunks() {
+        sink.emit_equal(hunk.before.start, hunk.after.start);
+        sink.lhs_cursor = hunk.before.end;
+        sink.rhs_cursor = hunk.after.end;
+    }
+    sink.emit_equal(lhs.len() as u32, rhs.len() as u32);
+    sink.pairs
 }
 
 /// Reconstructs [`lcs_pairs`]' matched anchors from imara-diff's change
@@ -354,8 +354,6 @@ fn lcs_pairs(
 struct LcsPairSink {
     lhs_cursor: u32,
     rhs_cursor: u32,
-    lhs_len: u32,
-    rhs_len: u32,
     pairs: Vec<(usize, usize)>,
 }
 
@@ -372,21 +370,6 @@ impl LcsPairSink {
                 (self.rhs_cursor + k) as usize,
             ));
         }
-    }
-}
-
-impl Sink for LcsPairSink {
-    type Out = Vec<(usize, usize)>;
-
-    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
-        self.emit_equal(before.start, after.start);
-        self.lhs_cursor = before.end;
-        self.rhs_cursor = after.end;
-    }
-
-    fn finish(mut self) -> Self::Out {
-        self.emit_equal(self.lhs_len, self.rhs_len);
-        self.pairs
     }
 }
 

@@ -3569,9 +3569,10 @@ mod tests {
             hunk_shapes(THREE_FNS, MOVED),
             [
                 (DiffHunkStatus::Moved, 0..4),
-                (DiffHunkStatus::Deleted, 10..10),
+                (DiffHunkStatus::Moved, 11..11),
             ],
-            "the four-line block reads as a move, blank line and all",
+            "the four-line block reads as a move, blank line and all, and so does \
+             the run it left at the end",
         );
     }
 
@@ -3587,7 +3588,7 @@ mod tests {
             hunk_shapes(THREE_FNS, PARTIAL),
             [
                 (DiffHunkStatus::Moved, 0..0),
-                (DiffHunkStatus::Added, 6..14),
+                (DiffHunkStatus::Added, 7..15),
             ],
             "the added run holds one relocated function and one written here, so it is an addition",
         );

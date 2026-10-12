@@ -17,10 +17,7 @@
 //! or hunk extents.
 
 use super::{ChangeKind, DiffChange, Side};
-use imara_diff::{
-    intern::{InternedInput, TokenSource},
-    Algorithm, Sink,
-};
+use imara_diff::{Algorithm, Diff, InternedInput, TokenSource};
 use std::{collections::HashMap, ops::Range, str::Chars};
 
 /// A line longer than this is refined as a whole rather than char-diffed, since
@@ -155,15 +152,18 @@ fn char_diff(
     if lhs == rhs {
         return (Vec::new(), Vec::new());
     }
+    // A char carries no indentation, so no slider heuristic places a region.
     let input = InternedInput::new(CharTokens(lhs), CharTokens(rhs));
-    let (lhs_regions, rhs_regions) = imara_diff::diff(
-        Algorithm::Histogram,
-        &input,
-        CharRegionSink {
-            lhs: Vec::new(),
-            rhs: Vec::new(),
-        },
-    );
+    let diff = Diff::compute(Algorithm::Histogram, &input);
+    let (mut lhs_regions, mut rhs_regions) = (Vec::new(), Vec::new());
+    for hunk in diff.hunks() {
+        if !hunk.before.is_empty() {
+            lhs_regions.push(hunk.before.start as usize..hunk.before.end as usize);
+        }
+        if !hunk.after.is_empty() {
+            rhs_regions.push(hunk.after.start as usize..hunk.after.end as usize);
+        }
+    }
     (
         char_regions_to_bytes(&merge_regions(lhs_regions), lhs, offsets),
         char_regions_to_bytes(&merge_regions(rhs_regions), rhs, offsets),
@@ -246,30 +246,6 @@ impl<'a> TokenSource for CharTokens<'a> {
 
     fn estimate_tokens(&self) -> u32 {
         self.0.len() as u32
-    }
-}
-
-/// Collects imara-diff's changed char-index ranges, `before` on the lhs and
-/// `after` on the rhs.
-struct CharRegionSink {
-    lhs: Vec<Range<usize>>,
-    rhs: Vec<Range<usize>>,
-}
-
-impl Sink for CharRegionSink {
-    type Out = (Vec<Range<usize>>, Vec<Range<usize>>);
-
-    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
-        if before.end > before.start {
-            self.lhs.push(before.start as usize..before.end as usize);
-        }
-        if after.end > after.start {
-            self.rhs.push(after.start as usize..after.end as usize);
-        }
-    }
-
-    fn finish(self) -> Self::Out {
-        (self.lhs, self.rhs)
     }
 }
 
