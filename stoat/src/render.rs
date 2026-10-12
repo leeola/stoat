@@ -73,6 +73,7 @@ use slotmap::SlotMap;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
+    ops::Range,
     path::Path,
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
@@ -511,20 +512,26 @@ pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::T
     }
 }
 
-/// Serialize every cell of `buf` to a self-contained VT byte stream via a
-/// [`CrosstermBackend`] over an in-memory buffer.
+/// Serialize every cell of `buf` to a self-contained VT byte stream, as
+/// [`serialize_rows`] serializes every row of it.
+pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
+    serialize_rows(buf, buf.area.top()..buf.area.bottom())
+}
+
+/// Serialize the cells of `buf` whose row is in `rows` to a self-contained VT
+/// byte stream via a [`CrosstermBackend`] over an in-memory buffer.
 ///
 /// Unlike the live render path, which diffs against the previous frame, this
-/// emits all cells unconditionally so the bytes fully paint a pool slot
-/// regardless of what that slot held before. Cursor moves are absolute, so the
-/// stream is positioned for the page's top-left independent of the live grid
-/// cursor.
+/// emits all those cells unconditionally, so the bytes fully paint those rows
+/// of a pool slot regardless of what the slot held before. Cursor moves are
+/// absolute, so the stream is positioned for the page's top-left independent
+/// of the live grid cursor.
 ///
 /// The cells a wide glyph covers are skipped, as the live diff skips them. The
 /// terminal advances its cursor across them when it prints the glyph, so a
 /// blank printed for one lands a column too far right and shifts the rest of
 /// the row. The gap makes the backend move the cursor before the next cell.
-pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
+pub(crate) fn serialize_rows(buf: &Buffer, rows: Range<u16>) -> Vec<u8> {
     use ratatui::backend::{Backend, CrosstermBackend};
 
     let mut bytes = Vec::new();
@@ -541,7 +548,7 @@ pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
                 return None;
             }
             hidden = cell.symbol().width().saturating_sub(1);
-            Some((x, y, cell))
+            rows.contains(&y).then_some((x, y, cell))
         });
         // CrosstermBackend over a Vec<u8> writer is infallible; the Results are
         // surfaced only because the Backend trait is generic over fallible writers.
