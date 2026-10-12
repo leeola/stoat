@@ -1844,6 +1844,116 @@ fn a_terminal_page_rides_its_own_batch() {
     );
 }
 
+/// A feed that changes nothing the page shows, such as a title, sends no page
+/// though it moves the terminal's generation. Output that paints sends one.
+#[test]
+fn a_feed_that_paints_nothing_sends_nothing() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
+    let mut feed = |h: &mut crate::test_harness::TestHarness, bytes: &[u8]| {
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(bytes);
+        pool_fills(&emit_raw(h, &mut rx), index)
+    };
+
+    let titled = feed(&mut h, b"\x1b]0;a title\x07");
+    let painted = feed(&mut h, b" world");
+
+    assert_eq!(
+        (titled, painted),
+        (vec![], vec![0]),
+        "a title sends no page, and output that paints sends one",
+    );
+}
+
+/// A grid that changes sends a whole page at the new grid.
+#[test]
+fn a_new_grid_sends_a_whole_page() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
+    h.stoat
+        .active_workspace_mut()
+        .term_pool_grids
+        .insert(term_id, (5, 30));
+    let _ = h.stoat.render();
+
+    assert_eq!(
+        pool_fills(&emit_raw(&mut h, &mut rx), index),
+        vec![0],
+        "the new grid sends its page",
+    );
+}
+
+/// A pane that passes to another terminal sends that terminal's whole page,
+/// though it draws the same cells as the page stoatty holds.
+#[test]
+fn a_pane_that_shows_another_terminal_sends_a_whole_page() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"");
+    {
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let ws = h.stoat.active_workspace_mut();
+        let other = ws.terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
+        let pane = ws.panes.focus();
+        ws.panes.pane_mut(pane).view = View::Terminal(other);
+        let grid = ws.term_pool_grids[&term_id];
+        ws.term_pool_grids.insert(other, grid);
+    }
+    let _ = h.stoat.render();
+
+    assert_eq!(
+        pool_fills(&emit_raw(&mut h, &mut rx), index),
+        vec![0],
+        "the other terminal sends its page",
+    );
+}
+
+/// A pane that moves declares its pool again and sends its page, though the
+/// page draws the same cells, since the rectangle stoatty holds the pool at
+/// moved with it.
+#[test]
+fn a_moved_pane_declares_its_pool_again() {
+    let (mut h, mut rx, _, index) = pooled_terminal_sent(b"hello");
+    let size = h.stoat.size();
+    h.resize(size.width, size.height - 2);
+    let _ = h.stoat.render();
+
+    let bytes = emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (pool_lifecycle(&bytes, index), pool_fills(&bytes, index)),
+        (vec!["declare"], vec![0]),
+        "the moved pane declares its pool and sends its page",
+    );
+}
+
+/// A stoat at protocol 9 whose focused pane pools a fresh terminal fed
+/// `output`, with the pane's grid reported and its first page sent, the
+/// terminal's id, and the pane's pool id.
+fn pooled_terminal_sent(
+    output: &[u8],
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    TermId,
+    u32,
+) {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 9;
+    let (term_id, index) = terminal_in_focused_pane(&mut h, output);
+    h.stoat
+        .active_workspace_mut()
+        .term_pool_grids
+        .insert(term_id, (6, 30));
+    let _ = h.stoat.render();
+    emit_raw(&mut h, &mut rx);
+    (h, rx, term_id, index)
+}
+
 /// A terminal page draws its pane as the live grid draws it, the cursor cell
 /// and the fade of an unfocused pane included, when the reported grid is the
 /// pane's own cells.
@@ -1865,7 +1975,15 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does() {
             .expect("the terminal pane pools");
         let region = pane.region;
         let term = &h.stoat.active_workspace().terms[term_id];
-        let page = terminal_page(term, &h.stoat.theme, region.height, region.width, &pane);
+        let mut page = Buffer::empty(Rect::default());
+        render_terminal_page(
+            term,
+            &h.stoat.theme,
+            region.height,
+            region.width,
+            &pane,
+            &mut page,
+        );
 
         let area = Rect::new(0, 0, region.width, region.height);
         let mut live_page = Buffer::empty(area);
@@ -1876,7 +1994,7 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does() {
         }
         (
             pane.is_focused,
-            page == crate::render::serialize_buffer(&live_page),
+            crate::render::serialize_buffer(&page) == crate::render::serialize_buffer(&live_page),
         )
     };
 

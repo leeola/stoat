@@ -2,7 +2,7 @@ use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
     agent_status::AgentStatus,
-    apc_emit::{self, PoolOwner},
+    apc_emit::{self, PoolOwner, TerminalPage},
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::OpenOrigin,
@@ -1050,6 +1050,10 @@ pub struct Stoat {
     /// workspace has index 0. The emit compares each pass against this record
     /// and retires a pool whose surface changed under the same id.
     pub(crate) pool_owners: std::collections::BTreeMap<u32, PoolOwner>,
+    /// The page each terminal pool last sent, by pool id, which
+    /// [`apc_emit::emit_smooth_scroll`] compares a new render against so that a
+    /// page stoatty already holds is not sent again.
+    pub(crate) terminal_pages: std::collections::HashMap<u32, TerminalPage>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -2445,6 +2449,7 @@ impl Stoat {
             aux_cursor: None,
             pool_cursor_holder: None,
             pool_owners: std::collections::BTreeMap::new(),
+            terminal_pages: std::collections::HashMap::new(),
             _index_build_task: None,
             redraw_notify,
             drain_notify,

@@ -67,6 +67,24 @@ struct TerminalPoolPane {
     dim: f32,
 }
 
+/// The page a terminal pool last sent, held to tell whether a new render of
+/// its pane changes anything stoatty shows.
+///
+/// A terminal's generation moves on every pty read, a title or a cursor report
+/// included, so the pool's version moves more often than its page does. The
+/// rendered cells are exact for every input the page depends on, so a render
+/// equal to the held page sends nothing.
+pub(crate) struct TerminalPage {
+    /// The terminal the held page shows. A pool that passes to another one
+    /// sends a whole page, whatever its cells.
+    term: TermId,
+    /// The page stoatty holds, at the grid it reported.
+    page: Buffer,
+    /// The buffer the next render draws into, swapped with `page` when that
+    /// render goes out, so that a compare allocates nothing.
+    spare: Buffer,
+}
+
 /// The surface whose pages a pane pool holds.
 ///
 /// A pane pool takes its pane's index as its id, and the root pane of every
@@ -846,6 +864,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         active.push(crate::smooth_scroll::non_pane_pool::HOVER);
     }
     stoat.smooth_scroll.drop_absent(&mut out, &active);
+    // A held page describes a pool that stoatty keeps only while its pane pools
+    // a terminal.
+    stoat
+        .terminal_pages
+        .retain(|pool, _| terminal_panes.iter().any(|pane| pane.region.pool == *pool));
 
     // Editor and review pages render off the run loop. The loop collects a
     // snapshot -- plus the cloned view state and theme for review -- and the
@@ -1235,18 +1258,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     // A terminal page is the emulator's screen, which is already at hand, so it
     // fills here rather than off the run loop as an editor page does.
-    let mut terminal_pages = Vec::new();
+    let mut page_batches = Vec::new();
     {
         let ws = &stoat.workspaces[stoat.active_workspace];
         for pane in &terminal_panes {
-            let Some(term) = ws.terms.get(pane.term_id) else {
-                continue;
-            };
-            terminal_pages.extend(emit_terminal_pool(
+            page_batches.extend(emit_terminal_pool(
                 &mut out,
                 &mut stoat.smooth_scroll,
-                term,
-                ws.term_pool_grids.get(&pane.term_id).copied(),
+                &mut stoat.terminal_pages,
+                ws,
                 pane,
                 theme,
                 theme_epoch,
@@ -1990,7 +2010,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     // Each terminal page rides a batch of its own, so a backed-up link that
     // supersedes it drops nothing else. The batch above declared its pool.
-    for page in terminal_pages {
+    for page in page_batches {
         let _ = apc_tx.send(page);
     }
 
@@ -2286,12 +2306,16 @@ fn terminal_pool_panes(
 }
 
 /// Declare `pane`'s pool, and answer the batch that fills its one page with
-/// `term` drawn at `grid`, the `(rows, cols)` stoatty reported for it.
+/// its terminal drawn at the `(rows, cols)` stoatty reported for it.
 ///
 /// The declaration and the scroll ride `out`, the frame's shared batch. The
 /// page rides a batch of its own, so a backed-up link that drops it for a later
 /// page of the pool drops nothing else. Send it after `out`, which declares the
 /// pool the page lands in.
+///
+/// A page whose cells equal the page `pages` holds for the pool sends nothing,
+/// though its version moved. Its terminal and its pool's rectangle must match
+/// too, or the page goes out whole. A sent page becomes the one `pages` holds.
 ///
 /// A pane whose grid has not been reported yet declares its region alone,
 /// which is what has stoatty report it, and answers `None`. A pane whose inputs
@@ -2299,12 +2323,15 @@ fn terminal_pool_panes(
 fn emit_terminal_pool(
     out: &mut Vec<u8>,
     state: &mut SmoothScrollState,
-    term: &TermSession,
-    grid: Option<(u16, u16)>,
+    pages: &mut std::collections::HashMap<u32, TerminalPage>,
+    ws: &Workspace,
     pane: &TerminalPoolPane,
     theme: &crate::theme::Theme,
     theme_epoch: u64,
 ) -> Option<Vec<u8>> {
+    let term = ws.terms.get(pane.term_id)?;
+    let grid = ws.term_pool_grids.get(&pane.term_id).copied();
+    let pool = pane.region.pool;
     let version = {
         let mut hasher = DefaultHasher::new();
         theme_epoch.hash(&mut hasher);
@@ -2316,7 +2343,27 @@ fn emit_terminal_pool(
         term.selection.hash(&mut hasher);
         hasher.finish()
     };
-    if state.already_emitted(pane.region.pool, version) {
+    if state.already_emitted(pool, version) {
+        return None;
+    }
+    let Some((rows, cols)) = grid else {
+        pool::emit_into(out, state, pane.region, 0.0, version, false, |_| Vec::new());
+        return None;
+    };
+
+    // A pool that sent no page yet holds an empty one, which no render of a
+    // reported grid equals.
+    let held = pages.entry(pool).or_insert_with(|| TerminalPage {
+        term: pane.term_id,
+        page: Buffer::empty(Rect::default()),
+        spare: Buffer::empty(Rect::default()),
+    });
+    render_terminal_page(term, theme, rows, cols, pane, &mut held.spare);
+    if held.term == pane.term_id
+        && state.holds_region(pool, &pane.region)
+        && held.spare == held.page
+    {
+        state.record_content_version(pool, version);
         return None;
     }
 
@@ -2326,28 +2373,34 @@ fn emit_terminal_pool(
     if !entered.contains(&0) {
         return None;
     }
-    let (rows, cols) = grid?;
 
-    let page = terminal_page(term, theme, rows, cols, pane);
+    std::mem::swap(&mut held.page, &mut held.spare);
+    held.term = pane.term_id;
+    let page = crate::render::serialize_buffer(&held.page);
     let mut batch = Vec::new();
-    stoatty_protocol::command::encode_fill_scope(&mut batch, pane.region.pool, 0, |out| {
+    stoatty_protocol::command::encode_fill_scope(&mut batch, pool, 0, |out| {
         out.extend_from_slice(&page)
     });
     Some(batch)
 }
 
-/// `term`'s screen drawn into a `rows` by `cols` page as the live grid draws
-/// the pane, faded by the pane's dim.
-fn terminal_page(
+/// Draw `term`'s screen into `buf` as a `rows` by `cols` page, as the live
+/// grid draws the pane, faded by the pane's dim.
+///
+/// `buf` takes the page's size, so a buffer held across renders allocates only
+/// when a page outgrows it.
+fn render_terminal_page(
     term: &TermSession,
     theme: &crate::theme::Theme,
     rows: u16,
     cols: u16,
     pane: &TerminalPoolPane,
-) -> Vec<u8> {
+    buf: &mut Buffer,
+) {
     let area = Rect::new(0, 0, cols, rows);
-    let mut buf = crate::smooth_scroll::page_buffer(area, theme);
-    crate::render::term_pane::render_term_pane(term, theme, area, pane.is_focused, &mut buf);
+    buf.resize(area);
+    buf.content.fill(crate::render::themed_blank(theme));
+    crate::render::term_pane::render_term_pane(term, theme, area, pane.is_focused, buf);
     if pane.dim > 0.0
         && let Some(bg) = crate::render::paint::style_rgb(
             theme
@@ -2355,9 +2408,8 @@ fn terminal_page(
                 .and_then(|style| style.bg),
         )
     {
-        crate::render::pane::dim_pane_content(&mut buf, area, bg, pane.dim);
+        crate::render::pane::dim_pane_content(buf, area, bg, pane.dim);
     }
-    crate::render::serialize_buffer(&buf)
 }
 
 /// The detached editor panes and their window-bound pool regions.

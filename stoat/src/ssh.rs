@@ -263,6 +263,8 @@ pub(crate) fn retire_terminal_state(stoat: &mut Stoat) {
     for (_, ws) in &mut stoat.workspaces {
         ws.term_pool_grids.clear();
     }
+    // The next terminal holds none of the pages these pools sent.
+    stoat.terminal_pages.clear();
     for (_, content) in std::mem::take(&mut stoat.minimap_content) {
         encode_minimap_drop_into(
             &mut out,

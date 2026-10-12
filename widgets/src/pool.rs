@@ -186,6 +186,34 @@ impl SmoothScrollState {
             .is_some_and(|entry| entry.content_version == version)
     }
 
+    /// Whether `pool`'s last emit declared `region`, so the terminal holds the
+    /// pool at that rectangle with the pages the emits sent it.
+    ///
+    /// False for a pool that has never emitted, and for one a drop retired.
+    pub fn holds_region(&self, pool: u32, region: &PoolRegionCommand) -> bool {
+        self.pools
+            .get(&pool)
+            .is_some_and(|entry| entry.region.as_ref() == Some(region))
+    }
+
+    /// Record `version` as the content of `pool`'s buffered pages, and send
+    /// nothing.
+    ///
+    /// For a caller that rendered its page at `version`, compared it with the
+    /// page it last sent, and found the two equal. An emit at `version` then
+    /// sends nothing and refills no page, as though that page had gone out. A
+    /// pool that has never emitted records nothing, since the terminal holds
+    /// no page of it.
+    pub fn record_content_version(&mut self, pool: u32, version: u64) {
+        let Some(entry) = self.pools.get_mut(&pool) else {
+            return;
+        };
+        entry.content_version = version;
+        for page in &mut entry.pages {
+            page.surface = version;
+        }
+    }
+
     /// The scroll target that `pool`'s last emit sent, which is where the
     /// terminal's next glide of the pool starts.
     ///
@@ -1359,6 +1387,51 @@ mod tests {
         });
         assert!(state.already_emitted(1, 7));
         assert!(!state.already_emitted(1, 0));
+    }
+
+    /// A recorded version marks the buffered pages current, so an emit at it
+    /// sends nothing and keeps every page. A later version still refills the
+    /// page a composite reads.
+    #[test]
+    fn an_emit_at_a_recorded_version_sends_nothing() {
+        let mut state = SmoothScrollState::default();
+        let page = |_| b"page".to_vec();
+        emit_into(
+            &mut Vec::new(),
+            &mut state,
+            region(1, 20),
+            0.0,
+            0,
+            false,
+            page,
+        );
+
+        state.record_content_version(1, 7);
+        let mut recorded = Vec::new();
+        let held = emit_into(
+            &mut recorded,
+            &mut state,
+            region(1, 20),
+            0.0,
+            7,
+            false,
+            page,
+        );
+        let moved = emit_into(
+            &mut Vec::new(),
+            &mut state,
+            region(1, 20),
+            0.0,
+            8,
+            false,
+            page,
+        );
+
+        assert_eq!(
+            (held, recorded, moved),
+            (vec![], vec![], vec![0]),
+            "the recorded version sends nothing, and the next one refills the shown page",
+        );
     }
 
     #[test]
