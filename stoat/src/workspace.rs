@@ -12,7 +12,7 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     buffer_registry::BufferRegistry,
     code_index::{
-        build::{reindex_buffer, IndexUpdate, ReindexTarget},
+        build::{indexable, reindex_buffer, IndexUpdate, ReindexTarget},
         nav::TrailState,
     },
     commit_list::{CommitListId, CommitListSnap, CommitListState},
@@ -1559,8 +1559,9 @@ impl Workspace {
     ///
     /// `persist` writes the shard and manifest entry when the update lands,
     /// which a save asks for and an edit does not. Skips buffers with no file
-    /// path, no resolved language, or no text left to read. The spawned job is
-    /// stored so it is not cancelled, replacing any prior one for the buffer.
+    /// path, no resolved language, a language the index takes nothing from, or
+    /// no text left to read. The spawned job is stored so it is not cancelled,
+    /// replacing any prior one for the buffer.
     ///
     /// Drops the buffer's pending edit debounce, since this extract covers the
     /// same text that timer fires to extract.
@@ -1580,6 +1581,9 @@ impl Workspace {
         let Some(language) = self.buffers.language_for(buffer_id) else {
             return;
         };
+        if !indexable(&language) {
+            return;
+        }
         let Some((text, tree)) = self.reindex_inputs(buffer_id) else {
             return;
         };
@@ -2012,6 +2016,29 @@ mod tests {
         ws.assign_languages_from_paths(&LanguageRegistry::standard());
 
         assert_eq!(ws.buffers.language_for(id).map(|l| l.name), Some("rust"));
+    }
+
+    /// A JSON grammar yields no symbol, so a settled edit of a JSON buffer
+    /// spawns no extraction.
+    #[test]
+    fn a_json_buffer_settle_spawns_no_reindex() {
+        let executor = Arc::new(TestScheduler::new()).executor();
+        let mut ws = Workspace::new(PathBuf::from("/repo"), &executor, crate::test_notify());
+        let (id, _) = ws
+            .buffers
+            .open(Path::new("/repo/data.json"), "{\"a\": 1}\n");
+        ws.assign_languages_from_paths(&LanguageRegistry::standard());
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        ws.enqueue_reindex(&executor, &tx, &crate::test_notify(), id, false);
+        assert_eq!(
+            (
+                ws.buffers.language_for(id).map(|l| l.name),
+                ws.index_jobs.contains_key(&id),
+            ),
+            (Some("json"), false),
+            "a resolved json buffer takes no reindex job",
+        );
     }
 
     #[test]

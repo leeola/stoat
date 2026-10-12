@@ -17,7 +17,10 @@ pub use highlight::{
 pub use highlight_map::{HighlightId, HighlightMap};
 pub use indent::{line_leading_whitespace, newline_indent, suggested_indent, IndentQueries};
 pub use language::{language_for_fence_token, Language, LanguageRegistry};
-pub use symbols::{extract_references, extract_symbols, RefKind, RefSite, SymbolDef, SymbolKind};
+pub use symbols::{
+    extract_references, extract_symbols, grammar_yields_symbols, RefKind, RefSite, SymbolDef,
+    SymbolKind,
+};
 pub use syntax_map::{
     LayerKey, LayerSummary, SyntaxLayer, SyntaxMap, SyntaxMapCapture, SyntaxSnapshot,
 };

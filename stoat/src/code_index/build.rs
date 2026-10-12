@@ -27,7 +27,8 @@ use std::{
     time::Instant,
 };
 use stoat_language::{
-    extract_references, extract_symbols, parse_rope, Language, LanguageRegistry, Tree,
+    extract_references, extract_symbols, grammar_yields_symbols, parse_rope, Language,
+    LanguageRegistry, Tree,
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{LineEnding, Rope};
@@ -510,14 +511,17 @@ fn read_utf8(fs: &dyn FsHost, path: &Path) -> Option<String> {
 
 /// Whether the index takes anything from a language.
 ///
-/// A registered language with neither an outline nor a tags query extracts an
-/// empty shard, so reading and parsing a file for one is work with no result.
-/// `toml` is registered and has neither.
+/// A file extracts an empty shard when its language has no tags query and its
+/// outline query matches nothing a symbol comes from. Reading and parsing such
+/// a file is work with no result. `toml` has neither query. `json` and
+/// `markdown` have outline queries, but their grammars name no node kind a
+/// symbol comes from.
 ///
 /// Both queries compile on the first call and cache per grammar, so asking
 /// costs nothing on the paths that go on to parse.
-fn indexable(language: &Language) -> bool {
-    language.outline_query().is_some() || language.tags_query().is_some()
+pub(crate) fn indexable(language: &Language) -> bool {
+    language.tags_query().is_some()
+        || (language.outline_query().is_some() && grammar_yields_symbols(&language.grammar))
 }
 
 /// Extract one file's shard, or `None` when the index takes nothing from the
@@ -594,7 +598,9 @@ pub(crate) fn extract_shard(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_index, index_file, load_or_extract, IndexBuild, IndexUpdate, ShardSource};
+    use super::{
+        build_index, index_file, indexable, load_or_extract, IndexBuild, IndexUpdate, ShardSource,
+    };
     use crate::{
         buffer_registry::fingerprint_bytes,
         code_index::store,
@@ -982,6 +988,33 @@ mod tests {
 
         assert_eq!(index_file(&fs, &registry, Path::new("/repo"), path), None);
         assert_eq!(reads(&fs), Vec::<PathBuf>::new());
+    }
+
+    /// JSON and markdown ship outline queries, but their grammars name no node
+    /// kind a symbol comes from. The RON grammar names `enum_variant`, but RON
+    /// ships no query. So the index takes nothing from any language but Rust.
+    #[test]
+    fn only_the_rust_language_is_indexable() {
+        let registry = LanguageRegistry::standard();
+        let mut indexed: Vec<(&str, bool)> = registry
+            .languages()
+            .iter()
+            .map(|language| (language.name, indexable(language)))
+            .collect();
+        indexed.sort();
+        assert_eq!(
+            indexed,
+            [
+                ("csv", false),
+                ("json", false),
+                ("markdown", false),
+                ("markdown-inline", false),
+                ("ron", false),
+                ("rust", true),
+                ("toml", false),
+                ("yaml", false),
+            ],
+        );
     }
 
     /// A manifest written before a language lost its queries still lists

@@ -13,7 +13,28 @@ use crate::highlight::{QueryCursorHandle, RopeTextProvider};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use stoat_text::Rope;
-use tree_sitter::{Node, Query, StreamingIterator};
+use tree_sitter::{Language as TsLanguage, Node, Query, StreamingIterator};
+
+/// Every `@item` node kind a symbol comes from, with what it becomes.
+///
+/// One table drives both [`symbol_kind`] and [`grammar_yields_symbols`], so a
+/// kind added here also widens the code index's gate.
+const SYMBOL_ITEMS: &[(&str, ItemKind)] = &[
+    ("function_item", ItemKind::Function),
+    ("function_signature_item", ItemKind::Function),
+    ("struct_item", ItemKind::Fixed(SymbolKind::Struct)),
+    ("enum_item", ItemKind::Fixed(SymbolKind::Enum)),
+    ("enum_variant", ItemKind::Fixed(SymbolKind::EnumVariant)),
+    ("trait_item", ItemKind::Fixed(SymbolKind::Trait)),
+    ("impl_item", ItemKind::Fixed(SymbolKind::Impl)),
+    ("mod_item", ItemKind::Fixed(SymbolKind::Module)),
+    ("type_item", ItemKind::Fixed(SymbolKind::TypeAlias)),
+    ("associated_type", ItemKind::Fixed(SymbolKind::TypeAlias)),
+    ("const_item", ItemKind::Fixed(SymbolKind::Const)),
+    ("static_item", ItemKind::Fixed(SymbolKind::Static)),
+    ("macro_definition", ItemKind::Fixed(SymbolKind::Macro)),
+    ("field_declaration", ItemKind::Fixed(SymbolKind::Field)),
+];
 
 /// A single named definition the source declares, such as a function,
 /// type, or field.
@@ -86,6 +107,16 @@ pub enum RefKind {
     Call,
     Type,
     Implements,
+}
+
+/// What an `@item` node kind becomes in [`SYMBOL_ITEMS`].
+#[derive(Clone, Copy)]
+enum ItemKind {
+    /// A function, which [`function_kind`] makes a method inside an impl or a
+    /// trait.
+    Function,
+    /// A kind that is the same wherever it appears.
+    Fixed(SymbolKind),
 }
 
 /// Extract every definition captured by `query` (an `outline.scm`) over
@@ -173,6 +204,17 @@ pub fn extract_references(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Ref
     out
 }
 
+/// Whether `grammar` names a node kind that [`extract_symbols`] keeps.
+///
+/// A grammar that names none yields no symbol from any outline query. JSON and
+/// markdown ship outline queries, but no node kind of theirs is one a symbol
+/// comes from.
+pub fn grammar_yields_symbols(grammar: &TsLanguage) -> bool {
+    SYMBOL_ITEMS
+        .iter()
+        .any(|(name, _)| grammar.id_for_node_kind(name, true) != 0)
+}
+
 /// Map a tags-query capture name to the [`RefKind`] it records, or `None`
 /// for any capture that is not a `@reference.*`.
 fn ref_kind(capture_name: &str) -> Option<RefKind> {
@@ -185,20 +227,11 @@ fn ref_kind(capture_name: &str) -> Option<RefKind> {
 }
 
 fn symbol_kind(item: Node<'_>) -> Option<SymbolKind> {
-    Some(match item.kind() {
-        "function_item" | "function_signature_item" => function_kind(item),
-        "struct_item" => SymbolKind::Struct,
-        "enum_item" => SymbolKind::Enum,
-        "enum_variant" => SymbolKind::EnumVariant,
-        "trait_item" => SymbolKind::Trait,
-        "impl_item" => SymbolKind::Impl,
-        "mod_item" => SymbolKind::Module,
-        "type_item" | "associated_type" => SymbolKind::TypeAlias,
-        "const_item" => SymbolKind::Const,
-        "static_item" => SymbolKind::Static,
-        "macro_definition" => SymbolKind::Macro,
-        "field_declaration" => SymbolKind::Field,
-        _ => return None,
+    let kind = item.kind();
+    let (_, item_kind) = SYMBOL_ITEMS.iter().find(|(name, _)| *name == kind)?;
+    Some(match item_kind {
+        ItemKind::Function => function_kind(item),
+        ItemKind::Fixed(symbol) => *symbol,
     })
 }
 
@@ -245,7 +278,9 @@ fn text_of(node: Node<'_>, rope: &Rope) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_references, extract_symbols, RefKind, SymbolDef, SymbolKind};
+    use super::{
+        extract_references, extract_symbols, grammar_yields_symbols, RefKind, SymbolDef, SymbolKind,
+    };
     use crate::{language::LanguageRegistry, parse_rope};
     use stoat_text::Rope;
 
@@ -294,6 +329,32 @@ fn main() {
         let mut syms = extract_symbols(query, tree.root_node(), &rope);
         syms.sort_by_key(|s| (s.def_range.start, s.def_range.end));
         syms
+    }
+
+    /// The RON grammar names `enum_variant`, so it passes as the Rust grammar
+    /// does. RON ships no outline query, which keeps it out of the index.
+    #[test]
+    fn only_the_rust_and_ron_grammars_yield_symbols() {
+        let reg = LanguageRegistry::standard();
+        let mut yields: Vec<(&str, bool)> = reg
+            .languages()
+            .iter()
+            .map(|lang| (lang.name, grammar_yields_symbols(&lang.grammar)))
+            .collect();
+        yields.sort();
+        assert_eq!(
+            yields,
+            [
+                ("csv", false),
+                ("json", false),
+                ("markdown", false),
+                ("markdown-inline", false),
+                ("ron", true),
+                ("rust", true),
+                ("toml", false),
+                ("yaml", false),
+            ],
+        );
     }
 
     #[test]
