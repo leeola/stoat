@@ -52,6 +52,27 @@ pub(crate) fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> 
     start..start + len
 }
 
+/// Every hunk's 0-based base lines, each as [`base_line_range`] gives it, from
+/// one pass over `base_text`.
+///
+/// A caller that tests rows against every hunk calls this once. A call of
+/// [`base_line_range`] per hunk rescans the text and walks the prior hunks
+/// each time. Its cost grows with the hunks times the bytes.
+pub(crate) fn base_line_ranges(base_text: &str, hunks: &[DiffHunk]) -> Vec<Range<u32>> {
+    let starts = line_starts(base_text);
+    let mut delta: i64 = 0;
+    hunks
+        .iter()
+        .map(|hunk| {
+            let buffer_len = hunk.buffer_line_range.end - hunk.buffer_line_range.start;
+            let base_len = hunk_base_lines(hunk, &starts, base_text).len() as u32;
+            let start = (i64::from(hunk.buffer_line_range.start) - delta).max(0) as u32;
+            delta += i64::from(buffer_len) - i64::from(base_len);
+            start..start + base_len
+        })
+        .collect()
+}
+
 /// Rows covering line hunk `k` alone, with up to `context` unchanged rows on
 /// each side.
 ///
@@ -624,6 +645,28 @@ mod tests {
     #[test]
     fn an_added_blank_line_stages_on_its_own() {
         assert_eq!(stage_hunk("a\nb\n", "a\n\nb\n", 0), "a\n\nb\n");
+    }
+
+    /// One pass places each hunk where a lone [`base_line_range`] call does,
+    /// over the blank-line and whole-file shapes that move the anchor.
+    #[test]
+    fn base_line_ranges_places_every_hunk_where_base_line_range_does() {
+        for (base, buffer) in [
+            ("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nb\n\nc\nd\ne\nf\nY\nh\n"),
+            ("a\nb\n\nc\nd\ne\nf\ng\nh\n", "a\nb\nc\nd\ne\nf\nY\nh\n"),
+            ("a\nb\n\nc\n", "a\nc\n"),
+            ("a\nb\nc\n", ""),
+            ("", "a\nb\n"),
+        ] {
+            let hunks = hunks(base, buffer);
+            assert_eq!(
+                base_line_ranges(base, &hunks),
+                (0..hunks.len())
+                    .map(|k| base_line_range(base, &hunks, k))
+                    .collect::<Vec<_>>(),
+                "{base:?} to {buffer:?}",
+            );
+        }
     }
 
     /// The index text after the 1-based buffer `lines` of hunk 0 stage over a

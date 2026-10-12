@@ -16,7 +16,7 @@ use crate::{
     pane::{FocusTarget, View},
     review::{ReviewFileInput, ReviewHunk},
     review_apply::{
-        base_line_range, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
+        base_line_ranges, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
         HUNK_CONTEXT,
     },
     review_session::DiffDocument,
@@ -1044,15 +1044,13 @@ fn unstage_hunk_patch(
     let head_text = head_text.unwrap_or("");
     let index_row = map_buffer_row_to_index(index_text, buffer_text, cursor_row);
     let hunks = line_hunks(index_text, head_text);
+    let ranges = base_line_ranges(index_text, &hunks);
 
     // A staged deletion reads as HEAD lines added over an empty index range,
     // so an empty range matches the row it starts at.
-    let k = (0..hunks.len()).find(|&k| {
-        let rows = base_line_range(index_text, &hunks, k);
-        match rows.is_empty() {
-            true => rows.start == index_row,
-            false => rows.contains(&index_row),
-        }
+    let k = ranges.iter().position(|rows| match rows.is_empty() {
+        true => rows.start == index_row,
+        false => rows.contains(&index_row),
     })?;
     hunk_to_patch(rel, index_text, head_text, &hunks, k, removes_file)
 }
@@ -1188,14 +1186,20 @@ fn unstage_rows_patch(
 ) -> Vec<String> {
     let removes_file = head_text.is_none();
     let head_text = head_text.unwrap_or("");
-    let index_rows = map_buffer_row_to_index(index_text, buffer_text, rows.start)
-        ..map_buffer_row_to_index(index_text, buffer_text, rows.end.saturating_sub(1)) + 1;
+    let index_rows = {
+        let starts = line_starts(index_text);
+        let buffer_hunks = line_hunks(index_text, buffer_text);
+        let index_row = |row| index_row_through(&buffer_hunks, &starts, index_text, row);
+        index_row(rows.start)..index_row(rows.end.saturating_sub(1)) + 1
+    };
+
     // The emitted patch runs index to HEAD, so the index is this diff's base
     // side and the staged rows are base rows. DiffHunk records base bytes
-    // rather than base lines, so the range comes from base_line_range.
+    // rather than base lines, so the ranges come from base_line_ranges.
     let hunks = line_hunks(index_text, head_text);
+    let ranges = base_line_ranges(index_text, &hunks);
     (0..hunks.len())
-        .filter(|&k| ranges_meet(&base_line_range(index_text, &hunks, k), &index_rows))
+        .filter(|&k| ranges_meet(&ranges[k], &index_rows))
         .rev()
         .filter_map(|k| {
             let hunk_rows = hunk_rows(index_text, head_text, &hunks, k, HUNK_CONTEXT)?;
@@ -1229,11 +1233,24 @@ fn ranges_meet(a: &Range<u32>, b: &Range<u32>) -> bool {
 /// staged side there. See [`amend::amended_file`].
 pub(super) fn map_buffer_row_to_index(index_text: &str, buffer_text: &str, cursor_row: u32) -> u32 {
     let starts = line_starts(index_text);
+    let buffer_hunks = line_hunks(index_text, buffer_text);
+    index_row_through(&buffer_hunks, &starts, index_text, cursor_row)
+}
+
+/// [`map_buffer_row_to_index`] through index-vs-buffer hunks and index line
+/// starts the caller already holds, so a caller that maps several rows diffs
+/// the two texts once.
+fn index_row_through(
+    buffer_hunks: &[crate::diff_map::DiffHunk],
+    starts: &[usize],
+    index_text: &str,
+    cursor_row: u32,
+) -> u32 {
     let mut shift: i64 = 0;
-    for hunk in line_hunks(index_text, buffer_text) {
+    for hunk in buffer_hunks {
         if hunk.buffer_line_range.end <= cursor_row {
             let buffer_len = (hunk.buffer_line_range.end - hunk.buffer_line_range.start) as i64;
-            let index_len = hunk_base_lines(&hunk, &starts, index_text).len() as i64;
+            let index_len = hunk_base_lines(hunk, starts, index_text).len() as i64;
             shift += buffer_len - index_len;
         }
     }
