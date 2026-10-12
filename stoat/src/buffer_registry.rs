@@ -111,6 +111,11 @@ struct BufferEntry {
     /// Kept apart from [`Self::tokens`] because these must stay in the parsed
     /// snapshot's byte coordinates. Anchors would silently follow later edits,
     /// which is exactly the movement the comparison needs to see.
+    ///
+    /// Eviction and a syntax clear drop these with the tree. A parse that
+    /// finds spans walks every capture in the file to compare them, before it
+    /// styles the visible rows. Without the tree and the tokens, that compare
+    /// reports nothing of use.
     token_spans: Option<SemanticTokenSpans>,
     /// Tree-sitter highlight tokens retained across editor lifetimes. The parse
     /// pipeline stores the same `(tokens, interner)` it installs onto editors,
@@ -487,6 +492,7 @@ impl BufferRegistry {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.language = Some(lang);
             drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
+            entry.token_spans = None;
             entry.tokens = None;
             entry.lsp_tokens = None;
             entry.lsp_token_source = None;
@@ -547,6 +553,7 @@ impl BufferRegistry {
     pub(crate) fn clear_syntax(&mut self, id: BufferId) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
+            entry.token_spans = None;
             entry.tokens = None;
             entry.lsp_tokens = None;
             entry.lsp_token_source = None;
@@ -730,7 +737,8 @@ impl BufferRegistry {
     /// the evicted ids.
     ///
     /// A buffer is a candidate when it holds any highlight state (syntax tree,
-    /// syntax map, tree-sitter or LSP tokens) and is not in `visible`. The
+    /// syntax map, tree-sitter or LSP tokens, raw token spans, or the server's
+    /// token stream) and is not in `visible`. The
     /// oldest candidates past `cap` have that state dropped, with the syntax
     /// tree and its layer map draining on a background thread as in
     /// [`Self::clear_syntax`].
@@ -748,7 +756,9 @@ impl BufferRegistry {
                         || entry.syntax_map.is_some()
                         || entry.tokens.is_some()
                         || entry.lsp_tokens.is_some()
-                        || entry.lsp_symbol_kinds.is_some())
+                        || entry.lsp_symbol_kinds.is_some()
+                        || entry.token_spans.is_some()
+                        || entry.lsp_token_source.is_some())
             })
             .map(|(id, entry)| (*id, entry.last_shown))
             .collect();
@@ -770,6 +780,8 @@ impl BufferRegistry {
                 entry.tokens = None;
                 entry.lsp_tokens = None;
                 entry.lsp_symbol_kinds = None;
+                entry.token_spans = None;
+                entry.lsp_token_source = None;
             }
         }
         evicted
@@ -1108,6 +1120,7 @@ mod tests {
         let (state, map) = parse_at(&lang, &rope, 1);
         reg.store_parse(id, state, map);
         reg.store_tokens(id, channel.clone());
+        reg.store_token_spans(id, Arc::from(Vec::new()));
         assert!(reg.tokens_for(id).is_some(), "stored tokens are retained");
 
         reg.clear_syntax(id);
@@ -1116,23 +1129,32 @@ mod tests {
             "clear_syntax drops retained tokens"
         );
         assert_eq!(
-            (reg.syntax_version(id), reg.syntax_map(id).is_none()),
-            (None, true),
-            "clear_syntax drops the parse",
+            (
+                reg.syntax_version(id),
+                reg.syntax_map(id).is_none(),
+                reg.take_token_spans(id).is_none(),
+            ),
+            (None, true, true),
+            "clear_syntax drops the parse and its spans",
         );
 
         let (state, map) = parse_at(&lang, &rope, 2);
         reg.store_parse(id, state, map);
         reg.store_tokens(id, channel.clone());
+        reg.store_token_spans(id, Arc::from(Vec::new()));
         reg.set_language(id, lang);
         assert!(
             reg.tokens_for(id).is_none(),
             "set_language drops retained tokens"
         );
         assert_eq!(
-            (reg.syntax_version(id), reg.syntax_map(id).is_none()),
-            (None, true),
-            "set_language drops the parse",
+            (
+                reg.syntax_version(id),
+                reg.syntax_map(id).is_none(),
+                reg.take_token_spans(id).is_none(),
+            ),
+            (None, true, true),
+            "set_language drops the parse and its spans",
         );
     }
 
@@ -1145,26 +1167,45 @@ mod tests {
             |_| 0,
         );
         let ids: Vec<BufferId> = (0..5)
-            .map(|_| {
+            .map(|n| {
                 let (id, _) = reg.new_scratch();
-                reg.store_tokens(id, channel.clone());
+                if n != 1 {
+                    reg.store_tokens(id, channel.clone());
+                }
+                reg.store_token_spans(id, Arc::from(Vec::new()));
+                reg.store_lsp_token_source(id, None, Arc::from(Vec::new()));
                 reg.mark_shown(id);
                 id
             })
             .collect();
 
         // ids[0] is the oldest but marked visible, so it survives. Over the four
-        // remaining hidden buffers with cap 2, the two oldest evict.
+        // remaining hidden buffers with cap 2, the two oldest evict. ids[1] holds
+        // no tokens, so only its spans and token stream make it a candidate.
         let evicted = reg.evict_hidden_highlights(&[ids[0]], 2);
         assert_eq!(evicted, vec![ids[1], ids[2]]);
-        assert!(
-            reg.tokens_for(ids[0]).is_some(),
-            "visible spared despite being oldest"
+
+        let kept: Vec<(bool, bool, bool)> = ids
+            .iter()
+            .map(|&id| {
+                (
+                    reg.tokens_for(id).is_some(),
+                    reg.take_token_spans(id).is_some(),
+                    reg.lsp_token_source_for(id).is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (true, true, true),
+                (false, false, false),
+                (false, false, false),
+                (true, true, true),
+                (true, true, true),
+            ],
+            "the visible buffer and the newest two keep tokens, spans, and stream",
         );
-        assert!(reg.tokens_for(ids[1]).is_none());
-        assert!(reg.tokens_for(ids[2]).is_none());
-        assert!(reg.tokens_for(ids[3]).is_some(), "within the newest cap");
-        assert!(reg.tokens_for(ids[4]).is_some());
     }
 
     #[test]
