@@ -1597,6 +1597,7 @@ mod tests {
             height: 8,
             window: 0,
             kind: PoolKind::Grid,
+            dim: 0,
         }));
         let view = PoolView {
             id: 1,

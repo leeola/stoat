@@ -566,6 +566,7 @@ mod tests {
                     height: 5,
                     window: 6,
                     kind: PoolKind::Grid,
+                    dim: 0,
                 }),
             ),
             (

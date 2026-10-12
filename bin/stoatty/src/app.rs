@@ -4485,6 +4485,7 @@ mod tests {
             height: 2,
             window: 1,
             kind: PoolKind::Grid,
+            dim: 0,
         }));
         // A two-row page, and the one below it, since the compose spans a row
         // more than the region is tall.
@@ -4669,6 +4670,7 @@ mod tests {
             height: 4,
             window: 0,
             kind: PoolKind::Grid,
+            dim: 0,
         }));
         batch.extend(encode_scroll(&ScrollCommand {
             pool: 1,
@@ -4937,6 +4939,7 @@ mod tests {
             height: 4,
             window: 0,
             kind: PoolKind::Terminal,
+            dim: 0,
         }));
         let declared = tiles(&project(&mut terminal, &mut frame));
 
@@ -4967,6 +4970,7 @@ mod tests {
             height: 2,
             window: 0,
             kind: PoolKind::Terminal,
+            dim: 0,
         }));
     }
 
@@ -5000,6 +5004,7 @@ mod tests {
                 height,
                 window: 0,
                 kind: PoolKind::Grid,
+                dim: 0,
             }));
             for page in 0..3 {
                 fill_page(&mut terminal, pool, page, b"....");

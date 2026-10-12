@@ -41,6 +41,27 @@ pub struct PoolRegionCommand {
     /// How the terminal draws the pool, which rides the frame as a byte after
     /// the head only for a [`PoolKind::Terminal`] pool.
     pub kind: PoolKind,
+    /// How far the terminal fades the pool's composite toward its clear color,
+    /// from 0 (no fade) to 255 (the clear color alone).
+    ///
+    /// A program fades an unfocused terminal pane this way, so a focus move
+    /// changes the region and leaves the pages alone. The byte rides the frame
+    /// after the kind, only for a [`PoolKind::Terminal`] pool. A grid pool
+    /// decodes as 0.
+    pub dim: u8,
+}
+
+impl PoolRegionCommand {
+    /// Whether `other` declares this pool at the same place, whatever its dim.
+    ///
+    /// A re-declare that changes only the dim keeps the pool's pages, so a
+    /// program fades a pool without a fill.
+    pub fn same_placement(&self, other: &Self) -> bool {
+        Self {
+            dim: other.dim,
+            ..*self
+        } == *other
+    }
 }
 
 /// How the terminal draws a pool declared by a [`PoolRegionCommand`].
@@ -223,10 +244,10 @@ pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
         w.write_all(&command.height.to_be_bytes())?;
         w.write_all(&command.window.to_be_bytes())?;
         // A grid pool's frame stays the head an older terminal reads, so the
-        // kind byte rides only on a pool that needs it.
+        // kind byte and the dim ride only on a pool that needs them.
         match command.kind {
             PoolKind::Grid => Ok(()),
-            PoolKind::Terminal => w.write_all(&[POOL_KIND_TERMINAL]),
+            PoolKind::Terminal => w.write_all(&[POOL_KIND_TERMINAL, command.dim]),
         }
     });
     frame::end(out);
@@ -516,10 +537,11 @@ pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> 
     // A head that stops at the window predates the kind, so it declares a grid
     // pool. A kind from a later version reads as a grid pool too, which is how
     // a terminal that predates the byte draws a terminal pool, so an appended
-    // field never makes the frame drop.
-    let kind = match full.get(16).copied() {
-        Some(POOL_KIND_TERMINAL) => PoolKind::Terminal,
-        _ => PoolKind::Grid,
+    // field never makes the frame drop. A terminal head that stops at the kind
+    // predates the dim, so it fades nothing.
+    let (kind, dim) = match full.get(16).copied() {
+        Some(POOL_KIND_TERMINAL) => (PoolKind::Terminal, full.get(17).copied().unwrap_or(0)),
+        _ => (PoolKind::Grid, 0),
     };
 
     Some(PoolRegionCommand {
@@ -530,6 +552,7 @@ pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> 
         height: u16::from_be_bytes([arg[10], arg[11]]),
         window: u32::from_be_bytes([arg[12], arg[13], arg[14], arg[15]]),
         kind,
+        dim,
     })
 }
 
@@ -635,6 +658,7 @@ mod tests {
             height: 22,
             window: 2,
             kind: PoolKind::Grid,
+            dim: 0,
         };
 
         assert_eq!(
@@ -644,9 +668,10 @@ mod tests {
     }
 
     /// A grid pool's frame is the 16-byte head an older terminal reads, so only
-    /// a terminal pool appends its kind, and both decode to what was declared.
+    /// a terminal pool appends its kind and dim, and both decode to what was
+    /// declared.
     #[test]
-    fn only_a_terminal_pool_region_appends_its_kind() {
+    fn only_a_terminal_pool_region_appends_its_kind_and_dim() {
         let grid = PoolRegionCommand {
             pool: 4,
             top: 1,
@@ -655,9 +680,11 @@ mod tests {
             height: 22,
             window: 2,
             kind: PoolKind::Grid,
+            dim: 0,
         };
         let terminal = PoolRegionCommand {
             kind: PoolKind::Terminal,
+            dim: 64,
             ..grid
         };
         let head_len = |command: &PoolRegionCommand| {
@@ -670,29 +697,66 @@ mod tests {
                 head_len(&grid),
                 head_len(&terminal),
             ),
-            (Some(Command::PoolRegion(terminal)), Some(16), Some(17)),
+            (Some(Command::PoolRegion(terminal)), Some(16), Some(18)),
         );
     }
 
     /// A head that stops at the window predates the kind and declares a grid
     /// pool. A kind from a later version also reads as a grid pool, which is how
-    /// a terminal that predates the byte draws a terminal pool.
+    /// a terminal that predates the byte draws a terminal pool. A terminal head
+    /// that stops at the kind predates the dim and fades nothing, and a grid
+    /// pool fades nothing whatever follows its kind.
     #[test]
     fn an_older_head_or_an_unknown_kind_is_a_grid_pool() {
         let head = vec![0, 0, 0, 4, 0, 1, 0, 2, 0, 76, 0, 22, 0, 0, 0, 2];
-        let kind_of = |arg: Vec<u8>| decode_pool_region(&[arg]).map(|region| region.kind);
+        let read = |tail: &[u8]| {
+            decode_pool_region(&[[head.as_slice(), tail].concat()])
+                .map(|region| (region.kind, region.dim))
+        };
 
         assert_eq!(
             [
-                kind_of(head.clone()),
-                kind_of([head.as_slice(), &[1]].concat()),
-                kind_of([head.as_slice(), &[2]].concat()),
+                read(&[]),
+                read(&[1]),
+                read(&[1, 64]),
+                read(&[2]),
+                read(&[2, 64])
             ],
             [
-                Some(PoolKind::Grid),
-                Some(PoolKind::Terminal),
-                Some(PoolKind::Grid),
+                Some((PoolKind::Grid, 0)),
+                Some((PoolKind::Terminal, 0)),
+                Some((PoolKind::Terminal, 64)),
+                Some((PoolKind::Grid, 0)),
+                Some((PoolKind::Grid, 0)),
             ],
+        );
+    }
+
+    /// A re-declare that changes only the dim keeps the pool where it was, and
+    /// a change to any other field moves it.
+    #[test]
+    fn a_region_that_differs_in_dim_alone_keeps_its_placement() {
+        let region = PoolRegionCommand {
+            pool: 4,
+            top: 1,
+            left: 2,
+            width: 76,
+            height: 22,
+            window: 2,
+            kind: PoolKind::Terminal,
+            dim: 0,
+        };
+
+        assert_eq!(
+            [
+                region.same_placement(&PoolRegionCommand { dim: 64, ..region }),
+                region.same_placement(&PoolRegionCommand { top: 2, ..region }),
+                region.same_placement(&PoolRegionCommand {
+                    kind: PoolKind::Grid,
+                    ..region
+                }),
+            ],
+            [true, false, false],
         );
     }
 

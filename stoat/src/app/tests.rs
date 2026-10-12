@@ -7359,6 +7359,7 @@ fn window_region() -> PoolRegionCommand {
         height: 23,
         window: 2,
         kind: PoolKind::Grid,
+        dim: 0,
     }
 }
 
@@ -15120,6 +15121,7 @@ fn pool_region(pool: u32) -> PoolRegionCommand {
         height: 10,
         window: 0,
         kind: PoolKind::Grid,
+        dim: 0,
     }
 }
 

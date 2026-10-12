@@ -147,7 +147,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
-| `pool_region` | P | 16 B, 17 B with kind | Declares a smooth-scroll pool |
+| `pool_region` | P | 16 B, 18 B with kind and dim | Declares a smooth-scroll pool |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
@@ -182,6 +182,13 @@ so send such a terminal whole fills. From version 10, a viewport resize keeps
 a terminal pool's pages, so a patch lands on the page the program last filled.
 A sender's backlog drops a fill or a patch of a page behind a later whole fill
 of that page, and drops nothing behind a patch.
+
+From protocol version 11, a terminal pool's `pool_region` appends a dim byte
+after its kind. The terminal mixes the pool's composite toward its clear color
+by dim / 255, so a program fades an unfocused pane and keeps its pages as they
+are. A re-declare that changes only the dim keeps the pool's pages. A terminal
+below version 11 ignores the byte, so send such a terminal pages with the fade
+in their cells.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
