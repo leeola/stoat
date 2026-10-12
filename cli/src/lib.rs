@@ -205,8 +205,9 @@ impl CommonArgs {
     /// Reconstruct the canonical argv these arguments parse from, for
     /// forwarding to a child process.
     ///
-    /// The flags come first, then the file paths as positionals. Parsing the
-    /// result back yields an equal [`CommonArgs`].
+    /// The flags come first, then `--` and the file paths as positionals, so a
+    /// path that starts with a hyphen stays a path. Parsing the result back
+    /// yields an equal [`CommonArgs`].
     pub fn to_argv(&self) -> Vec<String> {
         let mut argv = Vec::new();
         if self.continue_ {
@@ -231,6 +232,9 @@ impl CommonArgs {
             argv.push("--fixture".to_string());
             argv.push(fixture.clone());
         }
+        if !self.files.is_empty() {
+            argv.push("--".to_string());
+        }
         argv.extend(
             self.files
                 .iter()
@@ -253,9 +257,25 @@ mod tests {
     }
 
     fn round_trip(common: CommonArgs) {
-        let mut argv = vec!["prog".to_string()];
-        argv.extend(common.to_argv());
-        assert_eq!(Harness::parse_from(argv).common, common);
+        let argv = ["prog".to_string()].into_iter().chain(common.to_argv());
+        let parsed =
+            Harness::try_parse_from(argv).unwrap_or_else(|e| panic!("{common:?} parses back: {e}"));
+        assert_eq!(parsed.common, common);
+    }
+
+    /// A path that starts with a hyphen reads as a flag unless the separator
+    /// comes before it.
+    #[test]
+    fn a_file_with_a_leading_hyphen_round_trips() {
+        round_trip(CommonArgs {
+            files: vec![PathBuf::from("-notes.md")],
+            continue_: true,
+            resume: false,
+            inputs: None,
+            timeout: None,
+            input_speed: None,
+            fixture: None,
+        });
     }
 
     #[test]
