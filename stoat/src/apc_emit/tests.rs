@@ -1958,6 +1958,36 @@ fn a_moved_pane_declares_its_pool_again() {
     );
 }
 
+/// A click on a focused terminal pane leaves a zero-width selection, which
+/// paints no cell, so it sends nothing. A drag that extends it sends the page.
+#[test]
+fn a_click_on_a_focused_terminal_pane_sends_nothing() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
+    let mut select = |h: &mut crate::test_harness::TestHarness, head: (usize, usize)| {
+        let session = &mut h.stoat.active_workspace_mut().terms[term_id];
+        let selection = session
+            .selection
+            .get_or_insert(crate::term_session::TermSelection::new(0, 0));
+        selection.extend_to(head.0, head.1);
+        pool_commands(&emit_raw(h, &mut rx), index)
+    };
+
+    let clicked = select(&mut h, (0, 0));
+    let dragged = select(&mut h, (0, 3));
+
+    assert_eq!(
+        (
+            clicked.len(),
+            dragged
+                .iter()
+                .filter(|c| matches!(c, command::Command::Fill(_)))
+                .count()
+        ),
+        (0, 1),
+        "the click sends nothing, and the drag sends the page",
+    );
+}
+
 /// Under a terminal that paints row patches, an echo sends the echoed row as
 /// one patch in a batch of its own, and no whole page.
 #[test]

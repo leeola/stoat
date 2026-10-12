@@ -156,6 +156,16 @@ impl TermSession {
         }
     }
 
+    /// The selection the pane paints and copies, or `None` when nothing is
+    /// selected or when no drag extended the selection past its anchor.
+    ///
+    /// A zero-width selection marks no cell, being what a press leaves before a
+    /// drag, so whatever the selection drives reads this rather than
+    /// [`Self::selection`].
+    pub(crate) fn painted_selection(&self) -> Option<TermSelection> {
+        self.selection.filter(|sel| !sel.is_empty())
+    }
+
     /// The selected text, or `None` when nothing is selected, when no drag
     /// extended the selection past its anchor, or when the selection covers only
     /// blank cells.
@@ -163,7 +173,7 @@ impl TermSession {
     /// The selection reads as [`TermScreen::span_text`] reads a span, which is
     /// how a terminal copies a selection.
     pub fn selection_text(&self) -> Option<String> {
-        let selection = self.selection.filter(|sel| !sel.is_empty())?;
+        let selection = self.painted_selection()?;
         let (start, end) = selection.ordered();
         let text = self.term.span_text(start, end);
         (!text.trim().is_empty()).then_some(text)

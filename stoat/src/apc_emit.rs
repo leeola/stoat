@@ -2355,7 +2355,7 @@ fn emit_terminal_pool(
         pane.is_focused.hash(&mut hasher);
         pane.dim.to_bits().hash(&mut hasher);
         term.term.generation().hash(&mut hasher);
-        term.selection.hash(&mut hasher);
+        term.painted_selection().hash(&mut hasher);
         hasher.finish()
     };
     if state.already_emitted(pool, version) {
@@ -2580,7 +2580,7 @@ pub(crate) fn window_content_version(
             0u8.hash(&mut hasher);
             term_id.hash(&mut hasher);
             term.term.generation().hash(&mut hasher);
-            term.selection.hash(&mut hasher);
+            term.painted_selection().hash(&mut hasher);
         },
         View::Run(run_id) => {
             let run = ws.runs.get(*run_id)?;

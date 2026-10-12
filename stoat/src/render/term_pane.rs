@@ -37,7 +37,7 @@ pub(crate) fn render_term_pane(
     let term = &agent.term;
     let rows = term.rows().min(area.height as usize);
     let cols = term.cols().min(area.width as usize);
-    let selection = agent.selection.filter(|sel| !sel.is_empty());
+    let selection = agent.painted_selection();
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION);
 
     let mut cells = Vec::new();

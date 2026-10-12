@@ -7418,6 +7418,16 @@ fn a_terminal_pane_versions_on_everything_its_render_reads() {
     );
 
     h.stoat.active_workspace_mut().terms[term_id].selection = Some(TermSelection::new(1, 1));
+    assert_eq!(
+        base,
+        version(h.stoat.active_workspace(), true, 0, region),
+        "a press marks no cell, so it moves nothing"
+    );
+    h.stoat.active_workspace_mut().terms[term_id]
+        .selection
+        .as_mut()
+        .expect("the press left a selection")
+        .extend_to(1, 3);
     let selected = version(h.stoat.active_workspace(), true, 0, region);
     assert_ne!(base, selected, "a selection tints the cells it covers");
 
