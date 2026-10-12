@@ -7,10 +7,15 @@
 //! settings table.
 //!
 //! Every recognized setting comes from [`stoat_config::settings_schema`], the
-//! single source of truth that mirrors `Settings::apply`. The server advertises
-//! UTF-8 position encoding so line/column offsets are plain byte counts.
+//! single source of truth that mirrors `Settings::apply`. Every recognized
+//! action name comes from [`stoat_action::registry`], the registry the keymap
+//! resolves a binding against. The server advertises UTF-8 position encoding
+//! so line/column offsets are plain byte counts.
 
-use crate::host::lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError};
+use crate::{
+    host::lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError},
+    keymap,
+};
 use async_trait::async_trait;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
@@ -540,11 +545,14 @@ fn complete(text: &str, offset: usize) -> Vec<CompletionItem> {
     }
 }
 
-/// Diagnose parse errors and unrecognized settings across the whole document.
+/// Diagnose parse errors, unrecognized settings, and unknown actions across
+/// the whole document.
 ///
 /// Every [`stoat_config::ParseError`] becomes an error diagnostic. Each `on
 /// init` setting whose path matches no schema entry becomes an "unknown
-/// setting" warning spanning its path.
+/// setting" warning spanning its path. Each action in an `on key` block that
+/// [`stoat_action::registry`] does not know becomes an "unknown action" warning
+/// spanning its call, since the keymap drops that binding.
 fn diagnose(text: &str) -> Vec<Diagnostic> {
     let (config, errors) = stoat_config::parse(text);
     let lines = LineIndex::new(text);
@@ -583,7 +591,52 @@ fn diagnose(text: &str) -> Vec<Diagnostic> {
         }
     }
 
+    for block in &config.blocks {
+        if block.node.event == EventType::Key {
+            diagnose_actions(&block.node.statements, &lines, &mut diagnostics);
+        }
+    }
+
     diagnostics
+}
+
+/// Warn on each action in `statements` that no registered action answers to.
+///
+/// The walk mirrors the keymap's compile of a key block, so a predicate
+/// block's body and a function's body are walked too. A function call is
+/// skipped, since its body is diagnosed where it is declared.
+fn diagnose_actions(
+    statements: &[Spanned<Statement>],
+    lines: &LineIndex,
+    out: &mut Vec<Diagnostic>,
+) {
+    for statement in statements {
+        match &statement.node {
+            Statement::Binding(binding) => match &binding.action.node {
+                ActionExpr::Single(action) => {
+                    warn_unknown_action(&action.name, &binding.action.span, lines, out);
+                },
+                ActionExpr::Sequence(actions) => {
+                    for action in actions {
+                        warn_unknown_action(&action.node.name, &action.span, lines, out);
+                    }
+                },
+            },
+            Statement::PredicateBlock(block) => diagnose_actions(&block.body, lines, out),
+            Statement::FnDecl(decl) => diagnose_actions(&decl.body, lines, out),
+            Statement::FnCall(_) | Statement::Setting(_) | Statement::Let(_) => {},
+        }
+    }
+}
+
+fn warn_unknown_action(name: &str, span: &Span, lines: &LineIndex, out: &mut Vec<Diagnostic>) {
+    if keymap::is_unknown_action(name) {
+        out.push(diagnostic(
+            lines.range(span.clone()),
+            DiagnosticSeverity::WARNING,
+            format!("unknown action `{name}`"),
+        ));
+    }
 }
 
 /// Documentation and default for the setting under the cursor at `offset`.
@@ -1207,8 +1260,9 @@ mod tests {
     /// The schema drives the unknown-setting warning, so a setting removed from
     /// the schema but left in the shipped config puts a warning on the default
     /// config every user starts from. The sibling guard in the config crate
-    /// proves each schema entry has an apply arm; this one closes the other
-    /// direction.
+    /// proves each schema entry has an apply arm. This one closes the other
+    /// direction. The same pass warns on an action the registry does not know,
+    /// so this test also guards the actions the shipped config binds.
     #[test]
     fn the_shipped_config_names_only_known_settings() {
         let diagnostics = diagnose(crate::app::DEFAULT_KEYMAP);
@@ -1234,6 +1288,31 @@ mod tests {
         let lines = LineIndex::new(text);
         assert_eq!(warning.range.start, lines.position(path_start));
         assert_eq!(warning.range.end, lines.position(path_end));
+    }
+
+    /// Each stale action warns at its own call, wherever the binding sits: at
+    /// the top of the block, under a predicate, as one step of a sequence, or
+    /// in a function body.
+    #[test]
+    fn unknown_action_warns_at_action_span() {
+        let text = "on key {\n  j -> DiffWheelWalk();\n  mode == normal { k -> GoneVerb(); }\n  \
+                    l -> [MoveDown(), StaleStep()];\n  fn nav() { n -> FnStale(); }\n}";
+        let lines = LineIndex::new(text);
+
+        let warnings: Vec<(Option<DiagnosticSeverity>, String, Range)> = diagnose(text)
+            .into_iter()
+            .map(|diagnostic| (diagnostic.severity, diagnostic.message, diagnostic.range))
+            .collect();
+        let expected = ["DiffWheelWalk", "GoneVerb", "StaleStep", "FnStale"].map(|name| {
+            let call = format!("{name}()");
+            let start = text.find(&call).expect("call present");
+            (
+                Some(DiagnosticSeverity::WARNING),
+                format!("unknown action `{name}`"),
+                lines.range(start..start + call.len()),
+            )
+        });
+        assert_eq!(warnings, expected);
     }
 
     #[test]
