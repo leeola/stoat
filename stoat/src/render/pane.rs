@@ -1449,7 +1449,9 @@ fn staged_label_body(
 
     if let Some(lead) = base_lead {
         return Some(match file {
-            Some((staged, unstaged)) => format!("{lead} · file {staged}/{unstaged}"),
+            Some((staged, unstaged)) => {
+                format!("{lead} · file {staged} staged / {unstaged} unstaged")
+            },
             None => lead.to_string(),
         });
     }
@@ -1464,7 +1466,9 @@ fn staged_label_body(
 
     let repo_part = format!("repo {repo_staged} staged / {repo_unstaged} unstaged");
     Some(match file {
-        Some((staged, unstaged)) => format!("{repo_part} · file {staged}/{unstaged}"),
+        Some((staged, unstaged)) => {
+            format!("{repo_part} · file {staged} staged / {unstaged} unstaged")
+        },
         None => repo_part,
     })
 }
@@ -2330,7 +2334,7 @@ mod tests {
     fn the_staged_label_pairs_the_repo_hunks_with_the_focused_file() {
         assert_eq!(
             focused_staged_label(None, Some((2, 3)), Some((1, 4)), None).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 1/4 "),
+            Some(" repo 2 staged / 3 unstaged · file 1 staged / 4 unstaged "),
             "both pairs read side by side"
         );
         assert_eq!(
@@ -2360,7 +2364,7 @@ mod tests {
         );
         assert_eq!(
             focused_staged_label(None, Some((0, 0)), Some((1, 0)), None).as_deref(),
-            Some(" repo 0 staged / 0 unstaged · file 1/0 "),
+            Some(" repo 0 staged / 0 unstaged · file 1 staged / 0 unstaged "),
             "a stale zero tally still shows against a file that has hunks"
         );
     }
@@ -2369,7 +2373,7 @@ mod tests {
     fn the_staged_label_closes_with_the_hunk_under_the_cursor() {
         assert_eq!(
             focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some((Some(2), 7))).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 1/4 · hunk 2/7 "),
+            Some(" repo 2 staged / 3 unstaged · file 1 staged / 4 unstaged · hunk 2/7 "),
             "the position closes the label the counts opened"
         );
         assert_eq!(
@@ -2379,7 +2383,7 @@ mod tests {
         );
         assert_eq!(
             focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some((None, 7))).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 1/4 · hunk -/7 "),
+            Some(" repo 2 staged / 3 unstaged · file 1 staged / 4 unstaged · hunk -/7 "),
             "a cursor above the first hunk stands at no position"
         );
         assert_eq!(
@@ -2400,7 +2404,7 @@ mod tests {
         assert_eq!(
             focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), Some((1, 4)), None)
                 .as_deref(),
-            Some(" diff vs abc1234 · file 1/4 "),
+            Some(" diff vs abc1234 · file 1 staged / 4 unstaged "),
             "the base replaces the repo pair rather than joining it"
         );
         assert_eq!(
@@ -2518,7 +2522,7 @@ mod tests {
         assert!(
             rendered
                 .replace('─', " ")
-                .contains("repo 1 staged / 1 unstaged · file 1/1"),
+                .contains("repo 1 staged / 1 unstaged · file 1 staged / 1 unstaged"),
             "statusline reports the repo's files and the focused file's hunks:\n{rendered}"
         );
     }
@@ -2530,7 +2534,7 @@ mod tests {
     #[test]
     fn the_staged_summary_gives_way_to_a_message_it_leaves_no_room_for() {
         for stoatty in [true, false] {
-            let mut h = crate::test_harness::TestHarness::with_size(94, 12);
+            let mut h = crate::test_harness::TestHarness::with_size(112, 12);
             h.stoat.stoatty = stoatty;
             h.stage_index_scenario(
                 "/repo",
@@ -2554,7 +2558,7 @@ mod tests {
             assert_eq!(
                 [bar("saved"), bar("follow changes off")],
                 [
-                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · hunk -/1 1:1",
+                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1 staged / 1 unstaged · hunk -/1 1:1",
                     "NOR repo diff f.txt follow changes off 1:1",
                 ],
                 "stoatty {stoatty}",
