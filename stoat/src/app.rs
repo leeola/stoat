@@ -2,7 +2,7 @@ use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
     agent_status::AgentStatus,
-    apc_emit::{self, PoolOwner, TerminalPage},
+    apc_emit::{self, PoolOwner, TerminalPage, WindowPage},
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::OpenOrigin,
@@ -1054,6 +1054,10 @@ pub struct Stoat {
     /// [`apc_emit::emit_smooth_scroll`] compares a new render against so that a
     /// page stoatty already holds is not sent again.
     pub(crate) terminal_pages: std::collections::HashMap<u32, TerminalPage>,
+    /// The content page each detached non-editor pane last sent to its aux
+    /// window, by pane index. [`apc_emit::emit_smooth_scroll`] compares a new
+    /// render against it so that only the changed rows go out.
+    pub(crate) window_pages: std::collections::HashMap<u32, WindowPage>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -2450,6 +2454,7 @@ impl Stoat {
             pool_cursor_holder: None,
             pool_owners: std::collections::BTreeMap::new(),
             terminal_pages: std::collections::HashMap::new(),
+            window_pages: std::collections::HashMap::new(),
             _index_build_task: None,
             redraw_notify,
             drain_notify,

@@ -2424,6 +2424,26 @@ fn a_resize_mid_fill_discards_the_page_instead_of_painting_it_live() {
     );
 }
 
+/// The main viewport does not set the size of an aux window's pool, so its
+/// page in flight lands whole across a resize.
+#[test]
+fn a_resize_mid_fill_keeps_a_window_pools_page() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    declare_window_pool(&mut terminal, 2, 3);
+
+    terminal.advance(&encode_fill(&FillCommand { pool: 2, index: 0 }));
+    terminal.advance(b"pa");
+    terminal.resize(4, 10);
+    terminal.advance(b"ge");
+    terminal.advance(&encode_fill_end());
+
+    assert_eq!(
+        row_texts(pool_page(&terminal, 2, 0)),
+        vec!["page".to_owned(), String::new()],
+        "the page in flight lands whole on the window's pool",
+    );
+}
+
 #[test]
 fn bar_apc_frame_sets_a_grid_bar() {
     let frame = encode_bar(&BarCommand {

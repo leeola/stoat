@@ -90,6 +90,26 @@ pub(crate) struct TerminalPage {
     spare: Buffer,
 }
 
+/// The content page a detached non-editor pane last sent to its aux window,
+/// held to send only the rows that a new render changes.
+///
+/// The page depends on the pane's view, focus, dim, theme, and selection. The
+/// rendered cells are exact for all of them, so a row compare against the held
+/// page finds every change.
+pub(crate) struct WindowPage {
+    /// The view the held page shows. A pane that changes view sends a whole
+    /// page, whatever its cells.
+    view: View,
+    /// The rectangle the held page was declared at. A pane that moves or
+    /// resizes sends a whole page.
+    region: PoolRegionCommand,
+    /// The page stoatty holds.
+    page: Buffer,
+    /// The buffer the next render's content rows are copied into, swapped
+    /// with `page` when they go out, so that a compare allocates nothing.
+    spare: Buffer,
+}
+
 /// The surface whose pages a pane pool holds.
 ///
 /// A pane pool takes its pane's index as its id, and the root pane of every
@@ -297,7 +317,14 @@ pub(crate) fn emit_windows(stoat: &mut Stoat) {
 /// painters. It is built inline rather than by a `frame_ctx(stoat)` helper
 /// because a whole-`Stoat` borrow would conflict with the `&mut ws.editors`
 /// paint.
-fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
+///
+/// If the terminal paints row patches, a held content page goes out as one
+/// `fill_rows` patch for each run of changed rows. stoatty holds a page when
+/// it has an earlier render of the same view in the same rectangle. If no row
+/// changed, nothing goes out. The patches are the answer, each a batch to send
+/// on its own after `out`. Every other content page goes out whole in `out`.
+fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
+    let paints_patches = stoat.stoatty_protocol >= TERMINAL_ROWS_PROTOCOL;
     let mode = stoat.focused_mode().to_string();
     let lsp_pending = crate::lsp::lsp_pending_label(stoat);
     // Resolved before the workspace borrow. The constructor reads the whole
@@ -307,7 +334,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let windowed = ws.panes.windowed_panes();
     if windowed.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let workspace_name = ws.display_name().to_owned();
@@ -377,6 +404,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
 
     let split_count = ws.panes.split_panes().count();
     let show_badges = mode == "space_pane_display";
+    let mut patch_batches = Vec::new();
 
     for (windowed_index, (pane_id, window)) in windowed.into_iter().enumerate() {
         let (content, status, view, index, is_focused, area) = {
@@ -438,40 +466,66 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
 
             // render_pane also paints the status row. The status pool below
             // owns it, so only the content rows are copied out and shipped.
-            let mut content_buf = Buffer::empty(content);
+            // A pane that sent no page yet holds an empty one, which no
+            // content area equals.
+            let held = stoat
+                .window_pages
+                .entry(index)
+                .or_insert_with(|| WindowPage {
+                    view: view.clone(),
+                    region,
+                    page: Buffer::empty(Rect::default()),
+                    spare: Buffer::empty(Rect::default()),
+                });
+            held.spare.resize(content);
             for y in content.top()..content.bottom() {
                 for x in content.left()..content.right() {
-                    content_buf[(x, y)] = buf[(x, y)].clone();
+                    held.spare[(x, y)] = buf[(x, y)].clone();
                 }
             }
 
-            let bytes = crate::render::serialize_buffer(&content_buf);
             // A view with no tracked inputs falls back to hashing what it
             // painted, which still suppresses the fill even though it could
             // not suppress the paint.
             let content_version = input_version.unwrap_or_else(|| {
                 let mut hasher = DefaultHasher::new();
                 stoat.theme_epoch.hash(&mut hasher);
-                bytes.hash(&mut hasher);
+                held.spare.hash(&mut hasher);
                 hasher.finish()
             });
-            // A non-editor pane holds a single page, so only page 0 fills
-            // and the rest of the buffered window stays empty.
-            pool::emit_into(
-                out,
-                &mut stoat.smooth_scroll,
-                region,
-                0.0,
-                content_version,
-                false,
-                |page| {
-                    if page == 0 {
-                        bytes.clone()
-                    } else {
-                        Vec::new()
-                    }
-                },
-            );
+
+            let held_by_stoatty = held.view == view
+                && held.region == region
+                && held.page.area == held.spare.area
+                && stoat.smooth_scroll.holds_region(index, &region);
+            if paints_patches && held_by_stoatty {
+                patch_batches.extend(row_patches(index, &held.page, &held.spare));
+                stoat
+                    .smooth_scroll
+                    .record_content_version(index, content_version);
+            } else {
+                let bytes = crate::render::serialize_buffer(&held.spare);
+                // A non-editor pane holds a single page, so only page 0 fills
+                // and the rest of the buffered window stays empty.
+                pool::emit_into(
+                    out,
+                    &mut stoat.smooth_scroll,
+                    region,
+                    0.0,
+                    content_version,
+                    false,
+                    |page| {
+                        if page == 0 {
+                            bytes.clone()
+                        } else {
+                            Vec::new()
+                        }
+                    },
+                );
+                held.view = view.clone();
+                held.region = region;
+            }
+            std::mem::swap(&mut held.page, &mut held.spare);
         }
 
         if status.width == 0 || status.height == 0 {
@@ -537,6 +591,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
             |_| bytes.clone(),
         );
     }
+    patch_batches
 }
 
 /// Emit the stoatty smooth-scroll APC for every visible editor pane's current
@@ -823,6 +878,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
     // Detached non-editor panes repaint through a full-window content pool
     // plus a status row. The editor pool loop above declares neither.
+    let mut window_content = Vec::new();
     {
         let ws = stoat.active_workspace();
         for (pane_id, _) in ws.panes.windowed_panes() {
@@ -832,8 +888,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             }
             active.push(pane.index);
             active.push(crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index);
+            window_content.push(pane.index);
         }
     }
+    // A held page describes a pool that stoatty keeps only while its pane
+    // paints a window's content.
+    stoat
+        .window_pages
+        .retain(|index, _| window_content.contains(index));
     if finder_list.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::FINDER);
     }
@@ -2009,16 +2071,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         }
     }
 
-    emit_window_content(stoat, &mut out);
+    let window_patches = emit_window_content(stoat, &mut out);
 
     if !out.is_empty() {
         let _ = apc_tx.send(out);
     }
 
-    // Each terminal page rides a batch of its own, so a backed-up link that
-    // supersedes it drops nothing else. The batch above declared its pool.
-    for page in page_batches {
-        let _ = apc_tx.send(page);
+    // Each terminal page and window patch rides a batch of its own, so a
+    // backed-up link that supersedes one drops nothing else. The batch above
+    // declared their pools.
+    for batch in page_batches.into_iter().chain(window_patches) {
+        let _ = apc_tx.send(batch);
     }
 
     // The batch (regions, scrolls) has shipped, so the terminal has every pool's

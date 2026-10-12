@@ -3002,15 +3002,15 @@ impl Terminal {
             pool.page_pool.invalidate();
             pool.content_version = pool.content_version.wrapping_add(1);
         }
-        // Doomed rather than closed. A grid pool's page in flight has nowhere to
-        // land now, but the context has to stay open to swallow the rest of it,
-        // since the bytes would otherwise route to the live parser and paint the
-        // screen.
+        // Doomed rather than closed. A primary grid pool's page in flight has
+        // nowhere to land now, but the context has to stay open to swallow the
+        // rest of it, since the bytes would otherwise route to the live parser
+        // and paint the screen. This viewport does not set the size of an aux
+        // window's pool, so its page in flight still lands.
         if let Some(fill) = &mut self.fill
-            && self
-                .pools
-                .get(&fill.pool)
-                .is_none_or(|pool| pool.region.kind != PoolKind::Terminal)
+            && self.pools.get(&fill.pool).is_none_or(|pool| {
+                pool.region.window == 0 && pool.region.kind != PoolKind::Terminal
+            })
         {
             fill.discard = true;
         }

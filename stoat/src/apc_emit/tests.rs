@@ -1625,6 +1625,108 @@ fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
     );
 }
 
+/// Under a terminal that paints row patches, an echo in a detached terminal
+/// sends the echoed row as one patch and no whole page.
+#[test]
+fn a_detached_terminal_echo_ships_one_row_patch() {
+    let (mut h, mut rx, term_id, index) = detached_terminal_sent(b"");
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"x");
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    assert_eq!(
+        (pool_fills(&bytes, index), pool_patches(&bytes, index)),
+        (vec![], vec![(0, 1)]),
+        "the echo ships its row alone",
+    );
+}
+
+/// A title change moves a detached terminal's version but none of its cells,
+/// so it sends nothing.
+#[test]
+fn a_detached_terminal_title_change_sends_nothing() {
+    let (mut h, mut rx, term_id, index) = detached_terminal_sent(b"hello");
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"\x1b]0;a title\x07");
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    assert_eq!(
+        (pool_commands(&bytes, index), pool_patches(&bytes, index)),
+        (vec![], vec![]),
+        "the title sends nothing for the content pool",
+    );
+}
+
+/// A detached pane that shows another terminal sends that terminal's page
+/// whole, since stoatty holds a page of another view.
+#[test]
+fn a_detached_pane_view_change_ships_a_whole_page() {
+    let (mut h, mut rx, _, index) = detached_terminal_sent(b"hello");
+    {
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let ws = h.stoat.active_workspace_mut();
+        let other = ws.terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
+        ws.terms[other].term.feed(b"other");
+        let (pane, _) = ws.panes.windowed_panes()[0];
+        ws.panes.pane_mut(pane).view = View::Terminal(other);
+    }
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    assert_eq!(
+        (pool_fills(&bytes, index), pool_patches(&bytes, index)),
+        (vec![0], vec![]),
+        "the other terminal's page goes out whole",
+    );
+}
+
+/// A stoat at protocol 10 whose split pane holds a fresh terminal fed `output`.
+/// The pane is detached into its own window, and its first content page is
+/// sent. The terminal's id and the pane's pool id come with it.
+fn detached_terminal_sent(
+    output: &[u8],
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    TermId,
+    u32,
+) {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.window_ipc_connected = true;
+    h.stoat.stoatty_protocol = 10;
+    h.resize(80, 24);
+    h.type_action("SplitRight()");
+    h.settle();
+
+    let session: Arc<dyn crate::host::TerminalSession> =
+        Arc::new(crate::host::FakeTerminalSession::new());
+    let (term_id, index) = {
+        let ws = h.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let term_id = ws.terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+            TermSession::next_token(),
+        ));
+        ws.panes.pane_mut(focused).view = View::Terminal(term_id);
+        (term_id, ws.panes.pane(focused).index)
+    };
+    action_handlers::dispatch(&mut h.stoat, &DetachPane);
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(output);
+    emit_raw(&mut h, &mut rx);
+    (h, rx, term_id, index)
+}
+
 /// A fresh terminal in the focused split pane, fit to that pane by a render and
 /// then fed `output`, and the pane's index, which is its pool id.
 fn terminal_in_focused_pane(
