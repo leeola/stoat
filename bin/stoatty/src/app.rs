@@ -3086,6 +3086,9 @@ fn redraw(state: &mut State) {
 /// it holds only blanks of the clear color, so it leaves its own cells of
 /// that color to the clear.
 ///
+/// The composite fades toward the clear color by the region's dim, which is
+/// how the program fades an unfocused terminal pane without a new page.
+///
 /// `changed_rows` names the rows of `grid` that its last compose rewrote, for
 /// a pool that tracks them. A terminal pool does, and a gliding pool passes
 /// `None`.
@@ -3145,6 +3148,7 @@ fn pool_composite<'a>(
         occludable: pool.id < NON_PANE_POOL_BASE,
         skip_clear: region.kind == PoolKind::Terminal,
         changed_rows,
+        dim: f32::from(region.dim) / 255.0,
     }
 }
 
@@ -3285,6 +3289,7 @@ fn redraw_aux(
             occludable: pool.id < NON_PANE_POOL_BASE,
             skip_clear: false,
             changed_rows: None,
+            dim: 0.0,
         })
         .collect::<Vec<_>>();
 
@@ -4502,6 +4507,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 kind: PoolKind::Grid,
+                dim: 0,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -4543,6 +4549,7 @@ mod tests {
             width: 40,
             height: 12,
             kind: PoolKind::Grid,
+            dim: 0,
         };
         let pool = PoolView {
             id: 1,
@@ -4605,6 +4612,7 @@ mod tests {
             width: 4,
             height: 4,
             kind: PoolKind::Grid,
+            dim: 0,
         };
         let rides: Vec<_> = projection
             .rides
@@ -4764,6 +4772,31 @@ mod tests {
         );
     }
 
+    /// A re-declare that changes only the dim keeps the page the pool holds, so
+    /// the next frame composites that page again with nothing new to build,
+    /// faded by the new dim.
+    #[test]
+    fn a_redeclare_with_another_dim_composites_the_held_page_faded() {
+        let mut terminal = terminal_pooled(b"ab");
+        let mut frame = PoolFrame::default();
+        project(&mut terminal, &mut frame);
+
+        declare_terminal_pool(&mut terminal, 64);
+        let projection = project(&mut terminal, &mut frame);
+        let grid = &frame.anims[&1].document_grid;
+        let dims: Vec<f32> = projection
+            .active
+            .iter()
+            .map(|pool| pool_composite(pool, grid, None, None, [12.0, 24.0], 10).dim)
+            .collect();
+
+        assert_eq!(
+            (tiles(&projection), row_text(grid), dims),
+            (vec![(1, false)], "ab".to_owned(), vec![64.0 / 255.0]),
+            "the held page composites unchanged, faded by the new dim",
+        );
+    }
+
     /// A page whose content only scrolled changes the composite, though every
     /// row matches the page once the composite slides, and the tile reports the
     /// slide. A page filled back to what the composite holds changes nothing,
@@ -4865,7 +4898,7 @@ mod tests {
             .lock()
             .advance(&encode_pool_drop(&PoolDropCommand { pool: 1 }));
         let retired = reports(20, 20);
-        declare_terminal_pool(&mut terminal.lock());
+        declare_terminal_pool(&mut terminal.lock(), 0);
         let redeclared = reports(20, 20);
 
         assert_eq!(
@@ -4877,11 +4910,12 @@ mod tests {
 
     /// A terminal pool composites at the terminal font size over its own region
     /// and leaves its cells of the clear color to the clear. A grid pool
-    /// composites at the live grid's size and paints every cell.
+    /// composites at the live grid's size and paints every cell. Each fades by
+    /// its region's dim.
     #[test]
     fn a_terminal_pool_composites_at_the_terminal_font_size() {
         let grid = Grid::new(1, 1);
-        let drawn = |kind| {
+        let drawn = |kind, dim| {
             let tile = ActivePool {
                 id: 1,
                 region: PoolRegion {
@@ -4892,6 +4926,7 @@ mod tests {
                     width: 4,
                     height: 2,
                     kind,
+                    dim,
                 },
                 frac: 0.0,
                 content_changed: true,
@@ -4903,16 +4938,18 @@ mod tests {
                 composite.origin_cells,
                 composite.scissor,
                 composite.skip_clear,
+                composite.dim,
             )
         };
 
         assert_eq!(
-            (drawn(PoolKind::Terminal), drawn(PoolKind::Grid)),
+            (drawn(PoolKind::Terminal, 51), drawn(PoolKind::Grid, 0)),
             (
-                (Some(10), [2.0, 1.0], [24, 24, 48, 48], true),
-                (None, [2.0, 1.0], [24, 24, 48, 48], false)
+                (Some(10), [2.0, 1.0], [24, 24, 48, 48], true, 0.2),
+                (None, [2.0, 1.0], [24, 24, 48, 48], false, 0.0)
             ),
-            "only the terminal pool takes its size and skips the clear, and both cover the region",
+            "only the terminal pool takes its size and skips the clear, both cover the \
+             region, and each fades by its region's dim",
         );
     }
 
@@ -4956,12 +4993,14 @@ mod tests {
     fn terminal_pooled(text: &[u8]) -> Terminal {
         let mut terminal = Terminal::new(8, 8, Theme::default());
         terminal.advance(b"\x1b[?1049h");
-        declare_terminal_pool(&mut terminal);
+        declare_terminal_pool(&mut terminal, 0);
         fill_page(&mut terminal, 1, 0, text);
         terminal
     }
 
-    fn declare_terminal_pool(terminal: &mut Terminal) {
+    /// Declare terminal pool 1 over the top-left four by two cells, faded by
+    /// `dim`.
+    fn declare_terminal_pool(terminal: &mut Terminal, dim: u8) {
         terminal.advance(&encode_pool_region(&PoolRegionCommand {
             pool: 1,
             top: 0,
@@ -4970,7 +5009,7 @@ mod tests {
             height: 2,
             window: 0,
             kind: PoolKind::Terminal,
-            dim: 0,
+            dim,
         }));
     }
 

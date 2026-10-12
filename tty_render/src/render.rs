@@ -310,9 +310,11 @@ const MAX_COMPOSITE_POOLS: usize = 32;
 ///
 /// A dynamic uniform offset has to be a multiple of the adapter's
 /// `min_uniform_buffer_offset_alignment`, and 256 is the ceiling any adapter is
-/// guaranteed to accept. Every pass's globals struct is far smaller, so one slot is
-/// one stride.
-pub(crate) const GLOBALS_SLOT_STRIDE: u64 = 256;
+/// guaranteed to accept. The background pass's globals are larger than 256
+/// bytes, so a slot is two of those units. Each pass asserts at compile time
+/// that its globals fit one slot, because a struct that outgrows the stride
+/// writes into the next slot with no error.
+pub(crate) const GLOBALS_SLOT_STRIDE: u64 = 512;
 
 /// Slots a pass's globals buffer holds: one per pool, plus the live grid's.
 pub(crate) const GLOBALS_SLOTS: usize = MAX_COMPOSITE_POOLS + 1;

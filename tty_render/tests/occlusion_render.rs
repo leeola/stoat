@@ -494,6 +494,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
             occludable: true,
             skip_clear: false,
             changed_rows: None,
+            dim: 0.0,
         },
         PoolComposite {
             id: 1,
@@ -507,6 +508,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
             occludable: false,
             skip_clear: false,
             changed_rows: None,
+            dim: 0.0,
         },
     ];
 
@@ -658,6 +660,7 @@ fn a_box_riding_a_pool_stops_occluding_it() {
         occludable: true,
         skip_clear: false,
         changed_rows: None,
+        dim: 0.0,
     }];
 
     renderer.render_pools_into(

@@ -2887,8 +2887,9 @@ fn window_bound_pool_is_excluded_from_the_primary_composite() {
     );
 }
 
-/// Declare terminal-kind pool `id` over a `rows` by `cols` region at the origin.
-fn declare_terminal_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16) {
+/// Declare terminal-kind pool `id` over a `rows` by `cols` region at the origin,
+/// faded by `dim`.
+fn declare_terminal_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16, dim: u8) {
     terminal.advance(&encode_pool_region(&PoolRegionCommand {
         pool: id,
         top: 0,
@@ -2897,7 +2898,7 @@ fn declare_terminal_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16)
         height: rows,
         window: 0,
         kind: PoolKind::Terminal,
-        dim: 0,
+        dim,
     }));
 }
 
@@ -2931,7 +2932,7 @@ fn a_terminal_pool_sizes_its_pages_at_the_terminal_cell_size() {
     let mut terminal = Terminal::new(24, 80, Theme::default());
     terminal.set_cell_pixels(10, 20);
     terminal.set_terminal_cell_pixels(8, 16);
-    declare_terminal_pool(&mut terminal, 1, 10, 40);
+    declare_terminal_pool(&mut terminal, 1, 10, 40, 0);
 
     assert_eq!(pool_grids(&mut terminal, 1), ((12, 50), (12, 50), [50, 0]));
 }
@@ -2954,7 +2955,7 @@ fn a_terminal_cell_size_change_resizes_a_terminal_pool_in_place() {
     let mut terminal = Terminal::new(24, 80, Theme::default());
     terminal.set_cell_pixels(10, 20);
     terminal.set_terminal_cell_pixels(8, 16);
-    declare_terminal_pool(&mut terminal, 1, 10, 40);
+    declare_terminal_pool(&mut terminal, 1, 10, 40, 0);
     let before = terminal.pool_content_version(1);
 
     terminal.set_terminal_cell_pixels(10, 20);
@@ -2974,7 +2975,7 @@ fn a_terminal_pool_composes_its_page_at_its_grid() {
     let mut terminal = Terminal::new(24, 80, Theme::default());
     terminal.set_cell_pixels(10, 20);
     terminal.set_terminal_cell_pixels(8, 16);
-    declare_terminal_pool(&mut terminal, 1, 10, 40);
+    declare_terminal_pool(&mut terminal, 1, 10, 40, 0);
     let mut out = Grid::new(1, 1);
     let composed = |terminal: &Terminal, out: &mut Grid| {
         let composed = terminal.project_terminal_pool(1, out, &mut Vec::new(), &mut Vec::new());
@@ -3049,7 +3050,7 @@ fn compose_pages(
     pages: &[&[u8]],
 ) -> (Option<usize>, Vec<usize>, Vec<String>, Vec<String>) {
     let mut terminal = Terminal::new(24, 80, Theme::default());
-    declare_terminal_pool(&mut terminal, 1, rows, 4);
+    declare_terminal_pool(&mut terminal, 1, rows, 4, 0);
     let (mut out, mut changed, mut scratch) = (Grid::new(1, 1), Vec::new(), Vec::new());
 
     let mut shift = None;
@@ -3093,7 +3094,7 @@ fn a_row_patch_repaints_its_rows_and_keeps_the_rest() {
 #[test]
 fn a_row_patch_on_an_unbuffered_page_is_dropped() {
     let mut terminal = Terminal::new(24, 80, Theme::default());
-    declare_terminal_pool(&mut terminal, 1, 3, 4);
+    declare_terminal_pool(&mut terminal, 1, 3, 4, 0);
     let before = terminal.pool_content_version(1).expect("pool declared");
     patch_page(&mut terminal, 1, 1, (3, 4), b"x");
 
@@ -3148,7 +3149,7 @@ fn a_viewport_resize_keeps_a_terminal_pools_page() {
 /// [`filled_rows`], and the pool's version after that fill.
 fn filled_terminal_page() -> (Terminal, u64) {
     let mut terminal = Terminal::new(24, 80, Theme::default());
-    declare_terminal_pool(&mut terminal, 1, 3, 4);
+    declare_terminal_pool(&mut terminal, 1, 3, 4, 0);
     let mut stream = encode_fill(&FillCommand { pool: 1, index: 0 });
     stream.extend_from_slice(b"a\r\nb\r\nc");
     stream.extend_from_slice(&encode_fill_end());
@@ -3424,6 +3425,30 @@ fn a_region_redeclare_at_the_same_size_still_commits_the_page() {
         ),
         ('p', 'a'),
         "and it carries the content painted before the declare"
+    );
+}
+
+/// A program fades an unfocused terminal pane through its region's dim, so a
+/// re-declare that changes only the dim keeps the pool's pages, and a page
+/// painting across it still lands.
+#[test]
+fn a_redeclare_that_changes_only_the_dim_keeps_the_pages() {
+    let (mut terminal, before) = filled_terminal_page();
+
+    terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 1 }));
+    terminal.advance(b"next");
+    declare_terminal_pool(&mut terminal, 1, 3, 4, 64);
+    terminal.advance(&encode_fill_end());
+
+    assert_eq!(
+        (
+            terminal.pools[&1].region.dim,
+            page_state(&terminal, before).0,
+            page_committed(&terminal, 1, 1),
+        ),
+        (64, Some(filled_rows()), true),
+        "the region takes the dim, page 0 keeps its rows, and the page painted \
+         across the declare lands",
     );
 }
 

@@ -88,9 +88,15 @@
 /// all lays the patch's rows on its live grid. An emitter therefore sends a
 /// patch only to a terminal at version 10 or later.
 ///
+/// Version 11 reads the dim byte a terminal pool's `pool_region` appends, and
+/// fades the pool's composite toward the clear color by it. A re-declare that
+/// changes only the dim keeps the pool's pages. A terminal that predates it
+/// ignores the byte, so an emitter bakes the fade into the pages it sends to a
+/// terminal before version 11.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 pub mod command;
 pub mod detect;

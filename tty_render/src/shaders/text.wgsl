@@ -39,6 +39,11 @@ struct Globals {
     // The pool regions the grid, region, and underline draws skip. Zero rects on
     // every other draw.
     cover: Cover,
+    // The color a pool composite fades its glyphs, underlines, and run
+    // backgrounds toward in rgb, and how far in a. A terminal pane's pool fades
+    // when the pane loses focus. Zero on every other draw, which leaves each
+    // color as it is.
+    dim: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -196,7 +201,7 @@ fn vs_main(
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = mix(uv_min, uv_max, corner) / atlas_size;
-    out.fg = unpack4x8unorm(fg).rgb;
+    out.fg = mix(unpack4x8unorm(fg).rgb, globals.dim.rgb, globals.dim.a);
     out.kind = kind;
     out.seq = seq;
     out.follow = slot >> FOLLOW_SHIFT;
@@ -230,7 +235,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fade = follow_alpha(in.follow);
     if in.kind == KIND_COLOR {
         let texel = textureSampleLevel(color_atlas, atlas_sampler, in.uv, 0.0);
-        return vec4<f32>(texel.rgb * texel.a * fade, texel.a * fade);
+        // The atlas holds straight color, so the fade mixes it before the
+        // premultiply, as it mixes a mask glyph's fg.
+        let rgb = mix(texel.rgb, globals.dim.rgb, globals.dim.a);
+        return vec4<f32>(rgb * texel.a * fade, texel.a * fade);
     }
 
     let coverage = textureSampleLevel(mask_atlas, atlas_sampler, in.uv, 0.0).r * fade;
@@ -300,7 +308,7 @@ fn vs_underline(
     var out: UnderlineVsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.local = corner;
-    out.color = color;
+    out.color = mix(color, globals.dim.rgb, globals.dim.a);
     out.style = style;
     return out;
 }
@@ -385,7 +393,7 @@ fn vs_rect(
 
     var out: RectVsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = color;
+    out.color = mix(color, globals.dim.rgb, globals.dim.a);
     out.seq = seq;
     out.follow = follow;
     return out;

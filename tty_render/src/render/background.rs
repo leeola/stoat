@@ -85,7 +85,8 @@ struct BgInstance {
 /// on the 16-byte offset the uniform layout requires. The `vec4` corner pairs
 /// already sit on 16-byte boundaries. `skip_color`, `cursor_hollow`, and
 /// `occluder_cell` fill one more slot, which puts [`Cover`] on the 16-byte
-/// boundary its rect array requires.
+/// boundary its rect array requires. [`Cover`] is a whole number of 16-byte
+/// slots, so `dim` after it lands on a boundary too.
 ///
 /// Two pipelines share this uniform, so each write site zeroes the fields its own
 /// pipeline does not read. `panel_count` and `occlude_all` are non-zero only on an
@@ -138,7 +139,16 @@ struct Globals {
     /// The pool regions the live cell fill skips. A pool composite writes
     /// [`Cover::NONE`], since its own cells are what covers the live grid.
     cover: Cover,
+    /// The color a pool composite fades its cells toward, in the first three
+    /// components, and how far, in the fourth.
+    ///
+    /// A terminal pane's pool fades this way when the pane loses focus, so a
+    /// focus move rewrites this uniform and none of the pool's cells. Zero on
+    /// every other draw, which leaves each color as it is.
+    dim: [f32; 4],
 }
+
+const _: () = assert!(size_of::<Globals>() as u64 <= GLOBALS_SLOT_STRIDE);
 
 /// The cursor block's eased corners and color for the frame.
 #[derive(Clone, Copy)]
@@ -431,6 +441,7 @@ impl BackgroundPass {
             cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::new(covered, occluders.len()),
+            dim: [0.0; 4],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
         // The cursor reads its own slot, so a live frame seeds it here with the same
@@ -530,6 +541,10 @@ impl BackgroundPass {
     /// `skip` is the color whose cells draw no quad, which only a pool with
     /// nothing but the clear beneath it names. `None` paints every cell.
     ///
+    /// `dim` is the color the cells fade toward and how far, as
+    /// `[r, g, b, amount]`. The skip compares the colors before the fade, which
+    /// leaves the clear color as it is.
+    ///
     /// The page cells are occluded against `occluders` with the seq test bypassed,
     /// so a pooled cell gliding beneath a modal is hidden by it. `occluders`
     /// carries the frame's whole list and how much of it covers this pool, and
@@ -557,6 +572,7 @@ impl BackgroundPass {
         scrolled_rows: Option<isize>,
         changed_rows: Option<&[usize]>,
         skip: Option<Rgb>,
+        dim: [f32; 4],
         pool: u32,
         slot: usize,
     ) {
@@ -611,6 +627,7 @@ impl BackgroundPass {
             cursor_hollow: 0,
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
+            dim,
         };
         queue.write_buffer(
             &self.globals,
@@ -708,6 +725,7 @@ impl BackgroundPass {
             cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
+            dim: [0.0; 4],
         };
         // The cursor's own slot, so this can run after the cell globals are placed
         // without disturbing them.
@@ -1417,6 +1435,44 @@ mod tests {
         );
     }
 
+    /// A dimmed composite mixes each cell toward the color its dim names, by
+    /// the amount the dim names, which is how a terminal pane fades when it
+    /// loses focus.
+    #[test]
+    fn a_dimmed_composite_blends_its_cells_toward_the_clear() {
+        let (device, queue) = require_headless_device();
+        let grid = filled_grid(OTHER);
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+        let unit = |channel: u8| f32::from(channel) / 255.0;
+
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            pass.metrics,
+            PoolOccluders::new(&[], 0, false),
+            [TARGET as f32; 2],
+            0.0,
+            [0.0; 2],
+            true,
+            None,
+            None,
+            None,
+            [unit(CLEARED.r), unit(CLEARED.g), unit(CLEARED.b), 0.5],
+            1,
+            0,
+        );
+        let cells = cell_centers(&render_rgba(&device, &queue, CLEARED, |render_pass| {
+            pass.draw_composite(render_pass, 1, 0)
+        }));
+
+        assert_eq!(
+            cells,
+            vec![[225, 50, 150]; CELLS * CELLS],
+            "each cell lands halfway between its color and the clear",
+        );
+    }
+
     /// A composite that skips a color leaves its cells of that color to the
     /// clear, as the live frame does, and paints every other cell.
     #[test]
@@ -1652,6 +1708,7 @@ mod tests {
             scrolled,
             rows,
             skip,
+            [0.0; 4],
             1,
             0,
         );

@@ -1680,7 +1680,9 @@ impl Terminal {
                 let grid = pool_grid(&region, self.cell_pixels, self.terminal_cell_pixels);
                 // Whether the declare left the pool's pages newly built or
                 // rebuilt, so a page painting into them lost the slot it started
-                // on. A re-declare at the grid already held moves nothing.
+                // on. A re-declare at the grid already held moves nothing, which
+                // is how a re-declare that changes only the dim keeps the pages
+                // and the fill in flight.
                 let pages_replaced = match self.pools.get_mut(&region.pool) {
                     Some(pool) => {
                         let resized = pool.grid != grid;

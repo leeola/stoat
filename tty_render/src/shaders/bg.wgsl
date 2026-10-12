@@ -39,6 +39,10 @@ struct Globals {
     occluder_cell: vec2<f32>,
     // The pool regions the live cell fill skips. Zero rects on every other draw.
     cover: Cover,
+    // The color a pool composite fades its cells toward in rgb, and how far in
+    // a. A terminal pane's pool fades when the pane loses focus. Zero on every
+    // other draw, which leaves each color as it is.
+    dim: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -140,7 +144,9 @@ fn vs_main(
     );
 
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = unpack4x8unorm(packed).rgb;
+    // The skip test above reads the packed bits before the fade. A cell of the
+    // clear color fades toward the clear color, which leaves it the same.
+    out.color = mix(unpack4x8unorm(packed).rgb, globals.dim.rgb, globals.dim.a);
     return out;
 }
 

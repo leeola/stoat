@@ -1908,6 +1908,12 @@ pub struct PoolRegion {
     /// Whether the pool's pages hold grid cells or terminal-pane cells at the
     /// terminal font size, which sets the cell grid its pages are built at.
     pub kind: PoolKind,
+    /// How far the renderer fades the pool's composite toward the clear color,
+    /// from 0 (no fade) to 255 (the clear color alone).
+    ///
+    /// No page reads it, so a re-declare that changes only the dim keeps the
+    /// pool's pages.
+    pub dim: u8,
 }
 
 /// A fixed renderer-drawn status icon composited above the cells.

@@ -1609,6 +1609,7 @@ mod tests {
                 width: 4,
                 height: 8,
                 kind: PoolKind::Grid,
+                dim: 0,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -1838,6 +1839,7 @@ mod tests {
             height: 5,
             window: 0,
             kind: PoolKind::Grid,
+            dim: 0,
         };
         let at = |col, row| {
             cursor_in_region(
@@ -1906,6 +1908,7 @@ mod tests {
                 width: 20,
                 height: 40,
                 kind: PoolKind::Grid,
+                dim: 0,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,

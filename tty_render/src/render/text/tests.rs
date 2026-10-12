@@ -1500,6 +1500,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         true,
         None,
         None,
+        [0.0; 4],
         0,
         0,
     );
@@ -1525,6 +1526,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         false,
         None,
         None,
+        [0.0; 4],
         0,
         0,
     );
@@ -1574,6 +1576,7 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
         true,
         None,
         None,
+        [0.0; 4],
         0,
         0,
     );
@@ -2946,6 +2949,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         true,
         None,
         None,
+        [0.0; 4],
         0,
         0,
     );
@@ -2965,6 +2969,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         true,
         Some(1),
         None,
+        [0.0; 4],
         0,
         0,
     );
@@ -2984,6 +2989,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         true,
         None,
         None,
+        [0.0; 4],
         0,
         0,
     );
@@ -3032,6 +3038,7 @@ fn a_partial_composite_matches_a_full_rebuild() {
             true,
             None,
             changed_rows,
+            [0.0; 4],
             pool,
             0,
         );
@@ -3089,6 +3096,7 @@ fn a_partial_composite_after_a_slide_matches_a_full_rebuild() {
             true,
             scrolled,
             changed_rows,
+            [0.0; 4],
             pool,
             0,
         );
@@ -3156,6 +3164,7 @@ fn a_moved_composite_rebuilds_against_its_new_origin() {
             content_changed,
             None,
             None,
+            [0.0; 4],
             0,
             0,
         );
@@ -3223,6 +3232,7 @@ fn a_sub_cell_drift_leaves_the_instances_a_rebuild_would_hold() {
             content_changed,
             None,
             None,
+            [0.0; 4],
             0,
             0,
         );
@@ -3284,6 +3294,7 @@ fn a_composite_whose_runs_held_builds_none_of_them_again() {
             true,
             scrolled,
             None,
+            [0.0; 4],
             0,
             0,
         );
@@ -3359,6 +3370,7 @@ fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
             true,
             None,
             None,
+            [0.0; 4],
             0,
             0,
         );
@@ -3423,6 +3435,7 @@ fn a_reusing_composite_still_writes_its_own_globals() {
             changed,
             None,
             None,
+            [0.0; 4],
             pool,
             0,
         );
@@ -3439,6 +3452,46 @@ fn a_reusing_composite_still_writes_its_own_globals() {
         globals.scroll_y,
         -0.5 * pass.face.metrics.height,
         "and this frame's shift, which is the whole point of the frame",
+    );
+}
+
+/// A dim rides the composite's globals, so a pool that changes only its dim
+/// keeps the instances it built and still draws faded on the next frame.
+#[test]
+fn a_composite_carries_its_dim_in_its_globals() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let mut grid = Grid::new(3, 8);
+    fill_row(&mut grid, 0, "alpha");
+
+    let composite = |pass: &mut TextPass, changed, dim| {
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            pass.face.metrics,
+            PoolOccluders::new(&[], 0, true),
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            changed,
+            None,
+            None,
+            dim,
+            1,
+            0,
+        );
+        pass.composite_globals[0]
+            .expect("slot 0 carries globals")
+            .dim
+    };
+
+    assert_eq!(
+        [
+            composite(&mut pass, true, [0.0; 4]),
+            composite(&mut pass, false, [0.1, 0.2, 0.3, 0.5]),
+        ],
+        [[0.0; 4], [0.1, 0.2, 0.3, 0.5]],
+        "a frame that reuses the instances still writes the new dim",
     );
 }
 
@@ -3464,6 +3517,7 @@ fn composite_at(
         content_changed,
         None,
         None,
+        [0.0; 4],
         pool,
         0,
     );
@@ -3591,6 +3645,7 @@ fn composite_globals_name_the_atlas_the_pack_grew_to() {
         true,
         None,
         None,
+        [0.0; 4],
         0,
         0,
     );

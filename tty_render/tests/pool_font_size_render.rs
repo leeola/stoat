@@ -30,6 +30,42 @@ const HEIGHT: u32 = 96;
 
 #[test]
 fn a_pool_at_its_own_font_size_lays_its_cells_out_at_that_size() {
+    let (drawn, held): (Vec<_>, Vec<_>) = drawn_pool_cells(0.0).into_iter().unzip();
+
+    assert_eq!(
+        drawn,
+        held.into_iter().map(rgb).collect::<Vec<_>>(),
+        "each pool cell paints a square of the pool's size, counted from the region's corner",
+    );
+}
+
+/// A dimmed pool fades each cell toward the clear, which is black here, so a
+/// pool at half dim reads half of each cell's color.
+#[test]
+fn a_dimmed_pool_reads_faded_toward_the_clear() {
+    let off_by_more_than_rounding: Vec<_> = drawn_pool_cells(0.5)
+        .into_iter()
+        .filter(|&((r, g, b), held)| {
+            let far = |drawn: u8, color: u8| drawn.abs_diff(color / 2) > 1;
+            far(r, held.r) || far(g, held.g) || far(b, held.b)
+        })
+        .collect();
+
+    assert_eq!(
+        off_by_more_than_rounding,
+        [],
+        "every cell reads half its color, within a level of rounding",
+    );
+}
+
+/// The center pixel of each pool cell beside the color the cell holds, for a
+/// pool at half the live font size over a region inset from the surface's
+/// corner, faded by `dim`.
+///
+/// Each cell's background holds its color, and each odd column also draws a
+/// full block glyph of that color over it. A glyph that misses the fade then
+/// reads its full color, so the fade of both passes shows.
+fn drawn_pool_cells(dim: f32) -> Vec<((u8, u8, u8), Rgb)> {
     let (device, queue) = require_headless_device();
     let (target, view) = offscreen_target(&device, WIDTH, HEIGHT);
     let mut renderer = renderer(&device);
@@ -42,7 +78,12 @@ fn a_pool_at_its_own_font_size_lays_its_cells_out_at_that_size() {
     let mut pool = Grid::new(rows as usize, cols as usize);
     for row in 0..rows {
         for col in 0..cols {
-            pool.get_mut(row as usize, col as usize).bg = color(row, col);
+            let cell = pool.get_mut(row as usize, col as usize);
+            cell.bg = color(row, col);
+            if col % 2 == 1 {
+                cell.ch = '\u{2588}';
+                cell.fg = color(row, col);
+            }
         }
     }
 
@@ -66,6 +107,7 @@ fn a_pool_at_its_own_font_size_lays_its_cells_out_at_that_size() {
             occludable: true,
             skip_clear: false,
             changed_rows: None,
+            dim,
         }],
         &[],
     );
@@ -76,17 +118,10 @@ fn a_pool_at_its_own_font_size_lays_its_cells_out_at_that_size() {
         let y = top * live_h + row * pool_h + pool_h / 2;
         pixel(&pixels, x, y)
     };
-    let every = (0..rows).flat_map(|row| (0..cols).map(move |col| (row, col)));
-    assert_eq!(
-        every
-            .clone()
-            .map(|(row, col)| at(row, col))
-            .collect::<Vec<_>>(),
-        every
-            .map(|(row, col)| rgb(color(row, col)))
-            .collect::<Vec<_>>(),
-        "each pool cell paints a square of the pool's size, counted from the region's corner",
-    );
+    (0..rows)
+        .flat_map(|row| (0..cols).map(move |col| (row, col)))
+        .map(|(row, col)| (at(row, col), color(row, col)))
+        .collect()
 }
 
 #[test]

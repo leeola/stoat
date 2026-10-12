@@ -120,6 +120,7 @@ pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion
         width: command.width,
         height: command.height,
         kind: command.kind,
+        dim: command.dim,
     }
 }
 

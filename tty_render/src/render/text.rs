@@ -292,7 +292,17 @@ struct TextGlobals {
     /// The pool regions the grid and region draws skip. Every other draw
     /// carries [`Cover::NONE`], since a pool covers only the live grid.
     cover: Cover,
+    /// The color a pool composite fades its glyphs, underlines, and run
+    /// backgrounds toward, in the first three components, and how far, in the
+    /// fourth.
+    ///
+    /// A terminal pane's pool fades this way when the pane loses focus, so a
+    /// focus move rewrites this uniform and reshapes nothing. Zero on every
+    /// other draw, which leaves each color as it is.
+    dim: [f32; 4],
 }
+
+const _: () = assert!(size_of::<TextGlobals>() as u64 <= GLOBALS_SLOT_STRIDE);
 
 /// How far one set of instances is rotated in the buffer holding it.
 ///
@@ -1884,6 +1894,7 @@ impl TextPass {
                 origin_cells: [0.0; 2],
                 occluder_cell: cell_size,
                 cover,
+                dim: [0.0; 4],
             };
         let cover = Cover::new(covered, occluders.len());
         crate::render::upload_globals(
@@ -1942,6 +1953,10 @@ impl TextPass {
     /// the live face's caches never hold glyphs of a second size. The occluders
     /// stay cells of the live grid, while `origin_cells` and `shift_rows` count
     /// the pool's own cells.
+    ///
+    /// `dim` is the color the glyphs, underlines, and run backgrounds fade
+    /// toward and how far, as `[r, g, b, amount]`. It rides the globals alone,
+    /// so a change to it reshapes nothing.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_composite(
         &mut self,
@@ -1956,6 +1971,7 @@ impl TextPass {
         content_changed: bool,
         scrolled_rows: Option<isize>,
         changed_rows: Option<&[usize]>,
+        dim: [f32; 4],
         pool: u32,
         slot: usize,
     ) {
@@ -1979,6 +1995,7 @@ impl TextPass {
             content_changed,
             scrolled_rows,
             changed_rows,
+            dim,
             pool,
             slot,
         );
@@ -2023,6 +2040,7 @@ impl TextPass {
         content_changed: bool,
         scrolled_rows: Option<isize>,
         changed_rows: Option<&[usize]>,
+        dim: [f32; 4],
         pool: u32,
         slot: usize,
     ) {
@@ -2080,6 +2098,7 @@ impl TextPass {
             origin_cells,
             occluder_cell,
             cover: Cover::NONE,
+            dim,
         };
 
         // Ahead of the reuse return below, because a slot is the pool's position

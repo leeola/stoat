@@ -565,6 +565,7 @@ impl Renderer {
                 pool.changed_rows,
                 pool.occludable,
                 pool.skip_clear,
+                pool.dim,
                 pool.id,
                 slot,
             );
@@ -967,6 +968,7 @@ impl Renderer {
             None,
             occludable,
             false,
+            0.0,
             pool,
             slot,
         );
@@ -1015,6 +1017,9 @@ impl Renderer {
     ///
     /// `skip_clear` leaves the pool's cells of the frame's clear color undrawn,
     /// as [`PoolComposite::skip_clear`] describes.
+    ///
+    /// `dim` fades the pool's cells and glyphs toward the clear color, as
+    /// [`PoolComposite::dim`] describes.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_pool(
         &mut self,
@@ -1031,11 +1036,19 @@ impl Renderer {
         changed_rows: Option<&[usize]>,
         occludable: bool,
         skip_clear: bool,
+        dim: f32,
         pool: u32,
         slot: usize,
     ) {
         let resolution = [self.width as f32, self.height as f32];
         let origin_cells = pool_origin(origin_cells, self.metrics, metrics);
+        let clear = self.clear_rgb;
+        let dim = [
+            f32::from(clear.r) / 255.0,
+            f32::from(clear.g) / 255.0,
+            f32::from(clear.b) / 255.0,
+            dim,
+        ];
 
         // All four passes occlude this pool against the same panels, so the list
         // is built once here rather than in each of them. It cannot share
@@ -1061,6 +1074,7 @@ impl Renderer {
             scrolled_rows,
             changed_rows,
             skip_clear.then_some(self.clear_rgb),
+            dim,
             pool,
             slot,
         );
@@ -1076,6 +1090,7 @@ impl Renderer {
             content_changed,
             scrolled_rows,
             changed_rows,
+            dim,
             pool,
             slot,
         );
@@ -1378,6 +1393,13 @@ pub struct PoolComposite<'a> {
     /// [`Self::content_changed`] holds, which is what a pool that tracks no
     /// rows reports.
     pub changed_rows: Option<&'a [usize]>,
+    /// How far the composite fades toward the frame's clear color, from 0.0
+    /// (no fade) to 1.0 (the clear color alone).
+    ///
+    /// A terminal pane's pool fades when the pane loses focus. The fade rides
+    /// the composite's uniforms, so a change to it alone reuses every instance
+    /// the pool built.
+    pub dim: f32,
 }
 
 /// Clamp `scissor` (`[x, y, width, height]` in physical pixels) to a
@@ -2295,6 +2317,7 @@ impl GpuContext {
                 pool.changed_rows,
                 pool.occludable,
                 pool.skip_clear,
+                pool.dim,
                 pool.id,
                 slot,
             );
@@ -2578,6 +2601,7 @@ mod tests {
                 occludable: true,
                 skip_clear: false,
                 changed_rows: None,
+                dim: 0.0,
             },
             PoolComposite {
                 id: 4,
@@ -2591,6 +2615,7 @@ mod tests {
                 occludable: true,
                 skip_clear: false,
                 changed_rows: None,
+                dim: 0.0,
             },
         ];
 
@@ -2611,6 +2636,7 @@ mod tests {
                 pool.changed_rows,
                 pool.occludable,
                 pool.skip_clear,
+                pool.dim,
                 pool.id,
                 slot,
             );
@@ -2760,6 +2786,7 @@ mod tests {
             None,
             true,
             false,
+            0.0,
             3,
             0,
         );
@@ -3033,6 +3060,7 @@ mod tests {
             occludable: true,
             skip_clear: false,
             changed_rows: None,
+            dim: 0.0,
         }
     }
 
