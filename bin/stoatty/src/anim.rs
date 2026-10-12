@@ -930,6 +930,12 @@ pub(crate) struct PoolAnim {
     /// that changed it scrolled the document, so the change feeds the cursor
     /// sweep. Seeded to the creation target so a fresh pool does not sweep.
     pub(crate) last_scroll_target: f32,
+    /// The rows per page that [`Self::scroll`] and [`Self::last_scroll_target`]
+    /// use, as of the last glide step.
+    ///
+    /// A region that changes height changes the size of a page, so the next
+    /// step rescales both offsets to the new size. `None` until the first step.
+    page_rows: Option<f32>,
     /// Wall time since [`Self::last_scroll_target`] last changed. The follower
     /// converges to a still-moving target every frame in the momentum tail, so
     /// convergence alone cannot separate an active glide from a settled pool.
@@ -990,6 +996,7 @@ impl PoolAnim {
         PoolAnim {
             scroll,
             last_scroll_target: scroll,
+            page_rows: None,
             target_stable_for: HANDOFF_STABLE_TIME,
             document_grid: Grid::new(0, 0),
             last_top: None,
@@ -1165,6 +1172,17 @@ pub(crate) fn advance_pool_glide(
     dt: Duration,
 ) -> PoolStep {
     let page_rows = (pool.region.height as f32).max(1.0);
+
+    // A height change re-pages the document, and the app sends the same row
+    // again in pages of the new height. Offsets left in the old pages read that
+    // as a scroll and glide by the change in page size.
+    if let Some(prev) = anim.page_rows.replace(page_rows)
+        && prev != page_rows
+    {
+        let rescale = prev / page_rows;
+        anim.scroll *= rescale;
+        anim.last_scroll_target *= rescale;
+    }
 
     // A frame that moved the target scrolled the document, so reset the stable
     // timer. A frame that left it steady advances toward the handoff.
@@ -1654,6 +1672,38 @@ mod tests {
         assert!(
             matches!(step, PoolStep::Degraded),
             "a glide with nothing composed asks for the next frame",
+        );
+    }
+
+    /// A height change re-pages the document, and the app sends the same row
+    /// again in pages of the new height. The pool rests on that row, and does
+    /// not glide by the change in page size.
+    #[test]
+    fn a_height_change_keeps_the_document_row() {
+        let (mut view, terminal) = gated_pool();
+        view.scroll_target = DocumentOffset {
+            page: 2,
+            fraction: 0.0,
+        };
+        let mut anim = PoolAnim::new(2.0);
+        advance_pool_glide(&mut anim, &view, &terminal, None, HANDOFF_STABLE_TIME);
+
+        // Row 16 is page 2 at eight rows to a page, and page 1 at sixteen.
+        view.region.height = 16;
+        view.scroll_target = DocumentOffset {
+            page: 1,
+            fraction: 0.0,
+        };
+        let step = advance_pool_glide(&mut anim, &view, &terminal, None, Duration::from_millis(16));
+
+        assert_eq!(
+            (
+                matches!(step, PoolStep::Settled),
+                anim.scroll,
+                anim.last_scroll_target
+            ),
+            (true, 1.0, 1.0),
+            "(settled, eased offset, last target) in pages of sixteen rows",
         );
     }
 
