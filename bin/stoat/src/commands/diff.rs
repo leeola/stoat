@@ -61,7 +61,8 @@ pub struct DiffArgs {
     #[arg(long)]
     pub width: Option<u16>,
 
-    /// Force the language used for tokenization.
+    /// Force the language used for tokenization, by its name or one of its
+    /// extensions, such as `rust` or `rs`.
     #[arg(long)]
     pub language: Option<String>,
 
@@ -72,9 +73,6 @@ pub struct DiffArgs {
 }
 
 pub fn run(args: DiffArgs) -> Result<(), Whatever> {
-    // FIXME: --language is parsed but not threaded; per-file detection
-    // via `LanguageRegistry::for_path` covers default and --git modes.
-
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
     let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
     let cwd = std::env::current_dir().whatever_context("read current directory")?;
@@ -141,7 +139,7 @@ pub fn run_with_io<W: Write>(
 ) -> Result<(), WriteError> {
     let langs = LanguageRegistry::deferred();
 
-    let inputs = if args.git {
+    let mut inputs = if args.git {
         match read_git_external_inputs(fs, &langs, &args.git_args) {
             Ok(input) => vec![input],
             Err(e) => return Err(WriteError::Other(e)),
@@ -153,16 +151,48 @@ pub fn run_with_io<W: Write>(
                 args.git_args.len()
             ))));
         }
-        let Some((_workdir, inputs)) = scan_working_tree(git, fs, &langs, cwd) else {
-            return Ok(());
-        };
-        inputs
+        scan_working_tree(git, fs, &langs, cwd)
+            .map(|(_workdir, inputs)| inputs)
+            .unwrap_or_default()
     };
+
+    // Ahead of the cache probe, whose requests carry each input's language.
+    // An empty scan still checks the name, so a bad one is an error even with
+    // nothing to diff.
+    apply_language(&mut inputs, &langs, args.language.as_deref()).map_err(WriteError::Other)?;
+    if inputs.is_empty() {
+        return Ok(());
+    }
 
     let per_file = cached_hunks_via_socket(socket_dir, &inputs)
         .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3, None));
 
     render_all(out, &inputs, &per_file, opts).map_err(WriteError::from_io)
+}
+
+/// Force every input onto the language `name` resolves to, or leave each on
+/// the language its path detects when `name` is `None`.
+///
+/// `name` resolves as a fenced code block's token does, to a language whose
+/// name or one of whose extensions it matches, in either case. A name that
+/// resolves to no language is an error, because the caller asked for that
+/// language in particular.
+fn apply_language(
+    inputs: &mut [ReviewFileInput],
+    registry: &LanguageRegistry,
+    name: Option<&str>,
+) -> Result<(), Whatever> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let Some(language) = registry.language_for_fence_token(name) else {
+        whatever!("unknown language {name}");
+    };
+
+    for input in inputs {
+        input.language = Some(language.clone());
+    }
+    Ok(())
 }
 
 /// Distinguishes a benign broken-pipe write (pager quit early)
@@ -409,6 +439,29 @@ mod tests {
             base_text: Arc::new(format!("{name} base\n")),
             buffer_text: Arc::new(format!("{name} buffer\n")),
         }
+    }
+
+    /// A forced language lands on every input, and a name that resolves to no
+    /// language is an error that changes nothing.
+    #[test]
+    fn a_forced_language_lands_on_every_input() {
+        let langs = LanguageRegistry::deferred();
+        let mut inputs = [input("a.toml"), input("b")];
+
+        apply_language(&mut inputs, &langs, Some("rust")).expect("rust resolves");
+        let unknown =
+            apply_language(&mut inputs, &langs, Some("klingon")).map_err(|e| e.to_string());
+
+        assert_eq!(
+            (
+                inputs.map(|input| input.language.map(|language| language.name)),
+                unknown
+            ),
+            (
+                [Some("rust"), Some("rust")],
+                Err("unknown language klingon".to_string())
+            ),
+        );
     }
 
     #[test]
