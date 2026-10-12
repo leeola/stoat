@@ -895,12 +895,18 @@ impl ApplicationHandler<PtyEvent> for App {
         // and starts a fresh scan rather than panicking.
         let font_load = self.font_load.take().unwrap_or_else(FontLoad::spawn);
 
+        // A window has no scale until it exists, so the build takes the primary
+        // monitor's. Wayland names no primary monitor.
+        let guessed_scale = event_loop
+            .primary_monitor()
+            .map_or(1.0, |monitor| monitor.scale_factor());
         let mut attributes = with_app_name(Window::default_attributes().with_title(DEFAULT_TITLE));
         if let Some([cols, rows]) = self.size {
-            let [cell_width, cell_height] = render::cell_size(self.font_size, 1.0);
-            attributes = attributes.with_inner_size(LogicalSize::new(
-                cols as f32 * cell_width,
-                rows as f32 * cell_height,
+            attributes = attributes.with_inner_size(grid_window_size(
+                cols,
+                rows,
+                self.font_size,
+                guessed_scale,
             ));
         }
         if self.maximized {
@@ -910,8 +916,19 @@ impl ApplicationHandler<PtyEvent> for App {
         let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
         let window_time = t_window.elapsed();
 
-        let size = window.inner_size();
+        // A window that opened at another scale than the guess asks again for
+        // the size that holds the grid. A platform that applies the size at once
+        // answers it, and the others report it later as a resize. A maximized
+        // window asks for nothing, because on some platforms the request
+        // un-maximizes it. A compositor that sends the scale only after the
+        // window maps keeps the guessed size.
         let scale_factor = window.scale_factor();
+        let size = match self.size {
+            Some([cols, rows]) if !self.maximized && scale_factor != guessed_scale => window
+                .request_inner_size(grid_window_size(cols, rows, self.font_size, scale_factor))
+                .unwrap_or_else(|| window.inner_size()),
+            _ => window.inner_size(),
+        };
 
         let monitor = window.current_monitor();
         tracing::info!(
@@ -2514,7 +2531,7 @@ fn open_aux_window(
     let attributes = with_app_name(
         Window::default_attributes()
             .with_title(title)
-            .with_inner_size(aux_window_size(
+            .with_inner_size(grid_window_size(
                 cols,
                 rows,
                 state.font_size,
@@ -2624,7 +2641,7 @@ fn open_aux_window(
 /// before it knows the scale. Wayland then rounds the size to whole logical
 /// pixels. A size rounded down comes back a physical pixel short at some
 /// fractional scales and drops a column or a row, so the size rounds up.
-fn aux_window_size(cols: u16, rows: u16, font_size: u32, scale: f64) -> LogicalSize<f64> {
+fn grid_window_size(cols: u16, rows: u16, font_size: u32, scale: f64) -> LogicalSize<f64> {
     let [cell_w, cell_h] = render::cell_size(font_size, scale as f32);
     let extent = PhysicalSize::new(
         f64::from(cols) * f64::from(cell_w),
@@ -3977,13 +3994,13 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, aux_window_size,
-        bell_should_ring, classify_window_open, compose_aux_grid, earliest, forced_damage,
-        grid_pixels, net_font_step, notification_should_show, pool_composite, pool_grid_reports,
-        selection_copy_text, snap_shift_to_pixels, step_popovers, swallow_super_combo,
-        update_cell_pixels, wheel_upstream, zoom_route, ActivePool, ForceFull, FrameOutcome, Input,
-        PendingResize, PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent,
-        WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
+        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
+        classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
+        grid_window_size, net_font_step, notification_should_show, pool_composite,
+        pool_grid_reports, selection_copy_text, snap_shift_to_pixels, step_popovers,
+        swallow_super_combo, update_cell_pixels, wheel_upstream, zoom_route, ActivePool, ForceFull,
+        FrameOutcome, Input, PendingResize, PoolView, PtyWrite, TermEvent, Visibility,
+        WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -5088,14 +5105,14 @@ mod tests {
     /// first rounds it to whole logical pixels, so each grid goes through both
     /// at a range of whole and fractional scales.
     #[test]
-    fn aux_window_size_holds_the_requested_grid() {
+    fn grid_window_size_holds_the_requested_grid() {
         let misses: Vec<(f64, u16, u16)> = [1.0, 1.25, 1.5, 1.75, 2.0]
             .into_iter()
             .flat_map(|scale| {
                 (1..=100).flat_map(move |cols| (1..=50).map(move |rows| (scale, cols, rows)))
             })
             .filter(|&(scale, cols, rows)| {
-                let size = aux_window_size(cols, rows, 14, scale);
+                let size = grid_window_size(cols, rows, 14, scale);
                 let x11 = size.to_physical::<u32>(scale);
                 let wayland = size.cast::<u32>().to_physical::<u32>(scale);
                 [x11, wayland].into_iter().any(|physical| {
