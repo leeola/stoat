@@ -784,6 +784,72 @@ mod tests {
         done_rx.try_recv().expect("the caller is unparked");
     }
 
+    /// How many split panes show terminal `term_id`.
+    fn panes_showing_terminal(h: &TestHarness, term_id: crate::term_session::TermId) -> usize {
+        let ws = h.stoat.active_workspace();
+        ws.panes
+            .split_pane_ids()
+            .into_iter()
+            .filter(|&id| {
+                let view = &ws.panes.pane(id).view;
+                matches!(view, crate::pane::View::Terminal(t) if *t == term_id)
+            })
+            .count()
+    }
+
+    /// A directory reads as an error, so neither path opens, and the split for
+    /// the second keeps an empty editor rather than a second view of the shell.
+    #[test]
+    fn open_in_term_with_two_unopenable_paths_keeps_the_shell_in_one_pane() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("d/x.rs", ""), ("e/y.rs", "")]);
+        let (term_id, token) = terminal_in_focused_pane(&mut h);
+
+        let _ = open_in_term(&mut h, token, vec![root.join("d"), root.join("e")]);
+
+        assert_eq!(panes_showing_terminal(&h, term_id), 1);
+    }
+
+    #[test]
+    fn an_unopenable_later_path_gets_an_editor_of_its_own() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("d/x.rs", "")]);
+        let (_, token) = terminal_in_focused_pane(&mut h);
+
+        let _ = open_in_term(&mut h, token, vec![root.join("a.rs"), root.join("d")]);
+
+        let ws = h.stoat.active_workspace();
+        let editors: Vec<_> = ws
+            .panes
+            .split_pane_ids()
+            .into_iter()
+            .filter_map(|id| match ws.panes.pane(id).view {
+                crate::pane::View::Editor(editor) => Some(editor),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(editors.len(), 2, "both split panes show an editor");
+        assert_ne!(editors[0], editors[1], "and not the same one");
+    }
+
+    #[test]
+    fn a_failed_agent_open_leaves_no_second_view_of_the_focused_terminal() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("d/x.rs", "")]);
+        let (term_id, _) = terminal_in_focused_pane(&mut h);
+        let uid = h.stoat.active_workspace().uid();
+        let (done, _done_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let _ = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+            uid,
+            client: 0,
+            path: root.join("d"),
+            done,
+        });
+
+        assert_eq!(panes_showing_terminal(&h, term_id), 1);
+    }
+
     #[test]
     fn a_deferred_open_in_term_keeps_the_next_keys_from_the_shell() {
         let mut h = TestHarness::with_size(80, 24);

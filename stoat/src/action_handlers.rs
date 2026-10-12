@@ -59,7 +59,7 @@ pub(crate) use file_finder::{
 pub(crate) use palette::sync_palette_picker;
 pub(crate) use pane::{
     close_pane_by_id, dispose_view, restore_covered_terminal, restore_pane_after_term_exit,
-    retire_parked_pane, EditorDisposal,
+    retire_parked_pane, scratch_editor_view, EditorDisposal,
 };
 use std::{path::Path, sync::Arc};
 use stoat_action::{

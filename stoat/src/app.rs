@@ -7674,9 +7674,14 @@ impl Stoat {
                 };
                 self.enter_agent_workspace(ws_id);
 
+                let executor = self.executor.clone();
                 let new_pane = {
                     let ws = self.active_workspace_mut();
                     let new_pane = ws.panes.split(crate::pane::Axis::Vertical);
+                    // The split copies the focused view, and an open that fails
+                    // or reads on the pool keeps that copy in a second pane.
+                    let scratch = action_handlers::scratch_editor_view(ws, executor);
+                    ws.panes.pane_mut(new_pane).view = scratch;
                     ws.focus = FocusTarget::SplitPane;
                     new_pane
                 };
@@ -7751,11 +7756,18 @@ impl Stoat {
                         OpenOrigin::Named,
                     ),
                 )];
+                let executor = self.executor.clone();
                 for path in rest {
-                    let split = self
-                        .active_workspace_mut()
-                        .panes
-                        .split(crate::pane::Axis::Vertical);
+                    let split = {
+                        let ws = self.active_workspace_mut();
+                        let split = ws.panes.split(crate::pane::Axis::Vertical);
+                        // The split copies the focused view, and an open that
+                        // fails or reads on the pool keeps that copy in a second
+                        // pane.
+                        let scratch = action_handlers::scratch_editor_view(ws, executor.clone());
+                        ws.panes.pane_mut(split).view = scratch;
+                        split
+                    };
                     opens.push((
                         path,
                         crate::buffer_lifecycle::open_file_in_pane(
