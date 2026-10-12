@@ -22,7 +22,7 @@ use crate::{
     },
     term_session::{TermId, TermSession},
     workspace::{
-        diff::{self, DiffBase},
+        diff::{self, DiffBase, HunkPosition},
         Workspace,
     },
 };
@@ -1208,7 +1208,7 @@ fn status_segments(
             frame.diff_base,
             frame.repo_change_counts,
             status.staged_counts,
-            frame.hunk_position,
+            frame.hunk_position.as_ref(),
         ) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
@@ -1418,40 +1418,57 @@ fn focused_diagnostic_label(
 /// describes a working tree the pane is then not showing. The base always
 /// shows, even for a file with no hunks, since it says what is under review.
 ///
-/// A `hunk` position closes the label with ` · hunk K/N`, which says how far
-/// through the review the cursor stands. `K` prints as `-` above the focused
-/// file's first hunk, where the walk has nothing behind it. The position rides
-/// on a label the counts produced, so a scope with nothing to count shows
-/// nothing at all.
+/// A diff view's `position` names the focused file's place among the changed
+/// files ahead of its counts, as `file F/M`, and closes the label with
+/// ` · hunk K/N`, which says how far through the review the cursor stands. `K`
+/// prints as `-` above the focused file's first hunk, where the walk has
+/// nothing behind it. The position rides on a label the counts produced, so a
+/// scope with nothing to count shows nothing at all.
 fn focused_staged_label(
     base_lead: Option<&str>,
     repo: Option<(usize, usize)>,
     file: Option<(usize, usize)>,
-    hunk: Option<(Option<usize>, usize)>,
+    position: Option<&HunkPosition>,
 ) -> Option<String> {
-    let body = staged_label_body(base_lead, repo, file)?;
-    let Some((at, total)) = hunk else {
+    let place = position.map(|position| (position.file_at, position.file_total));
+    let body = staged_label_body(base_lead, repo, file, place)?;
+    let Some(position) = position else {
         return Some(format!(" {body} "));
     };
 
-    let at = at.map_or_else(|| "-".to_string(), |k| k.to_string());
-    Some(format!(" {body} · hunk {at}/{total} "))
+    let at = position
+        .hunk_at
+        .map_or_else(|| "-".to_string(), |k| k.to_string());
+    Some(format!(" {body} · hunk {at}/{} ", position.hunk_total))
 }
 
 /// The counts half of [`focused_staged_label`], unpadded so the hunk position
 /// appends behind it.
+///
+/// `place` is the focused file's `(at, total)` among the changed files. With
+/// it, the file part reads `file {at}/{total}` and then the file's counts, and
+/// a file with no counts keeps its place alone.
 fn staged_label_body(
     base_lead: Option<&str>,
     repo: Option<(usize, usize)>,
     file: Option<(usize, usize)>,
+    place: Option<(usize, usize)>,
 ) -> Option<String> {
     let file = file.filter(|&(staged, unstaged)| staged > 0 || unstaged > 0);
+    let file_part = match (place, file) {
+        (Some((at, total)), Some((staged, unstaged))) => Some(format!(
+            "file {at}/{total} · {staged} staged / {unstaged} unstaged"
+        )),
+        (Some((at, total)), None) => Some(format!("file {at}/{total}")),
+        (None, Some((staged, unstaged))) => {
+            Some(format!("file {staged} staged / {unstaged} unstaged"))
+        },
+        (None, None) => None,
+    };
 
     if let Some(lead) = base_lead {
-        return Some(match file {
-            Some((staged, unstaged)) => {
-                format!("{lead} · file {staged} staged / {unstaged} unstaged")
-            },
+        return Some(match file_part {
+            Some(part) => format!("{lead} · {part}"),
             None => lead.to_string(),
         });
     }
@@ -1465,10 +1482,8 @@ fn staged_label_body(
     }
 
     let repo_part = format!("repo {repo_staged} staged / {repo_unstaged} unstaged");
-    Some(match file {
-        Some((staged, unstaged)) => {
-            format!("{repo_part} · file {staged} staged / {unstaged} unstaged")
-        },
+    Some(match file_part {
+        Some(part) => format!("{repo_part} · {part}"),
         None => repo_part,
     })
 }
@@ -1784,7 +1799,7 @@ mod tests {
         lsp::drain,
         pane::View,
         term_session::TermId,
-        workspace::diff::{DiffBase, WorktreeBase},
+        workspace::diff::{DiffBase, HunkPosition, WorktreeBase},
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range};
@@ -2369,31 +2384,58 @@ mod tests {
         );
     }
 
+    fn hunk_position(
+        file_at: usize,
+        file_total: usize,
+        hunk_at: Option<usize>,
+        hunk_total: usize,
+    ) -> HunkPosition {
+        HunkPosition {
+            file_at,
+            file_total,
+            hunk_at,
+            hunk_total,
+        }
+    }
+
     #[test]
     fn the_staged_label_closes_with_the_hunk_under_the_cursor() {
+        let at_second_file = hunk_position(2, 4, Some(2), 7);
         assert_eq!(
-            focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some((Some(2), 7))).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 1 staged / 4 unstaged · hunk 2/7 "),
-            "the position closes the label the counts opened"
+            focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some(&at_second_file))
+                .as_deref(),
+            Some(" repo 2 staged / 3 unstaged · file 2/4 · 1 staged / 4 unstaged · hunk 2/7 "),
+            "the file's place leads its counts, and the hunk position closes the label"
         );
         assert_eq!(
-            focused_staged_label(None, Some((2, 3)), None, Some((Some(2), 7))).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · hunk 2/7 "),
-            "and follows the repo pair with no file half between them"
+            focused_staged_label(None, Some((2, 3)), None, Some(&at_second_file)).as_deref(),
+            Some(" repo 2 staged / 3 unstaged · file 2/4 · hunk 2/7 "),
+            "a file with no hunks keeps its place and drops its counts"
         );
         assert_eq!(
-            focused_staged_label(None, Some((2, 3)), Some((1, 4)), Some((None, 7))).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 1 staged / 4 unstaged · hunk -/7 "),
+            focused_staged_label(
+                None,
+                Some((2, 3)),
+                Some((1, 4)),
+                Some(&hunk_position(2, 4, None, 7))
+            )
+            .as_deref(),
+            Some(" repo 2 staged / 3 unstaged · file 2/4 · 1 staged / 4 unstaged · hunk -/7 "),
             "a cursor above the first hunk stands at no position"
         );
         assert_eq!(
-            focused_staged_label(Some("diff vs abc1234"), None, None, Some((Some(1), 3)))
-                .as_deref(),
-            Some(" diff vs abc1234 · hunk 1/3 "),
+            focused_staged_label(
+                Some("diff vs abc1234"),
+                None,
+                Some((1, 4)),
+                Some(&hunk_position(2, 4, Some(5), 13))
+            )
+            .as_deref(),
+            Some(" diff vs abc1234 · file 2/4 · 1 staged / 4 unstaged · hunk 5/13 "),
             "a named base carries the position too"
         );
         assert_eq!(
-            focused_staged_label(None, None, None, Some((Some(1), 3))),
+            focused_staged_label(None, None, None, Some(&hunk_position(1, 1, Some(1), 3))),
             None,
             "nothing to count hides the position with the rest of the label"
         );
@@ -2558,7 +2600,7 @@ mod tests {
             assert_eq!(
                 [bar("saved"), bar("follow changes off")],
                 [
-                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1 staged / 1 unstaged · hunk -/1 1:1",
+                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · 1 staged / 1 unstaged · hunk -/1 1:1",
                     "NOR repo diff f.txt follow changes off 1:1",
                 ],
                 "stoatty {stoatty}",

@@ -1219,20 +1219,35 @@ pub(crate) fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-/// Where the cursor sits among every hunk in the repository, as
-/// `(position, total)`, or `None` when the focused pane is not a diff view over
-/// a file the repo tracks.
+/// Where a diff view stands in the repository's review, as the bar names it.
 ///
-/// The position is `None` for a cursor above the focused file's first hunk,
-/// which is the one place the walk has no hunk behind it. The total counts the
-/// focused file through its live diff map rather than through the stored
-/// tally, because the map is what the reader is looking at and the tally is
-/// refreshed a beat later.
+/// `file_at` of `file_total` places the focused file among the changed files,
+/// in the tally's path order. The focused file always counts, since the view
+/// shows it whether or not the tally lists it. `hunk_at` of `hunk_total`
+/// places the cursor among every hunk in the repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HunkPosition {
+    pub(crate) file_at: usize,
+    pub(crate) file_total: usize,
+    /// `None` for a cursor above the focused file's first hunk, which is the
+    /// one place the walk has no hunk behind it.
+    pub(crate) hunk_at: Option<usize>,
+    pub(crate) hunk_total: usize,
+}
+
+/// Where the focused diff view stands among the repository's changed files
+/// and hunks, or `None` when the focused pane is not a diff view over a file
+/// the repo tracks.
+///
+/// The hunk total counts the focused file through its live diff map rather
+/// than through the stored tally, because the map is what the reader is
+/// looking at and the tally is refreshed a beat later. A file counts as
+/// changed when the tally gives it a hunk.
 ///
 /// Under the index base the count is of unstaged hunks alone, in the focused
 /// file and in the tally. Those hunks are the stops the diff view's walk makes.
 /// Under every other base the tally counts from HEAD.
-pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize)> {
+pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
         return None;
     };
@@ -1264,20 +1279,30 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<(Option<usize>, usize
         snapshot.visible_text.offset_to_point(offset).row
     };
 
-    let (before, total) = totals.iter().fold(
-        (0, diff_map.hunk_count()),
-        |(before, total), (path, count)| match path.cmp(&relative) {
-            Ordering::Less => (before + count, total + count),
-            // The live map already answered for this file.
-            Ordering::Equal => (before, total),
-            Ordering::Greater => (before, total + count),
+    let (before, total, files_before, files_other) = totals.iter().fold(
+        (0, diff_map.hunk_count(), 0, 0),
+        |(before, total, files_before, files_other), (path, count)| {
+            let changed = usize::from(*count > 0);
+            match path.cmp(&relative) {
+                Ordering::Less => (
+                    before + count,
+                    total + count,
+                    files_before + changed,
+                    files_other + changed,
+                ),
+                // The live map already answered for this file.
+                Ordering::Equal => (before, total, files_before, files_other),
+                Ordering::Greater => (before, total + count, files_before, files_other + changed),
+            }
         },
     );
 
-    Some((
-        diff_map.hunk_index_at(cursor_row).map(|k| before + k),
-        total,
-    ))
+    Some(HunkPosition {
+        file_at: files_before + 1,
+        file_total: files_other + 1,
+        hunk_at: diff_map.hunk_index_at(cursor_row).map(|k| before + k),
+        hunk_total: total,
+    })
 }
 
 /// The texts a file's diff measures its buffer against, as git last reported
@@ -1956,7 +1981,8 @@ mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, compute_diff_map, diff_sides,
         repo_hunk_position, resolve_base, scan_changed_ranges, BaseHighlightCache,
-        BaseHighlightMemo, DiffBase, DiffBaseText, DiffLanding, WorktreeBase, DIFF_SETTLE,
+        BaseHighlightMemo, DiffBase, DiffBaseText, DiffLanding, HunkPosition, WorktreeBase,
+        DIFF_SETTLE,
     };
     use crate::{
         action_handlers::{self, movement},
@@ -2140,19 +2166,27 @@ mod tests {
                 .install_test_diff_map(buffer_id, map);
         };
 
+        let at = |hunk_at| HunkPosition {
+            file_at: 2,
+            file_total: 2,
+            hunk_at,
+            hunk_total: 5,
+        };
+
         install(&mut h);
         assert_eq!(
             repo_hunk_position(h.stoat.active_workspace()),
-            Some((None, 5)),
-            "the cursor opens above the first hunk, and the total counts a.rs \
-             through the tally and b.rs through its map",
+            Some(at(None)),
+            "b.rs is the second of the two changed files, the cursor opens above \
+             its first hunk, and the total counts a.rs through the tally and b.rs \
+             through its map",
         );
 
         h.type_keys("j j j j j j j j");
         install(&mut h);
         assert_eq!(
             repo_hunk_position(h.stoat.active_workspace()),
-            Some((Some(5), 5)),
+            Some(at(Some(5))),
             "the second of b.rs's own hunks, offset by the three a.rs carries",
         );
     }
@@ -2182,10 +2216,49 @@ mod tests {
         h.settle_diff_jobs();
         let head = repo_hunk_position(h.stoat.active_workspace());
 
+        let only = |file_at, at_and_total| HunkPosition {
+            file_at,
+            file_total: file_at,
+            hunk_at: Some(at_and_total),
+            hunk_total: at_and_total,
+        };
         assert_eq!(
             [index, head],
-            [Some((Some(1), 1)), Some((Some(2), 2))],
-            "the staged a.rs counts under HEAD alone",
+            [Some(only(1, 1)), Some(only(2, 2))],
+            "the staged a.rs counts as a changed file and a hunk under HEAD alone",
+        );
+    }
+
+    /// The tally lists a pure move with no hunks. Such a file is no stop for
+    /// the walk, so it neither moves the focused file's place nor joins the
+    /// count.
+    #[test]
+    fn the_file_place_counts_only_files_with_hunks() {
+        let mut h = TestHarness::with_size(40, 16);
+        let workdir = PathBuf::from("/position");
+        h.stage_review_scenario(
+            &workdir,
+            &[
+                ("a.rs", "one\n", "ONE\n"),
+                ("a_moved.rs", "two\n", "TWO\n"),
+                ("b.rs", "three\n", "THREE\n"),
+                ("c.rs", "four\n", "FOUR\n"),
+            ],
+        );
+        h.fake_git().add_repo(&workdir).hunks("a_moved.rs", 0);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+
+        let position =
+            repo_hunk_position(h.stoat.active_workspace()).expect("the diff view has a position");
+        assert_eq!(
+            (position.file_at, position.file_total),
+            (2, 3),
+            "a.rs stands before b.rs and c.rs after it",
         );
     }
 
