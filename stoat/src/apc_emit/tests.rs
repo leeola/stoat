@@ -1666,6 +1666,21 @@ fn emit_raw(
     bytes
 }
 
+/// The batches one [`emit_smooth_scroll`] sends, apart and in order, with what
+/// came before them thrown away.
+fn emit_batches(
+    h: &mut crate::test_harness::TestHarness,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Vec<Vec<u8>> {
+    while rx.try_recv().is_ok() {}
+    emit_smooth_scroll(&mut h.stoat);
+    let mut batches = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        batches.push(batch);
+    }
+    batches
+}
+
 /// The commands in `bytes` that declare or fill pool `pool`.
 fn pool_commands(bytes: &[u8], pool: u32) -> Vec<command::Command> {
     use stoatty_protocol::command::Command;
@@ -1702,6 +1717,20 @@ fn pool_lifecycle(bytes: &[u8], pool: u32) -> Vec<&'static str> {
         .filter_map(|command| match command {
             Command::PoolDrop(drop) if drop.pool == pool => Some("drop"),
             Command::PoolRegion(region) if region.pool == pool => Some("declare"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The row patches of pool `pool` in `bytes`, as `(first_row, rows)` in wire
+/// order.
+fn pool_patches(bytes: &[u8], pool: u32) -> Vec<(u16, u16)> {
+    use stoatty_protocol::command::Command;
+
+    command::decode_stream(bytes)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::FillRows(patch) if patch.pool == pool => Some((patch.first_row, patch.rows)),
             _ => None,
         })
         .collect()
@@ -1926,6 +1955,110 @@ fn a_moved_pane_declares_its_pool_again() {
         (pool_lifecycle(&bytes, index), pool_fills(&bytes, index)),
         (vec!["declare"], vec![0]),
         "the moved pane declares its pool and sends its page",
+    );
+}
+
+/// Under a terminal that paints row patches, an echo sends the echoed row as
+/// one patch in a batch of its own, and no whole page.
+#[test]
+fn an_echo_ships_one_row_patch() {
+    use stoatty_protocol::command::{Command, FillRowsCommand};
+
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
+    h.stoat.stoatty_protocol = 10;
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"x");
+    let batches = emit_batches(&mut h, &mut rx);
+
+    let patch = FillRowsCommand {
+        pool: index,
+        index: 0,
+        first_row: 0,
+        rows: 1,
+        grid_rows: 6,
+        grid_cols: 30,
+    };
+    let opens = batches
+        .iter()
+        .map(|batch| command::decode_stream(batch).into_iter().next())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (
+            opens,
+            batches
+                .first()
+                .is_some_and(|batch| batch.windows(6).any(|window| window == b"hellox"))
+        ),
+        (vec![Some(Command::FillRows(patch))], true),
+        "the echo ships its row alone, as one patch",
+    );
+}
+
+/// Under a terminal that predates row patches, the same echo sends the page
+/// whole.
+#[test]
+fn a_protocol_9_terminal_gets_whole_pages() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"x");
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    assert_eq!(
+        (pool_fills(&bytes, index), pool_patches(&bytes, index)),
+        (vec![0], vec![]),
+        "the echo refills the whole page",
+    );
+}
+
+/// A pane whose region moves sends a whole page, even under a terminal that
+/// paints row patches, since stoatty holds no page at the new rectangle.
+#[test]
+fn a_region_change_ships_a_whole_page() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
+    h.stoat.stoatty_protocol = 10;
+    let size = h.stoat.size();
+    h.resize(size.width, size.height - 2);
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"x");
+    let _ = h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    assert_eq!(
+        (
+            pool_lifecycle(&bytes, index),
+            pool_fills(&bytes, index),
+            pool_patches(&bytes, index)
+        ),
+        (vec!["declare"], vec![0], vec![]),
+        "the moved region declares its pool and takes a whole page",
+    );
+}
+
+/// Rows that change apart ship as separate patches, one for each run of
+/// adjacent changed rows. The next change is measured against the patched
+/// page, so it ships only the rows it changed.
+#[test]
+fn separate_changed_rows_ship_separate_patches() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"a\r\nb\r\nc");
+    h.stoat.stoatty_protocol = 10;
+    let mut feed = |h: &mut crate::test_harness::TestHarness, bytes: &[u8]| {
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(bytes);
+        let bytes = emit_raw(h, &mut rx);
+        (pool_fills(&bytes, index), pool_patches(&bytes, index))
+    };
+
+    let apart = feed(&mut h, b"\x1b[1;1HA\x1b[3;1HC");
+    let between = feed(&mut h, b"\x1b[2;1HB\x1b[3;2H");
+
+    assert_eq!(
+        [apart, between],
+        [(vec![], vec![(0, 1), (2, 1)]), (vec![], vec![(1, 1)])],
+        "rows 0 and 2 ship as two patches, then row 1 alone",
     );
 }
 

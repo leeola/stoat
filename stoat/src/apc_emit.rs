@@ -41,7 +41,7 @@ use stoat_widgets::{
     pool::{self, MinimapWindowInputs, PageVersions, Refill, SmoothScrollState},
     ApcScene,
 };
-use stoatty_protocol::command::{PoolAnchorCommand, PoolKind, PoolRegionCommand};
+use stoatty_protocol::command::{FillRowsCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand};
 
 /// The protocol version that reads a decorations-only page fill. An older
 /// terminal ignores the marker and lays the runs after it on the live grid, so
@@ -52,6 +52,11 @@ const FILL_DECORATIONS_PROTOCOL: u32 = 5;
 /// font size and reports its grid. Under an older terminal a terminal pane
 /// draws on the live grid at the editor's font size.
 const TERMINAL_POOL_PROTOCOL: u32 = 9;
+
+/// The protocol version that paints a `fill_rows` patch onto a buffered page
+/// and keeps a terminal pool's pages across a viewport resize. Under an older
+/// terminal a terminal pane's pages go out whole.
+const TERMINAL_ROWS_PROTOCOL: u32 = 10;
 
 /// A split pane showing a terminal or an agent, as the terminal-kind pool that
 /// draws it at the terminal font size.
@@ -1260,6 +1265,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // fills here rather than off the run loop as an editor page does.
     let mut page_batches = Vec::new();
     {
+        let patches = stoat.stoatty_protocol >= TERMINAL_ROWS_PROTOCOL;
         let ws = &stoat.workspaces[stoat.active_workspace];
         for pane in &terminal_panes {
             page_batches.extend(emit_terminal_pool(
@@ -1270,6 +1276,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 pane,
                 theme,
                 theme_epoch,
+                patches,
             ));
         }
     }
@@ -2305,21 +2312,26 @@ fn terminal_pool_panes(
         .collect()
 }
 
-/// Declare `pane`'s pool, and answer the batch that fills its one page with
+/// Declare `pane`'s pool, and answer the batches that bring its one page to
 /// its terminal drawn at the `(rows, cols)` stoatty reported for it.
 ///
-/// The declaration and the scroll ride `out`, the frame's shared batch. The
-/// page rides a batch of its own, so a backed-up link that drops it for a later
-/// page of the pool drops nothing else. Send it after `out`, which declares the
-/// pool the page lands in.
+/// The declaration and the scroll ride `out`, the frame's shared batch. Each
+/// answered batch rides on its own, so a backed-up link that drops one for a
+/// later page of the pool drops nothing else. Send them after `out`, which
+/// declares the pool they land in.
 ///
 /// A page whose cells equal the page `pages` holds for the pool sends nothing,
-/// though its version moved. Its terminal and its pool's rectangle must match
-/// too, or the page goes out whole. A sent page becomes the one `pages` holds.
+/// though its version moved. With `patches`, a page that changed goes out as a
+/// `fill_rows` patch for each run of adjacent rows that differ from the held
+/// page. Without it, or when stoatty may not hold that page, the page goes out
+/// whole. stoatty holds it while the page shows the same terminal at the same
+/// grid and the pool keeps its rectangle. A sent page becomes the one `pages`
+/// holds.
 ///
 /// A pane whose grid has not been reported yet declares its region alone,
-/// which is what has stoatty report it, and answers `None`. A pane whose inputs
-/// all held since its last emit sends nothing and answers `None`.
+/// which is what has stoatty report it, and answers nothing. A pane whose
+/// inputs all held since its last emit sends nothing.
+#[allow(clippy::too_many_arguments)]
 fn emit_terminal_pool(
     out: &mut Vec<u8>,
     state: &mut SmoothScrollState,
@@ -2328,8 +2340,11 @@ fn emit_terminal_pool(
     pane: &TerminalPoolPane,
     theme: &crate::theme::Theme,
     theme_epoch: u64,
-) -> Option<Vec<u8>> {
-    let term = ws.terms.get(pane.term_id)?;
+    patches: bool,
+) -> Vec<Vec<u8>> {
+    let Some(term) = ws.terms.get(pane.term_id) else {
+        return Vec::new();
+    };
     let grid = ws.term_pool_grids.get(&pane.term_id).copied();
     let pool = pane.region.pool;
     let version = {
@@ -2344,11 +2359,11 @@ fn emit_terminal_pool(
         hasher.finish()
     };
     if state.already_emitted(pool, version) {
-        return None;
+        return Vec::new();
     }
     let Some((rows, cols)) = grid else {
         pool::emit_into(out, state, pane.region, 0.0, version, false, |_| Vec::new());
-        return None;
+        return Vec::new();
     };
 
     // A pool that sent no page yet holds an empty one, which no render of a
@@ -2359,19 +2374,27 @@ fn emit_terminal_pool(
         spare: Buffer::empty(Rect::default()),
     });
     render_terminal_page(term, theme, rows, cols, pane, &mut held.spare);
-    if held.term == pane.term_id
+    // The render takes the grid's size, so an area the held page shares is the
+    // grid it was rendered at.
+    let held_by_stoatty = held.term == pane.term_id
         && state.holds_region(pool, &pane.region)
-        && held.spare == held.page
-    {
+        && held.page.area == held.spare.area;
+    if held_by_stoatty && held.spare == held.page {
         state.record_content_version(pool, version);
-        return None;
+        return Vec::new();
+    }
+    if patches && held_by_stoatty {
+        let batches = row_patches(pool, &held.page, &held.spare);
+        state.record_content_version(pool, version);
+        std::mem::swap(&mut held.page, &mut held.spare);
+        return batches;
     }
 
     // An empty render requests a page with no fill in `out`, which leaves the
     // page to the batch answered below.
     let entered = pool::emit_into(out, state, pane.region, 0.0, version, false, |_| Vec::new());
     if !entered.contains(&0) {
-        return None;
+        return Vec::new();
     }
 
     std::mem::swap(&mut held.page, &mut held.spare);
@@ -2381,7 +2404,48 @@ fn emit_terminal_pool(
     stoatty_protocol::command::encode_fill_scope(&mut batch, pool, 0, |out| {
         out.extend_from_slice(&page)
     });
-    Some(batch)
+    vec![batch]
+}
+
+/// The `fill_rows` batches that bring `held`, the page stoatty holds for
+/// `pool`, to `page`, one batch for each run of adjacent rows that differ.
+///
+/// Both pages share one area, which is the grid each patch names.
+fn row_patches(pool: u32, held: &Buffer, page: &Buffer) -> Vec<Vec<u8>> {
+    let area = page.area;
+    let width = usize::from(area.width);
+    let differs = |row: u16| {
+        let start = usize::from(row) * width;
+        held.content[start..start + width] != page.content[start..start + width]
+    };
+
+    let mut batches = Vec::new();
+    let mut row = 0;
+    while row < area.height {
+        if !differs(row) {
+            row += 1;
+            continue;
+        }
+        let first = row;
+        while row < area.height && differs(row) {
+            row += 1;
+        }
+
+        let patch = FillRowsCommand {
+            pool,
+            index: 0,
+            first_row: first,
+            rows: row - first,
+            grid_rows: area.height,
+            grid_cols: area.width,
+        };
+        let mut batch = Vec::new();
+        stoatty_protocol::command::encode_fill_rows_scope(&mut batch, &patch, |out| {
+            out.extend_from_slice(&crate::render::serialize_rows(page, first..row))
+        });
+        batches.push(batch);
+    }
+    batches
 }
 
 /// Draw `term`'s screen into `buf` as a `rows` by `cols` page, as the live
