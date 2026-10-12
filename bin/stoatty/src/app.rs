@@ -316,9 +316,15 @@ enum PtyEvent {
     /// off the grid (window title, clipboard). Sent only when a parse yields
     /// events.
     Term(Vec<TermEvent>),
-    /// The child closed the pty and the reader thread ended. `last_output` is
-    /// the escape-stripped tail of what the child wrote, empty when it produced
-    /// nothing, carried so the main thread can log it alongside the exit status.
+    /// The child closed the pty and the reader thread ended, or the child
+    /// exited.
+    ///
+    /// The reader sends `last_output`, the escape-stripped tail of what the
+    /// child wrote, empty when it produced nothing, for the main thread to log
+    /// with the exit status. The exit waiter sees no output and sends it empty.
+    /// The waiter holds its event for a short grace after the exit, so the
+    /// event closes the window only when no end of file came first, as when a
+    /// background job still holds the pty open.
     Exited { last_output: String },
     /// An aux window's [`GpuContext`] finished building on a background thread.
     /// The main thread installs it into the matching [`AuxWindow`], which then
@@ -1033,6 +1039,14 @@ impl ApplicationHandler<PtyEvent> for App {
                             let _ = proxy.send_event(PtyEvent::Exited { last_output });
                             true
                         },
+                    }
+                },
+                {
+                    let proxy = self.proxy.clone();
+                    move || {
+                        let _ = proxy.send_event(PtyEvent::Exited {
+                            last_output: String::new(),
+                        });
                     }
                 },
             )

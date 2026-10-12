@@ -9,7 +9,7 @@
 //! that thread rather than the UI thread that forwards key presses.
 
 use libc::passwd;
-use portable_pty::{self, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use portable_pty::{self, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::{
     ffi::{c_char, CStr, OsString},
     io::{self, Read, Write},
@@ -20,7 +20,7 @@ use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Sender},
-        Arc,
+        Arc, Mutex, PoisonError,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -48,13 +48,15 @@ pub(crate) enum PtyOutput<'a> {
 /// A running shell attached to a pseudoterminal.
 ///
 /// Owns the PTY master (for resizing), a channel to the writer thread that
-/// forwards key presses to the shell's input, the child handle, and the reader
-/// thread. Dropping it kills the shell, which closes the slave and ends both
+/// forwards key presses to the shell's input, a killer for the child, the exit
+/// status its waiter thread stores, and the reader thread. Dropping it sends
+/// SIGHUP to a shell that has not exited, which closes the slave and ends both
 /// worker threads, so closing the window tears the shell down.
 pub(crate) struct Pty {
     master: Box<dyn MasterPty + Send>,
     writer: PtyWriter,
-    child: Box<dyn Child + Send + Sync>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    exit: Arc<Mutex<Option<ExitStatus>>>,
     _reader: JoinHandle<()>,
 }
 
@@ -103,6 +105,13 @@ impl PtyWriter {
 /// mechanism behind a frozen terminal.
 const WRITE_STALL_THRESHOLD: usize = 256;
 
+/// How long the exit waiter holds a child's exit before it reports it.
+///
+/// A child that held the pty alone closes it as it exits, and the reader's end
+/// of file follows within moments. That report carries the child's last output,
+/// and the delay lets it arrive first.
+const CHILD_EXIT_GRACE: Duration = Duration::from_millis(200);
+
 impl Pty {
     /// Spawn `program` with `args` over a fresh PTY sized `rows` by `cols` and
     /// start reading. Runs the command in `cwd` when given. A `None` cwd lets
@@ -126,6 +135,13 @@ impl Pty {
     /// itself. The writer is made here, so a caller could not have captured one,
     /// and the reader thread starts here too, so a slot filled afterwards would
     /// race the child's first bytes.
+    ///
+    /// `on_exit` runs on a waiter thread once the child exits, whether or not
+    /// the pty closed. A shell that exits while its background job still holds
+    /// the pty never ends the reader, so this is the only sign of that exit. It
+    /// runs [`CHILD_EXIT_GRACE`] after the exit, so the reader's
+    /// [`PtyOutput::Eof`], which carries the last output, comes first whenever
+    /// the child held the pty alone.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn<S>(
         program: &str,
@@ -140,6 +156,7 @@ impl Pty {
         pixel_width: u16,
         pixel_height: u16,
         sink: impl FnOnce(PtyWriter) -> S,
+        on_exit: impl FnOnce() + Send + 'static,
     ) -> io::Result<Pty>
     where
         S: FnMut(PtyOutput<'_>) -> bool + Send + 'static,
@@ -187,10 +204,15 @@ impl Pty {
             )
         });
 
+        let killer = child.clone_killer();
+        let exit = Arc::new(Mutex::new(None));
+        spawn_waiter(child, exit.clone(), CHILD_EXIT_GRACE, on_exit);
+
         Ok(Pty {
             master: pair.master,
             writer,
-            child,
+            killer,
+            exit,
             _reader: reader_thread,
         })
     }
@@ -236,14 +258,21 @@ impl Pty {
     /// rather than reading the status once. The bound matters because this runs
     /// on the main thread at shutdown, where a child that never exits must not
     /// stall the window close.
-    pub(crate) fn exit_status(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        wait_exit_status(self.child.as_mut(), timeout, Duration::from_millis(10))
+    pub(crate) fn exit_status(&self, timeout: Duration) -> Option<ExitStatus> {
+        wait_exit_status(&self.exit, timeout, Duration::from_millis(10))
     }
 }
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // A stored status means the waiter reaped the child, so its pid is free
+        // for another process. The lock holds the waiter back until the signal
+        // is out. A drop between the reap and the store still signals the pid.
+        // That gap is far too short for the pid range to cycle.
+        let exit = self.exit.lock().unwrap_or_else(PoisonError::into_inner);
+        if exit.is_none() {
+            let _ = self.killer.kill();
+        }
     }
 }
 
@@ -270,6 +299,27 @@ fn spawn_writer(mut writer: Box<dyn Write + Send>, depth: Arc<AtomicUsize>) -> S
         }
     });
     tx
+}
+
+/// Spawn a thread that waits for `child` to exit, stores its status in `slot`,
+/// and calls `on_exit` `grace` later.
+///
+/// The wait is on the child, not the pty, so a background job that holds the
+/// pty open does not delay it. A failed wait stores no status and still calls
+/// `on_exit`, because a wait fails only once the child is gone.
+fn spawn_waiter(
+    mut child: Box<dyn Child + Send + Sync>,
+    slot: Arc<Mutex<Option<ExitStatus>>>,
+    grace: Duration,
+    on_exit: impl FnOnce() + Send + 'static,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        if let Ok(status) = child.wait() {
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(status);
+        }
+        thread::sleep(grace);
+        on_exit();
+    })
 }
 
 /// Build the shell command to launch under stoatty, running in `cwd` when
@@ -624,23 +674,22 @@ pub(crate) fn strip_escapes(text: &str) -> String {
     out.trim().to_string()
 }
 
-/// Poll `child` every `poll` interval until it reports an exit status or
-/// `timeout` elapses, returning `None` on timeout or a wait error.
+/// The status the exit waiter stores in `slot`, polled every `poll` interval,
+/// or `None` once `timeout` elapses.
 ///
-/// Split out from [`Pty::exit_status`] so the polling loop can be driven by a
-/// stub child in tests. Always calls `try_wait` at least once, so a child that
-/// has already exited is reported without waiting a full `poll` interval.
+/// Split out from [`Pty::exit_status`] so a test drives the loop with a slot of
+/// its own. Reads the slot at least once, so a status already stored comes back
+/// without a wait of a full `poll` interval.
 fn wait_exit_status(
-    child: &mut (dyn Child + Send + Sync),
+    slot: &Mutex<Option<ExitStatus>>,
     timeout: Duration,
     poll: Duration,
 ) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {},
-            Err(_) => return None,
+        let stored = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if stored.is_some() {
+            return stored;
         }
         if Instant::now() >= deadline {
             return None;
@@ -721,9 +770,9 @@ fn passwd_shell() -> Option<String> {
 mod tests {
     use super::{
         accumulate_loop, configure_child_env, dup_fd, dup_for_polling, fd_readable_now,
-        prepend_path, push_tail, read_loop, shell_command, shell_or_default, spawn_writer,
-        strip_escapes, wait_exit_status, AsRawFd, Child, CommandBuilder, ExitStatus, PtyOutput,
-        PtySize, PtyWriter, HANDOFF_SLICE, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        prepend_path, push_tail, read_loop, shell_command, shell_or_default, spawn_waiter,
+        spawn_writer, strip_escapes, wait_exit_status, AsRawFd, Child, CommandBuilder, ExitStatus,
+        PtyOutput, PtySize, PtyWriter, HANDOFF_SLICE, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
     use portable_pty::ChildKiller;
     use std::{
@@ -732,7 +781,7 @@ mod tests {
         path::Path,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Condvar, Mutex,
+            mpsc, Arc, Condvar, Mutex,
         },
         thread,
         time::{Duration, Instant},
@@ -1391,12 +1440,10 @@ mod tests {
         }
     }
 
-    /// A [`Child`] that reports "still running" for `polls_left` calls, then
-    /// exits with `code`, so [`wait_exit_status`]'s polling loop runs
-    /// deterministically without a real process.
+    /// A [`Child`] that has already exited with `code`, so [`spawn_waiter`] runs
+    /// without a real process.
     #[derive(Debug)]
     struct StubChild {
-        polls_left: usize,
         code: u32,
     }
 
@@ -1412,11 +1459,7 @@ mod tests {
 
     impl Child for StubChild {
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-            if self.polls_left == 0 {
-                return Ok(Some(ExitStatus::with_exit_code(self.code)));
-            }
-            self.polls_left -= 1;
-            Ok(None)
+            Ok(Some(ExitStatus::with_exit_code(self.code)))
         }
 
         fn wait(&mut self) -> io::Result<ExitStatus> {
@@ -1428,24 +1471,56 @@ mod tests {
         }
     }
 
+    /// The main thread reads the status as soon as the exit arrives, so the
+    /// waiter stores it before the report, and reports once.
     #[test]
-    fn wait_exit_status_returns_the_code_after_polling() {
-        let mut child = StubChild {
-            polls_left: 3,
-            code: 3,
+    fn the_waiter_stores_the_status_before_it_reports_the_exit() {
+        let slot = Arc::new(Mutex::new(None));
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let on_exit = {
+            let slot = slot.clone();
+            move || {
+                let stored = slot.lock().unwrap().as_ref().map(ExitStatus::exit_code);
+                seen_tx.send(stored).unwrap();
+            }
         };
-        let status = wait_exit_status(&mut child, Duration::from_secs(1), Duration::from_millis(1));
+
+        spawn_waiter(
+            Box::new(StubChild { code: 3 }),
+            slot,
+            Duration::ZERO,
+            on_exit,
+        )
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            seen_rx.try_iter().collect::<Vec<_>>(),
+            [Some(3)],
+            "one report, with code 3 already stored",
+        );
+    }
+
+    #[test]
+    fn wait_exit_status_returns_the_status_once_the_waiter_stores_it() {
+        let slot = Arc::new(Mutex::new(None));
+        let store = thread::spawn({
+            let slot = slot.clone();
+            move || {
+                thread::sleep(Duration::from_millis(5));
+                *slot.lock().unwrap() = Some(ExitStatus::with_exit_code(3));
+            }
+        });
+
+        let status = wait_exit_status(&slot, Duration::from_secs(10), Duration::from_millis(1));
+        store.join().unwrap();
         assert_eq!(status.map(|status| status.exit_code()), Some(3));
     }
 
     #[test]
     fn wait_exit_status_times_out_when_the_child_never_exits() {
-        let mut child = StubChild {
-            polls_left: usize::MAX,
-            code: 0,
-        };
         let status = wait_exit_status(
-            &mut child,
+            &Mutex::new(None),
             Duration::from_millis(5),
             Duration::from_millis(1),
         );
