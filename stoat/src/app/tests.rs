@@ -7890,7 +7890,7 @@ fn a_positively_scoped_default_still_beats_a_broader_user_binding() {
 
 /// The layer drops a user binding naming a renamed action, so the shipped
 /// binding takes the key back rather than leaving it dead. The badge still
-/// counts it, because the count is taken before layering.
+/// names it, because the names are taken before layering.
 #[test]
 fn a_stale_user_binding_falls_back_to_the_default() {
     let stoat = stoat_with_user_config(
@@ -7910,7 +7910,7 @@ fn a_stale_user_binding_falls_back_to_the_default() {
         .expect("the badge still names the stale binding");
     assert_eq!(
         stoat.badges.get(id).expect("badge").label,
-        "config binds 1 unknown action",
+        "config binds unknown action WorkspacePickerNext",
     );
 }
 
@@ -8021,7 +8021,7 @@ fn a_startup_config_binding_an_unknown_action_raises_a_badge() {
         .expect("a stale binding raises a badge");
     assert_eq!(
         stoat.badges.get(id).expect("badge").label,
-        "config binds 1 unknown action",
+        "config binds unknown action WorkspacePickerNext",
     );
 }
 
@@ -8048,7 +8048,7 @@ fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
         .expect("a stale binding raises a badge");
     assert_eq!(
         stoat.badges.get(id).expect("badge").label,
-        "config binds 2 unknown actions",
+        "config binds 2 unknown actions: WorkspacePickerComplete, WorkspacePickerNext",
     );
 
     stoat.reload_user_config(DEFAULT_KEYMAP);
@@ -8056,6 +8056,30 @@ fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
         stoat.badges.find_by_source(BadgeSource::ConfigActions),
         None,
         "a repaired config retires the badge",
+    );
+}
+
+/// A badge paints one label line, so a long list of stale verbs stops after
+/// three names.
+#[test]
+fn a_badge_past_three_unknown_actions_ends_its_list_in_an_ellipsis() {
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let mut stoat = Stoat::new(
+        scheduler.executor(),
+        Settings::default(),
+        PathBuf::from("/repo"),
+    );
+
+    stoat.reload_user_config(
+        "on key { Up -> StaleA(); Down -> StaleB(); Left -> StaleC(); Right -> StaleD(); }",
+    );
+    let id = stoat
+        .badges
+        .find_by_source(BadgeSource::ConfigActions)
+        .expect("stale bindings raise a badge");
+    assert_eq!(
+        stoat.badges.get(id).expect("badge").label,
+        "config binds 4 unknown actions: StaleA, StaleB, StaleC, ...",
     );
 }
 

@@ -2746,22 +2746,34 @@ impl Stoat {
     /// user meets that key. The badge stays until a reload finds the config
     /// repaired, which an empty `unknown_actions` expresses by leaving none.
     ///
-    /// Only the count reaches the badge, because a badge paints one label
-    /// line. The names go to the log, which `:logs` opens.
+    /// The label names the verbs, so the user finds each binding without the
+    /// log. A badge paints one label line, so past three names the list ends
+    /// in `, ...`. The log names every one, and `:logs` opens it.
     fn raise_config_actions_badge(&mut self, unknown_actions: &[String]) {
+        const SHOWN: usize = 3;
+
         self.badges
             .remove_by_source(crate::badge::BadgeSource::ConfigActions);
         if unknown_actions.is_empty() {
             return;
         }
 
-        let count = unknown_actions.len();
-        let plural = if count == 1 { "" } else { "s" };
+        let label = match unknown_actions {
+            [name] => format!("config binds unknown action {name}"),
+            names => {
+                let shown = names[..names.len().min(SHOWN)].join(", ");
+                let more = if names.len() > SHOWN { ", ..." } else { "" };
+                format!(
+                    "config binds {} unknown actions: {shown}{more}",
+                    names.len()
+                )
+            },
+        };
         self.badges.insert(crate::badge::Badge {
             source: crate::badge::BadgeSource::ConfigActions,
             anchor: crate::badge::Anchor::BottomRight,
             state: crate::badge::BadgeState::Error,
-            label: format!("config binds {count} unknown action{plural}"),
+            label,
             detail: None,
         });
     }

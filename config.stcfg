@@ -16,8 +16,8 @@
 # same key away from every picker.
 #
 # A user binding naming an action stoat does not know is dropped, and the
-# binding here takes the key back. An error badge names how many such bindings
-# the config holds, and the log names each one.
+# binding here takes the key back. An error badge names each such verb, up to
+# three, and the log names every one.
 
 theme default_dark {
     let black         = "#282c34";
