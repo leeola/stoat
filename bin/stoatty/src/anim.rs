@@ -14,7 +14,7 @@ use std::{
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
 use stoatty_render::gpu::{HostRide, SketchReveal};
 use stoatty_term::{
-    grid::{self, Grid, Overlay, PoolKind, PoolRegion, Rgb, Sketch},
+    grid::{self, Cell, Grid, Overlay, PoolKind, PoolRegion, Rgb, Sketch},
     term::{Cursor, CursorShape, Damage, PoolView, Terminal},
 };
 
@@ -980,6 +980,14 @@ pub(crate) struct PoolAnim {
     /// [`Self::last_stamp`] instead. [`project_frame`] reads it to tell which
     /// kind of pool the state last served.
     pub(crate) last_version: Option<u64>,
+    /// The rows of [`Self::document_grid`] that the last terminal pool compose
+    /// rewrote, ascending, after it slid the rows by the page's scroll.
+    ///
+    /// Empty on a frame that composed nothing, and always for a gliding pool.
+    pub(crate) changed_rows: Vec<usize>,
+    /// The row a terminal pool compose reads the page through while it probes
+    /// the page's scroll, held so that a compose allocates nothing.
+    compose_scratch: Vec<Cell>,
     /// The [`PoolView::serial`] of the pool declaration this state serves.
     ///
     /// A drop and a declare in one batch keep the pool's id, so the serial is
@@ -1005,6 +1013,8 @@ impl PoolAnim {
             last_buffered: false,
             held_frac: None,
             last_version: None,
+            changed_rows: Vec::new(),
+            compose_scratch: Vec::new(),
             serial: 0,
         }
     }
@@ -1276,6 +1286,10 @@ pub(crate) fn advance_pool_glide(
 /// The tile that composites terminal pool `pool` this frame, composing its page
 /// into `anim.document_grid` first when its content version moved.
 ///
+/// The compose rewrites only the rows the page changed and names them in
+/// `anim.changed_rows`. A compose that changed no cell leaves the tile's
+/// content unchanged, so the renderer keeps what it built.
+///
 /// A terminal pool never glides. It is drawn at another font size than the live
 /// grid beneath its region, so it composites on every frame rather than handing
 /// the region back, and it asks for no frames of its own.
@@ -1291,16 +1305,29 @@ pub(crate) fn resident_pool(
 ) -> Option<ActivePool> {
     let moved = anim.last_version != Some(pool.content_version);
     anim.last_version = Some(pool.content_version);
-    let composed = moved && terminal.project_terminal_pool(pool.id, &mut anim.document_grid);
-    if composed {
+    let shift = if moved {
+        terminal.project_terminal_pool(
+            pool.id,
+            &mut anim.document_grid,
+            &mut anim.changed_rows,
+            &mut anim.compose_scratch,
+        )
+    } else {
+        anim.changed_rows.clear();
+        None
+    };
+    if shift.is_some() {
         anim.held_frac = Some(0.0);
     }
 
+    // A terminal page carries no decorations, so its cells alone tell whether
+    // the composite changed.
+    let content_changed = shift.is_some_and(|shift| shift > 0 || !anim.changed_rows.is_empty());
     anim.held_frac.map(|frac| ActivePool {
         id: pool.id,
         region: pool.region,
         frac,
-        content_changed: composed,
+        content_changed,
         scrolled_rows: None,
     })
 }

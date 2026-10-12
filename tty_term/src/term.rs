@@ -2324,32 +2324,66 @@ impl Terminal {
     }
 
     /// Compose terminal-kind pool `id`'s one page into `out`, sized to the
-    /// pool's grid.
+    /// pool's grid, and name in `changed` the rows of `out` the compose
+    /// rewrote.
     ///
     /// A terminal pool never glides, so the compose takes page 0 whole and adds
     /// no straddle row. [`Self::project_pool`] does add one, and a pool that
     /// buffers no page past the first never composes there.
     ///
-    /// Returns `false` for an unknown id, or while page 0 is not buffered.
+    /// Returns how many rows `out` slid up before the rewrite, which is how far
+    /// the page's content scrolled since the composite `out` held. The rows that
+    /// then still differ from the page are rewritten and listed in `changed`,
+    /// ascending. An `out` of another size holds nothing to keep, so the compose
+    /// fills it whole, lists every row, and returns zero.
+    ///
+    /// Returns `None` for an unknown id, or while page 0 is not buffered.
     /// `out` is then left as it was, so a caller holding a previous composite
-    /// keeps it.
-    pub fn project_terminal_pool(&self, id: u32, out: &mut Grid) -> bool {
-        let Some(pool) = self.pools.get(&id) else {
-            return false;
-        };
+    /// keeps it, and `changed` is left empty.
+    ///
+    /// `scratch` is the row the scroll probe reads the page through, held by
+    /// the caller so that a compose allocates nothing.
+    pub fn project_terminal_pool(
+        &self,
+        id: u32,
+        out: &mut Grid,
+        changed: &mut Vec<usize>,
+        scratch: &mut Vec<Cell>,
+    ) -> Option<usize> {
+        changed.clear();
+        let pool = self.pools.get(&id)?;
         let (rows, cols) = pool.grid;
-        if pool.page_pool.page(0).is_none() {
-            return false;
-        }
+        let page = pool.page_pool.page(0)?;
 
         if out.rows() != rows || out.cols() != cols {
             out.resize(rows, cols);
+            if !pool.page_pool.compose(0, out) {
+                return None;
+            }
+            changed.extend(0..rows);
+            stamp_pool_decorations(&pool.page_pool, out, 0, rows);
+            return Some(0);
         }
-        if !pool.page_pool.compose(0, out) {
-            return false;
+
+        // A program's output moves a terminal page as it moves a screen, so the
+        // held composite slides by the probed scroll and only the rows that
+        // still differ are copied.
+        scratch.clear();
+        scratch.resize(cols, Cell::default());
+        let shift = detect_shift(out, rows, scratch, |row, into| {
+            into.copy_from_slice(&page.row(row)[..cols]);
+        });
+        out.scroll_by(shift as isize);
+        for row in 0..rows {
+            let source = &page.row(row)[..cols];
+            if out.row(row) != source {
+                out.row_mut(row).copy_from_slice(source);
+                changed.push(row);
+            }
         }
+
         stamp_pool_decorations(&pool.page_pool, out, 0, rows);
-        true
+        Some(shift)
     }
 
     /// Compose a straddled scrollback-history window into `out` at the eased

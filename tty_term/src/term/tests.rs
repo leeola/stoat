@@ -2954,7 +2954,7 @@ fn a_terminal_pool_composes_its_page_at_its_grid() {
     declare_terminal_pool(&mut terminal, 1, 10, 40);
     let mut out = Grid::new(1, 1);
     let composed = |terminal: &Terminal, out: &mut Grid| {
-        let composed = terminal.project_terminal_pool(1, out);
+        let composed = terminal.project_terminal_pool(1, out, &mut Vec::new(), &mut Vec::new());
         let text: String = (0..out.cols().min(2))
             .map(|col| out.get(0, col).ch)
             .collect();
@@ -2970,11 +2970,86 @@ fn a_terminal_pool_composes_its_page_at_its_grid() {
     assert_eq!(
         (before, composed(&terminal, &mut out)),
         (
-            (false, (1, 1), " ".to_owned()),
-            (true, (12, 50), "hi".to_owned())
+            (None, (1, 1), " ".to_owned()),
+            (Some(0), (12, 50), "hi".to_owned())
         ),
         "an unbuffered page leaves the grid alone, and a buffered one fills it",
     );
+}
+
+/// A compose after a fill that changed one row rewrites that row alone, and
+/// the composite then holds the page.
+#[test]
+fn a_terminal_pool_compose_names_only_the_rows_its_page_changed() {
+    let (shift, changed, composite, page) = compose_pages(2, &[b"a\r\nb", b"a\r\nc"]);
+
+    assert_eq!(
+        (shift, changed, composite),
+        (Some(0), vec![1], page),
+        "the compose rewrites the changed row, and the composite matches the page",
+    );
+}
+
+/// A page whose content scrolled up slides the composite by as much, and the
+/// compose rewrites only the rows the scroll brought in.
+#[test]
+fn a_terminal_pool_compose_slides_a_scrolled_page() {
+    let (shift, changed, composite, page) =
+        compose_pages(5, &[b"1\r\n2\r\n3\r\n4\r\n5", b"3\r\n4\r\n5\r\n6\r\n7"]);
+
+    assert_eq!(
+        (shift, changed, composite),
+        (Some(2), vec![3, 4], page),
+        "the composite slides two rows and rewrites the two the scroll exposed",
+    );
+}
+
+/// A first compose has no composite to keep, so it names every row.
+#[test]
+fn a_first_terminal_pool_compose_names_every_row() {
+    let (shift, changed, composite, page) = compose_pages(3, &[b"x"]);
+
+    assert_eq!(
+        (shift, changed, composite),
+        (Some(0), vec![0, 1, 2], page),
+        "the first compose fills the composite whole",
+    );
+}
+
+/// Terminal pool 1 over a `rows` by 4 region, composed after a fill of each of
+/// `pages` in turn.
+///
+/// Returns the last compose's answer, the rows it named, and the text of the
+/// composite's rows and of the page's.
+fn compose_pages(
+    rows: u16,
+    pages: &[&[u8]],
+) -> (Option<usize>, Vec<usize>, Vec<String>, Vec<String>) {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_terminal_pool(&mut terminal, 1, rows, 4);
+    let (mut out, mut changed, mut scratch) = (Grid::new(1, 1), Vec::new(), Vec::new());
+
+    let mut shift = None;
+    for page in pages {
+        let mut stream = encode_fill(&FillCommand { pool: 1, index: 0 });
+        stream.extend_from_slice(page);
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+        shift = terminal.project_terminal_pool(1, &mut out, &mut changed, &mut scratch);
+    }
+
+    let page = pool_page(&terminal, 1, 0);
+    (shift, changed, row_texts(&out), row_texts(page))
+}
+
+/// The text of each row of `grid`, with the blanks at its end trimmed.
+fn row_texts(grid: &Grid) -> Vec<String> {
+    (0..grid.rows())
+        .map(|row| {
+            let text: String = grid.row(row).iter().map(|cell| cell.ch).collect();
+            text.trim_end().to_owned()
+        })
+        .collect()
 }
 
 #[test]

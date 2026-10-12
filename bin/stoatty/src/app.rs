@@ -4719,8 +4719,8 @@ mod tests {
     }
 
     /// A terminal pool composites on every frame at rest, and composes again
-    /// only when its page changes. It never glides, so it asks for no frames
-    /// and moves nothing that rides it.
+    /// only when its page changes, naming the rows the compose rewrote. It never
+    /// glides, so it asks for no frames and moves nothing that rides it.
     #[test]
     fn a_terminal_pool_composites_without_a_glide() {
         let mut terminal = terminal_pooled(b"ab");
@@ -4732,6 +4732,7 @@ mod tests {
                 projection.pool_easing,
                 projection.glided,
                 row_text(&frame.anims[&1].document_grid),
+                frame.anims[&1].changed_rows.clone(),
             )
         };
 
@@ -4743,11 +4744,37 @@ mod tests {
         assert_eq!(
             [first, again, refilled],
             [
-                (vec![(1, true)], false, vec![], "ab".to_owned()),
-                (vec![(1, false)], false, vec![], "ab".to_owned()),
-                (vec![(1, true)], false, vec![], "cd".to_owned()),
+                (vec![(1, true)], false, vec![], "ab".to_owned(), vec![0, 1]),
+                (vec![(1, false)], false, vec![], "ab".to_owned(), vec![]),
+                (vec![(1, true)], false, vec![], "cd".to_owned(), vec![0]),
             ],
-            "the pool composites every frame and composes again on a new page",
+            "the pool composites every frame and composes a new page's changed rows",
+        );
+    }
+
+    /// A page whose content only scrolled changes the composite, though every
+    /// row matches the page once the composite slides. A page filled back to
+    /// what the composite holds changes nothing, though its version moved.
+    #[test]
+    fn a_terminal_pool_composite_changes_when_its_page_scrolls() {
+        let mut terminal = terminal_pooled(b"ab\r\ncd");
+        let mut frame = PoolFrame::default();
+        project(&mut terminal, &mut frame);
+        let mut step = |terminal: &mut Terminal| {
+            let projection = project(terminal, &mut frame);
+            (tiles(&projection), frame.anims[&1].changed_rows.clone())
+        };
+
+        fill_page(&mut terminal, 1, 0, b"cd");
+        let scrolled = step(&mut terminal);
+        fill_page(&mut terminal, 1, 0, b"xy");
+        fill_page(&mut terminal, 1, 0, b"cd");
+        let restored = step(&mut terminal);
+
+        assert_eq!(
+            [scrolled, restored],
+            [(vec![(1, true)], vec![]), (vec![(1, false)], vec![])],
+            "a slide alone changes the composite, and a page back where it was changes nothing",
         );
     }
 
