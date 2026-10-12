@@ -110,18 +110,30 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
             .and_then(|()| stdin.flush().map_err(WriteError::from_io));
             drop(stdin);
             let _ = child.wait();
-            match render_result {
-                Ok(()) => Ok(()),
-                Err(WriteError::BrokenPipe) => Ok(()),
-                Err(WriteError::Other(e)) => Err(e),
-            }
+            ignore_closed_pipe(render_result)
         },
         None => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            run_with_io(&args, &*fs, &*git, &cwd, Some(&socket_dir), &opts, &mut out)
-                .map_err(WriteError::into_whatever)
+            ignore_closed_pipe(run_with_io(
+                &args,
+                &*fs,
+                &*git,
+                &cwd,
+                Some(&socket_dir),
+                &opts,
+                &mut out,
+            ))
         },
+    }
+}
+
+/// The command's outcome for a diff write, where a reader that closed the pipe
+/// early, such as a pager the user quit or `head`, ends the run quietly.
+fn ignore_closed_pipe(result: Result<(), WriteError>) -> Result<(), Whatever> {
+    match result {
+        Ok(()) | Err(WriteError::BrokenPipe) => Ok(()),
+        Err(WriteError::Other(e)) => Err(e),
     }
 }
 
@@ -211,15 +223,6 @@ impl WriteError {
             WriteError::BrokenPipe
         } else {
             WriteError::Other(FromString::without_source(format!("write diff: {e}")))
-        }
-    }
-
-    fn into_whatever(self) -> Whatever {
-        match self {
-            WriteError::BrokenPipe => FromString::without_source(
-                "diff write closed early before output completed".to_string(),
-            ),
-            WriteError::Other(e) => e,
         }
     }
 }
@@ -461,6 +464,23 @@ mod tests {
                 [Some("rust"), Some("rust")],
                 Err("unknown language klingon".to_string())
             ),
+        );
+    }
+
+    #[test]
+    fn a_reader_that_closes_the_pipe_ends_the_run_quietly() {
+        let outcome = |result: Result<(), WriteError>| {
+            ignore_closed_pipe(result).map_err(|error| error.to_string())
+        };
+        let disk_full = WriteError::Other(FromString::without_source("disk full".to_string()));
+
+        assert_eq!(
+            [
+                outcome(Ok(())),
+                outcome(Err(WriteError::BrokenPipe)),
+                outcome(Err(disk_full)),
+            ],
+            [Ok(()), Ok(()), Err("disk full".to_string())],
         );
     }
 

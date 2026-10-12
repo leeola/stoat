@@ -7,12 +7,14 @@
 #![allow(clippy::disallowed_methods)]
 
 use clap::Parser;
-#[cfg(unix)]
-use std::io::IsTerminal;
 use std::{
-    fs, io,
+    fmt::Display,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
+#[cfg(unix)]
+use std::{io::IsTerminal, os::fd::AsFd};
 use stoat::log::ident::{self, LogId, ProcessIdent};
 use stoat_bin::commands::term_open::{self, Forward};
 
@@ -82,13 +84,24 @@ fn main() {
     // A terminal-bound stderr lets third-party crates that write raw bytes to
     // fd 2 (arboard's debug drop-warning) paint over the raw-mode TUI. Send fd 2
     // to the log instead. The is_terminal guard preserves an explicit `2>file`,
-    // and --log-stderr keeps its console output by leaving log_path None.
+    // and --log-stderr keeps its console output by leaving log_path None. A
+    // command error still belongs on the terminal, so a copy of fd 2 from
+    // before the redirect carries it.
     #[cfg(unix)]
-    if let Some(path) = &log_path
-        && io::stderr().is_terminal()
-    {
-        redirect_stderr_to(path);
-    }
+    let console = match &log_path {
+        Some(path) if io::stderr().is_terminal() => {
+            let console = io::stderr()
+                .as_fd()
+                .try_clone_to_owned()
+                .ok()
+                .map(fs::File::from);
+            redirect_stderr_to(path);
+            console
+        },
+        _ => None,
+    };
+    #[cfg(not(unix))]
+    let console: Option<fs::File> = None;
 
     tracing::info!(
         log_id = %installed.id,
@@ -114,9 +127,21 @@ fn main() {
     }
 
     if let Err(e) = stoat_bin::commands::default::run(args, log_path) {
-        println!("Error: {e}");
+        report_error(console, &e);
         std::process::exit(1);
     }
+}
+
+/// Write a command's `error` to the console the user ran stoat from.
+///
+/// `console` is the terminal that fd 2 named before it moved to the log, and
+/// plain stderr stands in for it otherwise. A console that has gone away has
+/// nowhere to show the error, so a failed write is ignored and never panics.
+fn report_error(console: Option<fs::File>, error: &impl Display) {
+    let _ = match console {
+        Some(mut console) => writeln!(console, "Error: {error}"),
+        None => writeln!(io::stderr(), "Error: {error}"),
+    };
 }
 
 fn resolve_log_path(stem: &str) -> io::Result<PathBuf> {
