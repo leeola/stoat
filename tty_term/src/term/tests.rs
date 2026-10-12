@@ -3052,6 +3052,120 @@ fn row_texts(grid: &Grid) -> Vec<String> {
         .collect()
 }
 
+/// A patch of one row repaints that row and keeps the page's other rows, and
+/// the pool's version moves with the changed cells.
+#[test]
+fn a_row_patch_repaints_its_rows_and_keeps_the_rest() {
+    let (mut terminal, before) = filled_terminal_page();
+    patch_page(&mut terminal, 1, 1, (3, 4), b"x");
+
+    assert_eq!(
+        page_state(&terminal, before),
+        (Some(["a", "x", "c"].map(String::from).to_vec()), true),
+        "the patched row repaints, and the other rows keep the fill's",
+    );
+}
+
+/// A patch of a page the pool does not buffer has nothing to land on.
+#[test]
+fn a_row_patch_on_an_unbuffered_page_is_dropped() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_terminal_pool(&mut terminal, 1, 3, 4);
+    let before = terminal.pool_content_version(1).expect("pool declared");
+    patch_page(&mut terminal, 1, 1, (3, 4), b"x");
+
+    assert_eq!(
+        page_state(&terminal, before),
+        (None, false),
+        "no page appears"
+    );
+}
+
+/// A patch rendered at another grid would land on cells of another size.
+#[test]
+fn a_row_patch_at_another_grid_is_dropped() {
+    let (mut terminal, before) = filled_terminal_page();
+    patch_page(&mut terminal, 1, 1, (5, 4), b"x");
+
+    assert_eq!(
+        page_state(&terminal, before),
+        (Some(filled_rows()), false),
+        "the page keeps its fill",
+    );
+}
+
+/// A patch that names rows past its grid lands none of them.
+#[test]
+fn a_row_patch_past_its_grid_is_dropped() {
+    let (mut terminal, before) = filled_terminal_page();
+    patch_page(&mut terminal, 2, 2, (3, 4), b"x");
+
+    assert_eq!(
+        page_state(&terminal, before),
+        (Some(filled_rows()), false),
+        "the page keeps its fill",
+    );
+}
+
+/// A viewport resize keeps a terminal pool's page, so a later patch lands on
+/// the page the program last filled.
+#[test]
+fn a_viewport_resize_keeps_a_terminal_pools_page() {
+    let (mut terminal, before) = filled_terminal_page();
+    terminal.resize(20, 60);
+
+    assert_eq!(
+        page_state(&terminal, before),
+        (Some(filled_rows()), false),
+        "the page and its version both hold",
+    );
+}
+
+/// A terminal with terminal pool 1 over a 3 by 4 region, whose page 0 holds
+/// [`filled_rows`], and the pool's version after that fill.
+fn filled_terminal_page() -> (Terminal, u64) {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_terminal_pool(&mut terminal, 1, 3, 4);
+    let mut stream = encode_fill(&FillCommand { pool: 1, index: 0 });
+    stream.extend_from_slice(b"a\r\nb\r\nc");
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+
+    let version = terminal.pool_content_version(1).expect("pool declared");
+    (terminal, version)
+}
+
+/// The row texts [`filled_terminal_page`] fills its page with.
+fn filled_rows() -> Vec<String> {
+    ["a", "b", "c"].map(String::from).to_vec()
+}
+
+/// Patch `rows` rows from `first_row` of pool 1's page 0, rendered at `grid`,
+/// with `text` written at the start of the first of them.
+fn patch_page(terminal: &mut Terminal, first_row: u16, rows: u16, grid: (u16, u16), text: &[u8]) {
+    let patch = FillRowsCommand {
+        pool: 1,
+        index: 0,
+        first_row,
+        rows,
+        grid_rows: grid.0,
+        grid_cols: grid.1,
+    };
+    let mut stream = Vec::new();
+    encode_fill_rows_scope(&mut stream, &patch, |out| {
+        out.extend_from_slice(format!("\x1b[{};1H", first_row + 1).as_bytes());
+        out.extend_from_slice(text);
+    });
+    terminal.advance(&stream);
+}
+
+/// The row texts of pool 1's page 0, or `None` when the pool does not buffer
+/// it, and whether the pool's version moved past `before`.
+fn page_state(terminal: &Terminal, before: u64) -> (Option<Vec<String>>, bool) {
+    let page = terminal.pools[&1].page_pool.page(0).map(row_texts);
+    (page, terminal.pool_content_version(1) != Some(before))
+}
+
 #[test]
 fn a_fill_on_a_window_pool_marks_the_window_dirty_once() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
@@ -3351,12 +3465,12 @@ fn fill_paints_page_and_spares_live_grid() {
     );
 }
 
-/// A row patch paints neither its page nor the live screen. The capture holds
-/// its rows off the screen, the page keeps what its last whole fill painted,
-/// and the output after the patch's close marker paints the screen. The patch
-/// arrives in a read of its own, which no fill marker routes.
+/// A row patch paints its page and spares the live screen. The capture holds
+/// its rows off the screen, and the output after the patch's close marker
+/// paints the screen. The patch arrives in a read of its own, which no fill
+/// marker routes.
 #[test]
-fn a_row_patch_paints_neither_its_page_nor_the_live_grid() {
+fn a_row_patch_paints_its_page_and_spares_the_live_grid() {
     let mut terminal = Terminal::new(2, 4, Theme::default());
     let mut grid = Grid::new(2, 4);
     declare_pool(&mut terminal, 0, 2, 4);
@@ -3384,8 +3498,8 @@ fn a_row_patch_paints_neither_its_page_nor_the_live_grid() {
     terminal.project(&mut grid);
     assert_eq!(
         (page_text, (grid.get(0, 0).ch, grid.get(0, 1).ch)),
-        (('h', 'i'), ('o', 'k')),
-        "the page keeps its fill, and only the output after the patch paints the screen",
+        (('n', 'o'), ('o', 'k')),
+        "the patch paints its page, and only the output after it paints the screen",
     );
 }
 

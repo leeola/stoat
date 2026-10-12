@@ -1136,6 +1136,27 @@ impl PagePool {
         &mut page.grid
     }
 
+    /// Repaint some rows of document page `index` in place, and report whether
+    /// a cell changed, or `None` when the pool does not buffer the page.
+    ///
+    /// `paint` writes the rows into the page's grid and answers whether it
+    /// changed a cell. The page's other rows and its decorations stay as its
+    /// last fill left them, which is what a row patch relies on. A change gives
+    /// the slot a new stamp. See [`Self::window_stamp`].
+    pub fn patch(&mut self, index: u64, paint: impl FnOnce(&mut Grid) -> bool) -> Option<bool> {
+        let slot = self.slot(index);
+        let page = &mut self.pages[slot];
+        if page.index != Some(index) {
+            return None;
+        }
+
+        let changed = paint(&mut page.grid);
+        if changed {
+            page.stamp = next_page_stamp();
+        }
+        Some(changed)
+    }
+
     /// Whether the page just written into `index`'s slot renders differently
     /// from what that slot last held.
     ///
@@ -2468,6 +2489,44 @@ mod tests {
         assert!(
             !pool.content_changed(0, false),
             "a clear over cells already blank reports nothing",
+        );
+    }
+
+    /// A patch repaints a buffered page in place, so the page keeps its other
+    /// cells and takes a new stamp only when the paint changed a cell. A page
+    /// the pool does not buffer takes no patch.
+    #[test]
+    fn a_patch_repaints_a_buffered_page_in_place() {
+        let mut pool = PagePool::new(2, 2, 2);
+        pool.fill(0, 2, 2).get_mut(0, 0).ch = 'a';
+        pool.content_changed(0, true);
+        let filled = pool.window_stamp(0, 2);
+
+        let held = pool.patch(0, |_| false);
+        let after_held = pool.window_stamp(0, 2);
+        let painted = pool.patch(0, |grid| {
+            grid.get_mut(1, 0).ch = 'b';
+            true
+        });
+        let after_painted = pool.window_stamp(0, 2);
+        let absent = pool.patch(1, |_| true);
+
+        assert_eq!(
+            (
+                held,
+                after_held == filled,
+                painted,
+                after_painted > filled,
+                absent
+            ),
+            (Some(false), true, Some(true), true, None),
+            "only a patch that changed a cell moves the stamp",
+        );
+        assert_eq!(
+            pool.page(0)
+                .map(|grid| (grid.get(0, 0).ch, grid.get(1, 0).ch)),
+            Some(('a', 'b')),
+            "the patch keeps the cells it did not paint",
         );
     }
 

@@ -81,9 +81,16 @@
 /// terminal that predates it reads the region's head alone, so an emitter
 /// declares terminal pools only to a terminal at version 9 or later.
 ///
+/// Version 10 paints `fill_rows`, which repaints some rows of a buffered page
+/// and keeps the rest, and keeps a terminal pool's pages across a viewport
+/// resize, so a patch lands on the page the program last filled. A terminal
+/// that predates it paints no patch, and one that does not read the frame at
+/// all lays the patch's rows on its live grid. An emitter therefore sends a
+/// patch only to a terminal at version 10 or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 pub mod command;
 pub mod detect;

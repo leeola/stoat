@@ -4797,16 +4797,17 @@ mod tests {
         );
     }
 
-    /// A resize empties a terminal pool's page until the program paints it
-    /// again, and the pool holds its last composite meanwhile rather than
-    /// leaving the live grid to show through.
+    /// A cell size change empties a terminal pool's page until the program
+    /// paints it again, and the pool holds its last composite meanwhile rather
+    /// than leaving the live grid to show through.
     #[test]
     fn a_terminal_pool_holds_its_composite_while_its_page_refills() {
         let mut terminal = terminal_pooled(b"ab");
         let mut frame = PoolFrame::default();
         project(&mut terminal, &mut frame);
 
-        terminal.resize(9, 8);
+        terminal.set_cell_pixels(10, 20);
+        terminal.set_terminal_cell_pixels(5, 10);
         let projection = project(&mut terminal, &mut frame);
 
         assert_eq!(

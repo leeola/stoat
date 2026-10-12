@@ -175,10 +175,13 @@ older terminal reads.
 From protocol version 10, a `fill_rows` scope repaints whole rows of a
 buffered page and keeps its other rows. Its head names the pool, the page, the
 first row, the row count, and the grid the rows were rendered at. A terminal
-that holds the pool's pages at another grid drops the patch. Below version 10,
-the terminal captures a patch and drops it, so send such a terminal whole
-fills. A sender's backlog drops a fill or a patch of a page behind a later
-whole fill of that page, and drops nothing behind a patch.
+that holds the pool's pages at another grid drops the patch, and so does one
+that does not buffer the page. A terminal below version 10 paints no patch, and
+one that does not read the frame at all lays the patch's rows on its live grid,
+so send such a terminal whole fills. From version 10, a viewport resize keeps
+a terminal pool's pages, so a patch lands on the page the program last filled.
+A sender's backlog drops a fill or a patch of a page behind a later whole fill
+of that page, and drops nothing behind a patch.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

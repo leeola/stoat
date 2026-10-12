@@ -22,6 +22,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor},
     Term,
 };
+use std::ops::Range;
 
 /// Project a fill context's on-screen cells onto a page grid.
 ///
@@ -43,6 +44,23 @@ pub(super) fn project_term_cells(
     theme: &Theme,
     palette: &[Rgb; PALETTE_LEN],
 ) -> bool {
+    let rows = 0..grid.rows();
+    project_term_rows(grid, term, rows, theme, palette)
+}
+
+/// Project the fill context's on-screen cells of `rows` onto the same rows of
+/// a page grid, and report whether a cell it wrote differed from the slot's.
+///
+/// A row patch projects its rows alone and keeps the rest of the page. The
+/// copy is clamped to the overlap of the two grids, as
+/// [`project_term_cells`] describes.
+pub(super) fn project_term_rows(
+    grid: &mut Grid,
+    term: &Term<ResponseSink>,
+    rows: Range<usize>,
+    theme: &Theme,
+    palette: &[Rgb; PALETTE_LEN],
+) -> bool {
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
 
@@ -51,14 +69,14 @@ pub(super) fn project_term_cells(
     // maps grid `line + offset` to viewport `row`, so `line = row - offset` names
     // the same cells, the inversion [`Terminal::project`] uses.
     let term_grid = term.grid();
-    let rows = grid.rows().min(term.screen_lines());
+    let end = rows.end.min(grid.rows()).min(term.screen_lines());
     let cols = grid.cols().min(term.columns());
 
     // The comparison rides the write rather than following it. Every cell this
     // paints is already in a register, so asking whether it differs from the
     // slot costs nothing next to reading the whole page back afterward.
     let mut changed = false;
-    for row in 0..rows {
+    for row in rows.start..end {
         let source = &term_grid[Line(row as i32 - offset)];
         for (col, out) in grid.row_mut(row)[..cols].iter_mut().enumerate() {
             let cell = project_cell(&source[Column(col)], content.colors, theme, palette);

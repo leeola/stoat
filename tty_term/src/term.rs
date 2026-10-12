@@ -33,7 +33,7 @@ use decorate::{
 use parking_lot::Mutex;
 use project::{
     default_palette, detect_shift, indexed, mark_selection_change, named_color, project_cell,
-    project_cursor, project_term_cells, row_bounds,
+    project_cursor, project_term_cells, project_term_rows, row_bounds,
 };
 use scan::{notification_from_osc, EscEvent, EscScanner, ESC, XTVERSION_REPLY};
 use std::{
@@ -45,9 +45,9 @@ use std::{
 };
 use stoatty_protocol::{
     command::{
-        self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
-        LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
-        PolylineCommand, PoolKind, PoolRegionCommand, PopoverCommand, ScaleCommand,
+        self, BarCommand, BorderCommand, Command, FillRowsCommand, HelloCommand, IconCommand,
+        IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand,
+        PanelCommand, PolylineCommand, PoolKind, PoolRegionCommand, PopoverCommand, ScaleCommand,
         ScrollRegionCommand, SketchCommand, TextRunCommand, WindowOpenCommand,
     },
     frame::FrameScratch,
@@ -935,12 +935,17 @@ struct FillTarget {
     /// A `fill_decorations` scope keeps the cells its slot already holds, so
     /// the VT inside it reaches no parser and the commit projects nothing.
     cells: bool,
+    /// The page rows a `fill_rows` patch repaints, or `None` for a whole fill.
+    ///
+    /// The commit projects only these rows and keeps the rest of the page.
+    rows: Option<Range<usize>>,
     /// Whether the painted page is thrown away rather than committed.
     ///
-    /// A viewport resize empties every pool's pages, so the page in flight has
-    /// nothing left to land on. The context stays open regardless, because
-    /// closing it would route the rest of the page to the live parser and paint
-    /// it onto the screen.
+    /// A viewport resize empties every grid pool's pages, so a page in flight
+    /// for one has nothing left to land on. A row patch for a grid or rows its
+    /// pool does not hold has nothing to land on either. The context stays open
+    /// regardless, because closing it would route the rest of the page to the
+    /// live parser and paint it onto the screen.
     discard: bool,
     term: Term<ResponseSink>,
     parser: Processor,
@@ -982,6 +987,7 @@ impl FillTarget {
             pool,
             index,
             cells: true,
+            rows: None,
             discard: false,
             term,
             parser: Processor::new(),
@@ -1711,14 +1717,7 @@ impl Terminal {
                 self.mark_window_dirty(window);
             },
             Command::Fill(fill) => self.begin_fill(fill.pool, fill.index, true),
-            // A row patch is not painted. The capture holds its rows off the live
-            // screen, and the discard drops them at its close marker.
-            Command::FillRows(patch) => {
-                self.begin_fill(patch.pool, patch.index, true);
-                if let Some(fill) = &mut self.fill {
-                    fill.discard = true;
-                }
-            },
+            Command::FillRows(patch) => self.begin_fill_rows(patch),
             Command::FillDecorations(fill) => self.begin_fill(fill.pool, fill.index, false),
             Command::FillEnd => self.commit_fill(),
             Command::Scroll(scroll) => {
@@ -2610,7 +2609,32 @@ impl Terminal {
             None => FillTarget::new(pool, index, rows, cols),
         };
         fill.cells = cells;
+        fill.rows = None;
         self.fill = Some(fill);
+    }
+
+    /// Open a fill context that repaints rows of a buffered page, as
+    /// [`Self::begin_fill`] opens one for a whole page.
+    ///
+    /// The commit projects only the patched rows and keeps the rest of the
+    /// page. A patch for an unknown pool, for a grid other than the one the
+    /// pool holds, or for rows past that grid is captured and thrown away. Its
+    /// bytes then never reach the live screen, and never land on cells of
+    /// another size.
+    fn begin_fill_rows(&mut self, patch: FillRowsCommand) {
+        self.begin_fill(patch.pool, patch.index, true);
+
+        let first = usize::from(patch.first_row);
+        let rows = first..first + usize::from(patch.rows);
+        let grid = (usize::from(patch.grid_rows), usize::from(patch.grid_cols));
+        let lands = self
+            .pools
+            .get(&patch.pool)
+            .is_some_and(|pool| pool.grid == grid && rows.end <= grid.0);
+        if let Some(fill) = &mut self.fill {
+            fill.rows = Some(rows);
+            fill.discard = !lands;
+        }
     }
 
     /// Commit the open page fill onto its pool's slot and restore the live grid.
@@ -2647,8 +2671,16 @@ impl Terminal {
             // not change. Reporting one of those costs a recompose of
             // everything the pool feeds, which is why the version moves only
             // when the page does.
-            let changed = match fill.cells {
-                true => {
+            let changed = match (fill.rows.clone(), fill.cells) {
+                // A patch keeps the rest of its page, decorations included, so
+                // it lands only on a page the pool still buffers.
+                (Some(rows), _) => pool
+                    .page_pool
+                    .patch(fill.index, |grid| {
+                        project_term_rows(grid, &fill.term, rows, &self.theme, &self.palette)
+                    })
+                    .unwrap_or(false),
+                (None, true) => {
                     // The box project_term_cells writes, so the slot clears only
                     // what the paint below will not reach.
                     let grid = pool.page_pool.fill(
@@ -2662,7 +2694,7 @@ impl Terminal {
                         .set_decorations(fill.index, text_runs, bars, polylines);
                     pool.page_pool.content_changed(fill.index, cells_changed)
                 },
-                false => pool
+                (None, false) => pool
                     .page_pool
                     .redecorate(fill.index, text_runs, bars, polylines),
             };
@@ -2953,22 +2985,33 @@ impl Terminal {
 
         self.term.resize(GridSize { rows, cols });
         self.damage_pending = true;
-        // Pages are sized to each pool's region, not the viewport, so a viewport
-        // resize only empties them. The app re-declares regions and refills as
-        // its layout recomputes, and that redeclare is what resizes the pages.
-        // Any half-painted page is abandoned.
+        // A grid pool's pages are sized to its region, not the viewport, so a
+        // viewport resize only empties them. The app re-declares regions and
+        // refills as its layout recomputes, and that redeclare is what resizes
+        // the pages. Any half-painted page is abandoned.
+        //
+        // A terminal pool's pages hold its region's terminal-cell grid, which
+        // only a re-declare or a cell size change moves, and both rebuild the
+        // pages and reach the app. Its pages and its page in flight stay, so a
+        // row patch lands on the page the app last filled.
         for pool in self
             .pools
             .values_mut()
-            .filter(|pool| pool.region.window == 0)
+            .filter(|pool| pool.region.window == 0 && pool.region.kind != PoolKind::Terminal)
         {
             pool.page_pool.invalidate();
             pool.content_version = pool.content_version.wrapping_add(1);
         }
-        // Doomed rather than closed. The page in flight has nowhere to land now,
-        // but the context has to stay open to swallow the rest of it, since the
-        // bytes would otherwise route to the live parser and paint the screen.
-        if let Some(fill) = &mut self.fill {
+        // Doomed rather than closed. A grid pool's page in flight has nowhere to
+        // land now, but the context has to stay open to swallow the rest of it,
+        // since the bytes would otherwise route to the live parser and paint the
+        // screen.
+        if let Some(fill) = &mut self.fill
+            && self
+                .pools
+                .get(&fill.pool)
+                .is_none_or(|pool| pool.region.kind != PoolKind::Terminal)
+        {
             fill.discard = true;
         }
     }
