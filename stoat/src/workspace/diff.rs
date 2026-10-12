@@ -13,7 +13,8 @@
 
 use super::Workspace;
 use crate::{
-    buffer::BufferId,
+    action_handlers::movement::ChangeDir,
+    buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::{self, BufferRegistry},
     code_index::build::file_id,
     diff::{self, ReviewFileInput},
@@ -23,7 +24,9 @@ use crate::{
         BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap,
     },
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
+    editor_state::EditorId,
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
+    jumplist::JumpEntry,
     pane::View,
     syntax_parse,
 };
@@ -32,6 +35,7 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{HashMap, VecDeque},
     future::Future,
+    mem,
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
@@ -190,6 +194,22 @@ pub(crate) struct DiffState {
     /// blocking diff is not cancelled before it installs its [`DiffMap`] on the
     /// buffer.
     pub(super) jobs: HashMap<BufferId, DiffJob>,
+    /// Hunks-only diffs that a caller waits on, one per buffer, with the
+    /// landings to run once the hunks arrive.
+    ///
+    /// A diff open places the view and the cursor by the hunks, and resolving
+    /// the base and running the line pass costs 5-50 ms. A want
+    /// runs both on the blocking pool, so the loop paints the plain frame
+    /// meanwhile. A `.git` write marks a want superseded and never drops it, so
+    /// its landings still run.
+    wants: HashMap<BufferId, DiffWant>,
+    /// The buffer version each buffer's hunks-only map landed for.
+    ///
+    /// Such a map holds the hunks and none of the diff view's colors, so it
+    /// does not count as current. The drive passes its settle gate at this
+    /// version, since a buffer that was opened and not typed in has no burst
+    /// to wait out, and the colors arrive a frame later.
+    hunks_only: HashMap<BufferId, u64>,
     /// Buffer edit version each buffer's `diff_map` was last populated for.
     ///
     /// Records no-repo and untracked buffers too (with a cleared map) so they
@@ -300,9 +320,16 @@ impl DiffState {
     /// marks the hunks staged as they were before the write. The text did not
     /// move, so the recompute skips the settle window. `path` is `None` for a
     /// buffer with no file.
+    ///
+    /// A want in flight is marked superseded and kept, so its landings still
+    /// run.
     pub(super) fn invalidate(&mut self, id: BufferId, path: Option<&Path>) {
         self.jobs.remove(&id);
         self.versions.remove(&id);
+        self.hunks_only.remove(&id);
+        if let Some(want) = self.wants.get_mut(&id) {
+            want.superseded = true;
+        }
         self.tally_current = false;
         if let Some(path) = path {
             self.base_text.remove(path);
@@ -326,7 +353,11 @@ impl DiffState {
         for job in self.jobs.values_mut() {
             job.superseded = true;
         }
+        for want in self.wants.values_mut() {
+            want.superseded = true;
+        }
         self.versions.clear();
+        self.hunks_only.clear();
         self.tally_current = false;
         // The cached blobs were read from the git state this call is reacting
         // to having changed, so they are exactly what must not be reused.
@@ -359,13 +390,47 @@ impl DiffState {
         self.versions.get(&id) == Some(&version)
     }
 
+    /// Whether `id`'s installed map holds the hunks for buffer version
+    /// `version` and waits for its colors.
+    pub(super) fn hunks_installed(&self, id: BufferId, version: u64) -> bool {
+        self.hunks_only.get(&id) == Some(&version)
+    }
+
+    /// Whether a hunks-only diff of `id` is on the pool.
+    #[cfg(test)]
+    pub(super) fn want_pending(&self, id: BufferId) -> bool {
+        self.wants.contains_key(&id)
+    }
+
+    /// Run `landing` when `id`'s want lands, and answer `true`. With no want
+    /// of `id` in flight, answer `false` and keep nothing.
+    pub(super) fn add_landing(&mut self, id: BufferId, landing: DiffLanding) -> bool {
+        let Some(want) = self.wants.get_mut(&id) else {
+            return false;
+        };
+        want.landings.push(landing);
+        true
+    }
+
+    /// Drop the latched-view landing that `editor` waits on in `id`'s want.
+    pub(super) fn drop_latched_view(&mut self, id: BufferId, editor: EditorId) {
+        let Some(want) = self.wants.get_mut(&id) else {
+            return;
+        };
+        want.landings.retain(|landing| {
+            !matches!(landing, DiffLanding::LatchedView { editor: waiting } if *waiting == editor)
+        });
+    }
+
     /// Drop everything held for a closing buffer, and `path`'s blobs with it.
     ///
     /// Two of the collections hold a `Task`, and dropping one cancels work
     /// whose result nothing reads any more.
     pub(super) fn release(&mut self, id: BufferId, path: Option<&Path>) {
         self.jobs.remove(&id);
+        self.wants.remove(&id);
         self.versions.remove(&id);
+        self.hunks_only.remove(&id);
         self.diffed.remove(&id);
         self.settle.remove(&id);
         self.settle_timers.remove(&id);
@@ -380,7 +445,9 @@ impl DiffState {
     #[cfg(test)]
     pub(super) fn holds(&self, id: BufferId, path: Option<&Path>) -> bool {
         self.jobs.contains_key(&id)
+            || self.wants.contains_key(&id)
             || self.versions.contains_key(&id)
+            || self.hunks_only.contains_key(&id)
             || self.diffed.contains_key(&id)
             || self.settle.contains_key(&id)
             || self.settle_timers.contains_key(&id)
@@ -418,86 +485,152 @@ impl DiffState {
         }
     }
 
-    /// Compute and install `id`'s hunks synchronously, bypassing the background
-    /// job so they are available on the current turn.
+    /// Start a hunks-only diff of `id` on the blocking pool, and run `landing`
+    /// once its hunks land.
     ///
-    /// The diff view's left-column colors are not part of what lands here. They
-    /// cost a parse of the whole base file, which is the expensive half of a
-    /// diff map and no part of what a caller needing hunks this turn is after.
-    /// For a file with a language, the buffer's version is therefore left
-    /// unrecorded, so the next [`Self::drive_diff_jobs`] pass recomputes the map
-    /// with its colors and installs it a settle window later.
+    /// The job resolves the base and runs the line pass, which is what a diff
+    /// open places the view and the cursor by. It parses nothing, so the diff
+    /// view's colors arrive with a later drive. A want in flight at the
+    /// buffer's version takes the landing and spawns nothing. A want at an
+    /// older version hands its landings to the new one.
     ///
-    /// That replacement rests on the hunks left here carrying no anchors, which
-    /// is what tells [`DiffMap::renders_same_as`] the recomputed map decorates
-    /// differently. Anchor them here and it suppresses the install instead, and
-    /// the colors never arrive.
-    ///
-    /// A no-op for a buffer without a path.
+    /// Answers `landing` back when nothing is wanted, which is the answer for a
+    /// buffer with no path, so the caller runs it at once.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn install_now(
+    pub(super) fn want(
         &mut self,
         buffers: &BufferRegistry,
         git_root: &Path,
+        executor: &Executor,
         git_host: &Arc<dyn GitHost>,
-        language_registry: &Arc<LanguageRegistry>,
         syntax_styles: &SyntaxStyles,
         base_cache: &BaseHighlightCache,
+        redraw_notify: &Arc<Notify>,
         id: BufferId,
-    ) {
+        landing: Option<DiffLanding>,
+    ) -> Option<DiffLanding> {
         let Some(path) = buffers.path_for(id).map(Path::to_path_buf) else {
-            return;
+            return landing;
         };
         let Some(shared) = buffers.get(id) else {
-            return;
+            return landing;
         };
-        let (version, text) = {
-            let guard = shared.read().expect("buffer poisoned");
-            (
-                guard.snapshot.version,
-                guard.snapshot.visible_text.to_string(),
-            )
-        };
+        // The whole snapshot rather than its text, which the job materializes
+        // on the pool.
+        let buffer_snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
+        let target_version = buffer_snapshot.version;
 
-        // Resolved here rather than inside, so a miss is filed as one and the
-        // next landing on an untracked file costs a map lookup.
-        let base = match self.base_text.get(&path) {
-            Some(base) => base.clone(),
-            None => {
-                let base = resolve_base(&**git_host, git_root, &path, self.effective_base());
-                self.base_text.insert(path.clone(), base.clone());
-                base
+        let mut landings = match self.wants.remove(&id) {
+            Some(mut want) if want.target_version == target_version => {
+                want.landings.extend(landing);
+                self.wants.insert(id, want);
+                return None;
             },
+            Some(want) => want.landings,
+            None => Vec::new(),
         };
+        landings.extend(landing);
 
-        // The language is what gates the base-text parse inside, so withholding
-        // it is how the colors are skipped.
-        let diff_map = base.as_ref().and_then(|base| {
-            compute_diff_map(
-                &text,
-                None,
-                syntax_styles,
-                base_cache,
-                base,
-                // The sync open stays line-only so it lands in one frame. The
-                // structural refinement arrives at the background settle.
-                None,
-                None,
-            )
+        let task = executor.spawn_blocking({
+            let git_host = git_host.clone();
+            let git_root = git_root.to_path_buf();
+            let redraw = redraw_notify.clone();
+            let syntax_styles = syntax_styles.clone();
+            let base_cache = base_cache.clone();
+            let diff_base = self.effective_base().cloned();
+            let cached_base = self.base_text.get(&path).cloned();
+            move || {
+                // No language, memo, tree, or anchors. The hunks lack anchors on
+                // purpose, which is what tells `DiffMap::renders_same_as` that
+                // the drive's colored map decorates differently.
+                let out = run_diff_job(
+                    &*git_host,
+                    &git_root,
+                    path,
+                    diff_base.as_ref(),
+                    cached_base,
+                    &buffer_snapshot,
+                    target_version,
+                    id,
+                    None,
+                    &syntax_styles,
+                    &base_cache,
+                    None,
+                    None,
+                    false,
+                );
+                redraw.notify_one();
+                out
+            }
         });
-        if let Some(shared) = buffers.get(id) {
-            shared.write().expect("buffer poisoned").diff_map = diff_map;
-        }
+        self.wants.insert(
+            id,
+            DiffWant {
+                target_version,
+                task,
+                landings,
+                superseded: false,
+            },
+        );
 
         // Owed rather than read here, because a repo-wide tally is a walk of
-        // every diff in the repository and this runs on the UI thread.
+        // every diff in the repository.
         self.tally_current = false;
+        None
+    }
 
-        // A file with no language has no colors to wait for, so its map is
-        // already whole and nothing has to recompute it.
-        if language_registry.for_path(&path).is_none() {
-            self.versions.insert(id, version);
+    /// Install each wanted map whose hunks arrived, and answer its buffer with
+    /// the landings to run, in the order the callers added them.
+    ///
+    /// A landed map is whole when the file has no base or no language, since
+    /// there are no colors to wait for, so its version counts as current. Any
+    /// other map records a hunks-only marker, and the drive adds its colors. A
+    /// superseded want's map still paints, and files neither its blobs nor a
+    /// version.
+    ///
+    /// A want installs nothing when a whole map at its version or a later one
+    /// is already recorded. Its landings still run.
+    pub(super) fn poll_wants(
+        &mut self,
+        buffers: &BufferRegistry,
+        language_registry: &LanguageRegistry,
+    ) -> Vec<(BufferId, Vec<DiffLanding>)> {
+        let waker = futures::task::noop_waker();
+        let mut landed = Vec::new();
+        self.wants.retain(|_, want| {
+            let mut cx = Context::from_waker(&waker);
+            match Pin::new(&mut want.task).poll(&mut cx) {
+                Poll::Ready(out) => {
+                    landed.push((out, want.superseded, mem::take(&mut want.landings)));
+                    false
+                },
+                Poll::Pending => true,
+            }
+        });
+
+        let mut landings = Vec::with_capacity(landed.len());
+        for (out, superseded, want_landings) in landed {
+            let (id, version) = (out.buffer_id, out.target_version);
+            // A drive job in flight when the want started sometimes lands first,
+            // at this version or a later one. Its whole map is on the buffer and
+            // its version is recorded, so a hunks-only map must not replace it.
+            let outrun = self
+                .versions
+                .get(&id)
+                .is_some_and(|&recorded| recorded >= version);
+            if !outrun {
+                let whole = out.base.is_none() || language_registry.for_path(&out.path).is_none();
+                self.land(buffers, out, superseded);
+                if !superseded {
+                    match whole {
+                        true => self.versions.insert(id, version),
+                        false => self.hunks_only.insert(id, version),
+                    };
+                }
+            }
+            landings.push((id, want_landings));
         }
+        landings
     }
 
     /// Install `diff_map` on `id` and record it as computed for the buffer's
@@ -590,6 +723,10 @@ impl DiffState {
         if let Some(id) = buffers.id_for_path(&path) {
             self.jobs.remove(&id);
             self.versions.remove(&id);
+            self.hunks_only.remove(&id);
+            if let Some(want) = self.wants.get_mut(&id) {
+                want.superseded = true;
+            }
         }
     }
 
@@ -639,37 +776,16 @@ impl DiffState {
                     "diff job landed after its base moved"
                 );
             }
-            // A superseded job read blobs that a git write has since moved, so
-            // neither its blobs nor its version is filed. Its map still paints,
-            // and the unrecorded version owes the buffer a re-run.
-            if !superseded {
-                // Filed whether or not it resolved, since a miss is what an
-                // untracked buffer keeps re-deriving otherwise.
-                self.base_text.insert(out.path, out.base);
-            }
-            if let Some(shared) = buffers.get(out.buffer_id) {
-                let mut guard = shared.write().expect("buffer poisoned");
-                // A recompute landing on the same hunks is not news. Every
-                // decoration consumer keys off the map's version, and the
-                // minimap's edge sweep re-derives the whole file from it, so
-                // installing an identical map costs that for nothing. A write
-                // under .git re-diffs every visible buffer against content that
-                // did not move, which is where this earns its keep.
-                let same = match (&guard.diff_map, &out.diff_map) {
-                    (Some(installed), Some(fresh)) => installed.renders_same_as(fresh),
-                    (None, None) => true,
-                    _ => false,
-                };
-                if !same {
-                    guard.diff_map = out.diff_map;
-                }
-            }
+            let (buffer_id, target_version) = (out.buffer_id, out.target_version);
+            self.land(buffers, out, superseded);
             // Recorded either way, so an unchanged result still counts as
-            // diffed and the buffer is not tried again next frame.
+            // diffed and the buffer is not tried again next frame. A superseded
+            // job's unrecorded version owes the buffer a re-run.
             if !superseded {
-                self.versions.insert(out.buffer_id, out.target_version);
+                self.versions.insert(buffer_id, target_version);
+                self.hunks_only.remove(&buffer_id);
             }
-            self.diffed.insert(out.buffer_id, out.target_version);
+            self.diffed.insert(buffer_id, target_version);
         }
 
         if let Some(job) = &mut self.tally_job {
@@ -716,10 +832,23 @@ impl DiffState {
             {
                 continue;
             }
+            if self
+                .wants
+                .get(&buffer_id)
+                .is_some_and(|want| want.target_version == cur_version)
+            {
+                continue;
+            }
             // The buffer is still at the version its last diff read, so only its
             // blobs moved. There is no typing burst to wait out.
             let base_moved = self.diffed.get(&buffer_id) == Some(&cur_version);
-            if !base_moved && !self.settled(executor, redraw_notify, buffer_id, cur_version) {
+            // A hunks-only map marks a buffer that was opened and not typed in,
+            // which has no burst to wait out either, and still owes its colors.
+            let opened = self.hunks_only.get(&buffer_id) == Some(&cur_version);
+            if !base_moved
+                && !opened
+                && !self.settled(executor, redraw_notify, buffer_id, cur_version)
+            {
                 continue;
             }
 
@@ -752,38 +881,24 @@ impl DiffState {
                 let diff_base = self.effective_base().cloned();
                 let tree_cache = self.tree_cache.clone();
                 move || {
-                    // Materialize the rope only now that the diff is confirmed
-                    // stale and a job is committed, off the event-loop thread.
-                    let buffer_text = buffer_snapshot.visible_text.to_string();
-                    // A miss is an answer, so it is filed back like a hit and
-                    // the next settle in an untracked buffer walks nothing.
-                    let base = match cached_base {
-                        Some(base) => base,
-                        None => resolve_base(&*git_host, &git_root, &path, diff_base.as_ref()),
-                    };
-                    let diff_map = base.as_ref().and_then(|base| {
-                        compute_diff_map(
-                            &buffer_text,
-                            language.as_ref(),
-                            &syntax_styles,
-                            &base_cache,
-                            base,
-                            Some(&tree_cache),
-                            buffer_tree.as_ref(),
-                        )
-                        .map(|mut diff_map| {
-                            diff_map.anchor_hunks(&buffer_snapshot);
-                            diff_map
-                        })
-                    });
-                    redraw.notify_one();
-                    DiffJobOutput {
-                        buffer_id,
+                    let out = run_diff_job(
+                        &*git_host,
+                        &git_root,
                         path,
-                        target_version: cur_version,
-                        diff_map,
-                        base,
-                    }
+                        diff_base.as_ref(),
+                        cached_base,
+                        &buffer_snapshot,
+                        cur_version,
+                        buffer_id,
+                        language.as_ref(),
+                        &syntax_styles,
+                        &base_cache,
+                        Some(&tree_cache),
+                        buffer_tree.as_ref(),
+                        true,
+                    );
+                    redraw.notify_one();
+                    out
                 }
             });
             self.jobs.insert(
@@ -796,6 +911,36 @@ impl DiffState {
                     started: Instant::now(),
                 },
             );
+        }
+    }
+
+    /// Install `out`'s map on its buffer, and file the blobs it read unless a
+    /// `.git` write superseded the job that read them.
+    ///
+    /// A superseded map still paints, since it read its blobs no earlier than
+    /// the map on screen.
+    fn land(&mut self, buffers: &BufferRegistry, out: DiffJobOutput, superseded: bool) {
+        if !superseded {
+            // Filed whether or not it resolved, since a miss is what an
+            // untracked buffer keeps re-deriving otherwise.
+            self.base_text.insert(out.path, out.base);
+        }
+        if let Some(shared) = buffers.get(out.buffer_id) {
+            let mut guard = shared.write().expect("buffer poisoned");
+            // A recompute landing on the same hunks is not news. Every
+            // decoration consumer keys off the map's version, and the minimap's
+            // edge sweep re-derives the whole file from it, so installing an
+            // identical map costs that for nothing. A write under .git re-diffs
+            // every visible buffer against content that did not move, which is
+            // where this earns its keep.
+            let same = match (&guard.diff_map, &out.diff_map) {
+                (Some(installed), Some(fresh)) => installed.renders_same_as(fresh),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                guard.diff_map = out.diff_map;
+            }
         }
     }
 }
@@ -830,6 +975,40 @@ pub(super) struct DiffJobOutput {
     pub(super) base: Option<DiffBaseText>,
 }
 
+/// A hunks-only diff on the blocking pool, and what runs once it lands.
+pub(super) struct DiffWant {
+    target_version: u64,
+    task: Task<DiffJobOutput>,
+    /// What the callers that wanted the hunks do with them, in the order they
+    /// asked.
+    landings: Vec<DiffLanding>,
+    /// A `.git` write landed after the want read its blobs, so its map still
+    /// paints, and its blobs and its marker do not count.
+    superseded: bool,
+}
+
+/// What a caller that wanted a buffer's hunks does once they land.
+///
+/// A diff open places the view and the cursor by the hunks, so each landing is
+/// the step that waited for them. One that acts on an editor names it, since
+/// the focus moves on its own clock while the hunks are on the pool.
+#[derive(Debug, Clone)]
+pub(crate) enum DiffLanding {
+    /// Show a latched pane's editor as a diff when its file has a change, and
+    /// plain when it has none.
+    LatchedView { editor: EditorId },
+    /// Land a diff toggle's cursor on the change nearest it, with `origin` as
+    /// the jumplist entry the jump records.
+    ToggleJump {
+        editor: EditorId,
+        origin: Option<JumpEntry>,
+    },
+    /// A change-walk press that arrived before the hunks.
+    ChangeWalk { dir: ChangeDir, count: u32 },
+    /// A first-change or last-change press that arrived before the hunks.
+    EdgeChange { last: bool },
+}
+
 /// A task that wakes a redraw when a settle window closes, so the frame that
 /// ends the window is drawn even when nothing else asks for one.
 fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
@@ -837,6 +1016,65 @@ fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
     executor.spawn_with_redraw(redraw_notify.clone(), async move {
         timer_executor.timer(DIFF_SETTLE).await;
     })
+}
+
+/// Diff `buffer_snapshot`, the text of `path` at `target_version`, against its
+/// base, and package what the run read.
+///
+/// Runs on the blocking pool. `cached_base` is the base an earlier run filed,
+/// and its absence resolves the base through `git_host` against `diff_base`.
+/// With a language, the run also parses the base for the diff view's colors
+/// and refines the hunks structurally, reusing `tree_memo` and `buffer_tree`.
+/// With `anchor`, the hunks are anchored against the snapshot.
+#[allow(clippy::too_many_arguments)]
+fn run_diff_job(
+    git_host: &dyn GitHost,
+    git_root: &Path,
+    path: PathBuf,
+    diff_base: Option<&DiffBase>,
+    cached_base: Option<Option<DiffBaseText>>,
+    buffer_snapshot: &TextBufferSnapshot,
+    target_version: u64,
+    buffer_id: BufferId,
+    language: Option<&Arc<Language>>,
+    syntax_styles: &SyntaxStyles,
+    base_cache: &BaseHighlightCache,
+    tree_memo: Option<&TreeCache>,
+    buffer_tree: Option<&Tree>,
+    anchor: bool,
+) -> DiffJobOutput {
+    // Materialized only now that a job is committed, off the event-loop thread.
+    let buffer_text = buffer_snapshot.visible_text.to_string();
+    // A miss is an answer, so it is filed back like a hit and the next settle
+    // in an untracked buffer walks nothing.
+    let base = match cached_base {
+        Some(base) => base,
+        None => resolve_base(git_host, git_root, &path, diff_base),
+    };
+    let diff_map = base.as_ref().and_then(|base| {
+        compute_diff_map(
+            &buffer_text,
+            language,
+            syntax_styles,
+            base_cache,
+            base,
+            tree_memo,
+            buffer_tree,
+        )
+        .map(|mut diff_map| {
+            if anchor {
+                diff_map.anchor_hunks(buffer_snapshot);
+            }
+            diff_map
+        })
+    });
+    DiffJobOutput {
+        buffer_id,
+        path,
+        target_version,
+        diff_map,
+        base,
+    }
 }
 
 /// The names of what the diff view's left and right columns hold under
@@ -1655,7 +1893,7 @@ mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, compute_diff_map, diff_sides,
         repo_hunk_position, resolve_base, scan_changed_ranges, BaseHighlightCache,
-        BaseHighlightMemo, DiffBase, DiffBaseText, WorktreeBase, DIFF_SETTLE,
+        BaseHighlightMemo, DiffBase, DiffBaseText, DiffLanding, WorktreeBase, DIFF_SETTLE,
     };
     use crate::{
         action_handlers::{self, movement},
@@ -2543,6 +2781,140 @@ mod tests {
         );
     }
 
+    /// A repo where `a.rs` gains a line over HEAD, open with the background
+    /// diff on, and the buffer's id. The open leaves the map to the caller.
+    fn wanted_harness() -> (TestHarness, BufferId) {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", "fn foo() {}\n", "fn foo() {}\nfn bar() {}\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.stoat.open_file(Path::new("/repo/a.rs"));
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        (h, buffer_id)
+    }
+
+    /// The buffer's diff as `(hunk count, base colors in, hunks-only map in,
+    /// whole map current)`.
+    fn wanted_map(h: &TestHarness, buffer_id: BufferId) -> (usize, bool, bool, bool) {
+        let ws = h.stoat.active_workspace();
+        let (hunks, colors) = {
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            let dm = guard.diff_map.as_ref().expect("diff map installed");
+            (
+                dm.hunks_in_range(0..u32::MAX).len(),
+                dm.base_highlights_for_line(0).is_some(),
+            )
+        };
+        (
+            hunks,
+            colors,
+            ws.hunks_installed(buffer_id),
+            ws.diff_map_current(buffer_id),
+        )
+    }
+
+    /// A buffer that was opened and not typed in has no burst to wait out, so
+    /// the drive starts its colors job the frame its hunks land.
+    #[test]
+    fn a_wanted_map_lands_hunks_without_colors_and_the_drive_adds_them_with_no_settle() {
+        let (mut h, buffer_id) = wanted_harness();
+
+        h.settle_diff_map(buffer_id);
+        assert_eq!(
+            wanted_map(&h, buffer_id),
+            (1, false, true, false),
+            "the want lands the hunk with its colors owed",
+        );
+
+        h.stoat.drive_background();
+        h.settle();
+        h.stoat.drive_background();
+        assert_eq!(
+            wanted_map(&h, buffer_id),
+            (1, true, false, true),
+            "the drive lands the colors with no clock advance",
+        );
+    }
+
+    /// The blobs a want read predate a `.git` write that lands before it, so
+    /// its map paints and the next diff reads the blobs again.
+    #[test]
+    fn a_git_write_during_a_want_files_no_base() {
+        let (mut h, buffer_id) = wanted_harness();
+        let repo = PathBuf::from("/repo");
+        let before = h.fake_git().blob_reads(&repo);
+
+        action_handlers::review::ensure_diff_map(&mut h.stoat, buffer_id, None);
+        let want_reads = h.fake_git().blob_reads(&repo) - before;
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+        h.settle();
+        assert_eq!(
+            wanted_map(&h, buffer_id),
+            (1, false, false, false),
+            "the map installs and records neither a marker nor a version",
+        );
+
+        let reads = h.fake_git().blob_reads(&repo);
+        h.settle_diff_jobs();
+        assert_eq!(
+            (h.fake_git().blob_reads(&repo) - reads, want_reads > 0),
+            (want_reads, true),
+            "the next diff reads the blobs the want read",
+        );
+    }
+
+    /// A drive job in flight when a diff open wants the same version lands
+    /// first, and the want's hunks-only map then has nothing to add.
+    #[test]
+    fn a_want_that_lands_after_a_drive_job_keeps_the_jobs_colors() {
+        let (mut h, buffer_id) = wanted_harness();
+        h.stoat.drive_background();
+        h.advance_clock(DIFF_SETTLE + std::time::Duration::from_millis(1));
+        h.stoat.drive_background();
+        assert_eq!(
+            h.stoat.active_workspace().diff.jobs.len(),
+            1,
+            "the drive has a job in flight",
+        );
+
+        action_handlers::review::ensure_diff_map(&mut h.stoat, buffer_id, None);
+        h.run_until_parked();
+        h.stoat.drive_background();
+        assert_eq!(
+            wanted_map(&h, buffer_id),
+            (1, true, false, true),
+            "the job's whole map stays on the buffer",
+        );
+    }
+
+    #[test]
+    fn a_second_want_at_the_same_version_adds_its_landing_and_no_job() {
+        let (mut h, buffer_id) = wanted_harness();
+        let hops = h.blocking_calls();
+
+        for last in [false, true] {
+            action_handlers::review::ensure_diff_map(
+                &mut h.stoat,
+                buffer_id,
+                Some(DiffLanding::EdgeChange { last }),
+            );
+        }
+
+        let lasts: Vec<bool> = h.stoat.active_workspace().diff.wants[&buffer_id]
+            .landings
+            .iter()
+            .map(|landing| matches!(landing, DiffLanding::EdgeChange { last: true }))
+            .collect();
+        assert_eq!(
+            (h.blocking_calls() - hops, lasts),
+            (1, vec![false, true]),
+            "one job carries both landings in the order they came",
+        );
+    }
+
     #[test]
     fn a_pair_base_follows_an_edit_of_its_file() {
         let mut h = pair_harness();
@@ -3306,8 +3678,8 @@ mod tests {
         );
     }
 
-    /// Opening the view used to parse the whole base file on the thread that
-    /// handled the key, for colors nothing reads until the first frame after.
+    /// A diff toggle's hunks land without the base's colors, which cost a parse
+    /// of the whole base file, and the background pass adds the colors later.
     #[test]
     fn the_diff_toggle_opens_on_hunks_and_takes_its_colors_later() {
         let mut h = TestHarness::with_size(80, 24);
@@ -3330,6 +3702,7 @@ mod tests {
         };
 
         h.stoat.toggle_diff_view();
+        h.settle();
         assert_eq!(
             map(&h),
             (1, false),
@@ -3532,17 +3905,7 @@ mod tests {
         h.open_file(Path::new("/repo/gone.rs"));
 
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
-        let git_host = h.stoat.git_host.clone();
-        let language_registry = h.stoat.language_registry.clone();
-        let syntax_styles = h.stoat.syntax_styles.clone();
-        let base_cache = h.stoat.base_highlights_cache.clone();
-        h.stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+        h.settle_diff_map(buffer_id);
 
         (h, buffer_id)
     }
@@ -3564,17 +3927,7 @@ mod tests {
         h.stoat.active_workspace_mut().set_diff_base(base);
 
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
-        let git_host = h.stoat.git_host.clone();
-        let language_registry = h.stoat.language_registry.clone();
-        let syntax_styles = h.stoat.syntax_styles.clone();
-        let base_cache = h.stoat.base_highlights_cache.clone();
-        h.stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+        h.settle_diff_map(buffer_id);
 
         let ws = h.stoat.active_workspace();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
@@ -3741,17 +4094,7 @@ mod tests {
         h.open_file(Path::new("/repo/a.rs"));
 
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
-        let git_host = h.stoat.git_host.clone();
-        let language_registry = h.stoat.language_registry.clone();
-        let syntax_styles = h.stoat.syntax_styles.clone();
-        let base_cache = h.stoat.base_highlights_cache.clone();
-        h.stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+        h.settle_diff_map(buffer_id);
         assert!(
             h.stoat
                 .active_workspace()
@@ -3779,17 +4122,7 @@ mod tests {
         h.open_file(Path::new("/repo/a.txt"));
 
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
-        let git_host = h.stoat.git_host.clone();
-        let language_registry = h.stoat.language_registry.clone();
-        let syntax_styles = h.stoat.syntax_styles.clone();
-        let base_cache = h.stoat.base_highlights_cache.clone();
-        h.stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+        h.settle_diff_map(buffer_id);
 
         let ws = h.stoat.active_workspace();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");

@@ -6,6 +6,7 @@ pub(crate) mod keys;
 
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer::BufferId,
     keymap::resolve_config_action,
     keymap_state::arg_as_str,
     lsp::registry::ServerSelector,
@@ -531,6 +532,13 @@ impl TestHarness {
             "settle did not converge in {SETTLE_MAX_PASSES} passes: a pump keeps reporting \
              progress, which usually means one respawns the work it just finished"
         );
+    }
+
+    /// Want `buffer_id`'s hunks on the pool, as a diff open does, and settle
+    /// until they land.
+    pub(crate) fn settle_diff_map(&mut self, buffer_id: BufferId) {
+        crate::action_handlers::review::ensure_diff_map(&mut self.stoat, buffer_id, None);
+        self.settle();
     }
 
     /// Drive the background diff-populate job to completion for visible buffers.

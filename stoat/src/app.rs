@@ -3669,9 +3669,10 @@ impl Stoat {
     ///
     /// `Diff` turns the view on for the current editor. On the pathless startup
     /// scratch, which has no changes of its own, the toggle crosses into the
-    /// first changed file, installs its diff map, and lands the cursor on its
-    /// first hunk with the view scrolled to it. With no changed files it sets
-    /// the "no more changes" status and stays on the scratch.
+    /// first changed file and lands the cursor on its first hunk with the view
+    /// scrolled to it. The file's diff map lands a frame or more later. With no
+    /// changed files it sets the "no more changes" status and stays on the
+    /// scratch.
     pub fn open_working_tree_diff(&mut self) {
         action_handlers::dispatch(self, &Diff { rev: None });
     }
@@ -8360,7 +8361,9 @@ impl Stoat {
     /// This drives the diff jobs before the pumps, so a pump reads the maps
     /// that landed. It drives them again after the pumps, so a map that a pump
     /// staled starts its job in the same frame. A landed stage stales its
-    /// buffer's map, and a write under `.git` stales every map.
+    /// buffer's map, and a write under `.git` stales every map. A diff open's
+    /// hunks land in the pumps too, and the second drive then starts the job
+    /// that brings their colors in the same frame.
     pub(crate) fn drive_background(&mut self) {
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
@@ -8410,6 +8413,7 @@ impl Stoat {
         let git_jobs = git_jobs::pump(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
+        let diff_wants = action_handlers::review::pump_diff_wants(self);
         let conflict_file = action_handlers::conflict_view::pump_conflict_file(self);
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
@@ -8434,6 +8438,7 @@ impl Stoat {
             || git_jobs
             || code_search
             || changed_file_jump
+            || diff_wants
             || conflict_file
             || diff_nav_jump
             || lsp

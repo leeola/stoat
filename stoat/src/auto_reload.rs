@@ -956,8 +956,9 @@ pub(crate) fn drain_followed_change(stoat: &mut Stoat) -> bool {
 /// what the write changed. A buffer with unsaved edits, or one whose file mtime
 /// did not move, starts nothing.
 ///
-/// A file with no buffer opens in the pane on its first change stop, because
-/// the diff against its base is the only record of what changed in it.
+/// A file with no buffer opens in the pane's diff view at once, and the cursor
+/// goes to its first change stop when its hunks land. The diff against its base
+/// is the only record of what changed in it.
 fn follow_change_now(stoat: &mut Stoat, path: &Path) -> bool {
     let Some(target) = follow_target(stoat) else {
         return false;
@@ -1217,10 +1218,10 @@ fn editor_cursor_row(editor: &mut EditorState) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_to_offset, editor_cursor_row, ensure_auto_reload_poll, follow_change_now,
-        open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install, reload_all,
-        reload_focused, set_auto_reload_config, set_buffer_auto_reload, stat_and_read_buffer,
-        target_log_path, toggle_follow_changes, toggle_live_reload,
+        collapse_to_offset, drain_followed_change, editor_cursor_row, ensure_auto_reload_poll,
+        follow_change_now, open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install,
+        reload_all, reload_focused, set_auto_reload_config, set_buffer_auto_reload,
+        stat_and_read_buffer, target_log_path, toggle_follow_changes, toggle_live_reload,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -1792,6 +1793,7 @@ mod tests {
     fn follow_changes_opens_an_unopened_file_in_the_diff_view() {
         let mut h = follow_harness();
         assert!(follow_change_now(&mut h.stoat, Path::new("/repo/b.rs")));
+        h.settle();
         assert_eq!(landing(&mut h), (PathBuf::from("/repo/b.rs"), true, 1));
     }
 
@@ -1879,6 +1881,64 @@ mod tests {
 
         let (path, diff_view, _) = landing(&mut h);
         assert_eq!((path, diff_view), (PathBuf::from("/repo/new/c.rs"), true));
+    }
+
+    /// The followed file opens in the diff view at once, and its cursor waits
+    /// for the hunks.
+    #[test]
+    fn a_followed_write_to_an_unopened_file_lands_after_its_base_resolves() {
+        let mut h = follow_harness();
+        h.stoat.follow_pending = Some(PathBuf::from("/repo/b.rs"));
+        h.stoat.follow_tx.try_send(()).expect("follow channel open");
+
+        assert!(drain_followed_change(&mut h.stoat));
+        let b = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/b.rs"))
+            .expect("open buffer");
+        assert_eq!(
+            (
+                landing(&mut h),
+                h.stoat.active_workspace().diff_map_pending(b)
+            ),
+            ((PathBuf::from("/repo/b.rs"), true, 0), true),
+            "the file opens with its hunks on the pool",
+        );
+
+        h.settle();
+        assert_eq!(
+            landing(&mut h),
+            (PathBuf::from("/repo/b.rs"), true, 1),
+            "the cursor lands on the first change once the hunks are in",
+        );
+    }
+
+    #[test]
+    fn a_git_write_during_the_resolve_drops_the_seeded_base() {
+        let mut h = follow_harness();
+        h.stoat.set_diff_warm_auto(true);
+        h.fake_fs().insert_file("/repo/new.rs", "n\n");
+
+        assert!(follow_change_now(&mut h.stoat, Path::new("/repo/b.rs")));
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+        h.settle();
+        assert_eq!(
+            landing(&mut h),
+            (PathBuf::from("/repo/b.rs"), true, 1),
+            "the landing still happens",
+        );
+
+        assert!(follow_change_now(&mut h.stoat, Path::new("/repo/new.rs")));
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+        h.settle();
+        h.settle_diff_jobs();
+        assert_eq!(
+            h.fake_git().rename_source_calls(Path::new("/repo")),
+            2,
+            "the next diff of the new file resolves its base again",
+        );
     }
 
     #[test]

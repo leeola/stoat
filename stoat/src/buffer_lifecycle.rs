@@ -20,7 +20,7 @@ use crate::{
     buffer_registry::OpenOrigin,
     editor_state::{EditorId, EditorState},
     pane::{FocusTarget, PaneId, View},
-    workspace::{BridgeWaiter, Workspace, WorkspaceId},
+    workspace::{diff::DiffLanding, BridgeWaiter, Workspace, WorkspaceId},
 };
 use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
 use std::{
@@ -505,6 +505,9 @@ pub(crate) fn show_buffer_in_pane(
         View::Editor(eid) => Some(eid),
         _ => None,
     };
+    let outgoing_diff_view = old
+        .and_then(|eid| ws.editors.get(eid))
+        .is_some_and(|editor| editor.diff_view);
     let carried_mode = old
         .and_then(|eid| ws.editors.get(eid))
         .filter(|editor| editor.pinned || app::is_pinned_mode(&editor.mode))
@@ -539,12 +542,22 @@ pub(crate) fn show_buffer_in_pane(
     // to a modified file re-enters the diff. Neither widen nor cursor moves here.
     // The widen belongs to the latched session, and the jump target is the
     // position.
+    //
+    // The new buffer's hunks are often still on the pool, so it keeps the view
+    // the pane showed until they land and say otherwise. A walk through
+    // changed files then never flashes the plain layout between two diffs.
     let latched = stoat.workspaces[workspace].panes.pane(target).diff_mode;
-    if latched
-        && crate::action_handlers::review::ensure_diff_map(stoat, new_editor_id, buffer_id)
-        && let Some(editor) = stoat.workspaces[workspace].editors.get_mut(new_editor_id)
-    {
-        editor.set_diff_view(true);
+    if latched {
+        if let Some(editor) = stoat.workspaces[workspace].editors.get_mut(new_editor_id) {
+            editor.set_diff_view(outgoing_diff_view);
+        }
+        crate::action_handlers::review::ensure_diff_map(
+            stoat,
+            buffer_id,
+            Some(DiffLanding::LatchedView {
+                editor: new_editor_id,
+            }),
+        );
     }
 
     Some(buffer_id)

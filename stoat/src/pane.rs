@@ -198,6 +198,10 @@ pub struct Pane {
     /// base. A buffer with neither opens plain. Only an explicit `:diff` clears
     /// it.
     ///
+    /// The view follows the buffer's hunks when they land. Until then, the
+    /// buffer keeps the view the pane showed before it, so a walk through
+    /// changed files does not flash the plain layout between two diffs.
+    ///
     /// Per pane rather than per workspace, because the widen it engages is per
     /// pane and a second pane stays independent of this one.
     ///

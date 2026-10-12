@@ -12,6 +12,7 @@ use crate::{
     editor_state::EditorId,
     git_jobs::{self, GitJob, GitLanding, GitWork},
     host::GitRepo,
+    jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
     pane::{FocusTarget, View},
     review::{ReviewFileInput, ReviewHunk},
@@ -22,7 +23,8 @@ use crate::{
     review_session::DiffDocument,
     workspace::{
         diff::{
-            self, compute_base_highlights, BaseHighlightCache, DiffBase, RevOrigin, WorktreeBase,
+            self, compute_base_highlights, BaseHighlightCache, DiffBase, DiffLanding, RevOrigin,
+            WorktreeBase,
         },
         Workspace,
     },
@@ -382,7 +384,8 @@ pub(super) fn reopen_diff_view(stoat: &mut Stoat) {
     toggle_diff_view(stoat);
 }
 
-/// Arm the focused pane's diff latch, and show the diff where the reader stands.
+/// Arm the focused pane's diff latch, and show the diff where the reader stands
+/// once the file's hunks are in.
 ///
 /// Unlike [`toggle_diff_view`], this never crosses into another file or moves
 /// the cursor. A walkthrough stop over a file its commit did not touch must stay
@@ -396,21 +399,19 @@ pub(super) fn latch_diff_view(stoat: &mut Stoat) {
         panes.widen(focus);
     }
 
-    let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
+    let Some((editor, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
-    let has_hunks = ensure_diff_map(stoat, editor_id, buffer_id);
-    if let Some(editor) = super::focused_editor_mut(stoat) {
-        editor.set_diff_view(has_hunks);
-    }
+    ensure_diff_map(stoat, buffer_id, Some(DiffLanding::LatchedView { editor }));
 }
 
 /// Turn the diff view on for the focused editor where it stands.
 ///
-/// Sets the editor's flag, latches the focused pane and widens it, and builds
-/// the diff map the view reads. The cursor stays where it is, and the jump to
-/// the first change is what [`toggle_diff_view`] adds on top of this. A caller
-/// that places the cursor itself calls this rather than the toggle.
+/// Sets the editor's flag, latches the focused pane and widens it, and wants
+/// the hunks the view reads. The view paints at once, and hunks that are not
+/// current land a frame or more later. The cursor stays where it is, and the
+/// jump to the first change is what [`toggle_diff_view`] adds on top of this. A
+/// caller that places the cursor itself calls this rather than the toggle.
 ///
 /// See also:
 /// - [`exit_diff_view`], the exit half, which undoes every piece of this.
@@ -427,8 +428,13 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
     panes.pane_mut(focus).diff_mode = true;
     panes.widen(focus);
 
-    if let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() {
-        ensure_diff_map(stoat, editor_id, buffer_id);
+    // The reader's own open decides the view, so a latched switch that waits
+    // on the same hunks does not turn it off when they land.
+    if let Some((editor, buffer_id)) = stoat.focused_editor_ids() {
+        stoat
+            .active_workspace_mut()
+            .drop_latched_view(buffer_id, editor);
+        ensure_diff_map(stoat, buffer_id, None);
     }
 }
 
@@ -478,12 +484,9 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
 /// no scratch buffer -- the editor stays the real, editable file buffer, so
 /// re-pressing toggles the two columns off again.
 ///
-/// Opening the view lands the cursor on the change nearest the cursor's row,
-/// with a tie going to the change below, and pushes the pre-jump position to
-/// the jumplist, so the usual jump-back returns. A cursor that already sits on
-/// a change stays where it is, with no jump and no scroll. When the focused
-/// buffer has no changes of its own, opening the view instead crosses into the
-/// first changed file and lands on its first hunk. Toggling the view off leaves
+/// Opening the view lands the cursor once the file's hunks are in, which takes
+/// a frame or more when they are not current, so the loop paints the view
+/// first. [`land_toggle_jump`] places the cursor. Toggling the view off leaves
 /// the cursor untouched.
 ///
 /// See also:
@@ -501,7 +504,24 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     }
 
     enter_diff_view(stoat);
+    if let Some((editor, buffer_id)) = stoat.focused_editor_ids() {
+        ensure_diff_map(
+            stoat,
+            buffer_id,
+            Some(DiffLanding::ToggleJump { editor, origin }),
+        );
+    }
+}
 
+/// Land a diff toggle's cursor on the focused buffer's hunks.
+///
+/// The cursor goes to the change nearest its row, with a tie going to the
+/// change below, and `origin` goes to the jumplist, so the usual jump-back
+/// returns. A cursor that already sits on a change stays where it is, with no
+/// jump and no scroll. When the focused buffer has no changes of its own, the
+/// view instead crosses into the first changed file and lands on its first
+/// hunk.
+pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
     // `Some(true)` when the cursor moved onto a change, `Some(false)` when it
     // already sat on one, and `None` when the buffer has no change at all.
     let landing = super::focused_editor_mut(stoat).and_then(|editor| {
@@ -562,51 +582,114 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     }
 }
 
-/// Make sure `editor_id`'s display map holds a current diff map for
-/// `buffer_id`, and report whether it found any change to show.
+/// Make sure `buffer_id`'s diff map holds current hunks, and run `landing`
+/// once it does.
 ///
-/// A change is a hunk or a staged mark. Under the index base a file whose
-/// every change is staged has marks and no hunks, and its left column still
-/// has those marks to show.
+/// A map current at the buffer's version, with its colors or still without
+/// them, answers at once, and the landing runs now. Any other map has its hunks
+/// wanted on the blocking pool, where resolving the base and running the line
+/// pass take 5-50 ms, and the landing waits for them, so the loop paints the
+/// frame meanwhile. A buffer with no file has nothing to wait for, so its
+/// landing runs at once too.
 ///
-/// The editor is named rather than taken as the focused one, because the pane a
-/// navigation targets is not always the focused pane, and an answer from the
-/// wrong editor's map opens the wrong view.
+/// A map left over from before an external git mutation counts as stale. Such
+/// a map describes a base that has since moved, so trusting it opens the view
+/// on hunks measured against a HEAD that no longer exists.
 ///
-/// The background diff job usually has the map ready, since it drives the
-/// gutter marks, so the synchronous install below runs only when the fast path
-/// is empty. A map left over from before an external git mutation counts as
-/// empty. Such a map describes a base that has since moved, so trusting it
-/// opens the view on hunks measured against a HEAD that no longer exists.
-///
-/// Only the hunks are computed here. The left column's colors cost a parse of
-/// the whole base file, which the background pass takes on and lands a settle
-/// later.
-///
-/// `false` is the answer for a clean or untracked file, which is what tells a
-/// latched pane to show it plain.
-pub(crate) fn ensure_diff_map(stoat: &mut Stoat, editor_id: EditorId, buffer_id: BufferId) -> bool {
-    let map_current = stoat.active_workspace().diff_map_current(buffer_id);
-    let has_map = stoat
-        .active_workspace_mut()
-        .editors
-        .get_mut(editor_id)
-        .is_some_and(|editor| editor.display_map.snapshot().diff_map().is_some());
-    if !has_map || !map_current {
-        let git_host = stoat.git_host.clone();
-        let language_registry = stoat.language_registry.clone();
-        let syntax_styles = stoat.syntax_styles.clone();
-        let base_cache = stoat.base_highlights_cache.clone();
-        stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+/// Only the hunks are computed for the wait. The left column's colors cost a
+/// parse of the whole base file, which the background pass takes on and lands a
+/// frame later.
+pub(crate) fn ensure_diff_map(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    landing: Option<DiffLanding>,
+) {
+    let ws = stoat.active_workspace();
+    if ws.diff_map_current(buffer_id) || ws.hunks_installed(buffer_id) {
+        if let Some(landing) = landing {
+            land_diff_want(stoat, buffer_id, landing);
+        }
+        return;
     }
 
-    editor_shows_changes(stoat, editor_id)
+    let executor = stoat.executor.clone();
+    let git_host = stoat.git_host.clone();
+    let syntax_styles = stoat.syntax_styles.clone();
+    let base_cache = stoat.base_highlights_cache.clone();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let unwanted = stoat.active_workspace_mut().want_diff_map(
+        &executor,
+        &git_host,
+        &syntax_styles,
+        &base_cache,
+        &redraw_notify,
+        buffer_id,
+        landing,
+    );
+    if let Some(landing) = unwanted {
+        land_diff_want(stoat, buffer_id, landing);
+    }
+}
+
+/// Install every wanted diff map of the active workspace whose hunks landed,
+/// run the landings that waited for them, and report whether any landed.
+pub(crate) fn pump_diff_wants(stoat: &mut Stoat) -> bool {
+    let language_registry = stoat.language_registry.clone();
+    let landed = stoat
+        .active_workspace_mut()
+        .poll_diff_wants(&language_registry);
+    let any = !landed.is_empty();
+    for (buffer_id, landings) in landed {
+        for landing in landings {
+            land_diff_want(stoat, buffer_id, landing);
+        }
+    }
+    any
+}
+
+/// Run `landing` now that `buffer_id`'s hunks are in.
+///
+/// A landing acts only where the reader still is, since the reader moves on
+/// while the hunks are on the pool. A latched view needs its editor to show
+/// `buffer_id` in a latched split pane, a toggle jump needs its editor
+/// focused, and a change press needs the focused buffer to be `buffer_id`.
+/// Otherwise the landing is dropped.
+fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) {
+    let focused = stoat.focused_editor_ids();
+    match landing {
+        DiffLanding::LatchedView { editor } => {
+            let ws = stoat.active_workspace();
+            let shows = ws
+                .editors
+                .get(editor)
+                .is_some_and(|state| state.buffer_id == buffer_id);
+            let latched = ws.panes.split_panes().any(|(_, pane)| {
+                pane.diff_mode && matches!(pane.view, View::Editor(id) if id == editor)
+            });
+            if !shows || !latched {
+                return;
+            }
+            let has_changes = editor_shows_changes(stoat, editor);
+            if let Some(state) = stoat.active_workspace_mut().editors.get_mut(editor) {
+                state.set_diff_view(has_changes);
+            }
+        },
+        DiffLanding::ToggleJump { editor, origin } => {
+            if focused.is_some_and(|(id, _)| id == editor) {
+                land_toggle_jump(stoat, origin);
+            }
+        },
+        DiffLanding::ChangeWalk { dir, count } => {
+            if focused.is_some_and(|(_, id)| id == buffer_id) {
+                super::movement::goto_change_impl(stoat, dir, count);
+            }
+        },
+        DiffLanding::EdgeChange { last } => {
+            if focused.is_some_and(|(_, id)| id == buffer_id) {
+                super::movement::goto_edge_change(stoat, last);
+            }
+        },
+    }
 }
 
 /// Whether the editor's diff map holds a hunk or a staged mark.
@@ -1498,6 +1581,156 @@ mod tests {
         );
     }
 
+    /// A repo where `a.rs` and `b.rs` differ from HEAD on their second row and
+    /// `clean.rs` matches it, open on `a.rs` with the latch armed and its hunks
+    /// in.
+    fn latched_pair() -> TestHarness {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", "a\nb\n", "a\nc\n"), ("b.rs", "d\ne\n", "d\nf\n")],
+        );
+        // stage_review_scenario refuses a file that matches HEAD.
+        h.fake_fs().insert_file("/repo/clean.rs", b"same\n");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.head_file("clean.rs", "same\n");
+        }
+        h.open_file(Path::new("/repo/a.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        h.settle();
+        h
+    }
+
+    /// Where the diff of the buffer at `path` stands, as `(diff view on the
+    /// focused editor, hunks on the pool, hunks-only map in, whole map
+    /// current, hunk count)`.
+    fn want_state(h: &mut TestHarness, path: &str) -> (bool, bool, bool, bool, usize) {
+        let diff_view = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .diff_view;
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .buffers
+            .id_for_path(Path::new(path))
+            .expect("open buffer");
+        let hunks = ws
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .expect("buffer poisoned")
+            .diff_map
+            .as_ref()
+            .map_or(0, |map| map.hunks_in_range(0..u32::MAX).len());
+        (
+            diff_view,
+            ws.diff_map_pending(id),
+            ws.hunks_installed(id),
+            ws.diff_map_current(id),
+            hunks,
+        )
+    }
+
+    /// The test scheduler runs blocking work inline, so the hop count, not the
+    /// blob reads, is what shows the switch left its diff to the pool.
+    #[test]
+    fn a_latched_switch_keeps_the_panes_view_until_its_hunks_land() {
+        let mut h = latched_pair();
+        let hops = h.blocking_calls();
+
+        h.stoat.open_file(Path::new("/repo/b.rs"));
+        assert_eq!(
+            (want_state(&mut h, "/repo/b.rs"), h.blocking_calls() - hops),
+            ((true, true, false, false, 0), 1),
+            "the switch keeps the diff layout and leaves the hunks to the pool",
+        );
+
+        h.settle();
+        assert_eq!(
+            want_state(&mut h, "/repo/b.rs"),
+            (true, false, true, false, 1),
+            "the hunk lands, and its colors stay owed",
+        );
+    }
+
+    #[test]
+    fn a_latched_switch_to_a_clean_file_goes_plain_when_its_hunks_land() {
+        let mut h = latched_pair();
+
+        h.stoat.open_file(Path::new("/repo/clean.rs"));
+        assert_eq!(
+            want_state(&mut h, "/repo/clean.rs"),
+            (true, true, false, false, 0),
+            "the switch keeps the diff layout while the hunks are on the pool",
+        );
+
+        h.settle();
+        assert_eq!(
+            want_state(&mut h, "/repo/clean.rs"),
+            (false, false, true, false, 0),
+            "a file with no change shows plain once its hunks land",
+        );
+    }
+
+    #[test]
+    fn leaving_the_diff_before_a_switch_lands_keeps_the_view_off() {
+        let mut h = latched_pair();
+
+        h.stoat.open_file(Path::new("/repo/b.rs"));
+        super::exit_diff_view(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            want_state(&mut h, "/repo/b.rs"),
+            (false, false, true, false, 1),
+            "the landing finds the latch gone and leaves the view off",
+        );
+    }
+
+    #[test]
+    fn a_diff_open_after_a_latched_switch_keeps_the_view_on_a_clean_file() {
+        let mut h = latched_pair();
+
+        h.stoat.open_file(Path::new("/repo/clean.rs"));
+        super::enter_diff_view(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            want_state(&mut h, "/repo/clean.rs"),
+            (true, false, true, false, 0),
+            "the open outranks the switch that waited on the same hunks",
+        );
+    }
+
+    #[test]
+    fn a_diff_toggle_jumps_to_the_nearest_change_when_its_hunks_land() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\n", "a\nc\n")]);
+        h.open_file(Path::new("/repo/a.rs"));
+        let jumps = |h: &TestHarness| {
+            let panes = &h.stoat.active_workspace().panes;
+            panes.pane(panes.focus()).jumplist.entries().len()
+        };
+        let jumps_before = jumps(&h);
+
+        h.stoat.toggle_diff_view();
+        assert_eq!(
+            (
+                review_cursor_row(&mut h),
+                want_state(&mut h, "/repo/a.rs").1,
+                jumps(&h),
+            ),
+            (0, true, jumps_before),
+            "the cursor waits for the hunks",
+        );
+
+        h.settle();
+        assert_eq!(
+            (review_cursor_row(&mut h), jumps(&h)),
+            (1, jumps_before + 1),
+            "the cursor lands on the change, and the jump goes on the jumplist",
+        );
+    }
+
     /// Each proposal is one edit, so one undo backs one file out. That is the
     /// fine-grained reject, and it costs no verb of its own.
     #[test]
@@ -2135,6 +2368,7 @@ mod tests {
         h.stoat.active_workspace_mut().invalidate_all_diffs();
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        h.settle();
 
         assert_eq!(
             review_cursor_row(&mut h),

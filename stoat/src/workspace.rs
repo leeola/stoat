@@ -30,8 +30,8 @@ use crate::{
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermLocation, TermSession},
     workspace::diff::{
-        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState, RevOrigin,
-        WorktreeBase,
+        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffLanding, DiffState,
+        RevOrigin, WorktreeBase,
     },
 };
 use codegraph::{CodeGraph, FileId};
@@ -972,9 +972,10 @@ impl Workspace {
     /// content and the current git state.
     ///
     /// False for a buffer edited past its recorded version, one whose map was
-    /// invalidated, and one that never had a map. Callers that need fresh hunks
-    /// on the current turn pair this with [`Self::install_diff_map_now`], since
-    /// the presence of a map alone does not prove it is current.
+    /// invalidated, one that never had a map, and one whose map still waits
+    /// for its colors. Callers that need fresh hunks pair this with
+    /// [`Self::hunks_installed`] and [`Self::want_diff_map`], since the
+    /// presence of a map alone does not prove it is current.
     pub(crate) fn diff_map_current(&self, id: BufferId) -> bool {
         let Some(shared) = self.buffers.get(id) else {
             return false;
@@ -983,25 +984,68 @@ impl Workspace {
         self.diff.current(id, version)
     }
 
-    /// Compute and install `id`'s hunks on the current turn. See
-    /// [`DiffState::install_now`].
-    pub(crate) fn install_diff_map_now(
+    /// Whether `id`'s installed map holds the hunks for the buffer's current
+    /// content, with its colors still owed. See [`DiffState::hunks_installed`].
+    pub(crate) fn hunks_installed(&self, id: BufferId) -> bool {
+        let Some(shared) = self.buffers.get(id) else {
+            return false;
+        };
+        let version = shared.read().expect("buffer poisoned").snapshot.version;
+        self.diff.hunks_installed(id, version)
+    }
+
+    /// Whether `id`'s hunks are on the blocking pool. See
+    /// [`DiffState::want_pending`].
+    #[cfg(test)]
+    pub(crate) fn diff_map_pending(&self, id: BufferId) -> bool {
+        self.diff.want_pending(id)
+    }
+
+    /// Run `landing` once `id`'s hunks land, and answer whether any are on the
+    /// pool. See [`DiffState::add_landing`].
+    pub(crate) fn add_diff_landing(&mut self, id: BufferId, landing: DiffLanding) -> bool {
+        self.diff.add_landing(id, landing)
+    }
+
+    /// Keep a latched switch from setting `editor`'s view when `id`'s hunks
+    /// land. See [`DiffState::drop_latched_view`].
+    pub(crate) fn drop_latched_view(&mut self, id: BufferId, editor: EditorId) {
+        self.diff.drop_latched_view(id, editor);
+    }
+
+    /// Start `id`'s hunks on the blocking pool, with `landing` to run once they
+    /// land. See [`DiffState::want`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn want_diff_map(
         &mut self,
+        executor: &Executor,
         git_host: &Arc<dyn GitHost>,
-        language_registry: &Arc<LanguageRegistry>,
         syntax_styles: &SyntaxStyles,
         base_cache: &BaseHighlightCache,
+        redraw_notify: &Arc<Notify>,
         id: BufferId,
-    ) {
-        self.diff.install_now(
+        landing: Option<DiffLanding>,
+    ) -> Option<DiffLanding> {
+        self.diff.want(
             &self.buffers,
             &self.git_root,
+            executor,
             git_host,
-            language_registry,
             syntax_styles,
             base_cache,
+            redraw_notify,
             id,
-        );
+            landing,
+        )
+    }
+
+    /// Install every wanted map whose hunks landed. See
+    /// [`DiffState::poll_wants`].
+    pub(crate) fn poll_diff_wants(
+        &mut self,
+        language_registry: &LanguageRegistry,
+    ) -> Vec<(BufferId, Vec<DiffLanding>)> {
+        self.diff.poll_wants(&self.buffers, language_registry)
     }
 
     /// Point every buffer's diff at `base`, or back at the working tree's pick

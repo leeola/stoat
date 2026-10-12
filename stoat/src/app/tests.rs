@@ -9519,6 +9519,41 @@ fn diff_from_an_unchanged_file_crosses_into_the_first_changed_file() {
 }
 
 #[test]
+fn a_change_walk_press_before_the_hunks_land_replays_on_them() {
+    let mut h = Stoat::test();
+    h.stage_review_scenario(
+        "/repo",
+        &[
+            ("a.rs", "a\nb\n", "a\nX\n"),
+            ("b.rs", "a\nb\nc\nd\ne\n", "a\nX\nc\nd\nY\n"),
+        ],
+    );
+    h.open_file(Path::new("/repo/a.rs"));
+    h.stoat.toggle_diff_view();
+    h.settle();
+
+    h.stoat.open_file(Path::new("/repo/b.rs"));
+    for _ in 0..2 {
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    }
+    assert_eq!(
+        (
+            focused_cursor_row(&mut h.stoat),
+            h.stoat.pending_changed_file_jump.is_none(),
+        ),
+        (0, true),
+        "the presses wait for the hunks rather than cross out of the file",
+    );
+
+    h.settle();
+    assert_eq!(
+        focused_cursor_row(&mut h.stoat),
+        4,
+        "the presses replay on the hunks and land on the second change",
+    );
+}
+
+#[test]
 fn stoat_review_with_no_changes_stays_on_the_scratch() {
     let mut h = Stoat::test();
     let workdir = PathBuf::from("/repo");

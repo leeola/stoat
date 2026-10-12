@@ -15,7 +15,7 @@ use crate::{
         ResolvedRead, SelectionsCollection, SpanLanding,
     },
     workspace::{
-        diff::{self, DiffBase},
+        diff::{self, DiffBase, DiffLanding},
         Workspace,
     },
 };
@@ -4125,6 +4125,16 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
         return UpdateEffect::Redraw;
     }
 
+    // A press that arrives while the focused buffer's hunks are on the pool
+    // replays on them once they land, rather than walking a map with none.
+    if let Some((_, buffer_id)) = stoat.focused_editor_ids()
+        && stoat
+            .active_workspace_mut()
+            .add_diff_landing(buffer_id, DiffLanding::ChangeWalk { dir, count })
+    {
+        return UpdateEffect::Redraw;
+    }
+
     let count = count as usize;
     let extend = stoat.in_select_mode();
     let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
@@ -4429,7 +4439,18 @@ pub(super) fn goto_last_change(stoat: &mut Stoat) -> UpdateEffect {
 /// This shares only the hunk collection with [`goto_change_impl`], not its
 /// walk. The per-selection stepping, the extend branch, the repeat record and
 /// the cross-file hop all answer questions an end of the list does not ask.
-fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
+///
+/// A press that arrives while the buffer's hunks are on the pool replays on
+/// them once they land.
+pub(crate) fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
+    if let Some((_, buffer_id)) = stoat.focused_editor_ids()
+        && stoat
+            .active_workspace_mut()
+            .add_diff_landing(buffer_id, DiffLanding::EdgeChange { last })
+    {
+        return UpdateEffect::Redraw;
+    }
+
     let diff_walk = walks_diff_view(stoat);
     let target = {
         let Some(editor) = focused_editor_mut(stoat) else {
@@ -4909,20 +4930,26 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         return true;
     }
 
+    // The hop carries the view of the file it left, so a latched switch that
+    // waits on the landed file's hunks does not decide the view.
     if pending.source_diff_view
-        && let Some(editor) = focused_editor_mut(stoat)
+        && let Some((editor_id, buffer_id)) = stoat.focused_editor_ids()
     {
-        editor.set_diff_view(true);
+        let ws = stoat.active_workspace_mut();
+        ws.drop_latched_view(buffer_id, editor_id);
+        if let Some(editor) = ws.editors.get_mut(editor_id) {
+            editor.set_diff_view(true);
+        }
     }
 
     // The in-file walk reads its stops from the diff map, and the fresh editor
-    // has none until the background job settles. Without one here the next
-    // press finds no hunk in the file just landed and crosses out again, which
-    // reads as the hop skipping files. A map that is already current costs
-    // nothing. A stale one computes the single landed file, which is the price
-    // the latched pane already pays per switch.
-    if let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() {
-        super::review::ensure_diff_map(stoat, editor_id, buffer_id);
+    // has none until the background job settles. Without one the next press
+    // finds no hunk in the file just landed and crosses out again, which reads
+    // as the hop skipping files. A map that is already current costs nothing. A
+    // stale one wants the single landed file's hunks on the pool, and a press
+    // that arrives before they land replays on them.
+    if let Some((_, buffer_id)) = stoat.focused_editor_ids() {
+        super::review::ensure_diff_map(stoat, buffer_id, None);
     }
 
     let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
@@ -4943,9 +4970,10 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         // dispatch that skips the Key-event epilogue still lands scrolled. The
         // hop centers its landing the way the in-file walk does, biased toward
         // the file the reader crossed from, and on the whole chunk where the
-        // scan told it which rows the chunk covers. The map installed above is
-        // what puts the removed-line blocks in the display, so the span maps
-        // against real splices rather than against an unspliced buffer.
+        // scan told it which rows the chunk covers. A current map puts the
+        // removed-line blocks in the display, so the span maps against real
+        // splices. A map still on the pool leaves the display unspliced, and
+        // the span maps against the buffer rows alone.
         let down = matches!(pending.dir, ChangeDir::Next);
         let span = stop_display_span(&editor.display_map.snapshot(), &rows);
         view::center_jump_on_span(editor, span, down, center_off);

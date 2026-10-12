@@ -850,17 +850,7 @@ mod tests {
         h.settle();
 
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
-        let git_host = h.stoat.git_host.clone();
-        let language_registry = h.stoat.language_registry.clone();
-        let syntax_styles = h.stoat.syntax_styles.clone();
-        let base_cache = h.stoat.base_highlights_cache.clone();
-        h.stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+        h.settle_diff_map(buffer_id);
         path
     }
 
