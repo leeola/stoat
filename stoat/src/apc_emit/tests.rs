@@ -1792,6 +1792,58 @@ fn a_terminal_pool_fills_its_page_once_its_grid_is_reported() {
     );
 }
 
+/// A terminal page rides a batch of its own behind the frame's shared batch,
+/// so a later page of the pool that supersedes it on a backed-up link drops
+/// nothing else. The shared batch declares the pool and carries no fill.
+#[test]
+fn a_terminal_page_rides_its_own_batch() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 9;
+    let (term_id, index) = terminal_in_focused_pane(&mut h, b"hello");
+    h.stoat
+        .active_workspace_mut()
+        .term_pool_grids
+        .insert(term_id, (6, 30));
+    let _ = h.stoat.render();
+
+    while rx.try_recv().is_ok() {}
+    emit_smooth_scroll(&mut h.stoat);
+    let mut batches = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        batches.push(batch);
+    }
+
+    let page = {
+        let area = Rect::new(0, 0, 30, 6);
+        let mut page = crate::smooth_scroll::page_buffer(area, &h.stoat.theme);
+        let term = &h.stoat.active_workspace().terms[term_id];
+        crate::render::term_pane::render_term_pane(term, &h.stoat.theme, area, true, &mut page);
+        crate::render::serialize_buffer(&page)
+    };
+    let mut page_batch = Vec::new();
+    command::encode_fill_scope(&mut page_batch, index, 0, |out| {
+        out.extend_from_slice(&page)
+    });
+    let shared = batches.first().map(|batch| {
+        let commands = command::decode_stream(batch);
+        (
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::PoolRegion(r) if r.pool == index)),
+            commands.iter().any(|c| matches!(c, Command::Fill(_))),
+        )
+    });
+    assert_eq!(
+        (batches.len(), shared, batches.last() == Some(&page_batch)),
+        (2, Some((true, false)), true),
+        "the shared batch declares the pool with no fill, and the page rides alone after it",
+    );
+}
+
 /// A terminal page draws its pane as the live grid draws it, the cursor cell
 /// and the fade of an unfocused pane included, when the reported grid is the
 /// pane's own cells.

@@ -912,6 +912,37 @@ mod tests {
         );
     }
 
+    /// A terminal page rides a batch of its own, so a later page of its pool
+    /// supersedes that batch alone, and the batch between them keeps its scroll
+    /// and its window frame.
+    #[test]
+    fn a_superseded_terminal_page_drops_only_itself() {
+        let page = |tag: &str| {
+            let mut out = Vec::new();
+            command::encode_fill_scope(&mut out, 3, 0, |out| out.extend_from_slice(tag.as_bytes()));
+            out
+        };
+        let mut between = Vec::new();
+        command::encode_scroll_into(
+            &mut between,
+            &command::ScrollCommand {
+                pool: 1,
+                page: 2,
+                fraction: 0,
+            },
+        );
+        command::encode_window_focus_into(&mut between, &command::WindowFocusCommand { window: 2 });
+
+        let mut queued = vec![page("stale"), between.clone(), page("current")];
+        supersede_stale_fills(&mut queued);
+
+        assert_eq!(
+            queued,
+            vec![between, page("current")],
+            "only the earlier page goes, and the batch between keeps its frames",
+        );
+    }
+
     /// An idle slot with nothing armed, plus the raw and winsize closures a
     /// non-passthrough run never reaches.
     fn idle_input(
