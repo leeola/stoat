@@ -83,6 +83,39 @@ pub struct FillCommand {
     pub index: u64,
 }
 
+/// Name the rows of a buffered page that a [`Command::FillRows`] patch
+/// repaints.
+///
+/// The open half of a `fill_rows`/`fill_end` pair. The VT bytes that follow
+/// paint rows [`Self::first_row`] through `first_row + rows - 1` of page
+/// [`Self::index`] of pool [`Self::pool`], and the page keeps its other rows.
+/// A change that touched a few rows then costs those rows rather than a page.
+/// The rows are whole, so a patch sets every cell it covers and needs no
+/// memory of the page beyond its grid.
+///
+/// [`Self::grid_rows`] and [`Self::grid_cols`] name the grid the rows were
+/// rendered at. A terminal that holds the pool's pages at another grid drops
+/// the patch, since its rows would land on cells of another size.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FillRowsCommand {
+    pub pool: u32,
+    pub index: u64,
+    pub first_row: u16,
+    pub rows: u16,
+    pub grid_rows: u16,
+    pub grid_cols: u16,
+}
+
+/// The page a fill batch paints, and whether it paints the page whole.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FillBatchKey {
+    pub pool: u32,
+    pub index: u64,
+    /// True for a `fill`, which sets every row of the page. False for a
+    /// `fill_rows` patch, which sets some rows and keeps the rest.
+    pub whole: bool,
+}
+
 /// A smooth-scroll target as a document-page offset.
 ///
 /// Names where the program wants pool [`Self::pool`]'s viewport: `page` is the
@@ -259,6 +292,39 @@ pub fn encode_fill_decorations_into(out: &mut Vec<u8>, pool: u32, index: u64) {
     frame::end(out);
 }
 
+/// Append a `Gstoatty;fill_rows` open-marker frame for `command` to `out`.
+///
+/// The head is the pool, the page index, the first row, the row count, and the
+/// grid's rows and columns, in that order and big-endian.
+pub fn encode_fill_rows_into(out: &mut Vec<u8>, command: &FillRowsCommand) {
+    frame::begin(out, "fill_rows");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.pool.to_be_bytes())?;
+        w.write_all(&command.index.to_be_bytes())?;
+        w.write_all(&command.first_row.to_be_bytes())?;
+        w.write_all(&command.rows.to_be_bytes())?;
+        w.write_all(&command.grid_rows.to_be_bytes())?;
+        w.write_all(&command.grid_cols.to_be_bytes())
+    });
+    frame::end(out);
+}
+
+/// Append a whole row patch batch for `command` to `out`, being the open
+/// marker, whatever `rows` writes, then the close marker.
+///
+/// `rows` writes the VT bytes of the patched rows. The close marker is the one
+/// a fill takes, and the scope keeps it from being left out for the reason
+/// [`encode_fill_scope`] gives.
+pub fn encode_fill_rows_scope(
+    out: &mut Vec<u8>,
+    command: &FillRowsCommand,
+    rows: impl FnOnce(&mut Vec<u8>),
+) {
+    encode_fill_rows_into(out, command);
+    rows(out);
+    encode_fill_end_into(out);
+}
+
 /// Append a whole decorations-only batch for page `index` of pool `pool` to
 /// `out`, being the open marker, whatever `decorations` writes, then the close
 /// marker.
@@ -277,26 +343,36 @@ pub fn encode_fill_decorations_scope(
     encode_fill_end_into(out);
 }
 
-/// The `(pool, index)` a batch of bytes fills, or `None` when it is not a fill.
+/// The page a batch of bytes fills or patches, or `None` when it does neither.
 ///
 /// A fill batch is self-contained, holding the open marker, the page's VT
 /// bytes, and the close marker. Only the marker names the page, so this decodes
 /// the first frame and stops, never walking the page content behind it.
 ///
 /// The point of naming it is that pool slots are last-writer-wins and no other
-/// command reads a page's content, so a queued fill for a key that appears
-/// again later is work nobody will ever see. A sender with a backlog can drop
-/// the earlier one. `None` covers everything that has no such guarantee, from
-/// a different command to bytes that do not open with a frame at all.
+/// command reads a page's content. A later whole fill of a page therefore makes
+/// every earlier fill and patch of that page work nobody will ever see, and a
+/// sender with a backlog can drop them. A patch sets only its rows, so it makes
+/// nothing dead. `None` covers everything that has no such guarantee, from a
+/// different command to bytes that do not open with a frame at all.
 ///
 /// A decorations-only batch is never keyed. It changes only the runs on top of
 /// cells an earlier fill painted, so no sender drops it, and none drops a whole
 /// fill on its account.
-pub fn fill_batch_key(batch: &[u8]) -> Option<(u32, u64)> {
+pub fn fill_batch_key(batch: &[u8]) -> Option<FillBatchKey> {
     let end = frame::first_frame_end(batch)?;
     let frame = frame::decode(&batch[..end])?;
     match frame.sub.as_str() {
-        "fill" => decode_fill(&frame.args).map(|fill| (fill.pool, fill.index)),
+        "fill" => decode_fill(&frame.args).map(|fill| FillBatchKey {
+            pool: fill.pool,
+            index: fill.index,
+            whole: true,
+        }),
+        "fill_rows" => decode_fill_rows(&frame.args).map(|patch| FillBatchKey {
+            pool: patch.pool,
+            index: patch.index,
+            whole: false,
+        }),
         _ => None,
     }
 }
@@ -465,6 +541,21 @@ pub(super) fn decode_fill(args: &[Vec<u8>]) -> Option<FillCommand> {
         index: u64::from_be_bytes([
             arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
         ]),
+    })
+}
+
+pub(super) fn decode_fill_rows(args: &[Vec<u8>]) -> Option<FillRowsCommand> {
+    let arg: &[u8; 20] = args.first()?.get(..20)?.try_into().ok()?;
+
+    Some(FillRowsCommand {
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        index: u64::from_be_bytes([
+            arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
+        ]),
+        first_row: u16::from_be_bytes([arg[12], arg[13]]),
+        rows: u16::from_be_bytes([arg[14], arg[15]]),
+        grid_rows: u16::from_be_bytes([arg[16], arg[17]]),
+        grid_cols: u16::from_be_bytes([arg[18], arg[19]]),
     })
 }
 
@@ -673,7 +764,14 @@ mod tests {
         fill.extend_from_slice(b"\x1b[1;1Hpainted rows\x1b[0m");
         encode_fill_end_into(&mut fill);
 
-        assert_eq!(fill_batch_key(&fill), Some((3, 41)));
+        assert_eq!(
+            fill_batch_key(&fill),
+            Some(FillBatchKey {
+                pool: 3,
+                index: 41,
+                whole: true
+            })
+        );
         assert_eq!(
             fill_batch_key(&encode_fill_end()),
             None,
@@ -712,6 +810,31 @@ mod tests {
         });
 
         assert_eq!(fill_batch_key(&batch), None);
+    }
+
+    /// A row patch is keyed by its page, and as a patch, so a sender drops it
+    /// behind a later whole fill of the page and drops nothing on its account.
+    #[test]
+    fn a_row_patch_is_keyed_as_a_patch_of_its_page() {
+        let mut batch = Vec::new();
+        let patch = FillRowsCommand {
+            pool: 3,
+            index: 41,
+            first_row: 2,
+            rows: 1,
+            grid_rows: 6,
+            grid_cols: 30,
+        };
+        encode_fill_rows_scope(&mut batch, &patch, |out| out.extend_from_slice(b"row"));
+
+        assert_eq!(
+            fill_batch_key(&batch),
+            Some(FillBatchKey {
+                pool: 3,
+                index: 41,
+                whole: false
+            })
+        );
     }
 
     #[test]

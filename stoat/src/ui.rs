@@ -788,29 +788,34 @@ fn drain_apc(first: Option<Vec<u8>>, apc_rx: &mut UnboundedReceiver<Vec<u8>>) ->
     stdout.flush()
 }
 
-/// Drop each queued pool fill that a later one for the same page replaces,
-/// leaving everything else where it was.
+/// Drop each queued pool fill or row patch that a later whole fill of the same
+/// page replaces, leaving everything else where it was.
 ///
-/// A pool slot is last-writer-wins and no queued command reads a page's
-/// content, so an earlier fill for a page written again later is work nobody
-/// will ever see. On a link slower than the emit rate a hard scroll queues
-/// megabytes of them, and without this the user watches seconds-old pages
-/// replay in order before the current one arrives.
+/// A whole fill sets every row of its page's slot, and no queued command reads
+/// a page's content, so an earlier fill or patch of a page that a whole fill
+/// paints again later is work nobody will ever see. On a link slower than the
+/// emit rate a hard scroll queues megabytes of them, and without this the user
+/// watches seconds-old pages replay in order before the current one arrives.
 ///
-/// Only fills are touched. Anything else is content this cannot reason about,
-/// so it keeps its place and its bytes. Walking backward is what makes the
-/// survivor the last of each page rather than the first.
+/// A patch sets only its rows and keeps the rest, so it replaces nothing. The
+/// fills and patches before it still paint the rows it leaves alone.
+///
+/// Only fills and patches are touched. Anything else is content this cannot
+/// reason about, so it keeps its place and its bytes. Walking backward is what
+/// makes the survivor the last whole fill of each page rather than the first.
 fn supersede_stale_fills(queued: &mut Vec<Vec<u8>>) {
-    let mut seen: Vec<(u32, u64)> = Vec::new();
+    let mut filled: Vec<(u32, u64)> = Vec::new();
     let mut superseded = vec![false; queued.len()];
 
     for (at, batch) in queued.iter().enumerate().rev() {
         let Some(key) = command::fill_batch_key(batch) else {
             continue;
         };
-        match seen.contains(&key) {
-            true => superseded[at] = true,
-            false => seen.push(key),
+        let page = (key.pool, key.index);
+        if filled.contains(&page) {
+            superseded[at] = true;
+        } else if key.whole {
+            filled.push(page);
         }
     }
 
@@ -941,6 +946,75 @@ mod tests {
             vec![between, page("current")],
             "only the earlier page goes, and the batch between keeps its frames",
         );
+    }
+
+    /// A row patch of a page that a later whole fill paints again goes, since
+    /// the fill sets every row the patch set.
+    #[test]
+    fn a_whole_fill_drops_earlier_patches_of_its_page() {
+        let mut queued = vec![row_patch(3, 0, "rows"), page_fill(3, 0, "page")];
+        supersede_stale_fills(&mut queued);
+
+        assert_eq!(
+            queued,
+            vec![page_fill(3, 0, "page")],
+            "the fill outlives the patch"
+        );
+    }
+
+    /// A patch keeps the rows it does not set, so the fill before it still
+    /// paints them and stays.
+    #[test]
+    fn a_patch_drops_no_fill() {
+        let mut queued = vec![page_fill(3, 0, "page"), row_patch(3, 0, "rows")];
+        supersede_stale_fills(&mut queued);
+
+        assert_eq!(
+            queued,
+            vec![page_fill(3, 0, "page"), row_patch(3, 0, "rows")],
+            "the fill and the patch both stay",
+        );
+    }
+
+    /// Two patches may set different rows, so neither replaces the other.
+    #[test]
+    fn two_patches_of_one_page_both_stay() {
+        let mut queued = vec![row_patch(3, 0, "first"), row_patch(3, 0, "second")];
+        supersede_stale_fills(&mut queued);
+
+        assert_eq!(
+            queued,
+            vec![row_patch(3, 0, "first"), row_patch(3, 0, "second")],
+            "both patches stay, in order",
+        );
+    }
+
+    /// A whole fill batch for page `index` of pool `pool`, with `tag` as its
+    /// page bytes.
+    fn page_fill(pool: u32, index: u64, tag: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        command::encode_fill_scope(&mut out, pool, index, |out| {
+            out.extend_from_slice(tag.as_bytes())
+        });
+        out
+    }
+
+    /// A one-row patch batch of page `index` of pool `pool`, with `tag` as its
+    /// row bytes.
+    fn row_patch(pool: u32, index: u64, tag: &str) -> Vec<u8> {
+        let patch = command::FillRowsCommand {
+            pool,
+            index,
+            first_row: 0,
+            rows: 1,
+            grid_rows: 6,
+            grid_cols: 30,
+        };
+        let mut out = Vec::new();
+        command::encode_fill_rows_scope(&mut out, &patch, |out| {
+            out.extend_from_slice(tag.as_bytes())
+        });
+        out
     }
 
     /// An idle slot with nothing armed, plus the raw and winsize closures a

@@ -50,7 +50,7 @@ cap. An encoder whose argument could grow past it either paginates
 string and draws nothing. Every command in the table below is safe to emit
 blind.
 
-**Streamed content does not degrade.** Three commands carry their payload
+**Streamed content does not degrade.** These commands carry their payload
 *outside* the frame wrapper, as ordinary bytes between an open marker and a
 close marker:
 
@@ -59,6 +59,7 @@ close marker:
 | `popover` | `popover_end` | The popover's text |
 | `text_run` | `text_run_end` | The run's characters |
 | `fill` | `fill_end` | A page of VT cells |
+| `fill_rows` | `fill_end` | Whole rows of a buffered page |
 
 That is what frees them from the 64 KiB cap, and it is also what makes them
 dangerous: a terminal that never opened the capture prints those bytes over
@@ -67,8 +68,8 @@ them.**
 
 Captured text for `popover` and `text_run` must be plain text. The terminal cuts
 the capture at the first `ESC`, so set colors through the head fields rather
-than with escape sequences in the text. `fill` content is full VT by design,
-since it paints a page.
+than with escape sequences in the text. `fill` and `fill_rows` content is full
+VT by design, since it paints page cells.
 
 ## Finding out which terminal answered
 
@@ -144,6 +145,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `minimap` | D | 29 B + palette arg | Strip declaration; its content store is persistent |
 | `scroll_region` | D | 10 B | Eased by the change between declarations |
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
+| `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
 | `pool_region` | P | 16 B, 17 B with kind | Declares a smooth-scroll pool |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
@@ -169,6 +171,14 @@ byte of 1. The terminal composites that pool every frame at the terminal font
 size and reports the cell grid it holds as a `pool_sized` line on the window
 socket. A grid pool omits the byte, so its frame stays the 16-byte head an
 older terminal reads.
+
+From protocol version 10, a `fill_rows` scope repaints whole rows of a
+buffered page and keeps its other rows. Its head names the pool, the page, the
+first row, the row count, and the grid the rows were rendered at. A terminal
+that holds the pool's pages at another grid drops the patch. Below version 10,
+the terminal captures a patch and drops it, so send such a terminal whole
+fills. A sender's backlog drops a fill or a patch of a page behind a later
+whole fill of that page, and drops nothing behind a patch.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

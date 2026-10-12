@@ -1266,6 +1266,7 @@ impl Terminal {
                 matches!(
                     command,
                     Some(Command::Fill(_))
+                        | Some(Command::FillRows(_))
                         | Some(Command::FillDecorations(_))
                         | Some(Command::Popover(_))
                         | Some(Command::TextRun(_))
@@ -1321,6 +1322,7 @@ impl Terminal {
                 let routed = matches!(
                     command,
                     Command::Fill(_)
+                        | Command::FillRows(_)
                         | Command::FillDecorations(_)
                         | Command::FillEnd
                         | Command::Reset
@@ -1709,6 +1711,14 @@ impl Terminal {
                 self.mark_window_dirty(window);
             },
             Command::Fill(fill) => self.begin_fill(fill.pool, fill.index, true),
+            // A row patch is not painted. The capture holds its rows off the live
+            // screen, and the discard drops them at its close marker.
+            Command::FillRows(patch) => {
+                self.begin_fill(patch.pool, patch.index, true);
+                if let Some(fill) = &mut self.fill {
+                    fill.discard = true;
+                }
+            },
             Command::FillDecorations(fill) => self.begin_fill(fill.pool, fill.index, false),
             Command::FillEnd => self.commit_fill(),
             Command::Scroll(scroll) => {
@@ -2139,6 +2149,7 @@ impl Terminal {
             // the stream and pool controls, and the immediate minimap content,
             // view, and drop commands.
             Command::Fill(_)
+            | Command::FillRows(_)
             | Command::FillDecorations(_)
             | Command::FillEnd
             | Command::PopoverEnd

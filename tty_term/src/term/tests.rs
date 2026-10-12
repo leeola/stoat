@@ -19,20 +19,20 @@ use alacritty_terminal::{
 };
 use stoatty_protocol::command::{
     encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_decorations_scope,
-    encode_fill_end, encode_font_step, encode_hello, encode_icon, encode_ident_reply,
-    encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
-    encode_minimap_view, encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor,
-    encode_pool_cursor_release, encode_pool_drop, encode_pool_region, encode_popover,
-    encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-    encode_sketch, encode_text_run, encode_window_open, encode_zoom_capture, BarCommand,
-    BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
-    IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
-    MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-    PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
-    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand, PopoverCommand,
-    RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, SketchBounds,
-    SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
-    TextRunCommand, WindowOpenCommand,
+    encode_fill_end, encode_fill_rows_scope, encode_font_step, encode_hello, encode_icon,
+    encode_ident_reply, encode_line_layout, encode_minimap, encode_minimap_drop,
+    encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline, encode_pool_anchor,
+    encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop, encode_pool_region,
+    encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
+    encode_scroll_region, encode_sketch, encode_text_run, encode_window_open, encode_zoom_capture,
+    BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand,
+    HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand,
+    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
+    MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand,
+    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
+    PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
+    SketchStyle, SketchTiming, TextRunCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -3348,6 +3348,44 @@ fn fill_paints_page_and_spares_live_grid() {
         grid.get(0, 0).ch,
         ' ',
         "page content never reaches the live grid"
+    );
+}
+
+/// A row patch paints neither its page nor the live screen. The capture holds
+/// its rows off the screen, the page keeps what its last whole fill painted,
+/// and the output after the patch's close marker paints the screen. The patch
+/// arrives in a read of its own, which no fill marker routes.
+#[test]
+fn a_row_patch_paints_neither_its_page_nor_the_live_grid() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    let mut grid = Grid::new(2, 4);
+    declare_pool(&mut terminal, 0, 2, 4);
+
+    let mut fill = encode_fill(&FillCommand { pool: 0, index: 0 });
+    fill.extend_from_slice(b"hi");
+    fill.extend_from_slice(&encode_fill_end());
+    terminal.advance(&fill);
+
+    let patch = FillRowsCommand {
+        pool: 0,
+        index: 0,
+        first_row: 0,
+        rows: 1,
+        grid_rows: 2,
+        grid_cols: 4,
+    };
+    let mut stream = Vec::new();
+    encode_fill_rows_scope(&mut stream, &patch, |out| out.extend_from_slice(b"no"));
+    stream.extend_from_slice(b"ok");
+    terminal.advance(&stream);
+
+    let page = pool_page(&terminal, 0, 0);
+    let page_text = (page.get(0, 0).ch, page.get(0, 1).ch);
+    terminal.project(&mut grid);
+    assert_eq!(
+        (page_text, (grid.get(0, 0).ch, grid.get(0, 1).ch)),
+        (('h', 'i'), ('o', 'k')),
+        "the page keeps its fill, and only the output after the patch paints the screen",
     );
 }
 

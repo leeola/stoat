@@ -32,8 +32,9 @@ use minimap::{
 use panel::decode_panel;
 use polyline::decode_polyline;
 use pool::{
-    decode_fill, decode_pool_anchor, decode_pool_cursor, decode_pool_cursor_release,
-    decode_pool_drop, decode_pool_region, decode_reposition, decode_scroll,
+    decode_fill, decode_fill_rows, decode_pool_anchor, decode_pool_cursor,
+    decode_pool_cursor_release, decode_pool_drop, decode_pool_region, decode_reposition,
+    decode_scroll,
 };
 use popover::decode_popover;
 use scale::decode_scale;
@@ -73,13 +74,14 @@ pub use panel::{encode_panel, encode_panel_into, PanelCommand, PanelShadow};
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
 pub use pool::{
     encode_fill, encode_fill_decorations_into, encode_fill_decorations_scope, encode_fill_end,
-    encode_fill_end_into, encode_fill_into, encode_fill_scope, encode_pool_anchor,
-    encode_pool_anchor_into, encode_pool_cursor, encode_pool_cursor_into,
-    encode_pool_cursor_release, encode_pool_cursor_release_into, encode_pool_drop,
-    encode_pool_drop_into, encode_pool_region, encode_pool_region_into, encode_reposition,
-    encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key, FillCommand,
-    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
-    PoolRegionCommand, RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
+    encode_fill_end_into, encode_fill_into, encode_fill_rows_into, encode_fill_rows_scope,
+    encode_fill_scope, encode_pool_anchor, encode_pool_anchor_into, encode_pool_cursor,
+    encode_pool_cursor_into, encode_pool_cursor_release, encode_pool_cursor_release_into,
+    encode_pool_drop, encode_pool_drop_into, encode_pool_region, encode_pool_region_into,
+    encode_reposition, encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key,
+    FillBatchKey, FillCommand, FillRowsCommand, PoolAnchorCommand, PoolCursorCommand,
+    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand, RepositionCommand,
+    ScrollCommand, NON_PANE_POOL_BASE,
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,
@@ -151,6 +153,12 @@ pub enum Command {
     /// [`FillCommand::index`] instead of the live grid, until [`Command::FillEnd`]
     /// (or the next `fill`/`reset`) commits the slot and restores the live grid.
     Fill(FillCommand),
+    /// Open a page redirect that repaints some rows of a buffered page.
+    ///
+    /// The streamed bytes that follow paint the rows [`FillRowsCommand`] names,
+    /// and the page keeps its other rows. [`Command::FillEnd`] closes it the way
+    /// it closes a fill.
+    FillRows(FillRowsCommand),
     /// Open a page redirect that replaces only the decorations of a buffered
     /// page.
     ///
@@ -403,6 +411,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Sketch(c) => encode_sketch_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
         Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
+        Command::FillRows(c) => encode_fill_rows_into(out, c),
         Command::FillDecorations(c) => encode_fill_decorations_into(out, c.pool, c.index),
         Command::FillEnd => encode_fill_end_into(out),
         Command::Scroll(c) => encode_scroll_into(out, c),
@@ -456,6 +465,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         },
         "line_layout" => decode_line_layout(args).map(Command::LineLayout),
         "fill" => decode_fill(args).map(Command::Fill),
+        "fill_rows" => decode_fill_rows(args).map(Command::FillRows),
         "fill_decorations" => decode_fill(args).map(Command::FillDecorations),
         "fill_end" => Some(Command::FillEnd),
         "scroll" => decode_scroll(args).map(Command::Scroll),
@@ -577,6 +587,21 @@ mod tests {
                 }),
             ),
             ("fill", encode_fill(&FillCommand { pool: 1, index: 2 })),
+            ("fill_rows", {
+                let mut out = Vec::new();
+                encode_fill_rows_into(
+                    &mut out,
+                    &FillRowsCommand {
+                        pool: 1,
+                        index: 2,
+                        first_row: 3,
+                        rows: 4,
+                        grid_rows: 5,
+                        grid_cols: 6,
+                    },
+                );
+                out
+            }),
             (
                 "scroll",
                 encode_scroll(&ScrollCommand {
@@ -840,6 +865,29 @@ mod tests {
         assert_eq!(
             decode_stream(&bytes),
             vec![Command::Fill(fill), Command::FillEnd, Command::Reset]
+        );
+    }
+
+    /// A row patch reads back as its command and the close marker, with the VT
+    /// bytes of its rows stepped over.
+    #[test]
+    fn a_row_patch_round_trips_through_decode_stream() {
+        let patch = FillRowsCommand {
+            pool: 2,
+            index: 7,
+            first_row: 3,
+            rows: 2,
+            grid_rows: 24,
+            grid_cols: 80,
+        };
+        let mut bytes = Vec::new();
+        encode_fill_rows_scope(&mut bytes, &patch, |out| {
+            out.extend_from_slice(b"\x1b[4;1Hrow\x1b[0m")
+        });
+
+        assert_eq!(
+            decode_stream(&bytes),
+            vec![Command::FillRows(patch), Command::FillEnd]
         );
     }
 
