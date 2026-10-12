@@ -705,6 +705,7 @@ mod tests {
             true,
             None,
             None,
+            None,
             0,
             0,
         );

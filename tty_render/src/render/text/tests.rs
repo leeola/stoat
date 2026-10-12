@@ -1499,6 +1499,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         [0.0; 2],
         true,
         None,
+        None,
         0,
         0,
     );
@@ -1522,6 +1523,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         0.0,
         [0.0; 2],
         false,
+        None,
         None,
         0,
         0,
@@ -1570,6 +1572,7 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
         0.0,
         [0.0; 2],
         true,
+        None,
         None,
         0,
         0,
@@ -2942,6 +2945,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         [0.0; 2],
         true,
         None,
+        None,
         0,
         0,
     );
@@ -2960,6 +2964,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         [0.0; 2],
         true,
         Some(1),
+        None,
         0,
         0,
     );
@@ -2977,6 +2982,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         0.0,
         [0.0; 2],
         true,
+        None,
         None,
         0,
         0,
@@ -2996,6 +3002,117 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
             "every carried glyph lands on the cell a rebuild would put it on",
         );
     }
+}
+
+/// A composite that names its one changed row holds what a composite built
+/// whole from that change holds, glyphs and underlines alike.
+///
+/// The patch reshapes the named row alone and keeps the rest, so a kept row
+/// that lost its glyphs or underline, or a named row left stale, shows in the
+/// comparison. A row that changed without a name keeps what the pool built
+/// before, which is what shows the patch rebuilt one row.
+#[test]
+fn a_partial_composite_matches_a_full_rebuild() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let mut grid = Grid::new(3, 20);
+    fill_row(&mut grid, 0, "alpha");
+    fill_row(&mut grid, 1, "bravo");
+    fill_row(&mut grid, 2, "charlie");
+    grid.get_mut(2, 1).underline = UnderlineStyle::Straight;
+    let mut composite = |pool: u32, grid: &Grid, changed_rows: Option<&[usize]>| {
+        pass.prepare_composite(
+            &device,
+            &queue,
+            grid,
+            pass.face.metrics,
+            PoolOccluders::new(&[], 0, true),
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            true,
+            None,
+            changed_rows,
+            pool,
+            0,
+        );
+        let glyphs = pass.composite_instances(pool);
+        let underlines = pass.composite_underlines(pool);
+        (
+            bytemuck::cast_slice::<TextInstance, u8>(&glyphs).to_vec(),
+            bytemuck::cast_slice::<UnderlineInstance, u8>(&underlines).to_vec(),
+        )
+    };
+    composite(0, &grid, None);
+
+    fill_row(&mut grid, 1, "delta");
+    grid.get_mut(1, 0).underline = UnderlineStyle::Straight;
+    let whole = composite(1, &grid, None);
+    fill_row(&mut grid, 2, "foxtrot");
+    let patched = composite(0, &grid, Some(&[1]));
+
+    assert!(
+        !whole.0.is_empty() && !whole.1.is_empty(),
+        "the fixture has to build glyphs and underlines"
+    );
+    assert_eq!(
+        patched, whole,
+        "the patched pool holds the glyphs and underlines a whole build holds",
+    );
+}
+
+/// A patch after a slide keeps the rotation the slide left, so every row it
+/// does not name stays in the slot the slide put it in.
+///
+/// The slide leaves the pool rotated, and instances name the slot they sit
+/// in, so the glyphs are compared by the cell each lands on and the glyph it
+/// is.
+#[test]
+fn a_partial_composite_after_a_slide_matches_a_full_rebuild() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let rows_of = |lines: [&str; 3]| {
+        let mut grid = Grid::new(3, 20);
+        for (row, line) in lines.into_iter().enumerate() {
+            fill_row(&mut grid, row, line);
+        }
+        grid
+    };
+    let mut composite = |pool: u32, grid: &Grid, scrolled, changed_rows: Option<&[usize]>| {
+        pass.prepare_composite(
+            &device,
+            &queue,
+            grid,
+            pass.face.metrics,
+            PoolOccluders::new(&[], 0, true),
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            true,
+            scrolled,
+            changed_rows,
+            pool,
+            0,
+        );
+        pass.composite_glyphs(pool)
+            .iter()
+            .map(|glyph| (glyph.row, glyph.col, glyph.source))
+            .collect::<Vec<_>>()
+    };
+    composite(0, &rows_of(["alpha", "bravo", "charlie"]), None, None);
+    composite(
+        0,
+        &rows_of(["bravo", "charlie", "delta"]),
+        Some(1),
+        Some(&[]),
+    );
+
+    let patched = composite(0, &rows_of(["echo", "charlie", "delta"]), None, Some(&[0]));
+    let whole = composite(1, &rows_of(["echo", "charlie", "delta"]), None, None);
+
+    assert!(!whole.is_empty(), "the fixture has to shape something");
+    assert_eq!(
+        patched, whole,
+        "the patched pool lands every glyph on the cell a whole build puts it on",
+    );
 }
 
 /// A pool that moved rebuilds, even though its rows say nothing changed.
@@ -3037,6 +3154,7 @@ fn a_moved_composite_rebuilds_against_its_new_origin() {
             0.0,
             origin,
             content_changed,
+            None,
             None,
             0,
             0,
@@ -3104,6 +3222,7 @@ fn a_sub_cell_drift_leaves_the_instances_a_rebuild_would_hold() {
             [2.0, 4.0],
             content_changed,
             None,
+            None,
             0,
             0,
         );
@@ -3164,6 +3283,7 @@ fn a_composite_whose_runs_held_builds_none_of_them_again() {
             [0.0; 2],
             true,
             scrolled,
+            None,
             0,
             0,
         );
@@ -3238,6 +3358,7 @@ fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
             [0.0; 2],
             true,
             None,
+            None,
             0,
             0,
         );
@@ -3301,6 +3422,7 @@ fn a_reusing_composite_still_writes_its_own_globals() {
             origin,
             changed,
             None,
+            None,
             pool,
             0,
         );
@@ -3340,6 +3462,7 @@ fn composite_at(
         0.0,
         [0.0; 2],
         content_changed,
+        None,
         None,
         pool,
         0,
@@ -3466,6 +3589,7 @@ fn composite_globals_name_the_atlas_the_pack_grew_to() {
         0.0,
         [0.0; 2],
         true,
+        None,
         None,
         0,
         0,

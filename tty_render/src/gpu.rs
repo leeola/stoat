@@ -562,6 +562,7 @@ impl Renderer {
                 pool.origin_cells,
                 pool.content_changed,
                 pool.scrolled_rows,
+                pool.changed_rows,
                 pool.occludable,
                 pool.skip_clear,
                 pool.id,
@@ -963,6 +964,7 @@ impl Renderer {
             origin_cells,
             content_changed,
             scrolled_rows,
+            None,
             occludable,
             false,
             pool,
@@ -1008,6 +1010,9 @@ impl Renderer {
     /// [`Self::pool_metrics`]. `origin_cells` stays a cell of the live grid, and
     /// is restated in the pool's own cells for the passes.
     ///
+    /// `changed_rows` names the rows that differ once `scrolled_rows` slid the
+    /// pool's last composite, as [`PoolComposite::changed_rows`] describes.
+    ///
     /// `skip_clear` leaves the pool's cells of the frame's clear color undrawn,
     /// as [`PoolComposite::skip_clear`] describes.
     #[allow(clippy::too_many_arguments)]
@@ -1023,6 +1028,7 @@ impl Renderer {
         origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
+        changed_rows: Option<&[usize]>,
         occludable: bool,
         skip_clear: bool,
         pool: u32,
@@ -1053,6 +1059,7 @@ impl Renderer {
             origin_cells,
             content_changed,
             scrolled_rows,
+            changed_rows,
             skip_clear.then_some(self.clear_rgb),
             pool,
             slot,
@@ -1068,6 +1075,7 @@ impl Renderer {
             origin_cells,
             content_changed,
             scrolled_rows,
+            changed_rows,
             pool,
             slot,
         );
@@ -1362,6 +1370,14 @@ pub struct PoolComposite<'a> {
     /// pool covers live content, and the live cells along its edge and beside
     /// panels still draw, so it paints every cell.
     pub skip_clear: bool,
+    /// The rows of [`Self::grid`] that differ from the previous frame's
+    /// composite once [`Self::scrolled_rows`] slid it, ascending.
+    ///
+    /// Lets the composite rebuild those rows and the rows a slide exposed, and
+    /// keep every other row it built. `None` means every row whenever
+    /// [`Self::content_changed`] holds, which is what a pool that tracks no
+    /// rows reports.
+    pub changed_rows: Option<&'a [usize]>,
 }
 
 /// Clamp `scissor` (`[x, y, width, height]` in physical pixels) to a
@@ -2276,6 +2292,7 @@ impl GpuContext {
                 pool.origin_cells,
                 pool.content_changed,
                 pool.scrolled_rows,
+                pool.changed_rows,
                 pool.occludable,
                 pool.skip_clear,
                 pool.id,
@@ -2560,6 +2577,7 @@ mod tests {
                 scrolled_rows: None,
                 occludable: true,
                 skip_clear: false,
+                changed_rows: None,
             },
             PoolComposite {
                 id: 4,
@@ -2572,6 +2590,7 @@ mod tests {
                 scrolled_rows: None,
                 occludable: true,
                 skip_clear: false,
+                changed_rows: None,
             },
         ];
 
@@ -2589,6 +2608,7 @@ mod tests {
                 pool.origin_cells,
                 pool.content_changed,
                 pool.scrolled_rows,
+                pool.changed_rows,
                 pool.occludable,
                 pool.skip_clear,
                 pool.id,
@@ -2736,6 +2756,7 @@ mod tests {
             0.0,
             [0.0; 2],
             true,
+            None,
             None,
             true,
             false,
@@ -2895,6 +2916,47 @@ mod tests {
         );
     }
 
+    /// A pool that names its changed rows rebuilds those rows alone, so a row
+    /// that changed without a name still draws its earlier color and glyph.
+    #[test]
+    fn a_pool_composite_rebuilds_only_the_rows_it_names() {
+        let (device, queue) = require_headless_device();
+        let clear = Rgb::new(0, 0, 90);
+        let (target, mut renderer) = readback_renderer(&device, clear);
+        let (rows, cols) = renderer.grid_size();
+        let live = filled_grid(rows, cols, clear);
+        let mut gray = filled_grid(rows, cols, Rgb::new(80, 80, 80));
+        gray.get_mut(2, 1).ch = 'M';
+        let mut white = filled_grid(rows, cols, Rgb::new(80, 80, 80));
+        for row in [1, 2] {
+            for col in 0..cols {
+                white.get_mut(row, col).bg = Rgb::new(240, 240, 240);
+            }
+        }
+
+        draw_pooled(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[whole_pool(&gray)],
+        );
+        let pools = [PoolComposite {
+            changed_rows: Some(&[1]),
+            ..whole_pool(&white)
+        }];
+        let shot = draw_pooled(&device, &queue, &mut renderer, &target, &live, &pools);
+
+        let [w, h] = CELL;
+        let center = |row: u32| pixel(&shot, w / 2, row * h + h / 2);
+        assert_eq!(
+            ([center(1), center(2)], inked(&shot, 2, 1, [80, 80, 80])),
+            ([[240, 240, 240], [80, 80, 80]], true),
+            "the named row draws its new color, and the unnamed one its earlier color and glyph",
+        );
+    }
+
     /// The cell a 30-pixel font lays out at scale 1, in pixels.
     const CELL: [u32; 2] = [18, 36];
 
@@ -2970,6 +3032,7 @@ mod tests {
             scrolled_rows: None,
             occludable: true,
             skip_clear: false,
+            changed_rows: None,
         }
     }
 

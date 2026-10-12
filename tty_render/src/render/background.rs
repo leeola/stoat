@@ -521,6 +521,12 @@ impl BackgroundPass {
     /// written, as the live pass does for a scroll. `None`, or a grid of another
     /// shape, rebuilds every cell.
     ///
+    /// `changed_rows` names the rows, ascending, that differ from the slot's
+    /// rows once the move slid them. On a slot of the same shape the pass writes
+    /// those rows beside the exposed ones and keeps every other row. `None`
+    /// leaves the move alone to say what changed, so with no move every cell
+    /// rebuilds.
+    ///
     /// `skip` is the color whose cells draw no quad, which only a pool with
     /// nothing but the clear beneath it names. `None` paints every cell.
     ///
@@ -549,6 +555,7 @@ impl BackgroundPass {
         origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
+        changed_rows: Option<&[usize]>,
         skip: Option<Rgb>,
         pool: u32,
         slot: usize,
@@ -573,12 +580,17 @@ impl BackgroundPass {
         let (rows, cols) = (grid.rows(), grid.cols());
         let held = self.composite_slots.get(pool);
         let held_offset = held.map_or(0, |held| held.row_offset);
-        let rotate_by = scrolled_rows.filter(|&by| by != 0).filter(|_| {
-            rows > 0 && held.is_some_and(|held| (held.rows, held.cols) == (rows, cols))
-        });
+        let same_shape = held.is_some_and(|held| (held.rows, held.cols) == (rows, cols));
+        let rotate_by = scrolled_rows
+            .filter(|&by| by != 0)
+            .filter(|_| rows > 0 && same_shape);
+        // A patch keeps every row it does not name in the slot that row sits in,
+        // so the rotation holds and only the named rows are written.
+        let partial = content_changed && changed_rows.is_some() && same_shape;
         let row_offset = match (content_changed, rotate_by) {
             (false, _) => held_offset,
             (true, Some(by)) => (held_offset + by.rem_euclid(rows as isize) as u32) % rows as u32,
+            (true, None) if partial => held_offset,
             (true, None) => 0,
         };
 
@@ -615,14 +627,17 @@ impl BackgroundPass {
 
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.row_offset = row_offset;
-        if let Some(by) = rotate_by {
+        if rotate_by.is_some() || partial {
             // The rows the scroll kept already sit where the advanced offset
-            // points, so only the rows it exposed are written.
+            // points, so only the rows it exposed and the rows the patch names
+            // are written.
             let Some(last_col) = cols.checked_sub(1) else {
                 return;
             };
-            let exposed = exposed_rows(Some(by), rows);
-            for (at, run) in damaged_row_runs(|row| exposed.contains(&row), rows, row_offset) {
+            let exposed = rotate_by.map_or(0..0, |by| exposed_rows(Some(by), rows));
+            let named = changed_rows.unwrap_or_default();
+            let written = |row| exposed.contains(&row) || named.binary_search(&row).is_ok();
+            for (at, run) in damaged_row_runs(written, rows, row_offset) {
                 self.scratch.clear();
                 for row in run {
                     build_row_instances(grid, row, 0..=last_col, &mut self.scratch);
@@ -1396,7 +1411,7 @@ mod tests {
 
         prepare_live(&device, &queue, &mut pass, &grid, &[], &[]);
         assert_eq!(
-            composite_cells(&device, &queue, &mut pass, &grid, None, true, None),
+            composite_cells(&device, &queue, &mut pass, &grid, None, Change::Whole, None),
             vec![rgb(SKIP); CELLS * CELLS],
             "every composite cell paints its own color",
         );
@@ -1418,7 +1433,15 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            composite_cells(&device, &queue, &mut pass, &grid, None, true, Some(SKIP)),
+            composite_cells(
+                &device,
+                &queue,
+                &mut pass,
+                &grid,
+                None,
+                Change::Whole,
+                Some(SKIP)
+            ),
             expected,
             "each cell of the skipped color shows the clear, and the other cell paints",
         );
@@ -1438,20 +1461,20 @@ mod tests {
         // the end of the buffer, and three up writes the top three, wrapping
         // again.
         let steps = [
-            (document_rows(0, 4), None, true),
-            (document_rows(3, 4), Some(3), true),
-            (document_rows(5, 4), Some(2), true),
-            (document_rows(2, 4), Some(-3), true),
-            (document_rows(2, 4), Some(0), false),
-            (document_rows(9, 3), Some(1), true),
-            (document_rows(1, 3), Some(0), true),
+            (document_rows(0, 4), None, Change::Whole),
+            (document_rows(3, 4), Some(3), Change::Whole),
+            (document_rows(5, 4), Some(2), Change::Whole),
+            (document_rows(2, 4), Some(-3), Change::Whole),
+            (document_rows(2, 4), Some(0), Change::Held),
+            (document_rows(9, 3), Some(1), Change::Whole),
+            (document_rows(1, 3), Some(0), Change::Whole),
         ];
 
         let (drawn, built): (Vec<_>, Vec<_>) = steps
             .iter()
-            .map(|(grid, scrolled, changed)| {
+            .map(|(grid, scrolled, change)| {
                 (
-                    composite_cells(&device, &queue, &mut pass, grid, *scrolled, *changed, None),
+                    composite_cells(&device, &queue, &mut pass, grid, *scrolled, *change, None),
                     grid_cells(grid),
                 )
             })
@@ -1472,7 +1495,7 @@ mod tests {
             &mut pass,
             &document_rows(0, 4),
             None,
-            true,
+            Change::Whole,
             None,
         );
 
@@ -1482,9 +1505,65 @@ mod tests {
             repainted.get_mut(0, col).bg = OTHER;
         }
         assert_eq!(
-            composite_cells(&device, &queue, &mut pass, &repainted, Some(1), true, None),
+            composite_cells(
+                &device,
+                &queue,
+                &mut pass,
+                &repainted,
+                Some(1),
+                Change::Whole,
+                None
+            ),
             grid_cells(&document_rows(1, 4)),
             "the kept row draws what the first composite wrote",
+        );
+    }
+
+    /// A patched composite draws what one built from scratch draws, in place,
+    /// down a slide, and in place over the slide's rotation. It writes only the
+    /// rows it names and the rows a slide exposed, so a row that changed
+    /// without a name keeps what the earlier composite wrote.
+    #[test]
+    fn a_patched_composite_matches_one_built_from_scratch() {
+        let (device, queue) = require_headless_device();
+        let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);
+        let painted = |mut grid: Grid, row: usize, color: Rgb| {
+            for col in 0..CELLS {
+                grid.get_mut(row, col).bg = color;
+            }
+            grid
+        };
+        let mut patch = |grid: &Grid, scrolled, rows: &[usize]| {
+            composite_cells(
+                &device,
+                &queue,
+                &mut pass,
+                grid,
+                scrolled,
+                Change::Rows(rows),
+                None,
+            )
+        };
+        patch(&document_rows(0, 4), None, &[0, 1, 2, 3]);
+
+        // Row 1 changes and is named. Row 2 changes without a name.
+        let in_place = painted(painted(document_rows(0, 4), 1, OTHER), 2, OTHER);
+        // One row down, row 0 changes and is named, and row 3 is the exposed one.
+        let slid = painted(document_rows(1, 4), 0, SKIP);
+        let over_slide = painted(painted(document_rows(1, 4), 0, SKIP), 2, OTHER);
+
+        assert_eq!(
+            [
+                patch(&in_place, None, &[1]),
+                patch(&slid, Some(1), &[0]),
+                patch(&over_slide, None, &[2]),
+            ],
+            [
+                grid_cells(&painted(document_rows(0, 4), 1, OTHER)),
+                grid_cells(&slid),
+                grid_cells(&over_slide),
+            ],
+            "each patch writes its named and exposed rows, and keeps every other",
         );
     }
 
@@ -1530,18 +1609,36 @@ mod tests {
         grid
     }
 
+    /// How the grid a composite draws relates to the one the pass drew before.
+    #[derive(Clone, Copy)]
+    enum Change<'a> {
+        /// The same rows, so the pass keeps what it built.
+        Held,
+        /// Rows that differ in no named way, so the pass rebuilds them.
+        Whole,
+        /// Rows that differ only at these rows, ascending, once any slide moved
+        /// them.
+        Rows(&'a [usize]),
+    }
+
     /// The cell colors `pass` draws for `grid` composited as pool 1, whose
     /// content moved `scrolled` rows since its last composite, whose rows
-    /// `changed` or held, and whose cells of the color `skip` draw nothing.
+    /// changed as `change` says, and whose cells of the color `skip` draw
+    /// nothing.
     fn composite_cells(
         device: &Device,
         queue: &Queue,
         pass: &mut BackgroundPass,
         grid: &Grid,
         scrolled: Option<isize>,
-        changed: bool,
+        change: Change<'_>,
         skip: Option<Rgb>,
     ) -> Vec<[u8; 3]> {
+        let (changed, rows) = match change {
+            Change::Held => (false, None),
+            Change::Whole => (true, None),
+            Change::Rows(rows) => (true, Some(rows)),
+        };
         pass.prepare_composite(
             device,
             queue,
@@ -1553,6 +1650,7 @@ mod tests {
             [0.0; 2],
             changed,
             scrolled,
+            rows,
             skip,
             1,
             0,

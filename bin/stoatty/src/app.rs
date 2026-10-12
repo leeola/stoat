@@ -2943,9 +2943,12 @@ fn redraw(state: &mut State) {
         let composites = active
             .iter()
             .map(|pool| {
+                let anim = &state.pool_frame.anims[&pool.id];
                 pool_composite(
                     pool,
-                    &state.pool_frame.anims[&pool.id].document_grid,
+                    &anim.document_grid,
+                    (pool.region.kind == PoolKind::Terminal)
+                        .then_some(anim.changed_rows.as_slice()),
                     rides.iter().find(|ride| ride.pool == pool.id),
                     [cw, ch],
                     state.terminal_font_size,
@@ -3082,9 +3085,14 @@ fn redraw(state: &mut State) {
 /// `terminal_font_size` over the pane its region covers. The live grid under
 /// it holds only blanks of the clear color, so it leaves its own cells of
 /// that color to the clear.
+///
+/// `changed_rows` names the rows of `grid` that its last compose rewrote, for
+/// a pool that tracks them. A terminal pool does, and a gliding pool passes
+/// `None`.
 fn pool_composite<'a>(
     pool: &ActivePool,
     grid: &'a Grid,
+    changed_rows: Option<&'a [usize]>,
     ride: Option<&AnchorRide>,
     [cw, ch]: [f32; 2],
     terminal_font_size: u32,
@@ -3136,6 +3144,7 @@ fn pool_composite<'a>(
         scrolled_rows: pool.scrolled_rows,
         occludable: pool.id < NON_PANE_POOL_BASE,
         skip_clear: region.kind == PoolKind::Terminal,
+        changed_rows,
     }
 }
 
@@ -3275,6 +3284,7 @@ fn redraw_aux(
             scrolled_rows: pool.scrolled_rows,
             occludable: pool.id < NON_PANE_POOL_BASE,
             skip_clear: false,
+            changed_rows: None,
         })
         .collect::<Vec<_>>();
 
@@ -4753,8 +4763,9 @@ mod tests {
     }
 
     /// A page whose content only scrolled changes the composite, though every
-    /// row matches the page once the composite slides. A page filled back to
-    /// what the composite holds changes nothing, though its version moved.
+    /// row matches the page once the composite slides, and the tile reports the
+    /// slide. A page filled back to what the composite holds changes nothing,
+    /// though its version moved.
     #[test]
     fn a_terminal_pool_composite_changes_when_its_page_scrolls() {
         let mut terminal = terminal_pooled(b"ab\r\ncd");
@@ -4762,7 +4773,12 @@ mod tests {
         project(&mut terminal, &mut frame);
         let mut step = |terminal: &mut Terminal| {
             let projection = project(terminal, &mut frame);
-            (tiles(&projection), frame.anims[&1].changed_rows.clone())
+            let scrolled = projection.active.iter().map(|pool| pool.scrolled_rows);
+            (
+                tiles(&projection),
+                scrolled.collect::<Vec<_>>(),
+                frame.anims[&1].changed_rows.clone(),
+            )
         };
 
         fill_page(&mut terminal, 1, 0, b"cd");
@@ -4773,7 +4789,10 @@ mod tests {
 
         assert_eq!(
             [scrolled, restored],
-            [(vec![(1, true)], vec![]), (vec![(1, false)], vec![])],
+            [
+                (vec![(1, true)], vec![Some(1)], vec![]),
+                (vec![(1, false)], vec![None], vec![])
+            ],
             "a slide alone changes the composite, and a page back where it was changes nothing",
         );
     }
@@ -4875,7 +4894,7 @@ mod tests {
                 content_changed: true,
                 scrolled_rows: None,
             };
-            let composite = pool_composite(&tile, &grid, None, [12.0, 24.0], 10);
+            let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], 10);
             (
                 composite.font_size,
                 composite.origin_cells,

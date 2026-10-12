@@ -65,6 +65,7 @@ fn a_pool_at_its_own_font_size_lays_its_cells_out_at_that_size() {
             scrolled_rows: None,
             occludable: true,
             skip_clear: false,
+            changed_rows: None,
         }],
         &[],
     );

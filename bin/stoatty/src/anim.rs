@@ -1038,12 +1038,14 @@ pub(crate) struct ActivePool {
     /// the pool grid and the composite's instance rebuild are both skipped and
     /// only the shift is re-applied.
     pub(crate) content_changed: bool,
-    /// Rows the composed content moved by, when moving is all it did.
+    /// Rows the composed content moved by since the previous frame.
     ///
     /// An eased scroll walks the top a row or three at a time for many frames,
     /// and every row it keeps was already shaped for the frame before, so the
     /// composite can slide its per-row caches by this and re-shape only what the
-    /// move exposed.
+    /// move exposed. For a gliding pool, moving is all the content did. A
+    /// terminal pool also changes rows after the move, which
+    /// [`PoolAnim::changed_rows`] names.
     ///
     /// `None` when no row carries. The first frame of a glide, a changed page
     /// under the previous rows, and a resize each leave those rows describing
@@ -1286,9 +1288,12 @@ pub(crate) fn advance_pool_glide(
 /// The tile that composites terminal pool `pool` this frame, composing its page
 /// into `anim.document_grid` first when its content version moved.
 ///
-/// The compose rewrites only the rows the page changed and names them in
-/// `anim.changed_rows`. A compose that changed no cell leaves the tile's
-/// content unchanged, so the renderer keeps what it built.
+/// The compose slides the rows by the page's scroll, rewrites only the rows
+/// the page then changed, and names them in `anim.changed_rows`. The tile
+/// reports the scroll, so the renderer slides the rows it built and rebuilds
+/// only the named rows and the rows the scroll exposed. A compose that changed
+/// no cell leaves the tile's content unchanged, so the renderer keeps what it
+/// built.
 ///
 /// A terminal pool never glides. It is drawn at another font size than the live
 /// grid beneath its region, so it composites on every frame rather than handing
@@ -1328,7 +1333,7 @@ pub(crate) fn resident_pool(
         region: pool.region,
         frac,
         content_changed,
-        scrolled_rows: None,
+        scrolled_rows: shift.filter(|&shift| shift > 0).map(|shift| shift as isize),
     })
 }
 

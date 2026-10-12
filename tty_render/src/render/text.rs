@@ -799,10 +799,12 @@ pub struct TextPass {
     /// [`Self::overlay_instance_scratch`], swapped with
     /// [`Self::overlay_draws`] once filled.
     overlay_draw_scratch: Vec<OverlayDraw>,
-    /// Scratch reused across `prepare_composite` calls for the slots a pool
-    /// rebuilt, the rows it uploads, its text-run instances, and its run rects,
-    /// so a pool re-composite allocates no per-frame temporary. Dedicated to the
-    /// composite path rather than shared with the live scratch above.
+    /// Scratch reused across `prepare_composite` calls for the rows a pool
+    /// builds, the slots it rebuilt, the rows it uploads, its text-run
+    /// instances, and its run rects, so a pool re-composite allocates no
+    /// per-frame temporary. Dedicated to the composite path rather than shared
+    /// with the live scratch above.
+    composite_build_scratch: Vec<usize>,
     composite_slot_scratch: Vec<usize>,
     composite_upload_scratch: Vec<TextInstance>,
     composite_run_scratch: Vec<TextInstance>,
@@ -1192,6 +1194,7 @@ impl TextPass {
             run_rect_build_scratch: Vec::new(),
             overlay_instance_scratch: Vec::new(),
             overlay_draw_scratch: Vec::new(),
+            composite_build_scratch: Vec::new(),
             composite_slot_scratch: Vec::new(),
             composite_upload_scratch: Vec::new(),
             composite_run_scratch: Vec::new(),
@@ -1916,12 +1919,18 @@ impl TextPass {
     /// [`Self::draw_composite`] reads, leaving every live buffer and shaping
     /// cache intact, so the next live frame still patches only its damaged rows.
     ///
-    /// `shift_rows` shifts the grid up by that many rows. The pool grid changes
-    /// wholesale each frame, so every row is rebuilt with no per-row cache. The
-    /// pool is shaped fresh into local storage rather than through
+    /// `shift_rows` shifts the grid up by that many rows. The pool is shaped
+    /// into its own per-row caches rather than through
     /// [`Self::glyph_row_cache`], whose length and the sibling
     /// `glyph_cache_cols`/`last_cursor_cell` drive the live frame's incremental
     /// rebuild and so must not be disturbed.
+    ///
+    /// `scrolled_rows` is how far the pool's rows moved since its last
+    /// composite, and `changed_rows` names the rows, ascending, that differ once
+    /// that move slid them. The pass slides the rows it built, then reshapes the
+    /// rows the slide exposed and the rows `changed_rows` names. With
+    /// `changed_rows` at `None`, a slide reshapes only the exposed rows, and no
+    /// slide reshapes every row.
     ///
     /// Pool glyphs rasterize into the shared atlas. A grow moves every UV, so
     /// the atlas bind group the live draw also binds is recreated afterward.
@@ -1946,6 +1955,7 @@ impl TextPass {
         origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
+        changed_rows: Option<&[usize]>,
         pool: u32,
         slot: usize,
     ) {
@@ -1968,6 +1978,7 @@ impl TextPass {
             origin_cells,
             content_changed,
             scrolled_rows,
+            changed_rows,
             pool,
             slot,
         );
@@ -2011,6 +2022,7 @@ impl TextPass {
         origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
+        changed_rows: Option<&[usize]>,
         pool: u32,
         slot: usize,
     ) {
@@ -2044,10 +2056,14 @@ impl TextPass {
         let rotate_by = scrolled_rows
             .filter(|&by| by != 0)
             .filter(|_| carries && rows > 0);
+        // A patch keeps every row it does not name in the slot that row sits in,
+        // so the rotation holds and only the named rows are shaped again.
+        let partial = content_changed && carries && changed_rows.is_some();
         let reusing = !content_changed && reusable;
         let row_offset = match rotate_by {
             _ if reusing => held_offset,
             Some(by) => (held_offset + by.rem_euclid(rows as isize) as u32) % rows as u32,
+            None if partial => held_offset,
             None => 0,
         };
 
@@ -2089,9 +2105,20 @@ impl TextPass {
             offset: row_offset,
             rows,
         };
-        // Rows the frame has to shape for itself. A rotation leaves only the ones
-        // it scrolled into view. Anything else starts from nothing.
-        let exposed = exposed_rows(rotate_by, rows);
+        // Rows the frame has to shape for itself, ascending. A rotation leaves
+        // only the ones it scrolled into view, and a patch adds the ones it
+        // names. Anything else starts from nothing.
+        let mut build = mem::take(&mut self.composite_build_scratch);
+        build.clear();
+        match changed_rows.filter(|_| partial) {
+            Some(changed) => {
+                build.extend(rotate_by.map_or(0..0, |by| exposed_rows(Some(by), rows)));
+                build.extend_from_slice(changed);
+                build.sort_unstable();
+                build.dedup();
+            },
+            None => build.extend(exposed_rows(rotate_by, rows)),
+        }
 
         let slot = self.composite_slots.entry(pool, || new_slot(device));
         let held_instance_epoch = slot.instance_epoch;
@@ -2099,7 +2126,7 @@ impl TextPass {
         let mut glyph_rows = mem::take(&mut slot.glyph_rows);
         let mut underline_rows = mem::take(&mut slot.underline_rows);
         let mut glyph_instances = mem::take(&mut slot.glyph_instances);
-        if rotate_by.is_none() {
+        if rotate_by.is_none() && !partial {
             glyph_rows.clear();
             glyph_rows.resize_with(rows, Vec::new);
             underline_rows.clear();
@@ -2122,13 +2149,13 @@ impl TextPass {
         // upload plan walks the buffer in.
         let mut rebuilt = mem::take(&mut self.composite_slot_scratch);
         rebuilt.clear();
-        rebuilt.extend(exposed.clone().map(|row| rotation.slot(row)));
+        rebuilt.extend(build.iter().map(|&row| rotation.slot(row)));
         rebuilt.sort_unstable();
 
         // A row that came back a different length displaced every row after it,
         // so the buffer holds their old offsets from there on.
         let mut underline_from = None;
-        for row in exposed.clone() {
+        for &row in &build {
             let at = rotation.slot(row);
             let before = underline_rows[at].len();
             underline_rows[at].clear();
@@ -2228,7 +2255,7 @@ impl TextPass {
                 cursor_cell: None,
             };
 
-            for row in exposed.clone() {
+            for &row in &build {
                 let at = rotation.slot(row);
                 glyph_rows[at].clear();
                 self.rasterize_row(device, queue, grid, row, &shaping, &mut glyph_rows[at]);
@@ -2238,6 +2265,7 @@ impl TextPass {
             // the pass.
             self.substitutable = substitutable;
         }
+        self.composite_build_scratch = build;
 
         // Any run pack ran before the rows above, so either pass may have grown
         // the atlas since the runs froze their UVs. Every run glyph is resident
@@ -2280,7 +2308,8 @@ impl TextPass {
         // rather than after, so a pack inside it leaves a mismatch here next
         // frame instead of a slot nothing ever rebuilds.
         let instance_epoch = self.atlas.content_epoch();
-        let rebuild_all = rotate_by.is_none() || held_instance_epoch != instance_epoch;
+        let rebuild_all =
+            (rotate_by.is_none() && !partial) || held_instance_epoch != instance_epoch;
 
         let mut glyph_from = None;
         for at in 0..rows {
@@ -2365,6 +2394,12 @@ impl TextPass {
     #[cfg(test)]
     fn composite_instances(&self, pool: u32) -> Vec<TextInstance> {
         self.composite_rows(pool, |slot| &slot.glyph_instances)
+    }
+
+    /// One pool's built underline instances, in display-row order.
+    #[cfg(test)]
+    fn composite_underlines(&self, pool: u32) -> Vec<UnderlineInstance> {
+        self.composite_rows(pool, |slot| &slot.underline_rows)
     }
 
     /// Read one of a pool's per-slot caches back in display-row order.
