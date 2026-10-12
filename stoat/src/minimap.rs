@@ -359,16 +359,26 @@ pub struct MinimapContent {
     /// The next built row a recolor sweep will re-summarize, or `None` when idle.
     /// A syntax version change starts the sweep at
     /// [`Self::pending_syntax_rows`]' start, and it advances in [`SYNC_SLICE`]
-    /// steps until it reaches [`Self::resync_end`].
+    /// steps until it reaches [`Self::resync_end`]. It rests there while
+    /// [`Self::resync_extra`] still holds rows.
     resync_upto: Option<u32>,
-    /// The row an active sweep stops at, or `None` to run to
+    /// The row an active sweep's cursor stops at, or `None` to run to
     /// [`Self::built_upto`]. Always clamped to `built_upto` in use.
     resync_end: Option<u32>,
+    /// The rows a parse reported while a sweep ran that lie outside the
+    /// cursor's remaining window, swept once the cursor is done.
+    ///
+    /// The rows behind the cursor carry the old target's colors. Those differ
+    /// from the new target's only on the rows the new parse reports. The rows
+    /// ahead of the cursor read the new target when it gets there. So a parse
+    /// that lands mid-sweep adds only its rows here, and a sweep still finishes
+    /// while parses keep landing. `Some` only while [`Self::resync_upto`] is.
+    resync_extra: Option<Range<u32>>,
     /// The syntax version an active sweep is bringing the strip to, so a fresh
-    /// bump to a different version restarts the sweep at the top.
+    /// bump to a different version retargets the sweep in flight.
     resync_target: u64,
-    /// Rows reported changed since the last sweep finished, awaiting the next
-    /// sweep. Reset when a sweep consumes it.
+    /// Rows reported changed since a syntax bump last took them. The next bump
+    /// hands them to the sweep it starts, or to the sweep in flight.
     pending_syntax_rows: SweepRows,
     /// The rows a deferred edit left holding stand-in summaries, which the
     /// same [`Self::sync`] hands to the recolor sweep.
@@ -410,6 +420,7 @@ impl MinimapContent {
             synced_syntax_other: 0,
             resync_upto: None,
             resync_end: None,
+            resync_extra: None,
             resync_target: 0,
             pending_syntax_rows: SweepRows::All,
             edited_rows: None,
@@ -549,30 +560,45 @@ impl MinimapContent {
         // A recolor re-summarizes the built lines' content, swept under the
         // budget so a large file never recolors in one frame. A syntax
         // version change starts the sweep over the rows reported changed since
-        // the last one finished. A fresh bump to a new version mid-sweep
-        // restarts it against the new target.
+        // the last one finished.
         if versions.syntax != self.synced_syntax_version
             && (self.resync_upto.is_none() || self.resync_target != versions.syntax)
         {
-            // The rows an in-flight sweep already covered carry the old
-            // target's colors, so its remaining range and the new one cannot
-            // simply be unioned. Cover everything instead.
-            let rows = match self.resync_upto {
-                Some(_) => SweepRows::All,
-                None => std::mem::replace(&mut self.pending_syntax_rows, SweepRows::NONE),
-            };
+            let rows = std::mem::replace(&mut self.pending_syntax_rows, SweepRows::NONE);
             self.resync_target = versions.syntax;
-            match rows {
-                SweepRows::All => {
+            match (self.resync_upto, rows) {
+                // A change with no rows behind it leaves every line suspect, so
+                // the sweep starts over against the new target.
+                (_, SweepRows::All) => {
                     self.resync_upto = Some(0);
                     self.resync_end = None;
+                    self.resync_extra = None;
+                },
+                // A parse that lands mid-sweep keeps the cursor. The rows ahead
+                // of it read the new target when it gets there. The rows behind
+                // it differ from the new target only where the parse reports.
+                // So only the reported rows outside the cursor's remaining
+                // window go back on the sweep.
+                (Some(upto), SweepRows::Rows(rows)) => {
+                    let end = self.resync_end.unwrap_or(u32::MAX);
+                    for part in [
+                        rows.start..rows.end.min(upto),
+                        rows.start.max(end)..rows.end,
+                    ] {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        self.resync_extra = Some(match self.resync_extra.take() {
+                            Some(have) => have.start.min(part.start)..have.end.max(part.end),
+                            None => part,
+                        });
+                    }
                 },
                 // Nothing changed, so the strip is already at the new version.
-                SweepRows::Rows(rows) if rows.is_empty() => {
-                    self.resync_upto = None;
+                (None, SweepRows::Rows(rows)) if rows.is_empty() => {
                     self.synced_syntax_version = versions.syntax;
                 },
-                SweepRows::Rows(rows) => {
+                (None, SweepRows::Rows(rows)) => {
                     self.resync_upto = Some(rows.start);
                     self.resync_end = Some(rows.end);
                 },
@@ -605,17 +631,27 @@ impl MinimapContent {
                 .min(self.built_upto);
             let mut from = from.min(end);
 
+            // The loop sweeps the cursor's window first and the rows held for
+            // the end after it. Both go one slice at a time under one budget.
             loop {
-                let to = from.saturating_add(SYNC_SLICE).min(end);
-                self.resync_slice(new_rope, from..to, &tokens_for);
-                from = to;
+                let slice = if from < end {
+                    let to = from.saturating_add(SYNC_SLICE).min(end);
+                    let slice = from..to;
+                    from = to;
+                    slice
+                } else if let Some(slice) = self.next_extra_slice() {
+                    slice
+                } else {
+                    break;
+                };
+                self.resync_slice(new_rope, slice, &tokens_for);
 
-                if from >= end || started.elapsed() >= self.budget {
+                if started.elapsed() >= self.budget {
                     break;
                 }
             }
 
-            if from >= end {
+            if from >= end && self.resync_extra.is_none() {
                 self.resync_upto = None;
                 self.synced_syntax_version = self.resync_target;
             } else {
@@ -657,6 +693,22 @@ impl MinimapContent {
                 self.edge_resync_upto = Some(from);
             }
         }
+    }
+
+    /// The next slice of [`Self::resync_extra`] within the built rows, taken off
+    /// its front, or `None` once none of it is left.
+    fn next_extra_slice(&mut self) -> Option<Range<u32>> {
+        let extra = self.resync_extra.take()?;
+        let end = extra.end.min(self.built_upto);
+        if extra.start >= end {
+            return None;
+        }
+
+        let to = extra.start.saturating_add(SYNC_SLICE).min(end);
+        if to < end {
+            self.resync_extra = Some(to..end);
+        }
+        Some(extra.start..to)
     }
 
     /// Re-summarize the built lines in `range` and queue a one-line splice where
@@ -847,6 +899,10 @@ impl MinimapContent {
         if let Some(upto) = self.resync_upto {
             self.resync_upto = Some(slide(upto));
             self.resync_end = self.resync_end.map(slide);
+            self.resync_extra = self
+                .resync_extra
+                .take()
+                .map(|rows| slide(rows.start)..slide(rows.end));
         }
         if let SweepRows::Rows(rows) = &self.pending_syntax_rows
             && !rows.is_empty()
@@ -2243,6 +2299,18 @@ mod tests {
         move |rows: Range<u32>| rows.map(|r| (r, vec![tok(0..4, class)])).collect()
     }
 
+    /// [`color`] in `base`, with `row` alone in `class`.
+    fn color_except(
+        base: u8,
+        row: u32,
+        class: u8,
+    ) -> impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>> {
+        move |rows: Range<u32>| {
+            rows.map(|r| (r, vec![tok(0..4, if r == row { class } else { base })]))
+                .collect()
+        }
+    }
+
     /// A monochrome strip short enough to build and sweep in one sync, so a
     /// scoped sweep's row set is exactly what the splices report.
     ///
@@ -2422,8 +2490,11 @@ mod tests {
         );
     }
 
+    /// The rows a full sweep already passed carry version 1's colors, which
+    /// differ from version 2's only on the row the second parse reports. So the
+    /// sweep keeps its cursor, and takes that row once the cursor is done.
     #[test]
-    fn a_bump_landing_mid_sweep_falls_back_to_everything() {
+    fn a_bump_landing_mid_sweep_resweeps_only_its_rows_outside_the_cursor() {
         let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (rope, mut content) = built_recolor_fixture();
 
@@ -2439,10 +2510,92 @@ mod tests {
         );
         content.take_queued();
 
-        // A second parse lands mid-sweep reporting one row. The rows already
-        // swept carry version 1's colors, so the new sweep cannot trust that
-        // row alone and must start over.
-        content.note_syntax_rows(Some(9000..9001));
+        content.note_syntax_rows(Some(100..101));
+        let mut swept = Vec::new();
+        for _ in 0..8 {
+            content.sync(
+                &rope,
+                1,
+                &Patch::empty(),
+                parse_versions(0, 2),
+                color_except(1, 100, 2),
+                no_edges,
+            );
+            swept.extend(spliced_rows(&content.take_queued()));
+            if !content.build_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            swept,
+            (SYNC_SLICE..total).chain([100]).collect::<Vec<_>>(),
+            "the cursor finishes its window, then the reported row behind it",
+        );
+        let expected: Vec<LineRuns> = (0..total)
+            .map(|row| {
+                let class = if row == 100 { 2 } else { 1 };
+                summarize_line("line", &[tok(0..4, class)], None)
+            })
+            .collect();
+        assert_eq!(content.lines, expected);
+    }
+
+    /// A parse that lands on every sync of a full sweep adds its row for the
+    /// end. The cursor keeps its place, so the sweep finishes while the parses
+    /// land.
+    #[test]
+    fn a_sweep_finishes_while_a_parse_lands_every_sync() {
+        let (rope, mut content) = built_recolor_fixture();
+        content.note_syntax_rows(None);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            parse_versions(0, 1),
+            color(1),
+            no_edges,
+        );
+
+        for version in 2..6 {
+            if !content.build_pending() {
+                break;
+            }
+            content.note_syntax_rows(Some(10..11));
+            content.sync(
+                &rope,
+                1,
+                &Patch::empty(),
+                parse_versions(0, version),
+                color_except(1, 10, (version % 2 + 1) as u8),
+                no_edges,
+            );
+        }
+
+        assert!(
+            !content.build_pending(),
+            "the sweep finished within four more syncs"
+        );
+    }
+
+    /// A report past the end of a scoped sweep's window joins the sweep too,
+    /// since the cursor never reaches it.
+    #[test]
+    fn a_report_past_a_scoped_sweep_joins_it() {
+        let (rope, mut content) = built_recolor_fixture();
+        // Settle a full sweep to version 1 first, so the next report scopes one.
+        content.note_syntax_rows(None);
+        for _ in 0..2 {
+            content.sync(
+                &rope,
+                1,
+                &Patch::empty(),
+                parse_versions(0, 1),
+                color(1),
+                no_edges,
+            );
+        }
+        content.note_syntax_rows(Some(0..600));
         content.sync(
             &rope,
             1,
@@ -2451,36 +2604,74 @@ mod tests {
             color(2),
             no_edges,
         );
-        let restarted = content.take_queued();
-        assert_eq!(
-            restarted.first().map(|s| s.start),
-            Some(0),
-            "the restarted sweep covers the rows the first one already touched",
-        );
+        content.take_queued();
 
-        while content.build_pending() {
+        content.note_syntax_rows(Some(700..701));
+        let mut swept = Vec::new();
+        for _ in 0..8 {
             content.sync(
                 &rope,
                 1,
                 &Patch::empty(),
-                parse_versions(0, 2),
-                color(2),
+                parse_versions(0, 3),
+                color_except(2, 700, 3),
                 no_edges,
             );
+            swept.extend(spliced_rows(&content.take_queued()));
+            if !content.build_pending() {
+                break;
+            }
         }
-        let recolored = summarize_line("line", &[tok(0..4, 2)], None);
-        let stale: Vec<usize> = content
-            .lines
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| **line != recolored)
-            .map(|(row, _)| row)
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "the fallback sweep left rows {stale:?} on the previous version's runs"
+
+        assert_eq!(swept, (SYNC_SLICE..600).chain([700]).collect::<Vec<_>>());
+    }
+
+    /// An edit above the rows held for the end slides them with the text. The
+    /// sweep then restains the row the parse reported, not its old index.
+    #[test]
+    fn an_edit_slides_the_rows_held_for_the_end() {
+        let total = SYNC_SLICE + SYNC_SLICE / 2;
+        let (before, mut content) = built_recolor_fixture();
+        content.note_syntax_rows(None);
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            parse_versions(0, 1),
+            color(1),
+            no_edges,
         );
-        assert_eq!(content.lines.len(), total as usize);
+        // The cursor finishes its window and holds row 100 for the next sync.
+        content.note_syntax_rows(Some(100..101));
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            parse_versions(0, 2),
+            color_except(1, 100, 2),
+            no_edges,
+        );
+        content.take_queued();
+
+        // Four lines deleted at the top move row 100 to row 96.
+        let after = rope(&vec!["line"; total as usize - 4].join("\n"));
+        let edit = Patch::new(vec![Edit {
+            old: 0..20,
+            new: 0..0,
+        }]);
+        content.sync(
+            &after,
+            2,
+            &edit,
+            parse_versions(0, 2),
+            color_except(1, 96, 2),
+            no_edges,
+        );
+
+        let mut swept = spliced_rows(&content.take_queued());
+        // The edit's own rows re-summarize on the buffer-edit path.
+        swept.retain(|row| *row >= 4);
+        assert_eq!(swept, vec![96], "the held row slid up by the four lines");
     }
 
     #[test]
@@ -2547,35 +2738,37 @@ mod tests {
         );
     }
 
+    /// A parse that reports no rows leaves every line suspect. If it lands
+    /// mid-sweep, the sweep restarts at the top against the new target.
     #[test]
-    fn a_fresh_syntax_bump_restarts_the_sweep() {
+    fn an_unreported_bump_mid_sweep_restarts_the_sweep() {
         let (rope, mut content) = built_recolor_fixture();
 
         // The first recolor sweeps slice 0 to class 1, leaving the cursor mid-file.
+        content.note_syntax_rows(None);
         content.sync(
             &rope,
             1,
             &Patch::empty(),
-            versions(0, 1),
+            parse_versions(0, 1),
             color(1),
             no_edges,
         );
         content.take_queued();
 
-        // A fresh bump to a new version restarts at row 0 with the new color
-        // instead of continuing to the next slice.
+        content.note_syntax_rows(None);
         content.sync(
             &rope,
             1,
             &Patch::empty(),
-            versions(0, 2),
+            parse_versions(0, 2),
             color(2),
             no_edges,
         );
         let restarted = content.take_queued();
         assert_eq!(
             restarted[0].start, 0,
-            "a fresh bump restarts the sweep at the top"
+            "an unreported bump restarts the sweep at the top"
         );
         assert_eq!(restarted.len(), 1, "the restarted slice ships coalesced");
         assert_eq!(restarted[0].lines.len(), SYNC_SLICE as usize);
