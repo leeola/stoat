@@ -1010,11 +1010,12 @@ impl Workspace {
     /// The working tree's pick is the one the reader made through
     /// [`Self::set_worktree_base`], HEAD until they pick the index.
     ///
-    /// Re-diffs the whole workspace. Every cached blob was read against the
-    /// base being replaced, so none of them survive the change.
+    /// Re-diffs the whole workspace. Every cached blob, and every diff still
+    /// running, was read against the base being replaced, so none of them
+    /// survive the change.
     pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
         self.diff.base_override = base;
-        self.diff.invalidate_all();
+        self.diff.reset_for_new_base();
     }
 
     /// Pick which of its two own bases the working tree diffs against.

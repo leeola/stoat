@@ -333,6 +333,18 @@ impl DiffState {
         self.base_text.clear();
     }
 
+    /// Stale every buffer's diff map for a new base, and drop the jobs in
+    /// flight.
+    ///
+    /// A job in flight read the base that the change replaces. After a `.git`
+    /// write, [`Self::invalidate_all`] keeps such a job, because its blobs are
+    /// no staler than the map on screen. After a base change, its map shows a
+    /// base the reader has left, so the job goes.
+    pub(super) fn reset_for_new_base(&mut self) {
+        self.jobs.clear();
+        self.invalidate_all();
+    }
+
     /// Mark the repo-wide tally as owed, so the next drive spawns one.
     ///
     /// This serves the events that move the tally without staling any buffer
@@ -1665,7 +1677,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
-    use stoat_action::StageHunk;
+    use stoat_action::{DiffAgainstIndex, StageHunk};
     use stoat_language::{parse, structural_diff::TreeCache, LanguageRegistry};
 
     /// The bar reads the totals and a file list reads the per-file counts, so
@@ -2697,6 +2709,32 @@ mod tests {
             base_text_of(&h, buffer_id),
             "a\nZ\n",
             "the redrive diffs the buffer against the moved HEAD",
+        );
+    }
+
+    /// A job still running against the old base never installs once the base
+    /// changes, so the map the view opened on stays.
+    #[test]
+    fn a_base_change_drops_the_diff_running_against_the_old_base() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_index_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n", "a\nd\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+
+        h.stoat
+            .active_workspace_mut()
+            .invalidate_diff(buffer_id, Path::new("/repo/a.txt"));
+        h.stoat.drive_background();
+        action_handlers::dispatch(&mut h.stoat, &DiffAgainstIndex);
+        h.settle();
+        h.stoat.drive_background();
+
+        assert_eq!(
+            base_text_of(&h, buffer_id),
+            "a\nc\n",
+            "the index base stands, and the HEAD job never lands",
         );
     }
 
