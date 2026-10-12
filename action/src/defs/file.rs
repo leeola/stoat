@@ -56,7 +56,7 @@ define_action_def!(
     "OpenConfig",
     ActionKind::OpenConfig,
     "open the user config file",
-    "Open a user config in the focused pane. Omitted or `stoat` opens ~/.config/stoat/config.stcfg; `stoatty` opens the terminal's ~/.config/stoatty/config.toml. A config that does not yet exist is created from the matching built-in default.",
+    "Open a user config in the focused pane. Omitted or `stoat` opens ~/.config/stoat/config.stcfg; `stoatty` opens the terminal's ~/.config/stoatty/config.toml. A missing stoat config is created as a commented stub that layers over the shipped config. A missing stoatty config is created from the shipped config.toml.",
     ActionPriority::Common,
     command_name = "config",
     params = OPEN_CONFIG_PARAMS

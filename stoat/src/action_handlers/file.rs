@@ -23,6 +23,10 @@ use std::{
 };
 use stoat_text::Rope;
 
+/// A lookup of a user config file's path, which reads the process environment
+/// and answers [`None`] when no config home resolves.
+type PathResolver = fn() -> Option<PathBuf>;
+
 /// Write the focused buffer to its backing file via
 /// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
 /// LSP server via [`crate::host::LspHost::did_save`].
@@ -899,22 +903,37 @@ pub(crate) fn open_file(stoat: &mut Stoat, path: &Path, origin: OpenOrigin) -> O
 /// [`None`] and `"stoat"` open stoat's own config, `"stoatty"` opens the
 /// hosting terminal's. Any other target, or a path that does not resolve, only
 /// sets a status message. Delegates the seed-and-open to [`open_config_at`].
+///
+/// A missing stoat config is created as a commented stub that layers over the
+/// shipped config. A missing stoatty config is created from the shipped
+/// `config.toml`.
 pub(crate) fn open_config(stoat: &mut Stoat, target: Option<&str>) {
-    let (path, seed) = match target {
-        None | Some("stoat") => (crate::paths::user_config_path(), crate::app::DEFAULT_KEYMAP),
-        Some("stoatty") => (
-            crate::paths::stoatty_config_path(),
-            crate::app::DEFAULT_STOATTY_CONFIG,
-        ),
-        Some(_) => {
-            stoat.set_status("open-config: expected stoat or stoatty");
-            return;
-        },
+    let Some((resolve_path, seed)) = config_target(target) else {
+        stoat.set_status("open-config: expected stoat or stoatty");
+        return;
     };
 
-    match path {
+    match resolve_path() {
         Some(path) => open_config_at(stoat, &path, seed),
         None => stoat.set_status("could not resolve the user config path"),
+    }
+}
+
+/// The path resolver and the missing-file seed of the config `target` names,
+/// or [`None`] for a target that names no config.
+///
+/// Kept apart from [`open_config`] because the resolvers read the process
+/// environment.
+fn config_target(target: Option<&str>) -> Option<(PathResolver, &'static str)> {
+    match target {
+        None | Some("stoat") => {
+            Some((crate::paths::user_config_path, crate::app::USER_CONFIG_SEED))
+        },
+        Some("stoatty") => Some((
+            crate::paths::stoatty_config_path,
+            crate::app::DEFAULT_STOATTY_CONFIG,
+        )),
+        Some(_) => None,
     }
 }
 
@@ -953,6 +972,7 @@ mod tests {
         ForceSaveBuffer, GotoLastAccessed, NewWorkspace, OpenFile, SaveBuffer, SplitRight,
         WriteQuit,
     };
+    use stoat_config::Config;
     use stoatty_protocol::command;
 
     /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
@@ -996,22 +1016,22 @@ mod tests {
     }
 
     #[test]
-    fn open_config_seeds_the_default_when_missing() {
+    fn open_config_seeds_a_layering_stub_when_missing() {
         let mut h = TestHarness::with_size(80, 10);
         let path = PathBuf::from("/cfg/config.stcfg");
 
-        super::open_config_at(&mut h.stoat, &path, crate::app::DEFAULT_KEYMAP);
+        super::open_config_at(&mut h.stoat, &path, crate::app::USER_CONFIG_SEED);
 
         let mut bytes = Vec::new();
         h.fake_fs()
             .read(&path, &mut bytes)
             .expect("the missing config was seeded");
-        assert_eq!(bytes, crate::app::DEFAULT_KEYMAP.as_bytes());
+        assert_eq!(bytes, crate::app::USER_CONFIG_SEED.as_bytes());
 
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .buffer_id;
-        assert_eq!(buffer_text(&h, buffer_id), crate::app::DEFAULT_KEYMAP);
+        assert_eq!(buffer_text(&h, buffer_id), crate::app::USER_CONFIG_SEED);
     }
 
     #[test]
@@ -1021,7 +1041,7 @@ mod tests {
         let custom = "format_on_save = true;\n";
         h.fake_fs().insert_file(&path, custom.as_bytes());
 
-        super::open_config_at(&mut h.stoat, &path, crate::app::DEFAULT_KEYMAP);
+        super::open_config_at(&mut h.stoat, &path, crate::app::USER_CONFIG_SEED);
 
         let mut bytes = Vec::new();
         h.fake_fs()
@@ -1037,6 +1057,45 @@ mod tests {
             .expect("editor")
             .buffer_id;
         assert_eq!(buffer_text(&h, buffer_id), custom);
+    }
+
+    /// Stoat's own target seeds the stub, since a copy of the shipped config
+    /// pins bindings that a later release drops.
+    #[test]
+    fn a_config_target_names_its_seed() {
+        let seed = |target| super::config_target(target).map(|(_, seed)| seed);
+        assert_eq!(
+            [
+                seed(None),
+                seed(Some("stoat")),
+                seed(Some("stoatty")),
+                seed(Some("vim"))
+            ],
+            [
+                Some(crate::app::USER_CONFIG_SEED),
+                Some(crate::app::USER_CONFIG_SEED),
+                Some(crate::app::DEFAULT_STOATTY_CONFIG),
+                None,
+            ],
+        );
+    }
+
+    /// The stub layers over the shipped config, so it parses clean to a config
+    /// with no block and no theme, and every key and setting keeps the shipped
+    /// value.
+    #[test]
+    fn the_user_config_seed_states_nothing() {
+        let (config, errors) = stoat_config::parse(crate::app::USER_CONFIG_SEED);
+        assert_eq!(
+            (config, errors.len()),
+            (
+                Some(Config {
+                    blocks: Vec::new(),
+                    themes: Vec::new()
+                }),
+                0
+            ),
+        );
     }
 
     #[test]

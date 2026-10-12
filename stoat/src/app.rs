@@ -86,6 +86,36 @@ use tokio::{
 
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 
+/// The text `:config` writes to a missing stoat user config.
+///
+/// It holds only comments, so it parses to a config that states nothing. The
+/// user config layers over [`DEFAULT_KEYMAP`], and a copy of that pins every
+/// binding of the release that wrote it. A later release that drops a verb
+/// then leaves the user's file binding it.
+pub(crate) const USER_CONFIG_SEED: &str = r"# This is your stoat config. It layers over the config stoat ships and does
+# not replace it.
+#
+# Only what this file states changes. Every key it never binds, every setting
+# it never sets, and every theme it never defines keeps the shipped value. A
+# later release that changes the shipped config therefore leaves this file
+# usable.
+#
+# To start, uncomment an example below and change it.
+#
+# on init {
+#     editor.scrolloff = 3;
+# }
+#
+# on key {
+#     mode == normal {
+#         Ctrl-s -> SaveBuffer();
+#     }
+# }
+#
+# The command palette lists every action name. This editor completes setting
+# names.
+";
+
 /// The default stoatty config, embedded so `:open-config stoatty` can seed a
 /// missing one with the same file the terminal ships.
 pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml");
