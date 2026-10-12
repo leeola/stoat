@@ -593,9 +593,9 @@ impl FileFinder {
     /// sync hook. Drains any pending walk result first so freshly arrived
     /// paths participate in the same render tick.
     ///
-    /// The fallback of ignored files refilters with the list it stands in for,
-    /// so its rows answer the query the moment the list runs dry. Each scan
-    /// handed back names the picker it reports to.
+    /// The fallback of ignored files refilters only while the list it stands in
+    /// for shows no row, or while its own walk still streams. Each scan handed
+    /// back names the picker it reports to.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) -> Vec<PendingScan> {
         // Ahead of the browse branch so a git-status answer landing while a
         // directory query is typed is taken rather than left in the channel.
@@ -688,14 +688,23 @@ impl FileFinder {
     /// Bring the fallback of the list on display up to date with `query`, and
     /// hand back its scan.
     ///
-    /// Runs while the fallback stands aside too, so its rows already answer the
-    /// query when the list runs dry again.
+    /// The fallback scans only while the list shows no row, or while its own
+    /// walk still streams. Scans during the walk derive display rows only for
+    /// the paths that arrived, never for the whole walk in one turn.
+    ///
+    /// Otherwise the fallback forgets its results and costs nothing per
+    /// keystroke. When it stands in again, it shows no row for one turn rather
+    /// than the rows of an older query.
     fn refilter_fallback(&mut self, query: &str, out: &mut Vec<PendingScan>) {
-        let (_, Some(fallback)) = self.list_and_fallback_mut() else {
+        let (list, Some(fallback)) = self.list_and_fallback_mut() else {
             return;
         };
         pump_capped_walk(fallback);
         fallback.pump_scan();
+        if !list.rows_empty() && !fallback.walking() {
+            fallback.forget_results();
+            return;
+        }
         out.extend(ScanTarget::Fallback.tag(fallback.begin_scan(query)));
     }
 
@@ -709,8 +718,8 @@ impl FileFinder {
     /// A named scope catches up against the cache it filters rather than the
     /// walk, which holds a different set and would answer a different question.
     ///
-    /// A fallback of ignored files settles with its list, so an action reads the
-    /// row on display whichever of the two shows.
+    /// A fallback of ignored files settles only when its list settles to no
+    /// row, so an action reads the row on display whichever of the two shows.
     pub(crate) fn settle_scan(&mut self, query: &str) {
         // Browse filters the directory walk against its own partial rather than
         // the typed query, the leading directory having already been consumed
@@ -718,7 +727,9 @@ impl FileFinder {
         if let Some(browse) = &mut self.browse {
             let partial = browse.partial.clone();
             browse.picker.settle_scan(&partial);
-            if let Some(ignored) = &mut browse.ignored {
+            if browse.picker.lists_nothing()
+                && let Some(ignored) = &mut browse.ignored
+            {
                 ignored.settle_scan(&partial);
             }
             return;
@@ -726,7 +737,9 @@ impl FileFinder {
         match self.scope.clone() {
             FinderScope::All => {
                 self.core.settle_scan(query);
-                if let Some(ignored) = &mut self.ignored {
+                if self.core.lists_nothing()
+                    && let Some(ignored) = &mut self.ignored
+                {
                     ignored.settle_scan(query);
                 }
             },
@@ -2455,6 +2468,88 @@ mod tests {
             slots(&h),
             before,
             "the fallback's preview buffer and editor go with the finder",
+        );
+    }
+
+    /// A finder whose fallback of ignored files stood in for `main.toml`, with
+    /// the query then cut back to `main`, which the listed `src/main.rs`
+    /// matches.
+    fn finder_back_on_a_listed_match() -> TestHarness {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+        );
+        h.type_keys("space p");
+        h.type_text("main.toml");
+        settle_fallback(&mut h);
+
+        h.type_keys("backspace backspace backspace backspace backspace");
+        for _ in 0..2 {
+            let _ = h.snapshot();
+            h.settle();
+        }
+        h
+    }
+
+    /// The query the workspace fallback last took, or `None` with no fallback.
+    fn fallback_query(h: &TestHarness) -> Option<String> {
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        finder.ignored.as_ref().map(|f| f.last_filter_text.clone())
+    }
+
+    #[test]
+    fn a_listed_match_leaves_the_fallback_idle() {
+        let mut h = finder_back_on_a_listed_match();
+        assert_eq!(
+            (finder_rows(&h), fallback_query(&h)),
+            (vec!["src/main.rs".to_string()], Some(String::new())),
+            "the list shows its match and the fallback holds no query",
+        );
+
+        h.type_text(".toml");
+        settle_fallback(&mut h);
+        assert_eq!(finder_rows(&h), ["target/debug/main.toml"]);
+    }
+
+    #[test]
+    fn settling_a_listed_match_leaves_the_fallback_unsettled() {
+        let mut h = finder_back_on_a_listed_match();
+        let finder = h.stoat.file_finder.as_mut().expect("finder open");
+        finder.settle_scan("main");
+        assert_eq!(fallback_query(&h), Some(String::new()));
+    }
+
+    /// A browse settles its fallback by the same rule. `md` lists `notes.md`,
+    /// so the fallback that stood in for `mdx` stays unsettled.
+    #[test]
+    fn settling_a_listed_browse_match_leaves_its_fallback_unsettled() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[
+                ("build/.gitignore", "*.bin\n"),
+                ("build/mdx.bin", ""),
+                ("build/notes.md", ""),
+            ],
+        );
+        h.type_keys("space p");
+        h.type_text(&format!("{}/build/mdx", root.display()));
+        settle_fallback(&mut h);
+
+        h.type_keys("backspace");
+        for _ in 0..2 {
+            let _ = h.snapshot();
+            h.settle();
+        }
+        let finder = h.stoat.file_finder.as_mut().expect("finder open");
+        finder.settle_scan("");
+
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        let ignored = finder.browse.as_ref().and_then(|b| b.ignored.as_ref());
+        assert_eq!(
+            (finder_rows(&h), ignored.map(|f| f.last_filter_text.clone())),
+            (vec!["notes.md".to_string()], Some(String::new())),
         );
     }
 

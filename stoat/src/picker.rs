@@ -1200,10 +1200,44 @@ impl PathPicker {
     /// scan is out or a walk still streams, the answer is false, because the
     /// rows do not yet answer for every path.
     pub(crate) fn lists_nothing(&self) -> bool {
-        self.walk_rx.is_none()
-            && !self.scan_pending
-            && self.filter_valid
-            && self.picklist.filtered.is_empty()
+        self.rows_empty() && !self.scan_pending
+    }
+
+    /// Whether the walk still streams paths in.
+    ///
+    /// False for a caller-fed picker and for a walk cut short by
+    /// [`Self::stop_walk`].
+    pub(crate) fn walking(&self) -> bool {
+        self.walk_rx.is_some()
+    }
+
+    /// Whether the list shows no row, with every path delivered and the
+    /// current query accounted for.
+    ///
+    /// [`Self::lists_nothing`] without the wait for a scan still out. While a
+    /// scan runs, the rows on display still answer the query before it. So
+    /// this answers whether the list shows a row, not whether the query
+    /// matches one.
+    pub(crate) fn rows_empty(&self) -> bool {
+        self.walk_rx.is_none() && self.filter_valid && self.picklist.filtered.is_empty()
+    }
+
+    /// Drop the results and the query they answer, and retire a scan still out.
+    ///
+    /// The paths, the base the pick list holds, and its display rows stay, so
+    /// the next scan derives nothing for a path already seen. That is the
+    /// difference from [`Self::invalidate`], which drops the base and makes the
+    /// next sync copy and derive every path again. A picker with nothing to
+    /// forget stays as it is.
+    pub(crate) fn forget_results(&mut self) {
+        if self.last_filter_text.is_empty() && !self.filter_valid && !self.scan_pending {
+            return;
+        }
+
+        self.retire_scan();
+        self.last_filter_text.clear();
+        self.filter_valid = false;
+        self.picklist.clear_results();
     }
 
     /// Drain every walk batch since the last call into [`Self::all_paths`],
