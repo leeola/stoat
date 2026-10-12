@@ -2221,58 +2221,167 @@ fn pooled_terminal_sent(
 }
 
 /// A terminal page draws its pane as the live grid draws it, the cursor cell
-/// and the fade of an unfocused pane included, when the reported grid is the
-/// pane's own cells.
+/// included, when the reported grid is the pane's own cells. An unfocused
+/// pane's fade lands in the page's cells under protocol 10. Under 11 it rides
+/// the region instead, and the page that stoatty fades by it draws the pane as
+/// the live grid does.
 #[test]
-fn a_terminal_page_draws_its_pane_as_the_live_grid_does() {
+fn a_terminal_page_draws_its_pane_as_the_live_grid_does_and_the_region_carries_its_fade() {
+    let drawn = |protocol| {
+        let mut h = Stoat::test();
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.theme = Arc::new(rgb_review_theme());
+        h.stoat.settings.ui_inactive_dim = Some(0.2);
+        h.resize(80, 24);
+        h.type_action("SplitRight()");
+        h.settle();
+        let (term_id, _) =
+            terminal_in_focused_pane(&mut h, b"\x1b[38;2;200;180;40mhi\x1b[0m there");
+
+        let pages_and_live = |h: &mut crate::test_harness::TestHarness| {
+            let live = h.stoat.render();
+            let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
+            let pane = terminal_pool_panes(&h.stoat, inactive_dim, None)
+                .into_iter()
+                .find(|pane| pane.term_id == term_id)
+                .expect("the terminal pane pools");
+            let region = pane.region;
+            let term = &h.stoat.active_workspace().terms[term_id];
+            let mut page = Buffer::empty(Rect::default());
+            render_terminal_page(
+                term,
+                &h.stoat.theme,
+                region.height,
+                region.width,
+                &pane,
+                &mut page,
+            );
+
+            // stoatty composites the page faded by the region's dim.
+            let area = Rect::new(0, 0, region.width, region.height);
+            if region.dim > 0 {
+                let bg = crate::render::paint::style_rgb(
+                    h.stoat
+                        .theme
+                        .try_get(crate::theme::scope::UI_BACKGROUND)
+                        .and_then(|style| style.bg),
+                )
+                .expect("the theme's background is rgb");
+                let amount = f32::from(region.dim) / 255.0;
+                crate::render::pane::dim_pane_content(&mut page, area, bg, amount);
+            }
+
+            let mut live_page = Buffer::empty(area);
+            for y in 0..region.height {
+                for x in 0..region.width {
+                    live_page[(x, y)] = live[(region.left + x, region.top + y)].clone();
+                }
+            }
+            (
+                pane.is_focused,
+                region.dim,
+                crate::render::serialize_buffer(&page)
+                    == crate::render::serialize_buffer(&live_page),
+            )
+        };
+
+        let focused = pages_and_live(&mut h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let unfocused = pages_and_live(&mut h);
+        (focused, unfocused)
+    };
+
+    assert_eq!(
+        [drawn(10), drawn(11)],
+        [
+            ((true, 0, true), (false, 0, true)),
+            ((true, 0, true), (false, 51, true)),
+        ],
+        "the page paints the pane as the live grid does, with the fade in its cells \
+         under 10 and on its region under 11",
+    );
+}
+
+/// A focus move between two terminal panes changes each pane's dim and its
+/// cursor cell alone. Under protocol 11 the dim rides the region, so each pool
+/// takes its region again and a patch of its cursor row, and no page goes out
+/// whole.
+#[test]
+fn a_focus_move_between_terminal_panes_sends_their_cursor_rows_alone() {
+    assert_eq!(
+        focus_move_sent(11),
+        [
+            (vec![51], vec![], vec![(1, 1)]),
+            (vec![0], vec![], vec![(1, 1)]),
+        ],
+        "each pool takes its new dim and a patch of its cursor row",
+    );
+}
+
+/// Under protocol 10 an unfocused pane's fade lands in its page's cells, so a
+/// focus move repaints the colored row above each cursor row too, and declares
+/// no region.
+#[test]
+fn an_unfocused_terminal_pane_bakes_its_fade_under_protocol_ten() {
+    assert_eq!(
+        focus_move_sent(10),
+        [
+            (vec![], vec![], vec![(0, 2)]),
+            (vec![], vec![], vec![(0, 2)])
+        ],
+        "each pool patches its faded row and its cursor row, and its region holds still",
+    );
+}
+
+/// The dims one emit's regions declare for a pool, the pages it fills whole,
+/// and its row patches as `(first_row, rows)`.
+type PoolSent = (Vec<u8>, Vec<u64>, Vec<(u16, u16)>);
+
+/// What a focus move from the left terminal pane to the right one sends each
+/// pane's pool under `protocol`, left then right.
+///
+/// Each terminal shows a line in an RGB color on row 0, which a fade in the
+/// page's cells reaches, and holds its cursor on row 1.
+fn focus_move_sent(protocol: u32) -> [PoolSent; 2] {
+    use stoatty_protocol::command::Command;
+
     let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = protocol;
     h.stoat.theme = Arc::new(rgb_review_theme());
+    h.stoat.settings.ui_inactive_dim = Some(0.2);
     h.resize(80, 24);
     h.type_action("SplitRight()");
     h.settle();
-    let (term_id, _) = terminal_in_focused_pane(&mut h, b"\x1b[38;2;200;180;40mhi\x1b[0m there");
-
-    let pages_and_live = |h: &mut crate::test_harness::TestHarness| {
-        let live = h.stoat.render();
-        let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
-        let pane = terminal_pool_panes(&h.stoat, inactive_dim, None)
-            .into_iter()
-            .find(|pane| pane.term_id == term_id)
-            .expect("the terminal pane pools");
-        let region = pane.region;
-        let term = &h.stoat.active_workspace().terms[term_id];
-        let mut page = Buffer::empty(Rect::default());
-        render_terminal_page(
-            term,
-            &h.stoat.theme,
-            region.height,
-            region.width,
-            &pane,
-            &mut page,
-        );
-
-        let area = Rect::new(0, 0, region.width, region.height);
-        let mut live_page = Buffer::empty(area);
-        for y in 0..region.height {
-            for x in 0..region.width {
-                live_page[(x, y)] = live[(region.left + x, region.top + y)].clone();
-            }
-        }
-        (
-            pane.is_focused,
-            crate::render::serialize_buffer(&page) == crate::render::serialize_buffer(&live_page),
-        )
-    };
-
-    let focused = pages_and_live(&mut h);
+    let (right_term, right) =
+        terminal_in_focused_pane(&mut h, b"\x1b[38;2;200;180;40mright\x1b[0m\r\n");
     action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
-    let unfocused = pages_and_live(&mut h);
+    let (left_term, left) =
+        terminal_in_focused_pane(&mut h, b"\x1b[38;2;200;180;40mleft\x1b[0m\r\n");
+    for term in [left_term, right_term] {
+        h.stoat
+            .active_workspace_mut()
+            .term_pool_grids
+            .insert(term, (6, 30));
+    }
+    let _ = h.stoat.render();
+    emit_raw(&mut h, &mut rx);
 
-    assert_eq!(
-        (focused, unfocused),
-        ((true, true), (false, true)),
-        "the page and the live grid paint the pane alike, focused or not",
-    );
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+    let _ = h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    [left, right].map(|pool| {
+        let dims = command::decode_stream(&bytes)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::PoolRegion(region) if region.pool == pool => Some(region.dim),
+                _ => None,
+            })
+            .collect();
+        (dims, pool_fills(&bytes, pool), pool_patches(&bytes, pool))
+    })
 }
 
 /// A pane keeps its index when it opens another file, and the root pane of a

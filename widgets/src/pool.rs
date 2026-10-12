@@ -96,8 +96,11 @@ impl MinimapWindowInputs {
 #[derive(Default)]
 struct PoolEmitState {
     /// Region declared on the most recent emit, in absolute grid cells. `None`
-    /// until first declared. Re-emitted only when the rectangle changes (resize,
-    /// split, focus move).
+    /// until first declared.
+    ///
+    /// Re-emitted only when it changes. A resize or a split moves the
+    /// rectangle, which drops the pool's pages. A focus move changes a
+    /// terminal pool's dim alone, which keeps them.
     region: Option<PoolRegionCommand>,
     /// Half-open page range `[start, end)` whose fills have been requested for the
     /// pool, `None` until the first request.
@@ -186,14 +189,39 @@ impl SmoothScrollState {
             .is_some_and(|entry| entry.content_version == version)
     }
 
-    /// Whether `pool`'s last emit declared `region`, so the terminal holds the
-    /// pool at that rectangle with the pages the emits sent it.
+    /// Whether `pool`'s last emit declared `region`'s placement, so the
+    /// terminal holds the pool at that rectangle with the pages the emits sent
+    /// it.
     ///
-    /// False for a pool that has never emitted, and for one a drop retired.
+    /// The dim does not count, since a re-declare that changes only the dim
+    /// keeps the pages. False for a pool that has never emitted, and for one a
+    /// drop retired.
     pub fn holds_region(&self, pool: u32, region: &PoolRegionCommand) -> bool {
         self.pools
             .get(&pool)
-            .is_some_and(|entry| entry.region.as_ref() == Some(region))
+            .is_some_and(|entry| entry.region.is_some_and(|held| held.same_placement(region)))
+    }
+
+    /// Declare `region` for a pool whose placement the terminal holds, and
+    /// keep the pool's pages.
+    ///
+    /// For a caller that renders a held pool's page itself and sends only what
+    /// changed. A new dim then reaches the terminal ahead of the compare, so a
+    /// page that holds still fades all the same. A region that the pool
+    /// already holds, one at another placement, and one of a pool that has
+    /// never emitted send nothing here, since the next emit declares them.
+    pub fn declare_region(&mut self, out: &mut Vec<u8>, region: PoolRegionCommand) {
+        let Some(entry) = self.pools.get_mut(&region.pool) else {
+            return;
+        };
+        let Some(held) = entry.region else {
+            return;
+        };
+        if held == region || !held.same_placement(&region) {
+            return;
+        }
+        encode_pool_region_into(out, &region);
+        entry.region = Some(region);
     }
 
     /// Record `version` as the content of `pool`'s buffered pages, and send
@@ -387,12 +415,15 @@ impl SmoothScrollState {
 /// [`SmoothScrollState::set_geometry_unsettled`], since a resize throws away
 /// every page it is given while it lasts.
 ///
-/// Emits, in order: a `pool_region` frame when the rectangle changed; a
+/// Emits, in order: a `pool_region` frame when the region changed; a
 /// `fill`/page-VT/`fill_end` triple for each page newly entering the buffered
 /// window and each stale page a composite reads; a `reposition` frame when the
 /// new window is disjoint from the old, so a far jump re-anchors near the
 /// destination instead of easing across the gap; then a `scroll` frame carrying
 /// the precise target. A frame that needs none of these appends nothing.
+///
+/// A region that changes only its dim keeps the buffered window, so the
+/// terminal fades the pages it holds and no page enters.
 ///
 /// Returns the page indices filled this call, in ascending order: the pages
 /// newly entering the buffered window and the stale pages a composite reads. A
@@ -484,9 +515,15 @@ pub fn emit_pages_into(
     let hold = idle && scroll_offset.fract() == 0.0;
 
     let region_changed = entry.region != Some(region);
+    // A re-declare that changes only the dim keeps the terminal's slots.
+    let pages_moved = !entry
+        .region
+        .is_some_and(|held| held.same_placement(&region));
     if region_changed {
         encode_pool_region_into(out, &region);
         entry.region = Some(region);
+    }
+    if pages_moved {
         // A fresh region invalidates the pool's slot contents. Force a refill.
         entry.requested = None;
         entry.pages.clear();
@@ -526,7 +563,7 @@ pub fn emit_pages_into(
     // any other reason has settled by the time the page draws: a picker's box
     // grows with its match count, and blanking that list would cost more than
     // the page it saves.
-    let entered = if idle && region_changed && unsettled {
+    let entered = if idle && pages_moved && unsettled {
         Vec::new()
     } else {
         refill(
@@ -1738,6 +1775,40 @@ mod tests {
         assert_eq!(
             commands(&out).first(),
             Some(&Command::PoolRegion(region(1, 22)))
+        );
+    }
+
+    /// A focus move changes a terminal pool's dim alone, which the terminal
+    /// applies to the pages it holds, so the region goes out again and no page
+    /// refills.
+    #[test]
+    fn a_dim_only_region_change_redeclares_without_a_refill() {
+        let terminal = |dim| PoolRegionCommand {
+            kind: PoolKind::Terminal,
+            dim,
+            ..region(1, 20)
+        };
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        emit_into(&mut out, &mut state, terminal(0), 0.0, 0, false, |_| {
+            Vec::new()
+        });
+
+        out.clear();
+        let mut refilled = Vec::new();
+        emit_into(&mut out, &mut state, terminal(64), 0.0, 0, false, |page| {
+            refilled.push(page);
+            Vec::new()
+        });
+
+        assert_eq!(
+            (
+                refilled,
+                commands(&out),
+                state.holds_region(1, &terminal(0))
+            ),
+            (vec![], vec![Command::PoolRegion(terminal(64))], true),
+            "the region goes out again with no fill, and the pool keeps its placement",
         );
     }
 

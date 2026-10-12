@@ -58,17 +58,24 @@ const TERMINAL_POOL_PROTOCOL: u32 = 9;
 /// terminal a terminal pane's pages go out whole.
 const TERMINAL_ROWS_PROTOCOL: u32 = 10;
 
+/// The protocol version that fades a terminal pool toward its clear color by
+/// the dim its region carries. Under an older terminal an unfocused terminal
+/// pane's page carries the fade in its cells.
+const POOL_DIM_PROTOCOL: u32 = 11;
+
 /// A split pane showing a terminal or an agent, as the terminal-kind pool that
 /// draws it at the terminal font size.
 ///
-/// The focus and the dim travel with the region because the page paints both,
-/// the cursor cell and the fade an unfocused pane takes, as the live grid does.
+/// The focus travels with the region because the page paints the cursor cell,
+/// as the live grid does. The fade an unfocused pane takes rides the region's
+/// dim under a terminal that fades a pool, so a focus move changes the cursor
+/// rows alone. Under an older terminal the page paints the fade too.
 struct TerminalPoolPane {
     term_id: TermId,
     region: PoolRegionCommand,
     is_focused: bool,
-    /// How far the page blends toward the background. Zero for the focused
-    /// pane.
+    /// How far the page itself blends toward the background. Zero for the
+    /// focused pane, and for every pane whose region carries the fade.
     dim: f32,
 }
 
@@ -2353,6 +2360,16 @@ fn terminal_pool_panes(
 ) -> Vec<TerminalPoolPane> {
     let ws = stoat.active_workspace();
     let focused = matches!(ws.focus, FocusTarget::SplitPane).then(|| ws.panes.focus());
+    // The live grid fades an unfocused pane only toward an RGB theme
+    // background, which is the one stoatty's clear color follows.
+    let region_fades = stoat.stoatty_protocol >= POOL_DIM_PROTOCOL
+        && crate::render::paint::style_rgb(
+            stoat
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|style| style.bg),
+        )
+        .is_some();
     ws.panes
         .split_panes()
         .filter_map(|(id, pane)| {
@@ -2370,6 +2387,10 @@ fn terminal_pool_panes(
             }
 
             let is_focused = focused == Some(id);
+            let fade = match is_focused {
+                true => 0.0,
+                false => inactive_dim,
+            };
             Some(TerminalPoolPane {
                 term_id,
                 region: PoolRegionCommand {
@@ -2380,12 +2401,15 @@ fn terminal_pool_panes(
                     height: content.height,
                     window: 0,
                     kind: PoolKind::Terminal,
-                    dim: 0,
+                    dim: match region_fades {
+                        true => (fade * 255.0).round() as u8,
+                        false => 0,
+                    },
                 },
                 is_focused,
-                dim: match is_focused {
+                dim: match region_fades {
                     true => 0.0,
-                    false => inactive_dim,
+                    false => fade,
                 },
             })
         })
@@ -2406,7 +2430,8 @@ fn terminal_pool_panes(
 /// page. Without it, or when stoatty may not hold that page, the page goes out
 /// whole. stoatty holds it while the page shows the same terminal at the same
 /// grid and the pool keeps its rectangle. A sent page becomes the one `pages`
-/// holds.
+/// holds. A region whose dim alone moved goes out as its own declaration, and
+/// the pool keeps its page.
 ///
 /// A pane whose grid has not been reported yet declares its region alone,
 /// which is what has stoatty report it, and answers nothing. A pane whose
@@ -2459,6 +2484,11 @@ fn emit_terminal_pool(
     let held_by_stoatty = held.term == pane.term_id
         && state.holds_region(pool, &pane.region)
         && held.page.area == held.spare.area;
+    // A new dim fades the page stoatty holds, so it rides the shared batch
+    // ahead of the compare, and ahead of any patch the compare answers.
+    if held_by_stoatty {
+        state.declare_region(out, pane.region);
+    }
     if held_by_stoatty && held.spare == held.page {
         state.record_content_version(pool, version);
         return Vec::new();
