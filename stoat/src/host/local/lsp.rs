@@ -47,6 +47,7 @@ use serde_json::{json, value::RawValue, Value};
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Read, Write},
+    mem,
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
@@ -86,6 +87,13 @@ const WRITE_STALL_THRESHOLD: usize = 256;
 
 /// Waiting requests by id, each holding the raw `result` text its response
 /// carried so the awaiting caller runs the one typed parse itself.
+///
+/// The reader and writer threads take each sender out of the map and release
+/// the lock before they send on it or drop it. Either one runs the waiting
+/// request's waker. When the request's executor is gone, that waker drops the
+/// request on the calling thread, and the request's [`CancelOnDrop`] then
+/// locks this map. A thread that still holds the lock deadlocks there, and
+/// every later lock of the map waits forever.
 type PendingMap =
     Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Box<RawValue>, LspResponseError>>>>>;
 
@@ -785,11 +793,12 @@ fn reader_loop(
             let wakes = wakes_for(&routed, &mut active_progress);
             match routed {
                 Routed::Response { id, result } => {
-                    if let Some(tx) = pending
+                    // The guard drops before the send, as `PendingMap` requires.
+                    let waiting = pending
                         .lock()
                         .expect("lsp pending map poisoned")
-                        .remove(&id)
-                    {
+                        .remove(&id);
+                    if let Some(tx) = waiting {
                         let _ = tx.send(result);
                     }
                 },
@@ -835,7 +844,10 @@ fn writer_loop(
             break;
         }
     }
-    pending.lock().expect("lsp pending map poisoned").clear();
+
+    // The guard drops before the senders do, as `PendingMap` requires.
+    let waiting = mem::take(&mut *pending.lock().expect("lsp pending map poisoned"));
+    drop(waiting);
 }
 
 /// Forward the child's stderr lines to the `stoat::lsp` tracing target. Language
@@ -1371,14 +1383,18 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        client_capabilities, io, mpsc, reap_child, transcript_slug, transcript_stem,
-        unbounded_channel, wakes_for, write_framed, writer_loop, Arc, AtomicI64, AtomicUsize,
-        Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant, LocalLsp,
-        Mutex, Ordering, PendingMap, Receiver, Routed, ServerCapabilities, Stdio, TokioMutex,
-        REAP_TIMEOUT, SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
+        client_capabilities, io, mpsc, oneshot, reader_loop, reap_child, transcript_slug,
+        transcript_stem, unbounded_channel, wakes_for, write_framed, writer_loop, Arc, AtomicI64,
+        AtomicUsize, Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant,
+        LocalLsp, Mutex, Notify, Ordering, PendingMap, Receiver, Routed, ServerCapabilities, Stdio,
+        TokioMutex, REAP_TIMEOUT, SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
     };
     use crate::host::lsp::{IncomingRequest, LspHost, LspNotification};
     use serde_json::{json, Value};
+    use std::{
+        pin::Pin,
+        task::{Wake, Waker},
+    };
 
     /// `body` framed the way the transport frames it on its way to the child.
     fn encode_message(body: &[u8]) -> Vec<u8> {
@@ -1557,6 +1573,110 @@ mod tests {
             depth.load(Ordering::Relaxed),
             0,
             "every body it wrote it also counted off",
+        );
+    }
+
+    /// A waker that records whether the pending map was free each time it ran.
+    ///
+    /// A request's real waker drops the request in place once the request's
+    /// executor is gone, and the request's cancel guard then locks the map.
+    /// That waker deadlocks a thread that holds the lock. The probe only tries
+    /// the lock, so it reports the state in which the real waker hangs.
+    struct LockProbe {
+        pending: PendingMap,
+        runs: Mutex<Vec<bool>>,
+    }
+
+    impl Wake for LockProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let free = self.pending.try_lock().is_ok();
+            self.runs.lock().expect("probe poisoned").push(free);
+        }
+    }
+
+    /// Registers request `id` in `pending` with its receiver parked behind a
+    /// [`LockProbe`], the way an awaiting request parks its task.
+    ///
+    /// The receiver goes back to the caller, because a sender wakes nothing
+    /// once its receiver is gone.
+    fn probed_request(pending: PendingMap, id: i64) -> (impl Sized, Arc<LockProbe>) {
+        let (tx, mut rx) = oneshot::channel();
+        pending.lock().expect("pending map").insert(id, tx);
+
+        let probe = Arc::new(LockProbe {
+            pending,
+            runs: Mutex::new(Vec::new()),
+        });
+        let waker = Waker::from(probe.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            Pin::new(&mut rx).poll(&mut cx).is_pending(),
+            "nothing answers the request yet",
+        );
+        (rx, probe)
+    }
+
+    /// A request that still waits when the writer ends fails then, and its
+    /// waker runs with the map already released.
+    #[test]
+    fn the_writer_fails_a_waiting_request_with_the_map_released() {
+        let pending: PendingMap = Default::default();
+        let (_rx, probe) = probed_request(pending.clone(), 1);
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("a child that reads whatever it is given");
+        let stdin = child.stdin.take().expect("stdin was piped");
+
+        let (bodies, queue) = mpsc::channel();
+        drop(bodies);
+        writer_loop(stdin, queue, pending, Arc::new(AtomicUsize::new(0)));
+        child.wait().expect("the child exits once its input closes");
+
+        assert_eq!(
+            *probe.runs.lock().expect("probe poisoned"),
+            [true],
+            "the request woke once, with the map free",
+        );
+    }
+
+    /// A response reaches its waiting request with the map already released.
+    #[test]
+    fn the_reader_hands_a_response_over_with_the_map_released() {
+        let pending: PendingMap = Default::default();
+        let (_rx, probe) = probed_request(pending.clone(), 1);
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("a child that echoes whatever it is given");
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        write_framed(&mut stdin, br#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+            .expect("the child takes the response");
+        drop(stdin);
+
+        let (notif_tx, _notif_rx) = unbounded_channel();
+        let (incoming_tx, _incoming_rx) = unbounded_channel();
+        let stdout = child.stdout.take().expect("stdout was piped");
+        reader_loop(
+            stdout,
+            pending,
+            notif_tx,
+            incoming_tx,
+            None,
+            Arc::new(Notify::new()),
+        );
+        child.wait().expect("the child exits once its input closes");
+
+        assert_eq!(
+            *probe.runs.lock().expect("probe poisoned"),
+            [true],
+            "the request woke once, with the map free",
         );
     }
 
