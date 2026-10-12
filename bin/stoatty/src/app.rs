@@ -489,14 +489,6 @@ impl Visibility {
     }
 }
 
-/// A detached pane's aux OS window, a second render target for the window-bound
-/// pools the primary composite omits.
-///
-/// The winit window is created on the main thread when a
-/// [`TermEvent::WindowOpen`] arrives, while its [`GpuContext`] builds on a
-/// background thread and installs via [`PtyEvent::AuxGpuReady`], so the primary
-/// never stalls on aux GPU setup. Until it arrives `gpu` is `None` and redraw
-/// requests find nothing to draw.
 /// The size a batch of window events settled on, for a caller that fits the
 /// surface once rather than per event.
 ///
@@ -520,6 +512,14 @@ impl PendingResize {
     }
 }
 
+/// A detached pane's aux OS window, a second render target for the window-bound
+/// pools the primary composite omits.
+///
+/// The winit window is created on the main thread when a
+/// [`TermEvent::WindowOpen`] arrives, while its [`GpuContext`] builds on a
+/// background thread and installs via [`PtyEvent::AuxGpuReady`], so the primary
+/// never stalls on aux GPU setup. Until it arrives `gpu` is `None` and redraw
+/// requests find nothing to draw.
 struct AuxWindow {
     id: u32,
     window: Arc<Window>,
