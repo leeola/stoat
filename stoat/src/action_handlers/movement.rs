@@ -4523,15 +4523,15 @@ pub(crate) struct PendingChangedFileJump {
 
 /// What a changed-file scan decided.
 enum ChangedFileJump {
-    /// Open `path` and land on `line`.
+    /// Open `path` and land on its first or last stop.
     ///
-    /// A hop always lands on a change, so the row is unconditional: the scan
-    /// walks past every candidate that offers no landing row rather than
-    /// opening one blind.
+    /// A hop always lands on a change, so the scan walks past every candidate
+    /// that offers no landing row rather than opening one blind.
     ///
-    /// `rows` is the buffer rows that hunk occupies, which the far side centers
-    /// on. It rides the message because the target is not open when the scan
-    /// picks it, so nothing after the open knows which chunk was chosen.
+    /// `line` and `rows` are the scan's stop and the buffer rows its hunk
+    /// occupies. The landing reads the opened file's own map, and these are its
+    /// fallback for a map that offers no stop. They ride the message because
+    /// the target is not open when the scan picks it.
     To {
         path: PathBuf,
         line: u32,
@@ -4786,15 +4786,19 @@ fn scan_changed_file_jump(
     ChangedFileJump::NoMoreChanges
 }
 
-/// The landing row of `path`'s first (Next) or last (Prev) change against the
+/// The row of `path`'s first (Next) or last (Prev) change against the
 /// workspace's diff base, paired with the rows that change occupies.
 ///
+/// The answer that counts is whether the file offers a stop at all. The hop
+/// lands on the stop the opened file's own map offers, and the tree pass
+/// refines that map into runs this line-pass scan does not see. The row here
+/// is the fallback for a map that offers no stop.
+///
 /// A change is a hunk. Outside the diff view a staged mark under the index base
-/// is a change too, as in [`live_hunk_rows`]. The texts come
-/// from [`diff::base_texts`], which is what the target's own diff map reads,
-/// so the row this lands on is one of the stops that map offers. Reading HEAD
-/// instead leaves a file committed on top of a review base looking clean, and
-/// the hop drops the cursor at the file top with no change under it.
+/// is a change too, as in [`live_hunk_rows`]. The texts come from
+/// [`diff::base_texts`], which is what the target's own diff map reads. Reading
+/// HEAD instead leaves a file committed on top of a review base looking clean,
+/// and the hop drops the cursor at the file top with no change under it.
 ///
 /// The rows travel with the row because the hop's target is not open yet,
 /// which leaves nothing on the far side to look the chunk up from. An empty
@@ -4942,21 +4946,64 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         }
     }
 
-    // The in-file walk reads its stops from the diff map, and the fresh editor
-    // has none until the background job settles. Without one the next press
-    // finds no hunk in the file just landed and crosses out again, which reads
-    // as the hop skipping files. A map that is already current costs nothing. A
-    // stale one wants the single landed file's hunks on the pool, and a press
-    // that arrives before they land replays on them.
+    // The landing reads its stop from the landed file's own diff map, where
+    // the tree pass splits a hunk into the runs the in-file walk stops on, so
+    // the next press in the other direction leaves the file. A current map
+    // lands at once. Any other map is wanted whole on the pool, and a press
+    // that arrives before it lands replays on it.
     if let Some((_, buffer_id)) = stoat.focused_editor_ids() {
-        super::review::ensure_diff_map(stoat, buffer_id, None);
+        super::review::ensure_diff_map(
+            stoat,
+            buffer_id,
+            Some(DiffLanding::FileHop {
+                dir: pending.dir,
+                origin: pending.origin,
+                wrapped,
+                fallback: (line, rows),
+            }),
+        );
     }
+    true
+}
 
+/// Land a changed-file hop on the stop the landed file's own walk offers.
+///
+/// A Next hop lands on the file's first stop and a Prev hop on its last, read
+/// from the live diff map. A hunk the tree pass split into runs therefore lands
+/// on its first or last run, and the next press in the other direction leaves
+/// the file. `fallback` is the scan's row and rows, for a map that offers no
+/// stop.
+///
+/// Pushes `origin` to the jumplist and records the landing. A `wrapped` hop
+/// says so in the status line.
+pub(super) fn land_file_hop(
+    stoat: &mut Stoat,
+    dir: ChangeDir,
+    origin: Option<JumpEntry>,
+    wrapped: bool,
+    fallback: (u32, Range<u32>),
+) {
+    let diff_walk = walks_diff_view(stoat);
     let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
     if let Some(editor) = focused_editor_mut(stoat) {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let target_offset = buffer_snapshot.rope().point_to_offset(Point::new(line, 0));
+        let stops = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
+        let stop = match dir {
+            ChangeDir::Next => stops.first(),
+            ChangeDir::Prev => stops.last(),
+        };
+        let (target_offset, rows) = match stop {
+            Some(rows) => (
+                stop_landing_cell(buffer_snapshot.rope(), rows.clone()).start,
+                rows.clone(),
+            ),
+            None => {
+                let (line, rows) = fallback;
+                let offset = buffer_snapshot.rope().point_to_offset(Point::new(line, 0));
+                (offset, rows)
+            },
+        };
         editor.selections.transform(buffer_snapshot, |sel| {
             land_block_cursor(
                 sel.id,
@@ -4966,27 +5013,23 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
                 buffer_snapshot,
             )
         });
-        // Pull the view onto the landed hunk here, so a startup or mouse
+
+        // Pull the view onto the landed stop here, so a startup or mouse
         // dispatch that skips the Key-event epilogue still lands scrolled. The
         // hop centers its landing the way the in-file walk does, biased toward
-        // the file the reader crossed from, and on the whole chunk where the
-        // scan told it which rows the chunk covers. A current map puts the
-        // removed-line blocks in the display, so the span maps against real
-        // splices. A map still on the pool leaves the display unspliced, and
-        // the span maps against the buffer rows alone.
-        let down = matches!(pending.dir, ChangeDir::Next);
+        // the file the reader crossed from.
+        let down = matches!(dir, ChangeDir::Next);
         let span = stop_display_span(&editor.display_map.snapshot(), &rows);
         view::center_jump_on_span(editor, span, down, center_off);
     }
 
-    if let Some(entry) = pending.origin {
+    if let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
     }
     super::jump::record_change_landing(stoat);
     if wrapped {
         stoat.set_status("wrapped");
     }
-    true
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -951,6 +951,82 @@ fn prev_change_crosses_to_previous_file_last_hunk() {
     );
 }
 
+/// A hop lands where the landed file's own walk stands. A Prev hop into a hunk
+/// split into runs lands on the last run, so one press forward leaves the file.
+#[test]
+fn a_hop_landing_takes_the_live_map_s_last_run() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join("a.rs"));
+    install_refined_hunk(&mut h, 0..3, &[0..1, 2..3]);
+
+    land_file_hop(&mut h.stoat, ChangeDir::Prev, None, false, (0, 0..3));
+    let landed = focused_head_row(&mut h.stoat);
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (landed, focused_buffer_path(&h.stoat)),
+        (2, workdir.join("b.rs")),
+        "the hop lands on the last run, and one press forward leaves a.rs",
+    );
+}
+
+/// The scan's row is the top of the hunk, and the live map's first run starts
+/// below it.
+#[test]
+fn a_next_hop_landing_takes_the_live_map_s_first_run() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_two_changed_files(&mut h);
+    h.open_file(&workdir.join("a.rs"));
+    let run = 1..2;
+    install_refined_hunk(&mut h, 0..3, std::slice::from_ref(&run));
+
+    land_file_hop(&mut h.stoat, ChangeDir::Next, None, false, (0, 0..3));
+
+    assert_eq!(focused_head_row(&mut h.stoat), 1);
+}
+
+/// The scan diffs a file it has not opened with the line pass alone, so its
+/// row is the top of a hunk that the tree pass splits into runs. Here the runs
+/// are `if x` on row 1 and the changed literal on row 3. The hop lands on the
+/// last run the opened file's own map offers.
+#[test]
+fn a_backward_hop_into_an_unopened_file_lands_on_its_last_run() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = PathBuf::from("/repo");
+    h.stage_review_scenario(
+        &workdir,
+        &[
+            (
+                "a.rs",
+                "fn f() {\n    let a = 1;\n    let b = 2;\n}\n",
+                "fn f() {\n    if x {\n        let a = 1;\n        let b = 3;\n    }\n}\n",
+            ),
+            ("b.rs", "d\ne\nf\n", "d\nY\nf\n"),
+        ],
+    );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&workdir.join("b.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+    goto_change(&mut h.stoat, ChangeDir::Prev);
+    h.settle();
+    let landed = (
+        focused_buffer_path(&h.stoat),
+        focused_head_row(&mut h.stoat),
+    );
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (landed, focused_buffer_path(&h.stoat)),
+        ((workdir.join("a.rs"), 3), workdir.join("b.rs")),
+        "the hop lands on the changed literal's run, and one press forward leaves a.rs",
+    );
+}
+
 #[test]
 fn next_change_wraps_from_the_last_file_with_a_message() {
     let mut h = TestHarness::with_size(40, 20);

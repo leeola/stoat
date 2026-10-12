@@ -194,14 +194,15 @@ pub(crate) struct DiffState {
     /// blocking diff is not cancelled before it installs its [`DiffMap`] on the
     /// buffer.
     pub(super) jobs: HashMap<BufferId, DiffJob>,
-    /// Hunks-only diffs that a caller waits on, one per buffer, with the
-    /// landings to run once the hunks arrive.
+    /// Diffs that a caller waits on, one per buffer, with the landings to run
+    /// once the hunks arrive.
     ///
     /// A diff open places the view and the cursor by the hunks, and resolving
-    /// the base and running the line pass costs 5-50 ms. A want
-    /// runs both on the blocking pool, so the loop paints the plain frame
-    /// meanwhile. A `.git` write marks a want superseded and never drops it, so
-    /// its landings still run.
+    /// the base and running the line pass costs 5-50 ms. A want runs both on
+    /// the blocking pool, so the loop paints the plain frame meanwhile. A
+    /// changed-file hop wants the drive's whole job instead, since it lands on
+    /// the runs the tree pass makes. A `.git` write marks a want superseded and
+    /// never drops it, so its landings still run.
     wants: HashMap<BufferId, DiffWant>,
     /// The buffer version each buffer's hunks-only map landed for.
     ///
@@ -485,14 +486,20 @@ impl DiffState {
         }
     }
 
-    /// Start a hunks-only diff of `id` on the blocking pool, and run `landing`
-    /// once its hunks land.
+    /// Start a diff of `id` on the blocking pool, and run `landing` once its
+    /// hunks land.
     ///
     /// The job resolves the base and runs the line pass, which is what a diff
     /// open places the view and the cursor by. It parses nothing, so the diff
-    /// view's colors arrive with a later drive. A want in flight at the
-    /// buffer's version takes the landing and spawns nothing. A want at an
-    /// older version hands its landings to the new one.
+    /// view's colors arrive with a later drive. A landing that asks for the
+    /// whole map gets the drive's job instead. That job also runs the tree
+    /// pass, which splits a hunk into the runs a walk stops on, and the colors
+    /// and anchors, so its map counts as current once it lands.
+    ///
+    /// A want in flight at the buffer's version takes the landing and spawns
+    /// nothing, unless the landing asks for the whole map and the want holds
+    /// the hunks alone. A want that gives way hands its landings to the new
+    /// one, as a want at an older version does.
     ///
     /// Answers `landing` back when nothing is wanted, which is the answer for a
     /// buffer with no path, so the caller runs it at once.
@@ -503,6 +510,7 @@ impl DiffState {
         git_root: &Path,
         executor: &Executor,
         git_host: &Arc<dyn GitHost>,
+        language_registry: &LanguageRegistry,
         syntax_styles: &SyntaxStyles,
         base_cache: &BaseHighlightCache,
         redraw_notify: &Arc<Notify>,
@@ -519,9 +527,10 @@ impl DiffState {
         // on the pool.
         let buffer_snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
         let target_version = buffer_snapshot.version;
+        let whole = landing.as_ref().is_some_and(DiffLanding::wants_whole_map);
 
         let mut landings = match self.wants.remove(&id) {
-            Some(mut want) if want.target_version == target_version => {
+            Some(mut want) if want.target_version == target_version && (want.whole || !whole) => {
                 want.landings.extend(landing);
                 self.wants.insert(id, want);
                 return None;
@@ -531,6 +540,21 @@ impl DiffState {
         };
         landings.extend(landing);
 
+        // A hunks-only job takes no language, memo, tree, or anchors. Its
+        // hunks lack anchors on purpose, which is what tells
+        // `DiffMap::renders_same_as` that the drive's colored map decorates
+        // differently.
+        let (language, buffer_tree) = match whole {
+            true => (
+                language_registry.for_path(&path),
+                buffers
+                    .syntax(id)
+                    .filter(|state| state.version == target_version)
+                    .map(|state| state.tree.clone()),
+            ),
+            false => (None, None),
+        };
+
         let task = executor.spawn_blocking({
             let git_host = git_host.clone();
             let git_root = git_root.to_path_buf();
@@ -539,10 +563,8 @@ impl DiffState {
             let base_cache = base_cache.clone();
             let diff_base = self.effective_base().cloned();
             let cached_base = self.base_text.get(&path).cloned();
+            let tree_cache = whole.then(|| self.tree_cache.clone());
             move || {
-                // No language, memo, tree, or anchors. The hunks lack anchors on
-                // purpose, which is what tells `DiffMap::renders_same_as` that
-                // the drive's colored map decorates differently.
                 let out = run_diff_job(
                     &*git_host,
                     &git_root,
@@ -552,12 +574,12 @@ impl DiffState {
                     &buffer_snapshot,
                     target_version,
                     id,
-                    None,
+                    language.as_ref(),
                     &syntax_styles,
                     &base_cache,
-                    None,
-                    None,
-                    false,
+                    tree_cache.as_ref(),
+                    buffer_tree.as_ref(),
+                    whole,
                 );
                 redraw.notify_one();
                 out
@@ -570,6 +592,7 @@ impl DiffState {
                 task,
                 landings,
                 superseded: false,
+                whole,
             },
         );
 
@@ -582,9 +605,10 @@ impl DiffState {
     /// Install each wanted map whose hunks arrived, and answer its buffer with
     /// the landings to run, in the order the callers added them.
     ///
-    /// A landed map is whole when the file has no base or no language, since
-    /// there are no colors to wait for, so its version counts as current. Any
-    /// other map records a hunks-only marker, and the drive adds its colors. A
+    /// A landed map is whole when the want ran the drive's job, or when the
+    /// file has no base or no language, since there are no colors to wait for,
+    /// so its version counts as current. Any other map records a hunks-only
+    /// marker, and the drive adds its colors. A
     /// superseded want's map still paints, and files neither its blobs nor a
     /// version.
     ///
@@ -601,7 +625,12 @@ impl DiffState {
             let mut cx = Context::from_waker(&waker);
             match Pin::new(&mut want.task).poll(&mut cx) {
                 Poll::Ready(out) => {
-                    landed.push((out, want.superseded, mem::take(&mut want.landings)));
+                    landed.push((
+                        out,
+                        want.superseded,
+                        want.whole,
+                        mem::take(&mut want.landings),
+                    ));
                     false
                 },
                 Poll::Pending => true,
@@ -609,7 +638,7 @@ impl DiffState {
         });
 
         let mut landings = Vec::with_capacity(landed.len());
-        for (out, superseded, want_landings) in landed {
+        for (out, superseded, ran_whole, want_landings) in landed {
             let (id, version) = (out.buffer_id, out.target_version);
             // A drive job in flight when the want started sometimes lands first,
             // at this version or a later one. Its whole map is on the buffer and
@@ -619,13 +648,22 @@ impl DiffState {
                 .get(&id)
                 .is_some_and(|&recorded| recorded >= version);
             if !outrun {
-                let whole = out.base.is_none() || language_registry.for_path(&out.path).is_none();
+                let whole = ran_whole
+                    || out.base.is_none()
+                    || language_registry.for_path(&out.path).is_none();
                 self.land(buffers, out, superseded);
                 if !superseded {
+                    // A whole map replaces the hunks a want installed before
+                    // it, so their marker goes with them.
                     match whole {
-                        true => self.versions.insert(id, version),
-                        false => self.hunks_only.insert(id, version),
-                    };
+                        true => {
+                            self.versions.insert(id, version);
+                            self.hunks_only.remove(&id);
+                        },
+                        false => {
+                            self.hunks_only.insert(id, version);
+                        },
+                    }
                 }
             }
             landings.push((id, want_landings));
@@ -975,7 +1013,8 @@ pub(super) struct DiffJobOutput {
     pub(super) base: Option<DiffBaseText>,
 }
 
-/// A hunks-only diff on the blocking pool, and what runs once it lands.
+/// A diff on the blocking pool that a caller waits on, and what runs once it
+/// lands.
 pub(super) struct DiffWant {
     target_version: u64,
     task: Task<DiffJobOutput>,
@@ -985,6 +1024,9 @@ pub(super) struct DiffWant {
     /// A `.git` write landed after the want read its blobs, so its map still
     /// paints, and its blobs and its marker do not count.
     superseded: bool,
+    /// The job is the drive's, with the tree pass, the colors, and anchors, so
+    /// its map counts as current once it lands.
+    whole: bool,
 }
 
 /// What a caller that wanted a buffer's hunks does once they land.
@@ -1007,6 +1049,27 @@ pub(crate) enum DiffLanding {
     ChangeWalk { dir: ChangeDir, count: u32 },
     /// A first-change or last-change press that arrived before the hunks.
     EdgeChange { last: bool },
+    /// A changed-file hop that opened its target, landing on the file's first
+    /// (Next) or last (Prev) stop once the whole map is in.
+    ///
+    /// `origin` is the jumplist entry for where the hop started, and `wrapped`
+    /// says the walk went past an end. `fallback` is the scan's row and the
+    /// rows its hunk covers, for a map that offers no stop.
+    FileHop {
+        dir: ChangeDir,
+        origin: Option<JumpEntry>,
+        wrapped: bool,
+        fallback: (u32, Range<u32>),
+    },
+}
+
+impl DiffLanding {
+    /// Whether the landing reads the stops a walk offers, which the tree pass
+    /// splits into runs, so it waits for the whole map rather than the hunks
+    /// alone.
+    pub(crate) fn wants_whole_map(&self) -> bool {
+        matches!(self, Self::FileHop { .. })
+    }
 }
 
 /// A task that wakes a redraw when a settle window closes, so the frame that
@@ -2912,6 +2975,60 @@ mod tests {
             (h.blocking_calls() - hops, lasts),
             (1, vec![false, true]),
             "one job carries both landings in the order they came",
+        );
+    }
+
+    fn file_hop() -> DiffLanding {
+        DiffLanding::FileHop {
+            dir: movement::ChangeDir::Next,
+            origin: None,
+            wrapped: false,
+            fallback: (0, 0..1),
+        }
+    }
+
+    /// A hop lands on the runs the tree pass makes, which installed hunks alone
+    /// do not hold, so it wants the whole map and lands it current.
+    #[test]
+    fn a_hop_over_installed_hunks_wants_the_whole_map() {
+        let (mut h, buffer_id) = wanted_harness();
+        h.settle_diff_map(buffer_id);
+
+        action_handlers::review::ensure_diff_map(&mut h.stoat, buffer_id, Some(file_hop()));
+        let whole = h
+            .stoat
+            .active_workspace()
+            .diff
+            .wants
+            .get(&buffer_id)
+            .map(|want| want.whole);
+        assert_eq!(whole, Some(true), "the hop waits for the whole map");
+
+        h.settle();
+        assert_eq!(
+            wanted_map(&h, buffer_id),
+            (1, true, false, true),
+            "the whole map lands with its colors and counts as current",
+        );
+    }
+
+    #[test]
+    fn a_whole_want_takes_over_a_hunks_want_in_flight() {
+        let (mut h, buffer_id) = wanted_harness();
+        let hops = h.blocking_calls();
+
+        action_handlers::review::ensure_diff_map(
+            &mut h.stoat,
+            buffer_id,
+            Some(DiffLanding::EdgeChange { last: false }),
+        );
+        action_handlers::review::ensure_diff_map(&mut h.stoat, buffer_id, Some(file_hop()));
+
+        let want = &h.stoat.active_workspace().diff.wants[&buffer_id];
+        assert_eq!(
+            (h.blocking_calls() - hops, want.whole, want.landings.len()),
+            (2, true, 2),
+            "the whole job replaces the hunks one and carries both landings",
         );
     }
 

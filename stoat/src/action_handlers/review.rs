@@ -598,14 +598,16 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
 ///
 /// Only the hunks are computed for the wait. The left column's colors cost a
 /// parse of the whole base file, which the background pass takes on and lands a
-/// frame later.
+/// frame later. A landing that reads a walk's stops waits for the whole map
+/// instead, since the tree pass splits a hunk into the runs a walk stops on.
 pub(crate) fn ensure_diff_map(
     stoat: &mut Stoat,
     buffer_id: BufferId,
     landing: Option<DiffLanding>,
 ) {
     let ws = stoat.active_workspace();
-    if ws.diff_map_current(buffer_id) || ws.hunks_installed(buffer_id) {
+    let whole = landing.as_ref().is_some_and(DiffLanding::wants_whole_map);
+    if ws.diff_map_current(buffer_id) || (!whole && ws.hunks_installed(buffer_id)) {
         if let Some(landing) = landing {
             land_diff_want(stoat, buffer_id, landing);
         }
@@ -614,12 +616,14 @@ pub(crate) fn ensure_diff_map(
 
     let executor = stoat.executor.clone();
     let git_host = stoat.git_host.clone();
+    let language_registry = stoat.language_registry.clone();
     let syntax_styles = stoat.syntax_styles.clone();
     let base_cache = stoat.base_highlights_cache.clone();
     let redraw_notify = stoat.redraw_notify.clone();
     let unwanted = stoat.active_workspace_mut().want_diff_map(
         &executor,
         &git_host,
+        &language_registry,
         &syntax_styles,
         &base_cache,
         &redraw_notify,
@@ -652,8 +656,8 @@ pub(crate) fn pump_diff_wants(stoat: &mut Stoat) -> bool {
 /// A landing acts only where the reader still is, since the reader moves on
 /// while the hunks are on the pool. A latched view needs its editor to show
 /// `buffer_id` in a latched split pane, a toggle jump needs its editor
-/// focused, and a change press needs the focused buffer to be `buffer_id`.
-/// Otherwise the landing is dropped.
+/// focused, and a change press or a file hop needs the focused buffer to be
+/// `buffer_id`. Otherwise the landing is dropped.
 fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) {
     let focused = stoat.focused_editor_ids();
     match landing {
@@ -687,6 +691,16 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
         DiffLanding::EdgeChange { last } => {
             if focused.is_some_and(|(_, id)| id == buffer_id) {
                 super::movement::goto_edge_change(stoat, last);
+            }
+        },
+        DiffLanding::FileHop {
+            dir,
+            origin,
+            wrapped,
+            fallback,
+        } => {
+            if focused.is_some_and(|(_, id)| id == buffer_id) {
+                super::movement::land_file_hop(stoat, dir, origin, wrapped, fallback);
             }
         },
     }
