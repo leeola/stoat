@@ -63,16 +63,27 @@ use crate::{
     toggle::{self, Toggle, ToggleStates},
     workspace::{self, diff, Workspace, WorkspaceId},
 };
+use crossterm::{
+    cursor::MoveTo,
+    queue,
+    style::{
+        Attribute, Colors, Print, SetAttribute, SetBackgroundColor, SetColors, SetForegroundColor,
+        SetUnderlineColor,
+    },
+    terminal::{Clear, ClearType},
+};
 use ratatui::{
+    backend::IntoCrossterm,
     buffer::{Buffer, Cell},
     layout::Rect,
-    style::Color,
+    style::{Color, Modifier},
     widgets::StatefulWidget,
 };
 use slotmap::SlotMap;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
+    io,
     ops::Range,
     path::Path,
 };
@@ -407,6 +418,169 @@ impl PerfSegment {
     }
 }
 
+/// The colors, attributes, and cursor position that the bytes of a page stream
+/// leave on the terminal.
+///
+/// A cell writes its attribute and color changes only where they differ from
+/// this state. It writes a cursor move only where it does not follow the last
+/// cell. [`CrosstermBackend`](ratatui::backend::CrosstermBackend) keeps the
+/// same state as it draws, so a cell goes out as the bytes that backend writes
+/// for it.
+///
+/// See also:
+/// - [`serialize_rows`], the page stream this state follows.
+struct PagePen {
+    fg: Color,
+    bg: Color,
+    underline_color: Color,
+    modifier: Modifier,
+    last: Option<(u16, u16)>,
+}
+
+impl PagePen {
+    fn new() -> Self {
+        PagePen {
+            fg: Color::Reset,
+            bg: Color::Reset,
+            underline_color: Color::Reset,
+            modifier: Modifier::empty(),
+            last: None,
+        }
+    }
+
+    /// Write `cell` at column `x` of row `y`, after the state changes it needs.
+    fn paint(&mut self, out: &mut Vec<u8>, x: u16, y: u16, cell: &Cell) -> io::Result<()> {
+        self.move_to(out, x, y)?;
+
+        if cell.modifier != self.modifier {
+            self.set_modifier(out, cell.modifier)?;
+        }
+        self.set_colors(out, cell.fg, cell.bg)?;
+        if cell.underline_color != self.underline_color {
+            queue!(
+                out,
+                SetUnderlineColor(cell.underline_color.into_crossterm())
+            )?;
+            self.underline_color = cell.underline_color;
+        }
+
+        queue!(out, Print(cell.symbol()))
+    }
+
+    /// Clear from column `x` of row `y` to the end of the line under the colors
+    /// of `blank`.
+    fn erase(&mut self, out: &mut Vec<u8>, x: u16, y: u16, blank: &Cell) -> io::Result<()> {
+        self.move_to(out, x, y)?;
+        // The erase leaves the cursor at `x`, not past a painted cell.
+        self.last = None;
+
+        // Terminals do not agree on which attributes an erase applies, so the
+        // erase runs with none. SGR 0 also resets the colors, to the state of a
+        // new pen.
+        if !self.modifier.is_empty() {
+            queue!(out, SetAttribute(Attribute::Reset))?;
+            *self = PagePen::new();
+        }
+        self.set_colors(out, blank.fg, blank.bg)?;
+
+        queue!(out, Clear(ClearType::UntilNewLine))
+    }
+
+    /// Reset the colors and attributes, so the stream ends in the state a new
+    /// pen starts from.
+    fn finish(self, out: &mut Vec<u8>) -> io::Result<()> {
+        let reset = Color::Reset.into_crossterm();
+        queue!(
+            out,
+            SetForegroundColor(reset),
+            SetBackgroundColor(reset),
+            SetUnderlineColor(reset),
+            SetAttribute(Attribute::Reset),
+        )
+    }
+
+    fn move_to(&mut self, out: &mut Vec<u8>, x: u16, y: u16) -> io::Result<()> {
+        if self.last.map(|(last_x, last_y)| (last_x + 1, last_y)) != Some((x, y)) {
+            queue!(out, MoveTo(x, y))?;
+        }
+        self.last = Some((x, y));
+        Ok(())
+    }
+
+    fn set_colors(&mut self, out: &mut Vec<u8>, fg: Color, bg: Color) -> io::Result<()> {
+        if (fg, bg) != (self.fg, self.bg) {
+            queue!(
+                out,
+                SetColors(Colors::new(fg.into_crossterm(), bg.into_crossterm()))
+            )?;
+            self.fg = fg;
+            self.bg = bg;
+        }
+        Ok(())
+    }
+
+    /// Change the attributes to `to`.
+    ///
+    /// The commands and their order copy the private attribute diff of
+    /// [`CrosstermBackend`](ratatui::backend::CrosstermBackend), so a cell's
+    /// bytes stay the ones that backend writes.
+    fn set_modifier(&mut self, out: &mut Vec<u8>, to: Modifier) -> io::Result<()> {
+        let removed = self.modifier - to;
+        let added = to - self.modifier;
+        self.modifier = to;
+
+        if removed.contains(Modifier::REVERSED) {
+            queue!(out, SetAttribute(Attribute::NoReverse))?;
+        }
+
+        // SGR 22 clears bold and dim together, so the one of them that stays
+        // goes back on.
+        let intensity = Modifier::BOLD | Modifier::DIM;
+        let reset_intensity = removed.intersects(intensity);
+        if reset_intensity {
+            queue!(out, SetAttribute(Attribute::NormalIntensity))?;
+            if to.contains(Modifier::DIM) {
+                queue!(out, SetAttribute(Attribute::Dim))?;
+            }
+            if to.contains(Modifier::BOLD) {
+                queue!(out, SetAttribute(Attribute::Bold))?;
+            }
+        }
+
+        for (modifier, off) in [
+            (Modifier::ITALIC, Attribute::NoItalic),
+            (Modifier::UNDERLINED, Attribute::NoUnderline),
+            (Modifier::CROSSED_OUT, Attribute::NotCrossedOut),
+            (Modifier::HIDDEN, Attribute::NoHidden),
+        ] {
+            if removed.contains(modifier) {
+                queue!(out, SetAttribute(off))?;
+            }
+        }
+        if removed.intersects(Modifier::SLOW_BLINK | Modifier::RAPID_BLINK) {
+            queue!(out, SetAttribute(Attribute::NoBlink))?;
+        }
+
+        for (modifier, on) in [
+            (Modifier::REVERSED, Attribute::Reverse),
+            (Modifier::BOLD, Attribute::Bold),
+            (Modifier::ITALIC, Attribute::Italic),
+            (Modifier::UNDERLINED, Attribute::Underlined),
+            (Modifier::DIM, Attribute::Dim),
+            (Modifier::CROSSED_OUT, Attribute::CrossedOut),
+            (Modifier::HIDDEN, Attribute::Hidden),
+            (Modifier::SLOW_BLINK, Attribute::SlowBlink),
+            (Modifier::RAPID_BLINK, Attribute::RapidBlink),
+        ] {
+            let restored = reset_intensity && intensity.contains(modifier);
+            if added.contains(modifier) && !restored {
+                queue!(out, SetAttribute(on))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Format a [`PerfSegment`] for the status bar, padded like the other
 /// segments so neighbors stay separated.
 #[cfg(feature = "perf")]
@@ -512,50 +686,97 @@ pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::T
     }
 }
 
-/// Serialize every cell of `buf` to a self-contained VT byte stream, as
-/// [`serialize_rows`] serializes every row of it.
+/// Serialize every row of `buf` to a self-contained VT byte stream, as
+/// [`serialize_rows`] serializes them.
 pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
     serialize_rows(buf, buf.area.top()..buf.area.bottom())
 }
 
 /// Serialize the cells of `buf` whose row is in `rows` to a self-contained VT
-/// byte stream via a [`CrosstermBackend`] over an in-memory buffer.
+/// byte stream.
 ///
 /// Unlike the live render path, which diffs against the previous frame, this
-/// emits all those cells unconditionally, so the bytes fully paint those rows
+/// paints all those cells unconditionally, so the bytes fully paint those rows
 /// of a pool slot regardless of what the slot held before. Cursor moves are
 /// absolute, so the stream is positioned for the page's top-left independent
 /// of the live grid cursor.
 ///
-/// The cells a wide glyph covers are skipped, as the live diff skips them. The
-/// terminal advances its cursor across them when it prints the glyph, so a
-/// blank printed for one lands a column too far right and shifts the rest of
-/// the row. The gap makes the backend move the cursor before the next cell.
+/// The trailing run of identical blanks in each row goes out as one erase to
+/// the end of the line under their background. On a code page that run is
+/// most of the row, and a cell-by-cell paint costs the wire and the receiving
+/// parser one cell for each blank. An erased cell takes the receiver's default
+/// foreground, which a blank never shows.
+///
+/// The erase stops at the right edge of the receiving grid, so `buf` must end
+/// at that edge, as a page buffer at the size of its pool region does.
 pub(crate) fn serialize_rows(buf: &Buffer, rows: Range<u16>) -> Vec<u8> {
-    use ratatui::backend::{Backend, CrosstermBackend};
+    let mut out = Vec::new();
+    // Writes into a Vec<u8> never fail. The Results exist only because the
+    // crossterm commands write through io::Write.
+    let _ = queue_rows(&mut out, buf, rows);
+    out
+}
 
-    let mut bytes = Vec::new();
-    {
-        let mut backend = CrosstermBackend::new(&mut bytes);
-        let mut hidden = 0;
-        let cells = buf.content.iter().enumerate().filter_map(|(i, cell)| {
-            let (x, y) = buf.pos_of(i);
-            if x == buf.area.x {
-                hidden = 0;
-            }
-            if hidden > 0 {
-                hidden -= 1;
-                return None;
-            }
-            hidden = cell.symbol().width().saturating_sub(1);
-            rows.contains(&y).then_some((x, y, cell))
-        });
-        // CrosstermBackend over a Vec<u8> writer is infallible; the Results are
-        // surfaced only because the Backend trait is generic over fallible writers.
-        let _ = backend.draw(cells);
-        let _ = backend.flush();
+fn queue_rows(out: &mut Vec<u8>, buf: &Buffer, rows: Range<u16>) -> io::Result<()> {
+    let mut pen = PagePen::new();
+    let mut shown = Vec::new();
+
+    for y in rows.start.max(buf.area.top())..rows.end.min(buf.area.bottom()) {
+        shown_cells(buf, y, &mut shown);
+        let painted = shown.len() - trailing_blank_run(&shown);
+
+        for &(x, cell) in &shown[..painted] {
+            pen.paint(out, x, y, cell)?;
+        }
+        if let Some(&(x, blank)) = shown.get(painted) {
+            pen.erase(out, x, y, blank)?;
+        }
     }
-    bytes
+
+    pen.finish(out)
+}
+
+/// Replace `shown` with the cells of row `y` that print, each with its column.
+///
+/// The cells a wide glyph covers are left out, as the live diff leaves them
+/// out. The terminal advances its cursor across them when it prints the
+/// glyph, so a blank printed for one lands a column too far right and shifts
+/// the rest of the row. Because of the gap, the next cell writes a cursor move
+/// first.
+fn shown_cells<'a>(buf: &'a Buffer, y: u16, shown: &mut Vec<(u16, &'a Cell)>) {
+    shown.clear();
+
+    let width = usize::from(buf.area.width);
+    let start = usize::from(y - buf.area.y) * width;
+    let row = &buf.content[start..start + width];
+    let mut hidden = 0;
+    for (x, cell) in (buf.area.left()..buf.area.right()).zip(row) {
+        if hidden > 0 {
+            hidden -= 1;
+            continue;
+        }
+        hidden = cell.symbol().width().saturating_sub(1);
+        shown.push((x, cell));
+    }
+}
+
+/// The number of cells at the end of `shown` that go out as one erase.
+///
+/// The run is the cells equal to the last cell, when that cell is a space with
+/// no modifier. Such a cell shows only its background, so an erase under that
+/// background paints what the cells paint.
+fn trailing_blank_run(shown: &[(u16, &Cell)]) -> usize {
+    let Some(&(_, last)) = shown.last() else {
+        return 0;
+    };
+    if last.symbol() != " " || !last.modifier.is_empty() {
+        return 0;
+    }
+    shown
+        .iter()
+        .rev()
+        .take_while(|(_, cell)| *cell == last)
+        .count()
 }
 
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
@@ -2104,9 +2325,18 @@ mod lsp_filter_tests {
 
 #[cfg(test)]
 mod serialize_tests {
-    use super::serialize_buffer;
-    use crate::term_screen::TermScreen;
-    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+    use super::{serialize_buffer, serialize_rows};
+    use crate::term_screen::{StyledCell, TermScreen};
+    use ratatui::{
+        backend::{Backend, CrosstermBackend},
+        buffer::{Buffer, Cell},
+        layout::Rect,
+        style::{Color, Modifier, Style},
+    };
+    use unicode_width::UnicodeWidthStr;
+
+    const BLANK_FG: Color = Color::Rgb(200, 200, 200);
+    const BLANK_BG: Color = Color::Rgb(10, 20, 30);
 
     /// The cell a wide glyph covers prints nothing, so the cells after the
     /// glyph keep the columns the buffer gave them.
@@ -2120,5 +2350,160 @@ mod serialize_tests {
         screen.feed(&serialize_buffer(&buf));
 
         assert_eq!(screen.text(), "a\n\u{4e2d}bcde");
+    }
+
+    #[test]
+    fn a_page_with_trailing_blanks_projects_as_the_cell_by_cell_page_does() {
+        let mut buf = themed_page(3, 12);
+        buf.set_string(0, 0, "let x", Style::new().fg(Color::Rgb(220, 220, 100)));
+        buf.set_string(
+            5,
+            0,
+            "!",
+            Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        );
+        buf.set_string(0, 1, "\u{4e2d}ab", Style::new().fg(Color::Indexed(5)));
+        buf.set_style(
+            Rect::new(4, 1, 8, 1),
+            Style::new().bg(Color::Rgb(60, 60, 60)),
+        );
+
+        assert_eq!(
+            composite(&serialize_buffer(&buf), &buf),
+            composite(&backend_bytes(&buf), &buf),
+        );
+    }
+
+    #[test]
+    fn a_blank_row_is_one_move_and_one_erase() {
+        let mut buf = themed_page(2, 8);
+        buf.set_string(0, 0, "ab", Style::new());
+
+        assert_eq!(
+            String::from_utf8_lossy(&serialize_rows(&buf, 1..2)),
+            "\x1b[2;1H\x1b[38;2;200;200;200;48;2;10;20;30m\x1b[K\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+        );
+    }
+
+    #[test]
+    fn an_erase_after_an_attribute_resets_it_first() {
+        let mut buf = themed_page(1, 4);
+        buf.set_string(0, 0, "x", Style::new().add_modifier(Modifier::BOLD));
+
+        assert_eq!(
+            String::from_utf8_lossy(&serialize_buffer(&buf)),
+            "\x1b[1;1H\x1b[1m\x1b[38;2;200;200;200;48;2;10;20;30mx\x1b[0m\
+             \x1b[38;2;200;200;200;48;2;10;20;30m\x1b[K\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+        );
+    }
+
+    #[test]
+    fn a_zero_width_page_is_only_the_closing_reset() {
+        assert_eq!(
+            String::from_utf8_lossy(&serialize_buffer(&themed_page(2, 0))),
+            "\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_trailing_blank_serializes_as_the_backend_does() {
+        let mut buf = themed_page(3, 6);
+        let modifiers = [
+            Modifier::BOLD
+                | Modifier::ITALIC
+                | Modifier::UNDERLINED
+                | Modifier::REVERSED
+                | Modifier::CROSSED_OUT
+                | Modifier::HIDDEN
+                | Modifier::SLOW_BLINK,
+            Modifier::DIM,
+            Modifier::BOLD | Modifier::RAPID_BLINK,
+            Modifier::empty(),
+            Modifier::BOLD,
+            Modifier::BOLD | Modifier::DIM,
+        ];
+        for (x, modifier) in (0..).zip(modifiers) {
+            buf.set_string(x, 0, "m", Style::new().add_modifier(modifier));
+        }
+        buf.set_string(
+            0,
+            1,
+            "\u{4e2d}",
+            Style::new()
+                .fg(Color::Red)
+                .bg(Color::Reset)
+                .underline_color(Color::Indexed(9))
+                .add_modifier(Modifier::UNDERLINED),
+        );
+        buf.set_string(
+            2,
+            1,
+            "q",
+            Style::new().fg(Color::Reset).bg(Color::Indexed(17)),
+        );
+        buf.set_string(5, 1, " ", Style::new().add_modifier(Modifier::REVERSED));
+        buf.set_string(3, 2, "end", Style::new().fg(Color::Gray));
+
+        assert_eq!(
+            String::from_utf8_lossy(&serialize_buffer(&buf)),
+            String::from_utf8_lossy(&backend_bytes(&buf)),
+        );
+    }
+
+    /// A page of `rows` by `cols` blanks in the theme's colors.
+    fn themed_page(rows: u16, cols: u16) -> Buffer {
+        let mut blank = Cell::EMPTY;
+        blank.fg = BLANK_FG;
+        blank.bg = BLANK_BG;
+        Buffer::filled(Rect::new(0, 0, cols, rows), blank)
+    }
+
+    /// The cells of the grid of `buf` after `bytes` paint it, as a page
+    /// composite reads them.
+    ///
+    /// A space with no modifier shows no foreground, so its foreground is left
+    /// out.
+    fn composite(bytes: &[u8], buf: &Buffer) -> Vec<StyledCell> {
+        let mut screen = TermScreen::new(buf.area.height, buf.area.width);
+        screen.feed(bytes);
+        (0..usize::from(buf.area.height))
+            .flat_map(|row| screen.row(row))
+            .map(|cell| {
+                if cell.ch == ' ' && cell.modifiers.is_empty() {
+                    StyledCell { fg: None, ..cell }
+                } else {
+                    cell
+                }
+            })
+            .collect()
+    }
+
+    /// The page bytes [`CrosstermBackend`] draws for `buf`, one cell at a time
+    /// with no erase.
+    ///
+    /// A shown cell must go out as these bytes do, and a whole page must paint
+    /// what these bytes paint.
+    fn backend_bytes(buf: &Buffer) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut bytes);
+            let mut hidden = 0;
+            let cells = buf.content.iter().enumerate().filter_map(|(i, cell)| {
+                let (x, y) = buf.pos_of(i);
+                if x == buf.area.x {
+                    hidden = 0;
+                }
+                if hidden > 0 {
+                    hidden -= 1;
+                    return None;
+                }
+                hidden = cell.symbol().width().saturating_sub(1);
+                Some((x, y, cell))
+            });
+            backend
+                .draw(cells)
+                .expect("a draw into a Vec<u8> never fails");
+        }
+        bytes
     }
 }
