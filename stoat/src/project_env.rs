@@ -6,12 +6,16 @@
 //! would apply, so it can be replayed onto child spawns. A transient
 //! message reports the outcome.
 //!
-//! [`spawn_load`] is fire-and-forget. It detaches a task that writes its
-//! result into [`crate::app::Stoat::pending_env`], and [`install_pending`]
-//! drains that slot on the next background pump.
+//! [`spawn_load`] is fire-and-forget. It detaches a task that pushes its
+//! result onto [`crate::app::Stoat::pending_env`], and [`install_pending`]
+//! drains every result there on the next background pump.
 
 use crate::{app::Stoat, buffer::BufferId, host::ShellOutput, workspace::WorkspaceId};
-use std::{collections::HashMap, io, path::Path};
+use std::{
+    collections::HashMap,
+    io, mem,
+    path::{Path, PathBuf},
+};
 
 /// The exit code `sh` returns when the command it runs is not found on
 /// PATH, which for `direnv export json` means direnv is not installed.
@@ -53,6 +57,11 @@ pub(crate) struct WorkspaceEnv {
 /// while the load ran, and drop the result if that workspace is gone.
 pub(crate) struct PendingEnvLoad {
     pub(crate) workspace: WorkspaceId,
+    /// The root the load ran in.
+    ///
+    /// A `:cd` that lands while the load runs moves the workspace to another
+    /// root, and the install skips a load whose root the workspace has left.
+    pub(crate) root: PathBuf,
     /// Whether the load was user-requested. Manual loads always report
     /// their outcome. Automatic loads stay quiet for the non-actionable
     /// cases.
@@ -76,7 +85,7 @@ pub(crate) fn parse_direnv_export(bytes: &[u8]) -> Result<Vec<(String, Option<St
 /// workspace [`EnvLoadState::Loading`]. No-op when the workspace is gone.
 ///
 /// The detached task runs `direnv export json` in the workspace root via
-/// the shell host and parks its classified outcome in
+/// the shell host and pushes its classified outcome onto
 /// [`Stoat::pending_env`] for [`install_pending`] to drain.
 pub(crate) fn spawn_load(stoat: &mut Stoat, ws_id: WorkspaceId, manual: bool) {
     let git_root = {
@@ -87,6 +96,7 @@ pub(crate) fn spawn_load(stoat: &mut Stoat, ws_id: WorkspaceId, manual: bool) {
         ws.git_root.clone()
     };
 
+    let root = git_root.clone();
     let shell_host = stoat.shell_host.clone();
     let pending = stoat.pending_env.clone();
     let executor = stoat.executor.clone();
@@ -98,11 +108,15 @@ pub(crate) fn spawn_load(stoat: &mut Stoat, ws_id: WorkspaceId, manual: bool) {
                     shell_host.run("TERM=dumb direnv export json", b"", Some(&git_root), &[])
                 })
                 .await;
-            *pending.lock().expect("pending env mutex") = Some(PendingEnvLoad {
-                workspace: ws_id,
-                manual,
-                outcome: classify(result),
-            });
+            pending
+                .lock()
+                .expect("pending env mutex")
+                .push(PendingEnvLoad {
+                    workspace: ws_id,
+                    root,
+                    manual,
+                    outcome: classify(result),
+                });
         })
         .detach();
 }
@@ -155,50 +169,23 @@ pub(crate) fn reload_active_workspace(stoat: &mut Stoat) {
     spawn_load(stoat, ws_id, true);
 }
 
-/// Install a finished background load onto its workspace and report it.
+/// Install every finished background load onto its workspace, in the order
+/// the loads landed.
 ///
-/// Drains [`Stoat::pending_env`], a no-op when nothing finished. On
-/// success the diff replaces the workspace's env. On error the env is
-/// cleared. Either way the state becomes [`EnvLoadState::Loaded`]. The
-/// transient message follows the outcome and whether the load was manual.
+/// Drains [`Stoat::pending_env`], a no-op when nothing finished. See
+/// [`install_load`] for what one load does.
 ///
-/// A language-server spawn deferred while the env was loading (see
+/// A language-server spawn deferred during an env load (see
 /// [`crate::lsp::session::maybe_spawn_language_server`]) is re-fired
-/// here, now with the installed diff.
+/// once a load installs, now with the installed diff.
 pub(crate) fn install_pending(stoat: &mut Stoat) {
-    let pending = stoat.pending_env.lock().expect("pending env mutex").take();
-    let Some(PendingEnvLoad {
-        workspace,
-        manual,
-        outcome,
-    }) = pending
-    else {
+    let landed = mem::take(&mut *stoat.pending_env.lock().expect("pending env mutex"));
+    let mut installed = false;
+    for load in landed {
+        installed |= install_load(stoat, load);
+    }
+    if !installed {
         return;
-    };
-
-    let unset_on_exit = stoat.settings.direnv_unset_on_exit.unwrap_or(false);
-
-    let message = {
-        let Some(ws) = stoat.workspaces.get_mut(workspace) else {
-            return;
-        };
-        match outcome {
-            Ok(diff) => {
-                let (diff, message) = resolve_ok_diff(diff, &ws.git_root, manual, unset_on_exit);
-                ws.env.diff = diff;
-                ws.env.state = EnvLoadState::Loaded;
-                message
-            },
-            Err(err) => {
-                ws.env.diff = Vec::new();
-                ws.env.state = EnvLoadState::Loaded;
-                err_message(&err, manual)
-            },
-        }
-    };
-
-    if let Some(message) = message {
-        stoat.set_status(message);
     }
 
     // Language-server spawns deferred while the env loaded now run with the
@@ -219,6 +206,53 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
             crate::lsp::session::maybe_spawn_language_server(stoat, workspace, id);
         }
     }
+}
+
+/// Install one finished load onto its workspace and report it, answering
+/// whether it installed.
+///
+/// On success the diff replaces the workspace's env. On error the env is
+/// cleared. Either way the state becomes [`EnvLoadState::Loaded`]. The
+/// transient message follows the outcome and whether the load was manual.
+///
+/// A load for a workspace that is gone installs nothing. Neither does a load
+/// for a root the workspace has left, because the old root's environment
+/// must never reach spawns under the new root.
+fn install_load(stoat: &mut Stoat, load: PendingEnvLoad) -> bool {
+    let PendingEnvLoad {
+        workspace,
+        root,
+        manual,
+        outcome,
+    } = load;
+    let unset_on_exit = stoat.settings.direnv_unset_on_exit.unwrap_or(false);
+
+    let message = {
+        let Some(ws) = stoat.workspaces.get_mut(workspace) else {
+            return false;
+        };
+        if ws.git_root != root {
+            return false;
+        }
+        match outcome {
+            Ok(diff) => {
+                let (diff, message) = resolve_ok_diff(diff, &ws.git_root, manual, unset_on_exit);
+                ws.env.diff = diff;
+                ws.env.state = EnvLoadState::Loaded;
+                message
+            },
+            Err(err) => {
+                ws.env.diff = Vec::new();
+                ws.env.state = EnvLoadState::Loaded;
+                err_message(&err, manual)
+            },
+        }
+    };
+
+    if let Some(message) = message {
+        stoat.set_status(message);
+    }
+    true
 }
 
 /// Classify a shell-host run of `direnv export json` into a diff or an
@@ -592,6 +626,51 @@ mod tests {
         );
     }
 
+    /// A load for the old root that lands after a `:cd`, here behind the new
+    /// root's load in the same turn, installs nothing.
+    #[test]
+    fn a_load_for_the_root_a_cd_left_never_installs() {
+        let mut h = TestHarness::with_size(80, 24);
+        setup(
+            &mut h,
+            out(br#"{"NEW":"2","DIRENV_FILE":"/proj2/.envrc"}"#, b"", 0),
+        );
+        h.fake_fs().insert_dir("/proj2");
+        let ws_id = h.stoat.active_workspace;
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::SetCwd {
+                path: "/proj2".to_string(),
+            },
+        );
+        h.settle();
+        h.stoat
+            .pending_env
+            .lock()
+            .expect("pending env mutex")
+            .push(PendingEnvLoad {
+                workspace: ws_id,
+                root: PathBuf::from("/proj"),
+                manual: false,
+                outcome: Ok(vec![("OLD".to_string(), Some("1".to_string()))]),
+            });
+        install_pending(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.env.state, ws.env.diff.clone()),
+            (
+                EnvLoadState::Loaded,
+                vec![
+                    ("DIRENV_FILE".to_string(), Some("/proj2/.envrc".to_string())),
+                    ("NEW".to_string(), Some("2".to_string())),
+                ]
+            ),
+            "the new root's diff stands, and the old root's load installs nothing",
+        );
+    }
+
     #[test]
     fn cd_with_reload_disabled_clears_diff_without_running() {
         let mut h = TestHarness::with_size(80, 24);
@@ -609,6 +688,7 @@ mod tests {
                 path: "/proj2".to_string(),
             },
         );
+        ensure_loaded(&mut h.stoat);
         h.settle();
 
         let ws = h.stoat.active_workspace();
@@ -617,9 +697,14 @@ mod tests {
             ws.env.diff.is_empty(),
             "the old root's diff is cleared even when the reload is disabled"
         );
+        assert_eq!(
+            ws.env.state,
+            EnvLoadState::Off,
+            "the env parks off, so the next background pump loads nothing"
+        );
         assert!(
             fake.invocations().is_empty(),
-            "reload_on_cd = false runs no direnv"
+            "reload_on_cd = false runs no direnv, not even on the next pump"
         );
     }
 

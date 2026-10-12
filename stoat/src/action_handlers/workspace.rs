@@ -485,11 +485,14 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
             }
             stoat.watch_active_root();
 
-            if stoat.env_auto_load
-                && stoat.settings.direnv_reload_on_cd.unwrap_or(true)
-                && stoat.settings.direnv_load.unwrap_or(true)
-            {
-                crate::project_env::spawn_load(stoat, ws_id, false);
+            if stoat.env_auto_load && stoat.settings.direnv_load.unwrap_or(true) {
+                if stoat.settings.direnv_reload_on_cd.unwrap_or(true) {
+                    crate::project_env::spawn_load(stoat, ws_id, false);
+                } else {
+                    // The next background pump loads an unloaded env, so the
+                    // env parks off until an explicit reload.
+                    stoat.active_workspace_mut().env.state = crate::project_env::EnvLoadState::Off;
+                }
             }
 
             let root = stoat.active_workspace().git_root.display().to_string();

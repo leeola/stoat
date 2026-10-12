@@ -1746,11 +1746,14 @@ pub struct Stoat {
     /// replaces the file and orphans the children already connected through it.
     /// Dropping a task stops its server, which removes its socket file.
     pub(crate) agent_servers: std::collections::HashMap<WorkspaceUid, stoat_scheduler::Task<()>>,
-    /// Landing slot for a finished direnv load, drained by
+    /// Finished direnv loads in the order they landed, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
-    /// Shared rather than returned because the load runs detached on
-    /// [`Self::executor`] and cannot borrow `self`.
-    pub(crate) pending_env: Arc<std::sync::Mutex<Option<crate::project_env::PendingEnvLoad>>>,
+    ///
+    /// A queue rather than one slot, because a `:cd` starts a load while the
+    /// old root's load still runs, and both land. Shared rather than returned
+    /// because a load runs detached on [`Self::executor`], with no borrow of
+    /// `self`.
+    pub(crate) pending_env: Arc<std::sync::Mutex<Vec<crate::project_env::PendingEnvLoad>>>,
     /// Landing slot for a finished `--continue` session restore, drained by
     /// [`Self::install_pending_workspace_restore`] in [`Self::drive_background`].
     /// Shared rather than returned because the restore runs detached on
@@ -2581,7 +2584,7 @@ impl Stoat {
             serve_agent_sockets: false,
             session_log: None,
             agent_servers: std::collections::HashMap::new(),
-            pending_env: Arc::new(std::sync::Mutex::new(None)),
+            pending_env: Arc::new(std::sync::Mutex::new(Vec::new())),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
             pending_workspace_autosave: None,

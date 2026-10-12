@@ -742,12 +742,14 @@ mod tests {
         // keeping the test free of a real language-server process, then land
         // the env.
         h.stoat.set_lsp_host(Arc::new(crate::host::FakeLsp::new()));
-        *h.stoat.pending_env.lock().expect("pending env mutex") =
-            Some(crate::project_env::PendingEnvLoad {
+        h.stoat.pending_env.lock().expect("pending env mutex").push(
+            crate::project_env::PendingEnvLoad {
                 workspace: ws_id,
+                root,
                 manual: false,
                 outcome: Ok(Vec::new()),
-            });
+            },
+        );
         crate::project_env::install_pending(&mut h.stoat);
 
         assert_eq!(
