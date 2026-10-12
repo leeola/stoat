@@ -248,8 +248,6 @@ pub(crate) fn commit_picker_drill_in(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     picker.pending_commits = Some(task);
-
-    set_picker_query(stoat, "");
     UpdateEffect::Redraw
 }
 
@@ -257,16 +255,22 @@ pub(crate) fn commit_picker_drill_in(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The query typed in that scope comes back with it, since the user is being
 /// put back where they were rather than handed a fresh list.
+///
+/// Back also cancels a drill whose walk has not landed, at any scope, the root
+/// included, because the reader leaves the scope that the drill starts from.
 pub(crate) fn commit_picker_back(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.commit_picker.as_mut() else {
         return UpdateEffect::None;
     };
+    // A drill whose walk has not landed goes here. Otherwise it arrives later
+    // and pushes its scope over the scope the reader returns to.
+    let drilling = picker.pending_commits.take().is_some();
     let Some(query) = picker.pop_scope() else {
-        return UpdateEffect::None;
+        return match drilling {
+            true => UpdateEffect::Redraw,
+            false => UpdateEffect::None,
+        };
     };
-    // A drill still walking would otherwise arrive and push its scope on top of
-    // the one just returned to.
-    picker.pending_commits = None;
 
     set_picker_query(stoat, &query);
     ensure_selected_preview(stoat);
@@ -720,6 +724,9 @@ fn install_pending_commits(stoat: &mut Stoat) -> bool {
             if let Some(picker) = stoat.commit_picker.as_mut() {
                 picker.push_scope(label, ref_sha, commits, query_before);
             }
+            // The query clears only once the drilled scope shows, so a drill
+            // canceled or empty leaves the query as typed.
+            set_picker_query(stoat, "");
         },
     }
 
@@ -1699,6 +1706,39 @@ mod tests {
                 .and_then(|p| p.scope_label.clone()),
             None,
             "back at the root, titled by the role again"
+        );
+    }
+
+    /// Back before a drill lands cancels the drill, so the walk never arrives
+    /// to strand the reader in a scope with an empty query.
+    #[test]
+    fn a_back_press_while_a_drill_walks_cancels_the_drill() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+        h.type_text("9999");
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitPickerDrillIn);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitPickerBack);
+        h.settle();
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        assert_eq!(
+            (
+                picker_shas(&h),
+                picker_query(&h),
+                picker.scope_label.clone(),
+                picker.pending_commits.is_none()
+            ),
+            (
+                MERGED_DAG.map(String::from).to_vec(),
+                "9999".to_owned(),
+                None,
+                true
+            ),
+            "back cancels the drill, and the root list keeps its query"
         );
     }
 
