@@ -304,8 +304,9 @@ impl ArgPicker {
     /// it holds rather than the typed tail, the directory part having already
     /// gone into the walk's root.
     ///
-    /// The fallback ranks the tail while the list holds a match too, so its
-    /// rows already answer the tail when the list runs dry.
+    /// The fallback ranks the tail only while the list shows no row, or while
+    /// its own walk still streams. Otherwise it forgets its results and costs
+    /// nothing per keystroke.
     fn begin_refilter(&mut self, query: &str) -> Vec<PendingScan> {
         let begun = match &mut self.browse {
             Some(browse) => {
@@ -321,13 +322,20 @@ impl ArgPicker {
         let mut pending: Vec<PendingScan> = ScanTarget::List.tag(begun).into_iter().collect();
         if let Some(ignored) = &mut self.ignored {
             ignored.pump_scan();
-            pending.extend(ScanTarget::Fallback.tag(ignored.begin_scan(query)));
+            if !self.core.rows_empty() && !ignored.walking() {
+                ignored.forget_results();
+            } else {
+                pending.extend(ScanTarget::Fallback.tag(ignored.begin_scan(query)));
+            }
         }
         pending
     }
 
     /// Bring the active list and its fallback up to date here and now, for a
     /// caller about to act on the selection rather than paint it.
+    ///
+    /// The fallback settles only when the list settles to no row, which is
+    /// when it stands in for the list.
     fn settle_scan(&mut self, query: &str) {
         match &mut self.browse {
             Some(browse) => {
@@ -336,7 +344,9 @@ impl ArgPicker {
             },
             None => self.core.settle_scan(query),
         }
-        if let Some(ignored) = &mut self.ignored {
+        if self.core.lists_nothing()
+            && let Some(ignored) = &mut self.ignored
+        {
             ignored.settle_scan(query);
         }
     }
@@ -3328,6 +3338,55 @@ mod tests {
 
         h.type_keys("enter");
         assert_eq!(editor::focused_buffer_path(&h.stoat), toml);
+    }
+
+    /// Seed a workspace whose `:o` fallback of ignored files stood in for
+    /// `main.toml`, with the tail then cut back to `main`, which the listed
+    /// `src/main.rs` matches. Returns the workspace root.
+    fn open_tail_back_on_a_listed_match(h: &mut TestHarness) -> PathBuf {
+        let root =
+            seed_palette_workspace(h, &[("src/main.rs", ""), ("target/debug/main.toml", "")]);
+        h.type_text(":o main.toml");
+        settle_arg_fallback(h);
+
+        h.type_keys("backspace backspace backspace backspace backspace");
+        for _ in 0..2 {
+            let _ = h.snapshot();
+            h.settle();
+        }
+        root
+    }
+
+    /// The tail the `:o` fallback last took, or `None` with no fallback.
+    fn arg_fallback_query(h: &TestHarness) -> Option<String> {
+        arg_picker(h)
+            .ignored
+            .as_ref()
+            .map(|f| f.last_filter_text.clone())
+    }
+
+    #[test]
+    fn a_listed_tail_leaves_the_open_fallback_idle() {
+        let mut h = Stoat::test();
+        let root = open_tail_back_on_a_listed_match(&mut h);
+        assert_eq!(
+            (arg_rows(&h), arg_fallback_query(&h)),
+            (
+                vec![root.join("src/main.rs").display().to_string()],
+                Some(String::new()),
+            ),
+            "the list shows its match and the fallback holds no tail",
+        );
+    }
+
+    #[test]
+    fn settling_a_listed_tail_leaves_the_open_fallback_unsettled() {
+        let mut h = Stoat::test();
+        open_tail_back_on_a_listed_match(&mut h);
+        let palette = h.stoat.command_palette.as_mut().expect("palette open");
+        let picker = palette.arg_picker.as_mut().expect("arg picker active");
+        picker.settle_scan("main");
+        assert_eq!(arg_fallback_query(&h), Some(String::new()));
     }
 
     #[test]
