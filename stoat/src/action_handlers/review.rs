@@ -301,8 +301,8 @@ pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
 /// for the same file replaces the first, and closing returns the file to the
 /// workspace's base.
 ///
-/// Two equal files open the view with equal columns and a status that says
-/// so. With no pair it badges and changes nothing.
+/// Two equal files open the view with equal columns, and a status says so once
+/// the pair's hunks are in. With no pair it badges and changes nothing.
 ///
 /// See also:
 /// - [`Workspace::pair_panes`] for what counts as a pair.
@@ -373,10 +373,8 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
     );
     reopen_diff_view(stoat);
 
-    if let Some((editor_id, _)) = stoat.focused_editor_ids()
-        && !editor_shows_changes(stoat, editor_id)
-    {
-        stoat.set_status("the two files do not differ");
+    if let Some((editor, buffer_id)) = stoat.focused_editor_ids() {
+        ensure_diff_map(stoat, buffer_id, Some(DiffLanding::PairVerdict { editor }));
     }
     UpdateEffect::Redraw
 }
@@ -664,9 +662,9 @@ pub(crate) fn pump_diff_wants(stoat: &mut Stoat) -> bool {
 ///
 /// A landing acts only where the reader still is, since the reader moves on
 /// while the hunks are on the pool. A latched view needs its editor to show
-/// `buffer_id` in a latched split pane, a toggle jump needs its editor
-/// focused, and a change press or a file hop needs the focused buffer to be
-/// `buffer_id`. Otherwise the landing is dropped.
+/// `buffer_id` in a latched split pane, a toggle jump or a pair verdict needs
+/// its editor focused, and a change press or a file hop needs the focused
+/// buffer to be `buffer_id`. Otherwise the landing is dropped.
 fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) {
     let focused = stoat.focused_editor_ids();
     match landing {
@@ -690,6 +688,11 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
         DiffLanding::ToggleJump { editor, origin } => {
             if focused.is_some_and(|(id, _)| id == editor) {
                 land_toggle_jump(stoat, origin);
+            }
+        },
+        DiffLanding::PairVerdict { editor } => {
+            if focused.is_some_and(|(id, _)| id == editor) && !editor_shows_changes(stoat, editor) {
+                stoat.set_status("the two files do not differ");
             }
         },
         DiffLanding::ChangeWalk { dir, count } => {
@@ -2173,15 +2176,17 @@ mod tests {
             (
                 pair_base(&h, "/pair/b.txt"),
                 pair_view(&mut h),
-                review_cursor_row(&mut h)
+                review_cursor_row(&mut h),
+                h.stoat.pending_message.as_deref(),
             ),
             (
                 Some(("/pair/a.txt".into(), "one\ntwo\nthree\n".into())),
                 (true, true, Some(PathBuf::from("/pair/b.txt"))),
                 1,
+                None,
             ),
             "the right file diffs against the left, focused and widened, with the cursor on \
-             the first difference",
+             the first difference and no word that the files match",
         );
     }
 
@@ -2201,7 +2206,7 @@ mod tests {
         let mut h = TestHarness::with_size(120, 20);
         h.stage_review_scenario("/repo", &[("c.txt", "1\n", "2\n")]);
         h.open_side_by_side(("/repo/a.txt", "same\n"), ("/repo/b.txt", "same\n"));
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        run(&mut h, &stoat_action::DiffPair);
 
         let view = pair_view(&mut h);
         assert_eq!(
@@ -2216,6 +2221,40 @@ mod tests {
                 (true, true, Some(PathBuf::from("/repo/b.txt"))),
             ),
             "no hop into the repo's changed file",
+        );
+    }
+
+    /// A reader who leaves the measured file before its hunks land gets no
+    /// verdict about the file they left.
+    #[test]
+    fn the_verdict_drops_once_the_focus_moves_on() {
+        let mut h = TestHarness::with_size(120, 20);
+        h.open_side_by_side(("/pair/a.txt", "same\n"), ("/pair/b.txt", "same\n"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        h.settle();
+
+        assert_eq!(h.stoat.pending_message.as_deref(), None);
+    }
+
+    /// The git diff on the measured file before the press shows changes, and
+    /// the pair's own hunks show none, so the verdict waits for the pair's.
+    #[test]
+    fn equal_files_say_so_over_a_file_with_a_git_diff() {
+        let mut h = TestHarness::with_size(120, 20);
+        h.stage_review_scenario("/repo", &[("b.txt", "zero\n", "same\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_side_by_side(("/repo/a.txt", "same\n"), ("/repo/b.txt", "same\n"));
+        h.settle_diff_jobs();
+        run(&mut h, &stoat_action::DiffPair);
+
+        let view = pair_view(&mut h);
+        assert_eq!(
+            (h.stoat.pending_message.as_deref(), view),
+            (
+                Some("the two files do not differ"),
+                (true, true, Some(PathBuf::from("/repo/b.txt"))),
+            ),
         );
     }
 

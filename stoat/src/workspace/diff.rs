@@ -1104,6 +1104,12 @@ pub(crate) enum DiffLanding {
     ChangeWalk { dir: ChangeDir, count: u32 },
     /// A first-change or last-change press that arrived before the hunks.
     EdgeChange { last: bool },
+    /// Report two equal files once a pair press's hunks are in, when `editor`
+    /// still holds the focus.
+    ///
+    /// The verdict waits for the hunks, since the map on the buffer at the
+    /// press still measures the file against the base it had before the pair.
+    PairVerdict { editor: EditorId },
     /// A changed-file hop that opened its target, landing on the file's first
     /// (Next) or last (Prev) stop once the whole map is in.
     ///
