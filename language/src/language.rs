@@ -459,8 +459,18 @@ impl LanguageRegistry {
         self.languages.iter().find(|l| l.name == name).cloned()
     }
 
+    /// The language a file's name selects, by its extension.
+    ///
+    /// A `.gz` suffix names a compression, not a language, so the extension
+    /// under it decides, and `main.rs.gz` reads as Rust. Only one `.gz` layer
+    /// is looked through, so `a.gz` and `a.rs.gz.gz` select nothing.
     pub fn for_path(&self, path: &Path) -> Option<Arc<Language>> {
-        let ext = path.extension()?.to_str()?;
+        let ext = match path.extension()?.to_str()? {
+            gz if gz.eq_ignore_ascii_case("gz") => {
+                Path::new(path.file_stem()?).extension()?.to_str()?
+            },
+            ext => ext,
+        };
         self.languages
             .iter()
             .find(|l| l.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
@@ -974,6 +984,17 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.RS")).unwrap().name, "rust");
         assert!(reg.for_path(Path::new("a.txt")).is_none());
         assert!(reg.for_path(Path::new("noext")).is_none());
+    }
+
+    #[test]
+    fn for_path_looks_through_a_gz_suffix() {
+        let reg = LanguageRegistry::standard();
+        let name = |path: &str| reg.for_path(Path::new(path)).map(|l| l.name);
+
+        assert_eq!(
+            ["a.rs.gz", "a.json.GZ", "a.gz", "a.tar.gz", "a.rs.gz.gz"].map(name),
+            [Some("rust"), Some("json"), None, None, None]
+        );
     }
 
     #[test]
