@@ -53,7 +53,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use stoat_language::{LanguageRegistry, Tree};
 use stoat_scheduler::{Executor, Task};
@@ -162,6 +162,11 @@ pub struct Workspace {
     /// the renderer into the `git_root.file_name()` fallback used by tests.
     pub(crate) name: String,
     pub git_root: PathBuf,
+    /// The instant the workspace was last focused.
+    ///
+    /// Wall-clock time, so the workspace picker orders open rows beside saved
+    /// sessions, whose state files carry mtimes, by one clock.
+    pub(crate) last_active: SystemTime,
     /// The working tree root of the repository that holds [`Self::git_root`],
     /// or `None` when the root is in no repository or has not been entered.
     ///
@@ -446,6 +451,7 @@ impl Workspace {
             uid,
             name,
             git_root,
+            last_active: executor.system_now(),
             repo_root: None,
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,

@@ -81,11 +81,15 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
 /// so the first render after the switch shows correctly-sized panes, and watches
 /// its root, so a workspace entered after launch hears the writes under it.
 ///
+/// The entered workspace's `last_active` takes the switch's instant, which is
+/// what orders the workspace picker's rows by recency.
+///
 /// The language servers follow the switch. They close the documents of the
 /// workspace left and open the entered one's, through
 /// [`crate::lsp::session::mirror_workspace`].
 pub(crate) fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     stoat.active_workspace = next;
+    stoat.active_workspace_mut().last_active = stoat.executor.system_now();
     let size = stoat.size();
     stoat.active_workspace_mut().layout(size);
     stoat.watch_active_root();
@@ -569,7 +573,7 @@ mod tests {
     };
     use std::{
         sync::{Arc, Mutex},
-        time::UNIX_EPOCH,
+        time::{Duration, UNIX_EPOCH},
     };
     use time::macros::datetime;
 
@@ -1053,6 +1057,35 @@ mod tests {
             (stoat.workspaces.len(), stoat.agent_servers.len()),
             (1, 0),
             "the dropped launch workspace takes its hook server with it",
+        );
+    }
+
+    /// A switch stamps the workspace it enters, so a session entered again
+    /// ranks by that entry and not by its creation. The test clock moves only
+    /// when told, so it advances before each step.
+    #[test]
+    fn a_session_entered_again_ranks_by_that_entry() {
+        let mut harness = Stoat::test();
+        let first = harness.stoat.active_workspace;
+        for _ in 0..2 {
+            harness.advance_clock(Duration::from_secs(1));
+            harness.type_action("NewWorkspace()");
+        }
+        let third = harness.stoat.active_workspace;
+        harness.advance_clock(Duration::from_secs(1));
+        switch_active_workspace(&mut harness.stoat, first);
+        harness.advance_clock(Duration::from_secs(1));
+        switch_active_workspace(&mut harness.stoat, third);
+
+        harness.type_action("SwitchWorkspace()");
+        assert_eq!(
+            harness
+                .stoat
+                .workspace_picker
+                .as_ref()
+                .and_then(WorkspacePicker::selected_id),
+            Some(first),
+            "the session left last is the one the picker opens on"
         );
     }
 

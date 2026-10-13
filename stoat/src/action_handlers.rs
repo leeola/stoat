@@ -3192,24 +3192,27 @@ mod tests {
         );
     }
 
+    /// The picker opens on the session focused before this one, so Enter alone
+    /// returns there. The test clock moves only when told, so it advances
+    /// between the switches to give each workspace its own focus instant.
     #[test]
     fn picker_enter_switches_to_selected_workspace() {
         let mut h = Stoat::test();
+        h.advance_clock(Duration::from_secs(1));
         h.type_action("NewWorkspace()");
         let second = h.stoat.active_workspace;
+        h.advance_clock(Duration::from_secs(1));
         h.type_action("NewWorkspace()");
-        let third = h.stoat.active_workspace;
         assert_eq!(h.stoat.workspaces.len(), 3);
 
         h.type_action("SwitchWorkspace()");
-        h.type_keys("down enter");
+        h.type_keys("enter");
 
-        // Picker sorts current first, then by basename. With all three sharing
-        // the empty basename, uid is the tiebreaker (smallest first after the
-        // current one), so "Down Enter" lands on whichever sibling sorts first.
-        assert!(h.stoat.workspace_picker.is_none());
-        assert_ne!(h.stoat.active_workspace, third);
-        assert!(h.stoat.active_workspace == second || h.stoat.active_workspace != third);
+        assert_eq!(
+            (h.stoat.workspace_picker.is_none(), h.stoat.active_workspace),
+            (true, second),
+            "Enter closes the picker on the previous session"
+        );
     }
 
     #[test]

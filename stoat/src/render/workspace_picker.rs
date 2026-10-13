@@ -345,10 +345,15 @@ mod tests {
             "a meaningful page needs more than one row: {half}"
         );
 
+        let start = picker.selected();
         picker.page(1);
-        assert_eq!(picker.selected(), half, "a page down covers half a screen");
+        assert_eq!(
+            picker.selected(),
+            start + half,
+            "a page down covers half a screen"
+        );
         picker.page(-1);
-        assert_eq!(picker.selected(), 0, "and a page up returns");
+        assert_eq!(picker.selected(), start, "and a page up returns");
 
         for _ in 0..15 {
             picker.page(1);

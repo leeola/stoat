@@ -8,14 +8,15 @@ use slotmap::SlotMap;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 /// Where a listed workspace stands relative to the running instance.
 ///
-/// Ordered so a sort lists [`Active`](Self::Active) first, then
-/// [`Background`](Self::Background), then [`Inactive`](Self::Inactive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// The picker lists the [`Active`](Self::Active) row first and every other row
+/// by recency, so a [`Background`](Self::Background) workspace and an
+/// [`Inactive`](Self::Inactive) saved session interleave by time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceStatus {
     /// The focused workspace.
     Active,
@@ -34,6 +35,9 @@ pub enum WorkspaceStatus {
 /// through the `modal == workspace_picker` keymap block. [`Self::select_next`]
 /// and [`Self::select_prev`] move the highlight, and [`Self::selected_id`]
 /// reports the row to switch to.
+///
+/// The picker opens on the row after the active one, the session focused
+/// before it, so Enter at once returns there.
 pub struct WorkspacePicker {
     pub(crate) input: InputView,
     entries: Vec<PickerEntry>,
@@ -84,8 +88,9 @@ pub struct PickerEntry {
     pub editor_count: usize,
     /// The state file an inactive row restores from. `None` for open rows.
     pub state_path: Option<PathBuf>,
-    /// State file mtime, ordering inactive rows newest first. Epoch for open
-    /// rows, which sort by name instead.
+    /// The state file's mtime for an inactive row, and the last focus instant
+    /// for an open one. Every row after the active one orders by it, newest
+    /// first.
     pub mtime: SystemTime,
     /// Host this workspace's window was last handed to, or `None` when it is
     /// local. Picking such a row hands the window straight back to that host,
@@ -99,8 +104,9 @@ impl WorkspacePicker {
     /// Open workspaces list as [`WorkspaceStatus::Active`] (the focused one) or
     /// [`WorkspaceStatus::Background`]. Registry entries whose uid is not open
     /// list as [`WorkspaceStatus::Inactive`], so an open workspace wins over its
-    /// own on-disk sidecar. Rows order Active first, then Background by name,
-    /// then Inactive newest state file first.
+    /// own on-disk sidecar. The active row leads, and every other row follows
+    /// newest first, an open row by its last focus and a saved one by its state
+    /// file. The selection starts on the first row after the active one.
     ///
     /// The `input` is built by the caller because listing borrows every
     /// workspace immutably, while creating the input needs the active workspace
@@ -127,7 +133,7 @@ impl WorkspacePicker {
                 run_count: ws.runs.len(),
                 editor_count: ws.editors.len(),
                 state_path: None,
-                mtime: UNIX_EPOCH,
+                mtime: ws.last_active,
                 remote_host: ws.remote.as_ref().map(|target| target.host.clone()),
             })
             .collect();
@@ -153,18 +159,15 @@ impl WorkspacePicker {
         }
 
         entries.sort_by(|a, b| {
-            a.status
-                .cmp(&b.status)
-                .then_with(|| match a.status {
-                    WorkspaceStatus::Inactive => b.mtime.cmp(&a.mtime),
-                    _ => a.basename.cmp(&b.basename),
-                })
+            (a.status != WorkspaceStatus::Active)
+                .cmp(&(b.status != WorkspaceStatus::Active))
+                .then_with(|| b.mtime.cmp(&a.mtime))
                 .then_with(|| a.uid.0.cmp(&b.uid.0))
         });
 
         let selected = entries
             .iter()
-            .position(|e| e.status == WorkspaceStatus::Active)
+            .position(|e| e.status != WorkspaceStatus::Active)
             .unwrap_or(0);
 
         let haystacks = entries
@@ -399,7 +402,10 @@ mod tests {
     use crate::{
         buffer::BufferId, editor_state::EditorId, input_view::SubmitTarget, workspace::Workspace,
     };
-    use std::sync::Arc;
+    use std::{
+        sync::Arc,
+        time::{Duration, UNIX_EPOCH},
+    };
     use stoat_scheduler::{Executor, TestScheduler};
 
     fn executor() -> Executor {
@@ -415,6 +421,13 @@ mod tests {
         }
     }
 
+    /// The instant `secs` after the epoch, as a workspace's last focus or a
+    /// state file's mtime. The test clock gives every workspace one instant,
+    /// so a test that orders rows sets them apart.
+    fn focused_at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
     fn slotmap_with_two(exec: &Executor) -> (SlotMap<WorkspaceId, Workspace>, WorkspaceId) {
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let a = workspaces.insert(Workspace::new(
@@ -423,12 +436,14 @@ mod tests {
             crate::test_notify(),
         ));
         workspaces[a].id = a;
+        workspaces[a].last_active = focused_at(2);
         let b = workspaces.insert(Workspace::new(
             PathBuf::from("/tmp/beta"),
             exec,
             crate::test_notify(),
         ));
         workspaces[b].id = b;
+        workspaces[b].last_active = focused_at(1);
         (workspaces, a)
     }
 
@@ -443,7 +458,41 @@ mod tests {
         assert_eq!(entries[0].status, WorkspaceStatus::Active);
         assert_eq!(entries[0].id, Some(active));
         assert_eq!(entries[1].status, WorkspaceStatus::Background);
-        assert_eq!(picker.selected(), 0);
+        assert_eq!(
+            picker.selected(),
+            1,
+            "the selection starts on the row after the active one"
+        );
+    }
+
+    /// The active workspace is inserted last, and slot order puts the older
+    /// session first. Only the focus instants put `previous` first.
+    #[test]
+    fn the_picker_opens_on_the_previous_session() {
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut insert = |root: &str, focused: u64| {
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(root),
+                &exec,
+                crate::test_notify(),
+            ));
+            workspaces[id].id = id;
+            workspaces[id].last_active = focused_at(focused);
+            id
+        };
+        let older = insert("/tmp/older", 1);
+        let previous = insert("/tmp/previous", 2);
+        let active = insert("/tmp/active", 3);
+
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
+        let opened_on = picker.selected_id();
+        picker.select_next();
+        assert_eq!(
+            (opened_on, picker.selected_id()),
+            (Some(previous), Some(older)),
+            "Enter returns to the previous session, and Down reaches the one before it",
+        );
     }
 
     /// The three names are chosen so completing the middle row drops the first
@@ -455,7 +504,7 @@ mod tests {
     fn complete_selected_keeps_the_completed_row_selected() {
         let exec = executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
-        let mut insert = |root: &str, name: &str| {
+        let mut insert = |root: &str, name: &str, focused: u64| {
             let id = workspaces.insert(Workspace::new(
                 PathBuf::from(root),
                 &exec,
@@ -463,11 +512,12 @@ mod tests {
             ));
             workspaces[id].id = id;
             workspaces[id].name = name.into();
+            workspaces[id].last_active = focused_at(focused);
             id
         };
-        let active = insert("/tmp/zulu", "zulu");
-        insert("/tmp/ab", "ab");
-        insert("/tmp/abc", "abc");
+        let active = insert("/tmp/zulu", "zulu", 3);
+        insert("/tmp/ab", "ab", 2);
+        insert("/tmp/abc", "abc", 1);
 
         let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
         assert_eq!(
@@ -477,10 +527,9 @@ mod tests {
                 .map(|e| e.basename.as_str())
                 .collect::<Vec<_>>(),
             ["zulu", "ab", "abc"],
-            "the active workspace leads, then the rest by name"
+            "the active workspace leads, then the rest by recency"
         );
 
-        picker.select_next();
         assert_eq!(
             picker.selected_entry().map(|e| e.basename.as_str()),
             Some("ab"),
@@ -508,7 +557,6 @@ mod tests {
     fn remove_selected_drops_the_row_and_reranks() {
         let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
 
-        picker.select_next();
         assert_eq!(
             picker.selected_entry().map(|e| e.basename.as_str()),
             Some("beta"),
@@ -564,12 +612,11 @@ mod tests {
         assert_eq!(picker.entries().len(), 2, "no entry is dropped");
     }
 
-    /// The selection starts on `gamma`, so the reset to the first survivor is
-    /// observable. `new` alone already selects row 0.
+    /// The selection moves to `gamma` first, so the reset to the first survivor
+    /// is observable.
     #[test]
     fn omit_active_drops_the_active_row_and_selects_the_first_survivor() {
         let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
-        picker.select_next();
         picker.select_next();
 
         picker.omit_active();
@@ -631,19 +678,27 @@ mod tests {
         assert_eq!(picker.complete_selected(), None);
     }
 
+    /// The active row leads although it was focused before everything else,
+    /// and the open `beta` falls between the two saved sessions by time.
     #[test]
-    fn new_merges_registry_dedupes_open_and_orders_inactive_newest_first() {
+    fn rows_after_the_active_one_order_by_recency_across_open_and_saved() {
         use crate::workspace::registry::{RegistryEntry, WorkspaceMeta};
-        use std::time::Duration;
 
         let exec = executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
-        let a = workspaces.insert(Workspace::new(
-            PathBuf::from("/tmp/alpha"),
-            &exec,
-            crate::test_notify(),
-        ));
-        workspaces[a].id = a;
+        let mut insert = |root: &str, name: &str, focused: u64| {
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(root),
+                &exec,
+                crate::test_notify(),
+            ));
+            workspaces[id].id = id;
+            workspaces[id].name = name.into();
+            workspaces[id].last_active = focused_at(focused);
+            id
+        };
+        let a = insert("/tmp/alpha", "alpha", 10);
+        let b = insert("/tmp/beta", "beta", 70);
         let open_uid = workspaces[a].uid;
 
         let entry = |uid: u64, name: &str, root: &str, secs: u64| RegistryEntry {
@@ -655,7 +710,7 @@ mod tests {
                 remote_host: None,
             },
             state_path: PathBuf::from(root).join("s.ron"),
-            mtime: UNIX_EPOCH + Duration::from_secs(secs),
+            mtime: focused_at(secs),
         };
 
         let inactive = vec![
@@ -665,24 +720,20 @@ mod tests {
         ];
 
         let picker = WorkspacePicker::new(&workspaces, a, inactive, dummy_input());
-        let entries = picker.entries();
-
         assert_eq!(
-            entries.len(),
-            3,
-            "the open workspace's shadow sidecar dedupes"
+            picker
+                .entries()
+                .iter()
+                .map(|e| (e.basename.as_str(), e.id, e.status, e.buffer_count))
+                .collect::<Vec<_>>(),
+            [
+                ("alpha", Some(a), WorkspaceStatus::Active, 1),
+                ("new-proj", None, WorkspaceStatus::Inactive, 3),
+                ("beta", Some(b), WorkspaceStatus::Background, 1),
+                ("old-proj", None, WorkspaceStatus::Inactive, 3),
+            ],
+            "the open workspace's shadow sidecar dedupes, and the rest interleave newest first"
         );
-        assert_eq!(entries[0].status, WorkspaceStatus::Active);
-        assert_eq!(entries[0].id, Some(a));
-
-        assert_eq!(entries[1].status, WorkspaceStatus::Inactive);
-        assert_eq!(
-            entries[1].basename, "new-proj",
-            "inactive rows are newest first"
-        );
-        assert_eq!(entries[1].id, None);
-        assert_eq!(entries[1].buffer_count, 3);
-        assert_eq!(entries[2].basename, "old-proj");
     }
 
     #[test]
@@ -707,9 +758,9 @@ mod tests {
         let (workspaces, active) = slotmap_with_two(&exec);
         let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
 
-        assert_eq!(picker.selected_id(), Some(active));
-        picker.select_next();
         assert_eq!(picker.selected_id(), picker.entries()[1].id);
+        picker.select_prev();
+        assert_eq!(picker.selected_id(), Some(active));
     }
 
     #[test]
@@ -732,7 +783,7 @@ mod tests {
         let exec = executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let mut first = None;
-        for root in roots {
+        for (rank, root) in roots.iter().enumerate() {
             let id = workspaces.insert(Workspace::new(
                 PathBuf::from(*root),
                 &exec,
@@ -742,6 +793,9 @@ mod tests {
             // Cleared so the row's name falls back to the path basename. The
             // default is derived from the uid, which differs run to run.
             workspaces[id].name = String::new();
+            // Each root focused before the one listed ahead of it, so the rows keep
+            // the given order.
+            workspaces[id].last_active = focused_at((roots.len() - rank) as u64);
             first.get_or_insert(id);
         }
         let active = first.expect("at least one workspace");
