@@ -113,7 +113,7 @@ pub(crate) fn target_picker_layout(
     let modal = crate::render::chrome::modal_box(
         area,
         (120, 32u16.saturating_add(CHROME_ROWS)),
-        (120, 32),
+        (crate::render::chrome::list_modal_width(area), 32),
         (40, 12),
         zoom,
     )?;
@@ -726,5 +726,14 @@ mod tests {
             (true, true),
             "too narrow and too short both refuse rather than painting a stub"
         );
+    }
+
+    /// The width follows the window, so a 200-column area gets a box 160
+    /// wide, 80 percent of the area.
+    #[test]
+    fn a_wide_window_widens_the_picker_box() {
+        let layout = target_picker_layout(Rect::new(0, 0, 200, 60), 0, 40)
+            .expect("the area hosts the picker");
+        assert_eq!(layout.modal, Rect::new(20, 12, 160, 36));
     }
 }

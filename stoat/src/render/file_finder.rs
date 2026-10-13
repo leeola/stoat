@@ -28,9 +28,10 @@ pub(crate) struct FinderLayout {
 /// Lay out the file finder modal within `area`, or `None` when `area` is too
 /// small to host it.
 ///
-/// `content` is the cells the caller's list would need in full. Below the
-/// recommended 120x32 it changes nothing, and a data-heavy caller passes
-/// [`u16::MAX`] to ask for the whole area. `zoom` is the caller's step count
+/// `content` is the cells the caller's list needs in full. Below the
+/// recommended box, [`list_modal_width`](crate::render::chrome::list_modal_width)
+/// by 32 rows, it changes nothing, and a data-heavy caller passes [`u16::MAX`]
+/// to ask for the whole area. `zoom` is the caller's step count
 /// from [`modal_zoom`](crate::app::Stoat::modal_zoom), and `list_percent` the
 /// width its list takes from
 /// [`modal_split`](crate::app::Stoat::modal_split).
@@ -43,7 +44,13 @@ pub(crate) fn file_finder_layout(
     zoom: i8,
     list_percent: u16,
 ) -> Option<FinderLayout> {
-    let modal = crate::render::chrome::modal_box(area, content, (120, 32), (40, 12), zoom)?;
+    let modal = crate::render::chrome::modal_box(
+        area,
+        content,
+        (crate::render::chrome::list_modal_width(area), 32),
+        (40, 12),
+        zoom,
+    )?;
     // The title rides the top border, so it does not shrink the inner rect.
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
@@ -237,8 +244,8 @@ mod tests {
         let area = Rect::new(0, 0, 200, 60);
         assert_eq!(
             box_of(area, (120, 9)),
-            Rect::new(40, 14, 120, 32),
-            "content under the recommended size leaves the box at 120x32, centered"
+            Rect::new(20, 14, 160, 32),
+            "content under the recommended size leaves the box at 160x32, centered"
         );
     }
 
@@ -247,7 +254,7 @@ mod tests {
         let area = Rect::new(0, 0, 200, 60);
         assert_eq!(
             box_of(area, (120, 44)),
-            Rect::new(40, 8, 120, 44),
+            Rect::new(20, 8, 160, 44),
             "a list past the recommended height takes the rows it asks for"
         );
     }

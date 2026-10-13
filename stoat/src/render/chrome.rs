@@ -17,6 +17,14 @@ const MODAL_MARGIN: u16 = 4;
 /// zoomed-all-the-way-up box is allowed to shrink the surround to.
 const MODAL_MARGIN_MIN: u16 = 2;
 
+/// The smallest width a list modal recommends. A terminal up to 150 columns
+/// wide gets this box, less the margin on a terminal too narrow for it.
+const LIST_MODAL_RECOMMENDED_COLS: u16 = 120;
+
+/// The share of the area's width, in percent, that a list modal recommends
+/// once that share passes [`LIST_MODAL_RECOMMENDED_COLS`].
+const LIST_MODAL_WIDTH_PERCENT: u32 = 80;
+
 /// Denominator of one zoom step. Each step moves a dimension by this fraction of
 /// the area, so a step feels the same size on a small screen and a large one.
 const ZOOM_STEP_DIVISOR: u16 = 10;
@@ -88,6 +96,20 @@ fn zoomed(area: u16, content: u16, recommended: u16, min: u16, ceiling: u16, zoo
     let step = i32::from(area / ZOOM_STEP_DIVISOR) * i32::from(zoom);
 
     (i32::from(base) + step).clamp(i32::from(min), i32::from(ceiling)) as u16
+}
+
+/// The recommended width of a modal whose body is a list beside a preview.
+///
+/// The width is 120 columns on a terminal up to 150 wide, and 80 percent of
+/// the area past that. A path or symbol list has to read on a wide window,
+/// and a fixed width leaves most of such a window bare. The floor holds a
+/// small terminal's box at 120 columns.
+///
+/// [`modal_box`] clamps the width to the area less its margin, so a caller
+/// passes it unguarded.
+pub(crate) fn list_modal_width(area: Rect) -> u16 {
+    let share = u32::from(area.width) * LIST_MODAL_WIDTH_PERCENT / 100;
+    LIST_MODAL_RECOMMENDED_COLS.max(share as u16)
 }
 
 /// Draw a modal frame around `area` and return the inner content rect.
@@ -455,8 +477,8 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        hline, modal_box, modal_frame, modal_frame_above_pools, popout_frame, text, toggle_mark,
-        vline, POPOUT_INSET_PX,
+        hline, list_modal_width, modal_box, modal_frame, modal_frame_above_pools, popout_frame,
+        text, toggle_mark, vline, POPOUT_INSET_PX,
     };
     use crate::theme::Theme;
     use ratatui::{
@@ -540,6 +562,14 @@ mod tests {
             modal_box(Rect::new(0, 0, 42, 14), (10, 5), RECOMMENDED, MIN, 0),
             Some(Rect::new(1, 1, 40, 12)),
             "the smallest hostable area yields the minimum box"
+        );
+    }
+
+    #[test]
+    fn list_modal_width_holds_120_until_the_window_passes_150_columns() {
+        assert_eq!(
+            [80, 150, 200, 300].map(|width| list_modal_width(Rect::new(0, 0, width, 24))),
+            [120, 120, 160, 240],
         );
     }
 

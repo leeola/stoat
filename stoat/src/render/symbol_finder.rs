@@ -40,7 +40,7 @@ pub(crate) fn symbol_finder_layout(
     let modal = crate::render::chrome::modal_box(
         area,
         (120, content_rows.saturating_add(CHROME_ROWS)),
-        (120, 32),
+        (crate::render::chrome::list_modal_width(area), 32),
         (40, 12),
         zoom,
     )?;
@@ -352,8 +352,8 @@ mod tests {
                 .expect("the area hosts the finder");
         assert_eq!(
             modal,
-            Rect::new(40, 14, 120, 32),
-            "content under the recommended size leaves the box at 120x32, centered"
+            Rect::new(20, 14, 160, 32),
+            "content under the recommended size leaves the box at 160x32, centered"
         );
     }
 

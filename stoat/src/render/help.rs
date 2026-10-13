@@ -55,7 +55,7 @@ pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<Hel
     let modal = crate::render::chrome::modal_box(
         area,
         (120, content_rows.saturating_add(CHROME_ROWS)),
-        (120, 36),
+        (crate::render::chrome::list_modal_width(area), 36),
         (40, 12),
         zoom,
     )?;
@@ -498,8 +498,8 @@ mod tests {
         let laid = help_layout(Rect::new(0, 0, 200, 60), 5, 0).expect("the area hosts help");
         assert_eq!(
             laid.modal,
-            Rect::new(40, 12, 120, 36),
-            "content under the recommended size leaves the box at 120x36, centered"
+            Rect::new(20, 12, 160, 36),
+            "content under the recommended size leaves the box at 160x36, centered"
         );
     }
 
