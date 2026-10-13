@@ -17,8 +17,9 @@ use crate::{
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
-    buffer_registry::OpenOrigin,
+    buffer_registry::{OpenOrigin, ReadOnly},
     editor_state::{EditorId, EditorState},
+    host::FsMetadata,
     pane::{FocusTarget, PaneId, View},
     workspace::{diff::DiffLanding, BridgeWaiter, Workspace, WorkspaceId},
 };
@@ -52,7 +53,9 @@ pub(crate) struct PendingFileOpen {
     /// every workspace and says nothing on its own about which one meant it.
     workspace: WorkspaceId,
     target: PaneId,
-    disk_mtime: Option<SystemTime>,
+    /// The file's metadata when the open started, which carries its mtime and
+    /// its read-only bit.
+    meta: Option<FsMetadata>,
     origin: OpenOrigin,
     _task: Task<()>,
     result: Arc<Mutex<Option<std::io::Result<OpenContent>>>>,
@@ -106,9 +109,10 @@ fn open_file_in_pane_with(
     let absolute = absolute_path(stoat, path);
 
     let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
-    let disk_mtime = meta.map(|m| m.modified);
-    if defer_large && meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES {
-        spawn_pending_open(stoat, target, absolute, disk_mtime, origin);
+    // The on-disk size understates a compressed file's text, so the name picks
+    // the pool before the bytes are read.
+    if defer_large && (meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES || is_gzip_name(&absolute)) {
+        spawn_pending_open(stoat, target, absolute, meta, origin);
         return None;
     }
 
@@ -125,9 +129,7 @@ fn open_file_in_pane_with(
         },
     };
     let workspace = stoat.active_workspace;
-    install_content(
-        stoat, workspace, target, &absolute, content, disk_mtime, origin,
-    )
+    install_content(stoat, workspace, target, &absolute, content, meta, origin)
 }
 
 /// `path` as an absolute path, where a relative one starts at the active
@@ -137,6 +139,12 @@ pub(crate) fn absolute_path(stoat: &Stoat, path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     stoat.active_workspace().git_root.join(path)
+}
+
+/// Whether `path`'s name ends in `.gz`, in any case.
+fn is_gzip_name(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
 }
 
 /// Show what a read found, as the buffer or the image it turned out to be.
@@ -150,9 +158,10 @@ fn install_content(
     target: PaneId,
     absolute: &Path,
     content: OpenContent,
-    disk_mtime: Option<SystemTime>,
+    meta: Option<FsMetadata>,
     origin: OpenOrigin,
 ) -> Option<BufferId> {
+    let disk_mtime = meta.map(|m| m.modified);
     match content {
         OpenContent::Text { text, compressed } => finish_open(
             stoat,
@@ -161,7 +170,7 @@ fn install_content(
             absolute,
             OpenBody::Text {
                 text: &text,
-                compressed,
+                read_only: read_only_kind(compressed, meta),
             },
             disk_mtime,
             origin,
@@ -178,7 +187,7 @@ fn install_content(
             OpenBody::Rope {
                 rope,
                 ending,
-                compressed,
+                read_only: read_only_kind(compressed, meta),
             },
             disk_mtime,
             origin,
@@ -196,18 +205,31 @@ fn install_content(
 /// background one did that work on the pool and carries the rope, since
 /// building it is the expensive half of opening a large file.
 ///
-/// Both forms carry the `compressed` flag of [`OpenContent::Text`], which
-/// keeps a gzip file's buffer out of LSP.
+/// Both forms carry the read-only kind the open found, which a new buffer is
+/// tagged with.
 enum OpenBody<'a> {
     Text {
         text: &'a str,
-        compressed: bool,
+        read_only: Option<ReadOnly>,
     },
     Rope {
         rope: Rope,
         ending: LineEnding,
-        compressed: bool,
+        read_only: Option<ReadOnly>,
     },
+}
+
+/// The kind an open tags its buffer with, from whether the open decompressed
+/// the file and from the file's metadata.
+///
+/// A decompressed file outranks a missing write permission, since its text has
+/// no file of its own to write back to.
+fn read_only_kind(compressed: bool, meta: Option<FsMetadata>) -> Option<ReadOnly> {
+    if compressed {
+        return Some(ReadOnly::Compressed);
+    }
+    meta.is_some_and(|m| m.read_only)
+        .then_some(ReadOnly::Permission)
 }
 
 /// Point `target` at an image file, releasing whatever it showed as
@@ -249,7 +271,7 @@ fn spawn_pending_open(
     stoat: &mut Stoat,
     target: PaneId,
     absolute: PathBuf,
-    disk_mtime: Option<SystemTime>,
+    meta: Option<FsMetadata>,
     origin: OpenOrigin,
 ) {
     let workspace = stoat.active_workspace;
@@ -292,7 +314,7 @@ fn spawn_pending_open(
         path: absolute,
         workspace,
         target,
-        disk_mtime,
+        meta,
         origin,
         _task: task,
         result,
@@ -405,7 +427,7 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
             pending.target,
             &pending.path,
             content,
-            pending.disk_mtime,
+            pending.meta,
             pending.origin,
         );
         if let Some(buffer) = installed
@@ -451,7 +473,7 @@ fn finish_open(
     let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
 
-    let (buffer_id, buffer, compressed) = {
+    let (buffer_id, buffer, read_only) = {
         let ws = &mut stoat.workspaces[workspace];
         // Opening a path already registered hands back the existing buffer and
         // discards `content`. Everything read alongside it describes a file the
@@ -460,17 +482,17 @@ fn finish_open(
         // baseline onto a write the buffer never saw, leaving the guard
         // comparing that write against itself.
         let existed = ws.buffers.id_for_path(absolute).is_some();
-        let (ending, compressed, (buffer_id, buffer)) = match content {
-            OpenBody::Text { text, compressed } => (
+        let (ending, read_only, (buffer_id, buffer)) = match content {
+            OpenBody::Text { text, read_only } => (
                 LineEnding::detect(text),
-                compressed,
+                read_only,
                 ws.buffers.open(absolute, &LineEnding::normalize(text)),
             ),
             OpenBody::Rope {
                 rope,
                 ending,
-                compressed,
-            } => (ending, compressed, ws.buffers.open_rope(absolute, rope)),
+                read_only,
+            } => (ending, read_only, ws.buffers.open_rope(absolute, rope)),
         };
         ws.buffers.note_origin(buffer_id, origin);
         if !existed {
@@ -478,18 +500,19 @@ fn finish_open(
             if let Some(mtime) = disk_mtime {
                 ws.buffers.set_disk_mtime(buffer_id, mtime);
             }
+            ws.buffers.set_read_only(buffer_id, read_only);
         }
         if let Some(lang) = lang
             && ws.buffers.language_for(buffer_id).is_none()
         {
             ws.buffers.set_language(buffer_id, lang);
         }
-        (buffer_id, buffer, compressed)
+        (buffer_id, buffer, ws.buffers.read_only(buffer_id))
     };
 
     // The server indexes the gzip bytes under this path, and the text handed to
     // it disagrees with the file, so a compressed buffer stays out of LSP.
-    if !compressed {
+    if read_only != Some(ReadOnly::Compressed) {
         // The buffer's own rope, not the text just read from disk. An
         // already-open buffer keeps what it holds, so its rope is what the
         // server needs to see.
@@ -889,6 +912,7 @@ mod tests {
     use super::*;
     use crate::{
         action_handlers::{commits, dispatch},
+        host::FsHost,
         test_harness::{self, editor, TestHarness},
     };
     use stoat_action::{
@@ -910,16 +934,17 @@ mod tests {
         (path, buffer_id)
     }
 
-    /// A gzip file past the synchronous limit reads on the pool, and the rope
-    /// the pool builds keeps the flag that holds its buffer out of LSP.
+    /// A `.gz` name reads on the pool, since its size on disk understates its
+    /// text. The buffer holds the decompressed text in the inner name's
+    /// language, is tagged compressed, and stays out of LSP, and the file
+    /// keeps its gzip bytes.
     #[test]
-    fn a_large_gzip_file_opens_on_the_pool_and_stays_out_of_lsp() {
+    fn a_gzip_file_opens_as_its_text_with_the_inner_language_and_no_lsp() {
         let mut h = TestHarness::with_size(80, 24);
-        let root = Path::new("/big");
-        let path = root.join("huge.log.gz");
-        let text = "x\n".repeat(OPEN_SYNC_MAX_BYTES as usize / 2 + 16);
-        h.fake_fs()
-            .insert_file(&path, test_harness::gzip_stored(text.as_bytes()));
+        let root = Path::new("/gz");
+        let path = root.join("main.rs.gz");
+        let bytes = test_harness::gzip(b"fn main() {}\n");
+        h.fake_fs().insert_file(&path, &bytes);
         h.stoat.active_workspace_mut().git_root = root.to_path_buf();
 
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
@@ -931,26 +956,94 @@ mod tests {
             .is_none();
         h.settle();
         install_pending_opens(&mut h.stoat);
-        let id = h
-            .stoat
-            .active_workspace()
-            .buffers
+        let mut on_disk = Vec::new();
+        h.fake_fs().read(&path, &mut on_disk).expect("read");
+        let buffers = &h.stoat.active_workspace().buffers;
+        let id = buffers
             .id_for_path(&path)
             .expect("the buffer installs once the read finishes");
-        let len = h
-            .stoat
-            .active_workspace()
-            .buffers
+        let text = buffers
             .get(id)
             .expect("buffer")
             .read()
             .expect("poisoned")
             .rope()
-            .len();
+            .to_string();
 
         assert_eq!(
-            (deferred, len, h.stoat.lsp_opened.contains(&id)),
-            (true, text.len(), false)
+            (
+                deferred,
+                text,
+                buffers.language_for(id).map(|l| l.name),
+                buffers.read_only(id),
+                h.stoat.lsp_opened.contains(&id),
+                on_disk,
+            ),
+            (
+                true,
+                "fn main() {}\n".to_string(),
+                Some("rust"),
+                Some(ReadOnly::Compressed),
+                false,
+                bytes,
+            ),
+        );
+    }
+
+    /// A file the process lacks write access to opens tagged with the
+    /// permission, and unlike a compressed one it still reaches the server.
+    #[test]
+    fn a_file_the_process_cannot_write_opens_read_only() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/close-test");
+        let path = root.join("locked.txt");
+        h.fake_fs().insert_file(&path, b"locked\n");
+        h.fake_fs().set_read_only(&path, true);
+        h.stoat.active_workspace_mut().git_root = root;
+
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let id = focused_buffer_id(&mut h.stoat);
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().buffers.read_only(id),
+                h.stoat.lsp_opened.contains(&id)
+            ),
+            (Some(ReadOnly::Permission), true)
+        );
+    }
+
+    /// The metadata read before the pool's read is what the install records,
+    /// so a large file the process lacks write access to keeps its kind and its
+    /// mtime.
+    #[test]
+    fn a_large_read_only_file_keeps_its_kind_and_mtime_through_the_pool() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/big");
+        let path = root.join("locked.txt");
+        h.fake_fs()
+            .insert_file(&path, vec![b'x'; OPEN_SYNC_MAX_BYTES as usize + 16]);
+        h.fake_fs().set_read_only(&path, true);
+        let mtime = h
+            .fake_fs()
+            .metadata(&path)
+            .expect("metadata")
+            .expect("exists")
+            .modified;
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        install_pending_opens(&mut h.stoat);
+
+        let buffers = &h.stoat.active_workspace().buffers;
+        let id = buffers
+            .id_for_path(&path)
+            .expect("the buffer installs once the read finishes");
+        assert_eq!(
+            (buffers.read_only(id), buffers.disk_mtime(id)),
+            (Some(ReadOnly::Permission), Some(mtime))
         );
     }
 
@@ -1670,23 +1763,22 @@ mod tests {
         );
     }
 
-    /// A gzip file opens as the text it holds and stays out of LSP. The plain
-    /// file opened first shows that the server path is live.
+    /// The magic bytes decide, so a gzip file under another name opens on the
+    /// synchronous path, tagged compressed and out of LSP. The plain file
+    /// opened first shows that the server path is live.
     #[test]
-    fn a_gzip_file_opens_as_its_text_and_stays_out_of_lsp() {
+    fn a_gzip_file_under_another_name_opens_compressed() {
         let mut h = Stoat::test();
         let (_, plain) = open_path(&mut h, b"hello\n");
-        let gz = PathBuf::from("/close-test/main.rs.gz");
+        let packed = PathBuf::from("/close-test/packed.txt");
         h.fake_fs()
-            .insert_file(&gz, test_harness::gzip(b"fn main() {}\n"));
+            .insert_file(&packed, test_harness::gzip(b"fn main() {}\n"));
 
-        dispatch(&mut h.stoat, &OpenFile { path: gz });
+        dispatch(&mut h.stoat, &OpenFile { path: packed });
         h.settle();
         let id = focused_buffer_id(&mut h.stoat);
-        let text = h
-            .stoat
-            .active_workspace()
-            .buffers
+        let buffers = &h.stoat.active_workspace().buffers;
+        let text = buffers
             .get(id)
             .expect("buffer")
             .read()
@@ -1697,10 +1789,16 @@ mod tests {
         assert_eq!(
             (
                 text,
+                buffers.read_only(id),
                 h.stoat.lsp_opened.contains(&plain),
                 h.stoat.lsp_opened.contains(&id)
             ),
-            ("fn main() {}\n".to_string(), true, false)
+            (
+                "fn main() {}\n".to_string(),
+                Some(ReadOnly::Compressed),
+                true,
+                false
+            )
         );
     }
 

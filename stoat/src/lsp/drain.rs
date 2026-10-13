@@ -17,6 +17,7 @@
 use crate::{
     app::{SpawnScope, Stoat},
     buffer::BufferId,
+    buffer_registry::ReadOnly,
     host::LspHost,
     lsp::util,
     render::sanitize,
@@ -319,6 +320,9 @@ pub(crate) fn reopen_buffers(stoat: &mut Stoat, language: Option<&str>) {
 
 /// The path-bound buffers of [`Stoat::lsp_workspace`] in `language`, or every
 /// one of them when `language` is `None`, each with its path and rope.
+///
+/// A compressed buffer is left out. Its text is a gzip file's decompressed
+/// content, which disagrees with the file the server indexes under that path.
 fn covered_buffers(stoat: &Stoat, language: Option<&str>) -> Vec<(BufferId, PathBuf, Rope)> {
     // Ropes rather than strings, because this runs over every buffer it
     // covers in one turn and a rope clone is a refcount bump where
@@ -329,6 +333,9 @@ fn covered_buffers(stoat: &Stoat, language: Option<&str>) -> Vec<(BufferId, Path
         .into_iter()
         .filter_map(|path| {
             let id = buffers.id_for_path(&path)?;
+            if buffers.read_only(id) == Some(ReadOnly::Compressed) {
+                return None;
+            }
             if let Some(language) = language
                 && crate::lsp::session::lsp_language_name(buffers, id).as_deref() != Some(language)
             {
@@ -475,6 +482,27 @@ mod tests {
     const OPENED: &str = "fn a() {}\n";
     /// The text of `a.rs` after the edit [`edited_with_only_a_up`] makes.
     const EDITED: &str = "// x\nfn a() {}\n";
+
+    /// A server start or a restore reopens every covered buffer, and a
+    /// compressed one stays out, as its open left it out.
+    #[test]
+    fn reopening_leaves_a_compressed_buffer_closed() {
+        let mut h = Stoat::test();
+        let buffers = &mut h.stoat.active_workspace_mut().buffers;
+        let (plain, _) = buffers.open(Path::new("/w/a.rs"), "fn a() {}\n");
+        let (packed, _) = buffers.open(Path::new("/w/b.rs.gz"), "fn b() {}\n");
+        buffers.set_read_only(packed, Some(ReadOnly::Compressed));
+
+        reopen_buffers(&mut h.stoat, None);
+
+        assert_eq!(
+            (
+                h.stoat.lsp_opened.contains(&plain),
+                h.stoat.lsp_opened.contains(&packed)
+            ),
+            (true, false)
+        );
+    }
 
     #[test]
     fn show_message_is_attributed_to_its_server() {

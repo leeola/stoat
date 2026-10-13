@@ -96,18 +96,8 @@ pub(crate) fn stoat() -> Stoat {
 
 /// `bytes` as one gzip member, for a test that opens a compressed file.
 pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
-    gzip_at(bytes, Compression::default())
-}
-
-/// `bytes` as one gzip member stored without compression, so the file on disk
-/// is at least as large as the text it holds.
-pub(crate) fn gzip_stored(bytes: &[u8]) -> Vec<u8> {
-    gzip_at(bytes, Compression::none())
-}
-
-fn gzip_at(bytes: &[u8], level: Compression) -> Vec<u8> {
     let mut out = Vec::new();
-    GzEncoder::new(bytes, level)
+    GzEncoder::new(bytes, Compression::default())
         .read_to_end(&mut out)
         .expect("gzip encodes in memory");
     out

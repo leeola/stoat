@@ -30,7 +30,8 @@
 //! the buffer remains addressable by its new path.
 
 use crate::{
-    action_handlers::OpenContent, app::Stoat, buffer::BufferId, lsp::util::lsp_range_to_byte_range,
+    action_handlers::OpenContent, app::Stoat, buffer::BufferId, buffer_registry::ReadOnly,
+    lsp::util::lsp_range_to_byte_range,
 };
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, ResourceOp, TextEdit, Uri, WorkspaceEdit,
@@ -334,8 +335,8 @@ fn document_version_current(stoat: &Stoat, id: BufferId, version: Option<i32>) -
 /// The buffer for `path`, opened from disk when no buffer holds it yet.
 ///
 /// A file opened here gets the same setup as an ordinary open. The buffer holds
-/// LF text and records the file's line ending, mtime, and language, and its
-/// servers get a didOpen. Without the didOpen, the server keeps the disk text
+/// LF text and records the file's line ending, mtime, read-only kind, and
+/// language, and its servers get a didOpen. Without the didOpen, the server keeps the disk text
 /// and never hears of the edit about to land in the buffer.
 ///
 /// A file that is not UTF-8 text fails rather than decode lossily. A lossy
@@ -367,12 +368,7 @@ fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEdit
             path: path.to_path_buf(),
         });
     };
-    let disk_mtime = stoat
-        .fs_host
-        .metadata(path)
-        .ok()
-        .flatten()
-        .map(|meta| meta.modified);
+    let meta = stoat.fs_host.metadata(path).ok().flatten();
     let language = stoat.language_registry.for_path(path);
 
     let workspace = stoat.active_workspace;
@@ -380,8 +376,9 @@ fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEdit
         let buffers = &mut stoat.workspaces[workspace].buffers;
         let (id, buffer) = buffers.open(path, &LineEnding::normalize(&text));
         buffers.set_line_ending(id, LineEnding::detect(&text));
-        if let Some(mtime) = disk_mtime {
-            buffers.set_disk_mtime(id, mtime);
+        if let Some(meta) = meta {
+            buffers.set_disk_mtime(id, meta.modified);
+            buffers.set_read_only(id, meta.read_only.then_some(ReadOnly::Permission));
         }
         if let Some(language) = language {
             buffers.set_language(id, language);
@@ -964,6 +961,29 @@ mod tests {
                 LineEnding::Crlf,
             ),
         );
+    }
+
+    /// An edit into a closed file the process lacks write access to tags the
+    /// buffer it opens with the permission.
+    #[test]
+    fn an_edit_into_a_read_only_file_tags_its_buffer() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/locked.rs");
+        h.fake_fs().insert_file(&path, b"hello\n");
+        h.fake_fs().set_read_only(&path, true);
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(file_uri(&path), vec![text_edit(0, 5, 5, "!")]);
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
+
+        let buffers = &h.stoat.active_workspace().buffers;
+        let id = buffers.id_for_path(&path).expect("buffer open");
+        assert_eq!(buffers.read_only(id), Some(ReadOnly::Permission));
     }
 
     /// A gzip file's text exists only in memory, so an edit into it fails

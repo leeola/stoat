@@ -1259,6 +1259,7 @@ mod tests {
         action_handlers::{dispatch, focused_editor_mut},
         app::UpdateEffect,
         buffer::BufferId,
+        buffer_lifecycle,
         buffer_registry::AutoReloadMode,
         debounce::{self, FS_WATCH_DEBOUNCE},
         host::{FsEventKind, FsHost},
@@ -1354,6 +1355,8 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root.to_path_buf();
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
+        // A `.gz` name reads on the pool, and the run loop is what installs it.
+        buffer_lifecycle::install_pending_opens(&mut h.stoat);
         let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
         h.stoat
             .active_workspace_mut()
@@ -2317,6 +2320,8 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root.to_path_buf();
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
+        // A `.gz` name reads on the pool, and the run loop is what installs it.
+        buffer_lifecycle::install_pending_opens(&mut h.stoat);
         focused_editor_mut(&mut h.stoat).expect("editor").buffer_id
     }
 

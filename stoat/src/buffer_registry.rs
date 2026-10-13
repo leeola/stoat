@@ -93,6 +93,17 @@ pub(crate) enum OpenOrigin {
     Visited,
 }
 
+/// Why a buffer is read-only, which is the reason its text must not write back
+/// to its file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ReadOnly {
+    /// The process lacks write access to the file.
+    Permission,
+    /// The text is a gzip file's decompressed content, held only in memory, so
+    /// it has no file of its own to write back to.
+    Compressed,
+}
+
 #[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
@@ -154,6 +165,9 @@ struct BufferEntry {
     /// to clobber it. `None` for scratch buffers and for files whose
     /// metadata could not be read.
     disk_mtime: Option<SystemTime>,
+    /// Why the buffer must not write back to its file, or `None` for a buffer
+    /// that writes back.
+    read_only: Option<ReadOnly>,
     /// The buffer's auto-reload mode. Any non-[`AutoReloadMode::Off`] value is
     /// reported by [`BufferRegistry::auto_reload_paths`] so the auto-reload pump
     /// re-reads the file as the on-disk mtime advances. Set for the session log
@@ -261,6 +275,7 @@ impl BufferRegistry {
                 preview,
                 origin: OpenOrigin::Visited,
                 disk_mtime: None,
+                read_only: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
                 line_ending: LineEnding::default(),
@@ -315,6 +330,7 @@ impl BufferRegistry {
                 preview: false,
                 origin: OpenOrigin::Visited,
                 disk_mtime: None,
+                read_only: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
                 line_ending: LineEnding::default(),
@@ -374,6 +390,20 @@ impl BufferRegistry {
     /// scratch buffer, an unknown id, or a file whose metadata never read.
     pub(crate) fn disk_mtime(&self, id: BufferId) -> Option<SystemTime> {
         self.buffers.get(&id).and_then(|e| e.disk_mtime)
+    }
+
+    /// Record why `id` must not write back to its file, or `None` to let it.
+    /// No-op for an unknown id.
+    pub(crate) fn set_read_only(&mut self, id: BufferId, read_only: Option<ReadOnly>) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.read_only = read_only;
+        }
+    }
+
+    /// Why `id` must not write back to its file, or `None` for a buffer that
+    /// writes back and for an unknown id.
+    pub(crate) fn read_only(&self, id: BufferId) -> Option<ReadOnly> {
+        self.buffers.get(&id).and_then(|e| e.read_only)
     }
 
     /// Record the line terminator `id`'s file was read with, so a save can write
@@ -888,6 +918,7 @@ impl BufferRegistry {
                 },
                 line_ending: entry.line_ending,
                 disk_mtime: entry.disk_mtime,
+                read_only: entry.read_only,
             })
             .collect();
         entries.sort_by_key(|e| e.id);
@@ -941,6 +972,7 @@ impl BufferRegistry {
                     preview: false,
                     origin: OpenOrigin::Named,
                     disk_mtime: entry.disk_mtime,
+                    read_only: entry.read_only,
                     auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
                     line_ending: entry.line_ending,
@@ -979,6 +1011,14 @@ pub(crate) struct BufferEntrySnap {
     /// Without it a restored buffer has no baseline and the guard never fires.
     #[serde(default)]
     pub disk_mtime: Option<SystemTime>,
+    /// Why the buffer must not write back to its file. A restored compressed
+    /// buffer still holds text that is not the file's, so it keeps its kind
+    /// and stays out of LSP.
+    ///
+    /// Defaulted so a state file written before this field loads, as a
+    /// writable buffer.
+    #[serde(default)]
+    pub read_only: Option<ReadOnly>,
 }
 
 /// 32-byte blake3 hash of `text`. Used both to key [`CachedDiff`] in
@@ -1060,6 +1100,20 @@ mod tests {
         assert!(Arc::ptr_eq(&buf1, &buf2));
         let guard = buf1.read().unwrap();
         assert_eq!(guard.rope().to_string(), "hello");
+    }
+
+    /// A restored compressed buffer still holds text that is not its file's,
+    /// so the session keeps its kind.
+    #[test]
+    fn a_snapshot_round_trip_keeps_the_read_only_kind() {
+        let mut reg = BufferRegistry::new();
+        let (id, _) = reg.open(Path::new("/a.txt.gz"), "text");
+        reg.set_read_only(id, Some(ReadOnly::Compressed));
+
+        let mut restored = BufferRegistry::new();
+        restored.restore_from(reg.snapshot_retaining(|_, _| true));
+
+        assert_eq!(restored.read_only(id), Some(ReadOnly::Compressed));
     }
 
     #[test]
