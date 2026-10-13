@@ -7,8 +7,8 @@ use std::{
 };
 use stoat_language::{
     structural_diff::{
-        self, BufferRef, ChangeKind as LangChangeKind, DiffChange, DiffResult, FileDiffInput, Side,
-        TreeCache,
+        self, BufferRef, ChangeKind as LangChangeKind, DiffChange, DiffResult, FileDiffInput,
+        MatchedPairs, Side, TreeCache,
     },
     Language,
 };
@@ -201,6 +201,7 @@ pub(crate) fn aligned_rows(
             None,
             memo,
             None,
+            MatchedPairs::Collect,
         )
         .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text)),
         None => structural_diff::diff(base_text, buffer_text),

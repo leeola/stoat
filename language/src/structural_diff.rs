@@ -143,6 +143,19 @@ pub struct MatchedPair {
     pub rhs: Range<usize>,
 }
 
+/// Whether a structural diff collects the [`MatchedPair`]s that line alignment
+/// reads.
+///
+/// The pairs cost a walk over every matched subtree and a sort. A caller that
+/// reads only the changes, such as the editor's diff job, skips them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchedPairs {
+    /// Fill [`DiffResult::matched`].
+    Collect,
+    /// Leave [`DiffResult::matched`] empty.
+    Skip,
+}
+
 /// Provenance for a [`ChangeKind::Moved`] region. `sources` enumerates the
 /// counterpart location(s) on the other side: length 1 for unambiguous
 /// moves and `> 1` when multiple candidate source locations share the
@@ -204,7 +217,8 @@ pub struct DiffResult {
     /// Every token pair the tree diff holds unchanged, in lhs order.
     ///
     /// The two ranges of a pair hold equal text. The line fallback pairs no
-    /// tokens, so its result leaves this empty.
+    /// tokens, so its result leaves this empty, and so does a diff run under
+    /// [`MatchedPairs::Skip`].
     pub matched: Vec<MatchedPair>,
 }
 

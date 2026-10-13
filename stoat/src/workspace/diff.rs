@@ -44,8 +44,8 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_language::{
-    structural_diff, structural_diff::TreeCache, HighlightId, Language, LanguageRegistry,
-    SyntaxMap, Tree,
+    structural_diff::{self, MatchedPairs, TreeCache},
+    HighlightId, Language, LanguageRegistry, SyntaxMap, Tree,
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Rope;
@@ -1608,6 +1608,7 @@ pub(super) fn compute_diff_map(
                 None,
                 tree_memo,
                 buffer_tree,
+                MatchedPairs::Skip,
             )
             && !tree.fell_back_to_line_diff
         {

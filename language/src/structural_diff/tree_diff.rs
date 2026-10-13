@@ -30,7 +30,7 @@ use super::{
     sliders::fix_all_sliders,
     unchanged::{mark_unchanged, ChangeKind, ChangeMap},
     BufferRef, ChangeKind as DiffChangeKind, DiffChange, DiffResult, FileDiffInput, MatchedPair,
-    MoveMetadata, MoveSource, Side,
+    MatchedPairs, MoveMetadata, MoveSource, Side,
 };
 use crate::{parse, Language};
 use std::{
@@ -69,7 +69,7 @@ pub const DEFAULT_BYTE_LIMIT: usize = 1_000_000;
 /// side is over [`DEFAULT_BYTE_LIMIT`], the function returns `None` and
 /// the caller falls through to [`super::diff_lines`].
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
-    diff_with_language_cancellable(language, lhs, rhs, None, None, None)
+    diff_with_language_cancellable(language, lhs, rhs, None, None, None, MatchedPairs::Collect)
 }
 
 /// Parsed trees kept by the text they came from, so a side that has not
@@ -197,6 +197,9 @@ fn parse_memoized_within(
 /// spares the call the parse that dominates its cost. A tree from a different
 /// grammar is ignored rather than trusted, so a caller whose language and tree
 /// disagree gets a correct diff at full price. Pass [`None`] to parse `rhs`.
+///
+/// `pairs` says whether [`DiffResult::matched`] is filled. A caller that reads
+/// only the changes passes [`MatchedPairs::Skip`] and pays no pairing walk.
 pub fn diff_with_language_cancellable(
     language: &Arc<Language>,
     lhs: &str,
@@ -204,9 +207,10 @@ pub fn diff_with_language_cancellable(
     cancel: Option<&AtomicBool>,
     memo: Option<&TreeCache>,
     rhs_tree: Option<&Tree>,
+    pairs: MatchedPairs,
 ) -> Option<DiffResult> {
     let prepared = prepare_diff(language, lhs, rhs, cancel, memo, rhs_tree)?;
-    Some(finalize_single(&prepared))
+    Some(finalize_single(&prepared, pairs))
 }
 
 /// A parsed-and-preprocessed file diff, retained across the two finalize
@@ -259,7 +263,9 @@ pub fn prepare_diff<'a>(
 /// The single-file move pass runs on clones of the change maps, so the
 /// prepared maps stay pristine and the same [`PreparedDiff`] can still
 /// feed a later [`diff_changeset_from_slots`] cross-file pass.
-pub fn finalize_single(prepared: &PreparedDiff<'_>) -> DiffResult {
+///
+/// `pairs` says whether [`DiffResult::matched`] is filled.
+pub fn finalize_single(prepared: &PreparedDiff<'_>, pairs: MatchedPairs) -> DiffResult {
     let p = &prepared.prepared;
     let mut lhs_changes = p.lhs_changes.clone();
     let mut rhs_changes = p.rhs_changes.clone();
@@ -281,7 +287,7 @@ pub fn finalize_single(prepared: &PreparedDiff<'_>) -> DiffResult {
         lhs_lines: &p.lhs_lines,
         rhs_lines: &p.rhs_lines,
     }];
-    finalize_per_file(
+    let mut result = finalize_per_file(
         p,
         &lhs_changes,
         &rhs_changes,
@@ -289,7 +295,11 @@ pub fn finalize_single(prepared: &PreparedDiff<'_>) -> DiffResult {
         &records,
         &no_buffer,
         &views,
-    )
+    );
+    if pairs == MatchedPairs::Collect {
+        result.matched = matched_atom_pairs(p, &lhs_changes, &rhs_changes);
+    }
+    result
 }
 
 /// Run [`diff_with_language`]-quality diffs across a multi-file
@@ -419,15 +429,18 @@ pub fn diff_changeset_from_slots(mut slots: Vec<ChangesetSlot<'_>>) -> Vec<DiffR
             ChangesetSlot::Prepared(_, pd) => {
                 let p = &pd.prepared;
                 let my_struct_idx = structural_idx[slot_idx].expect("prepared slot");
-                finalize_per_file(
-                    p,
-                    &p.lhs_changes,
-                    &p.rhs_changes,
-                    my_struct_idx,
-                    &cs_records,
-                    &buffer_refs,
-                    &views,
-                )
+                DiffResult {
+                    matched: matched_atom_pairs(p, &p.lhs_changes, &p.rhs_changes),
+                    ..finalize_per_file(
+                        p,
+                        &p.lhs_changes,
+                        &p.rhs_changes,
+                        my_struct_idx,
+                        &cs_records,
+                        &buffer_refs,
+                        &views,
+                    )
+                }
             },
             ChangesetSlot::LineDiff { lhs, rhs } => line_diff::diff_lines(lhs, rhs),
         })
@@ -578,6 +591,10 @@ fn prepare_per_file<'a>(
 /// in the structural slice (`buffer_refs` and `views`); records whose
 /// `rhs_target.0` or any `lhs_sources[*].0` equals `my_idx` contribute
 /// metadata for this file.
+///
+/// The result holds no [`MatchedPair`]s. A caller that wants them adds
+/// [`matched_atom_pairs`], so a caller that reads only the changes pays no
+/// pairing walk.
 fn finalize_per_file(
     prepared: &PreparedFile<'_>,
     lhs_changes: &ChangeMap,
@@ -619,7 +636,7 @@ fn finalize_per_file(
     DiffResult {
         changes,
         fell_back_to_line_diff: false,
-        matched: matched_atom_pairs(prepared, lhs_changes, rhs_changes),
+        matched: Vec::new(),
     }
 }
 
@@ -1128,13 +1145,18 @@ mod tests {
             .collect()
     }
 
+    /// A call before and after a reformat across lines that adds an argument.
+    const REFORMAT: (&str, &str) = (
+        "fn f() {\n    foo(bar, baz);\n}\n",
+        "fn f() {\n    foo(\n        bar,\n        bang,\n        baz,\n    );\n}\n",
+    );
+
     /// A call reformatted across lines keeps all its tokens but the added
     /// argument and two commas, and each kept token pairs with itself on the
     /// line it moved to.
     #[test]
     fn matched_pairs_follow_tokens_across_a_reformat() {
-        let lhs = "fn f() {\n    foo(bar, baz);\n}\n";
-        let rhs = "fn f() {\n    foo(\n        bar,\n        bang,\n        baz,\n    );\n}\n";
+        let (lhs, rhs) = REFORMAT;
         let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
 
         let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
@@ -1154,6 +1176,31 @@ mod tests {
                 token("}", 2, 6),
             ],
             "the slider hands the old comma's partner to the novel run, so the comma pairs nothing",
+        );
+    }
+
+    /// A diff that skips the pairs leaves out the pairs and nothing else, so
+    /// the editor reads the same changes a review reads.
+    #[test]
+    fn skipping_matched_pairs_changes_nothing_else() {
+        let (lhs, rhs) = REFORMAT;
+        let diff = |pairs| {
+            diff_with_language_cancellable(&rust_lang(), lhs, rhs, None, None, None, pairs)
+                .expect("both sides parse")
+        };
+        let collected = diff(MatchedPairs::Collect);
+        assert!(
+            !collected.matched.is_empty(),
+            "the reformat keeps tokens to pair"
+        );
+
+        assert_eq!(
+            diff(MatchedPairs::Skip),
+            DiffResult {
+                matched: Vec::new(),
+                ..collected
+            },
+            "skipping the pairs empties them and leaves the rest of the result whole",
         );
     }
 
@@ -1853,8 +1900,16 @@ mod tests {
         // produces and the shape the memo exists for.
         for rhs in ["fn a() { one(); TWO(); }\nfn b() { three(); }\n", base] {
             let cold = diff_with_language(&lang, base, rhs).expect("cold diff parses");
-            let warm = diff_with_language_cancellable(&lang, base, rhs, None, Some(&memo), None)
-                .expect("memoized diff parses");
+            let warm = diff_with_language_cancellable(
+                &lang,
+                base,
+                rhs,
+                None,
+                Some(&memo),
+                None,
+                MatchedPairs::Collect,
+            )
+            .expect("memoized diff parses");
 
             assert_eq!(
                 change_shape(&warm),
@@ -1879,8 +1934,16 @@ mod tests {
         let text = "fn a() { one(); }\n";
         let memo: TreeCache = TreeCache::default();
 
-        diff_with_language_cancellable(&rust, text, text, None, Some(&memo), None)
-            .expect("diff parses");
+        diff_with_language_cancellable(
+            &rust,
+            text,
+            text,
+            None,
+            Some(&memo),
+            None,
+            MatchedPairs::Collect,
+        )
+        .expect("diff parses");
         let stored = memo.lock().expect("memo poisoned").entries[0].0;
         assert_eq!(
             stored.1, rust.name,
@@ -1926,8 +1989,16 @@ mod tests {
 
         for i in 0..MEMO_CAPACITY + 2 {
             let base = format!("fn f{i}() {{ call(); }}\n");
-            diff_with_language_cancellable(&lang, &base, "fn g() {}\n", None, Some(&memo), None)
-                .expect("diff parses");
+            diff_with_language_cancellable(
+                &lang,
+                &base,
+                "fn g() {}\n",
+                None,
+                Some(&memo),
+                None,
+                MatchedPairs::Collect,
+            )
+            .expect("diff parses");
         }
 
         let guard = memo.lock().expect("memo poisoned");
@@ -2000,8 +2071,16 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let lhs = "fn a() { call(arg1, arg2, arg3); }";
         let rhs = "fn b() { call(arg1, arg2, arg3); }";
-        let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel), None, None)
-            .expect("parse succeeds even on cancel");
+        let result = diff_with_language_cancellable(
+            &lang,
+            lhs,
+            rhs,
+            Some(&cancel),
+            None,
+            None,
+            MatchedPairs::Collect,
+        )
+        .expect("parse succeeds even on cancel");
         assert!(!result.fell_back_to_line_diff);
         // The structural-diff pipeline completed; we got changes even
         // though Dijkstra bailed immediately.
