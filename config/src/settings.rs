@@ -73,6 +73,11 @@ pub enum WrapMode {
 pub struct Settings {
     /// Enables the LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
+    /// Level of the session log for the stoat crates, a bare level (`error`,
+    /// `warn`, `info`, `debug`, `trace`) or a full tracing directive string.
+    /// `None` falls back to `debug`. `STOAT_LOG` or `RUST_LOG` in the
+    /// environment overrides it. Set via `log.level = debug;` in stcfg.
+    pub log_level: Option<String>,
     /// Runs LSP formatting on the focused buffer before each save when the
     /// server advertises the capability. `None` falls back to enabled, and
     /// `format_on_save = false;` in stcfg saves the buffer as typed. A format
@@ -302,6 +307,7 @@ impl Settings {
         finder_scopes.extend(other.finder_scopes);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
+            log_level: other.log_level.or(self.log_level),
             format_on_save: other.format_on_save.or(self.format_on_save),
             search_smart_case: other.search_smart_case.or(self.search_smart_case),
             config_auto_reload: other.config_auto_reload.or(self.config_auto_reload),
@@ -346,6 +352,11 @@ impl Settings {
             ["text_proto_log"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.text_proto_log = Some(b);
+                }
+            },
+            ["log", "level"] => {
+                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
+                    self.log_level = Some(s.clone());
                 }
             },
             ["format_on_save"] => {
@@ -630,6 +641,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -861,6 +873,24 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_log_level() {
+        let level = |src: &str| Settings::from_config(&parse_ok(src)).log_level;
+        assert_eq!(
+            [
+                level("on init { log.level = debug; }"),
+                level(r#"on init { log.level = "stoat=trace,wgpu_core=warn"; }"#),
+                level("on init { }"),
+            ],
+            [
+                Some("debug".to_string()),
+                Some("stoat=trace,wgpu_core=warn".to_string()),
+                None,
+            ],
+            "a bare level, a directive string, and absent",
+        );
+    }
+
+    #[test]
     fn from_config_extracts_lsp_server() {
         let config = parse_ok(r#"on init { lsp.server.rust = ["ra", "--flag"]; }"#);
         assert_eq!(
@@ -980,6 +1010,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -1026,6 +1057,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -1081,6 +1113,7 @@ mod tests {
     fn merge_right_wins_over_some() {
         let left = Settings {
             text_proto_log: Some(false),
+            log_level: None,
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
@@ -1119,6 +1152,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: Some(true),
+            log_level: None,
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
@@ -1159,6 +1193,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -1202,6 +1237,7 @@ mod tests {
     fn merge_right_none_preserves_left() {
         let left = Settings {
             text_proto_log: Some(true),
+            log_level: None,
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
@@ -1243,6 +1279,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -1297,6 +1334,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -1343,6 +1381,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                log_level: None,
                 format_on_save: None,
                 search_smart_case: None,
                 config_auto_reload: None,
@@ -1386,6 +1425,7 @@ mod tests {
     fn merge_right_overrides_theme() {
         let left = Settings {
             text_proto_log: None,
+            log_level: None,
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
@@ -1424,6 +1464,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: None,
+            log_level: None,
             format_on_save: None,
             search_smart_case: None,
             config_auto_reload: None,
@@ -1674,5 +1715,20 @@ mod tests {
         let merged = left.merge(right);
         assert_eq!(merged.terminal_shell, Some("/bin/zsh".to_string()));
         assert_eq!(merged.terminal_args, Some(vec!["-l".to_string()]));
+    }
+
+    /// A user's level overrides the shipped one, the merge order the config
+    /// loader uses.
+    #[test]
+    fn merge_right_overrides_log_level() {
+        let left = Settings {
+            log_level: Some("debug".to_string()),
+            ..Settings::default()
+        };
+        let right = Settings {
+            log_level: Some("trace".to_string()),
+            ..Settings::default()
+        };
+        assert_eq!(left.merge(right).log_level, Some("trace".to_string()));
     }
 }

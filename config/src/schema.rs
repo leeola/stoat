@@ -56,6 +56,14 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "false",
         },
         SettingDef {
+            path: &[Lit("log"), Lit("level")],
+            shape: ValueShape::String,
+            doc: "Session log level for the stoat crates: error, warn, info, \
+                  debug, or trace, or a full tracing directive string. \
+                  STOAT_LOG or RUST_LOG in the environment overrides it.",
+            default: "debug",
+        },
+        SettingDef {
             path: &[Lit("format_on_save")],
             shape: ValueShape::Bool,
             doc: "Run LSP formatting on the focused buffer before each save when \

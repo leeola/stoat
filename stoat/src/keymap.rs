@@ -3509,6 +3509,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
+                log_level: Some("debug".to_string()),
                 format_on_save: Some(true),
                 search_smart_case: Some(true),
                 config_auto_reload: Some(true),

@@ -324,6 +324,23 @@ fn build_config_artifacts(
     }
 }
 
+/// Point the session log at the level the settings name, or at `debug` when
+/// they name none.
+///
+/// A level that does not parse keeps the running level and logs a warning, so
+/// a typo in a reloaded config never turns the log off. `STOAT_LOG` or
+/// `RUST_LOG` at launch keeps its own filter, as [`stoat_log::set_level`]
+/// documents.
+fn apply_log_level(settings: &Settings) {
+    if let Err(err) = stoat_log::set_level(settings.log_level.as_deref().unwrap_or("debug")) {
+        tracing::warn!(
+            target: "stoat::app",
+            %err,
+            "log.level did not parse, so the running level stays"
+        );
+    }
+}
+
 /// Point every registered language's highlight map at `styles`' theme keys.
 ///
 /// Must run again after a theme swap, since the keys a capture name maps onto
@@ -2376,6 +2393,7 @@ impl Stoat {
             configured = settings.highlight_retention.is_some(),
             "highlight retention: caching syntax trees and token sets for hidden buffers"
         );
+        apply_log_level(&settings);
 
         let language_registry = Arc::new(LanguageRegistry::standard());
         install_highlight_maps(&language_registry, &syntax_styles);
@@ -2754,6 +2772,7 @@ impl Stoat {
 
         self.keymap = keymap;
         self.settings = settings;
+        apply_log_level(&self.settings);
         self.theme = Arc::new(theme);
         self.theme_pool = theme_pool;
         self.syntax_styles = syntax_styles;

@@ -429,6 +429,7 @@ fn run_tui(
 
     let cli_settings = Settings {
         text_proto_log,
+        log_level: None,
         format_on_save: None,
         search_smart_case: None,
         config_auto_reload: None,

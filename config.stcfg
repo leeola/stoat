@@ -237,6 +237,13 @@ on init {
     # Log the LSP text-protocol transcript. Off by default.
     text_proto_log = false;
 
+    # The level of the session log for stoat's own crates, which is error,
+    # warn, info, debug, or trace. Debug is the default, and it carries the
+    # diagnostic lines a bug report needs without the per-key trace lines. A
+    # full tracing directive string such as "stoat=trace,stoat::lsp=info" works
+    # too. STOAT_LOG or RUST_LOG in the environment overrides this setting.
+    log.level = debug;
+
     # Run LSP formatting on the focused buffer before each save when the server
     # advertises the capability. On by default. Set false to save the buffer as
     # typed. A format that errors or exceeds the save-time budget writes the
