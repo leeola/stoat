@@ -1113,6 +1113,14 @@ impl Workspace {
         self.diff.pairs.get(path)
     }
 
+    /// Every file measured against another file, with its pair.
+    pub(crate) fn pairs(&self) -> impl Iterator<Item = (&Path, &PairBase)> {
+        self.diff
+            .pairs
+            .iter()
+            .map(|(path, pair)| (path.as_path(), pair))
+    }
+
     /// Measure `path` against `pair`, in place of any pair it had.
     ///
     /// Only `path` re-diffs. Every other file keeps its base, so the diffs in

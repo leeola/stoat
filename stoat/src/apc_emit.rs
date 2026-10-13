@@ -351,6 +351,10 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
 
     let diff_base_lead = ws.diff_base().and_then(crate::render::pane::diff_base_lead);
     let diff_sides = diff::diff_sides(ws.diff_base());
+    let pair_sides: std::collections::HashMap<_, _> = ws
+        .pairs()
+        .map(|(path, pair)| (path.to_path_buf(), diff::pair_names(&pair.base_path, path)))
+        .collect();
     let held_buffers = ws.held_buffer_labels();
 
     let frame = crate::render::FrameCtx {
@@ -377,6 +381,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
         diff_sides: (&diff_sides.0, &diff_sides.1),
+        pair_sides: &pair_sides,
         lsp_pending,
         lsp_message: stoat
             .lsp_message

@@ -229,7 +229,11 @@ pub(crate) fn render_pane(
         && editor.diff_view
         && !(is_focused && view::cursor_display_row(editor) == editor.scroll_row)
     {
-        paint_diff_sides_bar(content_area, is_focused, frame, buf, scene);
+        let sides = buffers
+            .path_for(editor.buffer_id)
+            .and_then(|path| frame.pair_sides.get(path))
+            .map_or(frame.diff_sides, |(from, to)| (from.as_str(), to.as_str()));
+        paint_diff_sides_bar(content_area, is_focused, sides, frame, buf, scene);
     }
 
     let status_rows: u16 = if is_focused && frame.lsp_status_open {
@@ -350,22 +354,24 @@ fn dim_unfocused_pane(area: Rect, is_focused: bool, frame: FrameCtx<'_>, buf: &m
 
 /// Paint the diff view's sides bar over the top row of `content_area`.
 ///
-/// The bar names the base on the left and the buffers on the right, with the
-/// arrow over the divider so each name sits above its own column. It takes the
-/// pane's status bar style on a popout card. A card is the surface that shows
-/// over a gliding pane under stoatty and falls back to cells elsewhere.
+/// The bar names the base on the left and the buffers on the right, as
+/// `sides` holds them, with the arrow over the divider so each name sits above
+/// its own column. It takes the pane's status bar style on a popout card. A
+/// card is the surface that shows over a gliding pane under stoatty and falls
+/// back to cells elsewhere.
 ///
 /// Both names take the width of the longer one, so the card centers on the
 /// divider and reaches equally far over each column.
 fn paint_diff_sides_bar(
     content_area: Rect,
     is_focused: bool,
+    sides: (&str, &str),
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
     let theme = frame.theme;
-    let (from, to) = frame.diff_sides;
+    let (from, to) = sides;
     let (text, lead_chars) = diff_sides_bar_text(from, to);
 
     let style = theme.get(match is_focused {
@@ -1202,8 +1208,13 @@ fn status_segments(
         // because a cut drops the message's tail, such as the on or off of a
         // toggle report.
         let message_chars = frame.status_message.map_or(0, |m| m.chars().count());
+        let pair_lead = status
+            .buffer_id
+            .and_then(|id| buffers.path_for(id))
+            .and_then(|path| frame.pair_sides.get(path))
+            .map(|(from, _)| format!("diff vs {from}"));
         if let Some(text) = focused_staged_label(
-            frame.diff_base,
+            pair_lead.as_deref().or(frame.diff_base),
             frame.repo_change_counts,
             status.staged_counts,
             frame.hunk_position.as_ref(),
@@ -2383,6 +2394,44 @@ mod tests {
             focused_staged_label(None, Some((0, 0)), Some((1, 0)), None).as_deref(),
             Some(" repo 0 staged / 0 unstaged · file 1 staged / 0 unstaged "),
             "a stale zero tally still shows against a file that has hunks"
+        );
+    }
+
+    /// A pair names its two files over its own pane alone, and a git diff in
+    /// another tab names the workspace base, in the sides bar and in the
+    /// status lead both.
+    #[test]
+    fn the_sides_bar_names_the_pane_s_own_pair() {
+        // Each change sits below the top row, where the cursor lands, since the
+        // bar keeps clear of a focused cursor's line on the top row.
+        let mut h = crate::test_harness::TestHarness::with_size(120, 20);
+        h.stage_review_scenario("/repo", &[("c.txt", "x\ny\nz\n", "x\ny\nZ\n")]);
+        h.open_side_by_side(("/repo/a.txt", "one\ntwo\n"), ("/repo/b.txt", "one\nTWO\n"));
+        dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.open_file(Path::new("/repo/c.txt"));
+        dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        h.settle();
+
+        let named = |h: &mut crate::test_harness::TestHarness| {
+            h.snapshot();
+            let text = h.rendered_text().replace('─', " ");
+            // The text trims each row's end, which drops a card's last pad cell
+            // when only blank cells follow the card.
+            [
+                text.contains(diff_sides_bar_text("HEAD", "working tree").0.trim_end()),
+                text.contains(diff_sides_bar_text("a.txt", "b.txt").0.trim_end()),
+                text.contains("diff vs a.txt"),
+            ]
+        };
+        let git_tab = named(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::PrevTab);
+        h.settle();
+        assert_eq!(
+            [git_tab, named(&mut h)],
+            [[true, false, false], [false, true, true]],
+            "each tab's diff names its own sides and lead",
         );
     }
 

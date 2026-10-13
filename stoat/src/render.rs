@@ -89,7 +89,7 @@ use std::{
     hash::{Hash, Hasher},
     io,
     ops::Range,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
@@ -301,6 +301,12 @@ pub(crate) struct FrameCtx<'a> {
     /// The names of the diff's left and right sides, which the diff view's top
     /// bar reads.
     pub(crate) diff_sides: (&'a str, &'a str),
+    /// The sides a paired file's diff view names, keyed by the measured path.
+    ///
+    /// A pane reads its file's entry ahead of [`Self::diff_sides`], since a
+    /// pair holds for its own file alone and the workspace base names every
+    /// other pane.
+    pub(crate) pair_sides: &'a HashMap<PathBuf, (String, String)>,
     /// Label of the explicit LSP request still in flight, so the status bar
     /// shows a "lsp: {label}..." segment until the response lands. `None` when no
     /// such request is pending. See [`crate::lsp::lsp_pending_label`].
@@ -932,6 +938,10 @@ pub(crate) fn frame(
     // borrow of the workspace, which the pane loop mutates as it paints.
     let diff_base_lead = ws.diff_base().and_then(pane::diff_base_lead);
     let diff_sides = diff::diff_sides(ws.diff_base());
+    let pair_sides: HashMap<PathBuf, (String, String)> = ws
+        .pairs()
+        .map(|(path, pair)| (path.to_path_buf(), diff::pair_names(&pair.base_path, path)))
+        .collect();
     let held_buffers = ws.held_buffer_labels();
 
     let frame = FrameCtx {
@@ -962,6 +972,7 @@ pub(crate) fn frame(
         hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
         diff_sides: (&diff_sides.0, &diff_sides.1),
+        pair_sides: &pair_sides,
         lsp_pending,
         lsp_message: stoat
             .lsp_message

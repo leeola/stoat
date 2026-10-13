@@ -1242,7 +1242,7 @@ pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, String) {
 ///
 /// Each file takes its file name alone. Two files with one name take their
 /// paths below the directory they share, so the two sides never read the same.
-pub(super) fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
+pub(crate) fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
     let file_name = |path: &Path| {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
