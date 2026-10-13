@@ -290,7 +290,7 @@ fn amended_content(
 }
 
 /// How much of the hunk under the cursor one keypress moves.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum AmendUnit {
     /// The whole hunk, which is what `s` moves.
     Hunk,

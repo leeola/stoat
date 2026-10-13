@@ -737,7 +737,7 @@ fn editor_shows_changes(stoat: &mut Stoat, editor_id: EditorId) -> bool {
 }
 
 /// How [`stage_hunk`] acts on the hunk under the cursor.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum HunkStage {
     Stage,
     Unstage,
@@ -825,7 +825,7 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         return UpdateEffect::None;
     };
 
-    let (cursor_row, text, unit) = {
+    let (cursor_row, text, unit, drawn) = {
         let Some(editor) = super::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -842,7 +842,17 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
                 .map_or(AmendUnit::Hunk, AmendUnit::Rows),
             unit => unit,
         };
-        (cursor_row, buffer_snapshot.rope().clone(), unit)
+        // The press log reports what the gutter draws at the cursor row, which
+        // is the live hunk there and the row's staged mark.
+        let drawn = snapshot.diff_map().map(|map| {
+            let hunk = map
+                .live_hunks(buffer_snapshot)
+                .in_range(cursor_row..cursor_row + 1)
+                .next()
+                .map(|(hunk, rows)| (hunk.status, rows, hunk.refined()));
+            (hunk, map.staged_for_line(cursor_row))
+        });
+        (cursor_row, buffer_snapshot.rope().clone(), unit, drawn)
     };
 
     let Some(path) = stoat
@@ -855,6 +865,16 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
     };
     let git_root = stoat.active_workspace().git_root.clone();
     let pressed_rev = review_rev(stoat.active_workspace());
+    tracing::info!(
+        target: "stoat::review",
+        path = %path.display(),
+        cursor_row,
+        unit = ?unit,
+        mode = ?mode,
+        drawn = ?drawn,
+        sides = ?diff::diff_sides(stoat.active_workspace().diff_base()),
+        "staging press"
+    );
 
     let job = GitJob::new("stage", None, move |stoat: &mut Stoat| {
         // The index route diffs against HEAD and the amend route writes into
