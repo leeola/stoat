@@ -114,7 +114,10 @@ fn open_file_in_pane_with(
 
     let content = match read_open_content(&*stoat.fs_host, &absolute) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OpenContent::Text("\n".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OpenContent::Text {
+            text: "\n".to_string(),
+            compressed: false,
+        },
         Err(e) => {
             tracing::error!("failed to read {}: {}", absolute.display(), e);
             stoat.set_status(format!("cannot open {}: {e}", display_name(&absolute)));
@@ -151,21 +154,32 @@ fn install_content(
     origin: OpenOrigin,
 ) -> Option<BufferId> {
     match content {
-        OpenContent::Text(text) => finish_open(
+        OpenContent::Text { text, compressed } => finish_open(
             stoat,
             workspace,
             target,
             absolute,
-            OpenBody::Text(&text),
+            OpenBody::Text {
+                text: &text,
+                compressed,
+            },
             disk_mtime,
             origin,
         ),
-        OpenContent::Rope { rope, ending } => finish_open(
+        OpenContent::Rope {
+            rope,
+            ending,
+            compressed,
+        } => finish_open(
             stoat,
             workspace,
             target,
             absolute,
-            OpenBody::Rope { rope, ending },
+            OpenBody::Rope {
+                rope,
+                ending,
+                compressed,
+            },
             disk_mtime,
             origin,
         ),
@@ -181,9 +195,19 @@ fn install_content(
 /// A synchronous open carries the bytes it read and normalizes them here. A
 /// background one did that work on the pool and carries the rope, since
 /// building it is the expensive half of opening a large file.
+///
+/// Both forms carry the `compressed` flag of [`OpenContent::Text`], which
+/// keeps a gzip file's buffer out of LSP.
 enum OpenBody<'a> {
-    Text(&'a str),
-    Rope { rope: Rope, ending: LineEnding },
+    Text {
+        text: &'a str,
+        compressed: bool,
+    },
+    Rope {
+        rope: Rope,
+        ending: LineEnding,
+        compressed: bool,
+    },
 }
 
 /// Point `target` at an image file, releasing whatever it showed as
@@ -253,9 +277,10 @@ fn spawn_pending_open(
             // whole file, and this path exists because that file is large
             // enough for the walk to be felt on the thread that paints.
             let content = read_open_content(&*fs_host, &path).map(|content| match content {
-                OpenContent::Text(text) => OpenContent::Rope {
+                OpenContent::Text { text, compressed } => OpenContent::Rope {
                     ending: LineEnding::detect(&text),
                     rope: Rope::from(LineEnding::normalize(&text).as_ref()),
+                    compressed,
                 },
                 other => other,
             });
@@ -355,8 +380,9 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
     for pending in ready {
         let content = match pending.result.lock().expect("pending open mutex").take() {
             Some(Ok(c)) => c,
-            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                OpenContent::Text("\n".to_string())
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => OpenContent::Text {
+                text: "\n".to_string(),
+                compressed: false,
             },
             Some(Err(e)) => {
                 tracing::error!("failed to read {}: {}", pending.path.display(), e);
@@ -407,7 +433,8 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
 ///
 /// The shared tail of the sync and background open paths. It registers the
 /// buffer (deduping on path), records `origin` on it, applies mtime and
-/// language, notifies LSP, records the pane switch, and installs the editor.
+/// language, notifies LSP unless the file was compressed, records the pane
+/// switch, and installs the editor.
 ///
 /// `workspace` is named rather than taken as the active one because the
 /// background path installs a read that may have finished after the user
@@ -424,7 +451,7 @@ fn finish_open(
     let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
 
-    let (buffer_id, buffer) = {
+    let (buffer_id, buffer, compressed) = {
         let ws = &mut stoat.workspaces[workspace];
         // Opening a path already registered hands back the existing buffer and
         // discards `content`. Everything read alongside it describes a file the
@@ -433,12 +460,17 @@ fn finish_open(
         // baseline onto a write the buffer never saw, leaving the guard
         // comparing that write against itself.
         let existed = ws.buffers.id_for_path(absolute).is_some();
-        let (ending, (buffer_id, buffer)) = match content {
-            OpenBody::Text(text) => (
+        let (ending, compressed, (buffer_id, buffer)) = match content {
+            OpenBody::Text { text, compressed } => (
                 LineEnding::detect(text),
+                compressed,
                 ws.buffers.open(absolute, &LineEnding::normalize(text)),
             ),
-            OpenBody::Rope { rope, ending } => (ending, ws.buffers.open_rope(absolute, rope)),
+            OpenBody::Rope {
+                rope,
+                ending,
+                compressed,
+            } => (ending, compressed, ws.buffers.open_rope(absolute, rope)),
         };
         ws.buffers.note_origin(buffer_id, origin);
         if !existed {
@@ -452,13 +484,18 @@ fn finish_open(
         {
             ws.buffers.set_language(buffer_id, lang);
         }
-        (buffer_id, buffer)
+        (buffer_id, buffer, compressed)
     };
 
-    // The buffer's own rope, not the text just read from disk. An already-open
-    // buffer keeps what it holds, so its rope is what the server needs to see.
-    let rope = buffer.read().expect("buffer lock").rope().clone();
-    crate::lsp::session::notify_buffer_opened(stoat, workspace, buffer_id, absolute, rope);
+    // The server indexes the gzip bytes under this path, and the text handed to
+    // it disagrees with the file, so a compressed buffer stays out of LSP.
+    if !compressed {
+        // The buffer's own rope, not the text just read from disk. An
+        // already-open buffer keeps what it holds, so its rope is what the
+        // server needs to see.
+        let rope = buffer.read().expect("buffer lock").rope().clone();
+        crate::lsp::session::notify_buffer_opened(stoat, workspace, buffer_id, absolute, rope);
+    }
 
     jump::record_pane_switch(stoat, workspace, target, buffer_id);
     show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor)
@@ -852,7 +889,7 @@ mod tests {
     use super::*;
     use crate::{
         action_handlers::{commits, dispatch},
-        test_harness::{editor, TestHarness},
+        test_harness::{self, editor, TestHarness},
     };
     use stoat_action::{
         CloseBuffer, Diff, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark, SplitRight,
@@ -871,6 +908,50 @@ mod tests {
         h.settle();
         let buffer_id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
         (path, buffer_id)
+    }
+
+    /// A gzip file past the synchronous limit reads on the pool, and the rope
+    /// the pool builds keeps the flag that holds its buffer out of LSP.
+    #[test]
+    fn a_large_gzip_file_opens_on_the_pool_and_stays_out_of_lsp() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/big");
+        let path = root.join("huge.log.gz");
+        let text = "x\n".repeat(OPEN_SYNC_MAX_BYTES as usize / 2 + 16);
+        h.fake_fs()
+            .insert_file(&path, test_harness::gzip_stored(text.as_bytes()));
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        let deferred = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .is_none();
+        h.settle();
+        install_pending_opens(&mut h.stoat);
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .expect("the buffer installs once the read finishes");
+        let len = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .len();
+
+        assert_eq!(
+            (deferred, len, h.stoat.lsp_opened.contains(&id)),
+            (true, text.len(), false)
+        );
     }
 
     #[test]
@@ -1589,6 +1670,40 @@ mod tests {
         );
     }
 
+    /// A gzip file opens as the text it holds and stays out of LSP. The plain
+    /// file opened first shows that the server path is live.
+    #[test]
+    fn a_gzip_file_opens_as_its_text_and_stays_out_of_lsp() {
+        let mut h = Stoat::test();
+        let (_, plain) = open_path(&mut h, b"hello\n");
+        let gz = PathBuf::from("/close-test/main.rs.gz");
+        h.fake_fs()
+            .insert_file(&gz, test_harness::gzip(b"fn main() {}\n"));
+
+        dispatch(&mut h.stoat, &OpenFile { path: gz });
+        h.settle();
+        let id = focused_buffer_id(&mut h.stoat);
+        let text = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .to_string();
+
+        assert_eq!(
+            (
+                text,
+                h.stoat.lsp_opened.contains(&plain),
+                h.stoat.lsp_opened.contains(&id)
+            ),
+            ("fn main() {}\n".to_string(), true, false)
+        );
+    }
+
     #[test]
     fn close_buffer_clears_the_state_keyed_by_the_buffer() {
         let mut h = Stoat::test();
@@ -1813,7 +1928,7 @@ mod tests {
         {
             let pending = h.stoat.pending_file_opens.first().expect("one read is out");
             let held = pending.result.lock().expect("pending open mutex");
-            let Some(Ok(OpenContent::Rope { rope, ending })) = held.as_ref() else {
+            let Some(Ok(OpenContent::Rope { rope, ending, .. })) = held.as_ref() else {
                 panic!("the pool hands back a rope, not the bytes it read")
             };
             assert_eq!(*ending, LineEnding::Crlf, "with the ending it detected");

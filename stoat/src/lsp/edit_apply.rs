@@ -341,6 +341,9 @@ fn document_version_current(stoat: &Stoat, id: BufferId, version: Option<i32>) -
 /// A file that is not UTF-8 text fails rather than decode lossily. A lossy
 /// decode puts replacement characters in the buffer, and a later save writes
 /// them over the file's bytes.
+///
+/// A gzip file fails too. Its text exists only in memory, so a workspace edit
+/// never lands in it.
 fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEditError> {
     if let Some(id) = stoat.active_workspace().buffers.id_for_path(path) {
         return Ok(id);
@@ -351,7 +354,11 @@ fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEdit
                 path: path.to_path_buf(),
             }
         })?;
-    let OpenContent::Text(text) = content else {
+    let OpenContent::Text {
+        text,
+        compressed: false,
+    } = content
+    else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "not a text file",
@@ -447,7 +454,7 @@ mod tests {
     use super::*;
     use crate::{
         host::{FsHost, OffsetEncoding},
-        test_harness::TestHarness,
+        test_harness::{self, TestHarness},
     };
     use lsp_types::{
         CreateFile, DeleteFile, OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range,
@@ -956,6 +963,38 @@ mod tests {
                 "hello!\nworld\n".to_string(),
                 LineEnding::Crlf,
             ),
+        );
+    }
+
+    /// A gzip file's text exists only in memory, so an edit into it fails
+    /// before it opens a buffer.
+    #[test]
+    fn an_edit_into_a_gzip_file_fails_and_opens_nothing() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/closed.rs.gz");
+        h.fake_fs()
+            .insert_file(&path, test_harness::gzip(b"hello\n"));
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(file_uri(&path), vec![text_edit(0, 5, 5, "!")]);
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+
+        let failed = match apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16) {
+            Err(WorkspaceEditError::PathReadFailed {
+                path: read, source, ..
+            }) => Some((read, source.kind())),
+            _ => None,
+        };
+
+        assert_eq!(
+            (
+                failed,
+                h.stoat.active_workspace().buffers.id_for_path(&path)
+            ),
+            (Some((path.clone(), std::io::ErrorKind::InvalidData)), None),
         );
     }
 

@@ -12,6 +12,7 @@ use crate::{
     lsp::registry::ServerSelector,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use flate2::{read::GzEncoder, Compression};
 use ratatui::{
     buffer::Buffer,
     style::{Color, Modifier},
@@ -19,6 +20,7 @@ use ratatui::{
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fmt::Write,
+    io::Read,
     sync::Arc,
     time::Duration,
 };
@@ -90,6 +92,25 @@ pub(crate) fn stoat() -> Stoat {
     );
     stoat.update(Event::Resize(80, 24));
     stoat
+}
+
+/// `bytes` as one gzip member, for a test that opens a compressed file.
+pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
+    gzip_at(bytes, Compression::default())
+}
+
+/// `bytes` as one gzip member stored without compression, so the file on disk
+/// is at least as large as the text it holds.
+pub(crate) fn gzip_stored(bytes: &[u8]) -> Vec<u8> {
+    gzip_at(bytes, Compression::none())
+}
+
+fn gzip_at(bytes: &[u8], level: Compression) -> Vec<u8> {
+    let mut out = Vec::new();
+    GzEncoder::new(bytes, level)
+        .read_to_end(&mut out)
+        .expect("gzip encodes in memory");
+    out
 }
 
 impl TestHarness {

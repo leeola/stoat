@@ -20,7 +20,7 @@
 use crate::{
     action_handlers::{
         file::{display_name, open_file},
-        focused_editor_mut, jump, movement, read_string_via_host, review,
+        focused_editor_mut, jump, movement, read_text_via_host, review,
         view::ensure_cursor_in_view,
     },
     app::{Stoat, UpdateEffect},
@@ -278,7 +278,7 @@ fn read_and_compare(
     path: &Path,
     old: &Rope,
 ) -> Result<ReloadDiff, String> {
-    let new = read_string_via_host(fs, path)
+    let new = read_text_via_host(fs, path)
         .map_err(|e| format!("cannot reload {}: {e}", display_name(path)))?;
 
     // Before the prefix diff, which would otherwise compare the file's
@@ -703,7 +703,7 @@ fn reload_from_disk(
     path: &Path,
     mtime: SystemTime,
 ) -> ReloadOutcome {
-    let Ok(new) = read_string_via_host(&*stoat.fs_host, path) else {
+    let Ok(new) = read_text_via_host(&*stoat.fs_host, path) else {
         return ReloadOutcome::Missing;
     };
     stoat
@@ -1263,7 +1263,7 @@ mod tests {
         debounce::{self, FS_WATCH_DEBOUNCE},
         host::{FsEventKind, FsHost},
         pane::View,
-        test_harness::{editor, TestHarness},
+        test_harness::{self, editor, TestHarness},
         Stoat,
     };
     use std::{
@@ -1320,6 +1320,24 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message, None,
             "the same undecodable version must not report again"
+        );
+    }
+
+    /// A gzip file reloads as the text it holds, as it opened.
+    #[test]
+    fn auto_reload_decompresses_a_gzip_file() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-gzip");
+        let seed = test_harness::gzip(b"line1\n");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt.gz", &seed);
+
+        h.fake_fs()
+            .insert_file(&path, test_harness::gzip(b"line1\nline2\n"));
+        pump_poll(&mut h);
+
+        assert_eq!(
+            (buffer_text(&h, id), h.stoat.pending_message.clone()),
+            ("line1\nline2\n".to_string(), None)
         );
     }
 
@@ -2402,6 +2420,20 @@ mod tests {
             h.stoat.active_workspace().buffers.disk_mtime(id) > before,
             "the reload records the advanced disk mtime",
         );
+    }
+
+    /// `:reload` reads a gzip file as the text it holds, as the open did.
+    #[test]
+    fn reload_decompresses_a_gzip_file() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-gzip");
+        let id = open_plain(&mut h, root, "a.txt.gz", &test_harness::gzip(b"old\n"));
+
+        h.fake_fs()
+            .insert_file(root.join("a.txt.gz"), test_harness::gzip(b"new\n"));
+        reload_focused(&mut h.stoat, false);
+
+        assert_eq!(buffer_text(&h, id), "new\n");
     }
 
     #[test]

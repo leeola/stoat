@@ -4071,6 +4071,7 @@ dependencies = [
  "crossterm",
  "emojis",
  "etcetera",
+ "flate2",
  "futures",
  "git2",
  "globset",

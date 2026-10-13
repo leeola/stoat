@@ -61,7 +61,7 @@ pub(crate) use pane::{
     close_pane_by_id, dispose_view, restore_covered_terminal, restore_pane_after_term_exit,
     retire_parked_pane, scratch_editor_view, EditorDisposal,
 };
-use std::{path::Path, sync::Arc};
+use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
     GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab,
@@ -1635,13 +1635,29 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
     String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Read the text a reader of `path`'s current content sees, decompressed when
+/// the file is a gzip stream.
+///
+/// See also:
+/// - [`read_string_via_host`] for the bytes as they sit on disk.
+pub(crate) fn read_text_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Result<String> {
+    let mut buf = Vec::new();
+    fs.read(path, &mut buf)?;
+    decode_text(buf).map(|(text, _)| text)
+}
+
 /// What opening a file found in it.
 ///
 /// The open path has to tell an image from text before it decides what kind of
 /// pane to make, and it has only the bytes to go on. Reading them once and
 /// answering both questions is what keeps a large file off the disk twice.
 pub(crate) enum OpenContent {
-    Text(String),
+    Text {
+        text: String,
+        /// The bytes on disk are a gzip stream and `text` is what it held. The
+        /// text is not the file's content, so it has no file to write back to.
+        compressed: bool,
+    },
     /// Text already normalized and built into a rope, with the terminator the
     /// file arrived with.
     ///
@@ -1651,13 +1667,13 @@ pub(crate) enum OpenContent {
     Rope {
         rope: Rope,
         ending: LineEnding,
+        /// As on [`OpenContent::Text`].
+        compressed: bool,
     },
     /// An image, as its pixel dimensions. The bytes are dropped: nothing yet
     /// draws them, and holding a decoded image per open pane would cost far
     /// more than the label that is shown instead.
-    Image {
-        px: (u32, u32),
-    },
+    Image { px: (u32, u32) },
 }
 
 /// Read `path` through the supplied [`FsHost`], as an image or as text.
@@ -1668,7 +1684,8 @@ pub(crate) enum OpenContent {
 ///
 /// Anything that is not a recognized image is read as UTF-8 and fails the same
 /// way it always has, so a genuinely undecodable file still reports what is
-/// wrong with it.
+/// wrong with it. A gzip stream, also told by its leading bytes, is
+/// decompressed in memory first, and the file on disk stays as it is.
 pub(crate) fn read_open_content(fs: &dyn FsHost, path: &Path) -> std::io::Result<OpenContent> {
     let mut buf = Vec::new();
     fs.read(path, &mut buf)?;
@@ -1679,9 +1696,8 @@ pub(crate) fn read_open_content(fs: &dyn FsHost, path: &Path) -> std::io::Result
         return Ok(OpenContent::Image { px });
     }
 
-    String::from_utf8(buf)
-        .map(OpenContent::Text)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    let (text, compressed) = decode_text(buf)?;
+    Ok(OpenContent::Text { text, compressed })
 }
 
 /// Whether `bytes` opens with the signature of an image format this can size.
@@ -1707,6 +1723,33 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?
         .into_dimensions()
         .ok()
+}
+
+/// The two leading bytes of every gzip member.
+const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
+
+/// Decode a file's bytes as UTF-8 text, decompressing a gzip stream first, and
+/// say whether it was one.
+///
+/// A truncated or corrupt stream fails as [`std::io::ErrorKind::InvalidData`],
+/// the same kind an undecodable text file fails with.
+fn decode_text(buf: Vec<u8>) -> std::io::Result<(String, bool)> {
+    let compressed = buf.starts_with(GZIP_MAGIC);
+    let bytes = match compressed {
+        // Concatenated members are one valid stream, so every member decodes.
+        // The reader is a byte slice, so any failure is the decoder's.
+        true => {
+            let mut out = Vec::new();
+            flate2::read::MultiGzDecoder::new(&buf[..])
+                .read_to_end(&mut out)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            out
+        },
+        false => buf,
+    };
+    let text = String::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok((text, compressed))
 }
 
 #[cfg(test)]
@@ -3511,8 +3554,12 @@ mod tests {
 
         let read = |path: &str| match read_open_content(&fs, Path::new(path)) {
             Ok(OpenContent::Image { px }) => Ok(Some(px)),
-            Ok(OpenContent::Text(text)) => {
-                assert_eq!(text, "hello", "{path} read as text");
+            Ok(OpenContent::Text { text, compressed }) => {
+                assert_eq!(
+                    (text.as_str(), compressed),
+                    ("hello", false),
+                    "{path} read as text"
+                );
                 Ok(None)
             },
             Ok(OpenContent::Rope { .. }) => {
@@ -3538,6 +3585,62 @@ mod tests {
                 .err()
                 .map(|e| e.kind()),
             Some(std::io::ErrorKind::InvalidData),
+        );
+    }
+
+    /// The text and compressed flag a read of `path` hands back, or the kind
+    /// of its error.
+    fn read_text(
+        fs: &crate::host::FakeFs,
+        path: &str,
+    ) -> Result<(String, bool), std::io::ErrorKind> {
+        match read_open_content(fs, Path::new(path)) {
+            Ok(OpenContent::Text { text, compressed }) => Ok((text, compressed)),
+            Ok(_) => panic!("{path} read as something other than text"),
+            Err(e) => Err(e.kind()),
+        }
+    }
+
+    #[test]
+    fn a_gzip_file_opens_as_its_decompressed_text() {
+        let fs = crate::host::FakeFs::new();
+        let bytes = crate::test_harness::gzip(b"fn main() {}\n");
+        fs.insert_file("/w/main.rs.gz", &bytes);
+
+        let read = read_text(&fs, "/w/main.rs.gz");
+        let mut on_disk = Vec::new();
+        fs.read(Path::new("/w/main.rs.gz"), &mut on_disk)
+            .expect("read");
+
+        assert_eq!(
+            (read, on_disk),
+            (Ok(("fn main() {}\n".to_string(), true)), bytes),
+            "the open decompresses in memory, and the file keeps its gzip bytes",
+        );
+    }
+
+    #[test]
+    fn a_truncated_gzip_stream_fails_as_invalid_data() {
+        let fs = crate::host::FakeFs::new();
+        let bytes = crate::test_harness::gzip(b"fn main() {}\n");
+        fs.insert_file("/w/cut.gz", &bytes[..bytes.len() / 2]);
+
+        assert_eq!(
+            read_text(&fs, "/w/cut.gz"),
+            Err(std::io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn read_text_via_host_decompresses_gzip() {
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file("/w/a.gz", crate::test_harness::gzip(b"hello\n"));
+        fs.insert_file("/w/b.txt", b"plain\n");
+        let read = |path: &str| read_text_via_host(&fs, Path::new(path)).ok();
+
+        assert_eq!(
+            [read("/w/a.gz"), read("/w/b.txt")],
+            [Some("hello\n".to_string()), Some("plain\n".to_string())]
         );
     }
 }
