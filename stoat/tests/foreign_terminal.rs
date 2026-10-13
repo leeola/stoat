@@ -40,11 +40,19 @@ const KEY_SETTLE: Duration = Duration::from_millis(600);
 /// How long to wait for the process to exit after the quit.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the screen has to show what a step expects. Far past one frame and
-/// the startup handshake's fallback window, which the first step waits out, so
-/// a loaded machine still passes, and short enough that a missed step fails the
-/// run quickly.
+/// How long the screen has to show what a step expects once the session is up.
+/// Far past one frame and the startup handshake's fallback window, so a loaded
+/// machine still passes, and short enough that a missed step fails the run
+/// quickly.
 const SCREEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The bound on each wait that spans the startup of a spawned process.
+///
+/// A loaded machine stalls a process that pages in a large debug binary for
+/// longer than any step takes. That stall says nothing about the behavior under
+/// test. The startup lasts until the first frame, or until the socket for a
+/// process with no screen, and each step after it gets [`SCREEN_TIMEOUT`].
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What a spawned session must not inherit.
 ///
@@ -88,16 +96,24 @@ impl Session {
     /// nothing here sends, and it hands over what was typed meanwhile only as it
     /// ends. So an insert-mode round trip on screen shows the handshake is over
     /// and the input thread reads keys, however slowly the process started.
+    ///
+    /// The `i` goes out at the spawn, so the handshake's replay of what was
+    /// typed at launch stays covered. Frames go out only after the handshake,
+    /// so the first one gets [`STARTUP_TIMEOUT`], and the round trip's deadline
+    /// starts at that frame.
     fn start(cols: u16, rows: u16) -> Self {
         let mut session = Session::spawn(cols, rows);
         session.send("i");
+        let painted = session.settles_within(STARTUP_TIMEOUT, |screen| {
+            screen.contains(" NOR ") || screen.contains(" INS ")
+        });
         let inserting = session.settles(|screen| screen.contains(" INS "));
         session.send("\x1b");
         let normal = session.settles(|screen| screen.contains(" NOR "));
 
         assert_eq!(
-            (inserting, normal),
-            (true, true),
+            (painted, inserting, normal),
+            (true, true, true),
             "the session reads keys:\n{}",
             session.screen_text(),
         );
@@ -181,10 +197,10 @@ impl Session {
         self.grids.push((at, cols, rows));
     }
 
-    /// Whether the session writes `bytes` within [`SCREEN_TIMEOUT`], for what
+    /// Whether the session writes `bytes` within [`STARTUP_TIMEOUT`], for what
     /// never reaches the screen, such as the handshake's probe.
     fn wrote(&self, bytes: &[u8]) -> bool {
-        let deadline = Instant::now() + SCREEN_TIMEOUT;
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
             if find(&self.output.lock().expect("output lock"), bytes).is_some() {
                 return true;
@@ -206,7 +222,13 @@ impl Session {
     /// Polled rather than slept, so a passing run waits one frame rather than
     /// the whole bound, and a stalled session still gets the whole bound.
     fn settles(&self, done: impl Fn(&str) -> bool) -> bool {
-        let deadline = Instant::now() + SCREEN_TIMEOUT;
+        self.settles_within(SCREEN_TIMEOUT, done)
+    }
+
+    /// [`Self::settles`] with its own bound, for a wait that spans the
+    /// process's startup.
+    fn settles_within(&self, timeout: Duration, done: impl Fn(&str) -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             if done(&self.screen_text()) {
                 return true;
@@ -319,7 +341,7 @@ impl AttachServer {
 
         let file = format!("attach-{ATTACH_NAME}.sock");
         let socket = stoat_log::socket_dir(home.join(".local/state/stoat"), &file).join(file);
-        let deadline = Instant::now() + SCREEN_TIMEOUT;
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
         while UnixStream::connect(&socket).is_err() {
             assert!(
                 Instant::now() < deadline,
@@ -438,7 +460,9 @@ fn a_resize_during_the_handshake_repaints_after_it() {
     // answers it, so the handshake holds fd 0 for its whole fallback window.
     let probing = session.wrote(APC_INTRODUCER);
     session.resize(100, 40);
-    let repainted = session.settles(bar_reaches_the_edge);
+    // The repaint is the session's first frame, which goes out only once the
+    // handshake ends, so its wait spans what is left of the startup.
+    let repainted = session.settles_within(STARTUP_TIMEOUT, bar_reaches_the_edge);
     let screen = session.screen_text();
     let (status, _) = session.quit();
 
@@ -504,7 +528,7 @@ fn an_attach_paints_the_new_terminal_and_reads_its_keys() {
     let server = AttachServer::spawn(&workspace.2, &workspace.3);
     let mut client = Session::spawn_in(120, 40, workspace, &["--attachable", ATTACH_NAME]);
 
-    let painted = client.settles(|screen| screen.contains(" NOR "));
+    let painted = client.settles_within(STARTUP_TIMEOUT, |screen| screen.contains(" NOR "));
     client.send("i");
     let inserting = client.settles(|screen| screen.contains(" INS "));
     client.send("\x1b");
