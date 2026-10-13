@@ -7,7 +7,7 @@ use crate::{
     app::Stoat,
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, ProseChange},
     display_map::{
-        display_width, highlights::HighlightStyle, syntax_theme::DiffTheme, BlockRowKind,
+        display_width, highlights::HighlightStyle, syntax_theme::DiffTheme, Block, BlockRowKind,
         CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot, RowHighlightCursor, WrapPoint,
     },
     editor_state::EditorState,
@@ -315,6 +315,11 @@ pub(crate) struct DiffRowState {
     /// another of its rows, and its chars are still unchanged text. False for a
     /// block row.
     pub(crate) refined: bool,
+    /// Whether the right column marks this block row with a removal tick.
+    ///
+    /// Only the first row of a pure removal ticks, and only when the live rows
+    /// beside the gap carry no bar. False for every live row.
+    pub(crate) removal_tick: bool,
     /// Display-column ranges to mark, each with its kind and its
     /// [`ProseChange`]. Empty for a row no hunk refines.
     ///
@@ -398,22 +403,18 @@ fn build_diff_row_states(
 ) -> Vec<DiffRowState> {
     let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
     rows.map(|display_row| {
-        let kind = match snapshot.classify_row(display_row) {
-            BlockRowKind::Block { block, line_index } => DiffRowKind::Block {
-                segment: block.0.first_segment + line_index,
-            },
-            BlockRowKind::BufferRow { buffer_row } => DiffRowKind::BufferRow { buffer_row },
-        };
-        let buffer_row = match kind {
-            DiffRowKind::BufferRow { buffer_row } => buffer_row,
-            DiffRowKind::Block { segment } => {
+        let buffer_row = match snapshot.classify_row(display_row) {
+            BlockRowKind::BufferRow { buffer_row } => buffer_row,
+            BlockRowKind::Block { block, line_index } => {
+                let segment = block.0.first_segment + line_index;
                 return DiffRowState {
-                    kind,
+                    kind: DiffRowKind::Block { segment },
                     status: DiffStatus::Unchanged,
                     staged: None,
                     paired: false,
                     continuation: segment > 0,
                     refined: false,
+                    removal_tick: takes_removal_tick(snapshot, display_row, block),
                     change_spans: Vec::new(),
                 };
             },
@@ -435,10 +436,11 @@ fn build_diff_row_states(
                 .iter()
                 .any(|hunk| hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some());
         DiffRowState {
-            kind,
+            kind: DiffRowKind::BufferRow { buffer_row },
             status,
             continuation: snapshot.is_wrap_continuation(display_row),
             refined,
+            removal_tick: false,
             paired: status == DiffStatus::Modified
                 && paired_with_base(snapshot, buffer_row, &mut hunk_scratch),
             staged: marked
@@ -452,6 +454,29 @@ fn build_diff_row_states(
         }
     })
     .collect()
+}
+
+/// Whether `display_row`, a row of `block`, is where the right column ticks a
+/// pure removal.
+///
+/// Each removed base line is a block of its own. The blocks of one removal sit
+/// together below one live row, so only the first row of the run ticks. The
+/// tick marks a gap that the right column leaves blank. It stays off when the
+/// live row above or below the gap carries a bar, because that bar already
+/// marks the spot.
+fn takes_removal_tick(snapshot: &DisplaySnapshot, display_row: u32, block: &Block) -> bool {
+    if block.0.diff_status != Some(DiffHunkStatus::Deleted) {
+        return false;
+    }
+    let opens_run = display_row == 0
+        || matches!(
+            snapshot.classify_row(display_row - 1),
+            BlockRowKind::BufferRow { .. }
+        );
+    let above = block.0.placement.start();
+    opens_run
+        && snapshot.line_diff_status(above) == DiffStatus::Unchanged
+        && snapshot.line_diff_status(above + 1) == DiffStatus::Unchanged
 }
 
 /// Whether the modified row `buffer_row` has a base row beside it.
@@ -767,6 +792,11 @@ pub(crate) fn paint_diff_rows(
                     theme,
                     dials,
                 );
+                // The unified layout paints this row's bars in its one status
+                // column already, so only the two-column layout has a gap.
+                if row_state.removal_tick && sep_x.is_some() {
+                    draw_removal_tick(&mut rich, buf, inner, status_right_x, y, theme);
+                }
                 if !continuation {
                     base_line += 1;
                 }
@@ -2217,6 +2247,48 @@ fn draw_diff_status(
     }
 }
 
+/// Emit the removal tick (rich) or paint its ASCII glyphs in the right status
+/// column of block row `y`.
+///
+/// The tick spans both status cells at the top edge of the row, where the
+/// removed lines left the live side. It takes the deleted color and no staged
+/// color, because the left column already shows the removal's staged state.
+fn draw_removal_tick(
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    inner: Rect,
+    status_x: u16,
+    y: u16,
+    theme: &crate::theme::Theme,
+) {
+    match rich {
+        Some(rg) => {
+            let x0 = ((status_x - inner.x) * 16) as i16;
+            let y0 = ((y - inner.y) * 16) as i16;
+            // Twelve sixteenths spans both of `draw_diff_status`'s bars, the
+            // change bar at `x0` and the staged bar at `x0 + 7`, each five wide.
+            Bar {
+                x: x0,
+                y: y0,
+                width: 12,
+                height: 2,
+                color: rg
+                    .colors
+                    .faded(style_rgb(theme.get(s::DIFF_DELETED).fg).unwrap_or(rg.colors.dim)),
+            }
+            .render(inner, buf, &mut *rg.scene);
+        },
+        None => {
+            let style = theme.get(s::DIFF_DELETED);
+            for x in [status_x, status_x + 1] {
+                if x < buf.area.x + buf.area.width {
+                    buf[(x, y)].set_char('▔').set_style(style);
+                }
+            }
+        },
+    }
+}
+
 /// The scope a staged mark of `status` paints its change bar in.
 fn staged_mark_scope(status: DiffHunkStatus) -> &'static str {
     match status {
@@ -2735,10 +2807,10 @@ mod tests {
         diff_editor_with_map(text, dm)
     }
 
-    /// Each row's left change cell, left staged cell, and right staged cell as
-    /// glyph and color, with `editor` painted 120 columns wide under
-    /// [`rgb_diff_theme`].
-    fn status_cells(editor: &mut EditorState) -> Vec<[(String, Color); 3]> {
+    /// Each row's left change cell, left staged cell, right change cell, and
+    /// right staged cell as glyph and color, with `editor` painted 120 columns
+    /// wide under [`rgb_diff_theme`].
+    fn status_cells(editor: &mut EditorState) -> Vec<[(String, Color); 4]> {
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
         render_diff_view(
@@ -2762,6 +2834,7 @@ mod tests {
                 [
                     cell(columns.status_left_x, y),
                     cell(columns.status_left_x + 1, y),
+                    cell(columns.status_right_x, y),
                     cell(columns.status_right_x + 1, y),
                 ]
             })
@@ -2795,9 +2868,10 @@ mod tests {
             [
                 glyph("▎", s::DIFF_DELETED),
                 glyph("▎", s::DIFF_UNSTAGED),
+                glyph("▎", s::DIFF_MODIFIED),
                 glyph("▎", s::DIFF_UNSTAGED),
             ],
-            "the removed d beside the live D keeps the removal's bars: {cells:?}",
+            "the removed d keeps the removal's bars beside the live D's: {cells:?}",
         );
     }
 
@@ -2814,6 +2888,55 @@ mod tests {
             cells[1][..2],
             [glyph("▔", s::DIFF_DELETED), glyph("▎", s::DIFF_STAGED)],
             "the line after the removed text takes the deletion mark: {cells:?}",
+        );
+    }
+
+    /// A pure removal leaves the right column blank where its lines were. The
+    /// first row of the run marks the gap with a tick, and no other row does.
+    #[test]
+    fn a_pure_removal_ticks_the_right_column_once() {
+        let cells = status_cells(&mut diff_editor("a\nx\ny\nb\n", "a\nb\n"));
+        let right_symbols = |row: usize| [cells[row][2].0.as_str(), cells[row][3].0.as_str()];
+
+        assert_eq!(
+            cells[1][2..],
+            [glyph("▔", s::DIFF_DELETED), glyph("▔", s::DIFF_DELETED)],
+            "the first removed row ticks both right status cells: {cells:?}",
+        );
+        assert_eq!(
+            [right_symbols(2), right_symbols(3)],
+            [[" ", " "], [" ", " "]],
+            "the second removed row and the row after the gap stay blank: {cells:?}",
+        );
+    }
+
+    /// A removal beside a row that carries its own bar takes no tick, because
+    /// that bar already marks the spot.
+    #[test]
+    fn a_removal_beside_a_barred_row_gets_no_tick() {
+        let hunk = |status, end: u32, base_byte_range| DiffHunk {
+            status,
+            buffer_start_line: 1,
+            buffer_line_range: 1..end,
+            base_byte_range,
+            anchor_range: None,
+            token_detail: None,
+            unstaged_lines: Vec::new(),
+            marked_rows: Vec::new(),
+        };
+        let dm = DiffMap::from_hunks(
+            [
+                hunk(DiffHunkStatus::Deleted, 1, 2..4),
+                hunk(DiffHunkStatus::Added, 2, 4..4),
+            ],
+            Some(Arc::new("a\nx\nc\n".to_string())),
+        );
+        let cells = status_cells(&mut diff_editor_with_map("a\nB\nc\n", dm));
+
+        assert_eq!(
+            [cells[1][2].0.as_str(), cells[1][3].0.as_str()],
+            [" ", " "],
+            "the removed x sits above the added B, so it takes no tick: {cells:?}",
         );
     }
 
