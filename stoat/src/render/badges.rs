@@ -171,6 +171,25 @@ pub(crate) fn sync_walkthrough_badge(tray: &mut BadgeTray, run: Option<&Walkthro
     }
 }
 
+/// Reflect a held chord into `tray` under [`BadgeSource::PinnedMode`],
+/// replacing any left from a previous frame.
+///
+/// Mirrors [`sync_trail_badge`], but the label is the constant `pinned`, since
+/// the mode segment already names the chord. The per-frame re-derive is what
+/// drops the badge once a mode switch releases the pin.
+pub(crate) fn sync_pinned_badge(tray: &mut BadgeTray, pinned: bool) {
+    tray.remove_by_source(BadgeSource::PinnedMode);
+    if pinned {
+        tray.insert(Badge {
+            source: BadgeSource::PinnedMode,
+            anchor: Anchor::BottomRight,
+            state: BadgeState::Active,
+            label: "pinned".into(),
+            detail: None,
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_single_badge(
     badge: &Badge,
@@ -390,6 +409,70 @@ mod tests {
         status.apply(AgentHookEvent::SessionEnd);
         sync_agent_badge(&mut tray, Some(&status));
         assert!(tray.find_by_source(BadgeSource::Agent).is_none());
+    }
+
+    #[test]
+    fn sync_pinned_badge_inserts_then_clears() {
+        let mut tray = BadgeTray::new();
+        let corner = |tray: &BadgeTray| {
+            tray.at_anchor(Anchor::BottomRight)
+                .map(|(_, badge)| (badge.source, badge.label.clone(), badge.state))
+                .collect::<Vec<_>>()
+        };
+
+        sync_pinned_badge(&mut tray, true);
+        sync_pinned_badge(&mut tray, true);
+        let held = corner(&tray);
+        sync_pinned_badge(&mut tray, false);
+
+        assert_eq!(
+            (held, corner(&tray)),
+            (
+                vec![(
+                    BadgeSource::PinnedMode,
+                    "pinned".to_string(),
+                    BadgeState::Active
+                )],
+                vec![],
+            ),
+            "one badge per held frame, and none once released",
+        );
+    }
+
+    #[test]
+    fn pinned_chord_paints_the_badge_and_escape_clears_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 60);
+        h.type_keys("space g g");
+        let held = shows_pinned(&mut h);
+        h.type_keys("escape");
+        assert_eq!(
+            (held, shows_pinned(&mut h)),
+            (true, false),
+            "the badge shows while the chord holds"
+        );
+    }
+
+    /// A config-named `*_pin` mode holds with no `PinMode` press, and the
+    /// badge marks it all the same.
+    #[test]
+    fn a_pin_named_mode_paints_the_badge() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 60);
+        h.stoat.set_focused_mode("goto_pin".into());
+        assert!(shows_pinned(&mut h), "the mode's name marks the hold");
+    }
+
+    /// Whether the composited frame holds the word `pinned` on any row.
+    fn shows_pinned(h: &mut crate::test_harness::TestHarness) -> bool {
+        let buf = h.render_composited();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .contains("pinned")
     }
 
     /// A theme whose badge colors resolve to RGB, which is what selects the rich

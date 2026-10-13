@@ -900,6 +900,8 @@ pub(crate) fn frame(
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::sync_trail_badge(&mut ws.badges, ws.trail.as_ref());
     badges::sync_walkthrough_badge(&mut ws.badges, ws.walkthrough.as_ref());
+    let pinned = focused_pane_pinned(ws) || app::is_pinned_mode(mode);
+    badges::sync_pinned_badge(&mut ws.badges, pinned);
     let badge_cover = badges::bottom_right_cover(&ws.badges, &stoat.badges, size);
 
     let screen = crate::keymap_state::view_predicate(ws);

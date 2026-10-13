@@ -57,6 +57,11 @@ pub enum BadgeSource {
     /// At most one Walkthrough-sourced badge exists per workspace, and none
     /// once the tour ends.
     Walkthrough,
+    /// The focused editor's held chord, re-derived each frame from
+    /// [`EditorState::pinned`](crate::editor_state::EditorState::pinned) and
+    /// the `*_pin` mode names. At most one exists per workspace, and none while
+    /// no mode is pinned.
+    PinnedMode,
     /// One-shot version notice raised by `ShowVersion`, living in the
     /// app-level tray until the next key press dismisses it.
     Version,

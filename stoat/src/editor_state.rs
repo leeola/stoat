@@ -86,8 +86,9 @@ pub(crate) struct EditorState {
     ///
     /// A chord such as goto or git binds keys that act and then return to
     /// normal. While this is set that return is dropped, so the chord's keys
-    /// repeat until Escape. The mode name itself is untouched, so the
-    /// statusline and every other visual read as the unpinned mode does.
+    /// repeat until Escape. The mode name itself is untouched, so the mode
+    /// segment reads as the unpinned chord does, and the bottom-right `pinned`
+    /// badge is what marks the hold.
     pub(crate) pinned: bool,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
