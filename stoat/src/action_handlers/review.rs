@@ -1084,7 +1084,7 @@ fn index_hunk(
     mode: HunkStage,
 ) -> StageOutcome {
     let nothing = || StageOutcome::Unchanged("no hunk under the cursor".to_string());
-    let Some((head_text, index_text)) = staging_texts(repo, path) else {
+    let Some((head_text, index_text)) = read_staging_texts(repo, path, buffer_text) else {
         return nothing();
     };
 
@@ -1113,6 +1113,35 @@ fn index_hunk(
         Ok(()) => StageOutcome::Staged(message),
         Err(err) => StageOutcome::Unchanged(format!("could not update staging: {err}")),
     }
+}
+
+/// [`staging_texts`] for a staging press, with a debug line on the
+/// `stoat::review` target that says what the press read.
+///
+/// A file that neither HEAD nor the index holds logs as such, because its
+/// press reports the same status as a row that no hunk covers.
+fn read_staging_texts(
+    repo: &dyn GitRepo,
+    path: &Path,
+    buffer_text: &str,
+) -> Option<(Option<String>, String)> {
+    let Some((head_text, index_text)) = staging_texts(repo, path) else {
+        tracing::debug!(
+            target: "stoat::review",
+            path = %path.display(),
+            "neither HEAD nor the index holds the file"
+        );
+        return None;
+    };
+    tracing::debug!(
+        target: "stoat::review",
+        path = %path.display(),
+        head = head_text.is_some(),
+        index_lines = index_text.lines().count(),
+        buffer_lines = buffer_text.lines().count(),
+        "staging texts read"
+    );
+    Some((head_text, index_text))
 }
 
 /// HEAD's and the index's text for `path`, as `(head, index)`, for a press that
@@ -1148,6 +1177,13 @@ fn stage_hunk_patch(
 ) -> Option<String> {
     let (buffer_text, removes_file) = stage_post_image(buffer_text);
     let hunks = line_hunks(index_text, buffer_text);
+    log_hunks_near(
+        "stage hunk",
+        cursor_row,
+        &hunks,
+        &base_line_ranges(index_text, &hunks),
+        false,
+    );
 
     // Resolved by the gutter's own rule, so the staged unit is the one drawn
     // under the cursor. A zero-width range is a deletion or a move, which the
@@ -1197,6 +1233,7 @@ fn unstage_hunk_patch(
     let index_row = map_buffer_row_to_index(index_text, buffer_text, cursor_row);
     let hunks = line_hunks(index_text, head_text);
     let ranges = base_line_ranges(index_text, &hunks);
+    log_hunks_near("unstage hunk", index_row, &hunks, &ranges, true);
 
     // A staged deletion reads as HEAD lines added over an empty index range,
     // so an empty range matches the row it starts at.
@@ -1236,7 +1273,7 @@ fn index_rows(
     (staged, unstaged, nothing): (&'static str, &'static str, &'static str),
 ) -> StageOutcome {
     let unchanged = || StageOutcome::Unchanged(nothing.to_string());
-    let Some((head_text, index_text)) = staging_texts(repo, path) else {
+    let Some((head_text, index_text)) = read_staging_texts(repo, path, buffer_text) else {
         return unchanged();
     };
     let rel = rel.to_string_lossy();
@@ -1286,6 +1323,59 @@ fn line_hunks(base: &str, buffer: &str) -> Vec<crate::diff_map::DiffHunk> {
     crate::diff_map::changes_to_hunks(&result.changes, base, buffer)
 }
 
+/// The index range of the two ranges in `compared` beside `row`, which are the
+/// first range that reaches the row or lies past it, and the range before it.
+///
+/// An empty range is a deletion, and it reaches the row it starts at, as the
+/// lookups match it.
+fn hunks_around(row: u32, compared: &[Range<u32>]) -> Range<usize> {
+    let k = compared
+        .iter()
+        .position(|rows| match rows.is_empty() {
+            true => rows.start >= row,
+            false => rows.end > row,
+        })
+        .unwrap_or(compared.len());
+    k.saturating_sub(1)..(k + 1).min(compared.len())
+}
+
+/// Log the hunks a staging lookup compared around `row`, so a press that
+/// stages nothing shows how near the closest hunks sat and on which side.
+///
+/// Each hunk logs as its status, its buffer rows, and its base rows from
+/// `base_rows`. `row` lies in the base rows when `by_base` is set, and in the
+/// buffer rows otherwise. The two neighbors log at debug, and the whole list
+/// at trace.
+fn log_hunks_near(
+    what: &'static str,
+    row: u32,
+    hunks: &[crate::diff_map::DiffHunk],
+    base_rows: &[Range<u32>],
+    by_base: bool,
+) {
+    let triples: Vec<_> = hunks
+        .iter()
+        .zip(base_rows)
+        .map(|(hunk, base)| (hunk.status, hunk.buffer_line_range.clone(), base.clone()))
+        .collect();
+    let compared: Vec<Range<u32>> = match by_base {
+        true => base_rows.to_vec(),
+        false => hunks
+            .iter()
+            .map(|hunk| hunk.buffer_line_range.clone())
+            .collect(),
+    };
+    tracing::debug!(
+        target: "stoat::review",
+        what,
+        row,
+        count = hunks.len(),
+        near = ?&triples[hunks_around(row, &compared)],
+        "staging lookup"
+    );
+    tracing::trace!(target: "stoat::review", what, all = ?triples, "staging lookup");
+}
+
 /// Build the patches that stage only buffer `rows` by diffing the git index
 /// against the live buffer and keeping the changes on those rows.
 ///
@@ -1301,6 +1391,13 @@ fn stage_rows_patch(
 ) -> Vec<String> {
     let (buffer_text, removes_file) = stage_post_image(buffer_text);
     let hunks = line_hunks(index_text, buffer_text);
+    log_hunks_near(
+        "stage rows",
+        rows.start,
+        &hunks,
+        &base_line_ranges(index_text, &hunks),
+        false,
+    );
     (0..hunks.len())
         .filter(|&k| ranges_meet(&hunks[k].buffer_line_range, &rows))
         .rev()
@@ -1350,6 +1447,7 @@ fn unstage_rows_patch(
     // rather than base lines, so the ranges come from base_line_ranges.
     let hunks = line_hunks(index_text, head_text);
     let ranges = base_line_ranges(index_text, &hunks);
+    log_hunks_near("unstage rows", index_rows.start, &hunks, &ranges, true);
     (0..hunks.len())
         .filter(|&k| ranges_meet(&ranges[k], &index_rows))
         .rev()
@@ -1541,7 +1639,7 @@ pub(crate) fn populate_diff_cache_from(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_preview_highlights, build_document_from_changes, editor_shows_changes,
+        attach_preview_highlights, build_document_from_changes, editor_shows_changes, hunks_around,
         stage_rows_patch, unstage_rows_patch,
     };
     use crate::{
@@ -3066,6 +3164,17 @@ mod tests {
             press_on_the_second_hunk(SHIFT_BUFFER, &stoat_action::UnstageHunk),
             SECOND_HUNK_UNSTAGE
         );
+    }
+
+    #[test]
+    fn hunks_around_picks_the_neighbors_of_the_row() {
+        let compared = [0..2, 5..7, 9..9];
+        assert_eq!(
+            [6, 7, 0, 9, 20].map(|row| hunks_around(row, &compared)),
+            [0..2, 1..3, 0..1, 1..3, 2..3],
+            "a row inside, just past, before, at an empty range, and past the last"
+        );
+        assert_eq!(hunks_around(0, &[]), 0..0, "no ranges, no neighbors");
     }
 
     #[test]
