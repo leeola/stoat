@@ -5095,8 +5095,9 @@ impl Stoat {
         // names which layer dropped the press. An absent line means the event
         // never arrived, an unexpected modal or mode means the keymap context
         // was wrong, and a `None` action field means no binding matched. It is
-        // silent under the default `stoat=info` filter.
-        tracing::debug!(
+        // silent under the default `stoat=debug` filter, and a trace level for
+        // `stoat::keys` shows it.
+        tracing::trace!(
             target: "stoat::keys",
             code = ?key.code,
             mods = ?key.modifiers,

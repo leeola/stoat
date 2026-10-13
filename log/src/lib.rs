@@ -3,11 +3,11 @@
 //! ## Usage
 //!
 //! ```bash
-//! # Default: quiet, only important messages
+//! # Default: debug for the stoat crates, warn for everything else
 //! stoat gui
 //!
-//! # Debug level for all stoat crates
-//! STOAT_LOG=debug stoat gui
+//! # Info level for all stoat crates
+//! STOAT_LOG=info stoat gui
 //!
 //! # Trace level for all stoat crates
 //! STOAT_LOG=trace stoat gui
@@ -17,7 +17,10 @@
 //!
 //! 1. `STOAT_LOG` (highest priority) - Stoat-specific logging control
 //! 2. `RUST_LOG` - Standard tracing environment variable
-//! 3. Default - `warn` globally, `info` for stoat crates
+//! 3. Default - `warn` globally, `debug` for stoat crates
+//!
+//! [`set_level`] replaces the default after init, as a config does. Either
+//! variable pins its own filter, so `set_level` leaves that filter in place.
 
 pub mod ident;
 pub mod paths;
@@ -29,13 +32,15 @@ pub use paths::{data_dir, state_dir, workspace_state_dir};
 use snafu::{ResultExt, Snafu};
 #[cfg(unix)]
 pub use sockets::{socket_bind_dir, socket_dir};
-use std::{fs, io, path::PathBuf};
+use std::{fs, io, path::PathBuf, sync::OnceLock};
 pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{
     filter::ParseError,
     fmt,
+    layer::SubscriberExt,
+    reload,
     util::{SubscriberInitExt, TryInitError},
-    EnvFilter,
+    EnvFilter, Registry,
 };
 
 #[derive(Debug, Snafu)]
@@ -62,6 +67,13 @@ pub enum LogInitError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+
+    #[snafu(display("Failed to replace the log filter"))]
+    ReloadFilter {
+        source: reload::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// Where [`init`] routes tracing output.
@@ -74,6 +86,16 @@ pub enum LogTarget {
     Stderr,
 }
 
+/// The reload handle of the filter [`init`] installed, and whether
+/// `STOAT_LOG` or `RUST_LOG` chose that filter.
+struct FilterHandle {
+    handle: reload::Handle<EnvFilter, Registry>,
+    pinned_by_env: bool,
+}
+
+/// The filter [`init`] installed, which [`set_level`] replaces.
+static FILTER: OnceLock<FilterHandle> = OnceLock::new();
+
 /// Initialize logging to `target`.
 ///
 /// `LogTarget::File` appends to the file (creating it if needed) with ANSI off,
@@ -81,17 +103,21 @@ pub enum LogTarget {
 /// writes to stderr with ANSI on for live viewing, which the raw-mode TUI needs
 /// redirected (`2>file`) to stay readable.
 ///
-/// `stoat_log` takes precedence over `rust_log`; both `None` falls back to
-/// `warn` plus every [`DEFAULT_TARGETS`] crate at info. Callers resolve env
-/// state and the log file path at the binary boundary, including ensuring the
-/// parent directory exists; this crate does not read the process environment or
-/// create directories.
+/// `stoat_log` takes precedence over `rust_log`. With both `None`, the filter
+/// is `warn` plus every [`DEFAULT_TARGETS`] crate at debug, and [`set_level`]
+/// replaces it once a config loads.
+///
+/// Callers resolve env state and the log file path at the binary boundary,
+/// including ensuring the parent directory exists. This crate does not read the
+/// process environment or create directories.
 pub fn init(
     stoat_log: Option<String>,
     rust_log: Option<String>,
     target: LogTarget,
 ) -> Result<(), LogInitError> {
-    let filter = create_filter(stoat_log, rust_log)?;
+    let pinned_by_env = stoat_log.is_some() || rust_log.is_some();
+    let (filter, handle) = reload::Layer::new(create_filter(stoat_log, rust_log)?);
+    let registry = tracing_subscriber::registry().with(filter);
     match target {
         LogTarget::File(path) => {
             let file = fs::OpenOptions::new()
@@ -99,25 +125,50 @@ pub fn init(
                 .append(true)
                 .open(&path)
                 .with_context(|_| OpenLogFileSnafu { path: path.clone() })?;
-            fmt()
-                .with_env_filter(filter)
-                .with_writer(file)
-                .with_ansi(false)
-                .finish()
+            registry
+                .with(fmt::layer().with_writer(file).with_ansi(false))
                 .try_init()
                 .context(SetGlobalSubscriberSnafu)?;
         },
         LogTarget::Stderr => {
-            fmt()
-                .with_env_filter(filter)
-                .with_writer(io::stderr)
-                .with_ansi(true)
-                .finish()
+            registry
+                .with(fmt::layer().with_writer(io::stderr).with_ansi(true))
                 .try_init()
                 .context(SetGlobalSubscriberSnafu)?;
         },
     }
+    let _ = FILTER.set(FilterHandle {
+        handle,
+        pinned_by_env,
+    });
     Ok(())
+}
+
+/// Replace the filter [`init`] installed with `level`, as a config's log level
+/// asks.
+///
+/// `level` is a bare level such as `debug`, which applies to every
+/// [`DEFAULT_TARGETS`] crate over a `warn` floor, or a directive string as
+/// `STOAT_LOG` takes it. A level that does not parse is an error.
+///
+/// A process with no installed subscriber accepts any level that parses and
+/// changes nothing. An [`init`] that read `STOAT_LOG` or `RUST_LOG` keeps the
+/// filter of the environment, because a variable is an explicit request for
+/// one launch, and logs one info line that says so.
+pub fn set_level(level: &str) -> Result<(), LogInitError> {
+    let filter = expand_stoat_log(level)?;
+    let Some(installed) = FILTER.get() else {
+        return Ok(());
+    };
+    if installed.pinned_by_env {
+        tracing::info!(
+            target: "stoat_log",
+            level,
+            "config log level ignored, because STOAT_LOG or RUST_LOG is set"
+        );
+        return Ok(());
+    }
+    installed.handle.reload(filter).context(ReloadFilterSnafu)
 }
 
 /// The crate targets the compiled-in default and the bare-level `STOAT_LOG`
@@ -164,7 +215,7 @@ fn create_filter(
         return EnvFilter::try_new(rust_log).context(BuildEnvFilterSnafu);
     }
 
-    Ok(EnvFilter::new(default_directives("info")))
+    Ok(EnvFilter::new(default_directives("debug")))
 }
 
 fn expand_stoat_log(stoat_log: &str) -> Result<EnvFilter, LogInitError> {
@@ -177,7 +228,7 @@ fn expand_stoat_log(stoat_log: &str) -> Result<EnvFilter, LogInitError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_filter, default_directives};
+    use super::{create_filter, default_directives, set_level, LogInitError};
     use tracing::Level;
     use tracing_subscriber::fmt;
 
@@ -227,8 +278,8 @@ mod tests {
     /// crates, and the default has to name them rather than reach them through
     /// a prefix that happens to match.
     #[test]
-    fn the_default_names_every_target_at_info() {
-        assert_eq!(directives(None, None), expected("info"));
+    fn the_default_names_every_target_at_debug() {
+        assert_eq!(directives(None, None), expected("debug"));
     }
 
     /// The bare-level form builds its own string, so it has to name the same
@@ -294,5 +345,22 @@ mod tests {
             "one directive per named crate: {built}"
         );
         assert!(built.starts_with("warn,"), "the floor comes first: {built}");
+    }
+
+    #[test]
+    fn set_level_rejects_an_unknown_level() {
+        for level in ["bogus", "stoat=bogus"] {
+            assert!(
+                matches!(set_level(level), Err(LogInitError::BuildEnvFilter { .. })),
+                "{level} does not parse"
+            );
+        }
+    }
+
+    /// No test installs a global subscriber, so this process holds no filter
+    /// to replace.
+    #[test]
+    fn set_level_without_a_subscriber_accepts_a_level() {
+        assert!(matches!(set_level("trace"), Ok(())));
     }
 }
