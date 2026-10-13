@@ -2,7 +2,7 @@ use crate::{
     apc_emit,
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    buffer_registry::OpenOrigin,
+    buffer_registry::{OpenOrigin, ReadOnly},
     host::LanguageServerFeature,
     lsp::sync,
     workspace::WorkspaceId,
@@ -34,8 +34,9 @@ type PathResolver = fn() -> Option<PathBuf>;
 /// No-op for scratch buffers (no path) or when no editor is focused. Refuses to
 /// write when the file changed on disk since it was opened, leaving the buffer
 /// dirty and setting [`Stoat::pending_message`]. Use [`force_save_buffer`] to
-/// override. Write errors likewise leave the dirty flag set and surface the
-/// failure in the bottom message row rather than logging it silently.
+/// override. A read-only buffer is refused the same way, and no force
+/// overrides that. Write errors likewise leave the dirty flag set and surface
+/// the failure in the bottom message row rather than logging it silently.
 pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     save_effect(save_flow(stoat, false))
 }
@@ -43,6 +44,8 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 /// Save the focused buffer even when it changed on disk since it was opened,
 /// overwriting the external edit. Backs the `:w!` command. See [`save_buffer`]
 /// for the guarded variant.
+///
+/// A read-only buffer still refuses. The force overrides only the disk guard.
 pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     save_effect(save_flow(stoat, true))
 }
@@ -54,8 +57,9 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 /// closes, and the last one exits the application.
 ///
 /// The quit aborts whenever the save did not land. A scratch buffer with no
-/// path, a file changed on disk since it was opened, or a write error all leave
-/// the app running with the failure in [`Stoat::pending_message`].
+/// path, a read-only buffer, a file changed on disk since it was opened, or a
+/// write error all leave the app running with the failure in
+/// [`Stoat::pending_message`].
 ///
 /// A write that lands later, through format on save or the background write,
 /// defers the quit with it. [`Stoat::quit_after_save`] records the pane and the
@@ -83,7 +87,9 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
                 buffer_id.map(|buffer_id| (stoat.active_workspace, pane, buffer_id));
             UpdateEffect::Redraw
         },
-        SaveFlow::RefusedDiskChanged | SaveFlow::Failed => UpdateEffect::Redraw,
+        SaveFlow::RefusedReadOnly | SaveFlow::RefusedDiskChanged | SaveFlow::Failed => {
+            UpdateEffect::Redraw
+        },
         SaveFlow::NoTarget => {
             stoat.set_status("nothing to write; use :q to quit");
             UpdateEffect::Redraw
@@ -138,7 +144,10 @@ fn finish_deferred_quit(
                 return;
             },
             SaveFlow::Wrote => {},
-            SaveFlow::NoTarget | SaveFlow::RefusedDiskChanged | SaveFlow::Failed => return,
+            SaveFlow::NoTarget
+            | SaveFlow::RefusedReadOnly
+            | SaveFlow::RefusedDiskChanged
+            | SaveFlow::Failed => return,
         }
     }
 
@@ -156,6 +165,9 @@ enum SaveFlow {
     /// No focused editor, or the buffer is a scratch buffer with no backing
     /// path. Nothing to save.
     NoTarget,
+    /// The buffer is read-only, so the save was refused and
+    /// [`Stoat::pending_message`] says why. No force overrides it.
+    RefusedReadOnly,
     /// The file changed on disk since it was opened, so a guarded save was
     /// refused and [`Stoat::pending_message`] set. `:w!` overrides.
     RefusedDiskChanged,
@@ -180,9 +192,11 @@ enum SaveFlow {
 fn save_effect(flow: SaveFlow) -> UpdateEffect {
     match flow {
         SaveFlow::NoTarget | SaveFlow::AlreadyPending => UpdateEffect::None,
-        SaveFlow::RefusedDiskChanged | SaveFlow::Armed | SaveFlow::Wrote | SaveFlow::Failed => {
-            UpdateEffect::Redraw
-        },
+        SaveFlow::RefusedReadOnly
+        | SaveFlow::RefusedDiskChanged
+        | SaveFlow::Armed
+        | SaveFlow::Wrote
+        | SaveFlow::Failed => UpdateEffect::Redraw,
     }
 }
 
@@ -227,6 +241,18 @@ fn save_buffer_flow(stoat: &mut Stoat, buffer_id: BufferId, force: bool) -> Save
         .any(|pending| pending == key);
     if in_flight {
         return SaveFlow::AlreadyPending;
+    }
+
+    if let Some(kind) = refresh_read_only(stoat, buffer_id, &path) {
+        let message = match kind {
+            ReadOnly::Permission => "Path is read only".to_string(),
+            ReadOnly::Compressed => format!(
+                "{} is read only: decompressed from gzip in memory",
+                display_name(&path)
+            ),
+        };
+        stoat.set_status(message);
+        return SaveFlow::RefusedReadOnly;
     }
 
     if !force && disk_changed_since_open(stoat, buffer_id, &path) {
@@ -893,6 +919,31 @@ fn disk_changed_since_open(stoat: &Stoat, buffer_id: BufferId, path: &Path) -> b
     current > recorded
 }
 
+/// The read-only kind `buffer_id` has at this save, after a fresh look at
+/// `path`.
+///
+/// A compressed buffer stays compressed, since its text has no file of its own.
+/// Any other buffer's permission is probed again and recorded, as Helix checks
+/// the path at every save. A file made writable since the open saves and loses
+/// its tag, and one made read-only since gains it.
+fn refresh_read_only(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> Option<ReadOnly> {
+    if stoat.active_workspace().buffers.read_only(buffer_id) == Some(ReadOnly::Compressed) {
+        return Some(ReadOnly::Compressed);
+    }
+    let read_only = stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.read_only)
+        .then_some(ReadOnly::Permission);
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_read_only(buffer_id, read_only);
+    read_only
+}
+
 pub(crate) fn open_file(stoat: &mut Stoat, path: &Path, origin: OpenOrigin) -> Option<BufferId> {
     let target = stoat.active_workspace().panes.focus();
     crate::buffer_lifecycle::open_file_in_pane(stoat, target, path, origin)
@@ -957,9 +1008,10 @@ mod tests {
         action_handlers::dispatch,
         app::UpdateEffect,
         buffer::BufferId,
+        buffer_registry::ReadOnly,
         host::{FakeFsOp, FsHost},
         lsp::sync,
-        test_harness::{editor, TestHarness},
+        test_harness::{self, editor, TestHarness},
         Stoat,
     };
     use futures::FutureExt;
@@ -984,6 +1036,8 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root.to_path_buf();
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
+        // A `.gz` name reads on the pool, and the run loop is what installs it.
+        crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
         edit_focused(h, "edited ");
         path
     }
@@ -1779,6 +1833,114 @@ mod tests {
         let mut written = Vec::new();
         h.fake_fs().read(&path, &mut written).expect("readable");
         assert_eq!(written, b"external\n", "refused save leaves disk untouched");
+    }
+
+    /// The focused buffer's id.
+    fn focused_id(h: &mut TestHarness) -> BufferId {
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id
+    }
+
+    /// A compressed buffer's text is not its file's, so a save refuses, the
+    /// gzip bytes stay, and the buffer stays dirty.
+    #[test]
+    fn save_refuses_a_compressed_buffer_and_leaves_the_file() {
+        let mut h = Stoat::test();
+        let bytes = test_harness::gzip(b"original\n");
+        let path = open_edited(&mut h, Path::new("/save-gz"), "notes.txt.gz", &bytes);
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(
+            (
+                on_disk(&h, &path),
+                editor::focused_dirty(&h.stoat),
+                h.stoat.pending_message.as_deref()
+            ),
+            (
+                bytes,
+                true,
+                Some("notes.txt.gz is read only: decompressed from gzip in memory")
+            )
+        );
+    }
+
+    /// The force overrides the disk guard alone, so `:w!` still refuses a file
+    /// the process lacks write access to.
+    #[test]
+    fn force_save_refuses_a_read_only_file() {
+        let mut h = Stoat::test();
+        let path = open_edited(&mut h, Path::new("/save-ro"), "a.txt", b"original\n");
+        h.fake_fs().set_read_only(&path, true);
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(
+            (on_disk(&h, &path), h.stoat.pending_message.as_deref()),
+            (b"original\n".to_vec(), Some("Path is read only"))
+        );
+    }
+
+    /// Each save probes the file again, so a file opened read-only saves once
+    /// it becomes writable, and its tag lifts.
+    #[test]
+    fn a_save_lands_once_the_file_becomes_writable() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-chmod");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"original\n");
+        h.fake_fs().set_read_only(&path, true);
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        edit_focused(&mut h, "edited ");
+        let id = focused_id(&mut h);
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        let refused = (
+            h.stoat.pending_message.clone(),
+            h.stoat.active_workspace().buffers.read_only(id),
+        );
+        h.fake_fs().set_read_only(&path, false);
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(
+            (
+                refused,
+                on_disk(&h, &path),
+                h.stoat.active_workspace().buffers.read_only(id)
+            ),
+            (
+                (
+                    Some("Path is read only".to_string()),
+                    Some(ReadOnly::Permission)
+                ),
+                b"edited original\n".to_vec(),
+                None
+            )
+        );
+    }
+
+    /// A file made read-only since the open gains its tag at the save, which
+    /// refuses.
+    #[test]
+    fn a_save_tags_a_file_that_became_read_only() {
+        let mut h = Stoat::test();
+        let path = open_edited(&mut h, Path::new("/save-late-ro"), "a.txt", b"original\n");
+        let id = focused_id(&mut h);
+        let before = h.stoat.active_workspace().buffers.read_only(id);
+        h.fake_fs().set_read_only(&path, true);
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+
+        assert_eq!(
+            (before, h.stoat.active_workspace().buffers.read_only(id)),
+            (None, Some(ReadOnly::Permission))
+        );
     }
 
     #[test]

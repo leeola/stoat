@@ -97,10 +97,11 @@ pub(crate) enum OpenOrigin {
 /// to its file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ReadOnly {
-    /// The process lacks write access to the file.
+    /// The process lacks write access to the file. Each save probes the file
+    /// again, so a `chmod` that grants access lifts the tag.
     Permission,
     /// The text is a gzip file's decompressed content, held only in memory, so
-    /// it has no file of its own to write back to.
+    /// it has no file of its own to write back to, and no save writes it.
     Compressed,
 }
 
